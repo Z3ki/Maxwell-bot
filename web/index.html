@@ -116,6 +116,7 @@ footer{text-align:center;color:var(--fg3);font-size:11px;padding:40px 0 20px;pos
 </div>
 <div class="nav-r">
 <button class="nav-btn" onclick="toggleBg()">BG</button>
+<a href="https://github.com/Z3ki/Maxwell-bot" target="_blank" class="nav-btn" style="border-color:var(--cyan);color:var(--cyan)">GITHUB</a>
 <a href="/admin/" class="nav-btn" style="border-color:var(--magenta);color:var(--magenta)">ADMIN</a>
 </div>
 </header>
@@ -138,6 +139,15 @@ footer{text-align:center;color:var(--fg3);font-size:11px;padding:40px 0 20px;pos
 <div class="sr"><span class="lbl">RAM</span><span style="color:var(--fg);font-weight:600" id="sysMem">-</span></div>
 <div class="sr"><span class="lbl">Disk</span><span style="color:var(--fg);font-weight:600" id="sysDisk">-</span></div>
 <div class="sr"><span class="lbl">Uptime</span><span style="color:var(--fg);font-weight:600" id="sysUptime">-</span></div>
+</div>
+<div class="aside-section">
+<div class="aside-title">Repository</div>
+<div class="sr"><span class="lbl">Branch</span><span style="color:var(--cyan);font-weight:600" id="gitBranch">-</span></div>
+<div class="sr"><span class="lbl">Commit</span><span style="color:var(--fg);font-size:10px;text-overflow:ellipsis;white-space:nowrap;overflow:hidden;max-width:140px" id="gitCommit" title="-">-</span></div>
+<div style="margin-top:10px">
+  <button class="nav-btn" style="width:100%;border-color:var(--magenta);color:var(--magenta);font-size:10px;padding:5px 10px" onclick="triggerGitPull()">Git Pull (Update)</button>
+</div>
+<div id="gitPullResult" style="font-size:9px;color:var(--warn);margin-top:8px;max-height:80px;overflow-y:auto;white-space:pre-wrap;display:none;background:rgba(0,0,0,0.3);padding:6px;border-radius:4px;border:1px solid var(--bdr);font-family:monospace"></div>
 </div>
 </aside>
 
@@ -185,6 +195,10 @@ footer{text-align:center;color:var(--fg3);font-size:11px;padding:40px 0 20px;pos
 <div class="panel"><div class="panel-head"><h2>Active Sites</h2><span class="panel-total" id="cSites">0 live</span></div><div class="panel-body" id="sitesBody"><div class="empty">Loading...</div></div></div>
 <div class="panel"><div class="panel-head"><h2>Custom Prompts</h2><span class="panel-total" id="cPrompts">0 custom</span></div><div class="panel-body" id="promptsBody"><div class="empty">Loading...</div></div></div>
 <div class="panel"><div class="panel-head"><h2>Blocked Users</h2><span class="panel-total" id="cBlack">0 total</span></div><div class="panel-body" id="blackBody"><div class="empty">Loading...</div></div></div>
+<div class="panel" style="grid-column:span 2">
+<div class="panel-head"><h2>Maxwell Bot Repo (Open Source)</h2><span class="panel-total" id="gitRepoStats">⭐ 0 | 🍴 0 | 🐛 0</span></div>
+<div class="panel-body" id="gitRepoBody"><div class="empty">Loading repository activity...</div></div>
+</div>
 <div class="panel" style="grid-column:span 2"><div class="panel-head"><h2>Live Activity Feed</h2><span class="panel-total" id="cCommands">0 actions</span></div><div class="panel-body" id="commandsBody"><div class="empty">Loading...</div></div></div>
 </div>
 </main>
@@ -407,11 +421,95 @@ setInterval(()=>{
   }else tx('uptimeVal','offline');
 },1000);
 
+async function loadGitStatus(){
+  try{
+    const creds=JSON.parse(localStorage.getItem('maxwellAuth')||'{}');
+    const headers={};
+    if(creds.u&&creds.p)headers.Authorization='Basic '+btoa(creds.u+':'+creds.p);
+    const r=await fetch('/api/git/status',{headers});
+    if(!r.ok)return;
+    const d=await r.json();
+    if(d.branch)tx('gitBranch',d.branch);
+    if(d.commit){
+      const commitEl=$('gitCommit');
+      if(commitEl){
+        commitEl.textContent=d.commit;
+        commitEl.title=d.commit;
+      }
+    }
+  }catch(e){}
+}
+
+async function triggerGitPull(){
+  const resEl=$('gitPullResult');
+  resEl.style.display='block';
+  resEl.style.color='var(--warn)';
+  resEl.textContent='Executing git pull...';
+  try{
+    const creds=JSON.parse(localStorage.getItem('maxwellAuth')||'{}');
+    const headers={'Content-Type':'application/json'};
+    if(creds.u&&creds.p)headers.Authorization='Basic '+btoa(creds.u+':'+creds.p);
+    const r=await fetch('/api/git/pull',{method:'POST',headers});
+    const d=await r.json();
+    if(r.ok && d.ok){
+      resEl.style.color='var(--ok)';
+      resEl.textContent='Git Pull Successful!\n\n'+(d.output||'Already up-to-date.');
+      loadGitStatus();
+    }else{
+      resEl.style.color='var(--err)';
+      resEl.textContent='Error: '+(d.error||d.output||'Unknown error');
+    }
+  }catch(e){
+    resEl.style.color='var(--err)';
+    resEl.textContent='Failed to trigger pull: '+e.message;
+  }
+}
+
+async function loadGitHubRepo(){
+  try{
+    const [statsRes, commitsRes] = await Promise.all([
+      fetch('https://api.github.com/repos/Z3ki/Maxwell-bot').then(r=>r.ok?r.json():null).catch(()=>null),
+      fetch('https://api.github.com/repos/Z3ki/Maxwell-bot/commits').then(r=>r.ok?r.json():[]).catch(()=>[])
+    ]);
+
+    if(statsRes){
+      tx('gitRepoStats',`⭐ ${statsRes.stargazers_count} | 🍴 ${statsRes.forks_count} | 🐛 ${statsRes.open_issues_count}`);
+    }
+
+    const grb=$('gitRepoBody');
+    if(!grb) return;
+    if(!commitsRes || !commitsRes.length){
+      grb.innerHTML='<div class="empty">No repository activity found.</div>';
+    }else{
+      grb.innerHTML=commitsRes.slice(0,5).map(c=>{
+        const sha=c.sha.substring(0,7);
+        const msg=c.commit.message.split('\n')[0];
+        const author=c.commit.author.name;
+        const date=new Date(c.commit.author.date).toLocaleDateString();
+        const url=c.html_url;
+        return `<div class="li">
+          <span class="li-id"><a href="${url}" target="_blank" class="li-link">#${sha}</a></span>
+          <span class="li-content">
+            <b>${esc(msg)}</b>
+            <div class="li-sub">by ${esc(author)} &mdash; ${date}</div>
+          </span>
+        </div>`;
+      }).join('');
+    }
+  }catch(e){
+    console.error(e);
+  }
+}
+
 initBg();
 loadData();
 loadSystem();
+loadGitStatus();
+loadGitHubRepo();
 setInterval(loadData,15000);
 setInterval(loadSystem,30000);
+setInterval(loadGitStatus,30000);
+setInterval(loadGitHubRepo,60000);
 </script>
 </body>
 </html>
