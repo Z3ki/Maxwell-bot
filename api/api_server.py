@@ -861,6 +861,50 @@ async def system_stats(request):
     })
 
 
+# ---------- Git Status & Pull ----------
+async def git_status(request):
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "--abbrev-ref", "HEAD",
+            cwd=str(APP_ROOT),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        branch = stdout.decode("utf-8", errors="replace").strip()
+
+        proc = await asyncio.create_subprocess_exec(
+            "git", "log", "-1", "--format=%h - %s (%cr)",
+            cwd=str(APP_ROOT),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        commit = stdout.decode("utf-8", errors="replace").strip()
+
+        return _json_response({
+            "branch": branch,
+            "commit": commit,
+        })
+    except Exception as e:
+        return _json_response({"error": str(e)}, 500)
+
+
+async def git_pull(request):
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "pull",
+            cwd=str(APP_ROOT),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        text = (stdout + stderr).decode("utf-8", errors="replace")
+        return _json_response({"ok": True, "output": text})
+    except Exception as e:
+        return _json_response({"error": str(e)}, 500)
+
+
 # ---------- App ----------
 app = web.Application(middlewares=[_auth_middleware_unless_login], client_max_size=256 * 1024)
 app.router.add_get("/data/{file}", data_file)
@@ -890,6 +934,8 @@ app.router.add_get("/api/channels", channel_list)
 app.router.add_get("/api/chat/history", chat_history)
 app.router.add_get("/api/status", bot_status)
 app.router.add_get("/api/system", system_stats)
+app.router.add_get("/api/git/status", git_status)
+app.router.add_post("/api/git/pull", git_pull)
 app.router.add_options("/api/{path:.*}", lambda r: web.Response(status=204, headers={"Access-Control-Allow-Origin": CORS_ORIGIN, "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS", "Access-Control-Allow-Headers": "Content-Type, Authorization"}))
 
 if __name__ == "__main__":
