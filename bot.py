@@ -1083,13 +1083,12 @@ class MaxwellBot(commands.Bot):
                 video_path = tmp_path / f"input{suffix}"
                 video_path.write_bytes(blob)
 
-                # Extract frames at 2fps (1 every 0.5s), up to 120 frames
+                # Extract frames at 2fps (1 every 0.5s), no limit
                 frame_pattern = str(tmp_path / "frame-%03d.jpg")
                 frame_cmd = [
                     "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                     "-i", str(video_path),
                     "-vf", "fps=2,scale='min(768,iw)':-2",
-                    "-frames:v", "120",
                     frame_pattern,
                 ]
                 proc = await asyncio.create_subprocess_exec(
