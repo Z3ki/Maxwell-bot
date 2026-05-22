@@ -46,6 +46,9 @@ API_PORT = int(os.getenv("MAXWELL_API_PORT", "8765"))
 BASE_SITE_DIR = Path(os.getenv("MAXWELL_SITE_DIR", APP_ROOT / "public" / "bot")).resolve()
 ADMIN_USER = os.getenv("MAXWELL_ADMIN_USER", "").strip()
 ADMIN_PASSWORD = os.getenv("MAXWELL_ADMIN_PASSWORD", "").strip()
+REM_ENABLED_DEFAULT = str(os.getenv("REM_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
+REM_INTERVAL_DEFAULT = int(os.getenv("REM_INTERVAL_SECONDS", "600"))
+REM_RUN_HISTORY_DEFAULT = int(os.getenv("REM_RUN_HISTORY", "50"))
 
 
 def _load_admin_creds():
@@ -240,6 +243,52 @@ def _clean_id(value: str) -> str:
 
 def _control_path():
     return DATA_DIR / "bot_control.json"
+
+
+def _rem_state_path():
+    return DATA_DIR / "rem_state.json"
+
+
+def _rem_runs_path():
+    return DATA_DIR / "rem_runs.json"
+
+
+def _rem_events_path():
+    return DATA_DIR / "rem_events.json"
+
+
+def _rem_control_path():
+    return DATA_DIR / "rem_control.json"
+
+
+def _load_rem_control():
+    control = _safe_object(_load(_rem_control_path()))
+    return {
+        "enabled": bool(control.get("enabled", REM_ENABLED_DEFAULT)),
+        "interval_seconds": int(control.get("interval_seconds") or REM_INTERVAL_DEFAULT),
+        "max_turns": int(control.get("max_turns") or int(os.getenv("REM_MAX_TURNS", "3"))),
+        "prompt": str(control.get("prompt") or ""),
+    }
+
+
+async def _save_rem_control(control):
+    await atomic_json_write(_rem_control_path(), control)
+
+
+def _load_rem_status():
+    control = _load_rem_control()
+    state = _safe_object(_load(_rem_state_path()))
+    runs = _safe_list(_load(_rem_runs_path()))
+    events = _safe_list(_load(_rem_events_path()))
+    last = runs[-1] if runs and isinstance(runs[-1], dict) else {}
+    return {
+        "enabled": control["enabled"],
+        "interval_s": control["interval_seconds"],
+        "last_run": state.get("last_rem_run_ts") or last.get("ts") or "",
+        "events_buffered": len(events),
+        "last_audit_preview": str(state.get("last_audit") or last.get("audit") or "")[:500],
+        "running": bool(state.get("running")),
+    }
 
 
 def _load_control():
@@ -752,6 +801,66 @@ async def control_reset(request):
     return _json_response({"ok": True, "control": dict(DEFAULT_CONTROL)})
 
 
+# ---------- REM ----------
+async def rem_status(request):
+    return _json_response(_load_rem_status())
+
+
+async def rem_runs(request):
+    runs = _safe_list(_load(_rem_runs_path()))
+    try:
+        limit = max(1, min(int(request.query.get("limit", "50")), 200))
+    except (TypeError, ValueError):
+        limit = 50
+    try:
+        offset = max(0, int(request.query.get("offset", "0")))
+    except (TypeError, ValueError):
+        offset = 0
+    ordered = list(reversed(runs))
+    return _json_response({"items": ordered[offset:offset + limit], "total": len(runs), "offset": offset, "limit": limit})
+
+
+async def _queue_rem_command(cmd_type: str):
+    async with _file_lock:
+        cmds = _load_commands()
+        cmd_id = str(_uuid.uuid4())[:8]
+        cmds.append({
+            "id": cmd_id,
+            "type": cmd_type,
+            "status": "pending",
+            "result": "",
+            "created_at": time.time(),
+        })
+        if len(cmds) > MAX_COMMANDS:
+            cmds = cmds[-MAX_COMMANDS:]
+        await atomic_json_write(_commands_path(), cmds)
+    return cmd_id
+
+
+async def rem_run(request):
+    status = _load_rem_status()
+    if status.get("running"):
+        return _json_response({"ok": True, "started": False, "reason": "already running"})
+    cmd_id = await _queue_rem_command("rem_run")
+    return _json_response({"ok": True, "started": True, "id": cmd_id})
+
+
+async def rem_enable(request):
+    control = _load_rem_control()
+    control["enabled"] = True
+    await _save_rem_control(control)
+    cmd_id = await _queue_rem_command("rem_enable")
+    return _json_response({"ok": True, "enabled": True, "id": cmd_id})
+
+
+async def rem_disable(request):
+    control = _load_rem_control()
+    control["enabled"] = False
+    await _save_rem_control(control)
+    cmd_id = await _queue_rem_command("rem_disable")
+    return _json_response({"ok": True, "enabled": False, "id": cmd_id})
+
+
 # ---------- Command queue ----------
 def _commands_path():
     return DATA_DIR / "bot_commands.json"
@@ -804,6 +913,8 @@ async def commands_post(request):
     elif cmd_type == "reload_controls":
         pass
     elif cmd_type == "kick_bot":
+        pass
+    elif cmd_type in {"rem_run", "rem_enable", "rem_disable"}:
         pass
     else:
         return _json_response({"error": f"unknown command type: {cmd_type}"}, 400)
@@ -1067,6 +1178,11 @@ app.router.add_put("/api/sites", site_update)
 app.router.add_delete("/api/sites", site_delete)
 app.router.add_put("/api/control", control_put)
 app.router.add_delete("/api/control", control_reset)
+app.router.add_get("/api/rem/status", rem_status)
+app.router.add_get("/api/rem/runs", rem_runs)
+app.router.add_post("/api/rem/run", rem_run)
+app.router.add_post("/api/rem/enable", rem_enable)
+app.router.add_post("/api/rem/disable", rem_disable)
 app.router.add_get("/api/commands", commands_get)
 app.router.add_post("/api/commands", commands_post)
 app.router.add_delete("/api/commands", commands_del)
