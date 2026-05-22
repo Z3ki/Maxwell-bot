@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import shutil
+import tempfile
 import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1006,7 +1007,7 @@ class MaxwellBot(commands.Bot):
                     b64 = base64.b64encode(blob).decode("utf-8")
                 if is_image:
                     images.append(b64)
-                media.append({
+                item = {
                     "b64": b64,
                     "mime_type": mime,
                     "filename": attachment.filename,
@@ -1014,12 +1015,93 @@ class MaxwellBot(commands.Bot):
                     "is_text": bool(text),
                     "text": text,
                     "message_id": getattr(message, "id", None),
-                })
+                }
+                media.append(item)
+                if mime.startswith("video/") and b64:
+                    derived = await self._extract_video_derivatives(blob, attachment.filename, getattr(message, "id", None), max_size)
+                    for derived_item in derived:
+                        if derived_item.get("is_image"):
+                            images.append(derived_item["b64"])
+                        media.append(derived_item)
                 kind = "text" if text else "media"
                 logger.info(f"Extracted {kind} attachment {attachment.filename} ({len(blob)} bytes, mime={mime})")
             except Exception as e:
                 logger.error(f"Failed to download attachment {attachment.filename}: {e}")
         return images, media
+
+    async def _extract_video_derivatives(self, blob: bytes, filename: str, message_id, max_size: int) -> list[dict]:
+        """Extract representative frames and audio so models are not limited to provider-side video sampling."""
+        results = []
+        suffix = Path(filename).suffix.lower() or ".mp4"
+        try:
+            with tempfile.TemporaryDirectory(prefix="maxwell-video-") as tmp:
+                tmp_path = Path(tmp)
+                video_path = tmp_path / f"input{suffix}"
+                video_path.write_bytes(blob)
+
+                frame_pattern = str(tmp_path / "frame-%03d.jpg")
+                frame_cmd = [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-i", str(video_path),
+                    "-vf", "fps=1,scale='min(768,iw)':-2",
+                    "-frames:v", "8",
+                    frame_pattern,
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *frame_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                _stdout, stderr = await proc.communicate()
+                if proc.returncode == 0:
+                    for frame_path in sorted(tmp_path.glob("frame-*.jpg")):
+                        frame_blob = frame_path.read_bytes()
+                        if len(frame_blob) > max_size:
+                            continue
+                        results.append({
+                            "b64": base64.b64encode(frame_blob).decode("utf-8"),
+                            "mime_type": "image/jpeg",
+                            "filename": f"{filename}-{frame_path.stem}.jpg",
+                            "is_image": True,
+                            "is_text": False,
+                            "text": "",
+                            "message_id": message_id,
+                            "source": "video_frame",
+                        })
+                else:
+                    logger.warning(f"Video frame extraction failed for {filename}: {stderr.decode(errors='replace')[-300:]}")
+
+                audio_path = tmp_path / "audio.wav"
+                audio_cmd = [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-i", str(video_path),
+                    "-vn", "-ac", "1", "-ar", "16000",
+                    str(audio_path),
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *audio_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                _stdout, stderr = await proc.communicate()
+                if proc.returncode == 0 and audio_path.exists() and audio_path.stat().st_size > 44:
+                    audio_blob = audio_path.read_bytes()
+                    if len(audio_blob) <= max_size:
+                        results.append({
+                            "b64": base64.b64encode(audio_blob).decode("utf-8"),
+                            "mime_type": "audio/wav",
+                            "filename": f"{filename}-audio.wav",
+                            "is_image": False,
+                            "is_text": False,
+                            "text": "",
+                            "message_id": message_id,
+                            "source": "video_audio",
+                        })
+                elif proc.returncode != 0:
+                    logger.info(f"No extractable audio track for {filename}: {stderr.decode(errors='replace')[-200:]}")
+        except Exception as e:
+            logger.warning(f"Failed to derive frames/audio from video {filename}: {e}")
+        if results:
+            frame_count = sum(1 for item in results if item.get("is_image"))
+            audio_count = sum(1 for item in results if item.get("mime_type") == "audio/wav")
+            logger.info(f"Derived {frame_count} frame(s) and {audio_count} audio track(s) from video {filename}")
+        return results
 
     @staticmethod
     def _embed_text(embed) -> str:
@@ -1181,6 +1263,14 @@ class MaxwellBot(commands.Bot):
         ]
 
     @staticmethod
+    def _current_video_frame_media(media: list[dict], cached_media: list[dict]) -> list[dict]:
+        cached_names = {item.get("filename") for item in cached_media}
+        return [
+            item for item in media
+            if item.get("source") == "video_frame" and item.get("filename") not in cached_names
+        ]
+
+    @staticmethod
     def _format_media_summary(current_media: list[dict], active_media: list[dict]) -> str:
         current_images = [item for item in current_media if item.get("is_image")]
         current_other = [item for item in current_media if not item.get("is_image")]
@@ -1251,7 +1341,8 @@ class MaxwellBot(commands.Bot):
         _images, media = await self._extract_media(message)
         media.extend(await self._extract_embeds(message))
         self._cache_media_context(channel_id, media)
-        active_media = self._get_media_context(channel_id) + self._current_binary_media(media)
+        cached_media = self._get_media_context(channel_id)
+        active_media = cached_media + self._current_video_frame_media(media, cached_media) + self._current_binary_media(media)
         media_summary = self._format_media_summary(media, active_media)
         messages = await self._build_messages(message, content, has_media=bool(active_media), media_summary=media_summary)
         try:
