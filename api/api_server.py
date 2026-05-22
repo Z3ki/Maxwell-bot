@@ -17,12 +17,7 @@ from pathlib import Path
 from aiohttp import web
 
 APP_ROOT = Path(os.getenv("MAXWELL_APP_ROOT", Path(__file__).resolve().parents[1]))
-DATA_DIR = Path(os.getenv("DATA_DIR", APP_ROOT / "data"))
 ENV_FILE = Path(os.getenv("MAXWELL_ENV_FILE", APP_ROOT / ".env"))
-CORS_ORIGIN = os.getenv("MAXWELL_CORS_ORIGIN", os.getenv("MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com")).rstrip("/")
-API_HOST = os.getenv("MAXWELL_API_HOST", "127.0.0.1")
-API_PORT = int(os.getenv("MAXWELL_API_PORT", "8765"))
-BASE_SITE_DIR = Path(os.getenv("MAXWELL_SITE_DIR", APP_ROOT / "public" / "bot")).resolve()
 
 
 def _load_env_file(path: Path):
@@ -44,6 +39,11 @@ def _load_env_file(path: Path):
 
 
 _load_env_file(ENV_FILE)
+DATA_DIR = Path(os.getenv("DATA_DIR", APP_ROOT / "data"))
+CORS_ORIGIN = os.getenv("MAXWELL_CORS_ORIGIN", os.getenv("MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com")).rstrip("/")
+API_HOST = os.getenv("MAXWELL_API_HOST", "127.0.0.1")
+API_PORT = int(os.getenv("MAXWELL_API_PORT", "8765"))
+BASE_SITE_DIR = Path(os.getenv("MAXWELL_SITE_DIR", APP_ROOT / "public" / "bot")).resolve()
 ADMIN_USER = os.getenv("MAXWELL_ADMIN_USER", "").strip()
 ADMIN_PASSWORD = os.getenv("MAXWELL_ADMIN_PASSWORD", "").strip()
 
@@ -54,6 +54,9 @@ def _load_admin_creds():
     Persisting plaintext admin credentials in the data directory is unsafe for
     open-source deployments and easy to publish accidentally.
     """
+    global ADMIN_USER, ADMIN_PASSWORD
+    ADMIN_USER = os.getenv("MAXWELL_ADMIN_USER", "").strip()
+    ADMIN_PASSWORD = os.getenv("MAXWELL_ADMIN_PASSWORD", "").strip()
     return ADMIN_USER, ADMIN_PASSWORD
 
 
@@ -70,6 +73,12 @@ DEFAULT_CONTROL = {
     "typing_indicator": True,
     "store_memory": False,
     "long_term_memory_enabled": True,
+    "cross_context_enabled": True,
+    "cross_context_extract_enabled": True,
+    "cross_context_max_items": 10,
+    "cross_context_budget": 5000,
+    "cross_context_min_importance": 5,
+    "cross_context_dm_to_global_admin_only": True,
     "emoji_context_enabled": True,
     "music_context_enabled": True,
     "reply_dms": False,
@@ -155,6 +164,17 @@ def _basic_credentials(request):
         return None, None
     username, password = decoded.split(":", 1)
     return username, password
+
+
+def _has_admin_auth(request) -> bool:
+    _load_admin_creds()
+    if not ADMIN_USER or not ADMIN_PASSWORD:
+        return False
+    username, password = _basic_credentials(request)
+    return bool(
+        hmac.compare_digest(username or "", ADMIN_USER)
+        and hmac.compare_digest(password or "", ADMIN_PASSWORD)
+    )
 
 
 async def _auth_middleware(app, handler):
@@ -256,6 +276,9 @@ def _sanitize_control(control):
     out["ai_concurrency"] = max(1, min(out["ai_concurrency"], 10))
     out["memory_history_messages"] = max(0, min(out["memory_history_messages"], 100))
     out["memory_context_budget"] = max(1000, min(out["memory_context_budget"], 100000))
+    out["cross_context_max_items"] = max(1, min(int(out.get("cross_context_max_items", 10)), 50))
+    out["cross_context_budget"] = max(1000, min(int(out.get("cross_context_budget", 5000)), 20000))
+    out["cross_context_min_importance"] = max(1, min(int(out.get("cross_context_min_importance", 5)), 10))
     out["max_tool_iterations"] = max(0, min(out["max_tool_iterations"], 25))
     out["max_response_chars"] = max(80, min(out["max_response_chars"], 4000))
     out["base_personality"] = str(out.get("base_personality", DEFAULT_CONTROL["base_personality"]))[:12000]
@@ -282,6 +305,68 @@ def _memory_lines():
 
 def _memory_json():
     return [{"id": i + 1, "content": line} for i, line in enumerate(_memory_lines())]
+
+
+def _context_path():
+    return DATA_DIR / "shared_context.json"
+
+
+def _normalize_context_content(content: str) -> str:
+    return " ".join(str(content or "").split())[:1200]
+
+
+def _load_context_entries():
+    data = _load(_context_path())
+    if not isinstance(data, list):
+        return []
+    now = time.time()
+    out = []
+    for raw in data:
+        if not isinstance(raw, dict):
+            continue
+        content = _normalize_context_content(raw.get("content", ""))
+        if not content:
+            continue
+        expires_at = str(raw.get("expires_at") or "")
+        if expires_at:
+            try:
+                if time.mktime(time.strptime(expires_at[:19], "%Y-%m-%dT%H:%M:%S")) <= now:
+                    continue
+            except Exception:
+                pass
+        try:
+            importance = int(raw.get("importance", 5))
+        except (TypeError, ValueError):
+            importance = 5
+        visibility = str(raw.get("visibility") or "shared")[:32]
+        if visibility not in {"private", "shared", "admin_only", "public_hint"}:
+            visibility = "shared"
+        tags = raw.get("tags", [])
+        if isinstance(tags, str):
+            tags = [tags]
+        if not isinstance(tags, list):
+            tags = []
+        out.append({
+            "id": str(raw.get("id") or str(_uuid.uuid4())[:8])[:32],
+            "scope": str(raw.get("scope") or "global")[:80],
+            "visibility": visibility,
+            "importance": max(1, min(importance, 10)),
+            "content": content,
+            "source_user_id": str(raw.get("source_user_id") or "")[:64],
+            "source_channel_id": str(raw.get("source_channel_id") or "")[:64],
+            "source_guild_id": str(raw.get("source_guild_id") or "")[:64],
+            "source_kind": str(raw.get("source_kind") or "unknown")[:32],
+            "tags": [str(t).strip()[:32] for t in tags if str(t).strip()][:12],
+            "created_at": str(raw.get("created_at") or "")[:64],
+            "last_seen_at": str(raw.get("last_seen_at") or raw.get("created_at") or "")[:64],
+            "expires_at": expires_at[:64],
+        })
+    out.sort(key=lambda e: (e.get("last_seen_at", ""), e.get("created_at", "")), reverse=True)
+    return out[:1000]
+
+
+async def _save_context_entries(entries):
+    await atomic_json_write(_context_path(), entries[:1000])
 
 
 async def atomic_json_write(path: Path, data):
@@ -407,6 +492,92 @@ async def memory_delete(request):
             return _json_response({"error": "not found"}, 404)
         del mem[idx]
         await atomic_text_write(path, "\n".join(mem) + ("\n" if mem else ""))
+    return _json_response({"ok": True})
+
+
+# ---------- Shared context ----------
+async def context_get(request):
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
+    entries = _load_context_entries()
+    query = str(request.query.get("q", "")).strip().lower()
+    if query:
+        entries = [e for e in entries if query in (e.get("content", "") + " " + e.get("scope", "") + " " + " ".join(e.get("tags", []))).lower()]
+    return _json_response(entries[:500])
+
+
+async def context_post(request):
+    try:
+        body = await request.json()
+    except Exception:
+        return _json_response({"error": "invalid json"}, 400)
+    content = _normalize_context_content(body.get("content", ""))
+    if not content:
+        return _json_response({"error": "empty"}, 400)
+    tags = body.get("tags", [])
+    if isinstance(tags, str):
+        tags = [x.strip() for x in tags.split(",")]
+    if not isinstance(tags, list):
+        tags = []
+    try:
+        importance = int(body.get("importance", 8))
+    except (TypeError, ValueError):
+        importance = 8
+    now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    entry = {
+        "id": str(_uuid.uuid4())[:8],
+        "scope": str(body.get("scope") or "global")[:80],
+        "visibility": str(body.get("visibility") or "shared")[:32],
+        "importance": max(1, min(importance, 10)),
+        "content": content,
+        "source_user_id": str(body.get("source_user_id") or "admin")[:64],
+        "source_channel_id": str(body.get("source_channel_id") or "dashboard")[:64],
+        "source_guild_id": str(body.get("source_guild_id") or "")[:64],
+        "source_kind": "admin",
+        "tags": [str(t).strip()[:32] for t in tags if str(t).strip()][:12],
+        "created_at": now,
+        "last_seen_at": now,
+        "expires_at": str(body.get("expires_at") or "")[:64],
+    }
+    async with _file_lock:
+        entries = _load_context_entries()
+        entries.insert(0, entry)
+        await _save_context_entries(entries)
+    return _json_response({"ok": True, "id": entry["id"], "entry": entry})
+
+
+async def context_put(request):
+    try:
+        body = await request.json()
+    except Exception:
+        return _json_response({"error": "invalid json"}, 400)
+    context_id = str(body.get("id") or "").strip()
+    if not context_id:
+        return _json_response({"error": "id required"}, 400)
+    allowed = {"scope", "visibility", "importance", "content", "tags", "expires_at"}
+    async with _file_lock:
+        entries = _load_context_entries()
+        for entry in entries:
+            if str(entry.get("id")) == context_id:
+                for key in allowed:
+                    if key in body:
+                        entry[key] = _normalize_context_content(body[key]) if key == "content" else body[key]
+                entry["last_seen_at"] = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+                await _save_context_entries(entries)
+                return _json_response({"ok": True, "entry": entry})
+    return _json_response({"error": "not found"}, 404)
+
+
+async def context_delete(request):
+    context_id = str(request.query.get("id", "")).strip()
+    if not context_id:
+        return _json_response({"error": "id required"}, 400)
+    async with _file_lock:
+        entries = _load_context_entries()
+        kept = [e for e in entries if str(e.get("id")) != context_id]
+        if len(kept) == len(entries):
+            return _json_response({"error": "not found"}, 404)
+        await _save_context_entries(kept)
     return _json_response({"ok": True})
 
 
@@ -775,11 +946,13 @@ async def bot_status(request):
         "online": bool(bot_proc and bot_proc.get("pm2_env", {}).get("status") == "online"),
         "control": {k: control.get(k) for k in [
             "bot_enabled", "reply_dms", "reply_groups", "reply_mentions",
-            "auto_mode_enabled", "tools_enabled", "store_memory"
+            "auto_mode_enabled", "tools_enabled", "store_memory", "cross_context_enabled",
+            "cross_context_extract_enabled"
         ]},
         "stats": {
             "channels": len(mem),
             "messages": sum(len(v) for v in mem.values() if isinstance(v, list)),
+            "context": len(_load_context_entries()),
         },
         "pm2": {
             "bot": {
@@ -873,6 +1046,10 @@ app.router.add_post("/api/memory", memory_add)
 app.router.add_put("/api/memory", memory_update)
 app.router.add_delete("/api/memory", memory_delete)
 app.router.add_options("/api/memory", lambda r: web.Response(status=204, headers={"Access-Control-Allow-Origin": CORS_ORIGIN, "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS", "Access-Control-Allow-Headers": "Content-Type, Authorization"}))
+app.router.add_get("/api/context", context_get)
+app.router.add_post("/api/context", context_post)
+app.router.add_put("/api/context", context_put)
+app.router.add_delete("/api/context", context_delete)
 app.router.add_post("/api/prompts", prompt_save)
 app.router.add_delete("/api/prompts", prompt_delete)
 app.router.add_post("/api/blacklist", blacklist_post)

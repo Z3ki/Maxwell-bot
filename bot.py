@@ -133,6 +133,12 @@ DEFAULT_CONTROL = {
     "typing_indicator": True,
     "store_memory": False,
     "long_term_memory_enabled": True,
+    "cross_context_enabled": True,
+    "cross_context_extract_enabled": True,
+    "cross_context_max_items": 10,
+    "cross_context_budget": 5000,
+    "cross_context_min_importance": 5,
+    "cross_context_dm_to_global_admin_only": True,
     "emoji_context_enabled": True,
     "music_context_enabled": True,
     "reply_dms": False,
@@ -219,6 +225,7 @@ class MaxwellBot(commands.Bot):
         self._control = dict(DEFAULT_CONTROL)
         self._control_mtime = 0
         self._reaction_seen: set[str] = set()  # "{message_id}:{emoji}" dedup
+        self._context_tasks: set[asyncio.Task] = set()
         self._tasks = []
         self._setup_ai()
         self._setup_memory()
@@ -411,6 +418,7 @@ class MaxwellBot(commands.Bot):
                     "content": memory_content or "[media attached]",
                     "message_id": message.id,
                 })
+            self._maybe_schedule_context_extraction(message)
 
             if isinstance(message.channel, discord.DMChannel):
                 if self._control.get("reply_dms", True):
@@ -532,7 +540,7 @@ class MaxwellBot(commands.Bot):
         args = parts[1] if len(parts) > 1 else None
         if cmd in set(self._control.get("disabled_commands", []) or []):
             return
-        admin_commands = {"prompt", "clearprompt", "clearmem", "auto"}
+        admin_commands = {"prompt", "clearprompt", "clearmem", "auto", "context"}
         if cmd in admin_commands and not self._is_admin(message.author.id):
             await message.channel.send("not authorized")
             return
@@ -566,6 +574,8 @@ class MaxwellBot(commands.Bot):
                 self._drugged_until.pop(channel_id, None)
                 self._reaction_seen.clear()
                 await message.channel.send("Memory, media context, and channel state cleared.")
+            elif cmd == "context":
+                await self._handle_context_command(message, args)
             elif cmd == "drug":
                 now = asyncio.get_running_loop().time()
                 arg = (args or "").strip().lower()
@@ -622,6 +632,82 @@ class MaxwellBot(commands.Bot):
                     await message.channel.send(f"Unblacklisted <@{uid}>")
         except discord.Forbidden:
             pass
+
+    async def _handle_context_command(self, message, args: str | None):
+        arg = (args or "").strip()
+        channel_id = str(message.channel.id)
+        guild_id = str(message.guild.id) if message.guild else ""
+        user_id = str(message.author.id)
+        is_dm = isinstance(message.channel, discord.DMChannel)
+        is_admin = self._is_admin(message.author.id)
+
+        async def send_entries(entries, title="Context facts"):
+            if not entries:
+                await message.channel.send("No shared context facts.")
+                return
+            lines = [title]
+            for e in entries[:20]:
+                lines.append(
+                    f"{e.get('id')} [{e.get('scope')}/{e.get('visibility')}/i{e.get('importance')}] "
+                    f"{e.get('content')}"
+                )
+            for chunk in self._split_response("\n".join(lines), limit=1900):
+                await message.channel.send(chunk)
+
+        if not arg:
+            entries = await self.memory.get_relevant_shared_context(
+                user_id=user_id,
+                guild_id=guild_id,
+                channel_id=channel_id,
+                is_dm=is_dm,
+                is_admin=is_admin,
+                max_items=20,
+                budget=10000,
+            )
+            await send_entries(entries, "Relevant context facts")
+            return
+        if arg.lower() == "all":
+            await send_entries(await self.memory.list_shared_context(limit=50), "Recent context facts")
+            return
+        if arg.lower().startswith("forget "):
+            context_id = arg.split(maxsplit=1)[1].strip()
+            ok = await self.memory.remove_shared_context(context_id)
+            await message.channel.send("Context fact removed." if ok else "Context fact not found.")
+            return
+        if arg.lower().startswith("private "):
+            context_id = arg.split(maxsplit=1)[1].strip()
+            ok = await self.memory.update_shared_context(context_id, {"visibility": "private"})
+            await message.channel.send("Context fact marked private." if ok else "Context fact not found.")
+            return
+        if arg.lower().startswith("global "):
+            context_id = arg.split(maxsplit=1)[1].strip()
+            ok = await self.memory.update_shared_context(context_id, {"scope": "global", "visibility": "shared"})
+            await message.channel.send("Context fact promoted globally." if ok else "Context fact not found.")
+            return
+        if arg.lower().startswith("add "):
+            rest = arg.split(maxsplit=1)[1].strip()
+            scope, fact = "global", rest
+            parts = rest.split(maxsplit=1)
+            if len(parts) == 2 and (parts[0] == "global" or parts[0].startswith(("user:", "guild:", "channel:", "dm:"))):
+                scope, fact = parts[0], parts[1]
+            fact = " ".join(fact.split())[:1000]
+            if not fact:
+                await message.channel.send("Usage: `,context add [scope] <fact>`")
+                return
+            context_id = await self.memory.add_shared_context({
+                "scope": scope,
+                "visibility": "shared",
+                "importance": 8,
+                "content": fact,
+                "source_user_id": user_id,
+                "source_channel_id": channel_id,
+                "source_guild_id": guild_id,
+                "source_kind": "admin",
+                "tags": ["manual"],
+            })
+            await message.channel.send(f"Context fact saved: {context_id}" if context_id else "Could not save context fact.")
+            return
+        await message.channel.send("Usage: `,context`, `,context all`, `,context add [scope] <fact>`, `,context forget <id>`, `,context private <id>`, `,context global <id>`")
 
     async def _should_reply_auto(self, message) -> bool:
         if message.reference and message.reference.resolved and hasattr(message.reference.resolved, "author") and self.user and message.reference.resolved.author.id == self.user.id:
@@ -812,6 +898,187 @@ class MaxwellBot(commands.Bot):
             self._load_auto_channels(quiet=True)
             self._load_blacklist(quiet=True)
             self._load_control()
+
+    def _context_source_kind(self, message) -> str:
+        if isinstance(message.channel, discord.DMChannel):
+            return "dm"
+        if isinstance(message.channel, discord.GroupChannel):
+            return "group"
+        if message.guild:
+            return "guild"
+        return "unknown"
+
+    def _should_extract_context(self, message) -> bool:
+        if not self._control.get("cross_context_enabled", True) or not self._control.get("cross_context_extract_enabled", True):
+            return False
+        if not message.content and not message.attachments and not getattr(message, "embeds", None):
+            return False
+        text = (message.content or "").lower()
+        triggers = (
+            "important", "remember", "don't forget", "dont forget", "never forget", "tell everyone",
+            "for context", "note that", "call me", "my name is", "i prefer", "i hate", "i like",
+            "this is my", "meet my", "remember this",
+        )
+        if any(t in text for t in triggers):
+            return True
+        return isinstance(message.channel, discord.DMChannel) and self._is_admin(message.author.id) and len(text) >= 12
+
+    def _maybe_schedule_context_extraction(self, message):
+        if not self._should_extract_context(message):
+            return
+        task = asyncio.create_task(self._extract_shared_context_fact(message))
+        self._context_tasks.add(task)
+        task.add_done_callback(self._context_tasks.discard)
+        if len(self._context_tasks) > 20:
+            for stale in list(self._context_tasks)[:5]:
+                if stale.done():
+                    self._context_tasks.discard(stale)
+
+    @staticmethod
+    def _json_object_from_text(text: str) -> dict:
+        text = (text or "").strip()
+        if not text:
+            return {}
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if not match:
+            return {}
+        try:
+            data = json.loads(match.group(0))
+            return data if isinstance(data, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @staticmethod
+    def _sensitive_context_text(text: str) -> bool:
+        lowered = (text or "").lower()
+        sensitive = (
+            "password", "token", "api key", "apikey", "secret", "private key", "address", "phone",
+            "ssn", "social security", "credit card", "card number", "2fa", "otp",
+        )
+        return any(word in lowered for word in sensitive)
+
+    def _normalize_context_entry(self, message, data: dict) -> dict | None:
+        if not isinstance(data, dict) or not data.get("should_store"):
+            return None
+        summary = " ".join(str(data.get("summary") or data.get("content") or "").split())[:1000]
+        if not summary:
+            return None
+        try:
+            importance = int(data.get("importance", 5))
+        except (TypeError, ValueError):
+            importance = 5
+        min_importance = max(1, min(int(self._control.get("cross_context_min_importance", 5) or 5), 10))
+        if importance < min_importance:
+            return None
+
+        is_admin = self._is_admin(message.author.id)
+        is_dm = isinstance(message.channel, discord.DMChannel)
+        guild_id = str(message.guild.id) if message.guild else ""
+        channel_id = str(message.channel.id)
+        author_id = str(message.author.id)
+        scope = str(data.get("scope") or "").strip().lower()
+        visibility = str(data.get("visibility") or "shared").strip().lower()
+        if visibility not in {"private", "shared", "admin_only", "public_hint"}:
+            visibility = "shared"
+
+        allowed_scopes = {"global", f"user:{author_id}", f"channel:{channel_id}"}
+        if guild_id:
+            allowed_scopes.add(f"guild:{guild_id}")
+        if is_dm:
+            allowed_scopes.add(f"dm:{author_id}")
+        if not scope:
+            scope = "global" if is_admin and is_dm else f"user:{author_id}"
+        if is_dm and not is_admin:
+            scope = f"user:{author_id}"
+            if visibility != "admin_only":
+                visibility = "private"
+        if is_dm and is_admin and scope.startswith("guild:") and self._control.get("cross_context_dm_to_global_admin_only", True):
+            pass
+        elif scope not in allowed_scopes and not (is_admin and (scope == "global" or scope.startswith("guild:"))):
+            scope = f"user:{author_id}"
+        if self._sensitive_context_text(summary):
+            visibility = "admin_only" if is_admin else "private"
+            if not is_admin:
+                scope = f"user:{author_id}"
+
+        tags = data.get("tags", [])
+        if isinstance(tags, str):
+            tags = [tags]
+        if not isinstance(tags, list):
+            tags = []
+        expires_at = ""
+        try:
+            hours = float(data.get("expires_in_hours") or 0)
+            if hours > 0:
+                expires_at = (datetime.now(timezone.utc) + timedelta(hours=min(hours, 24 * 365))).isoformat()
+        except (TypeError, ValueError):
+            pass
+        return {
+            "scope": scope,
+            "visibility": visibility,
+            "importance": max(1, min(importance, 10)),
+            "content": summary,
+            "source_user_id": author_id,
+            "source_channel_id": channel_id,
+            "source_guild_id": guild_id,
+            "source_kind": self._context_source_kind(message),
+            "tags": tags,
+            "expires_at": expires_at,
+        }
+
+    async def _extract_shared_context_fact(self, message):
+        try:
+            text = (message.content or "").strip()
+            attachment_note = ""
+            if message.attachments:
+                names = [f"{a.filename} ({getattr(a, 'content_type', None) or 'unknown'})" for a in message.attachments[:5]]
+                attachment_note = "\nAttachments/media present: " + ", ".join(names)
+            embed_note = ""
+            if getattr(message, "embeds", None):
+                titles = []
+                for embed in message.embeds[:3]:
+                    titles.append(str(getattr(embed, "title", None) or getattr(embed, "description", None) or getattr(embed, "url", None) or "embed")[:160])
+                embed_note = "\nEmbeds present: " + "; ".join(titles)
+            is_admin = self._is_admin(message.author.id)
+            guild_id = str(message.guild.id) if message.guild else ""
+            channel_id = str(message.channel.id)
+            prompt = (
+                "You are Maxwell's private context watcher. Extract one durable cross-context fact only if this message contains "
+                "important future-use context, a preference, identity info, an operational instruction, or a user explicitly asks to remember something. "
+                "Do not store random chatter, jokes, secrets, passwords, addresses, credentials, or private sensitive details. "
+                "For media, only store a fact if the text explicitly says it matters or should be remembered. "
+                "Return strict JSON only with keys: should_store boolean, importance 1-10, scope string, visibility string, summary string, tags array, expires_in_hours number. "
+                "Scopes may be global, user:<user_id>, guild:<guild_id>, channel:<channel_id>, dm:<user_id>. "
+                "Visibility may be shared, private, admin_only, public_hint. Non-admin DM facts should normally be private user facts."
+            )
+            user = (
+                f"Author: {message.author.display_name} ({message.author.id})\n"
+                f"Admin author: {'yes' if is_admin else 'no'}\n"
+                f"Source: {self._context_source_kind(message)} channel={channel_id} guild={guild_id or 'none'}\n"
+                f"Message:\n{text[:2500]}{attachment_note}{embed_note}\n\n"
+                "Extract a fact or return {\"should_store\": false}."
+            )
+            await self._acquire_ai_slot(timeout=20)
+            try:
+                raw = await self.ai_provider.generate_response([
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": user},
+                ], timeout=20)
+            finally:
+                await self._release_ai_slot()
+            data = self._json_object_from_text(raw)
+            entry = self._normalize_context_entry(message, data)
+            if not entry:
+                return
+            context_id = await self.memory.add_shared_context(entry)
+            if context_id:
+                logger.info(f"Context watcher stored fact {context_id}: {entry['content'][:120]}")
+        except Exception as e:
+            logger.warning(f"Context extraction error: {e}")
 
     async def _command_queue_loop(self):
         path = Path(self.config.DATA_DIR) / "bot_commands.json"
@@ -1607,6 +1874,27 @@ class MaxwellBot(commands.Bot):
                     system_parts.append("Long-term memory:\n" + "\n".join(f"- {e['content']}" for e in ltm[:8]))
             except Exception:
                 pass
+        if self._control.get("cross_context_enabled", True):
+            try:
+                facts = await self.memory.get_relevant_shared_context(
+                    user_id=str(message.author.id),
+                    guild_id=str(message.guild.id) if message.guild else "",
+                    channel_id=channel_id,
+                    is_dm=isinstance(message.channel, discord.DMChannel),
+                    is_admin=self._is_admin(message.author.id),
+                    max_items=max(1, min(int(self._control.get("cross_context_max_items", 10) or 10), 50)),
+                    budget=max(1000, min(int(self._control.get("cross_context_budget", 5000) or 5000), 20000)),
+                )
+                if facts:
+                    lines = []
+                    for fact in facts:
+                        lines.append(f"- [{fact.get('scope')}, i{fact.get('importance')}] {fact.get('content')}")
+                    system_parts.append(
+                        "Cross-context facts (background only; do not reveal private source or say where you learned them):\n"
+                        + "\n".join(lines)
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to build shared context: {e}")
         if message.guild and self._control.get("emoji_context_enabled", True):
             emojis = self._guild_emojis.get(str(message.guild.id), {})
             if emojis:

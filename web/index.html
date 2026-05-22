@@ -202,7 +202,7 @@ function pill(cls,v){return '<span class="pill '+cls+'">'+esc(v)+'</span>'}
 
 const CONTROL_KEYS=[
   ['bot_enabled','Bot'],['reply_dms','DMs'],['reply_groups','Groups'],
-  ['reply_mentions','Mentions'],['auto_mode_enabled','Auto'],['tools_enabled','Tools'],['store_memory','Memory']
+  ['reply_mentions','Mentions'],['auto_mode_enabled','Auto'],['tools_enabled','Tools'],['store_memory','Memory'],['cross_context_enabled','Context']
 ];
 
 let bgEnabled=true;
@@ -319,7 +319,7 @@ async function loadData(){
     tx('hChannels',Object.keys(chObj).length);
     tx('hMessages',totalMsgs+' messages tracked');
     tx('hMemories',memArr.length);
-    tx('hAuto',auto.length+' auto channels');
+    tx('hAuto',auto.length+' auto channels / '+(statusData?.stats?.context??0)+' context facts');
     tx('hSites',Object.keys(sitesObj).length);
     tx('hBlocked',bl.length+' blocked users');
 
