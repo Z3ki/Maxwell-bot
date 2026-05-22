@@ -49,8 +49,9 @@ from bot_tools import (
     _read_response_limited,
 )
 from config import Config
-from memory import MemoryManager
+from memory import MemoryManager, RemEventLog
 from providers import MIME_MAP, OllamaProvider
+from rem import RemStore, load_rem_defaults, run_rem_once
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -203,6 +204,13 @@ class MaxwellBot(commands.Bot):
         self.bot_name = "Bot"
         self.ai_provider = None
         self.memory = None
+        self.rem_log = None
+        self.rem_store = None
+        self.rem_enabled = self.config.REM_ENABLED
+        self.rem_interval_seconds = self.config.REM_INTERVAL_SECONDS
+        self.rem_max_turns = self.config.REM_MAX_TURNS
+        self.rem_prompt_body = load_rem_defaults()["prompt"]
+        self._rem_running = False
         self.tools = {}
         self._channel_locks: dict[str, asyncio.Lock] = {}
         self._ai_concurrency = 3
@@ -242,6 +250,8 @@ class MaxwellBot(commands.Bot):
 
     def _setup_memory(self):
         self.memory = MemoryManager(data_dir=self.config.DATA_DIR, max_messages=self.config.MEMORY_MESSAGE_LIMIT)
+        self.rem_log = RemEventLog(data_dir=self.config.DATA_DIR, max_events=self.config.REM_EVENT_BUFFER_MAX)
+        self.rem_store = RemStore(self.config.DATA_DIR, run_history=self.config.REM_RUN_HISTORY)
 
     def _setup_tools(self):
         self.tools["image_generator"] = ImageGeneratorTool(self)
@@ -313,6 +323,8 @@ class MaxwellBot(commands.Bot):
     async def setup_hook(self):
         await self.ai_provider.initialize()
         self.memory.load_from_disk()
+        self.rem_log.load_from_disk()
+        await self._load_rem_control()
         self._load_sites()
         self._load_admins()
         self._load_auto_channels()
@@ -323,6 +335,7 @@ class MaxwellBot(commands.Bot):
             asyncio.create_task(self._memory_cleanup_loop()),
             asyncio.create_task(self._control_reload_loop()),
             asyncio.create_task(self._command_queue_loop()),
+            asyncio.create_task(self._rem_scheduler_loop()),
         ]
         logger.info("Bot setup complete")
 
@@ -540,7 +553,7 @@ class MaxwellBot(commands.Bot):
         args = parts[1] if len(parts) > 1 else None
         if cmd in set(self._control.get("disabled_commands", []) or []):
             return
-        admin_commands = {"prompt", "clearprompt", "clearmem", "auto", "context"}
+        admin_commands = {"prompt", "clearprompt", "clearmem", "auto", "context", "rem"}
         if cmd in admin_commands and not self._is_admin(message.author.id):
             await message.channel.send("not authorized")
             return
@@ -576,6 +589,8 @@ class MaxwellBot(commands.Bot):
                 await message.channel.send("Memory, media context, and channel state cleared.")
             elif cmd == "context":
                 await self._handle_context_command(message, args)
+            elif cmd == "rem":
+                await self._handle_rem_command(message, args)
             elif cmd == "drug":
                 now = asyncio.get_running_loop().time()
                 arg = (args or "").strip().lower()
@@ -865,6 +880,170 @@ class MaxwellBot(commands.Bot):
     def _is_admin(self, user_id) -> bool:
         return str(user_id) in self._admins
 
+    async def _load_rem_control(self):
+        try:
+            defaults = load_rem_defaults()
+            control = await self.rem_store.load_control()
+            self.rem_enabled = bool(control.get("enabled", self.config.REM_ENABLED))
+            self.rem_interval_seconds = max(10, int(control.get("interval_seconds", defaults.get("interval_seconds", self.config.REM_INTERVAL_SECONDS))))
+            self.rem_max_turns = max(0, min(int(control.get("max_turns", defaults.get("max_turns", self.config.REM_MAX_TURNS))), 10))
+            self.rem_prompt_body = str(control.get("prompt") or defaults.get("prompt") or self.rem_prompt_body)
+        except Exception as e:
+            logger.warning(f"Failed to load REM control: {e}")
+
+    async def _save_rem_control(self):
+        await self.rem_store.save_control({
+            "enabled": self.rem_enabled,
+            "interval_seconds": self.rem_interval_seconds,
+            "max_turns": self.rem_max_turns,
+            "prompt": self.rem_prompt_body,
+        })
+
+    async def _rem_status(self) -> dict:
+        state = await self.rem_store.load_state()
+        runs = await self.rem_store.load_runs()
+        last = runs[-1] if runs else {}
+        return {
+            "enabled": self.rem_enabled,
+            "interval_s": self.rem_interval_seconds,
+            "last_run": state.get("last_rem_run_ts") or last.get("ts") or "",
+            "last_audit_preview": (state.get("last_audit") or last.get("audit") or "")[:500],
+            "events_buffered": await self.rem_log.size(),
+            "model": self.config.OLLAMA_REM_MODEL,
+            "running": self._rem_running or bool(state.get("running")),
+        }
+
+    async def _run_rem_once_guarded(self) -> tuple[bool, str, dict | None]:
+        if self._rem_running:
+            return False, "REM is already running", None
+        self._rem_running = True
+        await self.rem_store.patch_state({"running": True, "running_since": datetime.now(timezone.utc).isoformat()})
+        try:
+            run = await run_rem_once(
+                memory_manager=self.memory,
+                rem_log=self.rem_log,
+                provider=self.ai_provider,
+                data_dir=self.config.DATA_DIR,
+                model=self.config.OLLAMA_REM_MODEL,
+                max_turns=self.rem_max_turns,
+                run_history=self.config.REM_RUN_HISTORY,
+                prompt_body=self.rem_prompt_body,
+                timeout=max(10, min(int(self._control.get("ai_timeout_seconds", 180) or 180), 600)),
+            )
+            logger.info(f"REM pass complete: {run.get('audit', '')[:160]}")
+            return True, "ok", run
+        except Exception as e:
+            logger.warning(f"REM pass failed: {e}")
+            await self.rem_store.patch_state({"running": False, "running_since": ""})
+            return False, str(e), None
+        finally:
+            self._rem_running = False
+
+    async def _rem_scheduler_loop(self):
+        while True:
+            await asyncio.sleep(max(10, int(self.rem_interval_seconds or 600)))
+            await self._load_rem_control()
+            if not self.rem_enabled:
+                continue
+            try:
+                await self._run_rem_once_guarded()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(f"REM scheduler error: {e}")
+
+    async def _handle_rem_command(self, message, args: str | None):
+        arg = (args or "").strip().lower()
+        if not arg:
+            status = await self._rem_status()
+            await message.channel.send(
+                "REM status\n"
+                f"enabled: {status['enabled']} running: {status['running']}\n"
+                f"interval: {status['interval_s']}s model: {status['model']}\n"
+                f"last run: {status['last_run'] or 'never'} events: {status['events_buffered']}\n"
+                f"audit: {status['last_audit_preview'] or '-'}"
+            )
+            return
+        if arg == "now":
+            ok, reason, run = await self._run_rem_once_guarded()
+            await message.channel.send(f"REM done: {(run or {}).get('audit', reason)[:1500]}" if ok else f"REM not started: {reason}")
+            return
+        if arg == "on":
+            self.rem_enabled = True
+            await self._save_rem_control()
+            await message.channel.send("REM enabled for this process.")
+            return
+        if arg == "off":
+            self.rem_enabled = False
+            await self._save_rem_control()
+            await message.channel.send("REM disabled for this process.")
+            return
+        if arg.startswith("audit"):
+            parts = arg.split()
+            limit = 5
+            if len(parts) > 1:
+                try:
+                    limit = max(1, min(int(parts[1]), 20))
+                except ValueError:
+                    pass
+            runs = (await self.rem_store.load_runs())[-limit:]
+            if not runs:
+                await message.channel.send("No REM runs yet.")
+                return
+            lines = [f"{r.get('ts', '?')} turns={r.get('turns_used', 0)} events={r.get('events', 0)} {str(r.get('audit', ''))[:500]}" for r in runs]
+            for chunk in self._split_response("\n".join(lines), limit=1900):
+                await message.channel.send(chunk)
+            return
+        if arg == "fix":
+            enabled = self.rem_enabled
+            defaults = load_rem_defaults()
+            self.rem_prompt_body = defaults["prompt"]
+            self.rem_interval_seconds = defaults["interval_seconds"]
+            self.rem_max_turns = defaults["max_turns"]
+            self.rem_enabled = enabled
+            await self._save_rem_control()
+            await message.channel.send("REM defaults restored.")
+            return
+        await message.channel.send("Usage: `,rem`, `,rem now`, `,rem on`, `,rem off`, `,rem audit [N]`, `,rem fix`")
+
+    @staticmethod
+    def _visible_event_content(message, content: str | None = None) -> str:
+        text = content if content is not None else (getattr(message, "content", "") or "")
+        text = re.sub(r"<think\b[^>]*>.*?</think>", "", str(text), flags=re.IGNORECASE | re.DOTALL).strip()
+        parts = [text] if text else []
+        for attachment in list(getattr(message, "attachments", []) or [])[:5]:
+            content_type = getattr(attachment, "content_type", "") or ""
+            if content_type.startswith("image/"):
+                kind = "image"
+            elif content_type.startswith("audio/"):
+                kind = "audio"
+            elif content_type.startswith("video/"):
+                kind = "video"
+            else:
+                kind = "file"
+            parts.append(f"[{kind}]")
+        if getattr(message, "embeds", None):
+            parts.append("[embed]")
+        return " ".join(p for p in parts if p).strip()
+
+    async def _record_rem_event(self, message, role: str, content: str | None = None):
+        try:
+            visible = self._visible_event_content(message, content)
+            if not visible:
+                return
+            await self.rem_log.record({
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "channel_id": str(message.channel.id),
+                "guild_id": str(message.guild.id) if message.guild else None,
+                "user_id": str(message.author.id) if role == "user" else (str(self.user.id) if self.user else ""),
+                "user_name": message.author.display_name if role == "user" else self.bot_name,
+                "role": role,
+                "content": visible,
+                "auto_mode": str(message.channel.id) in self._auto_channels,
+            })
+        except Exception as e:
+            logger.warning(f"Failed to record REM event: {e}")
+
     def _load_control(self, force: bool = False):
         path = Path(self.config.DATA_DIR) / "bot_control.json"
         try:
@@ -898,6 +1077,7 @@ class MaxwellBot(commands.Bot):
             self._load_auto_channels(quiet=True)
             self._load_blacklist(quiet=True)
             self._load_control()
+            await self._load_rem_control()
 
     def _context_source_kind(self, message) -> str:
         if isinstance(message.channel, discord.DMChannel):
@@ -1144,7 +1324,19 @@ class MaxwellBot(commands.Bot):
                             self._load_admins()
                             self._load_auto_channels()
                             self._load_blacklist()
+                            await self._load_rem_control()
                             cmd["result"] = "controls reloaded"
+                        elif typ == "rem_run":
+                            ok, reason, run = await self._run_rem_once_guarded()
+                            cmd["result"] = f"REM done: {(run or {}).get('audit', '')[:300]}" if ok else f"REM not started: {reason}"
+                        elif typ == "rem_enable":
+                            self.rem_enabled = True
+                            await self._save_rem_control()
+                            cmd["result"] = "REM enabled"
+                        elif typ == "rem_disable":
+                            self.rem_enabled = False
+                            await self._save_rem_control()
+                            cmd["result"] = "REM disabled"
                         elif typ == "kick_bot":
                             cmd["result"] = "bot will restart via PM2"
                             cmd["status"] = "done"
@@ -1693,6 +1885,7 @@ class MaxwellBot(commands.Bot):
     async def _handle_message(self, message, content: str = None):
         content = content or message.content
         channel_id = str(message.channel.id)
+        await self._record_rem_event(message, "user", content)
         current_task = asyncio.current_task()
         if current_task:
             self._active_requests[channel_id] = current_task
@@ -1753,6 +1946,7 @@ class MaxwellBot(commands.Bot):
                         await message.channel.send(chunk)
                     if len(chunks) > 1:
                         await asyncio.sleep(0.3)
+                await self._record_rem_event(message, "assistant", response)
         except Exception as e:
             logger.error(f"Error handling message: {e}\n{traceback.format_exc()}")
             if self._control.get("error_replies", True):
@@ -1966,6 +2160,10 @@ async def main():
             await bot.memory.flush()
         except Exception as e:
             logger.error(f"Failed to flush memory on shutdown: {e}")
+        try:
+            await bot.rem_log.flush()
+        except Exception as e:
+            logger.error(f"Failed to flush REM events on shutdown: {e}")
         try:
             await bot.ai_provider.close()
         except Exception as e:

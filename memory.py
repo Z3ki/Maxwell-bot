@@ -5,6 +5,7 @@ import logging
 import asyncio
 import os
 import tempfile
+import re
 import uuid
 from pathlib import Path
 from datetime import datetime, timezone
@@ -17,6 +18,7 @@ MAX_LTM_LINES = 999
 MAX_CHANNELS = 25
 MAX_SHARED_CONTEXT = 1000
 MAX_SHARED_CONTEXT_CHARS = 1200
+DEFAULT_REM_EVENT_BUFFER_MAX = 500
 
 
 def _utcnow() -> datetime:
@@ -76,6 +78,112 @@ def _parse_iso(ts: str) -> Optional[datetime]:
         return dt
     except Exception:
         return None
+
+
+def _strip_reasoning_text(content: str) -> str:
+    text = str(content or "")
+    text = re.sub(r"<think\b[^>]*>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    return " ".join(text.split())
+
+
+class RemEventLog:
+    """JSON-backed visible event ring for REM assimilation."""
+
+    def __init__(self, data_dir: str, max_events: int = DEFAULT_REM_EVENT_BUFFER_MAX):
+        self.data_dir = Path(data_dir)
+        self.events_file = self.data_dir / "rem_events.json"
+        self.max_events = max(1, int(max_events or DEFAULT_REM_EVENT_BUFFER_MAX))
+        self.events = []
+        self._lock = asyncio.Lock()
+        self._dirty = False
+        self._save_task = None
+
+    def load_from_disk(self):
+        try:
+            if self.events_file.exists():
+                data = json.loads(self.events_file.read_text(encoding="utf-8"))
+                self.events = self._sanitize_events(data if isinstance(data, list) else [])
+        except (json.JSONDecodeError, OSError) as e:
+            logger.error(f"Failed to load REM events: {e}")
+            self.events = []
+
+    def _sanitize_events(self, events: list) -> list:
+        clean = []
+        for raw in events:
+            if not isinstance(raw, dict):
+                continue
+            role = str(raw.get("role") or "")
+            if role not in {"user", "assistant"}:
+                continue
+            clean.append({
+                "ts": str(raw.get("ts") or _utcnow_iso()),
+                "channel_id": str(raw.get("channel_id") or ""),
+                "guild_id": str(raw.get("guild_id")) if raw.get("guild_id") is not None else None,
+                "user_id": str(raw.get("user_id") or ""),
+                "user_name": str(raw.get("user_name") or "")[:120],
+                "role": role,
+                "content": _strip_reasoning_text(raw.get("content", ""))[:4000],
+                "auto_mode": bool(raw.get("auto_mode", False)),
+            })
+        return clean[-self.max_events:]
+
+    async def _atomic_save(self, snapshot: list):
+        try:
+            await asyncio.to_thread(_atomic_json_write_sync, self.events_file, snapshot)
+        except Exception as e:
+            logger.error(f"Failed to save REM events: {e}")
+
+    def _schedule_save(self):
+        self._dirty = True
+        if self._save_task is not None:
+            self._save_task.cancel()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._save_task = loop.call_later(5, self._do_save)
+
+    def _do_save(self):
+        if self._dirty:
+            self._dirty = False
+            snapshot = json.loads(json.dumps(self.events, ensure_ascii=False))
+            asyncio.ensure_future(self._atomic_save(snapshot))
+        self._save_task = None
+
+    async def record(self, event: dict):
+        async with self._lock:
+            clean = self._sanitize_events([{**(event or {}), "ts": (event or {}).get("ts") or _utcnow_iso()}])
+            if not clean or not clean[0]["content"]:
+                return
+            self.events.append(clean[0])
+            if len(self.events) > self.max_events:
+                self.events = self.events[-self.max_events:]
+            self._schedule_save()
+
+    async def drain_slice(self, since_ts: str | None = None) -> list:
+        since = _parse_iso(since_ts or "")
+        async with self._lock:
+            if since is None:
+                return [dict(e) for e in self.events]
+            out = []
+            for event in self.events:
+                ts = _parse_iso(event.get("ts", ""))
+                if ts and ts > since:
+                    out.append(dict(event))
+            return out
+
+    async def size(self) -> int:
+        async with self._lock:
+            return len(self.events)
+
+    async def flush(self):
+        if self._save_task is not None:
+            self._save_task.cancel()
+            self._save_task = None
+        if self._dirty:
+            self._dirty = False
+            snapshot = json.loads(json.dumps(self.events, ensure_ascii=False))
+            await self._atomic_save(snapshot)
 
 
 class MemoryManager:
