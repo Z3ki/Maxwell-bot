@@ -1433,3 +1433,54 @@ class SendMediaTool(Tool):
             return f"Error sending media: {e}"
 
         return f"__MEDIA_SENT__ Sent media: {filename}"
+
+
+class KiloTool(Tool):
+    """Execute kilo command directly via Kilo's CLI to perform complex multi-step coding/research tasks (ADMINS ONLY)"""
+
+    def get_description(self):
+        return (
+            "Run kilo command directly via Kilo's CLI to perform complex multi-step coding/research tasks (ADMINS ONLY). "
+            "Params: instruction (required, the instruction for Kilo)."
+        )
+
+    async def execute(self, message: Message, instruction: str = None, **kwargs) -> str:
+        author_id = str(message.author.id) if message.author else ""
+        if not self.bot._is_admin(author_id):
+            return "Error: kilo is admin-only"
+
+        if not instruction or not instruction.strip():
+            return "Error: instruction parameter is required"
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "kilo", "run", "--auto", instruction,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+        except asyncio.TimeoutError:
+            return "Error: Kilo command timed out after 300 seconds"
+        except Exception as e:
+            return f"Error executing Kilo: {e}"
+
+        out = stdout.decode(errors="replace").strip()
+        err = stderr.decode(errors="replace").strip()
+
+        # Remove ANSI color codes
+        out = re.sub(r'\x1b\[[0-9;]*m', '', out)
+        err = re.sub(r'\x1b\[[0-9;]*m', '', err)
+
+        combined = ""
+        if out:
+            combined += out
+        if err:
+            if combined:
+                combined += "\n"
+            combined += f"[stderr] {err}"
+
+        if len(combined) > 5000:
+            combined = combined[:5000] + "\n...[output truncated]..."
+
+        return combined if combined else "Kilo ran successfully with no output."
+

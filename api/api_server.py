@@ -38,17 +38,24 @@ def _load_env_file(path: Path):
             os.environ[key] = value
 
 
+def _int_env_safe(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 _load_env_file(ENV_FILE)
 DATA_DIR = Path(os.getenv("DATA_DIR", APP_ROOT / "data"))
 CORS_ORIGIN = os.getenv("MAXWELL_CORS_ORIGIN", os.getenv("MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com")).rstrip("/")
 API_HOST = os.getenv("MAXWELL_API_HOST", "127.0.0.1")
-API_PORT = int(os.getenv("MAXWELL_API_PORT", "8765"))
+API_PORT = _int_env_safe("MAXWELL_API_PORT", 8765)
 BASE_SITE_DIR = Path(os.getenv("MAXWELL_SITE_DIR", APP_ROOT / "public" / "bot")).resolve()
 ADMIN_USER = os.getenv("MAXWELL_ADMIN_USER", "").strip()
 ADMIN_PASSWORD = os.getenv("MAXWELL_ADMIN_PASSWORD", "").strip()
 REM_ENABLED_DEFAULT = str(os.getenv("REM_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
-REM_INTERVAL_DEFAULT = int(os.getenv("REM_INTERVAL_SECONDS", "600"))
-REM_RUN_HISTORY_DEFAULT = int(os.getenv("REM_RUN_HISTORY", "50"))
+REM_INTERVAL_DEFAULT = _int_env_safe("REM_INTERVAL_SECONDS", 600)
+REM_RUN_HISTORY_DEFAULT = _int_env_safe("REM_RUN_HISTORY", 50)
 
 
 def _load_admin_creds():
@@ -263,10 +270,27 @@ def _rem_control_path():
 
 def _load_rem_control():
     control = _safe_object(_load(_rem_control_path()))
+    interval = REM_INTERVAL_DEFAULT
+    try:
+        if control.get("interval_seconds") is not None:
+            interval = max(10, int(control.get("interval_seconds")))
+    except (TypeError, ValueError):
+        pass
+    max_turns = 3
+    try:
+        env_val = os.getenv("REM_MAX_TURNS", "3")
+        max_turns = int(env_val)
+    except (TypeError, ValueError):
+        pass
+    try:
+        if control.get("max_turns") is not None:
+            max_turns = max(0, min(int(control.get("max_turns")), 10))
+    except (TypeError, ValueError):
+        pass
     return {
         "enabled": bool(control.get("enabled", REM_ENABLED_DEFAULT)),
-        "interval_seconds": int(control.get("interval_seconds") or REM_INTERVAL_DEFAULT),
-        "max_turns": int(control.get("max_turns") or int(os.getenv("REM_MAX_TURNS", "3"))),
+        "interval_seconds": interval,
+        "max_turns": max_turns,
         "prompt": str(control.get("prompt") or ""),
     }
 

@@ -286,6 +286,7 @@ class MaxwellBot(commands.Bot):
         self.tools["fetch_url"] = FetchUrlTool(self)
         self.tools["send_meme"] = SendMemeTool(self)
         self.tools["send_media"] = SendMediaTool(self)
+        self.tools["kilo_run"] = KiloTool(self)
 
     def _build_activities(self):
         activities = []
@@ -2190,6 +2191,12 @@ class MaxwellBot(commands.Bot):
                     user = message.get("from", {})
                     user_name = user.get("first_name", "Telegram User")
                     user_id = str(user.get("id", "unknown"))
+                    user_username = str(user.get("username") or "").strip().lower()
+
+                    # Only z3kilol is allowed to talk to the bot on Telegram
+                    if user_username != "z3kilol":
+                        logger.warning(f"Unauthorized Telegram access attempt by {user_name} ({user_id}, username: {user.get('username')})")
+                        continue
                     
                     # Handle Voice / Audio inputs
                     voice = message.get("voice")

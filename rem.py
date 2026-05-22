@@ -202,7 +202,7 @@ async def run_rem_once(
     since = state.get("last_rem_run_ts")
     events = await rem_log.drain_slice(since)
     if not events:
-        await store.patch_state({"last_rem_run_ts": started, "running": False})
+        await store.patch_state({"last_rem_run_ts": started, "running": False, "running_since": "", "last_audit": "DONE - empty slice"})
         run = {"ts": started, "turns_used": 0, "audit": "DONE - empty slice", "tool_counts": {}, "events": 0}
         await store.append_run(run)
         return run
