@@ -6,6 +6,18 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+AUDIO_FORMATS = {
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/wave": "wav",
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/mp4": "m4a",
+    "audio/x-m4a": "m4a",
+    "audio/ogg": "ogg",
+    "audio/flac": "flac",
+}
+
 MIME_MAP = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -86,19 +98,21 @@ class OllamaProvider:
             for img_b64 in images:
                 all_media.append({"b64": img_b64, "mime_type": "image/png"})
 
-        vision_media = []
+        payload_media = []
         for m in all_media:
             mime = str(m.get("mime_type", ""))
-            if mime.startswith("image/") and m.get("b64"):
-                vision_media.append(m)
+            if m.get("b64") and mime.startswith(("image/", "audio/", "video/")):
+                payload_media.append(m)
 
-        if vision_media:
+        if payload_media:
             target = None
             for msg in chat_messages:
                 content = msg.get("content", "")
                 if msg["role"] == "user" and (
                     "[User attached image" in content
                     or "[User attached media" in content
+                    or "Media available to inspect" in content
+                    or "Audio/video available to inspect" in content
                     or "Images available to inspect" in content
                 ):
                     target = msg
@@ -110,15 +124,28 @@ class OllamaProvider:
                         break
             if target is not None:
                 parts = [{"type": "text", "text": target.get("content", "")}]
-                for m in vision_media:
+                attached = 0
+                for m in payload_media:
                     mime = m["mime_type"]
                     b64 = m["b64"]
                     uri = f"data:{mime};base64,{b64}"
-                    parts.append({"type": "image_url", "image_url": {"url": uri}})
+                    if mime.startswith("image/"):
+                        parts.append({"type": "image_url", "image_url": {"url": uri}})
+                    elif mime.startswith("audio/"):
+                        audio_format = AUDIO_FORMATS.get(mime.split(";", 1)[0].lower())
+                        if audio_format:
+                            parts.append({"type": "input_audio", "input_audio": {"data": b64, "format": audio_format}})
+                        else:
+                            parts.append({"type": "audio_url", "audio_url": {"url": uri}})
+                    elif mime.startswith("video/"):
+                        parts.append({"type": "file", "file": {"filename": m.get("filename", "video.mp4"), "file_data": b64}})
+                    else:
+                        continue
+                    attached += 1
                 target["content"] = parts
-                logger.info(f"Attached {len(vision_media)} image item(s) to message")
+                logger.info(f"Attached {attached} multimodal item(s) to message")
             else:
-                logger.warning(f"No user message found to attach {len(vision_media)} image item(s)")
+                logger.warning(f"No user message found to attach {len(payload_media)} multimodal item(s)")
 
         data = {
             "model": self.model,
@@ -167,6 +194,11 @@ class OllamaProvider:
 
                     content = choices[0].get("message", {}).get("content", "")
                     if not content:
+                        if attempt < 3:
+                            wait = attempt * 2
+                            logger.warning(f"Provider returned empty response (attempt {attempt}/3), retrying in {wait}s...")
+                            await asyncio.sleep(wait)
+                            continue
                         raise RuntimeError("Empty response from provider")
 
                     return content

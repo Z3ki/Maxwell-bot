@@ -135,8 +135,10 @@ def _json_response(data, status=200):
     )
 
 def _needs_auth(request) -> bool:
-    """All API/data requests need auth except CORS preflight."""
+    """Mutations need auth; GETs and OPTIONS are public read."""
     if request.method == "OPTIONS":
+        return False
+    if request.method == "GET":
         return False
     return True
 
@@ -172,8 +174,10 @@ async def _auth_middleware(app, handler):
 
 
 async def _auth_middleware_unless_login(app, handler):
-    """Middleware that requires auth for all non-preflight requests."""
+    """Middleware that requires auth for mutations, except /api/login."""
     async def middleware(request):
+        if request.method == "POST" and request.path == "/api/login":
+            return await handler(request)
         if _needs_auth(request):
             _load_admin_creds()
             if not ADMIN_USER or not ADMIN_PASSWORD:

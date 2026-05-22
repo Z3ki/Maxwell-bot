@@ -6,9 +6,11 @@ import json
 import logging
 import re
 import shutil
+import tempfile
 import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import aiohttp
 import discord
@@ -216,6 +218,7 @@ class MaxwellBot(commands.Bot):
         self._media_context: dict[str, list[dict]] = {}
         self._control = dict(DEFAULT_CONTROL)
         self._control_mtime = 0
+        self._reaction_seen: set[str] = set()  # "{message_id}:{emoji}" dedup
         self._tasks = []
         self._setup_ai()
         self._setup_memory()
@@ -364,9 +367,13 @@ class MaxwellBot(commands.Bot):
         if allowed and channel_id not in allowed:
             return
 
+        has_content = bool(message.content)
+        has_attachment = bool(message.attachments)
+        has_embed = bool(getattr(message, "embeds", None))
+
         cooldown = float(self._control.get("per_user_cooldown_seconds", 1.5) or 0)
         last = self._cooldowns.get(str(message.author.id), 0)
-        if cooldown > 0 and now - last < cooldown:
+        if cooldown > 0 and now - last < cooldown and not (has_attachment or has_embed):
             return
         self._cooldowns[str(message.author.id)] = now
         if len(self._cooldowns) > 1000:
@@ -378,9 +385,7 @@ class MaxwellBot(commands.Bot):
                 await self.memory.add_to_channel_memory(channel_id, {"author": self.bot_name, "content": message.content, "message_id": message.id})
             return
 
-        has_content = bool(message.content)
-        has_attachment = bool(message.attachments)
-        if not has_content and not has_attachment:
+        if not has_content and not has_attachment and not has_embed:
             return
 
         async with self._get_channel_lock(channel_id):
@@ -393,6 +398,13 @@ class MaxwellBot(commands.Bot):
                         attachment_names.append(f"{attachment.filename} ({content_type})")
                     attachment_note = "[attachments: " + ", ".join(attachment_names) + "]"
                     memory_content = f"{memory_content} {attachment_note}".strip()
+                if has_embed:
+                    embed_titles = []
+                    for embed in message.embeds[:3]:
+                        title = getattr(embed, "title", None) or getattr(embed, "description", None) or getattr(embed, "url", None) or "embed"
+                        embed_titles.append(str(title)[:120])
+                    embed_note = "[embeds: " + "; ".join(embed_titles) + "]"
+                    memory_content = f"{memory_content} {embed_note}".strip()
                 await self.memory.add_to_channel_memory(channel_id, {
                     "author": message.author.display_name,
                     "author_id": str(message.author.id),
@@ -422,9 +434,96 @@ class MaxwellBot(commands.Bot):
                 if not self._control.get("reply_mentions", True):
                     return
                 clean = re.sub(rf"<@!?{self.user.id}>", "", message.content).strip() if mentioned and self.user else message.content
-                if not clean and not message.attachments:
+                if not clean and not message.attachments and not has_embed:
                     return
                 await self._handle_message(message, (clean or "look at this") + self._get_reply_context(message))
+
+    async def on_reaction_add(self, reaction, user):
+        """React to emoji reactions on Maxwell's messages (auto-mode only, once per emoji per message)."""
+        if not self.user or not self._control.get("bot_enabled", True):
+            return
+        if not self._control.get("auto_mode_enabled", False):
+            return
+        # Only react to reactions on Maxwell's own messages
+        if reaction.message.author.id != self.user.id:
+            return
+        # Ignore own reactions
+        if user.id == self.user.id:
+            return
+        # Only in auto-mode channels
+        channel_id = str(reaction.message.channel.id)
+        if channel_id not in self._auto_channels:
+            return
+        # Deduplicate: only once per emoji per message
+        emoji_str = str(reaction.emoji)
+        dedup_key = f"{reaction.message.id}:{emoji_str}"
+        if dedup_key in self._reaction_seen:
+            return
+        self._reaction_seen.add(dedup_key)
+        # Keep the dedup set from growing unbounded
+        if len(self._reaction_seen) > 5000:
+            discard = list(self._reaction_seen)[:2500]
+            for k in discard:
+                self._reaction_seen.discard(k)
+
+        logger.info(f"Reaction {emoji_str} from {user.display_name} on Maxwell's message in channel {channel_id}")
+
+        # Build a lightweight LLM call to decide whether to comment
+        try:
+            msg_content = reaction.message.content or "[no text]"
+            memory = await self.memory.get_channel_memory(channel_id)
+            recent = []
+            if memory:
+                for msg in memory[-6:]:
+                    if msg.get("content"):
+                        recent.append(f"{msg.get('author', '?')}: {msg.get('content', '')[:120]}")
+
+            recent_text = "\n".join(recent[-4:]) if recent else "[no recent messages]"
+            messages = [
+                {"role": "system", "content": (
+                    "You are Maxwell. Someone reacted to YOUR message with an emoji. "
+                    "You can see what your message said, who reacted, and the emoji they used. "
+                    "Decide if you want to say something about it in chat. "
+                    "If yes, write a SHORT casual response (one line, Maxwell's usual style). "
+                    "If you have nothing interesting to say, reply with exactly: __SKIP__\n"
+                    "Do NOT quote or repeat your original message. Do NOT explain the emoji. "
+                    "Only respond if it's actually funny, interesting, or worth acknowledging. "
+                    "Most reactions do NOT need a response — skip those."
+                )},
+                {"role": "user", "content": (
+                    f"Recent chat context:\n{recent_text}\n\n"
+                    f"Your message that got reacted to: \"{msg_content[:300]}\"\n"
+                    f"{user.display_name} reacted with: {emoji_str}\n\n"
+                    f"Do you want to say something? (write it, or __SKIP__)"
+                )},
+            ]
+
+            await self._acquire_ai_slot(timeout=15)
+            try:
+                result = await self.ai_provider.generate_response(messages, timeout=15)
+            finally:
+                await self._release_ai_slot()
+
+            result = result.strip()
+            if not result or "__SKIP__" in result or "__skip__" in result.lower() or len(result) < 2:
+                logger.info(f"Reaction handler: skipping (LLM said skip)")
+                return
+
+            # Send as a new standalone message, not a reply
+            for chunk in self._split_response(result):
+                await reaction.message.channel.send(chunk)
+            logger.info(f"Reaction handler: sent response in channel {channel_id}")
+
+            # Store in memory if enabled
+            if self._control.get("store_memory", True):
+                await self.memory.add_to_channel_memory(channel_id, {
+                    "author": self.bot_name,
+                    "content": result,
+                    "message_id": None,
+                    "is_tool": False,
+                })
+        except Exception as e:
+            logger.warning(f"Reaction handler error: {e}")
 
     async def _handle_command(self, message):
         content = message.content[len(self.command_prefix):].strip()
@@ -460,7 +559,13 @@ class MaxwellBot(commands.Bot):
                 await message.channel.send("Server prompt cleared.")
             elif cmd == "clearmem":
                 await self.memory.clear_channel_memory(channel_id)
-                await message.channel.send("Memory cleared for this channel.")
+                self._media_context.pop(channel_id, None)
+                self._auto_counter.pop(channel_id, None)
+                self._active_requests.pop(channel_id, None)
+                self._stop_until.pop(channel_id, None)
+                self._drugged_until.pop(channel_id, None)
+                self._reaction_seen.clear()
+                await message.channel.send("Memory, media context, and channel state cleared.")
             elif cmd == "drug":
                 now = asyncio.get_running_loop().time()
                 arg = (args or "").strip().lower()
@@ -760,7 +865,12 @@ class MaxwellBot(commands.Bot):
                                             cmd["result"] = f"HTTP {resp.status}"
                         elif typ == "clear_memory":
                             if cmd.get("channel_id"):
-                                await self.memory.clear_channel_memory(str(cmd["channel_id"]))
+                                cid = str(cmd["channel_id"])
+                                await self.memory.clear_channel_memory(cid)
+                                self._media_context.pop(cid, None)
+                                self._auto_counter.pop(cid, None)
+                                self._stop_until.pop(cid, None)
+                                self._drugged_until.pop(cid, None)
                                 cmd["result"] = "memory cleared"
                         elif typ == "reload_controls":
                             self._load_control(force=True)
@@ -886,6 +996,20 @@ class MaxwellBot(commands.Bot):
                 if not is_media and not is_text:
                     continue
                 mime = content_type.split(";")[0] if content_type else MIME_MAP.get(ext, "text/plain" if is_text else "application/octet-stream")
+                filename = attachment.filename
+                if mime == "image/gif" or ext == ".gif":
+                    normalized = await self._normalize_gif(blob, attachment.filename, max_size)
+                    if normalized:
+                        blob, mime, filename = normalized
+                if mime.startswith("video/"):
+                    normalized = await self._normalize_video(blob, attachment.filename, max_size)
+                    if normalized:
+                        blob, mime, filename = normalized
+                    derived = await self._extract_video_derivatives(blob, filename, getattr(message, "id", None), max_size)
+                    for derived_item in derived:
+                        if derived_item.get("is_image"):
+                            images.append(derived_item["b64"])
+                        media.append(derived_item)
                 is_image = ext in image_exts or mime.startswith("image/")
                 text = ""
                 b64 = ""
@@ -897,20 +1021,312 @@ class MaxwellBot(commands.Bot):
                     b64 = base64.b64encode(blob).decode("utf-8")
                 if is_image:
                     images.append(b64)
-                media.append({
+                item = {
                     "b64": b64,
                     "mime_type": mime,
-                    "filename": attachment.filename,
+                    "filename": filename,
                     "is_image": is_image,
                     "is_text": bool(text),
                     "text": text,
                     "message_id": getattr(message, "id", None),
-                })
+                }
+                media.append(item)
                 kind = "text" if text else "media"
-                logger.info(f"Extracted {kind} attachment {attachment.filename} ({len(blob)} bytes, mime={mime})")
+                logger.info(f"Extracted {kind} attachment {filename} ({len(blob)} bytes, mime={mime})")
             except Exception as e:
                 logger.error(f"Failed to download attachment {attachment.filename}: {e}")
         return images, media
+
+    async def _normalize_video(self, blob: bytes, filename: str, max_size: int) -> tuple[bytes, str, str] | None:
+        suffix = Path(filename).suffix.lower() or ".mp4"
+        try:
+            with tempfile.TemporaryDirectory(prefix="maxwell-video-") as tmp:
+                tmp_path = Path(tmp)
+                input_path = tmp_path / f"input{suffix}"
+                output_path = tmp_path / "normalized.mp4"
+                input_path.write_bytes(blob)
+                cmd = [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-i", str(input_path),
+                    "-vf", "scale='min(1280,iw)':-2,fps=24,format=yuv420p",
+                    "-c:v", "libx264", "-profile:v", "baseline", "-level", "3.1",
+                    "-preset", "veryfast", "-crf", "23",
+                    "-c:a", "aac", "-b:a", "128k",
+                    "-movflags", "+faststart",
+                    str(output_path),
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                _stdout, stderr = await proc.communicate()
+                if proc.returncode != 0 or not output_path.exists():
+                    logger.warning(f"Video normalization failed for {filename}: {stderr.decode(errors='replace')[-300:]}")
+                    return None
+                normalized = output_path.read_bytes()
+                if len(normalized) > max_size:
+                    logger.warning(f"Skipping normalized video {filename}: too large ({len(normalized)} bytes)")
+                    return None
+                out_name = f"{Path(filename).stem}-normalized.mp4"
+                logger.info(f"Normalized video {filename} -> {out_name} ({len(blob)} -> {len(normalized)} bytes)")
+                return normalized, "video/mp4", out_name
+        except Exception as e:
+            logger.warning(f"Failed to normalize video {filename}: {e}")
+            return None
+
+    async def _extract_video_derivatives(self, blob: bytes, filename: str, message_id, max_size: int) -> list[dict]:
+        """Extract representative frames and audio track from video for reliable model coverage."""
+        results = []
+        suffix = Path(filename).suffix.lower() or ".mp4"
+        try:
+            with tempfile.TemporaryDirectory(prefix="maxwell-vderiv-") as tmp:
+                tmp_path = Path(tmp)
+                video_path = tmp_path / f"input{suffix}"
+                video_path.write_bytes(blob)
+
+                # Extract frames at 2fps (1 every 0.5s), no limit
+                frame_pattern = str(tmp_path / "frame-%03d.jpg")
+                frame_cmd = [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-i", str(video_path),
+                    "-vf", "fps=2,scale='min(768,iw)':-2",
+                    frame_pattern,
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *frame_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                _stdout, stderr = await proc.communicate()
+                if proc.returncode == 0:
+                    for frame_path in sorted(tmp_path.glob("frame-*.jpg")):
+                        frame_blob = frame_path.read_bytes()
+                        if len(frame_blob) > max_size:
+                            continue
+                        results.append({
+                            "b64": base64.b64encode(frame_blob).decode("utf-8"),
+                            "mime_type": "image/jpeg",
+                            "filename": f"{filename}-{frame_path.stem}.jpg",
+                            "is_image": True,
+                            "is_text": False,
+                            "text": "",
+                            "message_id": message_id,
+                            "source": "video_frame",
+                        })
+                else:
+                    logger.warning(f"Video frame extraction failed for {filename}: {stderr.decode(errors='replace')[-300:]}")
+
+                # Extract audio track
+                audio_path = tmp_path / "audio.wav"
+                audio_cmd = [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-i", str(video_path),
+                    "-vn", "-ac", "1", "-ar", "16000",
+                    str(audio_path),
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *audio_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                _stdout, stderr = await proc.communicate()
+                if proc.returncode == 0 and audio_path.exists() and audio_path.stat().st_size > 44:
+                    audio_blob = audio_path.read_bytes()
+                    if len(audio_blob) <= max_size:
+                        results.append({
+                            "b64": base64.b64encode(audio_blob).decode("utf-8"),
+                            "mime_type": "audio/wav",
+                            "filename": f"{filename}-audio.wav",
+                            "is_image": False,
+                            "is_text": False,
+                            "text": "",
+                            "message_id": message_id,
+                            "source": "video_audio",
+                        })
+                elif proc.returncode != 0:
+                    logger.info(f"No extractable audio track for {filename}: {stderr.decode(errors='replace')[-200:]}")
+        except Exception as e:
+            logger.warning(f"Failed to derive frames/audio from video {filename}: {e}")
+        if results:
+            frame_count = sum(1 for item in results if item.get("is_image"))
+            audio_count = sum(1 for item in results if item.get("mime_type") == "audio/wav")
+            logger.info(f"Derived {frame_count} frame(s) and {audio_count} audio track(s) from video {filename}")
+        return results
+
+    async def _normalize_gif(self, blob: bytes, filename: str, max_size: int) -> tuple[bytes, str, str] | None:
+        try:
+            with tempfile.TemporaryDirectory(prefix="maxwell-gif-") as tmp:
+                tmp_path = Path(tmp)
+                input_path = tmp_path / "input.gif"
+                output_path = tmp_path / "gif-sheet.jpg"
+                input_path.write_bytes(blob)
+                cmd = [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-i", str(input_path),
+                    "-vf", "fps=2,scale=320:-2:flags=lanczos,tile=4x2:padding=4:margin=4:color=white",
+                    "-frames:v", "1",
+                    str(output_path),
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                _stdout, stderr = await proc.communicate()
+                if proc.returncode != 0 or not output_path.exists():
+                    logger.warning(f"GIF normalization failed for {filename}: {stderr.decode(errors='replace')[-300:]}")
+                    return None
+                normalized = output_path.read_bytes()
+                if len(normalized) > max_size:
+                    logger.warning(f"Skipping normalized GIF {filename}: too large ({len(normalized)} bytes)")
+                    return None
+                out_name = f"{Path(filename).stem}-gif-sheet.jpg"
+                logger.info(f"Normalized GIF {filename} -> {out_name} ({len(blob)} -> {len(normalized)} bytes)")
+                return normalized, "image/jpeg", out_name
+        except Exception as e:
+            logger.warning(f"Failed to normalize GIF {filename}: {e}")
+            return None
+
+    @staticmethod
+    def _embed_text(embed) -> str:
+        lines = []
+        if getattr(embed, "title", None):
+            lines.append(f"Title: {embed.title}")
+        if getattr(embed, "description", None):
+            lines.append(f"Description: {embed.description}")
+        if getattr(embed, "url", None):
+            lines.append(f"URL: {embed.url}")
+        author = getattr(embed, "author", None)
+        if author and getattr(author, "name", None):
+            author_line = f"Author: {author.name}"
+            if getattr(author, "url", None):
+                author_line += f" ({author.url})"
+            lines.append(author_line)
+        provider = getattr(embed, "provider", None)
+        if provider and getattr(provider, "name", None):
+            lines.append(f"Provider: {provider.name}")
+        for field in getattr(embed, "fields", []) or []:
+            name = getattr(field, "name", "field")
+            value = getattr(field, "value", "")
+            if name or value:
+                lines.append(f"Field - {name}: {value}")
+        footer = getattr(embed, "footer", None)
+        if footer and getattr(footer, "text", None):
+            lines.append(f"Footer: {footer.text}")
+        return "\n".join(line for line in lines if line).strip()
+
+    @staticmethod
+    def _embed_media_urls(embed) -> list[tuple[str, str]]:
+        urls = []
+        for label, obj_name in (("image", "image"), ("thumbnail", "thumbnail"), ("video", "video")):
+            obj = getattr(embed, obj_name, None)
+            url = getattr(obj, "url", None) or getattr(obj, "proxy_url", None)
+            if url:
+                urls.append((label, str(url)))
+        author = getattr(embed, "author", None)
+        if author and getattr(author, "icon_url", None):
+            urls.append(("author_icon", str(author.icon_url)))
+        footer = getattr(embed, "footer", None)
+        if footer and getattr(footer, "icon_url", None):
+            urls.append(("footer_icon", str(footer.icon_url)))
+        seen = set()
+        unique = []
+        for label, url in urls:
+            if url in seen:
+                continue
+            seen.add(url)
+            unique.append((label, url))
+        return unique
+
+    async def _download_embed_media(self, url: str, filename: str, max_size: int, message_id) -> dict | None:
+        if not _is_safe_url(url):
+            logger.warning(f"Skipping unsafe embed media URL: {url[:120]}")
+            return None
+        ext = Path(urlparse(url).path).suffix.lower()
+        try:
+            session = await _get_shared_session()
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=20, connect=8)) as resp:
+                if resp.status != 200:
+                    logger.warning(f"Skipping embed media {url[:120]}: HTTP {resp.status}")
+                    return None
+                content_type = (resp.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+                mime = content_type or MIME_MAP.get(ext, "")
+                if not mime.startswith(("image/", "video/", "audio/")):
+                    logger.warning(f"Skipping embed media {url[:120]}: unsupported mime {mime or 'unknown'}")
+                    return None
+                blob = await _read_response_limited(resp, max_size)
+        except Exception as e:
+            logger.warning(f"Failed to download embed media {url[:120]}: {e}")
+            return None
+        if not mime:
+            mime = MIME_MAP.get(ext, "application/octet-stream")
+        if mime == "image/gif" or ext == ".gif":
+            normalized = await self._normalize_gif(blob, filename, max_size)
+            if normalized:
+                blob, mime, filename = normalized
+        is_image = mime.startswith("image/")
+        logger.info(f"Extracted embed media {filename} ({len(blob)} bytes, mime={mime})")
+        return {
+            "b64": base64.b64encode(blob).decode("utf-8"),
+            "mime_type": mime,
+            "filename": filename,
+            "is_image": is_image,
+            "is_text": False,
+            "text": "",
+            "message_id": message_id,
+            "source": "embed",
+        }
+
+    async def _extract_embeds(self, message) -> list[dict]:
+        embeds = list(getattr(message, "embeds", []) or [])
+        if not embeds:
+            return []
+        max_mb = float(self._control.get("max_image_size_mb", 10) or 10)
+        max_size = int(max(1, min(max_mb, 25)) * 1024 * 1024)
+        media = []
+        text_blocks = []
+        message_id = getattr(message, "id", None)
+        media_count = 0
+        for idx, embed in enumerate(embeds[:5], 1):
+            text = self._embed_text(embed)
+            if text:
+                text_blocks.append(f"Embed {idx}:\n{text}")
+            for label, url in self._embed_media_urls(embed):
+                if media_count >= 5:
+                    break
+                ext = Path(urlparse(url).path).suffix.lower()
+                filename = f"embed-{idx}-{label}{ext or ''}"
+                item = await self._download_embed_media(url, filename, max_size, message_id)
+                if item:
+                    media.append(item)
+                    media_count += 1
+        if text_blocks:
+            media.insert(0, {
+                "b64": "",
+                "mime_type": "text/plain",
+                "filename": "discord-embeds.txt",
+                "is_image": False,
+                "is_text": True,
+                "text": "\n\n".join(text_blocks),
+                "message_id": message_id,
+                "source": "embed",
+            })
+            logger.info(f"Extracted text from {len(text_blocks)} embed(s)")
+        return media
+
+    async def _extract_gif_links(self, message) -> list[dict]:
+        urls = re.findall(r"https?://[^\s<>()]+", message.content or "")
+        gif_urls = []
+        for url in urls:
+            cleaned = url.rstrip(".,;!?)\"'")
+            path = urlparse(cleaned).path.lower()
+            if path.endswith(".gif"):
+                gif_urls.append(cleaned)
+        if not gif_urls:
+            return []
+        max_mb = float(self._control.get("max_image_size_mb", 10) or 10)
+        max_size = int(max(1, min(max_mb, 25)) * 1024 * 1024)
+        media = []
+        message_id = getattr(message, "id", None)
+        for idx, url in enumerate(gif_urls[:5], 1):
+            item = await self._download_embed_media(url, f"linked-gif-{idx}.gif", max_size, message_id)
+            if item:
+                item["source"] = "gif_link"
+                media.append(item)
+        return media
 
     def _cache_media_context(self, channel_id: str, media: list[dict]):
         image_media = [item for item in media if item.get("is_image")]
@@ -927,12 +1343,12 @@ class MaxwellBot(commands.Bot):
                 # request plus later handled messages in the same channel.
                 "uses_left": MEDIA_CONTEXT_USES,
             })
-        self._media_context[channel_id] = cached[-MAX_VISUAL_MEMORY_IMAGES:]
+        self._media_context[channel_id] = cached
         logger.info(f"Cached {len(image_media)} image(s) for channel {channel_id}; visual memory={len(self._media_context[channel_id])}")
 
     def _get_media_context(self, channel_id: str) -> list[dict]:
         active = []
-        for item in self._media_context.get(channel_id, [])[-MAX_VISUAL_MEMORY_IMAGES:]:
+        for item in self._media_context.get(channel_id, []):
             active.append({
                 "b64": item["b64"],
                 "mime_type": item["mime_type"],
@@ -942,13 +1358,22 @@ class MaxwellBot(commands.Bot):
         return active
 
     @staticmethod
+    def _current_binary_media(media: list[dict]) -> list[dict]:
+        return [
+            item for item in media
+            if item.get("b64") and not item.get("is_text") and not item.get("is_image")
+        ]
+
+    @staticmethod
     def _format_media_summary(current_media: list[dict], active_media: list[dict]) -> str:
         current_images = [item for item in current_media if item.get("is_image")]
         current_other = [item for item in current_media if not item.get("is_image")]
+        active_images = [item for item in active_media if str(item.get("mime_type", "")).startswith("image/")]
+        active_non_images = [item for item in active_media if not str(item.get("mime_type", "")).startswith("image/")]
         parts = []
-        if active_media:
+        if active_images:
             lines = []
-            for i, item in enumerate(active_media, 1):
+            for i, item in enumerate(active_images, 1):
                 filename = item.get("filename", "image")
                 mime = item.get("mime_type", "image")
                 label = "new" if any(item.get("message_id") == cur.get("message_id") and filename == cur.get("filename") for cur in current_images) else "recent"
@@ -957,21 +1382,26 @@ class MaxwellBot(commands.Bot):
                 "Images available to inspect, oldest to newest. Use these actual image attachments when answering:\n"
                 + "\n".join(lines)
             )
-            if len(current_images) > MAX_VISUAL_MEMORY_IMAGES:
-                parts.append(f"Only the latest {MAX_VISUAL_MEMORY_IMAGES} images from this message were kept in visual memory.")
+        if active_non_images:
+            lines = []
+            for i, item in enumerate(active_non_images, 1):
+                filename = item.get("filename", "media")
+                mime = item.get("mime_type", "media")
+                lines.append(f"{i}. {filename} ({mime}, new)")
+            parts.append(
+                "Audio/video available to inspect in the multimodal message payload. Use the actual attached media when answering:\n"
+                + "\n".join(lines)
+            )
         if current_other:
             text_items = [item for item in current_other if item.get("is_text") and item.get("text")]
-            binary_items = [item for item in current_other if item not in text_items]
             for item in text_items:
                 filename = item.get("filename", "attachment")
                 mime = item.get("mime_type", "text/plain")
+                label = "Embed text" if item.get("source") == "embed" else "Readable attachment"
                 parts.append(
-                    f"Readable attachment: {filename} ({mime}). Full file contents follow:\n"
+                    f"{label}: {filename} ({mime}). Full contents follow:\n"
                     f"```text\n{item.get('text', '')}\n```"
                 )
-            if binary_items:
-                names = ", ".join(f"{item.get('filename', 'media')} ({item.get('mime_type', 'media')})" for item in binary_items[:5])
-                parts.append(f"Non-image media attached but not in visual memory: {names}")
         return "\n".join(parts)
 
     def _tick_media_context(self, channel_id: str):
@@ -1001,8 +1431,11 @@ class MaxwellBot(commands.Bot):
             self._active_requests[channel_id] = current_task
         ai_timeout = max(10, min(int(self._control.get("ai_timeout_seconds", 180) or 180), 600))
         _images, media = await self._extract_media(message)
+        media.extend(await self._extract_embeds(message))
+        media.extend(await self._extract_gif_links(message))
         self._cache_media_context(channel_id, media)
-        active_media = self._get_media_context(channel_id)
+        cached_media = self._get_media_context(channel_id)
+        active_media = cached_media + self._current_binary_media(media)
         media_summary = self._format_media_summary(media, active_media)
         messages = await self._build_messages(message, content, has_media=bool(active_media), media_summary=media_summary)
         try:
@@ -1184,9 +1617,9 @@ class MaxwellBot(commands.Bot):
             system_parts.append("Tools (only when needed): " + " | ".join(descriptions) + "\nCall format exactly: [tool_name]\n{json params}\n[/tool_name]")
         if has_media:
             system_parts.append(
-                "Vision: recent image attachments are available in the visual message payload. Inspect the actual image content directly. "
-                "If multiple images are present, treat them as ordered oldest to newest by the numbered list. "
-                "Do not claim you cannot see images unless no image content was provided to the model."
+                "Multimodal input: recent image attachments and current audio/video attachments are available in the message payload. "
+                "Inspect the actual media content directly. If multiple images are present, treat them as ordered oldest to newest by the numbered list. "
+                "Do not claim you cannot see or hear media unless no media content was provided to the model."
             )
         messages = [{"role": "system", "content": "\n\n".join(system_parts)}]
         memory = await self.memory.get_channel_memory(channel_id)
@@ -1215,7 +1648,7 @@ class MaxwellBot(commands.Bot):
         if media_summary:
             user_parts.append(media_summary)
         elif has_media:
-            user_parts.append("Images available to inspect in visual memory.")
+            user_parts.append("Media available to inspect in the multimodal payload.")
         music = self._get_music_context(message) if self._control.get("music_context_enabled", True) else ""
         if music:
             user_parts.append(music)

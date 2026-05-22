@@ -1,15 +1,34 @@
 # Maxwell
 
-Maxwell is a Discord self-client experiment with an OpenAI-compatible/Ollama-style model backend, tools, temporary site generation, and a small web dashboard/admin API.
+Maxwell is a Discord self-bot backed by any OpenAI-compatible API. It reads text, images, audio, video, file attachments, and Discord embeds, then responds using an LLM with tool-calling support. It includes a web dashboard, admin API, and temporary site generation.
 
-## Security Notes
+**This is a self-bot** (`discord.py-self`, `self_bot=True`). Self-bots may violate Discord ToS. Use at your own risk.
 
-This project can store Discord message content, user IDs, generated sites, prompts, and admin data. Fresh defaults are conservative, but you must explicitly review settings before deploying.
+## Features
 
-- Do not commit `.env`, `data/`, logs, PM2 dumps, generated `public/bot/` sites, or real Caddy basic-auth hashes.
-- Set `MAXWELL_ADMIN_USER` and `MAXWELL_ADMIN_PASSWORD`; the API does not bootstrap or persist admin credentials.
-- Serve generated `/bot/*` sites on a separate sandbox origin if possible. Arbitrary generated HTML on the same origin as admin pages can steal browser-local credentials.
-- `discord.py-self` and `self_bot=True` may violate Discord Terms of Service. Use at your own risk or refactor to a normal bot account before public deployment.
+- Multimodal input: images, audio, video, text files, and Discord embeds are forwarded to the model as native content parts (image_url, audio_url, video_url).
+- Visual memory: recent images persist across messages per channel (configurable depth).
+- Tool system: image generation (Pollinations, NVIDIA NIM, GPT-compatible), web search, URL fetch, meme sending, shell execution (sandboxed Docker), polls, invites, site generation, avatar/presence/nickname changes, message editing/forwarding/deletion, and more.
+- Auto mode: per-channel opt-in where Maxwell decides whether to respond to each message via a lightweight decider prompt.
+- Reaction handler: responds to emoji reactions on its own messages in auto-mode channels.
+- Per-server custom prompts and long-term memory.
+- Web dashboard with public read-only GET endpoints and auth-protected mutations.
+- Temporary site hosting: generates HTML sites served under a configurable public URL.
+
+## Project Structure
+
+```
+bot.py              Main bot entry point
+bot_tools.py        Tool implementations
+providers.py        OpenAI-compatible provider wrapper
+config.py           Environment-backed configuration
+memory.py           Channel/server memory manager
+api/api_server.py   Dashboard and admin API server
+web/                Static dashboard files (index.html, admin/)
+examples/           Caddyfile and PM2 config examples
+docker/             Shell tool sandbox Dockerfile
+ecosystem.config.js PM2 process config
+```
 
 ## Setup
 
@@ -20,24 +39,76 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env`, then run:
+Edit `.env` with your values, then run:
 
 ```bash
 python bot.py
 python api/api_server.py
 ```
 
-With PM2:
+Or with PM2:
 
 ```bash
 pm2 start ecosystem.config.js
 ```
 
-## Web
+## Environment Variables
 
-Static dashboard files live in `web/`. A deployment can copy `web/index.html` and `web/admin/index.html` to a web root, then reverse proxy `/api/*` and `/data/*` to `MAXWELL_API_HOST:MAXWELL_API_PORT`.
+See `.env.example` for a full template. Key variables:
 
-See `examples/Caddyfile.example` for a sanitized reverse proxy example.
+| Variable | Required | Description |
+|---|---|---|
+| `DISCORD_TOKEN` | Yes | Discord user token |
+| `OLLAMA_BASE_URL` | No | OpenAI-compatible API base URL (default: `http://localhost:11434`) |
+| `OLLAMA_API_KEY` | No | Bearer token for the LLM API (falls back to `OPENAI_COMPAT_API_KEY`) |
+| `OLLAMA_MODEL` | No | Model name (default: `gemma4:31b-cloud`) |
+| `OLLAMA_MAX_TOKENS` | No | Max tokens (default: 200000) |
+| `OLLAMA_TEMPERATURE` | No | Temperature (default: 1.0) |
+| `NVIDIA_API_KEY` | No | NVIDIA NIM API key for HD image generation |
+| `GPT_IMAGE_URL` | No | GPT-compatible image generation endpoint |
+| `GPT_IMAGE_API_KEY` | No | API key for GPT image endpoint |
+| `DATA_DIR` | No | Data storage directory (default: `data`) |
+| `MAXWELL_ADMIN_USER` | Yes | Admin username for dashboard API |
+| `MAXWELL_ADMIN_PASSWORD` | Yes | Admin password for dashboard API |
+| `MAXWELL_SITE_DIR` | No | Directory for generated bot sites (default: `public/bot`) |
+| `MAXWELL_PUBLIC_BASE_URL` | No | Public URL for generated sites |
+| `MAXWELL_API_HOST` | No | API bind address (default: `127.0.0.1`) |
+| `MAXWELL_API_PORT` | No | API port (default: `8765`) |
+| `MAXWELL_CORS_ORIGIN` | No | Allowed CORS origin (default: same as `MAXWELL_PUBLIC_BASE_URL`) |
+
+## Commands
+
+All commands use the `,` prefix. Admin commands require the user to be in the admin list.
+
+| Command | Admin | Description |
+|---|---|---|
+| `,stop` | No | Cancel the active AI request in this channel |
+| `,prompt [text]` | Yes | View or set a custom server prompt |
+| `,clearprompt` | Yes | Clear the custom server prompt |
+| `,clearmem` | Yes | Clear channel memory and all cached state |
+| `,auto` | Yes | Toggle auto-mode for this channel |
+| `,auto list` | Yes | List all auto-mode channels |
+| `,drug [minutes]` | No | Temporary "fried" personality override |
+| `,drug off` | No | Turn off drug mode |
+| `,blacklist [user]` | Yes | Add/view/clear blacklisted users |
+| `,unblacklist [user]` | Yes | Remove a user from the blacklist |
+
+## Dashboard / API
+
+The API server (`api/api_server.py`) serves a dashboard and admin interface.
+
+- **GET endpoints** are public (no auth required) so the dashboard can load data.
+- **POST/PUT/DELETE endpoints** require HTTP Basic auth with `MAXWELL_ADMIN_USER` / `MAXWELL_ADMIN_PASSWORD`.
+- **`POST /api/login`** is exempt from middleware; credentials are validated by the handler.
+
+Static files (`web/index.html`, `web/admin/index.html`) should be copied to a web root. Reverse proxy `/api/*` and `/data/*` to `MAXWELL_API_HOST:MAXWELL_API_PORT`. See `examples/Caddyfile.example`.
+
+## Security
+
+- Never commit `.env`, `data/`, logs, PM2 dumps, or generated sites.
+- Set real values for `MAXWELL_ADMIN_USER` and `MAXWELL_ADMIN_PASSWORD`. The API does not persist or bootstrap credentials.
+- Generated bot sites serve arbitrary HTML. Host them on a separate origin from admin pages to prevent credential theft via XSS.
+- The shell tool runs commands inside a sandboxed Docker container (no network, read-only filesystem, capped memory/CPU/PIDs). See `docker/` for the Dockerfile.
 
 ## License
 
