@@ -28,7 +28,7 @@ nav{border-right:1px solid var(--bdr);background:var(--bg2);padding:8px}
 nav button{display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:transparent;color:var(--fg3);border:none;border-radius:6px;padding:8px 10px;font:inherit;font-size:11px;font-weight:600;cursor:pointer;transition:all .12s;letter-spacing:.02em}
 nav button:hover{background:rgba(0,229,255,.04);color:var(--fg2)}
 nav button.active{color:var(--cyan);background:rgba(0,229,255,.08);border-left:2px solid var(--cyan)}
-nav button .icon{font-size:14px;width:18px;text-align:center}
+nav button .icon{display:none}
 
 main{padding:16px;overflow:auto}
 
@@ -128,7 +128,34 @@ tr:hover{background:rgba(0,229,255,.02)}
 .chat-input-row{display:flex;gap:8px;margin-top:8px}
 .chat-input-row input{flex:1}
 
-@media(max-width:900px){.layout{grid-template-columns:1fr}nav{display:none}.grid-2,.grid-3{grid-template-columns:1fr}.pm2-grid{grid-template-columns:1fr}}
+@media(max-width:900px){
+  .top{height:auto;min-height:52px;padding:10px 12px;gap:10px;align-items:flex-start;flex-direction:column}
+  .top-nav{width:100%;overflow-x:auto;padding-bottom:2px}
+  .layout{display:block;min-height:auto}
+  nav{position:sticky;top:0;z-index:90;display:flex;gap:6px;overflow-x:auto;border-right:0;border-bottom:1px solid var(--bdr);padding:8px;background:var(--bg2)}
+  nav button{width:auto;white-space:nowrap;flex:0 0 auto;padding:8px 12px}
+  nav button.active{border-left:0;border-bottom:2px solid var(--cyan)}
+  main{padding:10px}
+  .grid-2,.grid-3,.control-grid,.pm2-grid{grid-template-columns:1fr}
+  .row{align-items:stretch}
+  .row input,.row select,.row button{width:100%;min-width:0}
+  .card{padding:12px;margin-bottom:10px;border-radius:8px}
+  table{display:block;overflow-x:auto;white-space:nowrap}
+  td textarea{min-width:240px}
+  .chat-input-row{flex-direction:column}
+  .stat-val{font-size:24px}
+}
+@media(max-width:520px){
+  body{font-size:13px}
+  .logo{font-size:14px}
+  .badge{font-size:9px}
+  button,input,textarea,select{font-size:13px}
+  .actions{flex-direction:column}
+  .actions .btn,.actions button{width:100%;justify-content:center}
+  .control-item label{align-items:flex-start;flex-direction:column}
+  .control-item input[type="number"]{width:100%}
+  .chat-area{max-height:300px}
+}
 </style>
 </head>
 <body x-data="adminPanel()">
@@ -661,7 +688,7 @@ tr:hover{background:rgba(0,229,255,.02)}
 function adminPanel(){
   return{
     tabs:['Overview','Actions','Chat Room','Controls','Memory','Context','Sites','Prompts','Blacklist','Auto Chan','Channels','Logs','Raw Data'],
-    tabIcons:{'Overview':'📊','Actions':'⚡','Chat Room':'💬','Controls':'⚙️','Memory':'🧠','Context':'🧩','Sites':'🌐','Prompts':'📝','Blacklist':'🚫','Auto Chan':'🔔','Channels':'📡','Logs':'📋','Raw Data':'🔍'},
+    tabIcons:{},
     tab:'Overview',
     stats:{guilds:0,channels:0,memories:0,sites:0,blacklist:0,prompts:0,autoChannels:0,online:true},
     memories:[],contextFacts:[],sites:{},prompts:{},blacklist:[],autoChannels:[],memoryJson:{},tools:[],
