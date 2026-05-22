@@ -216,6 +216,7 @@ class MaxwellBot(commands.Bot):
         self._media_context: dict[str, list[dict]] = {}
         self._control = dict(DEFAULT_CONTROL)
         self._control_mtime = 0
+        self._reaction_seen: set[str] = set()  # "{message_id}:{emoji}" dedup
         self._tasks = []
         self._setup_ai()
         self._setup_memory()
@@ -426,6 +427,93 @@ class MaxwellBot(commands.Bot):
                     return
                 await self._handle_message(message, (clean or "look at this") + self._get_reply_context(message))
 
+    async def on_reaction_add(self, reaction, user):
+        """React to emoji reactions on Maxwell's messages (auto-mode only, once per emoji per message)."""
+        if not self.user or not self._control.get("bot_enabled", True):
+            return
+        if not self._control.get("auto_mode_enabled", False):
+            return
+        # Only react to reactions on Maxwell's own messages
+        if reaction.message.author.id != self.user.id:
+            return
+        # Ignore own reactions
+        if user.id == self.user.id:
+            return
+        # Only in auto-mode channels
+        channel_id = str(reaction.message.channel.id)
+        if channel_id not in self._auto_channels:
+            return
+        # Deduplicate: only once per emoji per message
+        emoji_str = str(reaction.emoji)
+        dedup_key = f"{reaction.message.id}:{emoji_str}"
+        if dedup_key in self._reaction_seen:
+            return
+        self._reaction_seen.add(dedup_key)
+        # Keep the dedup set from growing unbounded
+        if len(self._reaction_seen) > 5000:
+            discard = list(self._reaction_seen)[:2500]
+            for k in discard:
+                self._reaction_seen.discard(k)
+
+        logger.info(f"Reaction {emoji_str} from {user.display_name} on Maxwell's message in channel {channel_id}")
+
+        # Build a lightweight LLM call to decide whether to comment
+        try:
+            msg_content = reaction.message.content or "[no text]"
+            memory = await self.memory.get_channel_memory(channel_id)
+            recent = []
+            if memory:
+                for msg in memory[-6:]:
+                    if msg.get("content"):
+                        recent.append(f"{msg.get('author', '?')}: {msg.get('content', '')[:120]}")
+
+            recent_text = "\n".join(recent[-4:]) if recent else "[no recent messages]"
+            messages = [
+                {"role": "system", "content": (
+                    "You are Maxwell. Someone reacted to YOUR message with an emoji. "
+                    "You can see what your message said, who reacted, and the emoji they used. "
+                    "Decide if you want to say something about it in chat. "
+                    "If yes, write a SHORT casual response (one line, Maxwell's usual style). "
+                    "If you have nothing interesting to say, reply with exactly: __SKIP__\n"
+                    "Do NOT quote or repeat your original message. Do NOT explain the emoji. "
+                    "Only respond if it's actually funny, interesting, or worth acknowledging. "
+                    "Most reactions do NOT need a response — skip those."
+                )},
+                {"role": "user", "content": (
+                    f"Recent chat context:\n{recent_text}\n\n"
+                    f"Your message that got reacted to: \"{msg_content[:300]}\"\n"
+                    f"{user.display_name} reacted with: {emoji_str}\n\n"
+                    f"Do you want to say something? (write it, or __SKIP__)"
+                )},
+            ]
+
+            await self._acquire_ai_slot(timeout=15)
+            try:
+                result = await self.ai_provider.generate_response(messages, timeout=15)
+            finally:
+                await self._release_ai_slot()
+
+            result = result.strip()
+            if not result or "__SKIP__" in result or "__skip__" in result.lower() or len(result) < 2:
+                logger.info(f"Reaction handler: skipping (LLM said skip)")
+                return
+
+            # Send as a new standalone message, not a reply
+            for chunk in self._split_response(result):
+                await reaction.message.channel.send(chunk)
+            logger.info(f"Reaction handler: sent response in channel {channel_id}")
+
+            # Store in memory if enabled
+            if self._control.get("store_memory", True):
+                await self.memory.add_to_channel_memory(channel_id, {
+                    "author": self.bot_name,
+                    "content": result,
+                    "message_id": None,
+                    "is_tool": False,
+                })
+        except Exception as e:
+            logger.warning(f"Reaction handler error: {e}")
+
     async def _handle_command(self, message):
         content = message.content[len(self.command_prefix):].strip()
         parts = content.split(maxsplit=1)
@@ -460,7 +548,13 @@ class MaxwellBot(commands.Bot):
                 await message.channel.send("Server prompt cleared.")
             elif cmd == "clearmem":
                 await self.memory.clear_channel_memory(channel_id)
-                await message.channel.send("Memory cleared for this channel.")
+                self._media_context.pop(channel_id, None)
+                self._auto_counter.pop(channel_id, None)
+                self._active_requests.pop(channel_id, None)
+                self._stop_until.pop(channel_id, None)
+                self._drugged_until.pop(channel_id, None)
+                self._reaction_seen.clear()
+                await message.channel.send("Memory, media context, and channel state cleared.")
             elif cmd == "drug":
                 now = asyncio.get_running_loop().time()
                 arg = (args or "").strip().lower()
@@ -760,7 +854,12 @@ class MaxwellBot(commands.Bot):
                                             cmd["result"] = f"HTTP {resp.status}"
                         elif typ == "clear_memory":
                             if cmd.get("channel_id"):
-                                await self.memory.clear_channel_memory(str(cmd["channel_id"]))
+                                cid = str(cmd["channel_id"])
+                                await self.memory.clear_channel_memory(cid)
+                                self._media_context.pop(cid, None)
+                                self._auto_counter.pop(cid, None)
+                                self._stop_until.pop(cid, None)
+                                self._drugged_until.pop(cid, None)
                                 cmd["result"] = "memory cleared"
                         elif typ == "reload_controls":
                             self._load_control(force=True)
