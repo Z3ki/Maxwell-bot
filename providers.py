@@ -178,6 +178,11 @@ class OllamaProvider:
 
                     content = choices[0].get("message", {}).get("content", "")
                     if not content:
+                        if attempt < 3:
+                            wait = attempt * 2
+                            logger.warning(f"Provider returned empty response (attempt {attempt}/3), retrying in {wait}s...")
+                            await asyncio.sleep(wait)
+                            continue
                         raise RuntimeError("Empty response from provider")
 
                     return content
