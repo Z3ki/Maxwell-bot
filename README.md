@@ -6,12 +6,12 @@ Maxwell is a Discord self-bot backed by any OpenAI-compatible API. It reads text
 
 ## Features
 
-- Multimodal input: images, audio, video, text files, and Discord embeds are forwarded to the model as native content parts (image_url, audio_url, video_url).
+- Multimodal input: images, audio, video, text files, and Discord embeds are forwarded to the model with normalized video, extracted frames, and extracted audio.
 - Visual memory: recent images persist across messages per channel (configurable depth).
 - Tool system: image generation (Pollinations, NVIDIA NIM, GPT-compatible), web search, URL fetch, meme sending, shell execution (sandboxed Docker), polls, invites, site generation, avatar/presence/nickname changes, message editing/forwarding/deletion, and more.
 - Auto mode: per-channel opt-in where Maxwell decides whether to respond to each message via a lightweight decider prompt.
 - Reaction handler: responds to emoji reactions on its own messages in auto-mode channels.
-- Per-server custom prompts and long-term memory.
+- Per-server custom prompts, long-term memory, and scoped cross-context facts across DMs, servers, groups, and channels.
 - Web dashboard with public read-only GET endpoints and auth-protected mutations.
 - Temporary site hosting: generates HTML sites served under a configurable public URL.
 
@@ -92,14 +92,21 @@ All commands use the `,` prefix. Admin commands require the user to be in the ad
 | `,drug off` | No | Turn off drug mode |
 | `,blacklist [user]` | Yes | Add/view/clear blacklisted users |
 | `,unblacklist [user]` | Yes | Remove a user from the blacklist |
+| `,context` | Yes | Show relevant scoped cross-context facts |
+| `,context all` | Yes | Show recent shared context facts |
+| `,context add [scope] <fact>` | Yes | Manually add a scoped context fact |
+| `,context forget <id>` | Yes | Delete a shared context fact |
+| `,context private <id>` | Yes | Mark a shared context fact private |
+| `,context global <id>` | Yes | Promote a fact to global shared context |
 
 ## Dashboard / API
 
 The API server (`api/api_server.py`) serves a dashboard and admin interface.
 
-- **GET endpoints** are public (no auth required) so the dashboard can load data.
-- **POST/PUT/DELETE endpoints** require HTTP Basic auth with `MAXWELL_ADMIN_USER` / `MAXWELL_ADMIN_PASSWORD`.
+- **GET dashboard endpoints** are public so the public dashboard can load data.
+- **Admin context endpoints** and all **POST/PUT/DELETE endpoints** require HTTP Basic auth with `MAXWELL_ADMIN_USER` / `MAXWELL_ADMIN_PASSWORD`.
 - **`POST /api/login`** is exempt from middleware; credentials are validated by the handler.
+- The admin HTML can be served publicly; protected actions still require API credentials inside the UI.
 
 Static files (`web/index.html`, `web/admin/index.html`) should be copied to a web root. Reverse proxy `/api/*` and `/data/*` to `MAXWELL_API_HOST:MAXWELL_API_PORT`. See `examples/Caddyfile.example`.
 

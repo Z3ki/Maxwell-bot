@@ -101,7 +101,29 @@ main{display:flex;flex-direction:column;gap:20px}
 footer{text-align:center;color:var(--fg3);font-size:11px;padding:40px 0 20px;position:relative;z-index:1}
 
 @media(max-width:1100px){.grid{grid-template-columns:1fr}aside{position:static}.stats-grid{grid-template-columns:repeat(3,1fr)}.hero-row{grid-template-columns:1fr 1fr}}
-@media(max-width:768px){.stats-grid{grid-template-columns:repeat(2,1fr)}.panels{grid-template-columns:1fr}.hero-row{grid-template-columns:1fr}.sys-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:768px){
+  .top{height:auto;min-height:56px;padding:12px;gap:10px;align-items:flex-start;flex-direction:column}
+  .nav-r{width:100%;overflow-x:auto;padding-bottom:2px}
+  .nav-btn{white-space:nowrap;flex:0 0 auto}
+  .grid{padding:12px;gap:12px}
+  .stats-grid{grid-template-columns:repeat(2,1fr);gap:8px}
+  .panels{grid-template-columns:1fr;gap:12px}
+  .panel[style]{grid-column:auto!important}
+  .hero-row{grid-template-columns:1fr;gap:10px}
+  .sys-grid{grid-template-columns:1fr 1fr}
+  .hero-card,.stat,.sys-card,.panel{border-radius:9px}
+  .hero-num{font-size:30px}
+  .uptime-bar{align-items:flex-start;flex-direction:column;gap:4px}
+}
+@media(max-width:520px){
+  .stats-grid,.sys-grid{grid-template-columns:1fr}
+  .logo{font-size:16px}
+  .status-tag,.nav-btn{font-size:10px}
+  .panel-head{align-items:flex-start;flex-direction:column;gap:4px}
+  .li{padding:10px 12px}
+  .li-content{white-space:normal;word-break:break-word}
+  footer{padding:24px 0 14px}
+}
 </style>
 </head>
 <body>
@@ -202,7 +224,7 @@ function pill(cls,v){return '<span class="pill '+cls+'">'+esc(v)+'</span>'}
 
 const CONTROL_KEYS=[
   ['bot_enabled','Bot'],['reply_dms','DMs'],['reply_groups','Groups'],
-  ['reply_mentions','Mentions'],['auto_mode_enabled','Auto'],['tools_enabled','Tools'],['store_memory','Memory']
+  ['reply_mentions','Mentions'],['auto_mode_enabled','Auto'],['tools_enabled','Tools'],['store_memory','Memory'],['cross_context_enabled','Context']
 ];
 
 let bgEnabled=true;
@@ -319,7 +341,7 @@ async function loadData(){
     tx('hChannels',Object.keys(chObj).length);
     tx('hMessages',totalMsgs+' messages tracked');
     tx('hMemories',memArr.length);
-    tx('hAuto',auto.length+' auto channels');
+    tx('hAuto',auto.length+' auto channels / '+(statusData?.stats?.context??0)+' context facts');
     tx('hSites',Object.keys(sitesObj).length);
     tx('hBlocked',bl.length+' blocked users');
 

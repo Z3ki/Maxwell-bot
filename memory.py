@@ -5,6 +5,7 @@ import logging
 import asyncio
 import os
 import tempfile
+import uuid
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
@@ -14,6 +15,16 @@ logger = logging.getLogger(__name__)
 MAX_MEMORY_CHARS = 1000
 MAX_LTM_LINES = 999
 MAX_CHANNELS = 25
+MAX_SHARED_CONTEXT = 1000
+MAX_SHARED_CONTEXT_CHARS = 1200
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _utcnow_iso() -> str:
+    return _utcnow().isoformat()
 
 
 def _atomic_json_write_sync(path: Path, data):
@@ -51,6 +62,22 @@ def _normalize_ltm_line(content: str) -> str:
     return " ".join(str(content).split())[:MAX_MEMORY_CHARS]
 
 
+def _normalize_context_text(content: str) -> str:
+    return " ".join(str(content or "").split())[:MAX_SHARED_CONTEXT_CHARS]
+
+
+def _parse_iso(ts: str) -> Optional[datetime]:
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(ts))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
 class MemoryManager:
     """Memory manager with async I/O, debounced saves, and atomic writes."""
 
@@ -59,8 +86,10 @@ class MemoryManager:
         self.max_messages = min(max_messages, 30)
         self.memory_file = self.data_dir / "memory.json"
         self.ltm_file = self.data_dir / "long_term_memory.txt"
+        self.shared_context_file = self.data_dir / "shared_context.json"
         self.memory = {}
         self.long_term_memory = []
+        self.shared_context = []
         self._lock = asyncio.Lock()
         self._dirty = False
         self._save_task = None
@@ -88,6 +117,15 @@ class MemoryManager:
         except OSError as e:
             logger.error(f"Failed to load long-term memory: {e}")
             self.long_term_memory = []
+
+        try:
+            if self.shared_context_file.exists():
+                data = json.loads(self.shared_context_file.read_text(encoding="utf-8"))
+                self.shared_context = self._sanitize_shared_context(data if isinstance(data, list) else [])
+                logger.info(f"Loaded {len(self.shared_context)} shared context facts")
+        except (json.JSONDecodeError, OSError) as e:
+            logger.error(f"Failed to load shared context: {e}")
+            self.shared_context = []
 
     async def _atomic_save(self, filepath: Path, data):
         """Thread-safe atomic JSON save."""
@@ -156,6 +194,167 @@ class MemoryManager:
         self.long_term_memory = [
             {"id": i + 1, "content": line} for i, line in enumerate(lines)
         ]
+
+    def _sanitize_shared_context(self, entries: list) -> list:
+        now = _utcnow()
+        sanitized = []
+        for raw in entries:
+            if not isinstance(raw, dict):
+                continue
+            content = _normalize_context_text(raw.get("content", ""))
+            if not content:
+                continue
+            expires_at = str(raw.get("expires_at") or "").strip()
+            if expires_at:
+                expiry = _parse_iso(expires_at)
+                if expiry and expiry <= now:
+                    continue
+            scope = str(raw.get("scope") or "global").strip()[:80]
+            visibility = str(raw.get("visibility") or "shared").strip()[:32]
+            if visibility not in {"private", "shared", "admin_only", "public_hint"}:
+                visibility = "shared"
+            try:
+                importance = int(raw.get("importance", 5))
+            except (TypeError, ValueError):
+                importance = 5
+            tags = raw.get("tags", [])
+            if isinstance(tags, str):
+                tags = [tags]
+            if not isinstance(tags, list):
+                tags = []
+            created_at = str(raw.get("created_at") or _utcnow_iso())
+            last_seen_at = str(raw.get("last_seen_at") or created_at)
+            sanitized.append({
+                "id": str(raw.get("id") or uuid.uuid4().hex[:10])[:32],
+                "scope": scope,
+                "visibility": visibility,
+                "importance": max(1, min(importance, 10)),
+                "content": content,
+                "source_user_id": str(raw.get("source_user_id") or "")[:64],
+                "source_channel_id": str(raw.get("source_channel_id") or "")[:64],
+                "source_guild_id": str(raw.get("source_guild_id") or "")[:64],
+                "source_kind": str(raw.get("source_kind") or "unknown")[:32],
+                "tags": [str(t).strip()[:32] for t in tags if str(t).strip()][:12],
+                "created_at": created_at,
+                "last_seen_at": last_seen_at,
+                "expires_at": expires_at,
+            })
+        sanitized.sort(key=lambda e: (str(e.get("last_seen_at", "")), str(e.get("created_at", ""))), reverse=True)
+        return sanitized[:MAX_SHARED_CONTEXT]
+
+    async def _save_shared_context(self):
+        self.shared_context = self._sanitize_shared_context(self.shared_context)
+        await asyncio.to_thread(_atomic_json_write_sync, self.shared_context_file, self.shared_context)
+
+    async def add_shared_context(self, entry: dict) -> str:
+        if not isinstance(entry, dict):
+            return ""
+        async with self._lock:
+            now = _utcnow_iso()
+            clean = self._sanitize_shared_context([{**entry, "created_at": entry.get("created_at") or now, "last_seen_at": entry.get("last_seen_at") or now}])
+            if not clean:
+                return ""
+            new_entry = clean[0]
+            # Merge exact duplicate content/scope to avoid noisy repeated facts.
+            for existing in self.shared_context:
+                if existing.get("scope") == new_entry.get("scope") and existing.get("content", "").lower() == new_entry.get("content", "").lower():
+                    existing["last_seen_at"] = now
+                    existing["importance"] = max(int(existing.get("importance", 5)), int(new_entry.get("importance", 5)))
+                    await self._save_shared_context()
+                    return str(existing.get("id"))
+            self.shared_context.insert(0, new_entry)
+            await self._save_shared_context()
+            logger.info(f"Added shared context #{new_entry['id']} scope={new_entry['scope']}")
+            return str(new_entry["id"])
+
+    async def remove_shared_context(self, context_id: str) -> bool:
+        async with self._lock:
+            before = len(self.shared_context)
+            self.shared_context = [e for e in self.shared_context if str(e.get("id")) != str(context_id)]
+            if len(self.shared_context) < before:
+                await self._save_shared_context()
+                logger.info(f"Removed shared context #{context_id}")
+                return True
+        return False
+
+    async def update_shared_context(self, context_id: str, updates: dict) -> bool:
+        if not isinstance(updates, dict):
+            return False
+        async with self._lock:
+            for entry in self.shared_context:
+                if str(entry.get("id")) == str(context_id):
+                    allowed = {"scope", "visibility", "importance", "content", "tags", "expires_at"}
+                    for key, value in updates.items():
+                        if key in allowed:
+                            entry[key] = value
+                    entry["last_seen_at"] = _utcnow_iso()
+                    self.shared_context = self._sanitize_shared_context(self.shared_context)
+                    await self._save_shared_context()
+                    logger.info(f"Updated shared context #{context_id}")
+                    return True
+        return False
+
+    async def list_shared_context(self, limit: int = 200) -> list:
+        async with self._lock:
+            self.shared_context = self._sanitize_shared_context(self.shared_context)
+            return [dict(e) for e in self.shared_context[:max(1, min(int(limit or 200), MAX_SHARED_CONTEXT))]]
+
+    async def get_relevant_shared_context(
+        self, user_id: str, guild_id: str = "", channel_id: str = "", is_dm: bool = False,
+        is_admin: bool = False, max_items: int = 10, budget: int = 5000,
+    ) -> list:
+        user_id = str(user_id or "")
+        guild_id = str(guild_id or "")
+        channel_id = str(channel_id or "")
+        scopes = {"global"}
+        if user_id:
+            scopes.add(f"user:{user_id}")
+            if is_dm:
+                scopes.add(f"dm:{user_id}")
+        if guild_id:
+            scopes.add(f"guild:{guild_id}")
+        if channel_id:
+            scopes.add(f"channel:{channel_id}")
+        async with self._lock:
+            self.shared_context = self._sanitize_shared_context(self.shared_context)
+            candidates = []
+            for entry in self.shared_context:
+                visibility = entry.get("visibility", "shared")
+                scope = entry.get("scope", "global")
+                if visibility == "admin_only" and not is_admin:
+                    continue
+                if visibility == "private" and not (is_admin or scope in {f"user:{user_id}", f"dm:{user_id}", f"channel:{channel_id}"}):
+                    continue
+                if scope not in scopes:
+                    continue
+                candidates.append(dict(entry))
+
+        def score(entry: dict):
+            scope = entry.get("scope", "")
+            exact = 0
+            if scope == f"user:{user_id}":
+                exact = 4
+            elif scope == f"channel:{channel_id}":
+                exact = 3
+            elif scope == f"guild:{guild_id}":
+                exact = 2
+            elif scope == "global":
+                exact = 1
+            ts = _parse_iso(entry.get("last_seen_at", "")) or _parse_iso(entry.get("created_at", "")) or datetime.fromtimestamp(0, timezone.utc)
+            return (exact, int(entry.get("importance", 5)), ts.timestamp())
+
+        candidates.sort(key=score, reverse=True)
+        selected = []
+        used = 0
+        for entry in candidates:
+            line_len = len(entry.get("content", "")) + len(entry.get("scope", "")) + 20
+            if selected and used + line_len > max(1000, min(int(budget or 5000), 20000)):
+                break
+            selected.append(entry)
+            used += line_len
+            if len(selected) >= max(1, min(int(max_items or 10), 50)):
+                break
+        return selected
 
     async def get_channel_memory(self, channel_id: str) -> list:
         async with self._lock:

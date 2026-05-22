@@ -4,7 +4,7 @@ maxwell.example.com {
 	header X-Content-Type-Options "nosniff"
 	header Referrer-Policy "strict-origin-when-cross-origin"
 
-	# Backend routes. The backend also requires Basic auth.
+	# Backend routes. Mutating API routes require Maxwell admin auth.
 	handle /api/* {
 		reverse_proxy 127.0.0.1:8765
 	}
@@ -12,12 +12,10 @@ maxwell.example.com {
 		reverse_proxy 127.0.0.1:8765
 	}
 
-	# Optional extra protection for admin UI.
+	# Admin UI loads directly. The app prompts for Maxwell admin credentials
+	# before calling protected API routes.
 	@admin path /admin /admin/*
 	handle @admin {
-		basic_auth {
-			admin $2a$14$replace_with_caddy_hash
-		}
 		file_server
 	}
 

@@ -28,7 +28,7 @@ nav{border-right:1px solid var(--bdr);background:var(--bg2);padding:8px}
 nav button{display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:transparent;color:var(--fg3);border:none;border-radius:6px;padding:8px 10px;font:inherit;font-size:11px;font-weight:600;cursor:pointer;transition:all .12s;letter-spacing:.02em}
 nav button:hover{background:rgba(0,229,255,.04);color:var(--fg2)}
 nav button.active{color:var(--cyan);background:rgba(0,229,255,.08);border-left:2px solid var(--cyan)}
-nav button .icon{font-size:14px;width:18px;text-align:center}
+nav button .icon{display:none}
 
 main{padding:16px;overflow:auto}
 
@@ -128,7 +128,34 @@ tr:hover{background:rgba(0,229,255,.02)}
 .chat-input-row{display:flex;gap:8px;margin-top:8px}
 .chat-input-row input{flex:1}
 
-@media(max-width:900px){.layout{grid-template-columns:1fr}nav{display:none}.grid-2,.grid-3{grid-template-columns:1fr}.pm2-grid{grid-template-columns:1fr}}
+@media(max-width:900px){
+  .top{height:auto;min-height:52px;padding:10px 12px;gap:10px;align-items:flex-start;flex-direction:column}
+  .top-nav{width:100%;overflow-x:auto;padding-bottom:2px}
+  .layout{display:block;min-height:auto}
+  nav{position:sticky;top:0;z-index:90;display:flex;gap:6px;overflow-x:auto;border-right:0;border-bottom:1px solid var(--bdr);padding:8px;background:var(--bg2)}
+  nav button{width:auto;white-space:nowrap;flex:0 0 auto;padding:8px 12px}
+  nav button.active{border-left:0;border-bottom:2px solid var(--cyan)}
+  main{padding:10px}
+  .grid-2,.grid-3,.control-grid,.pm2-grid{grid-template-columns:1fr}
+  .row{align-items:stretch}
+  .row input,.row select,.row button{width:100%;min-width:0}
+  .card{padding:12px;margin-bottom:10px;border-radius:8px}
+  table{display:block;overflow-x:auto;white-space:nowrap}
+  td textarea{min-width:240px}
+  .chat-input-row{flex-direction:column}
+  .stat-val{font-size:24px}
+}
+@media(max-width:520px){
+  body{font-size:13px}
+  .logo{font-size:14px}
+  .badge{font-size:9px}
+  button,input,textarea,select{font-size:13px}
+  .actions{flex-direction:column}
+  .actions .btn,.actions button{width:100%;justify-content:center}
+  .control-item label{align-items:flex-start;flex-direction:column}
+  .control-item input[type="number"]{width:100%}
+  .chat-area{max-height:300px}
+}
 </style>
 </head>
 <body x-data="adminPanel()">
@@ -342,6 +369,11 @@ tr:hover{background:rgba(0,229,255,.02)}
           <div class="control-grid">
             <div class="control-item"><label>Store memory <label class="switch"><input type="checkbox" x-model="control.store_memory"><span class="slider"></span></label></label></div>
             <div class="control-item"><label>Use LTM <label class="switch"><input type="checkbox" x-model="control.long_term_memory_enabled"><span class="slider"></span></label></label></div>
+            <div class="control-item"><label>Cross context <label class="switch"><input type="checkbox" x-model="control.cross_context_enabled"><span class="slider"></span></label></label></div>
+            <div class="control-item"><label>Context watcher <label class="switch"><input type="checkbox" x-model="control.cross_context_extract_enabled"><span class="slider"></span></label></label></div>
+            <div class="control-item"><label>Ctx items <input type="number" min="1" max="50" x-model.number="control.cross_context_max_items" style="width:80px"></label></div>
+            <div class="control-item"><label>Ctx budget <input type="number" min="1000" max="20000" step="1000" x-model.number="control.cross_context_budget" style="width:80px"></label></div>
+            <div class="control-item"><label>Min importance <input type="number" min="1" max="10" x-model.number="control.cross_context_min_importance" style="width:80px"></label></div>
             <div class="control-item"><label>Emoji ctx <label class="switch"><input type="checkbox" x-model="control.emoji_context_enabled"><span class="slider"></span></label></label></div>
             <div class="control-item"><label>Music ctx <label class="switch"><input type="checkbox" x-model="control.music_context_enabled"><span class="slider"></span></label></label></div>
             <div class="control-item"><label>History msgs <input type="number" min="0" max="100" x-model.number="control.memory_history_messages" style="width:80px"></label></div>
@@ -421,6 +453,43 @@ tr:hover{background:rgba(0,229,255,.02)}
           </tbody>
         </table>
         <div x-show="memories.length===0" class="muted" style="padding:16px;text-align:center">No memories.</div>
+      </div>
+    </div>
+  </template>
+
+  <!-- ═══ Context ═══ -->
+  <template x-if="tab==='Context'">
+    <div>
+      <div class="msg" :class="msgType+' show'" x-text="msg" x-show="msg"></div>
+      <div class="card">
+        <h2>Add Shared Context</h2>
+        <div class="row" style="margin-bottom:8px">
+          <input x-model="newContextScope" placeholder="scope: global, user:id, guild:id" style="max-width:260px">
+          <select x-model="newContextVisibility" style="width:150px"><option value="shared">shared</option><option value="private">private</option><option value="admin_only">admin_only</option><option value="public_hint">public_hint</option></select>
+          <input type="number" min="1" max="10" x-model.number="newContextImportance" style="width:110px" title="importance">
+        </div>
+        <textarea x-model="newContextContent" placeholder="important fact Maxwell should use as background..." rows="3"></textarea>
+        <div class="actions"><button class="btn btn-cyan" @click="addContextFact()">Add Fact</button><button class="btn btn-cyan" @click="loadContextFacts()">Refresh</button></div>
+      </div>
+      <div class="card">
+        <h2>Shared Context Facts</h2>
+        <input x-model="contextFilter" placeholder="search..." style="width:100%;margin-bottom:8px">
+        <table>
+          <thead><tr><th>ID</th><th>Scope</th><th>Vis</th><th>Imp</th><th>Content</th><th></th></tr></thead>
+          <tbody>
+            <template x-for="fact in filteredContextFacts()" :key="fact.id">
+              <tr>
+                <td class="mono" style="color:var(--cyan)" x-text="fact.id"></td>
+                <td><input x-model="fact.scope" style="min-width:130px"></td>
+                <td><select x-model="fact.visibility"><option value="shared">shared</option><option value="private">private</option><option value="admin_only">admin_only</option><option value="public_hint">public_hint</option></select></td>
+                <td><input type="number" min="1" max="10" x-model.number="fact.importance" style="width:60px"></td>
+                <td><textarea class="mini-ta" x-model="fact.content" style="min-height:54px"></textarea><div class="muted" x-text="(fact.tags||[]).join(', ')"></div></td>
+                <td style="width:100px"><div class="actions"><button class="btn btn-cyan" style="padding:4px 10px;font-size:10px" @click="saveContextFact(fact)">Save</button><button class="btn btn-err" style="padding:4px 10px;font-size:10px" @click="deleteContextFact(fact.id)">Del</button></div></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+        <div x-show="contextFacts.length===0" class="muted" style="padding:16px;text-align:center">No shared context facts.</div>
       </div>
     </div>
   </template>
@@ -618,18 +687,18 @@ tr:hover{background:rgba(0,229,255,.02)}
 <script>
 function adminPanel(){
   return{
-    tabs:['Overview','Actions','Chat Room','Controls','Memory','Sites','Prompts','Blacklist','Auto Chan','Channels','Logs','Raw Data'],
-    tabIcons:{'Overview':'📊','Actions':'⚡','Chat Room':'💬','Controls':'⚙️','Memory':'🧠','Sites':'🌐','Prompts':'📝','Blacklist':'🚫','Auto Chan':'🔔','Channels':'📡','Logs':'📋','Raw Data':'🔍'},
+    tabs:['Overview','Actions','Chat Room','Controls','Memory','Context','Sites','Prompts','Blacklist','Auto Chan','Channels','Logs','Raw Data'],
+    tabIcons:{},
     tab:'Overview',
     stats:{guilds:0,channels:0,memories:0,sites:0,blacklist:0,prompts:0,autoChannels:0,online:true},
-    memories:[],sites:{},prompts:{},blacklist:[],autoChannels:[],memoryJson:{},tools:[],
+    memories:[],contextFacts:[],sites:{},prompts:{},blacklist:[],autoChannels:[],memoryJson:{},tools:[],
     selectedChatChannel:'',chatHistoryMessages:[],newChatMessage:'',chatLoading:false,
     channels:[],
     pm2:{bot:null,api:null},
     logProcess:'maxwell-bot',logLines:'100',logViewer:'',
-    control:{bot_enabled:true,log_messages:false,error_replies:true,typing_indicator:true,store_memory:false,long_term_memory_enabled:true,emoji_context_enabled:true,music_context_enabled:true,reply_dms:false,reply_groups:false,reply_mentions:true,reply_to_bots:false,auto_mode_enabled:false,auto_eval_every:5,auto_max_recent_replies:5,auto_recent_window_minutes:10,auto_inactivity_minutes:30,per_user_cooldown_seconds:1.5,process_images:true,max_image_size_mb:10,ai_timeout_seconds:180,ai_concurrency:3,memory_history_messages:20,memory_context_budget:30000,max_tool_iterations:10,max_response_chars:500,tools_enabled:false,disabled_tools:[],ignore_users:[],allowed_channels:[],blocked_channels:[],disabled_commands:[],base_personality:'',auto_decider_prompt:''},
+    control:{bot_enabled:true,log_messages:false,error_replies:true,typing_indicator:true,store_memory:false,long_term_memory_enabled:true,cross_context_enabled:true,cross_context_extract_enabled:true,cross_context_max_items:10,cross_context_budget:5000,cross_context_min_importance:5,cross_context_dm_to_global_admin_only:true,emoji_context_enabled:true,music_context_enabled:true,reply_dms:false,reply_groups:false,reply_mentions:true,reply_to_bots:false,auto_mode_enabled:false,auto_eval_every:5,auto_max_recent_replies:5,auto_recent_window_minutes:10,auto_inactivity_minutes:30,per_user_cooldown_seconds:1.5,process_images:true,max_image_size_mb:10,ai_timeout_seconds:180,ai_concurrency:3,memory_history_messages:20,memory_context_budget:30000,max_tool_iterations:10,max_response_chars:500,tools_enabled:false,disabled_tools:[],ignore_users:[],allowed_channels:[],blocked_channels:[],disabled_commands:[],base_personality:'',auto_decider_prompt:''},
     listText:{ignore_users:'',allowed_channels:'',blocked_channels:'',disabled_commands:''},
-    memFilter:'',newMemory:'',newPromptId:'',newPromptText:'',newBlacklistId:'',newAutoChannelId:'',adminUser:'',adminPass:'',
+    memFilter:'',newMemory:'',contextFilter:'',newContextScope:'global',newContextVisibility:'shared',newContextImportance:8,newContextContent:'',newPromptId:'',newPromptText:'',newBlacklistId:'',newAutoChannelId:'',adminUser:'',adminPass:'',
     msg:'',msgType:'',
     actionChannelId:'',actionMessage:'',actionDmUserId:'',actionDmMessage:'',
     actionStatus:'online',actionActivityType:'',actionActivityText:'',
@@ -705,9 +774,12 @@ function adminPanel(){
           this.stats.autoChannels=this.autoChannels.length;
           this.stats.online=false;
         }
+        if(this.adminUser||this.adminPass){await this.loadContextFacts(false)}
       }catch(e){console.error(e);this.stats.online=false;}
     },
     filteredMemories(){const q=this.memFilter.toLowerCase();if(!q)return this.memories;return this.memories.filter(m=>(m.content+' '+m.id).toLowerCase().includes(q))},
+    filteredContextFacts(){const q=this.contextFilter.toLowerCase();if(!q)return this.contextFacts;return this.contextFacts.filter(f=>JSON.stringify(f).toLowerCase().includes(q))},
+    async loadContextFacts(show=true){try{const data=await this.apiFetch('/api/context',{method:'GET'});this.contextFacts=Array.isArray(data)?data:[];if(show)this.showMsg('Context loaded','ok')}catch(e){if(show)this.showMsg('Error: '+e.message,'err')}},
     async loadChatHistory(channelId){
       this.selectedChatChannel=channelId;this.chatLoading=true;
       try{const data=await this.apiFetch('/api/chat/history?channel_id='+encodeURIComponent(channelId));this.chatHistoryMessages=Array.isArray(data)?data:[];}catch(e){this.showMsg('Error: '+e.message,'err');}
@@ -740,6 +812,9 @@ function adminPanel(){
     async addMemory(){if(!this.newMemory.trim()){this.showMsg('Empty','err');return;}try{await this.apiFetch('/api/memory',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:this.newMemory})});this.newMemory='';await this.loadAll();this.showMsg('Memory added','ok')}catch(e){this.showMsg('Error: '+e.message,'err')}},
     async saveMemory(m){if(!String(m.content||'').trim()){this.showMsg('Empty','err');return;}try{await this.apiFetch('/api/memory',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:m.id,content:m.content})});await this.loadAll();this.showMsg('Saved','ok')}catch(e){this.showMsg('Error: '+e.message,'err')}},
     async deleteMemory(id){try{await this.apiFetch('/api/memory?id='+encodeURIComponent(id),{method:'DELETE'});await this.loadAll();this.showMsg('Deleted','ok')}catch(e){this.showMsg('Error: '+e.message,'err')}},
+    async addContextFact(){if(!this.newContextContent.trim()){this.showMsg('Empty','err');return;}try{await this.apiFetch('/api/context',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scope:this.newContextScope||'global',visibility:this.newContextVisibility,importance:this.newContextImportance,content:this.newContextContent,tags:['manual']})});this.newContextContent='';await this.loadContextFacts(false);this.showMsg('Context added','ok')}catch(e){this.showMsg('Error: '+e.message,'err')}},
+    async saveContextFact(fact){try{await this.apiFetch('/api/context',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:fact.id,scope:fact.scope,visibility:fact.visibility,importance:fact.importance,content:fact.content,tags:fact.tags||[],expires_at:fact.expires_at||''})});await this.loadContextFacts(false);this.showMsg('Saved','ok')}catch(e){this.showMsg('Error: '+e.message,'err')}},
+    async deleteContextFact(id){try{await this.apiFetch('/api/context?id='+encodeURIComponent(id),{method:'DELETE'});await this.loadContextFacts(false);this.showMsg('Deleted','ok')}catch(e){this.showMsg('Error: '+e.message,'err')}},
     async savePrompt(id){try{await this.apiFetch('/api/prompts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,text:this.prompts[id]})});this.showMsg('Saved','ok')}catch(e){this.showMsg('Error: '+e.message,'err')}},
     async deletePrompt(id){try{await this.apiFetch('/api/prompts?id='+encodeURIComponent(id),{method:'DELETE'});await this.loadAll();this.showMsg('Deleted','ok')}catch(e){this.showMsg('Error: '+e.message,'err')}},
     async addPrompt(){if(!this.newPromptId.trim()||!this.newPromptText.trim()){this.showMsg('Need ID and text','err');return;}try{await this.apiFetch('/api/prompts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:this.newPromptId,text:this.newPromptText})});this.newPromptId='';this.newPromptText='';await this.loadAll();this.showMsg('Added','ok')}catch(e){this.showMsg('Error: '+e.message,'err')}},
