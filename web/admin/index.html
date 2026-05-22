@@ -240,6 +240,21 @@ tr:hover{background:rgba(0,229,255,.02)}
         </div>
         <div class="muted" style="margin-top:6px">All API/data requests require auth. Passwords are kept in memory only.</div>
       </div>
+
+      <div class="card">
+        <h2>REM Dreamer</h2>
+        <div class="pm2-row"><span>Status</span><span class="pill" :class="remStatus.enabled?'on':'off'" x-text="remStatus.enabled?'enabled':'disabled'"></span></div>
+        <div class="pm2-row"><span>Running</span><span class="mono" x-text="remStatus.running?'yes':'no'"></span></div>
+        <div class="pm2-row"><span>Interval</span><span class="mono" x-text="(remStatus.interval_s||0)+'s'"></span></div>
+        <div class="pm2-row"><span>Events</span><span class="mono" x-text="remStatus.events_buffered||0"></span></div>
+        <div class="pm2-row"><span>Last run</span><span class="mono" x-text="remStatus.last_run?new Date(remStatus.last_run).toLocaleString():'never'"></span></div>
+        <div class="muted" style="margin-top:6px" x-text="remStatus.last_audit_preview||'No audit yet.'"></div>
+        <div class="actions">
+          <button class="btn btn-cyan" @click="runRemNow()">Run now</button>
+          <button class="btn btn-ok" @click="setRemEnabled(true)">Enable</button>
+          <button class="btn btn-err" @click="setRemEnabled(false)">Disable</button>
+        </div>
+      </div>
     </div>
   </template>
 
@@ -691,6 +706,7 @@ function adminPanel(){
     tabIcons:{},
     tab:'Overview',
     stats:{guilds:0,channels:0,memories:0,sites:0,blacklist:0,prompts:0,autoChannels:0,online:true},
+    remStatus:{enabled:false,interval_s:600,last_run:'',events_buffered:0,last_audit_preview:'',running:false},
     memories:[],contextFacts:[],sites:{},prompts:{},blacklist:[],autoChannels:[],memoryJson:{},tools:[],
     selectedChatChannel:'',chatHistoryMessages:[],newChatMessage:'',chatLoading:false,
     channels:[],
@@ -730,7 +746,7 @@ function adminPanel(){
     },
     async loadAll(){
       try{
-        const[ltm,m,s,p,b,a,c,statusData,chData]=await Promise.all([
+        const[ltm,m,s,p,b,a,c,statusData,chData,remData]=await Promise.all([
           this.apiFetch('/data/long_term_memory.json').catch(()=>[]),
           this.apiFetch('/data/memory.json').catch(()=>({})),
           this.apiFetch('/data/sites.json').catch(()=>({})),
@@ -739,7 +755,8 @@ function adminPanel(){
           this.apiFetch('/data/auto_channels.json').catch(()=>[]),
           this.apiFetch('/data/bot_control.json').catch(()=>({})),
           this.apiFetch('/api/status').catch(()=>null),
-          this.apiFetch('/api/channels').catch(()=>[])
+          this.apiFetch('/api/channels').catch(()=>[]),
+          this.apiFetch('/api/rem/status').catch(()=>null)
         ]);
         this.memoryJson=(m&&typeof m==='object'&&!Array.isArray(m))?m:{};
         const memArr=Array.isArray(ltm)?ltm.map((x,i)=>({id:x.id??i+1,content:x.content??x})):[];
@@ -774,6 +791,7 @@ function adminPanel(){
           this.stats.autoChannels=this.autoChannels.length;
           this.stats.online=false;
         }
+        if(remData&&typeof remData==='object')this.remStatus=Object.assign({},this.remStatus,remData);
         if(this.adminUser||this.adminPass){await this.loadContextFacts(false)}
       }catch(e){console.error(e);this.stats.online=false;}
     },
@@ -826,6 +844,8 @@ function adminPanel(){
     async runAction(type,params){try{await this.apiFetch('/api/commands',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({type},params))});this.showMsg('Command queued','ok');if(type==='shell')setTimeout(()=>this.loadCommands(),2000)}catch(e){this.showMsg('Error: '+e.message,'err')}},
     async loadCommands(){try{const cmds=await this.apiFetch('/api/commands',{method:'GET'});if(Array.isArray(cmds)){this.commandHistory=cmds.reverse();const sh=cmds.find(c=>c.type==='shell'&&c.status==='done'&&c.result);if(sh)this.actionShellResult=sh.result}}catch(e){}},
     async deleteCommand(id){try{await this.apiFetch('/api/commands?id='+encodeURIComponent(id),{method:'DELETE'});await this.loadCommands();this.showMsg('Deleted','ok')}catch(e){this.showMsg('Error: '+e.message,'err')}},
+    async runRemNow(){try{const data=await this.apiFetch('/api/rem/run',{method:'POST'});this.showMsg(data.started?'REM queued':'REM not started: '+(data.reason||'unknown'),data.started?'ok':'err');setTimeout(()=>this.loadAll(),1500)}catch(e){this.showMsg('Error: '+e.message,'err')}},
+    async setRemEnabled(on){try{await this.apiFetch('/api/rem/'+(on?'enable':'disable'),{method:'POST'});await this.loadAll();this.showMsg('REM '+(on?'enabled':'disabled'),'ok')}catch(e){this.showMsg('Error: '+e.message,'err')}},
     async extendSite(slug){try{await this.apiFetch('/api/sites',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({slug,extend_24h:true})});await this.loadAll();this.showMsg('Extended','ok')}catch(e){this.showMsg('Error: '+e.message,'err')}},
     async deleteSite(slug){try{await this.apiFetch('/api/sites?slug='+encodeURIComponent(slug),{method:'DELETE'});await this.loadAll();this.showMsg('Deleted','ok')}catch(e){this.showMsg('Error: '+e.message,'err')}},
     async restartPm2(target){try{const data=await this.apiFetch('/api/pm2/restart?target='+encodeURIComponent(target),{method:'POST'});this.showMsg('Restart sent for '+target,'ok');setTimeout(()=>this.loadAll(),3000)}catch(e){this.showMsg('Error: '+e.message,'err')}},

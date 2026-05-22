@@ -86,6 +86,22 @@ class OllamaProvider:
         self, messages: list[dict], images: list[str] = None, media: list[dict] = None, timeout: int = 60
     ) -> str:
         """Generate response. images is legacy b64 list, media is list of {b64, mime_type}."""
+        message = await self.generate_chat_completion(messages, images=images, media=media, timeout=timeout)
+        content = message.get("content", "")
+        if not content:
+            raise RuntimeError("Empty response from provider")
+        return content
+
+    async def generate_chat_completion(
+        self,
+        messages: list[dict],
+        images: list[str] = None,
+        media: list[dict] = None,
+        tools: list[dict] = None,
+        model: str = None,
+        timeout: int = 60,
+    ) -> dict:
+        """Generate an OpenAI-compatible assistant message, optionally with tools."""
         if not self.available:
             raise RuntimeError("Provider not available")
 
@@ -148,12 +164,15 @@ class OllamaProvider:
                 logger.warning(f"No user message found to attach {len(payload_media)} multimodal item(s)")
 
         data = {
-            "model": self.model,
+            "model": model or self.model,
             "messages": chat_messages,
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
             "stream": False,
         }
+        if tools:
+            data["tools"] = tools
+            data["tool_choice"] = "auto"
 
         session = await self._get_session()
         last_error = None
@@ -192,8 +211,9 @@ class OllamaProvider:
                     if not choices:
                         raise RuntimeError("No response from provider")
 
-                    content = choices[0].get("message", {}).get("content", "")
-                    if not content:
+                    message = choices[0].get("message", {})
+                    content = message.get("content", "")
+                    if not content and not message.get("tool_calls"):
                         if attempt < 3:
                             wait = attempt * 2
                             logger.warning(f"Provider returned empty response (attempt {attempt}/3), retrying in {wait}s...")
@@ -201,7 +221,7 @@ class OllamaProvider:
                             continue
                         raise RuntimeError("Empty response from provider")
 
-                    return content
+                    return message
             except asyncio.TimeoutError:
                 if attempt < 3:
                     wait = attempt * 2
