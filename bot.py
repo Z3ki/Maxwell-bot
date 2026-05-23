@@ -2309,18 +2309,20 @@ class MaxwellBot(commands.Bot):
                     + ". If you want to use one in chat, write exactly its :name: alias; Maxwell will render it. "
                     "Do not write raw Discord emoji IDs."
                 )
-        if self.tools:
-            descriptions = [f"{name}: {tool.get_description()}" for name, tool in self.tools.items()]
-            system_parts.append(
-                "Tools are optional. Use them only when they actually help. Available tools: "
-                + " | ".join(descriptions)
-                + "\nTo call a tool, output one plain JSON object on its own line and nothing else for that tool call: "
-                '{"tool":"tool_name","param":"value"}. '
-                "Use exact tool names. Put parameters directly in the object, or under an args object. "
-                "Examples: {\"tool\":\"react\",\"emoji\":\"catjam\"} or "
-                "{\"tool\":\"web_search\",\"query\":\"latest thing\"}. "
-                "After tool results are returned, answer normally. Do not wrap tool calls in markdown."
-            )
+        if self.tools and self._control.get("tools_enabled", True):
+            disabled = set(self._control.get("disabled_tools", []) or [])
+            descriptions = [f"{name}: {tool.get_description()}" for name, tool in self.tools.items() if name not in disabled]
+            if descriptions:
+                system_parts.append(
+                    "Tools are optional. Use them only when they actually help. Available tools: "
+                    + " | ".join(descriptions)
+                    + "\nTo call a tool, output one plain JSON object on its own line and nothing else for that tool call: "
+                    '{"tool":"tool_name","param":"value"}. '
+                    "Use exact tool names. Put parameters directly in the object, or under an args object. "
+                    "Examples: {\"tool\":\"react\",\"emoji\":\"catjam\"} or "
+                    "{\"tool\":\"web_search\",\"query\":\"latest thing\"}. "
+                    "After tool results are returned, answer normally. Do not wrap tool calls in markdown."
+                )
         if has_media:
             system_parts.append(
                 "Multimodal input: recent image attachments and current audio/video attachments are available in the message payload. "
