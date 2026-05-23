@@ -1534,9 +1534,8 @@ class TtsTool(Tool):
             )
             service = riva.client.SpeechSynthesisService(auth)
 
-            tts_voice_name = "Jason"
-            tts_language_code = "en-US"
-            tts_emotion = "Angry"
+            tts_voice_name = os.environ.get("TTS_RIVA_VOICE", "Magpie-Multilingual.EN-US.Jason.Angry")
+            tts_language_code = os.environ.get("TTS_RIVA_LANGUAGE", "en-US")
 
             # Use gRPC service synchronously (run in executor since it is synchronous gRPC)
             def run_riva():
@@ -1546,11 +1545,11 @@ class TtsTool(Tool):
                     language_code=tts_language_code,
                     sample_rate_hz=44100,
                     encoding=AudioEncoding.LINEAR_PCM,
-                    custom_configuration={"emotion": tts_emotion}
                 )
 
             loop = asyncio.get_event_loop()
             resp = await loop.run_in_executor(None, run_riva)
+            logger.info(f"Riva TTS synthesized audio with voice={tts_voice_name!r}, language={tts_language_code!r}")
 
             # Save the WAV file
             with wave.open(filename, 'wb') as out_f:
@@ -1573,6 +1572,7 @@ class TtsTool(Tool):
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(None, run_gtts)
                 used_fallback = True
+                logger.warning("TTS used gTTS fallback; voice selection/emotion is unavailable in fallback audio")
             except Exception as fallback_err:
                 return f"Error: Riva TTS failed ({e}) and fallback gTTS failed ({fallback_err})"
 
@@ -1591,7 +1591,81 @@ class TtsTool(Tool):
             logger.warning(f"Failed to convert TTS to voice OGG: {stderr.decode(errors='replace')[-300:]}")
             return source
 
-        # Send as voice-style audio. Telegram adapters use sendVoice; Discord falls back to an Opus OGG attachment.
+        async def get_audio_duration(source: str) -> float:
+            proc = await asyncio.create_subprocess_exec(
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                source,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _stderr = await proc.communicate()
+            if proc.returncode != 0:
+                return 1.0
+            try:
+                return max(0.1, float(stdout.decode().strip()))
+            except ValueError:
+                return 1.0
+
+        async def make_waveform(source: str) -> str:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-i", source,
+                "-f", "s16le", "-ac", "1", "-ar", "8000", "pipe:1",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _stderr = await proc.communicate()
+            if proc.returncode != 0 or len(stdout) < 2:
+                return base64.b64encode(bytes([128] * 256)).decode("ascii")
+
+            sample_count = len(stdout) // 2
+            bucket_size = max(1, sample_count // 256)
+            waveform = bytearray()
+            for bucket_start in range(0, min(sample_count, bucket_size * 256), bucket_size):
+                bucket_end = min(sample_count, bucket_start + bucket_size)
+                peak = 0
+                for sample_index in range(bucket_start, bucket_end):
+                    byte_index = sample_index * 2
+                    sample = int.from_bytes(stdout[byte_index:byte_index + 2], "little", signed=True)
+                    peak = max(peak, abs(sample))
+                waveform.append(min(255, int(peak / 32767 * 255)))
+
+            if len(waveform) < 256:
+                waveform.extend([0] * (256 - len(waveform)))
+            return base64.b64encode(bytes(waveform[:256])).decode("ascii")
+
+        async def send_discord_voice_message(source: str):
+            from discord.flags import MessageFlags
+            from discord.http import handle_message_parameters
+
+            class VoiceMessageFile(discord.File):
+                def __init__(self, fp, filename: str, duration: float, waveform: str):
+                    super().__init__(fp, filename=filename)
+                    self._duration = duration
+                    self._waveform = waveform
+
+                def to_dict(self, index: int):
+                    payload = super().to_dict(index)
+                    payload["duration_secs"] = self._duration
+                    payload["waveform"] = self._waveform
+                    return payload
+
+            channel = message.channel
+            state = getattr(channel, "_state", getattr(message, "_state", None))
+            if state is None or not hasattr(state, "http"):
+                raise RuntimeError("Discord message state is unavailable")
+
+            flags = MessageFlags._from_value(0)
+            flags.voice = True
+            duration = await get_audio_duration(source)
+            waveform = await make_waveform(source)
+            voice_file = VoiceMessageFile(source, filename="voice-message.ogg", duration=duration, waveform=waveform)
+            with handle_message_parameters(file=voice_file, flags=flags) as params:
+                await state.http.send_message(channel.id, params=params)
+
+        # Send as voice-style audio. Telegram adapters use sendVoice; Discord needs a voice flag plus waveform metadata.
         if os.path.exists(filename):
             send_path = filename
             try:
@@ -1599,7 +1673,7 @@ class TtsTool(Tool):
                 if hasattr(message, "send_voice_file"):
                     await message.send_voice_file(send_path)
                 else:
-                    await message.reply(file=discord.File(send_path, filename="voice-message.ogg" if send_path.endswith(".ogg") else None))
+                    await send_discord_voice_message(send_path)
                 return "__NO_RESPONSE__"
             except Exception as discord_err:
                 return f"Error sending TTS voice message to channel: {discord_err}"
