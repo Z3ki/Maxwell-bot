@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import re
+import os
 import shutil
 import sys
 import tempfile
@@ -101,6 +102,51 @@ TEXT_MIME_TYPES = {
     "application/sql",
     "application/rtf",
 }
+
+
+async def _synthesize_tts_wav(text: str, output_path: str) -> str:
+    nvidia_api_key = os.environ.get("NVIDIA_API_KEY", "")
+    if nvidia_api_key:
+        try:
+            import riva.client
+            from riva.client.proto import riva_tts_pb2
+
+            auth = riva.client.Auth(uri="grpc.nvcf.nvidia.com:443", use_ssl=True, metadata=[["authorization", f"Bearer {nvidia_api_key}"]])
+            service = riva.client.SpeechSynthesisService(auth)
+            response = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: service.synthesize_online(
+                    text=text,
+                    voice_name="Jason",
+                    language_code="en-US",
+                    sample_rate_hz=48000,
+                    custom_configuration={"emotion": "Angry"},
+                ),
+            )
+            with open(output_path, "wb") as f:
+                f.write(response.audio)
+            if os.path.exists(output_path):
+                return output_path
+        except Exception as e:
+            logger.warning(f"NVIDIA Riva TTS failed for VC playback: {e}. Falling back to gTTS.")
+
+    from gtts import gTTS
+    mp3_path = output_path + ".mp3"
+
+    def run_gtts():
+        gTTS(text=text, lang="en").save(mp3_path)
+
+    await asyncio.get_running_loop().run_in_executor(None, run_gtts)
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", mp3_path, "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", output_path,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    _stdout, _stderr = await proc.communicate()
+    if proc.returncode != 0 or not os.path.exists(output_path):
+        raise RuntimeError("Failed to synthesize TTS audio")
+    return output_path
+
 TEXT_ATTACHMENT_EXTS = {
     ".1", ".2", ".3", ".4", ".5", ".6", ".7", ".8", ".9",
     ".asm", ".bat", ".c", ".cfg", ".clj", ".cmake", ".cmd", ".conf",
@@ -1002,6 +1048,8 @@ class MaxwellBot(commands.Bot):
                     self._auto_channels.add(channel_id)
                     self._save_auto_channels()
                     await message.channel.send("Auto mode on — I'll respond to messages whenever I feel like it.")
+            elif cmd == "vc":
+                await self._handle_vc_command(message, args)
             elif cmd in ("blacklist", "unblacklist"):
                 if not self._is_admin(message.author.id):
                     return
@@ -1024,6 +1072,64 @@ class MaxwellBot(commands.Bot):
                     await message.channel.send(f"Unblacklisted <@{uid}>")
         except discord.Forbidden:
             pass
+
+
+    async def _handle_vc_command(self, message, args: str | None):
+        arg = (args or "").strip()
+        parts = arg.split(maxsplit=1)
+        sub = (parts[0].lower() if parts else "")
+        rest = parts[1] if len(parts) > 1 else ""
+
+        if sub in {"", "help"}:
+            await message.channel.send("VC commands: `,vc join`, `,vc leave`, `,vc status`, `,vc say <text>`")
+            return
+        if sub == "status":
+            vc = discord.utils.get(self.voice_clients, guild=message.guild) if message.guild else None
+            if vc and vc.is_connected():
+                await message.channel.send(f"connected to **{vc.channel.name}**")
+            else:
+                await message.channel.send("not connected to a voice channel")
+            return
+        if sub == "join":
+            target = getattr(message.author, "voice", None)
+            if not target or not target.channel:
+                await message.channel.send("join a voice channel first")
+                return
+            vc = discord.utils.get(self.voice_clients, guild=message.guild) if message.guild else None
+            if vc and vc.is_connected():
+                await vc.move_to(target.channel)
+            else:
+                await target.channel.connect(self_deaf=False, self_mute=False)
+            await message.channel.send(f"joined **{target.channel.name}**")
+            return
+        if sub == "leave":
+            vc = discord.utils.get(self.voice_clients, guild=message.guild) if message.guild else None
+            if vc and vc.is_connected():
+                await vc.disconnect(force=True)
+                await message.channel.send("left voice channel")
+            else:
+                await message.channel.send("not connected")
+            return
+        if sub == "say":
+            if not rest.strip():
+                await message.channel.send("usage: `,vc say <text>`")
+                return
+            vc = discord.utils.get(self.voice_clients, guild=message.guild) if message.guild else None
+            if not vc or not vc.is_connected():
+                await message.channel.send("connect me first with `,vc join`")
+                return
+            with tempfile.TemporaryDirectory(prefix="maxwell-vc-") as tmp:
+                wav_path = str(Path(tmp) / "tts.wav")
+                await _synthesize_tts_wav(rest[:400], wav_path)
+                if vc.is_playing():
+                    vc.stop()
+                source = discord.FFmpegPCMAudio(wav_path)
+                done = asyncio.Event()
+                vc.play(source, after=lambda _e: done.set())
+                await message.channel.send("speaking now")
+                await asyncio.wait_for(done.wait(), timeout=90)
+            return
+        await message.channel.send("unknown vc command. try `,vc help`")
 
     async def _handle_context_command(self, message, args: str | None):
         arg = (args or "").strip()
