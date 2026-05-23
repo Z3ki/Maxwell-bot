@@ -62,6 +62,12 @@ MAX_VISUAL_MEMORY_IMAGES = 3
 MEDIA_CONTEXT_USES = 11
 CUSTOM_EMOJI_ALIAS_RE = re.compile(r"(?<!<)(?<!<a):([A-Za-z0-9_]{2,32}):(?!\d)")
 TOOL_LINE_RE = re.compile(r"(?im)^\s*(?:TOOL|CALL)\s+([A-Za-z_]\w*)\s*[:\-]?\s*")
+CREATE_SITE_BLOCK_RE = re.compile(
+    r"(?is)\[create_site\]\s*"
+    r"name\s*:\s*(?P<name>[^\n]+)\n"
+    r"title\s*:\s*(?P<title>[^\n]+)\n"
+    r"body\s*:\s*\n(?P<body>.*?)\s*\[/create_site\]"
+)
 TEXT_MIME_TYPES = {
     "application/json",
     "application/javascript",
@@ -156,15 +162,34 @@ def _tool_params_from_json(obj: dict) -> tuple[str | None, dict]:
     return name, {k: v for k, v in obj.items() if k not in selector_keys}
 
 
-def collect_tool_calls(response: str, available_tools: set[str], disabled_tools: set[str] | None = None) -> list[tuple[int, int, str, dict]]:
+def collect_tool_calls(
+    response: str,
+    available_tools: set[str],
+    disabled_tools: set[str] | None = None,
+    include_disabled: bool = False,
+) -> list[tuple[int, int, str, dict]]:
     disabled_tools = disabled_tools or set()
     calls = []
 
     def add_call(start: int, end: int, name: str, params: dict):
-        if name in available_tools and name not in disabled_tools:
+        if name in available_tools and (include_disabled or name not in disabled_tools):
             calls.append((start, end, name, params))
 
+    for match in CREATE_SITE_BLOCK_RE.finditer(response):
+        add_call(
+            match.start(),
+            match.end(),
+            "create_site",
+            {
+                "name": match.group("name").strip(),
+                "title": match.group("title").strip(),
+                "body": match.group("body").strip(),
+            },
+        )
+
     for match in re.finditer(r"\[(?:TOOL_CALL:)?(\w+)\s*\]", response):
+        if any(start <= match.start() < end for start, end, _name, _params in calls):
+            continue
         name = match.group(1)
         result = extract_json_object(response, match.end())
         if not result:
@@ -2254,7 +2279,7 @@ class MaxwellBot(commands.Bot):
         if not self._control.get("tools_enabled", True):
             return response, []
         disabled = set(self._control.get("disabled_tools", []) or [])
-        calls = collect_tool_calls(response, set(self.tools), disabled)
+        calls = collect_tool_calls(response, set(self.tools), disabled, include_disabled=True)
         if not calls:
             return response, []
         calls.sort(key=lambda x: x[0])
@@ -2266,6 +2291,9 @@ class MaxwellBot(commands.Bot):
                 segments.append(response[last:start])
                 last = end
                 try:
+                    if name in disabled:
+                        tool_results.append(f"Tool {name}: Error - tool is disabled")
+                        continue
                     result = await self.tools[name].execute(message, **params)
                     tool_results.append(f"Tool {name}: {result}" if result else f"Tool {name}: executed successfully")
                 except Exception as e:
@@ -2356,6 +2384,8 @@ class MaxwellBot(commands.Bot):
                     "Use exact tool names. Put parameters directly in the object, or under an args object. "
                     "Examples: {\"tool\":\"react\",\"emoji\":\"catjam\"} or "
                     "{\"tool\":\"web_search\",\"query\":\"latest thing\"}. "
+                    "For create_site with full HTML, prefer this raw block so HTML quotes do not break JSON: "
+                    "[create_site]\nname: short-slug\ntitle: Site title\nbody:\n<!DOCTYPE html>...\n[/create_site]. "
                     "After tool results are returned, answer normally. Do not wrap tool calls in markdown. "
                     "IMPORTANT: The character limit does NOT apply to tool JSON calls. You may write as much as needed in tool parameters."
                 )

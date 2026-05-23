@@ -54,3 +54,24 @@ def test_process_tool_calls_still_returns_other_tool_results():
         assert react.calls == [{"emoji": "catjam"}]
 
     asyncio.run(run())
+
+
+def test_process_tool_calls_strips_disabled_tool_call():
+    react = FakeTool("Reacted with <:catjam:123>")
+    bot = SimpleNamespace(
+        _control={"tools_enabled": True, "disabled_tools": ["react"], "typing_indicator": False},
+        tools={"react": react},
+    )
+    message = SimpleNamespace()
+
+    async def run():
+        response, tool_results = await MaxwellBot._process_tool_calls(
+            bot,
+            message,
+            '{"tool":"react","emoji":"catjam"}',
+        )
+        assert response == ""
+        assert tool_results == ["Tool react: Error - tool is disabled"]
+        assert react.calls == []
+
+    asyncio.run(run())

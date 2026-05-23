@@ -39,3 +39,37 @@ def test_collect_tool_calls_keeps_name_param_when_tool_key_selects_tool():
     assert [(name, params) for _start, _end, name, params in calls] == [
         ("create_site", {"name": "nyxwell", "title": "hi"})
     ]
+
+
+def test_collect_tool_calls_can_include_disabled_for_dispatcher_stripping():
+    calls = collect_tool_calls(
+        '{"tool":"react","emoji":"catjam"}',
+        TOOLS,
+        {"react"},
+        include_disabled=True,
+    )
+
+    assert [(name, params) for _start, _end, name, params in calls] == [("react", {"emoji": "catjam"})]
+
+
+def test_collect_tool_calls_accepts_raw_create_site_block():
+    response = """[create_site]
+name: kris
+title: Kris Bio
+body:
+<!DOCTYPE html>
+<html><body><h1 class="hero">Kris</h1></body></html>
+[/create_site]"""
+
+    calls = collect_tool_calls(response, TOOLS | {"create_site"})
+
+    assert [(name, params) for _start, _end, name, params in calls] == [
+        (
+            "create_site",
+            {
+                "name": "kris",
+                "title": "Kris Bio",
+                "body": '<!DOCTYPE html>\n<html><body><h1 class="hero">Kris</h1></body></html>',
+            },
+        )
+    ]
