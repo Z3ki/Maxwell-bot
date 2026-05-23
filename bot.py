@@ -410,7 +410,7 @@ DEFAULT_CONTROL = {
     ),
     "auto_decider_prompt": (
         "You are Maxwell, a real person in this group chat. Decide if you should reply to the latest message. "
-        "Output ONLY 'yes' or 'no'. "
+        "Output ONLY 'yes' or 'no'. Be conservative and avoid butting into conversations that are not for you. "
         "Say 'yes' if: "
         "- Someone directly pings you or replies to your message. "
         "- Someone asks a direct question that you can answer or give a strong/funny opinion on. "
@@ -1046,6 +1046,20 @@ class MaxwellBot(commands.Bot):
             return True
         if not message.content and any(a.filename.lower().endswith(".gif") for a in message.attachments):
             return False
+        content = (message.content or "").strip()
+        content_l = content.lower()
+        # Fast-path skips to avoid obvious "auto-mode stupidity" cases before spending LLM calls.
+        if not content and not message.attachments:
+            return False
+        if message.author.bot:
+            return False
+        if content_l.startswith((",", "!", "/", ".")) and len(content.split()) <= 3:
+            # likely bot command / slash-like shorthand
+            return False
+        if len(content) <= 2 and not message.attachments:
+            return False
+        if re.fullmatch(r"[\W_]+", content or ""):
+            return False
         channel_id = str(message.channel.id)
         eval_every = max(1, min(int(self._control.get("auto_eval_every", 5) or 5), 100))
         count = self._auto_counter.get(channel_id, 0) + 1
@@ -1087,7 +1101,15 @@ class MaxwellBot(commands.Bot):
             await self._acquire_ai_slot(timeout=30)
             try:
                 result = await self.ai_provider.generate_response(messages, timeout=10)
-                return result.strip().lower().startswith("yes")
+                normalized = result.strip().lower()
+                # Require an explicit yes/no; default to no on ambiguous output.
+                if normalized == "yes":
+                    return True
+                if normalized == "no":
+                    return False
+                if normalized.startswith("yes") and "no" not in normalized[:10]:
+                    return True
+                return False
             finally:
                 await self._release_ai_slot()
         except Exception as e:
