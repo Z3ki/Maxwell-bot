@@ -108,24 +108,43 @@ async def _synthesize_tts_wav(text: str, output_path: str) -> str:
     nvidia_api_key = os.environ.get("NVIDIA_API_KEY", "")
     if nvidia_api_key:
         try:
-            import riva.client
-            from riva.client.proto import riva_tts_pb2
+            import wave
 
-            auth = riva.client.Auth(uri="grpc.nvcf.nvidia.com:443", use_ssl=True, metadata=[["authorization", f"Bearer {nvidia_api_key}"]])
+            import riva.client
+            from riva.client.proto.riva_audio_pb2 import AudioEncoding
+
+            voice_name = os.environ.get("TTS_RIVA_VOICE", "Magpie-Multilingual.EN-US.Jason.Angry")
+            language_code = os.environ.get("TTS_RIVA_LANGUAGE", "en-US")
+            auth = riva.client.Auth(
+                uri="grpc.nvcf.nvidia.com:443",
+                use_ssl=True,
+                metadata_args=[
+                    ["function-id", "877104f7-e885-42b9-8de8-f6e4c6303969"],
+                    ["authorization", f"Bearer {nvidia_api_key}"],
+                ],
+                options=[
+                    ("grpc.max_receive_message_length", 64 * 1024 * 1024),
+                    ("grpc.max_send_message_length", 64 * 1024 * 1024),
+                ],
+            )
             service = riva.client.SpeechSynthesisService(auth)
             response = await asyncio.get_running_loop().run_in_executor(
                 None,
-                lambda: service.synthesize_online(
+                lambda: service.synthesize(
                     text=text,
-                    voice_name="Jason",
-                    language_code="en-US",
+                    voice_name=voice_name,
+                    language_code=language_code,
                     sample_rate_hz=48000,
-                    custom_configuration={"emotion": "Angry"},
+                    encoding=AudioEncoding.LINEAR_PCM,
                 ),
             )
-            with open(output_path, "wb") as f:
-                f.write(response.audio)
+            with wave.open(output_path, "wb") as f:
+                f.setnchannels(1)
+                f.setsampwidth(2)
+                f.setframerate(48000)
+                f.writeframesraw(response.audio)
             if os.path.exists(output_path):
+                logger.info(f"Riva VC TTS synthesized audio with voice={voice_name!r}, language={language_code!r}")
                 return output_path
         except Exception as e:
             logger.warning(f"NVIDIA Riva TTS failed for VC playback: {e}. Falling back to gTTS.")
@@ -1125,7 +1144,8 @@ class MaxwellBot(commands.Bot):
                     vc.stop()
                 source = discord.FFmpegPCMAudio(wav_path)
                 done = asyncio.Event()
-                vc.play(source, after=lambda _e: done.set())
+                loop = asyncio.get_running_loop()
+                vc.play(source, after=lambda _e: loop.call_soon_threadsafe(done.set))
                 await message.channel.send("speaking now")
                 await asyncio.wait_for(done.wait(), timeout=90)
             return
