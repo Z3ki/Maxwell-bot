@@ -137,6 +137,7 @@ def _tool_params_from_json(obj: dict) -> tuple[str | None, dict]:
     name = obj.get("tool") or obj.get("name") or obj.get("action")
     if not isinstance(name, str):
         return None, {}
+    name = name.strip()
     params = obj.get("args") or obj.get("params")
     if isinstance(params, dict):
         return name, params
@@ -158,7 +159,7 @@ def collect_tool_calls(response: str, available_tools: set[str], disabled_tools:
             continue
         json_str, end = result
         try:
-            params = json.loads(json_str)
+            params = json.loads(json_str, strict=False)
         except json.JSONDecodeError:
             continue
         if isinstance(params, dict):
@@ -172,7 +173,7 @@ def collect_tool_calls(response: str, available_tools: set[str], disabled_tools:
             continue
         json_str, end = result
         try:
-            params = json.loads(json_str)
+            params = json.loads(json_str, strict=False)
         except json.JSONDecodeError:
             continue
         if isinstance(params, dict):
@@ -186,7 +187,7 @@ def collect_tool_calls(response: str, available_tools: set[str], disabled_tools:
             continue
         json_str, end = result
         try:
-            obj = json.loads(json_str)
+            obj = json.loads(json_str, strict=False)
         except json.JSONDecodeError:
             continue
         if not isinstance(obj, dict):
@@ -2321,7 +2322,8 @@ class MaxwellBot(commands.Bot):
                     "Use exact tool names. Put parameters directly in the object, or under an args object. "
                     "Examples: {\"tool\":\"react\",\"emoji\":\"catjam\"} or "
                     "{\"tool\":\"web_search\",\"query\":\"latest thing\"}. "
-                    "After tool results are returned, answer normally. Do not wrap tool calls in markdown."
+                    "After tool results are returned, answer normally. Do not wrap tool calls in markdown. "
+                    "IMPORTANT: The character limit does NOT apply to tool JSON calls. You may write as much as needed in tool parameters."
                 )
         if has_media:
             system_parts.append(
