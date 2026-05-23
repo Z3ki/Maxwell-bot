@@ -264,24 +264,53 @@ class TelegramMessageAdapter:
     def typing(self):
         return _NoopTyping()
 
-    async def send_voice_file(self, path: str):
+    async def _send_file_bytes(self, blob: bytes, filename: str | None = None):
+        filename = filename or "attachment.bin"
+        ext = Path(filename).suffix.lower()
+        endpoint = "sendDocument"
+        field_name = "document"
+        content_type = "application/octet-stream"
+
+        if ext in {".ogg", ".oga", ".opus"}:
+            endpoint = "sendVoice"
+            field_name = "voice"
+            content_type = "audio/ogg"
+        elif ext in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+            endpoint = "sendPhoto"
+            field_name = "photo"
+            content_type = "image/png" if ext == ".png" else "image/jpeg"
+
         form = aiohttp.FormData()
         form.add_field("chat_id", str(self.chat_id))
-        with open(path, "rb") as voice_file:
-            form.add_field("voice", voice_file, filename="voice-message.ogg", content_type="audio/ogg")
-            async with self.session.post(f"{self.url_base}/sendVoice", data=form) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    raise RuntimeError(f"Telegram sendVoice failed: {resp.status} - {text[:300]}")
+        form.add_field(field_name, blob, filename=filename, content_type=content_type)
+        async with self.session.post(f"{self.url_base}/{endpoint}", data=form) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise RuntimeError(f"Telegram {endpoint} failed: {resp.status} - {text[:300]}")
 
     async def reply(self, content: str = None, file=None, **kwargs):
         if file is not None:
-            path = getattr(file, "fp", None) or getattr(file, "filename", None)
-            if hasattr(path, "name"):
-                path = path.name
-            if not path:
-                raise RuntimeError("Telegram adapter cannot send file without a path")
-            await self.send_voice_file(str(path))
+            file_obj = getattr(file, "fp", None)
+            filename = getattr(file, "filename", None)
+            if file_obj is None:
+                path = getattr(file, "filename", None)
+                if path and Path(str(path)).exists():
+                    with open(path, "rb") as fh:
+                        await self._send_file_bytes(fh.read(), Path(str(path)).name)
+                    return None
+                raise RuntimeError("Telegram adapter cannot send file: missing file payload")
+
+            if hasattr(file_obj, "seek"):
+                try:
+                    file_obj.seek(0)
+                except Exception:
+                    pass
+            blob = file_obj.read()
+            if not isinstance(blob, (bytes, bytearray)):
+                raise RuntimeError("Telegram adapter expected bytes-like file payload")
+            if not filename and hasattr(file_obj, "name"):
+                filename = Path(str(file_obj.name)).name
+            await self._send_file_bytes(bytes(blob), filename)
             return None
         if content:
             async with self.session.post(f"{self.url_base}/sendMessage", json={"chat_id": self.chat_id, "text": content}):
