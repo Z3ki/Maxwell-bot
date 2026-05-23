@@ -131,7 +131,6 @@ class OllamaProvider:
         data = {
             "model": model or endpoint.model if endpoint.name == "primary" else endpoint.model,
             "messages": chat_messages,
-            "max_tokens": self.max_tokens,
             "temperature": self.temperature,
             "stream": False,
         }

@@ -69,6 +69,7 @@ def test_generate_chat_completion_model_override():
         assert message["content"] == "ok"
     asyncio.run(run())
     assert session.payloads[0]["model"] == "rem-model"
+    assert "max_tokens" not in session.payloads[0]
     assert session.payloads[0]["tools"][0]["function"]["name"] == "ltm_list"
 
 
@@ -115,4 +116,6 @@ def test_generate_chat_completion_falls_back_to_secondary_provider():
     ]
     assert session.payloads[0]["model"] == "primary-model"
     assert session.payloads[1]["model"] == "fallback-model"
+    assert "max_tokens" not in session.payloads[0]
+    assert "max_tokens" not in session.payloads[1]
     assert session.payloads[1]["reasoning"] == {"exclude": True}
