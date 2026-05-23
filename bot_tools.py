@@ -1508,6 +1508,7 @@ class TtsTool(Tool):
             return "Error: NVIDIA_API_KEY is not configured"
 
         filename = f"tts_{message.id}.wav"
+        voice_filename = f"tts_{message.id}.ogg"
         used_fallback = False
         error_details = ""
 
@@ -1568,19 +1569,39 @@ class TtsTool(Tool):
             except Exception as fallback_err:
                 return f"Error: Riva TTS failed ({e}) and fallback gTTS failed ({fallback_err})"
 
-        # Send file to discord channel
+        async def make_voice_ogg(source: str) -> str:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-i", source,
+                "-vn", "-ac", "1", "-ar", "48000", "-c:a", "libopus", "-b:a", "32k",
+                voice_filename,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _stdout, stderr = await proc.communicate()
+            if proc.returncode == 0 and os.path.exists(voice_filename):
+                return voice_filename
+            logger.warning(f"Failed to convert TTS to voice OGG: {stderr.decode(errors='replace')[-300:]}")
+            return source
+
+        # Send as voice-style audio. Telegram adapters use sendVoice; Discord falls back to an Opus OGG attachment.
         if os.path.exists(filename):
+            send_path = filename
             try:
-                await message.reply(file=discord.File(filename))
-                status = "Synthesized using NVIDIA Riva TTS" if not used_fallback else f"Synthesized using fallback local gTTS (Riva failed: {error_details})"
-                return status
+                send_path = await make_voice_ogg(filename)
+                if hasattr(message, "send_voice_file"):
+                    await message.send_voice_file(send_path)
+                else:
+                    await message.reply(file=discord.File(send_path, filename="voice-message.ogg" if send_path.endswith(".ogg") else None))
+                return "__NO_RESPONSE__"
             except Exception as discord_err:
-                return f"Error sending audio file to channel: {discord_err}"
+                return f"Error sending TTS voice message to channel: {discord_err}"
             finally:
-                if os.path.exists(filename):
-                    try:
-                        os.remove(filename)
-                    except Exception:
-                        pass
+                for path in {filename, voice_filename}:
+                    if os.path.exists(path):
+                        try:
+                            os.remove(path)
+                        except Exception:
+                            pass
         else:
             return f"Error: Audio file {filename} was not generated"

@@ -940,8 +940,6 @@ async def commands_post(request):
         command["channel_id"] = str(body.get("channel_id", "")).strip()
     elif cmd_type == "reload_controls":
         pass
-    elif cmd_type == "kick_bot":
-        pass
     elif cmd_type in {"rem_run", "rem_enable", "rem_disable"}:
         pass
     else:
@@ -969,6 +967,13 @@ async def commands_del(request):
         cmds = [c for c in cmds if c.get("id") != cid]
         await atomic_json_write(_commands_path(), cmds)
     return _json_response({"ok": True})
+
+
+async def discord_state(request):
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
+    state = _safe_object(_load(DATA_DIR / "discord_state.json"))
+    return _json_response(state)
 
 
 # ---------- PM2 / System ----------
@@ -1144,8 +1149,6 @@ async def login_post(request):
 
 # ---------- System Stats ----------
 async def system_stats(request):
-    if not _has_admin_auth(request):
-        return _json_response({"error": "unauthorized"}, 401)
     try:
         proc = await asyncio.create_subprocess_exec(
             "cat", "/proc/loadavg",
@@ -1226,6 +1229,7 @@ app.router.add_post("/api/rem/disable", rem_disable)
 app.router.add_get("/api/commands", commands_get)
 app.router.add_post("/api/commands", commands_post)
 app.router.add_delete("/api/commands", commands_del)
+app.router.add_get("/api/discord/state", discord_state)
 app.router.add_post("/api/login", login_post)
 app.router.add_get("/api/pm2", pm2_status)
 app.router.add_get("/api/pm2/logs", pm2_logs)

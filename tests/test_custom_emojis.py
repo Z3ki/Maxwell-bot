@@ -17,3 +17,12 @@ def test_render_custom_emoji_aliases_preserves_existing_discord_markup():
     )
 
     assert rendered == "already <:dave:456> and <a:catjam:123>"
+
+
+def test_render_custom_emoji_aliases_fixes_broken_discord_markup():
+    rendered = render_custom_emoji_aliases(
+        "broken <:dave:> and <a:catjam:>",
+        {"catjam": "<a:catjam:123>", "dave": "<:dave:456>"},
+    )
+
+    assert rendered == "broken <:dave:456> and <a:catjam:123>"

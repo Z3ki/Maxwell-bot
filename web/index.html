@@ -410,7 +410,7 @@ async function loadSystem(){
     if(!r.ok)return;
     const d=await r.json();
     if(d.load){
-      tx('sysLoad',d.load[0]+'</span>');
+      tx('sysLoad',d.load[0]);
       tx('sysCpu',d.load[0]);
       const loadPct=Math.min(100,parseFloat(d.load[0])*100/4);
       $('sysCpuBar').style.width=loadPct+'%';
@@ -428,9 +428,9 @@ async function loadSystem(){
       $('sysDiskBar').style.width=pct+'%';
     }
     if(d.uptime_seconds){
-      const d=Math.floor(d.uptime_seconds/86400);
-      const h=Math.floor((d.uptime_seconds%86400)/3600);
-      tx('sysUptime',(d>0?d+'d ':'')+h+'h');
+      const days=Math.floor(d.uptime_seconds/86400);
+      const hours=Math.floor((d.uptime_seconds%86400)/3600);
+      tx('sysUptime',(days>0?days+'d ':'')+hours+'h');
     }
   }catch(e){}
 }

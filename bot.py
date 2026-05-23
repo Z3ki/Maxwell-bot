@@ -94,6 +94,9 @@ def render_custom_emoji_aliases(text: str, emojis: dict[str, str]) -> str:
     if not text or not emojis:
         return text
 
+    # Fix broken AI-generated Discord emojis like <:blow_me:> or <a:catjam:>
+    text = re.sub(r"<a?:([A-Za-z0-9_]{2,32}):>", r":\1:", text)
+
     def replace(match: re.Match) -> str:
         return emojis.get(match.group(1).lower(), match.group(0))
 
@@ -201,6 +204,51 @@ def collect_tool_calls(response: str, available_tools: set[str], disabled_tools:
             seen.add(key)
             deduped.append(call)
     return deduped
+
+
+class _NoopTyping:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class TelegramMessageAdapter:
+    def __init__(self, session, url_base: str, chat_id, message_id):
+        self.session = session
+        self.url_base = url_base
+        self.chat_id = chat_id
+        self.id = message_id or chat_id
+        self.guild = None
+        self.channel = self
+
+    def typing(self):
+        return _NoopTyping()
+
+    async def send_voice_file(self, path: str):
+        form = aiohttp.FormData()
+        form.add_field("chat_id", str(self.chat_id))
+        with open(path, "rb") as voice_file:
+            form.add_field("voice", voice_file, filename="voice-message.ogg", content_type="audio/ogg")
+            async with self.session.post(f"{self.url_base}/sendVoice", data=form) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise RuntimeError(f"Telegram sendVoice failed: {resp.status} - {text[:300]}")
+
+    async def reply(self, content: str = None, file=None, **kwargs):
+        if file is not None:
+            path = getattr(file, "fp", None) or getattr(file, "filename", None)
+            if hasattr(path, "name"):
+                path = path.name
+            if not path:
+                raise RuntimeError("Telegram adapter cannot send file without a path")
+            await self.send_voice_file(str(path))
+            return None
+        if content:
+            async with self.session.post(f"{self.url_base}/sendMessage", json={"chat_id": self.chat_id, "text": content}):
+                pass
+        return None
 
 
 def _looks_like_text(blob: bytes) -> bool:
@@ -467,6 +515,7 @@ class MaxwellBot(commands.Bot):
             asyncio.create_task(self._memory_cleanup_loop()),
             asyncio.create_task(self._control_reload_loop()),
             asyncio.create_task(self._command_queue_loop()),
+            asyncio.create_task(self._discord_state_loop()),
             asyncio.create_task(self._rem_scheduler_loop()),
         ]
         if self.config.TELEGRAM_TOKEN:
@@ -480,6 +529,54 @@ class MaxwellBot(commands.Bot):
             logger.info(f"Logged in as {self.bot_name} ({self.user.id})")
         logger.info(f"Connected to {len(self.guilds)} guilds")
         self._load_emojis()
+        await self._save_discord_state()
+
+    async def _discord_state_loop(self):
+        while True:
+            await asyncio.sleep(60)
+            try:
+                if self.is_ready():
+                    await self._save_discord_state()
+            except Exception as e:
+                logger.warning(f"Discord state snapshot error: {e}")
+
+    async def _save_discord_state(self):
+        guilds = []
+        for guild in self.guilds:
+            channels = []
+            for channel in getattr(guild, "text_channels", [])[:200]:
+                channels.append({
+                    "id": str(channel.id),
+                    "name": channel.name,
+                    "category": getattr(getattr(channel, "category", None), "name", "") or "",
+                    "position": getattr(channel, "position", 0),
+                })
+            guilds.append({
+                "id": str(guild.id),
+                "name": guild.name,
+                "member_count": getattr(guild, "member_count", None),
+                "channels": channels,
+            })
+        dms = []
+        for channel in getattr(self, "private_channels", [])[:100]:
+            recipient = getattr(channel, "recipient", None)
+            recipients = getattr(channel, "recipients", None)
+            name = getattr(recipient, "display_name", None) or getattr(recipient, "name", None) or getattr(channel, "name", None)
+            if not name and recipients:
+                name = ", ".join(getattr(user, "display_name", getattr(user, "name", "unknown")) for user in recipients[:5])
+            dms.append({
+                "id": str(getattr(channel, "id", "")),
+                "name": name or "DM",
+                "recipient_id": str(getattr(recipient, "id", "")) if recipient else "",
+                "type": channel.__class__.__name__,
+            })
+        payload = {
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "user": {"id": str(self.user.id), "name": self.user.display_name} if self.user else {},
+            "guilds": guilds,
+            "dms": dms,
+        }
+        await asyncio.to_thread(_atomic_json_write, Path(self.config.DATA_DIR) / "discord_state.json", payload)
 
     def _load_emojis(self):
         self._guild_emojis = {}
@@ -1431,6 +1528,10 @@ class MaxwellBot(commands.Bot):
                             ch = self.get_channel(int(cmd["channel_id"])) or await self.fetch_channel(int(cmd["channel_id"]))
                             await ch.send(cmd["content"])
                             cmd["result"] = "sent"
+                        elif typ == "send_dm":
+                            user = self.get_user(int(cmd["user_id"])) or await self.fetch_user(int(cmd["user_id"]))
+                            await user.send(cmd["content"])
+                            cmd["result"] = "dm sent"
                         elif typ == "set_presence":
                             status_map = {"online": discord.Status.online, "idle": discord.Status.idle, "dnd": discord.Status.dnd, "invisible": discord.Status.invisible}
                             presence_status = cmd.get("presence_status") or cmd.get("discord_status") or cmd.get("presence") or "online"
@@ -1486,12 +1587,6 @@ class MaxwellBot(commands.Bot):
                             self.rem_enabled = False
                             await self._save_rem_control()
                             cmd["result"] = "REM disabled"
-                        elif typ == "kick_bot":
-                            cmd["result"] = "bot will restart via PM2"
-                            cmd["status"] = "done"
-                            _atomic_json_write(path, commands_data)
-                            await self.close()
-                            return
                         else:
                             cmd["result"] = "unknown command"
                     except Exception as e:
@@ -2398,7 +2493,15 @@ class MaxwellBot(commands.Bot):
                                 )
                         except Exception as e:
                             logger.warning(f"Telegram context fetching error: {e}")
-                            
+
+                    if self._control.get("tools_enabled", True) and "tts" in self.tools:
+                        system_parts.append(
+                            "Telegram voice replies: when the user asks you to speak, say it out loud, or use TTS, "
+                            "call the tts tool with one plain JSON object and no extra text: "
+                            '{"tool":"tts","text":"words to speak"}. '
+                            "The bot will send it as a Telegram voice message."
+                        )
+
                     messages = [{"role": "system", "content": "\n\n".join(system_parts)}]
                     
                     # Build memory context from this TG chat
@@ -2438,7 +2541,14 @@ class MaxwellBot(commands.Bot):
                         continue
                         
                     response_text = response_text.strip()
-                    
+
+                    if self._control.get("tools_enabled", True):
+                        tg_tool_message = TelegramMessageAdapter(session, url_base, chat_id, message.get("message_id"))
+                        response_text, tool_results = await self._process_tool_calls(tg_tool_message, response_text)
+                        if any("__NO_RESPONSE__" in tr for tr in tool_results):
+                            response_text = ""
+                        response_text = response_text.strip()
+
                     # Save context memory
                     if self._control.get("store_memory", True):
                         memory_note = text or "[audio sent]"
@@ -2449,16 +2559,17 @@ class MaxwellBot(commands.Bot):
                         })
                         await self.memory.add_to_channel_memory(tg_chan_id, {
                             "author": self.bot_name,
-                            "content": response_text,
+                            "content": response_text or "[voice message sent]",
                         })
                         
-                    # Reply back via TG
-                    reply_payload = {
-                        "chat_id": chat_id,
-                        "text": response_text
-                    }
-                    async with session.post(f"{url_base}/sendMessage", json=reply_payload):
-                        pass
+                    # Reply back via TG when a tool did not already send a voice response.
+                    if response_text:
+                        reply_payload = {
+                            "chat_id": chat_id,
+                            "text": response_text
+                        }
+                        async with session.post(f"{url_base}/sendMessage", json=reply_payload):
+                            pass
                         
             except asyncio.CancelledError:
                 break
