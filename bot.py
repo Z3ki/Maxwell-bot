@@ -396,7 +396,7 @@ DEFAULT_CONTROL = {
     "reply_dms": False,
     "reply_groups": False,
     "reply_mentions": True,
-    "reply_to_bots": False,
+    "reply_to_bots": True,
     "auto_mode_enabled": False,
     "auto_eval_every": 1,
     "auto_max_recent_replies": 5,
@@ -430,18 +430,63 @@ DEFAULT_CONTROL = {
     "auto_decider_prompt": (
         "You are Maxwell, a real person in this group chat. Decide if you should reply to the latest message. "
         "Output ONLY 'yes' or 'no'. Be conservative and avoid butting into conversations that are not for you. "
+        "Use the recent context to understand who is talking to whom; do not treat older context as something to answer. "
         "Say 'yes' if: "
         "- Someone directly pings you or replies to your message. "
         "- Someone asks a direct question that you can answer or give a strong/funny opinion on. "
+        "- A bot message directly addresses Maxwell, quotes Maxwell, or clearly invites a response. "
         "- The topic is highly chaotic, funny, controversial, or interesting, and you can add a short, blunt, or sassy one-liner. "
         "- Someone uploads media (image/video/audio) asking for your thoughts. "
         "Say 'no' if: "
-        "- It is random chatter between other people where you'd be awkward or butting in. "
+        "- It is random chatter between other people or bots where you'd be awkward or butting in. "
         "- It is just hello/goodbye, boring greetings, simple agreement (e.g. 'ok', 'yeah'), or laughing/emoji spam. "
-        "- It is a bot command or a message meant for someone else. "
+        "- It is a bot command, automated status/log output, or a message meant for someone else. "
         "- You have nothing interesting, funny, or blunt to add. If in doubt, output 'no'."
     ),
 }
+
+
+def _parse_memory_timestamp(value: str):
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def _recent_auto_reply_count(memory: list, bot_names: set[str], window_minutes: int, now: datetime | None = None) -> int:
+    if window_minutes <= 0:
+        return 0
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=window_minutes)
+    count = 0
+    for msg in reversed(memory or []):
+        ts = _parse_memory_timestamp(msg.get("timestamp", ""))
+        if ts and ts < cutoff:
+            break
+        if msg.get("author") in bot_names:
+            count += 1
+    return count
+
+
+FOLLOWUP_TOOL_NAMES = {
+    "image_generator", "hd_image", "lookup_user", "search_messages", "create_invite", "create_poll",
+    "forward_message", "edit_message", "list_servers", "create_site", "list_sites", "web_search",
+    "fetch_url", "shell",
+}
+
+
+def _tool_results_need_followup(tool_results: list[str]) -> bool:
+    for result in tool_results:
+        if "Error" in result:
+            return True
+        if any(result.startswith(f"Tool {name}:") for name in FOLLOWUP_TOOL_NAMES):
+            return True
+    return False
 
 
 def _atomic_json_write(path: Path, data):
@@ -688,12 +733,10 @@ class MaxwellBot(commands.Bot):
                 preview = "[hidden]"
             logger.info(f"MSG from {message.author.display_name} ({message.author.id}) in {getattr(message.channel, 'name', 'DM')}: {preview}")
 
-        if message.content and message.content.startswith(self.command_prefix):
+        if message.content and message.content.startswith(self.command_prefix) and not message.author.bot:
             await self._handle_command(message)
             return
 
-        if message.author.bot and not self._control.get("reply_to_bots", False):
-            return
         if str(message.author.id) in self._blacklist or str(message.author.id) in set(self._control.get("ignore_users", []) or []):
             return
         if not self._control.get("bot_enabled", True):
@@ -756,12 +799,16 @@ class MaxwellBot(commands.Bot):
                 await self.memory.add_to_channel_memory(channel_id, {
                     "author": message.author.display_name,
                     "author_id": str(message.author.id),
+                    "author_is_bot": bool(message.author.bot),
                     "content": memory_content or "[media attached]",
                     "message_id": message.id,
                 })
                 if self.rem_log:
                     await self._record_rem_event(message, "user", memory_content)
             self._maybe_schedule_context_extraction(message)
+
+            if message.author.bot and not self._control.get("reply_to_bots", True):
+                return
 
             if isinstance(message.channel, discord.DMChannel):
                 if self._control.get("reply_dms", True):
@@ -1070,8 +1117,6 @@ class MaxwellBot(commands.Bot):
         # Fast-path skips to avoid obvious "auto-mode stupidity" cases before spending LLM calls.
         if not content and not message.attachments:
             return False
-        if message.author.bot:
-            return False
         if content_l.startswith((",", "!", "/", ".")) and len(content.split()) <= 3:
             # likely bot command / slash-like shorthand
             return False
@@ -1087,12 +1132,24 @@ class MaxwellBot(commands.Bot):
             return False
         self._auto_counter[channel_id] = 0
         memory = await self.memory.get_channel_memory(channel_id)
+        max_recent = max(0, int(self._control.get("auto_max_recent_replies", 5) or 0))
+        window_minutes = max(1, int(self._control.get("auto_recent_window_minutes", 10) or 10))
+        bot_names = {self.bot_name}
+        if self.user:
+            bot_names.add(self.user.display_name)
+        if max_recent and _recent_auto_reply_count(memory, bot_names, window_minutes) >= max_recent:
+            return False
         try:
             recent = []
             if memory:
+                current_message_id = getattr(message, "id", None)
                 for msg in memory[-8:]:
+                    if current_message_id is not None and msg.get("message_id") == current_message_id:
+                        continue
                     if msg.get("content"):
-                        recent.append(f"{msg.get('author', '?')}: {msg.get('content', '')[:120]}")
+                        author = msg.get("author", "?")
+                        author_label = f"{author} [bot]" if msg.get("author_is_bot") else author
+                        recent.append(f"{author_label}: {msg.get('content', '')[:120]}")
             prompt = self._control.get("auto_decider_prompt", DEFAULT_CONTROL["auto_decider_prompt"])
             mention_note = ""
             if message.mentions:
@@ -1113,9 +1170,10 @@ class MaxwellBot(commands.Bot):
                     f"\nReply analysis: this message is a direct reply/response to {reply_to_who}. "
                     f"The message being replied to was from {ref_author}: '{ref_content[:150]}'."
                 )
+            author_label = f"{message.author.display_name} [bot]" if message.author.bot else message.author.display_name
             messages = [
                 {"role": "system", "content": str(prompt)},
-                {"role": "user", "content": f"Recent context:\n{'\n'.join(recent)}\n\nNew message from {message.author.display_name}: {message.content[:300]}{mention_note}{reply_note}\n\nShould Maxwell reply?"},
+                {"role": "user", "content": f"Recent context:\n{'\n'.join(recent)}\n\nNew message from {author_label}: {message.content[:300]}{mention_note}{reply_note}\n\nShould Maxwell reply?"},
             ]
             await self._acquire_ai_slot(timeout=30)
             try:
@@ -2296,14 +2354,13 @@ class MaxwellBot(commands.Bot):
             if not response or not response.strip():
                 return
             max_iters = max(0, min(int(self._control.get("max_tool_iterations", 10) or 0), 25))
-            response_tools = {"image_generator", "hd_image", "lookup_user", "search_messages", "create_invite", "create_poll", "forward_message", "edit_message", "list_servers", "create_site", "list_sites", "web_search", "fetch_url"}
             all_tool_results = []
             for iteration in range(max_iters):
                 response, tool_results = await self._process_tool_calls(message, response)
                 all_tool_results.extend(tool_results)
                 if not tool_results:
                     break
-                if not any(tr.startswith(f"Tool {t}:") or "Error" in tr for tr in tool_results for t in response_tools):
+                if not _tool_results_need_followup(tool_results):
                     break
                 result_messages = await self._build_messages(message, content, has_media=bool(active_media), media_summary=media_summary)
                 result_messages.append({"role": "user", "content": "=== TOOL RESULTS ===\n" + "\n".join(tool_results) + "\n=== END ===\nRespond based on these results. Don't call more tools unless necessary."})
@@ -2414,7 +2471,8 @@ class MaxwellBot(commands.Bot):
         else:
             self._drugged_until.pop(channel_id, None)
         local_now = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=-4)))
-        system_parts.append(f"User: {message.author.display_name} ({message.author.id}) | {local_now.strftime('%a %b %d %I:%M %p')} AST")
+        user_kind = "bot" if message.author.bot else "human"
+        system_parts.append(f"User: {message.author.display_name} ({message.author.id}, {user_kind}) | {local_now.strftime('%a %b %d %I:%M %p')} AST")
         if self._control.get("long_term_memory_enabled", True):
             try:
                 ltm = self.memory.get_long_term_memory()
@@ -2492,14 +2550,17 @@ class MaxwellBot(commands.Bot):
                 elif msg.get("author") == (self.user.display_name if self.user else self.bot_name):
                     line = f"You: {msg.get('content', '')[:4000]}"
                 else:
-                    line = f"{msg.get('author', '?')}: {msg.get('content', '')[:4000]}"
+                    author = msg.get("author", "?")
+                    author_label = f"{author} [bot]" if msg.get("author_is_bot") else author
+                    line = f"{author_label}: {msg.get('content', '')[:4000]}"
                 if used + len(line) > budget:
                     break
                 lines.append(line)
                 used += len(line)
             if lines:
                 messages.append({"role": "system", "content": "Recent context (background only; do not answer these):\n" + "\n".join(reversed(lines))})
-        user_parts = [f"Latest message to answer from {message.author.display_name}: {user_message}"]
+        author_label = f"{message.author.display_name} [bot]" if message.author.bot else message.author.display_name
+        user_parts = [f"Latest message to answer from {author_label}: {user_message}"]
         if media_summary:
             user_parts.append(media_summary)
         elif has_media:

@@ -1141,11 +1141,11 @@ class ShellTool(Tool):
         except asyncio.TimeoutError:
             text = f"$ {command}\n\u23f1 Timed out after {self.TIMEOUT}s"
             await message.reply(f"```ansi\n{text}\n```")
-            return "__SHELL_SENT__"
+            return f"__SHELL_SENT__\n{text}"
         except Exception as e:
             text = f"$ {command}\n\u274c Error: {e}"
             await message.reply(f"```ansi\n{text}\n```")
-            return "__SHELL_SENT__"
+            return f"__SHELL_SENT__\n{text}"
 
         out = stdout.decode(errors="replace")
         err = stderr.decode(errors="replace")
@@ -1182,7 +1182,7 @@ class ShellTool(Tool):
             if len(chunks) > 1:
                 await asyncio.sleep(0.3)
 
-        return "__SHELL_SENT__"
+        return f"__SHELL_SENT__\n{text}"
 
     async def _ensure_container(self):
         if self._container_ready:

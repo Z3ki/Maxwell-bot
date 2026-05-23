@@ -94,7 +94,7 @@ DEFAULT_CONTROL = {
     "reply_dms": False,
     "reply_groups": False,
     "reply_mentions": True,
-    "reply_to_bots": False,
+    "reply_to_bots": True,
     "auto_mode_enabled": False,
     "auto_eval_every": 5,
     "auto_max_recent_replies": 5,
@@ -124,16 +124,18 @@ DEFAULT_CONTROL = {
     ),
     "auto_decider_prompt": (
         "You are Maxwell, a real person in this group chat. Decide if you should reply to the latest message. "
-        "Output ONLY 'yes' or 'no'. "
+        "Output ONLY 'yes' or 'no'. Be conservative and avoid butting into conversations that are not for you. "
+        "Use the recent context to understand who is talking to whom; do not treat older context as something to answer. "
         "Say 'yes' if: "
         "- Someone directly pings you or replies to your message. "
         "- Someone asks a direct question that you can answer or give a strong/funny opinion on. "
+        "- A bot message directly addresses Maxwell, quotes Maxwell, or clearly invites a response. "
         "- The topic is highly chaotic, funny, controversial, or interesting, and you can add a short, blunt, or sassy one-liner. "
         "- Someone uploads media (image/video/audio) asking for your thoughts. "
         "Say 'no' if: "
-        "- It is random chatter between other people where you'd be awkward or butting in. "
+        "- It is random chatter between other people or bots where you'd be awkward or butting in. "
         "- It is just hello/goodbye, boring greetings, simple agreement (e.g. 'ok', 'yeah'), or laughing/emoji spam. "
-        "- It is a bot command or a message meant for someone else. "
+        "- It is a bot command, automated status/log output, or a message meant for someone else. "
         "- You have nothing interesting, funny, or blunt to add. If in doubt, output 'no'."
     ),
 }

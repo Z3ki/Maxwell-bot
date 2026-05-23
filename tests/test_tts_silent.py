@@ -1,7 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from bot import MaxwellBot
+from bot import MaxwellBot, _tool_results_need_followup
 
 
 class FakeTool:
@@ -75,3 +75,11 @@ def test_process_tool_calls_strips_disabled_tool_call():
         assert react.calls == []
 
     asyncio.run(run())
+
+
+def test_shell_tool_results_trigger_followup():
+    assert _tool_results_need_followup(["Tool shell: __SHELL_SENT__\n$ date\nSat May 23"])
+
+
+def test_no_response_tool_results_do_not_trigger_followup():
+    assert not _tool_results_need_followup(["Tool no_response: __NO_RESPONSE__"])
