@@ -34,24 +34,24 @@ class FakeProvider:
         return self.messages.pop(0)
 
 
-def test_rem_loop_dispatches_tools_stops_done_and_records_run(tmp_path):
+def test_rem_loop_bypasses_tool_calls_and_records_run(tmp_path):
     async def run():
         log = RemEventLog(str(tmp_path), max_events=10)
         await log.record({"role": "user", "channel_id": "c", "user_id": "u", "user_name": "u", "content": "remember cats", "auto_mode": False})
         mem = FakeMemory()
         provider = FakeProvider([
-            {"role": "assistant", "content": "", "tool_calls": [{"id": "1", "function": {"name": "ltm_add", "arguments": "{\"content\":\"User likes cats\"}"}}]},
-            {"role": "assistant", "content": "DONE\n- added cats"},
+            {"role": "assistant", "content": "DONE\n- reviewed visible slice\n- no memory edits"},
         ])
         rem_run = await run_rem_once(memory_manager=mem, rem_log=log, provider=provider, data_dir=str(tmp_path), model="rem", max_turns=3)
-        assert mem.items == ["User likes cats"]
-        assert rem_run["tool_counts"] == {"ltm_add": 1}
+        assert mem.items == []
+        assert rem_run["tool_counts"] == {}
         assert rem_run["audit"].startswith("DONE")
+        assert provider.calls == 1
         assert len(await RemStore(str(tmp_path)).load_runs()) == 1
     asyncio.run(run())
 
 
-def test_rem_loop_turn_cap_and_empty_slice_advances(tmp_path):
+def test_rem_loop_empty_slice_and_single_pass_advances(tmp_path):
     async def run():
         log = RemEventLog(str(tmp_path), max_events=10)
         mem = FakeMemory()
@@ -62,10 +62,10 @@ def test_rem_loop_turn_cap_and_empty_slice_advances(tmp_path):
 
         await log.record({"role": "user", "channel_id": "c", "user_id": "u", "user_name": "u", "content": "new", "auto_mode": False})
         provider = FakeProvider([
-            {"role": "assistant", "content": "", "tool_calls": [{"id": "1", "function": {"name": "ltm_list", "arguments": "{}"}}]},
-            {"role": "assistant", "content": "", "tool_calls": [{"id": "2", "function": {"name": "ltm_list", "arguments": "{}"}}]},
+            {"role": "assistant", "content": "DONE\n- reviewed new slice"},
         ])
         rem_run = await run_rem_once(memory_manager=mem, rem_log=log, provider=provider, data_dir=str(tmp_path), model="rem", max_turns=1)
-        assert rem_run["turns_used"] == 1
-        assert "turn cap" in rem_run["audit"]
+        assert rem_run["turns_used"] == 0
+        assert rem_run["audit"].startswith("DONE")
+        assert provider.calls == 1
     asyncio.run(run())

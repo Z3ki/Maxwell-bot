@@ -18,7 +18,7 @@ DEFAULT_REM_PROMPT_BODY = (
     "Run Maxwell REM memory assimilation. Review the short-term visible slice injected by the scheduler. "
     "Search existing memories before adding or editing. Consolidate durable facts, preferences, decisions, "
     "identities, and unresolved work. Do not let useful context vanish like tears in rain. Delete or supersede "
-    "memory bloat when it is clearly obsolete. Use ltm_add, ltm_edit, or ltm_remove for durable changes. "
+    "memory bloat when it is clearly obsolete. Do not call tools in REM mode. "
     "Answer DONE with a short audit list when complete."
 )
 
@@ -32,12 +32,12 @@ def rem_system_prompt(turns_remaining: int, prompt_body: str | None = None) -> s
     return (
         "You are Maxwell REM, a periodic memory assimilation process. "
         "You are not answering live chat. You are organizing the last slice of visible life into durable memory.\n\n"
-        "Use the long-term memory tools to add/edit/remove durable lines. Keep memory useful, specific, "
+        "Keep memory useful, specific, "
         "deduplicated, and inspectable; do not compress away decisions, preferences, unresolved tasks, or identity facts. "
         "Do not let useful context vanish like tears in rain.\n\n"
         f"{body}\n\n"
         f"You have {turns_remaining} REM tool turn(s) left after this call. "
-        "If more searching or editing is needed, call tools. If assimilation is complete, answer DONE with a short audit list."
+        "Do not call tools in REM mode. Always answer DONE with a short audit list."
     )
 
 
@@ -207,7 +207,6 @@ async def run_rem_once(
         await store.append_run(run)
         return run
 
-    tools = build_ltm_tools(memory_manager)
     messages = [
         {"role": "system", "content": rem_system_prompt(max_turns, prompt_body=prompt_body)},
         {"role": "system", "content": short_term_slice_prompt(events)},
@@ -216,43 +215,10 @@ async def run_rem_once(
     tool_counts: Counter[str] = Counter()
     audit = ""
     turns_used = 0
-    schemas = ltm_tool_schemas()
     try:
         await store.patch_state({"running": True, "running_since": started})
-        for turn in range(max(1, int(max_turns or 3)) + 1):
-            response = await _provider_message(provider, messages, schemas, model, timeout)
-            calls = _tool_calls(response)
-            content = _message_content(response).strip()
-            if not calls:
-                audit = content or "DONE"
-                break
-            messages.append(response)
-            if turn >= max_turns:
-                audit = "DONE - turn cap reached"
-                break
-            turns_used += 1
-            for call in calls:
-                function = call.get("function") or {}
-                name = function.get("name") or call.get("name")
-                raw_args = function.get("arguments") or call.get("arguments") or {}
-                try:
-                    args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
-                except Exception:
-                    args = {}
-                if name not in tools:
-                    result = {"error": "unknown tool"}
-                else:
-                    try:
-                        result = await tools[name](**args)
-                        tool_counts[name] += 1
-                    except Exception as e:
-                        result = {"error": str(e)}
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": str(call.get("id") or name or "tool"),
-                    "name": str(name or "unknown"),
-                    "content": json.dumps(result, ensure_ascii=False, default=str),
-                })
+        response = await _provider_message(provider, messages, [], model, timeout)
+        audit = _message_content(response).strip() or "DONE"
         finished = utcnow_iso()
         run = {"ts": finished, "turns_used": turns_used, "audit": audit[:4000], "tool_counts": dict(tool_counts), "events": len(events)}
         await store.patch_state({"last_rem_run_ts": finished, "last_audit": audit[:4000], "running": False, "running_since": ""})
