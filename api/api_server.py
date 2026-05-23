@@ -977,7 +977,14 @@ async def discord_state(request):
 
 
 # ---------- PM2 / System ----------
+_pm2_cache = None
+_pm2_cache_time = 0.0
+
 async def _pm2_json():
+    global _pm2_cache, _pm2_cache_time
+    now = time.time()
+    if _pm2_cache is not None and (now - _pm2_cache_time) < 10.0:
+        return _pm2_cache
     try:
         proc = await asyncio.create_subprocess_exec(
             "pm2", "jlist",
@@ -986,9 +993,11 @@ async def _pm2_json():
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
         data = json.loads(stdout.decode("utf-8", errors="replace"))
-        return data if isinstance(data, list) else []
+        _pm2_cache = data if isinstance(data, list) else []
+        _pm2_cache_time = now
+        return _pm2_cache
     except Exception:
-        return []
+        return _pm2_cache if _pm2_cache is not None else []
 
 
 async def pm2_status(request):
@@ -1150,39 +1159,26 @@ async def login_post(request):
 # ---------- System Stats ----------
 async def system_stats(request):
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "cat", "/proc/loadavg",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-        loadavg = stdout.decode("utf-8", errors="replace").strip().split()[:3]
+        loadavg = [f"{x:.2f}" for x in os.getloadavg()]
     except Exception:
-        loadavg = ["0", "0", "0"]
+        loadavg = ["0.00", "0.00", "0.00"]
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "free", "-m",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-        lines = stdout.decode("utf-8", errors="replace").strip().splitlines()
-        mem_parts = lines[1].split() if len(lines) > 1 else []
-        mem_total = int(mem_parts[1]) if len(mem_parts) > 1 else 0
-        mem_used = int(mem_parts[2]) if len(mem_parts) > 2 else 0
+        meminfo = Path("/proc/meminfo").read_text(encoding="utf-8")
+        mem_total_kb = 0
+        mem_avail_kb = 0
+        for line in meminfo.splitlines():
+            if line.startswith("MemTotal:"):
+                mem_total_kb = int(line.split()[1])
+            elif line.startswith("MemAvailable:"):
+                mem_avail_kb = int(line.split()[1])
+        mem_total = mem_total_kb // 1024
+        mem_used = (mem_total_kb - mem_avail_kb) // 1024
     except Exception:
         mem_total, mem_used = 0, 0
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "df", "-B1", "/",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-        lines = stdout.decode("utf-8", errors="replace").strip().splitlines()
-        disk_parts = lines[1].split() if len(lines) > 1 else []
-        disk_total = int(disk_parts[1]) if len(disk_parts) > 1 else 0
-        disk_used = int(disk_parts[2]) if len(disk_parts) > 2 else 0
+        usage = shutil.disk_usage("/")
+        disk_total = usage.total
+        disk_used = usage.used
     except Exception:
         disk_total, disk_used = 0, 0
     uptime_seconds = 0
