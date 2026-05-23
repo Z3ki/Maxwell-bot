@@ -1091,7 +1091,10 @@ class NoResponseTool(Tool):
     """Silently skip sending any reply to the current message"""
 
     def get_description(self):
-        return "Skip replying to this message entirely. Use when you have nothing to say."
+        return (
+            "Skip replying to this message entirely. Use this when the user message is not useful to engage with "
+            "(e.g., spam, baiting, pure annoyance, or low-effort fillers like 'idc') or when you truly have nothing to add."
+        )
 
     async def execute(self, message: Message, **kwargs) -> str:
         return "__NO_RESPONSE__"
