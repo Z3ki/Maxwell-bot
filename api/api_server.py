@@ -310,8 +310,6 @@ def _load_rem_status():
     return {
         "enabled": control["enabled"],
         "interval_s": control["interval_seconds"],
-        "max_turns": control["max_turns"],
-        "prompt": control["prompt"],
         "last_run": state.get("last_rem_run_ts") or last.get("ts") or "",
         "events_buffered": len(events),
         "last_audit_preview": str(state.get("last_audit") or last.get("audit") or "")[:500],
@@ -893,35 +891,6 @@ async def rem_disable(request):
     return _json_response({"ok": True, "enabled": False, "id": cmd_id})
 
 
-async def rem_config(request):
-    if not _has_admin_auth(request):
-        return _json_response({"error": "unauthorized"}, 401)
-    try:
-        body = await request.json()
-    except Exception:
-        return _json_response({"error": "invalid json"}, 400)
-    if not isinstance(body, dict):
-        return _json_response({"error": "invalid config"}, 400)
-    control = _load_rem_control()
-    if "enabled" in body:
-        control["enabled"] = bool(body.get("enabled"))
-    if "interval_seconds" in body:
-        try:
-            control["interval_seconds"] = max(10, min(int(body.get("interval_seconds")), 86400))
-        except (TypeError, ValueError):
-            return _json_response({"error": "bad interval_seconds"}, 400)
-    if "max_turns" in body:
-        try:
-            control["max_turns"] = max(0, min(int(body.get("max_turns")), 10))
-        except (TypeError, ValueError):
-            return _json_response({"error": "bad max_turns"}, 400)
-    if "prompt" in body:
-        control["prompt"] = str(body.get("prompt") or "")[:MAX_PROMPT_CHARS]
-    await _save_rem_control(control)
-    cmd_id = await _queue_rem_command("reload_controls")
-    return _json_response({"ok": True, "control": control, "id": cmd_id})
-
-
 # ---------- Command queue ----------
 def _commands_path():
     return DATA_DIR / "bot_commands.json"
@@ -1255,7 +1224,6 @@ app.router.add_get("/api/rem/runs", rem_runs)
 app.router.add_post("/api/rem/run", rem_run)
 app.router.add_post("/api/rem/enable", rem_enable)
 app.router.add_post("/api/rem/disable", rem_disable)
-app.router.add_put("/api/rem/config", rem_config)
 app.router.add_get("/api/commands", commands_get)
 app.router.add_post("/api/commands", commands_post)
 app.router.add_delete("/api/commands", commands_del)

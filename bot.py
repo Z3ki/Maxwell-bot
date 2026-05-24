@@ -1489,8 +1489,6 @@ class MaxwellBot(commands.Bot):
         return {
             "enabled": self.rem_enabled,
             "interval_s": self.rem_interval_seconds,
-            "max_turns": self.rem_max_turns,
-            "prompt": self.rem_prompt_body,
             "last_run": state.get("last_rem_run_ts") or last.get("ts") or "",
             "last_audit_preview": (state.get("last_audit") or last.get("audit") or "")[:500],
             "events_buffered": await self.rem_log.size(),
