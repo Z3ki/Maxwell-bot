@@ -1,4 +1,4 @@
-from bot import collect_tool_calls
+from bot import collect_tool_calls, strip_tool_payload_leaks
 
 
 TOOLS = {"react", "web_search", "create_poll"}
@@ -86,3 +86,12 @@ def test_collect_tool_calls_ignores_long_content_object_without_args():
     response = '{"tool":"send_message","content":"' + long_text + '"}'
     calls = collect_tool_calls(response, TOOLS | {"send_message"})
     assert calls == []
+
+
+def test_strip_tool_payload_leaks_removes_standalone_json_tool_lines():
+    text = '\n'.join([
+        '{"tool":"reasoning_log","thoughts":"x"}',
+        '{"tool":"send_message","content":"hi"}',
+        "actual reply",
+    ])
+    assert strip_tool_payload_leaks(text) == "actual reply"
