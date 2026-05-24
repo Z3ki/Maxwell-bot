@@ -326,22 +326,28 @@ def collect_tool_calls(
         if isinstance(params, dict):
             add_call(match.start(), end, name, params)
 
-    for match in re.finditer(r"{", response):
-        if any(start <= match.start() < end for start, end, _name, _params in calls):
-            continue
-        result = extract_json_object(response, match.start())
-        if not result:
-            continue
-        json_str, end = result
-        try:
-            obj = json.loads(json_str, strict=False)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(obj, dict):
-            continue
-        name, params = _tool_params_from_json(obj)
-        if name:
-            add_call(match.start(), end, name, params)
+    stripped = response.strip()
+    # Safety hardening: only treat free-form JSON as a tool call when the
+    # entire assistant response is exactly one JSON object.
+    if stripped.startswith("{"):
+        whole = extract_json_object(stripped, 0)
+        if whole:
+            json_str, end = whole
+            if end == len(stripped):
+                try:
+                    obj = json.loads(json_str, strict=False)
+                except json.JSONDecodeError:
+                    obj = None
+                if isinstance(obj, dict):
+                    name, params = _tool_params_from_json(obj)
+                    if name:
+                        # Guard against accidental execution of leaked prose-like payloads.
+                        if "args" not in obj and "params" not in obj:
+                            content = obj.get("content")
+                            if isinstance(content, str) and len(content.strip()) > 280:
+                                name = None
+                        if name:
+                            add_call(0, len(response), name, params)
 
     calls.sort(key=lambda x: (x[0], x[1]))
     deduped = []

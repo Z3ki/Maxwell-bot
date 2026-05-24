@@ -73,3 +73,16 @@ body:
             },
         )
     ]
+
+
+def test_collect_tool_calls_ignores_json_when_surrounded_by_text():
+    response = 'here is debug: {"tool":"react","emoji":"catjam"} do not run this'
+    calls = collect_tool_calls(response, TOOLS)
+    assert calls == []
+
+
+def test_collect_tool_calls_ignores_long_content_object_without_args():
+    long_text = "a" * 400
+    response = '{"tool":"send_message","content":"' + long_text + '"}'
+    calls = collect_tool_calls(response, TOOLS | {"send_message"})
+    assert calls == []
