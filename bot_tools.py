@@ -1533,17 +1533,31 @@ class ShellTool(Tool):
         if run_code != 0:
             raise RuntimeError(stderr.decode(errors="replace").strip() or "docker run failed")
 
+    def _normalize_command(self, command: str) -> str:
+        raw = str(command or "").strip()
+        if not raw:
+            return ""
+
+        # If the model leaked a tool call payload, try to recover a literal command from backticks.
+        if "<tool:" in raw.lower():
+            m = re.search(r"`([^`]+)`", raw)
+            if m:
+                return m.group(1).strip()
+            return ""
+        return raw
+
     async def _run_shell_command(self, command: str):
         await self._ensure_container()
-        # Automatically use sudo for executing commands inside the sandbox
-        sudo_command = f"sudo {command}" if not command.strip().startswith("sudo") else command
+        sanitized = self._normalize_command(command)
+        if not sanitized:
+            raise RuntimeError("empty command")
         proc = await asyncio.create_subprocess_exec(
             "docker",
             "exec",
             "--workdir", "/home/maxwell",
             "--user", "maxwell",
             self.CONTAINER_NAME,
-            "bash", "-lc", sudo_command,
+            "bash", "-lc", sanitized,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -1551,21 +1565,22 @@ class ShellTool(Tool):
         return stdout, stderr, proc.returncode
 
     async def execute(self, message: Message, command: str = None, **kwargs) -> str:
-        if not command or not command.strip():
-            return "Error: command is required"
+        normalized = self._normalize_command(command)
+        if not normalized:
+            return "Error: command is required (tool-call markup was detected or command was empty)"
 
         author_id = str(message.author.id)
         if not (self.bot._is_admin(author_id) or author_id in self.bot._shell_whitelist):
             return "Error: You do not have permission to use the shell tool. Ask an admin to whitelist you with `,shell <user_id>`."
 
         try:
-            stdout, stderr, exit_code = await self._run_shell_command(command)
+            stdout, stderr, exit_code = await self._run_shell_command(normalized)
         except asyncio.TimeoutError:
-            text = f"$ {command}\n\u23f1 Timed out after {self.TIMEOUT}s"
+            text = f"$ {normalized}\n\u23f1 Timed out after {self.TIMEOUT}s"
             await message.channel.send(f"```ansi\n{text}\n```")
             return f"__SHELL_SENT__\n{text}"
         except Exception as e:
-            text = f"$ {command}\n\u274c Error: {e}"
+            text = f"$ {normalized}\n\u274c Error: {e}"
             await message.channel.send(f"```ansi\n{text}\n```")
             return f"__SHELL_SENT__\n{text}"
 
@@ -1584,14 +1599,14 @@ class ShellTool(Tool):
         if len(combined) > self.MAX_OUTPUT:
             combined = combined[:self.MAX_OUTPUT] + "\n... (truncated)"
 
-        text = f"$ {command}\n{combined}"
+        text = f"$ {normalized}\n{combined}"
         chunks = []
         remaining = text
         while remaining:
             if len(remaining) <= 1990:
                 chunks.append(remaining)
                 break
-            header = f"$ {command}\n"
+            header = f"$ {normalized}\n"
             cut = remaining.rfind("\n", 0, 1990)
             if cut <= len(header):
                 cut = 1990
@@ -1847,12 +1862,15 @@ class TtsTool(Tool):
     def get_description(self):
         return (
             "Convert a text response into a speech voice message and send it to the triggering channel. "
-            "Params: text (required string)."
+            "Params: text (required string), language/lang (optional: english or spanish)."
         )
 
-    async def execute(self, message: Message, text: str = None, **kwargs) -> str:
+    async def execute(self, message: Message, text: str = None, language: str = None, lang: str = None, **kwargs) -> str:
         if not text or not text.strip():
             return "Error: text parameter is required"
+
+        requested_lang = str(language or lang or kwargs.get("language") or kwargs.get("lang") or "english").strip().lower()
+        lang_is_spanish = requested_lang in {"es", "es-es", "spanish", "spanish_jason_angry", "jason_es"}
 
         import wave
         import os
@@ -1887,8 +1905,10 @@ class TtsTool(Tool):
             )
             service = riva.client.SpeechSynthesisService(auth)
 
-            tts_voice_name = os.environ.get("TTS_RIVA_VOICE", "Magpie-Multilingual.EN-US.Jason.Angry")
-            tts_language_code = os.environ.get("TTS_RIVA_LANGUAGE", "en-US")
+            default_voice = "Magpie-Multilingual.ES-ES.Jason.Angry" if lang_is_spanish else "Magpie-Multilingual.EN-US.Jason.Angry"
+            default_code = "es-ES" if lang_is_spanish else "en-US"
+            tts_voice_name = os.environ.get("TTS_RIVA_VOICE_ES" if lang_is_spanish else "TTS_RIVA_VOICE", default_voice)
+            tts_language_code = os.environ.get("TTS_RIVA_LANGUAGE_ES" if lang_is_spanish else "TTS_RIVA_LANGUAGE", default_code)
 
             # Use gRPC service synchronously (run in executor since it is synchronous gRPC)
             def run_riva():
@@ -1919,7 +1939,7 @@ class TtsTool(Tool):
                 from gtts import gTTS
 
                 def run_gtts():
-                    tts = gTTS(text=text, lang='en')
+                    tts = gTTS(text=text, lang='es' if lang_is_spanish else 'en')
                     tts.save(filename)
 
                 loop = asyncio.get_event_loop()
