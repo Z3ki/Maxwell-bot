@@ -44,7 +44,7 @@ def test_process_tool_calls_preserves_no_response_marker_for_tts():
         response, tool_results = await MaxwellBot._process_tool_calls(
             bot,
             message,
-            '{"tool":"tts","text":"say this"}',
+            '<tool:tts text="say this" />',
         )
         assert response == ""
         assert tool_results == ["Tool tts: __NO_RESPONSE__"]
@@ -65,7 +65,7 @@ def test_process_tool_calls_still_returns_other_tool_results():
         response, tool_results = await MaxwellBot._process_tool_calls(
             bot,
             message,
-            '{"tool":"react","emoji":"catjam"}',
+            '<tool:react emoji="catjam" />',
         )
         assert response == ""
         assert tool_results == ["Tool react: Reacted with <:catjam:123>"]
@@ -88,7 +88,7 @@ def test_process_tool_calls_records_tool_history_in_memory():
         response, tool_results = await MaxwellBot._process_tool_calls(
             bot,
             message,
-            '{"tool":"react","emoji":"catjam"}',
+            '<tool:react emoji="catjam" />',
         )
         assert response == ""
         assert tool_results == ["Tool react: Reacted with <:catjam:123>"]
@@ -121,7 +121,7 @@ def test_process_tool_calls_strips_disabled_tool_call():
         response, tool_results = await MaxwellBot._process_tool_calls(
             bot,
             message,
-            '{"tool":"react","emoji":"catjam"}',
+            '<tool:react emoji="catjam" />',
         )
         assert response == ""
         assert tool_results == ["Tool react: Error - tool is disabled"]
@@ -142,7 +142,7 @@ def test_process_tool_calls_strips_platform_incompatible_tool_call():
         response, tool_results = await MaxwellBot._process_tool_calls(
             bot,
             message,
-            '{"tool":"react","emoji":"catjam"}',
+            '<tool:react emoji="catjam" />',
         )
         assert response == ""
         assert tool_results == ["Tool react: Error - tool is not available on this platform"]

@@ -251,53 +251,6 @@ def extract_json_object(text: str, start: int = 0) -> tuple[str, int] | None:
     return None
 
 
-def iter_standalone_json_objects(text: str, start: int = 0, end: int | None = None):
-    end = len(text) if end is None else end
-    pos = start
-    while pos < end:
-        line_start = pos
-        while pos < end and text[pos] in " \t":
-            pos += 1
-        if pos < end and text[pos] == "{":
-            result = extract_json_object(text, pos)
-            if result:
-                json_str, json_end = result
-                rest = json_end
-                while rest < end and text[rest] in " \t\r":
-                    rest += 1
-                if rest >= end or text[rest] == "\n":
-                    yield line_start, rest, json_str
-                    pos = rest + 1
-                    continue
-        newline = text.find("\n", line_start, end)
-        if newline == -1:
-            break
-        pos = newline + 1
-
-
-def _tool_params_from_json(obj: dict) -> tuple[str | None, dict]:
-    tool_name = obj.get("tool")
-    fallback_name = obj.get("name")
-    action_name = obj.get("action")
-    name = tool_name or fallback_name or action_name
-    if not isinstance(name, str):
-        return None, {}
-    name = name.strip()
-    params = obj.get("args") or obj.get("params")
-    if isinstance(params, dict):
-        return name, params
-
-    selector_keys = set()
-    if isinstance(tool_name, str) and tool_name.strip():
-        selector_keys.add("tool")
-    elif isinstance(fallback_name, str) and fallback_name.strip():
-        selector_keys.add("name")
-    elif isinstance(action_name, str) and action_name.strip():
-        selector_keys.add("action")
-
-    return name, {k: v for k, v in obj.items() if k not in selector_keys}
-
-
 def collect_tool_calls(
     response: str,
     available_tools: set[str],
@@ -311,98 +264,102 @@ def collect_tool_calls(
         if name in available_tools and (include_disabled or name not in disabled_tools):
             calls.append((start, end, name, params))
 
-    def add_json_tool_object(start: int, end: int, obj: dict):
-        name, params = _tool_params_from_json(obj)
-        if not name:
-            return
-        # Guard against accidental execution of leaked prose-like payloads.
-        if "args" not in obj and "params" not in obj:
-            content = obj.get("content")
-            if isinstance(content, str) and len(content.strip()) > 280:
-                return
-        add_call(start, end, name, params)
+    # Pattern to find opening tags: e.g. <tool:name ...> or <name ...>
+    # Group 1: namespace tag name, Group 2: namespace tag attributes/end
+    # Group 3: plain tag name, Group 4: plain tag attributes/end
+    tag_pattern = re.compile(
+        r"<(?:tool:(\w+)|(\w+))(?:\s+([^>]*))?\s*(/?)>",
+        re.IGNORECASE
+    )
 
-    for match in CREATE_SITE_BLOCK_RE.finditer(response):
-        add_call(
-            match.start(),
-            match.end(),
-            "create_site",
-            {
-                "name": match.group("name").strip(),
-                "title": match.group("title").strip(),
-                "body": match.group("body").strip(),
-            },
+    pos = 0
+    while True:
+        match = tag_pattern.search(response, pos)
+        if not match:
+            break
+        
+        name = match.group(1) or match.group(2)
+        attrs_str = match.group(3) or ""
+        self_closing = match.group(4) == "/"
+        
+        start = match.start()
+        end = match.end()
+        pos = end
+        
+        if not name or name not in available_tools:
+            continue
+
+        params = {}
+        # Parse attributes from opening tag if present (e.g. key="val" or key='val')
+        if attrs_str:
+            attr_matches = re.finditer(
+                r'(\w+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')',
+                attrs_str
+            )
+            for attr in attr_matches:
+                k = attr.group(1)
+                v = attr.group(2) if attr.group(2) is not None else attr.group(3)
+                params[k] = v
+
+        if self_closing:
+            add_call(start, end, name, params)
+            continue
+
+        # Non-self-closing: find matching close tag </tool:name> or </name>
+        close_pattern = re.compile(
+            rf"</\s*(?:tool:{re.escape(name)}|{re.escape(name)})\s*>",
+            re.IGNORECASE
         )
+        close_match = close_pattern.search(response, end)
+        if not close_match:
+            # Fallback: if no closing tag, parse to end of string
+            body = response[end:]
+            end_pos = len(response)
+        else:
+            body = response[end:close_match.start()]
+            end_pos = close_match.end()
+            pos = end_pos  # Advance scanner past closing tag
 
-    for match in re.finditer(r"\[(?:TOOL_CALL:)?(\w+)\s*\]", response):
-        if any(start <= match.start() < end for start, end, _name, _params in calls):
-            continue
-        name = match.group(1)
-        result = extract_json_object(response, match.end())
-        if not result:
-            continue
-        json_str, end = result
-        try:
-            params = json.loads(json_str, strict=False)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(params, dict):
-            close = re.match(r"\s*\[/" + re.escape(name) + r"\]", response[end:])
-            add_call(match.start(), end + (close.end() if close else 0), name, params)
+        # Parse child elements inside body (e.g. <key>value</key>)
+        sub_pattern = re.compile(r"<(\w+)(?:\s+[^>]*)?>(.*?)</\s*\1\s*>", re.DOTALL)
+        sub_matches = list(sub_pattern.finditer(body))
+        
+        if sub_matches:
+            for sub in sub_matches:
+                params[sub.group(1)] = sub.group(2)
+        else:
+            # Fallback: map the entire raw body as the default parameter
+            cleaned_body = body.strip()
+            if cleaned_body:
+                default_param = "content"
+                if name == "react":
+                    default_param = "emoji"
+                elif name == "web_search":
+                    default_param = "query"
+                elif name == "create_poll":
+                    default_param = "question"
+                elif name == "send_file":
+                    default_param = "content"
+                elif name == "reasoning_log":
+                    default_param = "thoughts"
+                elif name == "tts":
+                    default_param = "text"
+                elif name == "fetch_url":
+                    default_param = "url"
+                elif name == "shell":
+                    default_param = "command"
+                elif name == "set_nickname":
+                    default_param = "nickname"
+                elif name == "set_activity":
+                    default_param = "name"
+                elif name == "kilo_run":
+                    default_param = "code"
+                elif name == "create_site":
+                    default_param = "body"
+                
+                params[default_param] = cleaned_body
 
-    for match in TOOL_LINE_RE.finditer(response):
-        name = match.group(1)
-        result = extract_json_object(response, match.end())
-        if not result:
-            continue
-        json_str, end = result
-        try:
-            params = json.loads(json_str, strict=False)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(params, dict):
-            add_call(match.start(), end, name, params)
-
-    fenced_ranges = []
-    for match in FENCED_JSON_BLOCK_RE.finditer(response):
-        body_start, body_end = match.span("body")
-        found = False
-        for start, end, json_str in iter_standalone_json_objects(response, body_start, body_end):
-            try:
-                obj = json.loads(json_str, strict=False)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(obj, dict):
-                before = len(calls)
-                add_json_tool_object(start, end, obj)
-                found = found or len(calls) > before
-        if found:
-            fenced_ranges.append(match.span())
-
-    for start, end, json_str in iter_standalone_json_objects(response):
-        if any(fence_start <= start < fence_end for fence_start, fence_end in fenced_ranges):
-            continue
-        try:
-            obj = json.loads(json_str, strict=False)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            add_json_tool_object(start, end, obj)
-
-    stripped = response.strip()
-    # Safety hardening: only treat free-form JSON as a tool call when the
-    # entire assistant response is exactly one JSON object.
-    if stripped.startswith("{"):
-        whole = extract_json_object(stripped, 0)
-        if whole:
-            json_str, end = whole
-            if end == len(stripped):
-                try:
-                    obj = json.loads(json_str, strict=False)
-                except json.JSONDecodeError:
-                    obj = None
-                if isinstance(obj, dict):
-                    add_json_tool_object(0, len(response), obj)
+        add_call(start, end_pos, name, params)
 
     calls.sort(key=lambda x: (x[0], x[1]))
     deduped = []
@@ -417,23 +374,12 @@ def collect_tool_calls(
 
 def strip_tool_payload_leaks(text: str) -> str:
     cleaned = str(text or "")
-    for match in reversed(list(FENCED_JSON_BLOCK_RE.finditer(cleaned))):
-        body_start, body_end = match.span("body")
-        body = cleaned[body_start:body_end]
-        ranges = []
-        for start, end, json_str in iter_standalone_json_objects(cleaned, body_start, body_end):
-            try:
-                obj = json.loads(json_str, strict=False)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(obj, dict) and any(key in obj for key in ("tool", "name", "action")):
-                ranges.append((start - body_start, end - body_start))
-        remaining = body
-        for start, end in reversed(ranges):
-            remaining = remaining[:start] + remaining[end:]
-        if ranges and not remaining.strip():
-            cleaned = cleaned[:match.start()] + cleaned[match.end():]
-    cleaned = JSON_TOOL_LINE_RE.sub("", cleaned)
+    # Robustly remove any <tool:name ...>...</tool:name> or <tool:name /> tags
+    # First, self-closing tags
+    cleaned = re.sub(r"<tool:\w+\s+[^>]*?/>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<\w+\s+[^>]*?/>", "", cleaned, flags=re.IGNORECASE)
+    # Next, tags with matching closing tags
+    cleaned = re.sub(r"<(tool:(\w+)|(\w+))(?:\s+[^>]*)?>(.*?)</\s*(?:tool:\2|\3)\s*>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
@@ -2802,7 +2748,7 @@ class MaxwellBot(commands.Bot):
                 if not _tool_results_need_followup(tool_results):
                     break
                 result_messages = await self._build_messages(message, content, has_media=bool(active_media), media_summary=media_summary)
-                result_messages.append({"role": "user", "content": "=== TOOL RESULTS ===\n" + "\n".join(tool_results) + "\n=== END ===\nContinue from these results. If the user still needs a visible reply, finish now with send_message. If no visible reply is appropriate, finish with no_response. If you only called reasoning_log, you have not answered the user yet. Do not stop after reasoning_log."})
+                result_messages.append({"role": "user", "content": "=== TOOL RESULTS ===\n" + "\n".join(tool_results) + "\n=== END ===\nContinue from these results. If the user still needs a visible reply, finish now with <tool:send_message>reply text</tool:send_message>. If no visible reply is appropriate, finish with <tool:no_response />. If you only called reasoning_log, you have not answered the user yet. Do not stop after reasoning_log."})
                 await self._acquire_ai_slot(timeout=ai_timeout)
                 try:
                     followup = await self.ai_provider.generate_response(result_messages, media=active_media, timeout=ai_timeout)
@@ -2993,19 +2939,17 @@ class MaxwellBot(commands.Bot):
         return (
             "Tools are optional. Use them only when they actually help. Available tools: "
             + " | ".join(descriptions)
-            + "\nTool-call format is strict. Output one plain JSON object per tool call, on its own line, with no markdown fence, no bullet, and no prose on that same line: "
-            + '{"tool":"tool_name","param":"value"}. '
-            + "Use exact tool names. Put parameters directly in the object, or under an args object. "
-            + "Valid examples: {\"tool\":\"react\",\"emoji\":\"catjam\"} or "
-            + "{\"tool\":\"send_file\",\"filename\":\"script.py\",\"content\":\"print('hi')\\n\"}. "
-            + "For create_site with full HTML, prefer this raw block so HTML quotes do not break JSON: "
-            + "[create_site]\nname: short-slug\ntitle: Site title\nbody:\n<!DOCTYPE html>...\n[/create_site]. "
+            + "\nTool-call format is strict. Output tool calls using XML-like tags: "
+            + "<tool:tool_name param1=\"value\" param2=\"value\" /> or <tool:tool_name><param1>value</param1></tool:tool_name>. "
+            + "Valid examples: <tool:react emoji=\"catjam\" /> or "
+            + "<tool:send_file><filename>script.py</filename><content>print('hi')</content></tool:send_file>. "
+            + "If a parameter is multi-line, use sub-tags inside the main tool tag. "
+            + "If a tool takes only a single default parameter (e.g. content for send_message, thoughts for reasoning_log, text for tts), you can put it directly inside the tag: <tool:send_message>hello</tool:send_message>. "
             + "You may call multiple tools in one assistant response. If you call reasoning_log, it is internal only and does NOT answer the user. "
-            + "Every tool-using turn must end with exactly one terminal visible decision: send_message to reply, or no_response to stay silent. "
-            + "Never stop after reasoning_log. Never output reasoning_log as the only tool unless your next tool call is send_message/no_response in the same response or follow-up. "
-            + "Order: reasoning_log first when using terminal tools, any helper tools next, then send_message/no_response last. Do not wrap tool calls in markdown. "
-            + "If the user asks you to say something, send text, create a prompt, or answer a question, the final action should normally be send_message. "
-            + "IMPORTANT: The character limit does NOT apply to tool JSON calls. You may write as much as needed in tool parameters."
+            + "Every tool-using turn must end with exactly one terminal visible decision: <tool:send_message>reply text</tool:send_message> to reply, or <tool:no_response /> to stay silent. "
+            + "Never stop after reasoning_log. Never output reasoning_log as the only tool. "
+            + "Order: reasoning_log first when using terminal tools, any helper tools next, then send_message/no_response last. Do not wrap tool calls in markdown fences. "
+            + "IMPORTANT: The character limit does NOT apply to tool tag parameters."
         )
 
     async def _build_messages(self, message, user_message: str, has_media: bool = False, media_summary: str = "") -> list[dict]:
@@ -3329,7 +3273,7 @@ class MaxwellBot(commands.Bot):
                             result_messages = [dict(m) for m in messages]
                             result_messages.append({
                                 "role": "user",
-                                "content": "=== TOOL RESULTS ===\n" + "\n".join(tool_results) + "\n=== END ===\nRespond based on these results. Don't call more tools unless necessary.",
+                                "content": "=== TOOL RESULTS ===\n" + "\n".join(tool_results) + "\n=== END ===\nContinue from these results. If the user still needs a visible reply, finish now with <tool:send_message>reply text</tool:send_message>. If no visible reply is appropriate, finish with <tool:no_response />. If you only called reasoning_log, you have not answered the user yet. Do not stop after reasoning_log.",
                             })
                             await self._acquire_ai_slot(timeout=30)
                             try:

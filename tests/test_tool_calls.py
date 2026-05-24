@@ -1,49 +1,54 @@
 from bot import collect_tool_calls, strip_tool_payload_leaks
 
 
-TOOLS = {"react", "web_search", "create_poll"}
+TOOLS = {"react", "web_search", "create_poll", "send_message", "reasoning_log", "create_site"}
 
 
-def test_collect_tool_calls_accepts_plain_json_tool_object():
-    calls = collect_tool_calls('{"tool":"react","emoji":"catjam"}', TOOLS)
+def test_collect_tool_calls_accepts_self_closing_namespace_tags():
+    calls = collect_tool_calls('<tool:react emoji="catjam" />', TOOLS)
 
     assert [(name, params) for _start, _end, name, params in calls] == [("react", {"emoji": "catjam"})]
 
 
-def test_collect_tool_calls_accepts_args_object():
-    calls = collect_tool_calls('{"tool":"web_search","args":{"query":"openrouter"}}', TOOLS)
+def test_collect_tool_calls_accepts_self_closing_plain_tags():
+    calls = collect_tool_calls('<react emoji="catjam" />', TOOLS)
+
+    assert [(name, params) for _start, _end, name, params in calls] == [("react", {"emoji": "catjam"})]
+
+
+def test_collect_tool_calls_accepts_tags_with_sub_elements():
+    calls = collect_tool_calls(
+        '<tool:web_search><query>openrouter</query></tool:web_search>',
+        TOOLS
+    )
 
     assert [(name, params) for _start, _end, name, params in calls] == [("web_search", {"query": "openrouter"})]
 
 
-def test_collect_tool_calls_accepts_tool_line_format():
-    calls = collect_tool_calls('TOOL react {"emoji":"catjam"}', TOOLS)
+def test_collect_tool_calls_accepts_tags_with_attributes_and_sub_elements():
+    calls = collect_tool_calls(
+        '<tool:web_search engine="google"><query>openrouter</query></tool:web_search>',
+        TOOLS
+    )
 
-    assert [(name, params) for _start, _end, name, params in calls] == [("react", {"emoji": "catjam"})]
+    assert [(name, params) for _start, _end, name, params in calls] == [("web_search", {"engine": "google", "query": "openrouter"})]
 
 
-def test_collect_tool_calls_keeps_legacy_bracket_format():
-    calls = collect_tool_calls('[react]\n{"emoji":"catjam"}\n[/react]', TOOLS)
+def test_collect_tool_calls_accepts_default_fallback_parameter():
+    calls = collect_tool_calls('<tool:send_message>hello world</tool:send_message>', TOOLS)
 
-    assert [(name, params) for _start, _end, name, params in calls] == [("react", {"emoji": "catjam"})]
+    assert [(name, params) for _start, _end, name, params in calls] == [("send_message", {"content": "hello world"})]
 
 
 def test_collect_tool_calls_ignores_disabled_tools():
-    calls = collect_tool_calls('{"tool":"react","emoji":"catjam"}', TOOLS, {"react"})
+    calls = collect_tool_calls('<tool:react emoji="catjam" />', TOOLS, {"react"})
 
     assert calls == []
-
-def test_collect_tool_calls_keeps_name_param_when_tool_key_selects_tool():
-    calls = collect_tool_calls('{"tool":"create_site","name":"nyxwell","title":"hi"}', TOOLS | {"create_site"})
-
-    assert [(name, params) for _start, _end, name, params in calls] == [
-        ("create_site", {"name": "nyxwell", "title": "hi"})
-    ]
 
 
 def test_collect_tool_calls_can_include_disabled_for_dispatcher_stripping():
     calls = collect_tool_calls(
-        '{"tool":"react","emoji":"catjam"}',
+        '<tool:react emoji="catjam" />',
         TOOLS,
         {"react"},
         include_disabled=True,
@@ -52,96 +57,28 @@ def test_collect_tool_calls_can_include_disabled_for_dispatcher_stripping():
     assert [(name, params) for _start, _end, name, params in calls] == [("react", {"emoji": "catjam"})]
 
 
-def test_collect_tool_calls_accepts_raw_create_site_block():
-    response = """[create_site]
-name: kris
-title: Kris Bio
-body:
-<!DOCTYPE html>
-<html><body><h1 class="hero">Kris</h1></body></html>
-[/create_site]"""
-
-    calls = collect_tool_calls(response, TOOLS | {"create_site"})
-
-    assert [(name, params) for _start, _end, name, params in calls] == [
-        (
-            "create_site",
-            {
-                "name": "kris",
-                "title": "Kris Bio",
-                "body": '<!DOCTYPE html>\n<html><body><h1 class="hero">Kris</h1></body></html>',
-            },
-        )
-    ]
-
-
-def test_collect_tool_calls_ignores_json_when_surrounded_by_text():
-    response = 'here is debug: {"tool":"react","emoji":"catjam"} do not run this'
-    calls = collect_tool_calls(response, TOOLS)
-    assert calls == []
-
-
-def test_collect_tool_calls_accepts_standalone_json_tool_lines():
+def test_collect_tool_calls_accepts_multiple_tags():
     response = '\n'.join([
-        '{"tool":"reasoning_log","thoughts":"x"}',
-        '{"tool":"send_message","content":"hi"}',
+        '<tool:reasoning_log>thinking...</tool:reasoning_log>',
+        '<tool:send_message>hello</tool:send_message>',
     ])
-    calls = collect_tool_calls(response, TOOLS | {"reasoning_log", "send_message"})
+    calls = collect_tool_calls(response, TOOLS)
 
     assert [(name, params) for _start, _end, name, params in calls] == [
-        ("reasoning_log", {"thoughts": "x"}),
-        ("send_message", {"content": "hi"}),
+        ("reasoning_log", {"thoughts": "thinking..."}),
+        ("send_message", {"content": "hello"}),
     ]
 
 
-def test_collect_tool_calls_accepts_fenced_json_tool_lines():
-    response = '''```json
-{"tool":"reasoning_log","thoughts":"x"}
-{"tool":"send_message","content":"hi"}
-```'''
-    calls = collect_tool_calls(response, TOOLS | {"reasoning_log", "send_message"})
-
-    assert [(name, params) for _start, _end, name, params in calls] == [
-        ("reasoning_log", {"thoughts": "x"}),
-        ("send_message", {"content": "hi"}),
-    ]
-
-
-def test_collect_tool_calls_accepts_pretty_fenced_json_tool_object():
-    response = '''```json
-{
-  "tool": "send_message",
-  "args": {
-    "content": "hi"
-  }
-}
-```'''
-    calls = collect_tool_calls(response, TOOLS | {"send_message"})
-
-    assert [(name, params) for _start, _end, name, params in calls] == [
-        ("send_message", {"content": "hi"})
-    ]
-
-
-def test_collect_tool_calls_ignores_long_content_object_without_args():
-    long_text = "a" * 400
-    response = '{"tool":"send_message","content":"' + long_text + '"}'
-    calls = collect_tool_calls(response, TOOLS | {"send_message"})
-    assert calls == []
-
-
-def test_strip_tool_payload_leaks_removes_standalone_json_tool_lines():
+def test_strip_tool_payload_leaks_removes_standalone_tags():
     text = '\n'.join([
-        '{"tool":"reasoning_log","thoughts":"x"}',
-        '{"tool":"send_message","content":"hi"}',
+        '<tool:reasoning_log>thinking...</tool:reasoning_log>',
+        '<tool:send_message>hello</tool:send_message>',
         "actual reply",
     ])
     assert strip_tool_payload_leaks(text) == "actual reply"
 
 
-def test_strip_tool_payload_leaks_removes_fenced_json_tool_blocks():
-    text = '''```json
-{"tool":"send_message","content":"hi"}
-```
-actual reply'''
+def test_strip_tool_payload_leaks_removes_self_closing_tags():
+    text = '<tool:react emoji="catjam" />\nactual reply'
     assert strip_tool_payload_leaks(text) == "actual reply"
