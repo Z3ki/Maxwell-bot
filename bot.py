@@ -21,16 +21,21 @@ from discord.ext import commands
 from bot_tools import (
     ChangeAvatarTool,
     ChangePresenceTool,
+    CreateCategoryTool,
+    CreateChannelTool,
     CreateInviteTool,
     CreatePollTool,
     CreateSiteTool,
+    DeleteChannelTool,
     DeleteMessageTool,
+    EditChannelTool,
     EditMessageTool,
     FetchUrlTool,
     ForwardMessageTool,
     HDImageGeneratorTool,
     ImageGeneratorTool,
     KiloTool,
+    ListAdminServersTool,
     ListServersTool,
     ListSitesTool,
     LookupUserTool,
@@ -560,7 +565,7 @@ def _recent_auto_reply_count(memory: list, bot_names: set[str], window_minutes: 
 FOLLOWUP_TOOL_NAMES = {
     "image_generator", "hd_image", "lookup_user", "search_messages", "create_invite", "create_poll",
     "forward_message", "edit_message", "list_servers", "create_site", "list_sites", "web_search",
-    "fetch_url", "shell",
+    "fetch_url", "shell", "list_admin_servers", "create_category", "create_channel", "edit_channel", "delete_channel",
 }
 
 TELEGRAM_COMPATIBLE_TOOL_NAMES = {
@@ -670,6 +675,11 @@ class MaxwellBot(commands.Bot):
         self.tools["typing"] = TypingTool(self)
         self.tools["tts"] = TtsTool(self)
         self.tools["list_servers"] = ListServersTool(self)
+        self.tools["list_admin_servers"] = ListAdminServersTool(self)
+        self.tools["create_category"] = CreateCategoryTool(self)
+        self.tools["create_channel"] = CreateChannelTool(self)
+        self.tools["edit_channel"] = EditChannelTool(self)
+        self.tools["delete_channel"] = DeleteChannelTool(self)
         self.tools["change_avatar"] = ChangeAvatarTool(self)
         self.tools["create_site"] = CreateSiteTool(self)
         self.tools["list_sites"] = ListSitesTool(self)

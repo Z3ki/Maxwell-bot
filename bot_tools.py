@@ -119,6 +119,65 @@ def _is_safe_url(url: str) -> bool:
         return False
 
 
+def _clean_discord_name(value: str, *, max_len: int = 100) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"[\r\n\t]+", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text[:max_len].strip()
+
+
+def _clean_channel_name(value: str) -> str:
+    text = _clean_discord_name(value, max_len=100).lower()
+    text = re.sub(r"\s+", "-", text).strip("-")
+    return text[:100]
+
+
+async def _resolve_guild(bot, message: Message, guild_id: str | None = None):
+    if guild_id:
+        try:
+            gid = int(str(guild_id).strip())
+        except (TypeError, ValueError):
+            return None, f"Error: invalid guild_id: {guild_id}"
+        guild = bot.get_guild(gid)
+        if not guild:
+            return None, f"Error: I am not in server {guild_id} or it is not cached"
+        return guild, ""
+    if getattr(message, "guild", None):
+        return message.guild, ""
+    return None, "Error: guild_id is required when using this from DMs or group chats"
+
+
+def _guild_me(guild):
+    return getattr(guild, "me", None) or getattr(guild, "self_member", None)
+
+
+def _admin_caps(guild) -> tuple[set[str], str]:
+    me = _guild_me(guild)
+    if not me:
+        return set(), "bot member is not cached"
+    perms = getattr(me, "guild_permissions", None)
+    if not perms:
+        return set(), "permissions are not cached"
+    caps = set()
+    if getattr(perms, "administrator", False):
+        caps.update({"administrator", "manage_channels", "manage_roles", "manage_guild", "manage_messages", "kick_members", "ban_members"})
+    else:
+        for name in ("manage_channels", "manage_roles", "manage_guild", "manage_messages", "kick_members", "ban_members"):
+            if getattr(perms, name, False):
+                caps.add(name)
+    return caps, ""
+
+
+def _has_guild_cap(guild, cap: str) -> bool:
+    caps, _reason = _admin_caps(guild)
+    return "administrator" in caps or cap in caps
+
+
+def _channel_label(channel) -> str:
+    name = getattr(channel, "name", None) or str(getattr(channel, "id", "unknown"))
+    return f"#{name} ({getattr(channel, 'id', '?')})"
+
+
 class ImageGeneratorTool(Tool):
     """Fast image generation using NVIDIA Flux"""
 
@@ -911,6 +970,254 @@ class ListServersTool(Tool):
         if not lines:
             return "You're not in any servers or group chats."
         return "\n".join(lines)
+
+
+class ListAdminServersTool(Tool):
+    """List servers where Maxwell has useful admin permissions."""
+
+    def get_description(self):
+        return (
+            "List servers where you have usable admin/mod permissions, especially manage_channels. "
+            "Use this before trying server admin actions. No params."
+        )
+
+    async def execute(self, message: Message, **kwargs) -> str:
+        rows = []
+        for guild in getattr(self.bot, "guilds", []) or []:
+            caps, reason = _admin_caps(guild)
+            if not caps:
+                continue
+            channels = list(getattr(guild, "channels", []) or [])
+            cats = [ch for ch in channels if isinstance(ch, discord.CategoryChannel)]
+            text = [ch for ch in channels if isinstance(ch, discord.TextChannel)]
+            voice = [ch for ch in channels if isinstance(ch, discord.VoiceChannel)]
+            cap_text = ", ".join(sorted(caps)) if caps else reason
+            rows.append(
+                f"{guild.name} (ID: {guild.id}) | caps: {cap_text} | "
+                f"categories: {len(cats)} text: {len(text)} voice: {len(voice)}"
+            )
+        if not rows:
+            return "No servers with cached admin/manage permissions. Don't try admin tools until this lists a target."
+        return "Servers with usable admin tools:\n" + "\n".join(rows[:30])
+
+
+class CreateCategoryTool(Tool):
+    """Create a Discord category channel."""
+
+    def get_description(self):
+        return (
+            "Create a Discord category (the separator/group that channels sit under). Requires manage_channels. "
+            "Params: name (required), guild_id (optional unless not in that server), position (optional). "
+            "Use list_admin_servers first to pick a server where manage_channels is available."
+        )
+
+    async def execute(self, message: Message, name: str = None, guild_id: str = None, position: str = None, **kwargs) -> str:
+        clean = _clean_discord_name(name)
+        if not clean:
+            return "Error: name is required"
+        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        if error:
+            return error
+        if not _has_guild_cap(guild, "manage_channels"):
+            return f"Error: I do not have manage_channels/admin in {guild.name}. Run list_admin_servers first."
+        try:
+            category = await guild.create_category(clean, reason=f"Maxwell admin tool requested by {message.author}")
+            if position is not None:
+                try:
+                    await category.edit(position=max(0, int(position)), reason="Maxwell admin tool position update")
+                except (TypeError, ValueError):
+                    return f"Created category {category.name} ({category.id}), but position was invalid"
+            return f"Created category {category.name} ({category.id}) in {guild.name}"
+        except discord.Forbidden:
+            return f"Error: Discord denied creating category in {guild.name}; missing manage_channels or role hierarchy issue"
+        except Exception as e:
+            return f"Error creating category: {e}"
+
+
+class CreateChannelTool(Tool):
+    """Create text or voice channels."""
+
+    def get_description(self):
+        return (
+            "Create a Discord text or voice channel. Requires manage_channels. "
+            "Params: name (required), kind/type (text or voice, default text), guild_id (optional), "
+            "category_id or category_name (optional), topic (text only, optional), nsfw (optional), slowmode_seconds (optional). "
+            "Use create_category first when the user wants a new channel group/section."
+        )
+
+    def _find_category(self, guild, category_id: str = None, category_name: str = None):
+        if category_id:
+            try:
+                cid = int(str(category_id).strip())
+            except (TypeError, ValueError):
+                return None, f"Error: invalid category_id: {category_id}"
+            category = discord.utils.get(getattr(guild, "categories", []) or [], id=cid)
+            if not category:
+                return None, f"Error: category {category_id} not found in {guild.name}"
+            return category, ""
+        if category_name:
+            wanted = str(category_name).strip().lower()
+            matches = [cat for cat in (getattr(guild, "categories", []) or []) if cat.name.lower() == wanted]
+            if not matches:
+                return None, f"Error: category named '{category_name}' not found in {guild.name}"
+            if len(matches) > 1:
+                return None, f"Error: multiple categories named '{category_name}', use category_id"
+            return matches[0], ""
+        return None, ""
+
+    async def execute(
+        self,
+        message: Message,
+        name: str = None,
+        kind: str = None,
+        type: str = None,
+        guild_id: str = None,
+        category_id: str = None,
+        category_name: str = None,
+        topic: str = None,
+        nsfw: str = "false",
+        slowmode_seconds: str = "0",
+        **kwargs,
+    ) -> str:
+        clean = _clean_channel_name(name)
+        if not clean:
+            return "Error: name is required"
+        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        if error:
+            return error
+        if not _has_guild_cap(guild, "manage_channels"):
+            return f"Error: I do not have manage_channels/admin in {guild.name}. Run list_admin_servers first."
+        category, error = self._find_category(guild, category_id, category_name)
+        if error:
+            return error
+        channel_kind = str(kind or type or "text").strip().lower()
+        try:
+            if channel_kind in {"voice", "vc"}:
+                channel = await guild.create_voice_channel(clean, category=category, reason=f"Maxwell admin tool requested by {message.author}")
+            elif channel_kind in {"text", "chat"}:
+                try:
+                    slowmode = max(0, min(int(slowmode_seconds or 0), 21600))
+                except (TypeError, ValueError):
+                    slowmode = 0
+                channel = await guild.create_text_channel(
+                    clean,
+                    category=category,
+                    topic=str(topic or "")[:1024] or None,
+                    nsfw=str(nsfw).lower() in {"1", "true", "yes", "on"},
+                    slowmode_delay=slowmode,
+                    reason=f"Maxwell admin tool requested by {message.author}",
+                )
+            else:
+                return "Error: kind/type must be text or voice"
+            where = f" under {category.name}" if category else ""
+            return f"Created {channel_kind} channel {_channel_label(channel)} in {guild.name}{where}"
+        except discord.Forbidden:
+            return f"Error: Discord denied creating channel in {guild.name}; missing manage_channels or role hierarchy issue"
+        except Exception as e:
+            return f"Error creating channel: {e}"
+
+
+class EditChannelTool(Tool):
+    """Rename/move/update basic channel settings."""
+
+    def get_description(self):
+        return (
+            "Edit a Discord channel. Requires manage_channels. Params: channel_id (required), "
+            "name (optional), category_id or category_name (optional), topic (text only, optional), slowmode_seconds (text only, optional), nsfw (text only, optional)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        channel_id: str = None,
+        name: str = None,
+        category_id: str = None,
+        category_name: str = None,
+        topic: str = None,
+        slowmode_seconds: str = None,
+        nsfw: str = None,
+        **kwargs,
+    ) -> str:
+        if not channel_id:
+            return "Error: channel_id is required"
+        try:
+            channel = self.bot.get_channel(int(channel_id)) or await self.bot.fetch_channel(int(channel_id))
+        except (TypeError, ValueError):
+            return f"Error: invalid channel_id: {channel_id}"
+        except Exception as e:
+            return f"Error finding channel: {e}"
+        guild = getattr(channel, "guild", None)
+        if not guild:
+            return "Error: channel is not in a server"
+        if not _has_guild_cap(guild, "manage_channels"):
+            return f"Error: I do not have manage_channels/admin in {guild.name}. Run list_admin_servers first."
+        updates = {}
+        if name:
+            clean = _clean_channel_name(name) if not isinstance(channel, discord.CategoryChannel) else _clean_discord_name(name)
+            if clean:
+                updates["name"] = clean
+        if category_id or category_name:
+            category, error = CreateChannelTool(self.bot)._find_category(guild, category_id, category_name)
+            if error:
+                return error
+            updates["category"] = category
+        if isinstance(channel, discord.TextChannel):
+            if topic is not None:
+                updates["topic"] = str(topic)[:1024]
+            if slowmode_seconds is not None:
+                try:
+                    updates["slowmode_delay"] = max(0, min(int(slowmode_seconds), 21600))
+                except (TypeError, ValueError):
+                    return "Error: slowmode_seconds must be a number"
+            if nsfw is not None:
+                updates["nsfw"] = str(nsfw).lower() in {"1", "true", "yes", "on"}
+        elif topic is not None or slowmode_seconds is not None or nsfw is not None:
+            return "Error: topic, slowmode_seconds, and nsfw only apply to text channels"
+        if not updates:
+            return "Error: provide at least one edit field"
+        try:
+            await channel.edit(**updates, reason=f"Maxwell admin tool requested by {message.author}")
+            return f"Edited {_channel_label(channel)} in {guild.name}: {', '.join(sorted(updates))}"
+        except discord.Forbidden:
+            return f"Error: Discord denied editing {_channel_label(channel)}; missing manage_channels or role hierarchy issue"
+        except Exception as e:
+            return f"Error editing channel: {e}"
+
+
+class DeleteChannelTool(Tool):
+    """Delete a Discord channel with name confirmation."""
+
+    def get_description(self):
+        return (
+            "Delete a Discord channel or category. Dangerous. Requires manage_channels. "
+            "Params: channel_id (required), confirm_name (required and must exactly match the channel/category name)."
+        )
+
+    async def execute(self, message: Message, channel_id: str = None, confirm_name: str = None, **kwargs) -> str:
+        if not channel_id or not confirm_name:
+            return "Error: channel_id and confirm_name are required"
+        try:
+            channel = self.bot.get_channel(int(channel_id)) or await self.bot.fetch_channel(int(channel_id))
+        except (TypeError, ValueError):
+            return f"Error: invalid channel_id: {channel_id}"
+        except Exception as e:
+            return f"Error finding channel: {e}"
+        guild = getattr(channel, "guild", None)
+        if not guild:
+            return "Error: channel is not in a server"
+        if not _has_guild_cap(guild, "manage_channels"):
+            return f"Error: I do not have manage_channels/admin in {guild.name}. Run list_admin_servers first."
+        actual = getattr(channel, "name", "")
+        if str(confirm_name) != actual:
+            return f"Error: confirm_name must exactly match '{actual}'"
+        try:
+            label = _channel_label(channel)
+            await channel.delete(reason=f"Maxwell admin tool requested by {message.author}")
+            return f"Deleted {label} from {guild.name}"
+        except discord.Forbidden:
+            return f"Error: Discord denied deleting {_channel_label(channel)}; missing manage_channels or role hierarchy issue"
+        except Exception as e:
+            return f"Error deleting channel: {e}"
 
 
 class ChangeAvatarTool(Tool):

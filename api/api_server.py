@@ -146,6 +146,7 @@ KNOWN_TOOLS = [
     "memory_edit", "react", "edit_message", "delete_message", "create_poll",
     "create_invite", "lookup_user", "search_messages", "set_nickname",
     "forward_message", "typing", "list_servers", "change_avatar", "create_site",
+    "list_admin_servers", "create_category", "create_channel", "edit_channel", "delete_channel",
     "list_sites", "web_search", "no_response", "shell", "fetch_url",
     "send_meme", "send_media",
 ]
