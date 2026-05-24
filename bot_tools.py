@@ -1150,7 +1150,7 @@ class SendFileTool(Tool):
 
 
 class ShellTool(Tool):
-    """Execute shell commands on the host"""
+    """Execute shell commands in the dedicated Docker sandbox."""
 
     CONTAINER_NAME = "maxwell-shell"
     IMAGE_NAME = "maxwell-shell"
@@ -1160,21 +1160,72 @@ class ShellTool(Tool):
 
     def get_description(self):
         return (
-            "Run a shell command directly on the host with bash -lc. Output sent directly to chat. "
+            "Run a shell command in the isolated maxwell-shell Docker sandbox with bash -lc. Output sent directly to chat. "
             "Params: command (required)."
         )
+
+    async def _run_docker(self, *args: str, timeout: int = 30):
+        proc = await asyncio.create_subprocess_exec(
+            "docker",
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        return await asyncio.wait_for(proc.communicate(), timeout=timeout), proc.returncode
+
+    async def _ensure_container(self):
+        try:
+            (stdout, _stderr), code = await self._run_docker(
+                "inspect", "-f", "{{.State.Running}}", self.CONTAINER_NAME, timeout=10
+            )
+            if code == 0:
+                if stdout.decode(errors="replace").strip().lower() == "true":
+                    return
+                (_stdout, stderr), start_code = await self._run_docker("start", self.CONTAINER_NAME, timeout=15)
+                if start_code == 0:
+                    return
+                raise RuntimeError(stderr.decode(errors="replace").strip() or "docker start failed")
+        except FileNotFoundError:
+            raise RuntimeError("docker is not installed or not on PATH")
+        except asyncio.TimeoutError:
+            raise RuntimeError("docker did not respond while checking sandbox")
+
+        (_stdout, stderr), build_code = await self._run_docker(
+            "build", "-t", self.IMAGE_NAME, self.DOCKERFILE_DIR, timeout=180
+        )
+        if build_code != 0:
+            raise RuntimeError(stderr.decode(errors="replace").strip() or "docker build failed")
+
+        (_stdout, stderr), run_code = await self._run_docker(
+            "run", "-d",
+            "--name", self.CONTAINER_NAME,
+            self.IMAGE_NAME,
+            timeout=30,
+        )
+        if run_code != 0:
+            raise RuntimeError(stderr.decode(errors="replace").strip() or "docker run failed")
+
+    async def _run_shell_command(self, command: str):
+        await self._ensure_container()
+        proc = await asyncio.create_subprocess_exec(
+            "docker",
+            "exec",
+            "--workdir", "/home/maxwell",
+            "--user", "maxwell",
+            self.CONTAINER_NAME,
+            "bash", "-lc", command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.TIMEOUT)
+        return stdout, stderr, proc.returncode
 
     async def execute(self, message: Message, command: str = None, **kwargs) -> str:
         if not command or not command.strip():
             return "Error: command is required"
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "bash", "-lc", command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.TIMEOUT)
+            stdout, stderr, exit_code = await self._run_shell_command(command)
         except asyncio.TimeoutError:
             text = f"$ {command}\n\u23f1 Timed out after {self.TIMEOUT}s"
             await message.reply(f"```ansi\n{text}\n```")
@@ -1186,7 +1237,6 @@ class ShellTool(Tool):
 
         out = stdout.decode(errors="replace")
         err = stderr.decode(errors="replace")
-        exit_code = proc.returncode
         combined = ""
         if out.strip():
             combined += out.strip()
