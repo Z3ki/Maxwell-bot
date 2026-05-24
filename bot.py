@@ -1334,6 +1334,47 @@ class MaxwellBot(commands.Bot):
                     self._auto_channels.add(channel_id)
                     self._save_auto_channels()
                     await message.channel.send("Auto mode on — I'll respond to messages whenever I feel like it.")
+            elif cmd == "admin":
+                if not self._is_admin(message.author.id):
+                    await message.channel.send("not authorized")
+                    return
+                if args is None:
+                    admins = ", ".join(f"<@{uid}>" for uid in sorted(self._admins))
+                    await message.channel.send(f"Admins: {admins}" if admins else "No admins configured.")
+                elif args.lower() == "clear":
+                    self._admins = set(OWNER_IDS)
+                    self._save_admins()
+                    await message.channel.send("Admin list reset to owners.")
+                else:
+                    uid = args.strip().strip("<@!>")
+                    if not uid.isdigit():
+                        await message.channel.send("usage: `,admin <@user|user_id>` or `,admin clear`")
+                        return
+                    if uid in self._admins:
+                        self._admins.discard(uid)
+                        self._save_admins()
+                        await message.channel.send(f"Removed <@{uid}> from admins.")
+                    else:
+                        self._admins.add(uid)
+                        self._save_admins()
+                        await message.channel.send(f"Added <@{uid}> to admins.")
+            elif cmd == "help":
+                await message.channel.send(
+                    "Commands:\n"
+                    "` ,help` - show this list\n"
+                    "` ,stop` - stop active response in this channel\n"
+                    "` ,prompt [text]` - view/set server prompt (admin)\n"
+                    "` ,clearprompt` - clear server prompt (admin)\n"
+                    "` ,clearmem` - clear channel memory (admin)\n"
+                    "` ,context ...` - manage memory/context (admin)\n"
+                    "` ,rem ...` - manage/run REM (admin)\n"
+                    "` ,auto [list]` - toggle/list auto mode (admin)\n"
+                    "` ,vc ...` - voice commands\n"
+                    "` ,drug [minutes|off|status]` - drug mode timer\n"
+                    "` ,admin [@user|user_id|clear]` - add/remove/list admins (admin)\n"
+                    "` ,shell [@user|clear]` - shell whitelist (admin)\n"
+                    "` ,blacklist [@user|clear]` / `,unblacklist @user` - blacklist controls (admin)\n"
+                )
             elif cmd == "vc":
                 await self._handle_vc_command(message, args)
             elif cmd in ("shell",):
@@ -1740,6 +1781,12 @@ class MaxwellBot(commands.Bot):
 
     def _is_admin(self, user_id) -> bool:
         return str(user_id) in self._admins
+
+    def _save_admins(self):
+        try:
+            _atomic_json_write(Path(self.config.DATA_DIR) / "admins.json", sorted(self._admins))
+        except Exception as e:
+            logger.error(f"Failed to save admins: {e}")
 
     async def _load_rem_control(self):
         try:
