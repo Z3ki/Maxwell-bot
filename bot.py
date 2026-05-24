@@ -107,6 +107,7 @@ AUTO_GAME_ACTIVITIES = [
 ]
 CUSTOM_EMOJI_ALIAS_RE = re.compile(r"(?<!<)(?<!<a):([A-Za-z0-9_]{2,32}):(?!\d)")
 TOOL_LINE_RE = re.compile(r"(?im)^\s*(?:TOOL|CALL)\s+([A-Za-z_]\w*)\s*[:\-]?\s*")
+TOOL_TRACE_LINE_RE = re.compile(r"(?im)^\s*Called\s+[A-Za-z_]\w*\s+with\s+\{.*?\}\s*->\s*__\w+__.*$")
 CREATE_SITE_BLOCK_RE = re.compile(
     r"(?is)\[create_site\]\s*"
     r"name\s*:\s*(?P<name>[^\n]+)\n"
@@ -2743,6 +2744,7 @@ class MaxwellBot(commands.Bot):
                 return
             response = re.sub(r"\[(\w+)\]\s*\n?\s*\{.*?\}\s*\n?\s*\[/\1\]", "", response, flags=re.DOTALL)
             response = re.sub(r"\[/?(?:TOOL_CALL:)?[\w-]+.*?\]", "", response)
+            response = TOOL_TRACE_LINE_RE.sub("", response)
             response = response.replace("__NO_RESPONSE__", "").replace("__SHELL_SENT__", "").replace("__MEME_SENT__", "").replace("__MEDIA_SENT__", "").strip()
             response = re.sub(r"(?m)^\s*\*[^*]+\*\s*$", "", response).strip() or response.strip()
             if response:
@@ -2841,6 +2843,9 @@ class MaxwellBot(commands.Bot):
                 segments.append(response[last:start])
                 last = end
                 try:
+                    if name == "send_message" and message.guild and isinstance(params.get("content"), str):
+                        params = dict(params)
+                        params["content"] = self._render_custom_emojis(params.get("content", ""), message.guild)
                     if name in disabled:
                         result_text = "Error - tool is disabled"
                         tool_results.append(f"Tool {name}: {result_text}")
