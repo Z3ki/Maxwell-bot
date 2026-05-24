@@ -1393,19 +1393,75 @@ class ReasoningLogTool(Tool):
 
     def get_description(self):
         return (
-            "Store reasoning metadata for inspection. "
-            "Params: intent/confidence/decision/thoughts/data (all optional; any JSON accepted). "
+            "Store detailed reasoning metadata for inspection. Use this before send_message/no_response. "
+            "Be verbose and include all useful internal decision data. Params: intent, confidence, decision, "
+            "thoughts, assumptions, evidence, alternatives, risks, tool_plan, response_plan, data, and any other JSON fields. "
             "This does not reply to users."
         )
 
     async def execute(self, message: Message, **kwargs) -> str:
-        payload = dict(kwargs or {})
+        model_supplied = dict(kwargs or {})
+        payload = dict(model_supplied)
         try:
             payload.setdefault("intent", payload.get("decision", "reply"))
+            payload.setdefault("confidence", payload.get("confidence", None))
+            payload.setdefault("thoughts", payload.get("thoughts", ""))
+            payload["model_supplied"] = model_supplied
+            payload["runtime_context"] = self._runtime_context(message)
             await self.bot._record_llm_trace(message, payload)
             return "__REASONING_RECORDED__"
         except Exception as e:
             return f"Error recording reasoning: {e}"
+
+    def _runtime_context(self, message: Message) -> dict:
+        author = getattr(message, "author", None)
+        channel = getattr(message, "channel", None)
+        guild = getattr(message, "guild", None)
+        reference = getattr(message, "reference", None)
+        resolved_ref = getattr(reference, "resolved", None)
+        attachments = []
+        for attachment in getattr(message, "attachments", []) or []:
+            attachments.append({
+                "id": str(getattr(attachment, "id", "")),
+                "filename": getattr(attachment, "filename", ""),
+                "content_type": getattr(attachment, "content_type", ""),
+                "size": getattr(attachment, "size", None),
+                "url": getattr(attachment, "url", ""),
+            })
+        embeds = []
+        for embed in getattr(message, "embeds", []) or []:
+            embeds.append({
+                "title": getattr(embed, "title", None),
+                "description": getattr(embed, "description", None),
+                "url": getattr(embed, "url", None),
+                "type": getattr(embed, "type", None),
+            })
+        mentions = []
+        for user in getattr(message, "mentions", []) or []:
+            mentions.append({
+                "id": str(getattr(user, "id", "")),
+                "name": str(getattr(user, "display_name", getattr(user, "name", ""))),
+                "bot": bool(getattr(user, "bot", False)),
+            })
+        return {
+            "platform": str(getattr(message, "tool_platform", "discord") or "discord"),
+            "message_id": str(getattr(message, "id", "")),
+            "message_content": str(getattr(message, "content", "") or ""),
+            "created_at": str(getattr(message, "created_at", "") or ""),
+            "channel_id": str(getattr(channel, "id", "")),
+            "channel_name": str(getattr(channel, "name", "")),
+            "guild_id": str(getattr(guild, "id", "")),
+            "guild_name": str(getattr(guild, "name", "")),
+            "author_id": str(getattr(author, "id", "")),
+            "author_name": str(getattr(author, "display_name", getattr(author, "name", ""))),
+            "author_is_bot": bool(getattr(author, "bot", False)),
+            "mentions": mentions,
+            "attachments": attachments,
+            "embeds": embeds,
+            "reference_message_id": str(getattr(reference, "message_id", "") or ""),
+            "reference_author_id": str(getattr(getattr(resolved_ref, "author", None), "id", "") or ""),
+            "reference_content": str(getattr(resolved_ref, "content", "") or ""),
+        }
 
 
 class NoResponseTool(Tool):
