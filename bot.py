@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import html
 import json
 import logging
 import re
@@ -350,6 +351,99 @@ class TelegramUserAdapter:
         self.bot = bot
 
 
+def _telegram_html(text: str) -> str:
+    """Render plain text plus fenced code blocks as Telegram HTML."""
+    source = str(text or "")
+    parts = []
+    pos = 0
+    fence_re = re.compile(r"```([^\n`]*)\n?(.*?)```", re.DOTALL)
+    for match in fence_re.finditer(source):
+        parts.append(html.escape(source[pos:match.start()]))
+        lang = re.sub(r"[^A-Za-z0-9_+-]", "", match.group(1).strip())[:30]
+        code = html.escape(match.group(2).strip("\n"))
+        if lang:
+            parts.append(f'<pre><code class="language-{lang}">{code}</code></pre>')
+        else:
+            parts.append(f"<pre>{code}</pre>")
+        pos = match.end()
+    parts.append(html.escape(source[pos:]))
+    return "".join(parts)
+
+
+def _split_html_payload(fragment: str, limit: int = 3900) -> list[str]:
+    if len(fragment) <= limit:
+        return [fragment]
+    chunks = []
+    remaining = fragment
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+        cut = remaining.rfind("\n", 0, limit)
+        if cut < 1:
+            cut = limit
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:].lstrip("\n")
+    return chunks
+
+
+def _telegram_html_chunks(text: str, limit: int = 3900) -> list[str]:
+    """Render Telegram HTML and split without breaking code-block tags."""
+    source = str(text or "")
+    chunks: list[str] = []
+    current = ""
+
+    def flush():
+        nonlocal current
+        if current:
+            chunks.append(current)
+            current = ""
+
+    def add_plain(fragment: str):
+        nonlocal current
+        for piece in _split_html_payload(html.escape(fragment), limit):
+            if current and len(current) + len(piece) > limit:
+                flush()
+            if len(piece) > limit:
+                chunks.extend(_split_html_payload(piece, limit))
+            else:
+                current += piece
+
+    def add_code(code_text: str, lang: str):
+        nonlocal current
+        lang = re.sub(r"[^A-Za-z0-9_+-]", "", lang.strip())[:30]
+        open_tag = f'<pre><code class="language-{lang}">' if lang else "<pre>"
+        close_tag = "</code></pre>" if lang else "</pre>"
+        budget = max(1, limit - len(open_tag) - len(close_tag))
+        for piece in _split_html_payload(html.escape(code_text.strip("\n")), budget):
+            block = open_tag + piece + close_tag
+            if current and len(current) + len(block) > limit:
+                flush()
+            chunks.append(block)
+
+    pos = 0
+    fence_re = re.compile(r"```([^\n`]*)\n?(.*?)```", re.DOTALL)
+    for match in fence_re.finditer(source):
+        add_plain(source[pos:match.start()])
+        add_code(match.group(2), match.group(1))
+        pos = match.end()
+    add_plain(source[pos:])
+    flush()
+    return chunks or [""]
+
+
+class TelegramChannelAdapter:
+    def __init__(self, message_adapter):
+        self._message = message_adapter
+        self.id = f"tg:{message_adapter.chat_id}"
+
+    def typing(self):
+        return _NoopTyping()
+
+    async def send(self, content: str = None, file=None, **kwargs):
+        return await self._message.reply(content=content, file=file, **kwargs)
+
+
 class TelegramMessageAdapter:
     def __init__(self, session, url_base: str, chat_id, message_id, user_id=None, user_name: str = "Telegram User"):
         self.session = session
@@ -357,7 +451,7 @@ class TelegramMessageAdapter:
         self.chat_id = chat_id
         self.id = message_id or chat_id
         self.guild = None
-        self.channel = self
+        self.channel = TelegramChannelAdapter(self)
         self.author = TelegramUserAdapter(user_id or chat_id, user_name)
         self.tool_platform = "telegram"
 
@@ -375,13 +469,27 @@ class TelegramMessageAdapter:
             endpoint = "sendVoice"
             field_name = "voice"
             content_type = "audio/ogg"
+        elif ext in {".mp3", ".wav", ".m4a", ".flac"}:
+            endpoint = "sendAudio"
+            field_name = "audio"
+            content_type = "audio/mpeg" if ext == ".mp3" else "application/octet-stream"
+        elif ext in {".mp4", ".mov", ".webm", ".mkv"}:
+            endpoint = "sendVideo"
+            field_name = "video"
+            content_type = "video/mp4" if ext == ".mp4" else "application/octet-stream"
+        elif ext == ".gif":
+            endpoint = "sendAnimation"
+            field_name = "animation"
+            content_type = "image/gif"
         elif ext in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
             endpoint = "sendPhoto"
             field_name = "photo"
-            content_type = "image/png" if ext == ".png" else "image/jpeg"
+            content_type = "image/png" if ext == ".png" else ("image/webp" if ext == ".webp" else "image/jpeg")
 
         form = aiohttp.FormData()
         form.add_field("chat_id", str(self.chat_id))
+        if self.id:
+            form.add_field("reply_parameters", json.dumps({"message_id": self.id}))
         form.add_field(field_name, blob, filename=filename, content_type=content_type)
         async with self.session.post(f"{self.url_base}/{endpoint}", data=form) as resp:
             if resp.status != 200:
@@ -413,8 +521,14 @@ class TelegramMessageAdapter:
             await self._send_file_bytes(bytes(blob), filename)
             return None
         if content:
-            async with self.session.post(f"{self.url_base}/sendMessage", json={"chat_id": self.chat_id, "text": content}):
-                pass
+            for chunk in _telegram_html_chunks(str(content)):
+                payload = {"chat_id": self.chat_id, "text": chunk, "parse_mode": "HTML"}
+                if self.id:
+                    payload["reply_parameters"] = {"message_id": self.id}
+                async with self.session.post(f"{self.url_base}/sendMessage", json=payload) as resp:
+                    if resp.status != 200:
+                        text = await resp.text()
+                        raise RuntimeError(f"Telegram sendMessage failed: {resp.status} - {text[:300]}")
         return None
 
     async def send(self, content: str = None, file=None, **kwargs):
@@ -2989,12 +3103,38 @@ class MaxwellBot(commands.Bot):
                         
                     response_text = response_text.strip()
 
+                    all_tool_results = []
                     if self._control.get("tools_enabled", True):
                         tg_tool_message = TelegramMessageAdapter(session, url_base, chat_id, message.get("message_id"), user_id, user_name)
-                        response_text, tool_results = await self._process_tool_calls(tg_tool_message, response_text)
-                        if any("__NO_RESPONSE__" in tr for tr in tool_results):
+                        max_iters = max(0, min(int(self._control.get("max_tool_iterations", 10) or 0), 25))
+                        for _iteration in range(max_iters):
+                            response_text, tool_results = await self._process_tool_calls(tg_tool_message, response_text)
+                            all_tool_results.extend(tool_results)
+                            if not tool_results:
+                                break
+                            if not _tool_results_need_followup(tool_results):
+                                break
+                            result_messages = [dict(m) for m in messages]
+                            result_messages.append({
+                                "role": "user",
+                                "content": "=== TOOL RESULTS ===\n" + "\n".join(tool_results) + "\n=== END ===\nRespond based on these results. Don't call more tools unless necessary.",
+                            })
+                            await self._acquire_ai_slot(timeout=30)
+                            try:
+                                async with session.post(f"{url_base}/sendChatAction", json={"chat_id": chat_id, "action": "typing"}):
+                                    pass
+                                followup = await self.ai_provider.generate_response(result_messages, media=tg_media, timeout=30)
+                                if followup and followup.strip():
+                                    response_text = followup.strip()
+                                else:
+                                    break
+                            finally:
+                                await self._release_ai_slot()
+                        if any("__NO_RESPONSE__" in tr for tr in all_tool_results):
                             response_text = ""
-                        response_text = response_text.strip()
+                        response_text = re.sub(r"\[(\w+)\]\s*\n?\s*\{.*?\}\s*\n?\s*\[/\1\]", "", response_text, flags=re.DOTALL)
+                        response_text = re.sub(r"\[/?(?:TOOL_CALL:)?[\w-]+.*?\]", "", response_text)
+                        response_text = response_text.replace("__NO_RESPONSE__", "").replace("__SHELL_SENT__", "").replace("__MEME_SENT__", "").replace("__MEDIA_SENT__", "").strip()
 
                     # Save context memory
                     if self._control.get("store_memory", True):
@@ -3011,17 +3151,22 @@ class MaxwellBot(commands.Bot):
                         
                     # Reply back via TG when a tool did not already send a voice response.
                     if response_text:
-                        reply_payload = {
-                            "chat_id": chat_id,
-                            "text": response_text
-                        }
-                        async with session.post(f"{url_base}/sendMessage", json=reply_payload):
-                            pass
+                        tg_reply = TelegramMessageAdapter(session, url_base, chat_id, message.get("message_id"), user_id, user_name)
+                        await tg_reply.reply(response_text)
                         
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Telegram polling loop exception: {e}")
+                if self._control.get("error_replies", True):
+                    try:
+                        failed_chat_id = locals().get("chat_id")
+                        if failed_chat_id:
+                            failed_message_id = (locals().get("message") or {}).get("message_id") if isinstance(locals().get("message"), dict) else None
+                            tg_reply = TelegramMessageAdapter(session, url_base, failed_chat_id, failed_message_id)
+                            await tg_reply.reply("something went wrong... try again")
+                    except Exception:
+                        pass
                 await asyncio.sleep(5)
 
 async def main():

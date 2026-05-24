@@ -1,7 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from bot import MaxwellBot, _tool_results_need_followup
+from bot import MaxwellBot, _telegram_html, _tool_results_need_followup
 
 
 class FakeTool:
@@ -222,6 +222,14 @@ def test_build_messages_includes_tool_history_outside_recent_count():
 
 def test_shell_tool_results_trigger_followup():
     assert _tool_results_need_followup(["Tool shell: __SHELL_SENT__\n$ date\nSat May 23"])
+
+
+def test_telegram_html_renders_code_blocks():
+    rendered = _telegram_html("before\n```ansi\n$ whoami\nmaxwell\n```\nafter <ok>")
+
+    assert "before" in rendered
+    assert '<pre><code class="language-ansi">$ whoami\nmaxwell</code></pre>' in rendered
+    assert "after &lt;ok&gt;" in rendered
 
 
 def test_no_response_tool_results_do_not_trigger_followup():
