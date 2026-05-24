@@ -2581,6 +2581,29 @@ class MaxwellBot(commands.Bot):
         calls.sort(key=lambda x: x[0])
         segments = []
         last = 0
+        async def remember_tool_call(name: str, params: dict, result: str):
+            if not self._control.get("store_memory", True):
+                return
+            channel = getattr(message, "channel", None)
+            channel_id = getattr(channel, "id", None)
+            if channel_id is None or not hasattr(self, "memory"):
+                return
+            try:
+                params_text = json.dumps(params or {}, ensure_ascii=False, sort_keys=True)
+            except TypeError:
+                params_text = str(params or {})
+            await self.memory.add_to_channel_memory(
+                str(channel_id),
+                {
+                    "author": "Tool",
+                    "content": f"Called {name} with {params_text} -> {result}",
+                    "is_tool": True,
+                    "tool_name": name,
+                    "tool_params": params or {},
+                    "tool_result": result,
+                },
+            )
+
         async def run_calls():
             nonlocal last
             for start, end, name, params in calls:
@@ -2588,16 +2611,24 @@ class MaxwellBot(commands.Bot):
                 last = end
                 try:
                     if name in disabled:
-                        tool_results.append(f"Tool {name}: Error - tool is disabled")
+                        result_text = "Error - tool is disabled"
+                        tool_results.append(f"Tool {name}: {result_text}")
+                        await remember_tool_call(name, params, result_text)
                         continue
                     if name not in compatible:
-                        tool_results.append(f"Tool {name}: Error - tool is not available on this platform")
+                        result_text = "Error - tool is not available on this platform"
+                        tool_results.append(f"Tool {name}: {result_text}")
+                        await remember_tool_call(name, params, result_text)
                         continue
                     result = await self.tools[name].execute(message, **params)
-                    tool_results.append(f"Tool {name}: {result}" if result else f"Tool {name}: executed successfully")
+                    result_text = str(result) if result else "executed successfully"
+                    tool_results.append(f"Tool {name}: {result_text}")
+                    await remember_tool_call(name, params, result_text)
                 except Exception as e:
                     logger.error(f"Tool execution error for {name}: {e}\n{traceback.format_exc()}")
-                    tool_results.append(f"Tool {name}: Error - {e}")
+                    result_text = f"Error - {e}"
+                    tool_results.append(f"Tool {name}: {result_text}")
+                    await remember_tool_call(name, params, result_text)
         if self._control.get("typing_indicator", True):
             async with message.channel.typing():
                 await run_calls()
@@ -2723,7 +2754,11 @@ class MaxwellBot(commands.Bot):
             used = 0
             lines = []
             current_message_id = getattr(message, "id", None)
-            for msg in reversed(memory[-count:] if count else []):
+            recent_memory = memory[-count:] if count else []
+            recent_ids = {id(msg) for msg in recent_memory}
+            tool_history = [msg for msg in memory if msg.get("is_tool") and id(msg) not in recent_ids]
+            context_memory = tool_history + list(recent_memory)
+            for msg in reversed(context_memory):
                 if current_message_id is not None and msg.get("message_id") == current_message_id:
                     continue
                 if msg.get("is_tool"):
