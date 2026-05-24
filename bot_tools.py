@@ -1506,6 +1506,8 @@ class ShellTool(Tool):
         (_stdout, stderr), run_code = await self._run_docker(
             "run", "-d",
             "--name", self.CONTAINER_NAME,
+            "--memory", "2g",
+            "--cpus", "1.0",
             self.IMAGE_NAME,
             timeout=30,
         )

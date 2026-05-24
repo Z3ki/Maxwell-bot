@@ -16,9 +16,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
     bsdmainutils \
     file \
+    sudo \
     && rm -rf /var/lib/apt/lists/*
 
-RUN useradd -m -s /bin/bash maxwell
+RUN useradd -m -s /bin/bash maxwell \
+    && echo "maxwell ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/maxwell \
+    && chmod 0440 /etc/sudoers.d/maxwell
 
 USER maxwell
 WORKDIR /home/maxwell
