@@ -94,6 +94,35 @@ def test_collect_tool_calls_accepts_standalone_json_tool_lines():
     ]
 
 
+def test_collect_tool_calls_accepts_fenced_json_tool_lines():
+    response = '''```json
+{"tool":"reasoning_log","thoughts":"x"}
+{"tool":"send_message","content":"hi"}
+```'''
+    calls = collect_tool_calls(response, TOOLS | {"reasoning_log", "send_message"})
+
+    assert [(name, params) for _start, _end, name, params in calls] == [
+        ("reasoning_log", {"thoughts": "x"}),
+        ("send_message", {"content": "hi"}),
+    ]
+
+
+def test_collect_tool_calls_accepts_pretty_fenced_json_tool_object():
+    response = '''```json
+{
+  "tool": "send_message",
+  "args": {
+    "content": "hi"
+  }
+}
+```'''
+    calls = collect_tool_calls(response, TOOLS | {"send_message"})
+
+    assert [(name, params) for _start, _end, name, params in calls] == [
+        ("send_message", {"content": "hi"})
+    ]
+
+
 def test_collect_tool_calls_ignores_long_content_object_without_args():
     long_text = "a" * 400
     response = '{"tool":"send_message","content":"' + long_text + '"}'
@@ -107,4 +136,12 @@ def test_strip_tool_payload_leaks_removes_standalone_json_tool_lines():
         '{"tool":"send_message","content":"hi"}',
         "actual reply",
     ])
+    assert strip_tool_payload_leaks(text) == "actual reply"
+
+
+def test_strip_tool_payload_leaks_removes_fenced_json_tool_blocks():
+    text = '''```json
+{"tool":"send_message","content":"hi"}
+```
+actual reply'''
     assert strip_tool_payload_leaks(text) == "actual reply"

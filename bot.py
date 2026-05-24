@@ -109,6 +109,7 @@ CUSTOM_EMOJI_ALIAS_RE = re.compile(r"(?<!<)(?<!<a):([A-Za-z0-9_]{2,32}):(?!\d)")
 TOOL_LINE_RE = re.compile(r"(?im)^\s*(?:TOOL|CALL)\s+([A-Za-z_]\w*)\s*[:\-]?\s*")
 TOOL_TRACE_LINE_RE = re.compile(r"(?im)^\s*Called\s+[A-Za-z_]\w*\s+with\s+\{.*?\}\s*->\s*__\w+__.*$")
 JSON_TOOL_LINE_RE = re.compile(r'(?im)^\s*\{(?=[^\n]*"(?:tool|name|action)"\s*:)[^\n]*\}\s*$')
+FENCED_JSON_BLOCK_RE = re.compile(r"(?is)```[ \t]*(?:json|tool|tools)?[^\n`]*\n(?P<body>.*?)```")
 CREATE_SITE_BLOCK_RE = re.compile(
     r"(?is)\[create_site\]\s*"
     r"name\s*:\s*(?P<name>[^\n]+)\n"
@@ -250,6 +251,30 @@ def extract_json_object(text: str, start: int = 0) -> tuple[str, int] | None:
     return None
 
 
+def iter_standalone_json_objects(text: str, start: int = 0, end: int | None = None):
+    end = len(text) if end is None else end
+    pos = start
+    while pos < end:
+        line_start = pos
+        while pos < end and text[pos] in " \t":
+            pos += 1
+        if pos < end and text[pos] == "{":
+            result = extract_json_object(text, pos)
+            if result:
+                json_str, json_end = result
+                rest = json_end
+                while rest < end and text[rest] in " \t\r":
+                    rest += 1
+                if rest >= end or text[rest] == "\n":
+                    yield line_start, rest, json_str
+                    pos = rest + 1
+                    continue
+        newline = text.find("\n", line_start, end)
+        if newline == -1:
+            break
+        pos = newline + 1
+
+
 def _tool_params_from_json(obj: dict) -> tuple[str | None, dict]:
     tool_name = obj.get("tool")
     fallback_name = obj.get("name")
@@ -338,13 +363,31 @@ def collect_tool_calls(
         if isinstance(params, dict):
             add_call(match.start(), end, name, params)
 
-    for match in JSON_TOOL_LINE_RE.finditer(response):
+    fenced_ranges = []
+    for match in FENCED_JSON_BLOCK_RE.finditer(response):
+        body_start, body_end = match.span("body")
+        found = False
+        for start, end, json_str in iter_standalone_json_objects(response, body_start, body_end):
+            try:
+                obj = json.loads(json_str, strict=False)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                before = len(calls)
+                add_json_tool_object(start, end, obj)
+                found = found or len(calls) > before
+        if found:
+            fenced_ranges.append(match.span())
+
+    for start, end, json_str in iter_standalone_json_objects(response):
+        if any(fence_start <= start < fence_end for fence_start, fence_end in fenced_ranges):
+            continue
         try:
-            obj = json.loads(match.group(0), strict=False)
+            obj = json.loads(json_str, strict=False)
         except json.JSONDecodeError:
             continue
         if isinstance(obj, dict):
-            add_json_tool_object(match.start(), match.end(), obj)
+            add_json_tool_object(start, end, obj)
 
     stripped = response.strip()
     # Safety hardening: only treat free-form JSON as a tool call when the
@@ -374,6 +417,22 @@ def collect_tool_calls(
 
 def strip_tool_payload_leaks(text: str) -> str:
     cleaned = str(text or "")
+    for match in reversed(list(FENCED_JSON_BLOCK_RE.finditer(cleaned))):
+        body_start, body_end = match.span("body")
+        body = cleaned[body_start:body_end]
+        ranges = []
+        for start, end, json_str in iter_standalone_json_objects(cleaned, body_start, body_end):
+            try:
+                obj = json.loads(json_str, strict=False)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict) and any(key in obj for key in ("tool", "name", "action")):
+                ranges.append((start - body_start, end - body_start))
+        remaining = body
+        for start, end in reversed(ranges):
+            remaining = remaining[:start] + remaining[end:]
+        if ranges and not remaining.strip():
+            cleaned = cleaned[:match.start()] + cleaned[match.end():]
     cleaned = JSON_TOOL_LINE_RE.sub("", cleaned)
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
@@ -2897,6 +2956,7 @@ class MaxwellBot(commands.Bot):
             await run_calls()
         segments.append(response[last:])
         cleaned = re.sub(r"\[/?(?:TOOL_CALL:)?[\w-]+.*?\]", "", "".join(segments)).strip()
+        cleaned = re.sub(r"(?is)```[ \t]*(?:json|tool|tools)?[^\n`]*\n\s*```", "", cleaned).strip()
         return cleaned, tool_results
 
     async def _record_llm_trace(self, message, payload: dict):
