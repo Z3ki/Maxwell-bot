@@ -74,6 +74,24 @@ def test_process_tool_calls_still_returns_other_tool_results():
     asyncio.run(run())
 
 
+def test_process_tool_calls_handles_unclosed_send_message_without_leaking_environment_details():
+    send_message = FakeTool("__MESSAGE_SENT__ Sent 6 chars")
+    bot = SimpleNamespace(
+        _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False},
+        tools={"send_message": send_message},
+    )
+    message = SimpleNamespace(guild=None)
+    response = '<tool:send_message>Hello!<|end|><environment_details>secret context</environment_details>'
+
+    async def run():
+        cleaned, tool_results = await MaxwellBot._process_tool_calls(bot, message, response)
+        assert cleaned == ""
+        assert tool_results == ["Tool send_message: __MESSAGE_SENT__ Sent 6 chars"]
+        assert send_message.calls == [{"content": "Hello!"}]
+
+    asyncio.run(run())
+
+
 def test_process_tool_calls_records_tool_history_in_memory():
     react = FakeTool("Reacted with <:catjam:123>")
     memory = FakeMemory()

@@ -334,6 +334,9 @@ def _find_tool_close(text: str, name: str, start: int) -> re.Match | None:
     return close_re.search(text, start)
 
 
+UNTERMINATED_TOOL_STOP_RE = re.compile(r"<\|end\|>|<environment_details\b", re.IGNORECASE)
+
+
 def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = None):
     text = str(response or "")
     stripped = text.lstrip()
@@ -360,7 +363,10 @@ def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = 
             continue
         close_match = _find_tool_close(text, name, tag_end + 1)
         if not close_match:
-            pos = tag_end + 1
+            stop_match = UNTERMINATED_TOOL_STOP_RE.search(text, tag_end + 1)
+            body_end = stop_match.start() if stop_match else len(text)
+            yield start, len(text), name, attrs_str, text[tag_end + 1:body_end], False
+            pos = len(text)
             continue
         yield start, close_match.end(), name, attrs_str, text[tag_end + 1:close_match.start()], False
         pos = close_match.end()

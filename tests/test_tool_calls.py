@@ -40,6 +40,13 @@ def test_collect_tool_calls_accepts_default_fallback_parameter():
     assert [(name, params) for _start, _end, name, params in calls] == [("send_message", {"content": "hello world"})]
 
 
+def test_collect_tool_calls_accepts_unclosed_terminal_before_end_marker():
+    response = '<tool:send_message>Hello!<|end|><environment_details>secret context</environment_details>'
+    calls = collect_tool_calls(response, TOOLS)
+
+    assert [(name, params) for _start, _end, name, params in calls] == [("send_message", {"content": "Hello!"})]
+
+
 def test_collect_tool_calls_accepts_shell_command_subtag():
     calls = collect_tool_calls('<tool:shell><command>neofetch</command></tool:shell>', TOOLS | {"shell"})
 
@@ -150,3 +157,8 @@ def test_strip_tool_payload_leaks_keeps_normal_xml():
 def test_strip_tool_payload_leaks_removes_shorthand_tool_blocks():
     text = '<tool:send_file><filename>bot.py</filename><content>print("hi")</content></tool>\nactual reply'
     assert strip_tool_payload_leaks(text) == "actual reply"
+
+
+def test_strip_tool_payload_leaks_removes_unclosed_tool_and_environment_details():
+    text = '<tool:send_message>Hello!<|end|><environment_details>secret context</environment_details>'
+    assert strip_tool_payload_leaks(text) == ""
