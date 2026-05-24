@@ -191,10 +191,7 @@ class ImageGeneratorTool(Tool):
     async def execute(self, message: Message, prompt: str = None, **kwargs) -> str:
         if not prompt:
             return "Error: prompt parameter is required"
-        nvidia_key = self.bot.config.NVIDIA_API_KEY
-        if nvidia_key:
-            return await self._nvidia_generate(message, prompt)
-        return await self._pollinations_fallback(message, prompt)
+        return await self._nvidia_generate(message, prompt)
 
     async def _nvidia_generate(self, message: Message, prompt: str) -> str:
         api_key = self.bot.config.NVIDIA_API_KEY
@@ -280,36 +277,6 @@ class ImageGeneratorTool(Tool):
         if last_error:
             return last_error
         return "Error: Image generation failed after retries"
-
-    async def _pollinations_fallback(self, message: Message, prompt: str) -> str:
-        encoded_prompt = quote(prompt)
-        seed = str(random.randint(0, 1000000))
-        url = (
-            f"https://image.pollinations.ai/prompt/{encoded_prompt}"
-            f"?model={self.bot.config.POLLINATIONS_MODEL}"
-            f"&seed={seed}&nologo=true&width=1024&height=1024"
-        )
-
-        session = await _get_shared_session()
-        try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=90)) as response:
-                if response.status != 200:
-                    return f"Error generating image: API returned status {response.status}"
-                image_bytes = await _read_response_limited(response, 25 * 1024 * 1024)
-                file = File(BytesIO(image_bytes), filename="generated_image.png")
-                try:
-                    await message.channel.send(file=file)
-                except discord.Forbidden:
-                    logger.warning(f"Cannot send fallback image in {message.channel.id} — missing permissions")
-                    return "Error: Cannot send image — missing permissions"
-                await self.bot.memory.add_to_channel_memory(
-                    str(message.channel.id),
-                    {"author": "Tool", "content": f"Generated image: {prompt[:200]}", "is_tool": True},
-                )
-                return f"Image generated and sent successfully: {prompt[:100]}"
-        except Exception as e:
-            logger.error(f"Pollinations fallback error: {e}")
-            return f"Error generating image: {e}"
 
 
 class HDImageGeneratorTool(Tool):
