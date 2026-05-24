@@ -29,8 +29,38 @@ from ddgs import DDGS as _DDGS
 logger = logging.getLogger(__name__)
 
 OWNER_IDS = {"1471821513824014480"}
+TTS_LANGUAGE_ALIASES = {
+    "en": "english",
+    "en-us": "english",
+    "english": "english",
+    "us": "english",
+    "es": "spanish",
+    "es-us": "spanish",
+    "es-es": "spanish",
+    "spanish": "spanish",
+    "espanol": "spanish",
+    "español": "spanish",
+    "spanish_jason_angry": "spanish",
+    "jason_es": "spanish",
+}
+TTS_RIVA_DEFAULTS = {
+    "english": ("Magpie-Multilingual.EN-US.Jason.Angry", "en-US"),
+    "spanish": ("Magpie-Multilingual.ES-US.Jason.Angry", "es-US"),
+}
 
 _SHARED_SESSION: aiohttp.ClientSession = None
+
+
+def _tts_language_key(language: str | None = None, lang: str | None = None, **kwargs) -> str:
+    requested = str(language or lang or kwargs.get("language") or kwargs.get("lang") or "english").strip().lower()
+    return TTS_LANGUAGE_ALIASES.get(requested, "english")
+
+
+def _tts_riva_voice_config(language_key: str) -> tuple[str, str]:
+    voice_env = "TTS_RIVA_VOICE_ES" if language_key == "spanish" else "TTS_RIVA_VOICE"
+    lang_env = "TTS_RIVA_LANGUAGE_ES" if language_key == "spanish" else "TTS_RIVA_LANGUAGE"
+    default_voice, default_code = TTS_RIVA_DEFAULTS.get(language_key, TTS_RIVA_DEFAULTS["english"])
+    return os.environ.get(voice_env, default_voice), os.environ.get(lang_env, default_code)
 
 
 def _is_safe_ip(value: str) -> bool:
@@ -1869,15 +1899,15 @@ class TtsTool(Tool):
         if not text or not text.strip():
             return "Error: text parameter is required"
 
-        requested_lang = str(language or lang or kwargs.get("language") or kwargs.get("lang") or "english").strip().lower()
-        lang_is_spanish = requested_lang in {"es", "es-es", "spanish", "spanish_jason_angry", "jason_es"}
+        language_key = _tts_language_key(language, lang, **kwargs)
+        lang_is_spanish = language_key == "spanish"
 
         import wave
         import os
         import discord
 
         # Determine API Key and Setup File
-        nvidia_api_key = os.environ.get("NVIDIA_API_KEY", "")
+        nvidia_api_key = os.environ.get("NVIDIA_API_KEY", "") or getattr(getattr(self, "bot", None).config, "NVIDIA_API_KEY", "")
         if not nvidia_api_key:
             return "Error: NVIDIA_API_KEY is not configured"
 
@@ -1905,10 +1935,7 @@ class TtsTool(Tool):
             )
             service = riva.client.SpeechSynthesisService(auth)
 
-            default_voice = "Magpie-Multilingual.ES-ES.Jason.Angry" if lang_is_spanish else "Magpie-Multilingual.EN-US.Jason.Angry"
-            default_code = "es-ES" if lang_is_spanish else "en-US"
-            tts_voice_name = os.environ.get("TTS_RIVA_VOICE_ES" if lang_is_spanish else "TTS_RIVA_VOICE", default_voice)
-            tts_language_code = os.environ.get("TTS_RIVA_LANGUAGE_ES" if lang_is_spanish else "TTS_RIVA_LANGUAGE", default_code)
+            tts_voice_name, tts_language_code = _tts_riva_voice_config(language_key)
 
             # Use gRPC service synchronously (run in executor since it is synchronous gRPC)
             def run_riva():
