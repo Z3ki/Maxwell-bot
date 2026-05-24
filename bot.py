@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import os
+import random
 import shutil
 import sys
 import tempfile
@@ -87,6 +88,21 @@ logger = logging.getLogger(__name__)
 
 MAX_VISUAL_MEMORY_IMAGES = 3
 MEDIA_CONTEXT_USES = 11
+PRESENCE_ROTATION_SECONDS = 10 * 60
+AUTO_CUSTOM_STATUSES = [
+    "dreaming in shell",
+    "watching the wires",
+    "running tiny errands",
+    "thinking in public",
+    "haunting the logs",
+    "listening for pings",
+]
+AUTO_GAME_ACTIVITIES = [
+    (discord.ActivityType.watching, "the chat scroll by"),
+    (discord.ActivityType.listening, "terminal rain"),
+    (discord.ActivityType.playing, "with containers"),
+    (discord.ActivityType.competing, "against latency"),
+]
 CUSTOM_EMOJI_ALIAS_RE = re.compile(r"(?<!<)(?<!<a):([A-Za-z0-9_]{2,32}):(?!\d)")
 TOOL_LINE_RE = re.compile(r"(?im)^\s*(?:TOOL|CALL)\s+([A-Za-z_]\w*)\s*[:\-]?\s*")
 CREATE_SITE_BLOCK_RE = re.compile(
@@ -731,6 +747,7 @@ class MaxwellBot(commands.Bot):
         self._last_avatar_change: float = 0
         self._custom_status = None
         self._current_game = None
+        self._auto_presence_enabled = True
         self._cooldowns: dict[str, float] = {}
         self._active_requests: dict[str, asyncio.Task] = {}
         self._stop_until: dict[str, float] = {}
@@ -862,6 +879,7 @@ class MaxwellBot(commands.Bot):
             asyncio.create_task(self._control_reload_loop()),
             asyncio.create_task(self._command_queue_loop()),
             asyncio.create_task(self._discord_state_loop()),
+            asyncio.create_task(self._presence_rotation_loop()),
             asyncio.create_task(self._rem_scheduler_loop()),
         ]
         if self.config.TELEGRAM_TOKEN:
@@ -885,6 +903,25 @@ class MaxwellBot(commands.Bot):
                     await self._save_discord_state()
             except Exception as e:
                 logger.warning(f"Discord state snapshot error: {e}")
+
+    async def _presence_rotation_loop(self):
+        while True:
+            await asyncio.sleep(PRESENCE_ROTATION_SECONDS)
+            try:
+                if not self.is_ready() or not self._auto_presence_enabled:
+                    continue
+                status = random.choice((discord.Status.online, discord.Status.idle, discord.Status.dnd))
+                activity_type, text = random.choice(AUTO_GAME_ACTIVITIES)
+                self._current_game = discord.Activity(type=activity_type, name=text)
+                custom_text = random.choice(AUTO_CUSTOM_STATUSES)
+                self._custom_status = discord.CustomActivity(name=custom_text, state=custom_text)
+                await self.change_presence(
+                    status=status,
+                    activities=self._build_activities(),
+                    edit_settings=True,
+                )
+            except Exception as e:
+                logger.warning(f"Presence rotation error: {e}")
 
     async def _save_discord_state(self):
         guilds = []
