@@ -108,6 +108,7 @@ AUTO_GAME_ACTIVITIES = [
 CUSTOM_EMOJI_ALIAS_RE = re.compile(r"(?<!<)(?<!<a):([A-Za-z0-9_]{2,32}):(?!\d)")
 TOOL_LINE_RE = re.compile(r"(?im)^\s*(?:TOOL|CALL)\s+([A-Za-z_]\w*)\s*[:\-]?\s*")
 TOOL_TRACE_LINE_RE = re.compile(r"(?im)^\s*Called\s+[A-Za-z_]\w*\s+with\s+\{.*?\}\s*->\s*__\w+__.*$")
+JSON_TOOL_LINE_RE = re.compile(r'(?im)^\s*\{(?=[^\n]*"(?:tool|name|action)"\s*:)[^\n]*\}\s*$')
 CREATE_SITE_BLOCK_RE = re.compile(
     r"(?is)\[create_site\]\s*"
     r"name\s*:\s*(?P<name>[^\n]+)\n"
@@ -326,22 +327,28 @@ def collect_tool_calls(
         if isinstance(params, dict):
             add_call(match.start(), end, name, params)
 
-    for match in re.finditer(r"{", response):
-        if any(start <= match.start() < end for start, end, _name, _params in calls):
-            continue
-        result = extract_json_object(response, match.start())
-        if not result:
-            continue
-        json_str, end = result
-        try:
-            obj = json.loads(json_str, strict=False)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(obj, dict):
-            continue
-        name, params = _tool_params_from_json(obj)
-        if name:
-            add_call(match.start(), end, name, params)
+    stripped = response.strip()
+    # Safety hardening: only treat free-form JSON as a tool call when the
+    # entire assistant response is exactly one JSON object.
+    if stripped.startswith("{"):
+        whole = extract_json_object(stripped, 0)
+        if whole:
+            json_str, end = whole
+            if end == len(stripped):
+                try:
+                    obj = json.loads(json_str, strict=False)
+                except json.JSONDecodeError:
+                    obj = None
+                if isinstance(obj, dict):
+                    name, params = _tool_params_from_json(obj)
+                    if name:
+                        # Guard against accidental execution of leaked prose-like payloads.
+                        if "args" not in obj and "params" not in obj:
+                            content = obj.get("content")
+                            if isinstance(content, str) and len(content.strip()) > 280:
+                                name = None
+                        if name:
+                            add_call(0, len(response), name, params)
 
     calls.sort(key=lambda x: (x[0], x[1]))
     deduped = []
@@ -352,6 +359,12 @@ def collect_tool_calls(
             seen.add(key)
             deduped.append(call)
     return deduped
+
+
+def strip_tool_payload_leaks(text: str) -> str:
+    cleaned = str(text or "")
+    cleaned = JSON_TOOL_LINE_RE.sub("", cleaned)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
 class _NoopTyping:
@@ -2747,6 +2760,7 @@ class MaxwellBot(commands.Bot):
             response = TOOL_TRACE_LINE_RE.sub("", response)
             response = response.replace("__NO_RESPONSE__", "").replace("__SHELL_SENT__", "").replace("__MEME_SENT__", "").replace("__MEDIA_SENT__", "").strip()
             response = re.sub(r"(?m)^\s*\*[^*]+\*\s*$", "", response).strip() or response.strip()
+            response = strip_tool_payload_leaks(response)
             if response:
                 await self._ensure_reasoning_trace(message, all_tool_results, response, "reply")
                 response = self._render_custom_emojis(response, message.guild)
@@ -3267,6 +3281,7 @@ class MaxwellBot(commands.Bot):
                         response_text = re.sub(r"\[(\w+)\]\s*\n?\s*\{.*?\}\s*\n?\s*\[/\1\]", "", response_text, flags=re.DOTALL)
                         response_text = re.sub(r"\[/?(?:TOOL_CALL:)?[\w-]+.*?\]", "", response_text)
                         response_text = response_text.replace("__NO_RESPONSE__", "").replace("__SHELL_SENT__", "").replace("__MEME_SENT__", "").replace("__MEDIA_SENT__", "").strip()
+                        response_text = strip_tool_payload_leaks(response_text)
 
                     # Save context memory
                     if self._control.get("store_memory", True):
