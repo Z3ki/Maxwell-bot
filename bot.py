@@ -46,6 +46,8 @@ from bot_tools import (
     ReactTool,
     SearchMessagesTool,
     SendFileTool,
+    SendMessageTool,
+    ReasoningLogTool,
     SendMediaTool,
     SendMemeTool,
     SetActivityTool,
@@ -820,6 +822,8 @@ class MaxwellBot(commands.Bot):
         self.tools["shell"] = ShellTool(self)
         self.tools["fetch_url"] = FetchUrlTool(self)
         self.tools["send_file"] = SendFileTool(self)
+        self.tools["send_message"] = SendMessageTool(self)
+        self.tools["reasoning_log"] = ReasoningLogTool(self)
         self.tools["send_meme"] = SendMemeTool(self)
         self.tools["send_media"] = SendMediaTool(self)
         self.tools["kilo_run"] = KiloTool(self)
@@ -2733,6 +2737,8 @@ class MaxwellBot(commands.Bot):
                     await self._release_ai_slot()
             if any("__NO_RESPONSE__" in tr for tr in all_tool_results):
                 return
+            if any("__MESSAGE_SENT__" in tr for tr in all_tool_results):
+                return
             response = re.sub(r"\[(\w+)\]\s*\n?\s*\{.*?\}\s*\n?\s*\[/\1\]", "", response, flags=re.DOTALL)
             response = re.sub(r"\[/?(?:TOOL_CALL:)?[\w-]+.*?\]", "", response)
             response = response.replace("__NO_RESPONSE__", "").replace("__SHELL_SENT__", "").replace("__MEME_SENT__", "").replace("__MEDIA_SENT__", "").strip()
@@ -2779,7 +2785,7 @@ class MaxwellBot(commands.Bot):
         calls = collect_tool_calls(response, set(self.tools), disabled, include_disabled=True)
         if not calls:
             return response, []
-        calls.sort(key=lambda x: x[0])
+        calls.sort(key=lambda x: (1 if x[2] in {"send_message", "no_response"} else 0, x[0]))
         segments = []
         last = 0
         async def remember_tool_call(name: str, params: dict, result: str):
@@ -2839,6 +2845,24 @@ class MaxwellBot(commands.Bot):
         cleaned = re.sub(r"\[/?(?:TOOL_CALL:)?[\w-]+.*?\]", "", "".join(segments)).strip()
         return cleaned, tool_results
 
+    async def _record_llm_trace(self, message, payload: dict):
+        path = Path(self.config.DATA_DIR) / "llm_traces.json"
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            traces = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(traces, list):
+                traces = []
+        except Exception:
+            traces = []
+        traces.append({
+            "ts": now,
+            "channel_id": str(getattr(getattr(message, "channel", None), "id", "")),
+            "user_id": str(getattr(getattr(message, "author", None), "id", "")),
+            "platform": self._message_tool_platform(message),
+            "payload": payload or {},
+        })
+        _atomic_json_write(path, traces[-300:])
+
     def _message_tool_platform(self, message) -> str:
         return str(getattr(message, "tool_platform", "discord") or "discord")
 
@@ -2869,7 +2893,7 @@ class MaxwellBot(commands.Bot):
             + "{\"tool\":\"send_file\",\"filename\":\"script.py\",\"content\":\"print('hi')\\n\"}. "
             + "For create_site with full HTML, prefer this raw block so HTML quotes do not break JSON: "
             + "[create_site]\nname: short-slug\ntitle: Site title\nbody:\n<!DOCTYPE html>...\n[/create_site]. "
-            + "After tool results are returned, answer normally. Do not wrap tool calls in markdown. "
+            + "You may call multiple tools in one response. Always run analysis/reasoning/tools first, then call send_message as the final visible action (or no_response). After tool results are returned, call tools again if needed and end with send_message/no_response. Do not wrap tool calls in markdown. "
             + "IMPORTANT: The character limit does NOT apply to tool JSON calls. You may write as much as needed in tool parameters."
         )
 
@@ -3207,7 +3231,7 @@ class MaxwellBot(commands.Bot):
                                     break
                             finally:
                                 await self._release_ai_slot()
-                        if any("__NO_RESPONSE__" in tr for tr in all_tool_results):
+                        if any("__NO_RESPONSE__" in tr for tr in all_tool_results) or any("__MESSAGE_SENT__" in tr for tr in all_tool_results):
                             response_text = ""
                         response_text = re.sub(r"\[(\w+)\]\s*\n?\s*\{.*?\}\s*\n?\s*\[/\1\]", "", response_text, flags=re.DOTALL)
                         response_text = re.sub(r"\[/?(?:TOOL_CALL:)?[\w-]+.*?\]", "", response_text)

@@ -1361,6 +1361,53 @@ class WebSearchTool(Tool):
             return f"Error searching: {e}"
 
 
+
+
+class SendMessageTool(Tool):
+    """Send a plain text reply to the current message."""
+
+    def get_description(self):
+        return (
+            "Send a message to the current chat. Prefer this for final user-facing output. "
+            "Params: content (required), reply (optional bool, default true)."
+        )
+
+    async def execute(self, message: Message, content: str = None, reply: bool = True, **kwargs) -> str:
+        text = str(content or "").strip()
+        if not text:
+            return "Error: content is required"
+        try:
+            if str(reply).lower() in {"0", "false", "no", "off"}:
+                await message.channel.send(text)
+            else:
+                await message.reply(text)
+            return f"__MESSAGE_SENT__ Sent {len(text)} chars"
+        except discord.Forbidden:
+            return "Error: missing permissions to send message"
+        except Exception as e:
+            return f"Error sending message: {e}"
+
+
+class ReasoningLogTool(Tool):
+    """Capture inspectable reasoning/decision metadata for dashboards."""
+
+    def get_description(self):
+        return (
+            "Store reasoning metadata for inspection. "
+            "Params: intent/confidence/decision/thoughts/data (all optional; any JSON accepted). "
+            "This does not reply to users."
+        )
+
+    async def execute(self, message: Message, **kwargs) -> str:
+        payload = dict(kwargs or {})
+        try:
+            payload.setdefault("intent", payload.get("decision", "reply"))
+            await self.bot._record_llm_trace(message, payload)
+            return "__REASONING_RECORDED__"
+        except Exception as e:
+            return f"Error recording reasoning: {e}"
+
+
 class NoResponseTool(Tool):
     """Silently skip sending any reply to the current message"""
 

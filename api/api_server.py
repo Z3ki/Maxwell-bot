@@ -148,7 +148,7 @@ KNOWN_TOOLS = [
     "forward_message", "typing", "list_servers", "change_avatar", "create_site",
     "list_admin_servers", "create_category", "create_channel", "edit_channel", "delete_channel",
     "list_sites", "web_search", "no_response", "shell", "fetch_url",
-    "send_meme", "send_media",
+    "send_meme", "send_media", "send_message", "reasoning_log",
 ]
 
 
@@ -829,6 +829,22 @@ async def control_reset(request):
 
 
 # ---------- REM ----------
+
+
+def _llm_traces_path():
+    return DATA_DIR / "llm_traces.json"
+
+
+async def llm_traces(request):
+    traces = _safe_list(_load(_llm_traces_path()))
+    limit = _int_env_safe("MAXWELL_TRACE_API_LIMIT", 200)
+    try:
+        q = int(request.query.get("limit", limit))
+        limit = max(1, min(q, 1000))
+    except Exception:
+        pass
+    return _json_response(traces[-limit:])
+
 async def rem_status(request):
     if not _has_admin_auth(request):
         return _json_response({"error": "unauthorized"}, 401)
@@ -1220,6 +1236,7 @@ app.router.add_put("/api/sites", site_update)
 app.router.add_delete("/api/sites", site_delete)
 app.router.add_put("/api/control", control_put)
 app.router.add_delete("/api/control", control_reset)
+app.router.add_get("/api/llm/traces", llm_traces)
 app.router.add_get("/api/rem/status", rem_status)
 app.router.add_get("/api/rem/runs", rem_runs)
 app.router.add_post("/api/rem/run", rem_run)
