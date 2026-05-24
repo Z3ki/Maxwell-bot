@@ -1535,15 +1535,16 @@ class ShellTool(Tool):
 
     async def _run_shell_command(self, command: str):
         await self._ensure_container()
-        # Automatically use sudo for executing commands inside the sandbox
-        sudo_command = f"sudo {command}" if not command.strip().startswith("sudo") else command
+        sanitized = command.strip()
+        if not sanitized:
+            raise RuntimeError("empty command")
         proc = await asyncio.create_subprocess_exec(
             "docker",
             "exec",
             "--workdir", "/home/maxwell",
             "--user", "maxwell",
             self.CONTAINER_NAME,
-            "bash", "-lc", sudo_command,
+            "bash", "-lc", sanitized,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -1847,12 +1848,15 @@ class TtsTool(Tool):
     def get_description(self):
         return (
             "Convert a text response into a speech voice message and send it to the triggering channel. "
-            "Params: text (required string)."
+            "Params: text (required string), language/lang (optional: english or spanish)."
         )
 
-    async def execute(self, message: Message, text: str = None, **kwargs) -> str:
+    async def execute(self, message: Message, text: str = None, language: str = None, lang: str = None, **kwargs) -> str:
         if not text or not text.strip():
             return "Error: text parameter is required"
+
+        requested_lang = str(language or lang or kwargs.get("language") or kwargs.get("lang") or "english").strip().lower()
+        lang_is_spanish = requested_lang in {"es", "es-es", "spanish", "spanish_jason_angry", "jason_es"}
 
         import wave
         import os
@@ -1887,8 +1891,10 @@ class TtsTool(Tool):
             )
             service = riva.client.SpeechSynthesisService(auth)
 
-            tts_voice_name = os.environ.get("TTS_RIVA_VOICE", "Magpie-Multilingual.EN-US.Jason.Angry")
-            tts_language_code = os.environ.get("TTS_RIVA_LANGUAGE", "en-US")
+            default_voice = "Magpie-Multilingual.ES-ES.Jason.Angry" if lang_is_spanish else "Magpie-Multilingual.EN-US.Jason.Angry"
+            default_code = "es-ES" if lang_is_spanish else "en-US"
+            tts_voice_name = os.environ.get("TTS_RIVA_VOICE_ES" if lang_is_spanish else "TTS_RIVA_VOICE", default_voice)
+            tts_language_code = os.environ.get("TTS_RIVA_LANGUAGE_ES" if lang_is_spanish else "TTS_RIVA_LANGUAGE", default_code)
 
             # Use gRPC service synchronously (run in executor since it is synchronous gRPC)
             def run_riva():
@@ -1919,7 +1925,7 @@ class TtsTool(Tool):
                 from gtts import gTTS
 
                 def run_gtts():
-                    tts = gTTS(text=text, lang='en')
+                    tts = gTTS(text=text, lang='es' if lang_is_spanish else 'en')
                     tts.save(filename)
 
                 loop = asyncio.get_event_loop()
