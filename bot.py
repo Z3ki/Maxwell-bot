@@ -731,6 +731,10 @@ TELEGRAM_COMPATIBLE_TOOL_NAMES = {
 
 
 def _tool_results_need_followup(tool_results: list[str]) -> bool:
+    # If a terminal action was already taken, no follow-up is needed
+    if any(any(marker in result for marker in ("__MESSAGE_SENT__", "__NO_RESPONSE__")) for result in tool_results):
+        return False
+
     for result in tool_results:
         if "Error" in result:
             return True

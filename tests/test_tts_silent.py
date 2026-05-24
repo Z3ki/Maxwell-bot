@@ -283,3 +283,10 @@ def test_telegram_html_renders_code_blocks():
 
 def test_no_response_tool_results_do_not_trigger_followup():
     assert not _tool_results_need_followup(["Tool no_response: __NO_RESPONSE__"])
+
+
+def test_reasoning_log_with_send_message_does_not_trigger_followup():
+    assert not _tool_results_need_followup([
+        "Tool reasoning_log: __REASONING_RECORDED__",
+        "Tool send_message: __MESSAGE_SENT__ Sent 10 chars"
+    ])
