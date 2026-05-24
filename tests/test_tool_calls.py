@@ -81,6 +81,19 @@ def test_collect_tool_calls_ignores_json_when_surrounded_by_text():
     assert calls == []
 
 
+def test_collect_tool_calls_accepts_standalone_json_tool_lines():
+    response = '\n'.join([
+        '{"tool":"reasoning_log","thoughts":"x"}',
+        '{"tool":"send_message","content":"hi"}',
+    ])
+    calls = collect_tool_calls(response, TOOLS | {"reasoning_log", "send_message"})
+
+    assert [(name, params) for _start, _end, name, params in calls] == [
+        ("reasoning_log", {"thoughts": "x"}),
+        ("send_message", {"content": "hi"}),
+    ]
+
+
 def test_collect_tool_calls_ignores_long_content_object_without_args():
     long_text = "a" * 400
     response = '{"tool":"send_message","content":"' + long_text + '"}'

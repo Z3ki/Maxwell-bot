@@ -286,6 +286,17 @@ def collect_tool_calls(
         if name in available_tools and (include_disabled or name not in disabled_tools):
             calls.append((start, end, name, params))
 
+    def add_json_tool_object(start: int, end: int, obj: dict):
+        name, params = _tool_params_from_json(obj)
+        if not name:
+            return
+        # Guard against accidental execution of leaked prose-like payloads.
+        if "args" not in obj and "params" not in obj:
+            content = obj.get("content")
+            if isinstance(content, str) and len(content.strip()) > 280:
+                return
+        add_call(start, end, name, params)
+
     for match in CREATE_SITE_BLOCK_RE.finditer(response):
         add_call(
             match.start(),
@@ -327,6 +338,14 @@ def collect_tool_calls(
         if isinstance(params, dict):
             add_call(match.start(), end, name, params)
 
+    for match in JSON_TOOL_LINE_RE.finditer(response):
+        try:
+            obj = json.loads(match.group(0), strict=False)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            add_json_tool_object(match.start(), match.end(), obj)
+
     stripped = response.strip()
     # Safety hardening: only treat free-form JSON as a tool call when the
     # entire assistant response is exactly one JSON object.
@@ -340,15 +359,7 @@ def collect_tool_calls(
                 except json.JSONDecodeError:
                     obj = None
                 if isinstance(obj, dict):
-                    name, params = _tool_params_from_json(obj)
-                    if name:
-                        # Guard against accidental execution of leaked prose-like payloads.
-                        if "args" not in obj and "params" not in obj:
-                            content = obj.get("content")
-                            if isinstance(content, str) and len(content.strip()) > 280:
-                                name = None
-                        if name:
-                            add_call(0, len(response), name, params)
+                    add_json_tool_object(0, len(response), obj)
 
     calls.sort(key=lambda x: (x[0], x[1]))
     deduped = []
