@@ -1533,9 +1533,22 @@ class ShellTool(Tool):
         if run_code != 0:
             raise RuntimeError(stderr.decode(errors="replace").strip() or "docker run failed")
 
+    def _normalize_command(self, command: str) -> str:
+        raw = str(command or "").strip()
+        if not raw:
+            return ""
+
+        # If the model leaked a tool call payload, try to recover a literal command from backticks.
+        if "<tool:" in raw.lower():
+            m = re.search(r"`([^`]+)`", raw)
+            if m:
+                return m.group(1).strip()
+            return ""
+        return raw
+
     async def _run_shell_command(self, command: str):
         await self._ensure_container()
-        sanitized = command.strip()
+        sanitized = self._normalize_command(command)
         if not sanitized:
             raise RuntimeError("empty command")
         proc = await asyncio.create_subprocess_exec(
@@ -1552,21 +1565,22 @@ class ShellTool(Tool):
         return stdout, stderr, proc.returncode
 
     async def execute(self, message: Message, command: str = None, **kwargs) -> str:
-        if not command or not command.strip():
-            return "Error: command is required"
+        normalized = self._normalize_command(command)
+        if not normalized:
+            return "Error: command is required (tool-call markup was detected or command was empty)"
 
         author_id = str(message.author.id)
         if not (self.bot._is_admin(author_id) or author_id in self.bot._shell_whitelist):
             return "Error: You do not have permission to use the shell tool. Ask an admin to whitelist you with `,shell <user_id>`."
 
         try:
-            stdout, stderr, exit_code = await self._run_shell_command(command)
+            stdout, stderr, exit_code = await self._run_shell_command(normalized)
         except asyncio.TimeoutError:
-            text = f"$ {command}\n\u23f1 Timed out after {self.TIMEOUT}s"
+            text = f"$ {normalized}\n\u23f1 Timed out after {self.TIMEOUT}s"
             await message.channel.send(f"```ansi\n{text}\n```")
             return f"__SHELL_SENT__\n{text}"
         except Exception as e:
-            text = f"$ {command}\n\u274c Error: {e}"
+            text = f"$ {normalized}\n\u274c Error: {e}"
             await message.channel.send(f"```ansi\n{text}\n```")
             return f"__SHELL_SENT__\n{text}"
 
@@ -1585,14 +1599,14 @@ class ShellTool(Tool):
         if len(combined) > self.MAX_OUTPUT:
             combined = combined[:self.MAX_OUTPUT] + "\n... (truncated)"
 
-        text = f"$ {command}\n{combined}"
+        text = f"$ {normalized}\n{combined}"
         chunks = []
         remaining = text
         while remaining:
             if len(remaining) <= 1990:
                 chunks.append(remaining)
                 break
-            header = f"$ {command}\n"
+            header = f"$ {normalized}\n"
             cut = remaining.rfind("\n", 0, 1990)
             if cut <= len(header):
                 cut = 1990
