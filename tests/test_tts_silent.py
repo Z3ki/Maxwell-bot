@@ -175,6 +175,54 @@ def test_tool_prompt_keeps_discord_tools_for_discord():
     assert "react:" in prompt
 
 
+def test_tool_prompt_requires_reasoning_before_terminal_action():
+    bot = SimpleNamespace(
+        _control={"tools_enabled": True, "disabled_tools": []},
+        tools={"reasoning_log": FakeTool("__REASONING_RECORDED__"), "send_message": FakeTool("sent")},
+    )
+
+    prompt = MaxwellBot._tool_system_prompt(bot, "discord")
+
+    assert "MUST call reasoning_log before every terminal action" in prompt
+
+
+def test_ensure_reasoning_trace_backfills_missing_trace():
+    reasoning = FakeTool("__REASONING_RECORDED__")
+    bot = SimpleNamespace(tools={"reasoning_log": reasoning})
+    message = SimpleNamespace()
+
+    async def run():
+        await MaxwellBot._ensure_reasoning_trace(bot, message, ["Tool send_message: __MESSAGE_SENT__ Sent 2 chars"], "hi", "send_message")
+
+    asyncio.run(run())
+
+    assert reasoning.calls == [
+        {
+            "intent": "forced_trace",
+            "decision": "send_message",
+            "thoughts": "Auto-recorded because the model did not call reasoning_log before terminal output.",
+            "data": {
+                "response_preview": "hi",
+                "response_chars": 2,
+                "tool_results": ["Tool send_message: __MESSAGE_SENT__ Sent 2 chars"],
+            },
+        }
+    ]
+
+
+def test_ensure_reasoning_trace_skips_existing_trace():
+    reasoning = FakeTool("__REASONING_RECORDED__")
+    bot = SimpleNamespace(tools={"reasoning_log": reasoning})
+    message = SimpleNamespace()
+
+    async def run():
+        await MaxwellBot._ensure_reasoning_trace(bot, message, ["Tool reasoning_log: __REASONING_RECORDED__"], "hi", "reply")
+
+    asyncio.run(run())
+
+    assert reasoning.calls == []
+
+
 def test_build_messages_includes_tool_history_outside_recent_count():
     memory = FakeMemory(
         [

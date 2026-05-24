@@ -2736,14 +2736,17 @@ class MaxwellBot(commands.Bot):
                 finally:
                     await self._release_ai_slot()
             if any("__NO_RESPONSE__" in tr for tr in all_tool_results):
+                await self._ensure_reasoning_trace(message, all_tool_results, response, "no_response")
                 return
             if any("__MESSAGE_SENT__" in tr for tr in all_tool_results):
+                await self._ensure_reasoning_trace(message, all_tool_results, response, "send_message")
                 return
             response = re.sub(r"\[(\w+)\]\s*\n?\s*\{.*?\}\s*\n?\s*\[/\1\]", "", response, flags=re.DOTALL)
             response = re.sub(r"\[/?(?:TOOL_CALL:)?[\w-]+.*?\]", "", response)
             response = response.replace("__NO_RESPONSE__", "").replace("__SHELL_SENT__", "").replace("__MEME_SENT__", "").replace("__MEDIA_SENT__", "").strip()
             response = re.sub(r"(?m)^\s*\*[^*]+\*\s*$", "", response).strip() or response.strip()
             if response:
+                await self._ensure_reasoning_trace(message, all_tool_results, response, "reply")
                 response = self._render_custom_emojis(response, message.guild)
                 chunks = self._split_response(response, limit=1900)
                 for i, chunk in enumerate(chunks):
@@ -2775,6 +2778,27 @@ class MaxwellBot(commands.Bot):
             if self._active_requests.get(channel_id) is current_task:
                 self._active_requests.pop(channel_id, None)
             self._tick_media_context(channel_id)
+
+    async def _ensure_reasoning_trace(self, message, tool_results: list[str], response: str, outcome: str):
+        if any("__REASONING_RECORDED__" in tr for tr in tool_results):
+            return
+        tool = self.tools.get("reasoning_log")
+        if tool is None:
+            return
+        try:
+            await tool.execute(
+                message,
+                intent="forced_trace",
+                decision=outcome,
+                thoughts="Auto-recorded because the model did not call reasoning_log before terminal output.",
+                data={
+                    "response_preview": str(response or "")[:500],
+                    "response_chars": len(str(response or "")),
+                    "tool_results": list(tool_results or [])[-10:],
+                },
+            )
+        except Exception as e:
+            logger.warning(f"Failed to force reasoning trace: {e}")
 
     async def _process_tool_calls(self, message, response: str):
         tool_results = []
@@ -2893,7 +2917,7 @@ class MaxwellBot(commands.Bot):
             + "{\"tool\":\"send_file\",\"filename\":\"script.py\",\"content\":\"print('hi')\\n\"}. "
             + "For create_site with full HTML, prefer this raw block so HTML quotes do not break JSON: "
             + "[create_site]\nname: short-slug\ntitle: Site title\nbody:\n<!DOCTYPE html>...\n[/create_site]. "
-            + "You may call multiple tools in one response. Always run analysis/reasoning/tools first, then call send_message as the final visible action (or no_response). After tool results are returned, call tools again if needed and end with send_message/no_response. Do not wrap tool calls in markdown. "
+            + "You may call multiple tools in one response. You MUST call reasoning_log before every terminal action, then call send_message as the final visible action (or no_response). Always run analysis/reasoning/tools first, then call send_message/no_response last. After tool results are returned, call tools again if needed and end with reasoning_log followed by send_message/no_response. Do not wrap tool calls in markdown. "
             + "IMPORTANT: The character limit does NOT apply to tool JSON calls. You may write as much as needed in tool parameters."
         )
 
@@ -3232,6 +3256,8 @@ class MaxwellBot(commands.Bot):
                             finally:
                                 await self._release_ai_slot()
                         if any("__NO_RESPONSE__" in tr for tr in all_tool_results) or any("__MESSAGE_SENT__" in tr for tr in all_tool_results):
+                            outcome = "no_response" if any("__NO_RESPONSE__" in tr for tr in all_tool_results) else "send_message"
+                            await self._ensure_reasoning_trace(tg_tool_message, all_tool_results, response_text, outcome)
                             response_text = ""
                         response_text = re.sub(r"\[(\w+)\]\s*\n?\s*\{.*?\}\s*\n?\s*\[/\1\]", "", response_text, flags=re.DOTALL)
                         response_text = re.sub(r"\[/?(?:TOOL_CALL:)?[\w-]+.*?\]", "", response_text)
@@ -3253,6 +3279,7 @@ class MaxwellBot(commands.Bot):
                     # Reply back via TG when a tool did not already send a voice response.
                     if response_text:
                         tg_reply = TelegramMessageAdapter(session, url_base, chat_id, message.get("message_id"), user_id, user_name)
+                        await self._ensure_reasoning_trace(tg_reply, all_tool_results, response_text, "reply")
                         await tg_reply.reply(response_text)
                         
             except asyncio.CancelledError:
