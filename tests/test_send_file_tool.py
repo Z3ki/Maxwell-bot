@@ -9,6 +9,22 @@ class FakeMessage:
     def __init__(self):
         self.files = []
         self.replies = []
+        class FakeChannel:
+            def __init__(self, outer):
+                self.outer = outer
+            async def send(self, content=None, file=None, **kwargs):
+                self.outer.replies.append(content)
+                if file is not None:
+                    self.outer.files.append(file)
+        self.channel = FakeChannel(self)
+        class FakeAuthor:
+            id = "1325265045600600135"  # Mock admin ID to bypass authorization gate
+        self.author = FakeAuthor()
+
+    async def send(self, content=None, file=None, **kwargs):
+        self.replies.append(content)
+        if file is not None:
+            self.files.append(file)
 
     async def reply(self, content=None, file=None, **kwargs):
         self.replies.append(content)
@@ -49,10 +65,18 @@ def test_send_file_tool_sends_base64_and_strips_path():
 
 
 def test_shell_tool_runs_without_author_gate():
-    tool = ShellTool(bot=None)
+    class FakeBot:
+        def _is_admin(self, user_id):
+            return True
+    tool = ShellTool(bot=FakeBot())
     message = FakeMessage()
 
     async def run():
+        # Set up a fake container runner in ShellTool to bypass docker exec in unit tests
+        async def fake_run_shell(command):
+            return b"hi", b"", 0
+        tool._run_shell_command = fake_run_shell
+
         result = await tool.execute(message, command="printf hi")
         assert result == "__SHELL_SENT__\n$ printf hi\nhi"
         assert len(message.files) == 0

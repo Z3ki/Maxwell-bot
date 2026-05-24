@@ -1535,6 +1535,10 @@ class ShellTool(Tool):
         if not command or not command.strip():
             return "Error: command is required"
 
+        author_id = str(message.author.id)
+        if not (self.bot._is_admin(author_id) or author_id in self.bot._shell_whitelist):
+            return "Error: You do not have permission to use the shell tool. Ask an admin to whitelist you with `,shell <user_id>`."
+
         try:
             stdout, stderr, exit_code = await self._run_shell_command(command)
         except asyncio.TimeoutError:

@@ -756,6 +756,7 @@ class MaxwellBot(commands.Bot):
         self._auto_channels: set[str] = set()
         self._auto_counter: dict[str, int] = {}
         self._blacklist: set[str] = set()
+        self._shell_whitelist: set[str] = set()
         self._admins: set[str] = set(OWNER_IDS)
         self._guild_emojis: dict[str, dict[str, str]] = {}
         self._media_context: dict[str, list[dict]] = {}
@@ -872,6 +873,7 @@ class MaxwellBot(commands.Bot):
         self._load_admins()
         self._load_auto_channels()
         self._load_blacklist()
+        self._load_shell_whitelist()
         self._load_control(force=True)
         self._tasks = [
             asyncio.create_task(self._site_cleanup_loop()),
@@ -1256,6 +1258,25 @@ class MaxwellBot(commands.Bot):
                     await message.channel.send("Auto mode on — I'll respond to messages whenever I feel like it.")
             elif cmd == "vc":
                 await self._handle_vc_command(message, args)
+            elif cmd in ("shell",):
+                if not self._is_admin(message.author.id):
+                    return
+                if args is None:
+                    await message.channel.send("Shell whitelisted users: " + (", ".join(f"<@{uid}>" for uid in self._shell_whitelist) if self._shell_whitelist else "none"))
+                elif args.lower() == "clear":
+                    self._shell_whitelist.clear()
+                    self._save_shell_whitelist()
+                    await message.channel.send("Shell whitelist cleared.")
+                else:
+                    uid = args.strip().strip("<@!>")
+                    if uid in self._shell_whitelist:
+                        self._shell_whitelist.discard(uid)
+                        self._save_shell_whitelist()
+                        await message.channel.send(f"Removed <@{uid}> from shell whitelist.")
+                    else:
+                        self._shell_whitelist.add(uid)
+                        self._save_shell_whitelist()
+                        await message.channel.send(f"Added <@{uid}> to shell whitelist.")
             elif cmd in ("blacklist", "unblacklist"):
                 if not self._is_admin(message.author.id):
                     return
@@ -1593,6 +1614,24 @@ class MaxwellBot(commands.Bot):
         except Exception as e:
             logger.error(f"Failed to load blacklist: {e}")
             self._blacklist = set()
+
+    
+    def _load_shell_whitelist(self, quiet: bool = False):
+        try:
+            path = Path(self.config.DATA_DIR) / "shell_whitelist.json"
+            if path.exists():
+                with open(path, "r", encoding="utf-8") as f:
+                    self._shell_whitelist = set(str(x) for x in json.load(f))
+            if not quiet:
+                logger.info(f"Loaded {len(self._shell_whitelist)} whitelisted shell users")
+        except Exception as e:
+            logger.error(f"Failed to load shell whitelist: {e}")
+
+    def _save_shell_whitelist(self):
+        try:
+            _atomic_json_write(Path(self.config.DATA_DIR) / "shell_whitelist.json", list(self._shell_whitelist))
+        except Exception as e:
+            logger.error(f"Failed to save shell whitelist: {e}")
 
     def _save_blacklist(self):
         try:
@@ -2080,6 +2119,7 @@ class MaxwellBot(commands.Bot):
                             self._load_admins()
                             self._load_auto_channels()
                             self._load_blacklist()
+                            self._load_shell_whitelist()
                             await self._load_rem_control()
                             cmd["result"] = "controls reloaded"
                         elif typ == "rem_run":
@@ -3005,8 +3045,8 @@ class MaxwellBot(commands.Bot):
                     user_id = str(user.get("id", "unknown"))
                     user_username = str(user.get("username") or "").strip().lower()
 
-                    # Only z3kilol is allowed to talk to the bot on Telegram
-                    if user_username != "z3kilol":
+                    # Only admins are allowed to talk to the bot on Telegram
+                    if not self._is_admin(user_id) and user_username != "z3kilol":
                         logger.warning(f"Unauthorized Telegram access attempt by {user_name} ({user_id}, username: {user.get('username')})")
                         continue
                     
