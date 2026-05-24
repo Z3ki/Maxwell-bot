@@ -1514,13 +1514,15 @@ class ShellTool(Tool):
 
     async def _run_shell_command(self, command: str):
         await self._ensure_container()
+        # Automatically use sudo for executing commands inside the sandbox
+        sudo_command = f"sudo {command}" if not command.strip().startswith("sudo") else command
         proc = await asyncio.create_subprocess_exec(
             "docker",
             "exec",
             "--workdir", "/home/maxwell",
             "--user", "maxwell",
             self.CONTAINER_NAME,
-            "bash", "-lc", command,
+            "bash", "-lc", sudo_command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -1535,11 +1537,11 @@ class ShellTool(Tool):
             stdout, stderr, exit_code = await self._run_shell_command(command)
         except asyncio.TimeoutError:
             text = f"$ {command}\n\u23f1 Timed out after {self.TIMEOUT}s"
-            await message.reply(f"```ansi\n{text}\n```")
+            await message.channel.send(f"```ansi\n{text}\n```")
             return f"__SHELL_SENT__\n{text}"
         except Exception as e:
             text = f"$ {command}\n\u274c Error: {e}"
-            await message.reply(f"```ansi\n{text}\n```")
+            await message.channel.send(f"```ansi\n{text}\n```")
             return f"__SHELL_SENT__\n{text}"
 
         out = stdout.decode(errors="replace")
@@ -1572,7 +1574,7 @@ class ShellTool(Tool):
             remaining = remaining[cut:].lstrip("\n")
 
         for chunk in chunks:
-            await message.reply(f"```ansi\n{chunk}\n```")
+            await message.channel.send(f"```ansi\n{chunk}\n```")
             if len(chunks) > 1:
                 await asyncio.sleep(0.3)
 
