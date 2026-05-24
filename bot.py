@@ -334,13 +334,73 @@ def _find_tool_close(text: str, name: str, start: int) -> re.Match | None:
     return close_re.search(text, start)
 
 
-UNTERMINATED_TOOL_STOP_RE = re.compile(r"<\|end\|>|<environment_details\b", re.IGNORECASE)
+UNTERMINATED_TOOL_STOP_RE = re.compile(r"<\|end\|>|<environment_details\b|<system-reminder\b", re.IGNORECASE)
+PIPE_TOOL_RE = re.compile(
+    r"<\|tool:([A-Za-z_]\w*)\s*([^>]*)>(.*?)(?:<\|/tool:\1\s*>|<\|end\|>|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+PIPE_TOOL_CALL_RE = re.compile(
+    r"<\|tool_call_begin\|>\s*([A-Za-z_]\w*)\|>(.*?)(?:<\|tool_call_end\|>|<\|end\|>|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+ARTIFACT_BLOCK_RE = re.compile(
+    r"<(?:system-reminder|environment_details)\b[^>]*>.*?(?:</(?:system-reminder|environment_details)>|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+PIPE_MARKER_RE = re.compile(r"<\|/?(?:tool:[A-Za-z_]\w*|tool_call_begin|tool_call_end|end)\|?>", re.IGNORECASE)
+
+
+def _strip_leading_reasoning_json(text: str) -> str:
+    extracted = extract_json_object(text)
+    if not extracted:
+        return text
+    raw_json, end = extracted
+    try:
+        payload = json.loads(raw_json)
+    except json.JSONDecodeError:
+        return text
+    if not isinstance(payload, dict) or not ({"thoughts", "intent", "decision", "tool_plan"} & set(payload)):
+        return text
+    return text[end:].lstrip()
+
+
+def strip_model_artifact_leaks(text: str, strip_pipe_markers: bool = True) -> str:
+    cleaned = _strip_leading_reasoning_json(str(text or ""))
+    cleaned = ARTIFACT_BLOCK_RE.sub("", cleaned)
+    if strip_pipe_markers:
+        cleaned = PIPE_MARKER_RE.sub("", cleaned)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
+def _parse_loose_tool_params(raw: str) -> dict:
+    source = str(raw or "").strip()
+    params = _parse_xml_attrs(source)
+    key_matches = list(re.finditer(r"(?:^|\s)([A-Za-z_]\w*)\s*=", source))
+    for index, match in enumerate(key_matches):
+        key = match.group(1)
+        value_start = match.end()
+        value_end = key_matches[index + 1].start() if index + 1 < len(key_matches) else len(source)
+        value = source[value_start:value_end].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        params[key] = html.unescape(value)
+    return params
 
 
 def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = None):
     text = str(response or "")
-    stripped = text.lstrip()
-    if stripped.startswith("{") or stripped.startswith("[{"):
+    pipe_matches = []
+    for match in PIPE_TOOL_RE.finditer(text):
+        name = match.group(1)
+        if available_tools is None or name in available_tools:
+            pipe_matches.append((match.start(), match.end(), name, match.group(2), match.group(3), False))
+    for match in PIPE_TOOL_CALL_RE.finditer(text):
+        name = match.group(1)
+        if available_tools is None or name in available_tools:
+            pipe_matches.append((match.start(), match.end(), name, match.group(2), "", True))
+    if pipe_matches:
+        for item in sorted(pipe_matches, key=lambda x: (x[0], x[1])):
+            yield item
         return
     pos = 0
     while pos < len(text):
@@ -413,7 +473,7 @@ def collect_tool_calls(
             calls.append((start, end, name, params))
 
     for start, end, name, attrs_str, body, _self_closing in _iter_top_level_tool_tags(response, available_tools):
-        params = _parse_xml_attrs(attrs_str)
+        params = _parse_loose_tool_params(attrs_str) if "=" in attrs_str else _parse_xml_attrs(attrs_str)
         params.update(_parse_tool_body_params(name, body))
         add_call(start, end, name, params)
 
@@ -429,11 +489,11 @@ def collect_tool_calls(
 
 
 def strip_tool_payload_leaks(text: str) -> str:
-    cleaned = str(text or "")
+    cleaned = strip_model_artifact_leaks(text)
     ranges = [(start, end) for start, end, *_rest in _iter_top_level_tool_tags(cleaned, KNOWN_XML_TOOL_NAMES)]
     for start, end in reversed(ranges):
         cleaned = cleaned[:start] + cleaned[end:]
-    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return strip_model_artifact_leaks(cleaned)
 
 
 class _NoopTyping:
@@ -2931,8 +2991,9 @@ class MaxwellBot(commands.Bot):
 
     async def _process_tool_calls(self, message, response: str):
         tool_results = []
+        response = strip_model_artifact_leaks(response, strip_pipe_markers=False)
         if not self._control.get("tools_enabled", True):
-            return response, []
+            return strip_tool_payload_leaks(response), []
         disabled = set(self._control.get("disabled_tools", []) or [])
         compatible = MaxwellBot._compatible_tool_names(self, MaxwellBot._message_tool_platform(self, message))
         calls = collect_tool_calls(response, set(self.tools), disabled, include_disabled=True)
@@ -2998,7 +3059,8 @@ class MaxwellBot(commands.Bot):
         else:
             await run_calls()
         segments.append(response[last:])
-        cleaned = re.sub(r"\[/?(?:TOOL_CALL:)?[\w-]+.*?\]", "", "".join(segments)).strip()
+        cleaned = strip_tool_payload_leaks("".join(segments))
+        cleaned = re.sub(r"\[/?(?:TOOL_CALL:)?[\w-]+.*?\]", "", cleaned).strip()
         cleaned = re.sub(r"(?is)```[ \t]*(?:json|tool|tools)?[^\n`]*\n\s*```", "", cleaned).strip()
         return cleaned, tool_results
 

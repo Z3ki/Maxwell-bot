@@ -1,7 +1,7 @@
 from bot import collect_tool_calls, strip_tool_payload_leaks
 
 
-TOOLS = {"react", "web_search", "create_poll", "send_message", "reasoning_log", "create_site"}
+TOOLS = {"react", "web_search", "create_poll", "send_message", "reasoning_log", "create_site", "tts"}
 
 
 def test_collect_tool_calls_accepts_self_closing_namespace_tags():
@@ -45,6 +45,22 @@ def test_collect_tool_calls_accepts_unclosed_terminal_before_end_marker():
     calls = collect_tool_calls(response, TOOLS)
 
     assert [(name, params) for _start, _end, name, params in calls] == [("send_message", {"content": "Hello!"})]
+
+
+def test_collect_tool_calls_accepts_pipe_tool_format():
+    calls = collect_tool_calls("<|tool:send_message>Hello! What's up?<|end|>", TOOLS)
+
+    assert [(name, params) for _start, _end, name, params in calls] == [
+        ("send_message", {"content": "Hello! What's up?"})
+    ]
+
+
+def test_collect_tool_calls_accepts_pipe_tool_call_begin_format():
+    calls = collect_tool_calls("<|tool_call_begin|>tts|>text=Test tts language=spanish<|tool_call_end|>", TOOLS)
+
+    assert [(name, params) for _start, _end, name, params in calls] == [
+        ("tts", {"text": "Test tts", "language": "spanish"})
+    ]
 
 
 def test_collect_tool_calls_accepts_shell_command_subtag():
@@ -161,4 +177,16 @@ def test_strip_tool_payload_leaks_removes_shorthand_tool_blocks():
 
 def test_strip_tool_payload_leaks_removes_unclosed_tool_and_environment_details():
     text = '<tool:send_message>Hello!<|end|><environment_details>secret context</environment_details>'
+    assert strip_tool_payload_leaks(text) == ""
+
+
+def test_strip_tool_payload_leaks_removes_reasoning_json_and_system_reminder():
+    text = '''{
+  "thoughts": "User asked for TTS.",
+  "intent": "tts",
+  "decision": "Call tts"
+}
+<tool:tts text="Hey there!" language="english" />
+<system-reminder>secret context</system-reminder>'''
+
     assert strip_tool_payload_leaks(text) == ""

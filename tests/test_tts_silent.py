@@ -92,6 +92,52 @@ def test_process_tool_calls_handles_unclosed_send_message_without_leaking_enviro
     asyncio.run(run())
 
 
+def test_process_tool_calls_handles_reasoning_json_tts_without_leaking_system_reminder():
+    tts = FakeTool("__NO_RESPONSE__")
+    bot = SimpleNamespace(
+        _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False},
+        tools={"tts": tts},
+    )
+    message = SimpleNamespace()
+    response = '''{
+  "thoughts": "User asked for a TTS.",
+  "intent": "Provide a text-to-speech response.",
+  "decision": "Call the tts tool.",
+  "tool_plan": "Use tts with text Hey there."
+}
+<tool:tts text="Hey there!" language="english" />
+<system-reminder>secret context</system-reminder>'''
+
+    async def run():
+        cleaned, tool_results = await MaxwellBot._process_tool_calls(bot, message, response)
+        assert cleaned == ""
+        assert tool_results == ["Tool tts: __NO_RESPONSE__"]
+        assert tts.calls == [{"text": "Hey there!", "language": "english"}]
+
+    asyncio.run(run())
+
+
+def test_process_tool_calls_handles_pipe_tts_format():
+    tts = FakeTool("__NO_RESPONSE__")
+    bot = SimpleNamespace(
+        _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False},
+        tools={"tts": tts},
+    )
+    message = SimpleNamespace()
+
+    async def run():
+        cleaned, tool_results = await MaxwellBot._process_tool_calls(
+            bot,
+            message,
+            "<|tool_call_begin|>tts|>text=Test tts language=spanish<|tool_call_end|>",
+        )
+        assert cleaned == ""
+        assert tool_results == ["Tool tts: __NO_RESPONSE__"]
+        assert tts.calls == [{"text": "Test tts", "language": "spanish"}]
+
+    asyncio.run(run())
+
+
 def test_process_tool_calls_records_tool_history_in_memory():
     react = FakeTool("Reacted with <:catjam:123>")
     memory = FakeMemory()
