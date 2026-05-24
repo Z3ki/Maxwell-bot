@@ -1908,9 +1908,6 @@ class TtsTool(Tool):
 
         # Determine API Key and Setup File
         nvidia_api_key = os.environ.get("NVIDIA_API_KEY", "") or getattr(getattr(self, "bot", None).config, "NVIDIA_API_KEY", "")
-        if not nvidia_api_key:
-            return "Error: NVIDIA_API_KEY is not configured"
-
         filename = f"tts_{message.id}.wav"
         voice_filename = f"tts_{message.id}.ogg"
         used_fallback = False
@@ -1918,6 +1915,9 @@ class TtsTool(Tool):
 
         try:
             # Try NVIDIA Riva TTS
+            if not nvidia_api_key:
+                raise RuntimeError("NVIDIA_API_KEY is not configured")
+
             import riva.client
             from riva.client.proto.riva_audio_pb2 import AudioEncoding
 
