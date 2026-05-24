@@ -2742,6 +2742,18 @@ class MaxwellBot(commands.Bot):
                 messages.append({"role": "system", "content": "Recent context (background only; do not answer these):\n" + "\n".join(reversed(lines))})
         author_label = f"{message.author.display_name} [bot]" if message.author.bot else message.author.display_name
         user_parts = [f"Latest message to answer from {author_label}: {user_message}"]
+        mention_names = [getattr(user, "display_name", str(getattr(user, "id", "unknown"))) for user in (message.mentions or [])]
+        if mention_names:
+            mentions_maxwell = bool(self.user and any(getattr(user, "id", None) == self.user.id for user in message.mentions))
+            user_parts.append(
+                "Mentioned users in latest message: "
+                + ", ".join(mention_names)
+                + f". Mentions Maxwell: {'yes' if mentions_maxwell else 'no'}."
+            )
+        ref = getattr(getattr(message, "reference", None), "resolved", None)
+        if ref and hasattr(ref, "author"):
+            reply_target = getattr(ref.author, "display_name", str(getattr(ref.author, "id", "unknown")))
+            user_parts.append(f"Latest message is a reply to: {reply_target}.")
         if media_summary:
             user_parts.append(media_summary)
         elif has_media:
