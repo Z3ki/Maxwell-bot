@@ -251,6 +251,148 @@ def extract_json_object(text: str, start: int = 0) -> tuple[str, int] | None:
     return None
 
 
+DEFAULT_TOOL_PARAMS = {
+    "react": "emoji",
+    "web_search": "query",
+    "create_poll": "question",
+    "send_file": "content",
+    "send_message": "content",
+    "reasoning_log": "thoughts",
+    "tts": "text",
+    "fetch_url": "url",
+    "shell": "command",
+    "set_nickname": "nickname",
+    "set_activity": "name",
+    "kilo_run": "code",
+    "create_site": "body",
+}
+
+KNOWN_XML_TOOL_NAMES = set(DEFAULT_TOOL_PARAMS) | {
+    "change_avatar", "change_presence", "create_category", "create_channel", "create_invite",
+    "delete_channel", "delete_message", "edit_channel", "edit_message", "forward_message",
+    "hd_image", "image_generator", "list_admin_servers", "list_servers", "list_sites",
+    "lookup_user", "memory_edit", "send_media", "send_meme", "typing",
+}
+
+TOOL_PARAM_TAGS = {
+    "args", "assumptions", "body", "channel_id", "code", "command", "confidence", "confirm_name",
+    "content", "data", "decision", "elapsed", "emoji", "encoding", "engine", "evidence", "filename",
+    "guild_id", "intent", "lang", "language", "max_length", "max_results", "message_id", "name",
+    "nickname", "position", "prompt", "query", "question", "reply", "response_plan", "risks", "size",
+    "status", "subreddit", "text", "thoughts", "title", "tool_plan", "type", "url",
+}
+
+
+def _find_xml_tag_end(text: str, start: int) -> int:
+    quote_char = ""
+    escaped = False
+    for i in range(start + 1, len(text)):
+        ch = text[i]
+        if quote_char:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote_char:
+                quote_char = ""
+            continue
+        if ch in {'"', "'"}:
+            quote_char = ch
+        elif ch == ">":
+            return i
+    return -1
+
+
+def _parse_xml_open_tag(raw_tag: str) -> tuple[str | None, str, bool]:
+    inner = raw_tag[1:-1].strip()
+    if not inner or inner.startswith("/"):
+        return None, "", False
+    self_closing = inner.endswith("/")
+    if self_closing:
+        inner = inner[:-1].rstrip()
+    match = re.match(r"(?:tool:)?([A-Za-z_]\w*)(?:\s+(.*))?$", inner, re.DOTALL)
+    if not match:
+        return None, "", False
+    return match.group(1), match.group(2) or "", self_closing
+
+
+def _parse_xml_attrs(attrs_str: str) -> dict:
+    attrs = {}
+    attr_re = re.compile(
+        r"([A-Za-z_]\w*)\s*=\s*(?:\"((?:\\.|[^\"\\])*)\"|'((?:\\.|[^'\\])*)'|([^\s\"'<>/]+))",
+        re.DOTALL,
+    )
+    for match in attr_re.finditer(attrs_str or ""):
+        value = next(group for group in match.groups()[1:] if group is not None)
+        value = value.replace('\\"', '"').replace("\\'", "'")
+        attrs[match.group(1)] = html.unescape(value)
+    return attrs
+
+
+def _find_tool_close(text: str, name: str, start: int) -> re.Match | None:
+    close_re = re.compile(rf"</\s*(?:tool:)?{re.escape(name)}\s*>", re.IGNORECASE)
+    return close_re.search(text, start)
+
+
+def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = None):
+    text = str(response or "")
+    stripped = text.lstrip()
+    if stripped.startswith("{") or stripped.startswith("[{"):
+        return
+    pos = 0
+    while pos < len(text):
+        start = text.find("<", pos)
+        if start == -1:
+            break
+        if start > 0 and not text[start - 1].isspace():
+            pos = start + 1
+            continue
+        tag_end = _find_xml_tag_end(text, start)
+        if tag_end == -1:
+            break
+        name, attrs_str, self_closing = _parse_xml_open_tag(text[start:tag_end + 1])
+        if not name or (available_tools is not None and name not in available_tools):
+            pos = start + 1
+            continue
+        if self_closing:
+            yield start, tag_end + 1, name, attrs_str, "", True
+            pos = tag_end + 1
+            continue
+        close_match = _find_tool_close(text, name, tag_end + 1)
+        if not close_match:
+            pos = tag_end + 1
+            continue
+        yield start, close_match.end(), name, attrs_str, text[tag_end + 1:close_match.start()], False
+        pos = close_match.end()
+
+
+def _parse_tool_body_params(name: str, body: str) -> dict:
+    params = {}
+    consumed = []
+    child_re = re.compile(r"<([A-Za-z_]\w*)(?:\s+[^>]*)?>(.*?)</\s*\1\s*>", re.DOTALL | re.IGNORECASE)
+    for match in child_re.finditer(body or ""):
+        key = match.group(1)
+        if key not in TOOL_PARAM_TAGS:
+            continue
+        params[key] = html.unescape(match.group(2).strip())
+        consumed.append(match.span())
+    if params:
+        leftovers = body
+        for start, end in reversed(consumed):
+            leftovers = leftovers[:start] + leftovers[end:]
+        if leftovers.strip():
+            default_param = DEFAULT_TOOL_PARAMS.get(name)
+            if default_param and default_param not in params:
+                params[default_param] = html.unescape(body.strip())
+        return params
+
+    cleaned_body = (body or "").strip()
+    default_param = DEFAULT_TOOL_PARAMS.get(name)
+    if cleaned_body and default_param:
+        params[default_param] = html.unescape(cleaned_body)
+    return params
+
+
 def collect_tool_calls(
     response: str,
     available_tools: set[str],
@@ -264,102 +406,10 @@ def collect_tool_calls(
         if name in available_tools and (include_disabled or name not in disabled_tools):
             calls.append((start, end, name, params))
 
-    # Pattern to find opening tags: e.g. <tool:name ...> or <name ...>
-    # Group 1: namespace tag name, Group 2: namespace tag attributes/end
-    # Group 3: plain tag name, Group 4: plain tag attributes/end
-    tag_pattern = re.compile(
-        r"<(?:tool:(\w+)|(\w+))(?:\s+([^>]*))?\s*(/?)>",
-        re.IGNORECASE
-    )
-
-    pos = 0
-    while True:
-        match = tag_pattern.search(response, pos)
-        if not match:
-            break
-        
-        name = match.group(1) or match.group(2)
-        attrs_str = match.group(3) or ""
-        self_closing = match.group(4) == "/"
-        
-        start = match.start()
-        end = match.end()
-        pos = end
-        
-        if not name or name not in available_tools:
-            continue
-
-        params = {}
-        # Parse attributes from opening tag if present (e.g. key="val" or key='val')
-        if attrs_str:
-            attr_matches = re.finditer(
-                r'(\w+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')',
-                attrs_str
-            )
-            for attr in attr_matches:
-                k = attr.group(1)
-                v = attr.group(2) if attr.group(2) is not None else attr.group(3)
-                params[k] = v
-
-        if self_closing:
-            add_call(start, end, name, params)
-            continue
-
-        # Non-self-closing: find matching close tag </tool:name> or </name>
-        close_pattern = re.compile(
-            rf"</\s*(?:tool:{re.escape(name)}|{re.escape(name)})\s*>",
-            re.IGNORECASE
-        )
-        close_match = close_pattern.search(response, end)
-        if not close_match:
-            # Fallback: if no closing tag, parse to end of string
-            body = response[end:]
-            end_pos = len(response)
-        else:
-            body = response[end:close_match.start()]
-            end_pos = close_match.end()
-            pos = end_pos  # Advance scanner past closing tag
-
-        # Parse child elements inside body (e.g. <key>value</key>)
-        sub_pattern = re.compile(r"<(\w+)(?:\s+[^>]*)?>(.*?)</\s*\1\s*>", re.DOTALL)
-        sub_matches = list(sub_pattern.finditer(body))
-        
-        if sub_matches:
-            for sub in sub_matches:
-                params[sub.group(1)] = sub.group(2)
-        else:
-            # Fallback: map the entire raw body as the default parameter
-            cleaned_body = body.strip()
-            if cleaned_body:
-                default_param = "content"
-                if name == "react":
-                    default_param = "emoji"
-                elif name == "web_search":
-                    default_param = "query"
-                elif name == "create_poll":
-                    default_param = "question"
-                elif name == "send_file":
-                    default_param = "content"
-                elif name == "reasoning_log":
-                    default_param = "thoughts"
-                elif name == "tts":
-                    default_param = "text"
-                elif name == "fetch_url":
-                    default_param = "url"
-                elif name == "shell":
-                    default_param = "command"
-                elif name == "set_nickname":
-                    default_param = "nickname"
-                elif name == "set_activity":
-                    default_param = "name"
-                elif name == "kilo_run":
-                    default_param = "code"
-                elif name == "create_site":
-                    default_param = "body"
-                
-                params[default_param] = cleaned_body
-
-        add_call(start, end_pos, name, params)
+    for start, end, name, attrs_str, body, _self_closing in _iter_top_level_tool_tags(response, available_tools):
+        params = _parse_xml_attrs(attrs_str)
+        params.update(_parse_tool_body_params(name, body))
+        add_call(start, end, name, params)
 
     calls.sort(key=lambda x: (x[0], x[1]))
     deduped = []
@@ -374,12 +424,9 @@ def collect_tool_calls(
 
 def strip_tool_payload_leaks(text: str) -> str:
     cleaned = str(text or "")
-    # Robustly remove any <tool:name ...>...</tool:name> or <tool:name /> tags
-    # First, self-closing tags
-    cleaned = re.sub(r"<tool:\w+\s+[^>]*?/>", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"<\w+\s+[^>]*?/>", "", cleaned, flags=re.IGNORECASE)
-    # Next, tags with matching closing tags
-    cleaned = re.sub(r"<(tool:(\w+)|(\w+))(?:\s+[^>]*)?>(.*?)</\s*(?:tool:\2|\3)\s*>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    ranges = [(start, end) for start, end, *_rest in _iter_top_level_tool_tags(cleaned, KNOWN_XML_TOOL_NAMES)]
+    for start, end in reversed(ranges):
+        cleaned = cleaned[:start] + cleaned[end:]
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
@@ -2950,6 +2997,7 @@ class MaxwellBot(commands.Bot):
             + "If a parameter is multi-line, use sub-tags inside the main tool tag. "
             + "If a tool takes only a single default parameter (e.g. content for send_message, thoughts for reasoning_log, text for tts), you can put it directly inside the tag: <tool:send_message>hello</tool:send_message>. "
             + "You may call multiple tools in one assistant response. If you call reasoning_log, it is internal only and does NOT answer the user. "
+            + "Only top-level tool tags execute. Never put literal <tool:...> tags inside reasoning_log fields; describe planned tools in plain text instead. "
             + "Every tool-using turn must end with exactly one terminal visible decision: <tool:send_message>reply text</tool:send_message> to reply, or <tool:no_response /> to stay silent. "
             + "Never stop after reasoning_log. Never output reasoning_log as the only tool. "
             + "Order: reasoning_log first when using terminal tools, any helper tools next, then send_message/no_response last. Do not wrap tool calls in markdown fences. "

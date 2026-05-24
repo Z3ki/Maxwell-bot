@@ -40,6 +40,40 @@ def test_collect_tool_calls_accepts_default_fallback_parameter():
     assert [(name, params) for _start, _end, name, params in calls] == [("send_message", {"content": "hello world"})]
 
 
+def test_collect_tool_calls_accepts_shell_command_subtag():
+    calls = collect_tool_calls('<tool:shell><command>neofetch</command></tool:shell>', TOOLS | {"shell"})
+
+    assert [(name, params) for _start, _end, name, params in calls] == [("shell", {"command": "neofetch"})]
+
+
+def test_collect_tool_calls_does_not_execute_nested_tool_tags():
+    response = '<tool:reasoning_log><thoughts><tool:shell command="neofetch" /><tool:send_message>bad</tool:send_message></thoughts></tool:reasoning_log>'
+    calls = collect_tool_calls(response, TOOLS | {"shell"})
+
+    assert [(name, params) for _start, _end, name, params in calls] == [
+        (
+            "reasoning_log",
+            {"thoughts": '<tool:shell command="neofetch" /><tool:send_message>bad</tool:send_message>'},
+        )
+    ]
+
+
+def test_collect_tool_calls_ignores_json_reasoning_with_tool_tags():
+    response = '{"thoughts":"<tool:shell command=\\"neofetch\\" />","intent":"reply"}'
+    calls = collect_tool_calls(response, TOOLS | {"shell"})
+
+    assert calls == []
+
+
+def test_collect_tool_calls_does_not_scan_inside_tool_body_for_terminal_call():
+    response = '<tool:reasoning_log>run shell then <tool:no_response /></tool:reasoning_log>'
+    calls = collect_tool_calls(response, TOOLS | {"no_response"})
+
+    assert [(name, params) for _start, _end, name, params in calls] == [
+        ("reasoning_log", {"thoughts": "run shell then <tool:no_response />"})
+    ]
+
+
 def test_collect_tool_calls_ignores_disabled_tools():
     calls = collect_tool_calls('<tool:react emoji="catjam" />', TOOLS, {"react"})
 
@@ -82,3 +116,8 @@ def test_strip_tool_payload_leaks_removes_standalone_tags():
 def test_strip_tool_payload_leaks_removes_self_closing_tags():
     text = '<tool:react emoji="catjam" />\nactual reply'
     assert strip_tool_payload_leaks(text) == "actual reply"
+
+
+def test_strip_tool_payload_leaks_keeps_normal_xml():
+    text = '<div class="card">hello</div>\nactual reply'
+    assert strip_tool_payload_leaks(text) == text
