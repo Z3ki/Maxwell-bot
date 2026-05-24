@@ -330,7 +330,7 @@ def _parse_xml_attrs(attrs_str: str) -> dict:
 
 
 def _find_tool_close(text: str, name: str, start: int) -> re.Match | None:
-    close_re = re.compile(rf"</\s*(?:tool:)?{re.escape(name)}\s*>", re.IGNORECASE)
+    close_re = re.compile(rf"</\s*(?:(?:tool:)?{re.escape(name)}|tool)\s*>", re.IGNORECASE)
     return close_re.search(text, start)
 
 
@@ -344,7 +344,7 @@ def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = 
         start = text.find("<", pos)
         if start == -1:
             break
-        if start > 0 and not text[start - 1].isspace():
+        if start > 0 and not (text[start - 1].isspace() or text[start - 1] == ">"):
             pos = start + 1
             continue
         tag_end = _find_xml_tag_end(text, start)

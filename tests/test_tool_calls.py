@@ -74,6 +74,30 @@ def test_collect_tool_calls_does_not_scan_inside_tool_body_for_terminal_call():
     ]
 
 
+def test_collect_tool_calls_accepts_shorthand_tool_close_tags():
+    response = """<tool:reasoning_log>
+thinking
+</tool><tool:send_file>
+<filename>bot.py</filename>
+<content>await ctx.reply(response.text)
+except Exception as e:
+    await ctx.reply(f"Error querying AI: {e}")</content>
+</tool><tool:send_message>Here you go</tool>"""
+    calls = collect_tool_calls(response, TOOLS | {"send_file"})
+
+    assert [(name, params) for _start, _end, name, params in calls] == [
+        ("reasoning_log", {"thoughts": "thinking"}),
+        (
+            "send_file",
+            {
+                "filename": "bot.py",
+                "content": 'await ctx.reply(response.text)\nexcept Exception as e:\n    await ctx.reply(f"Error querying AI: {e}")',
+            },
+        ),
+        ("send_message", {"content": "Here you go"}),
+    ]
+
+
 def test_collect_tool_calls_ignores_disabled_tools():
     calls = collect_tool_calls('<tool:react emoji="catjam" />', TOOLS, {"react"})
 
@@ -121,3 +145,8 @@ def test_strip_tool_payload_leaks_removes_self_closing_tags():
 def test_strip_tool_payload_leaks_keeps_normal_xml():
     text = '<div class="card">hello</div>\nactual reply'
     assert strip_tool_payload_leaks(text) == text
+
+
+def test_strip_tool_payload_leaks_removes_shorthand_tool_blocks():
+    text = '<tool:send_file><filename>bot.py</filename><content>print("hi")</content></tool>\nactual reply'
+    assert strip_tool_payload_leaks(text) == "actual reply"
