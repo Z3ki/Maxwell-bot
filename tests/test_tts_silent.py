@@ -183,7 +183,8 @@ def test_tool_prompt_requires_reasoning_before_terminal_action():
 
     prompt = MaxwellBot._tool_system_prompt(bot, "discord")
 
-    assert "MUST call reasoning_log before every terminal action" in prompt
+    assert "reasoning_log first" in prompt
+    assert "Never stop after reasoning_log" in prompt
 
 
 def test_ensure_reasoning_trace_backfills_missing_trace():
