@@ -8,16 +8,11 @@ from bot_tools import ReasoningLogTool
 
 class FakeMessage:
     def __init__(self):
-        self.id = 99
-        self.content = "what should we do?"
-        self.created_at = "2026-05-24T11:00:00Z"
         self.files = []
         self.replies = []
         class FakeChannel:
             def __init__(self, outer):
                 self.outer = outer
-                self.id = 123
-                self.name = "general"
             async def send(self, content=None, file=None, **kwargs):
                 self.outer.replies.append(content)
                 if file is not None:
@@ -25,14 +20,7 @@ class FakeMessage:
         self.channel = FakeChannel(self)
         class FakeAuthor:
             id = "1325265045600600135"  # Mock admin ID to bypass authorization gate
-            display_name = "alice"
-            bot = False
         self.author = FakeAuthor()
-        self.guild = type("FakeGuild", (), {"id": 456, "name": "guild"})()
-        self.mentions = []
-        self.attachments = []
-        self.embeds = []
-        self.reference = None
 
     async def send(self, content=None, file=None, **kwargs):
         self.replies.append(content)
@@ -121,14 +109,10 @@ def test_reasoning_log_tool_records_verbose_payload():
 
     asyncio.run(run())
 
-    payload = bot.traces[0]
-    assert payload["model_supplied"] == {
+    assert bot.traces == [{
+        "thoughts": "Need answer directly.",
         "intent": "reply",
         "confidence": 0.82,
-        "thoughts": "Need answer directly.",
         "data": {"raw": [1, 2, 3]},
-    }
-    assert payload["runtime_context"]["message_content"] == "what should we do?"
-    assert payload["runtime_context"]["channel_name"] == "general"
-    assert payload["runtime_context"]["guild_name"] == "guild"
-    assert payload["runtime_context"]["author_name"] == "alice"
+    }]
+    assert list(bot.traces[0])[:1] == ["thoughts"]
