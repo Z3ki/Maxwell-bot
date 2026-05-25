@@ -21,9 +21,13 @@ import discord
 from discord.ext import commands
 try:
     from discord.ext import voice_recv
-except Exception:
+    from voice_live import LiveSpeechSink
+except Exception as e:
     voice_recv = None
-from voice_live import LiveSpeechSink
+    LiveSpeechSink = None
+    _voice_recv_import_error = e
+else:
+    _voice_recv_import_error = None
 
 from bot_tools import (
     ChangeAvatarTool,
@@ -921,8 +925,9 @@ class MaxwellBot(commands.Bot):
         self._reaction_seen: set[str] = set()  # "{message_id}:{emoji}" dedup
         self._recorded_rem_msg_ids: set[int] = set()  # "message_id" dedup for REM events
         self._context_tasks: set[asyncio.Task] = set()
-        self._vc_sinks: dict[int, LiveSpeechSink] = {}
+        self._vc_sinks: dict[int, object] = {}
         self._vc_text_channels: dict[int, discord.abc.Messageable] = {}
+        self._vc_voice_channels: dict[int, object] = {}
         self._vc_reply_locks: dict[int, asyncio.Lock] = {}
         self._vc_playback_until: dict[int, float] = {}
         self._tasks = []
@@ -1505,89 +1510,92 @@ class MaxwellBot(commands.Bot):
 
 
     async def _handle_vc_command(self, message, args: str | None):
-        if not message.guild:
-            await message.channel.send("VC commands are only supported in server channels.")
-            return
         arg = (args or "").strip()
         parts = arg.split(maxsplit=1)
         sub = (parts[0].lower() if parts else "")
         rest = parts[1] if len(parts) > 1 else ""
+        target_state = getattr(message.author, "voice", None)
+        target_channel = getattr(target_state, "channel", None)
 
         if sub in {"", "help"}:
             await message.channel.send("VC commands: `,vc join`, `,vc leave`, `,vc status`, `,vc listen`, `,vc unlisten`, `,vc say <text>`")
             return
         if sub == "status":
-            vc = self._vc_get_client(message.guild)
+            vc = self._vc_get_client(message.guild, target_channel)
             connected = bool(vc and vc.is_connected())
             listening = self._vc_is_listening(vc)
-            chan = vc.channel.name if connected and vc.channel else "none"
+            chan = getattr(getattr(vc, "channel", None), "name", None) or str(getattr(getattr(vc, "channel", None), "id", "none"))
             await message.channel.send(f"connected: **{connected}** | channel: **{chan}** | listening: **{listening}** | reply_mode: **{self._control.get('vc_reply_mode','voice')}** | response_mode: **{self._control.get('vc_response_mode','addressed')}** | rms: **{self._control.get('vc_rms_threshold',500)}** | pause: **{self._control.get('vc_pause_seconds',0.9)}s**")
             return
         if sub == "join":
-            if voice_recv is None:
-                await message.channel.send("voice receive module missing. install requirements (`pip install -r requirements.txt`) and retry.")
+            if voice_recv is None or LiveSpeechSink is None:
+                await message.channel.send(f"voice receive module missing or failed to import. install requirements (`pip install -r requirements.txt`) and retry. error: {_voice_recv_import_error}")
                 return
-            target = getattr(message.author, "voice", None)
-            if not target or not target.channel:
+            if not target_channel:
                 await message.channel.send("join a voice channel first")
                 return
-            vc = discord.utils.get(self.voice_clients, guild=message.guild) if message.guild else None
+            vc = self._vc_get_client(message.guild, target_channel)
             try:
                 if vc and vc.is_connected():
-                    await vc.move_to(target.channel)
+                    if getattr(getattr(vc, "channel", None), "id", None) != getattr(target_channel, "id", None):
+                        await vc.move_to(target_channel)
                 else:
-                    await target.channel.connect(cls=voice_recv.VoiceRecvClient, self_deaf=False, self_mute=False)
-            except RuntimeError as e:
+                    vc = await self._vc_connect_channel(target_channel)
+                if not hasattr(vc, "listen"):
+                    await message.channel.send("joined voice, but this connection does not support receive/listen")
+                    return
+            except (RuntimeError, TypeError, discord.ClientException) as e:
                 logger.exception("Voice channel join failed")
                 await message.channel.send(f"couldn't join voice: {e}")
                 return
             try:
-                listening = await self._vc_start_listening(message.guild, message.channel)
-                await message.channel.send(f"joined **{target.channel.name}** | listening: **{listening}**")
+                listening = await self._vc_start_listening(message.guild, message.channel, target_channel)
+                await message.channel.send(f"joined **{getattr(target_channel, 'name', target_channel.id)}** | listening: **{listening}**")
             except Exception as e:
                 logger.exception("Voice listening start failed")
-                await message.channel.send(f"joined **{target.channel.name}** | listening failed: {e}")
+                await message.channel.send(f"joined **{getattr(target_channel, 'name', target_channel.id)}** | listening failed: {e}")
             return
         if sub == "leave":
-            vc = self._vc_get_client(message.guild)
+            vc = self._vc_get_client(message.guild, target_channel)
             if vc and vc.is_connected():
-                await self._vc_stop_listening(message.guild)
+                await self._vc_stop_listening(message.guild, target_channel, message.channel)
                 await vc.disconnect(force=True)
                 await message.channel.send("left voice channel")
             else:
                 await message.channel.send("not connected")
             return
         if sub == "listen":
-            if voice_recv is None:
-                await message.channel.send("voice receive module missing. install requirements (`pip install -r requirements.txt`) and retry.")
+            if voice_recv is None or LiveSpeechSink is None:
+                await message.channel.send(f"voice receive module missing or failed to import. install requirements (`pip install -r requirements.txt`) and retry. error: {_voice_recv_import_error}")
                 return
-            vc = self._vc_get_client(message.guild)
+            vc = self._vc_get_client(message.guild, target_channel)
             if not vc or not vc.is_connected():
                 await message.channel.send("not connected; use `,vc join` first")
                 return
             try:
-                listening = await self._vc_start_listening(message.guild, message.channel)
+                listening = await self._vc_start_listening(message.guild, message.channel, getattr(vc, "channel", target_channel))
                 await message.channel.send("listening enabled" if listening else "already listening")
             except Exception as e:
                 logger.exception("Voice listen failed")
                 await message.channel.send(f"failed to start listening: {e}")
             return
         if sub == "unlisten":
-            await self._vc_stop_listening(message.guild)
+            await self._vc_stop_listening(message.guild, target_channel, message.channel)
             await message.channel.send("listening disabled")
             return
         if sub == "say":
             if not rest.strip():
                 await message.channel.send("usage: `,vc say <text>`")
                 return
-            vc = discord.utils.get(self.voice_clients, guild=message.guild) if message.guild else None
+            vc = self._vc_get_client(message.guild, target_channel)
             if not vc or not vc.is_connected():
                 await message.channel.send("connect me first with `,vc join`")
                 return
             with tempfile.TemporaryDirectory(prefix="maxwell-vc-") as tmp:
                 wav_path = str(Path(tmp) / "tts.wav")
                 await _synthesize_tts_wav(rest[:400], wav_path)
-                sink = self._vc_sinks.get(message.guild.id) if message.guild else None
+                key = self._vc_context_key(message.guild, getattr(vc, "channel", target_channel), message.channel)
+                sink = self._vc_sinks.get(key)
                 if sink:
                     sink.set_ignore_until(asyncio.get_running_loop().time() + 90.0)
                 if vc.is_playing():
@@ -1601,34 +1609,106 @@ class MaxwellBot(commands.Bot):
             return
         await message.channel.send("unknown vc command. try `,vc help`")
 
-    def _vc_get_client(self, guild):
-        return discord.utils.get(self.voice_clients, guild=guild) if guild else None
+    def _vc_context_key(self, guild=None, voice_channel=None, text_channel=None) -> int:
+        if guild is not None:
+            return int(guild.id)
+        channel = voice_channel or text_channel
+        return int(getattr(channel, "id", 0) or 0)
+
+    def _vc_get_client(self, guild=None, voice_channel=None):
+        if guild is not None:
+            found = discord.utils.get(self.voice_clients, guild=guild)
+            if found:
+                return found
+        voice_channel_id = getattr(voice_channel, "id", None)
+        if voice_channel_id is not None:
+            for vc in self.voice_clients:
+                if getattr(getattr(vc, "channel", None), "id", None) == voice_channel_id:
+                    return vc
+        return None
 
     def _vc_is_listening(self, vc) -> bool:
-        return bool(vc and getattr(vc, "_maxwell_sink", None))
-
-    async def _vc_start_listening(self, guild, text_channel):
-        if not guild:
+        if not vc:
             return False
-        vc = self._vc_get_client(guild)
+        try:
+            if hasattr(vc, "is_listening") and vc.is_listening():
+                return True
+        except Exception:
+            pass
+        return bool(getattr(vc, "_maxwell_sink", None))
+
+    async def _vc_connect_channel(self, channel):
+        if voice_recv is None:
+            raise RuntimeError(f"voice receive module is unavailable: {_voice_recv_import_error}")
+        attempts = (
+            {"cls": voice_recv.VoiceRecvClient, "self_deaf": False, "self_mute": False},
+            {"cls": voice_recv.VoiceRecvClient},
+        )
+        last_error = None
+        for kwargs in attempts:
+            try:
+                return await channel.connect(**kwargs)
+            except TypeError as e:
+                last_error = e
+                lowered = str(e).lower()
+                if "unexpected keyword" in lowered or "got an unexpected" in lowered:
+                    continue
+                raise
+        raise RuntimeError(f"voice channel connect signature is incompatible with voice receive: {last_error}")
+
+    async def _vc_start_listening(self, guild, text_channel, voice_channel=None):
+        key = self._vc_context_key(guild, voice_channel, text_channel)
+        if not key:
+            return False
+        vc = self._vc_get_client(guild, voice_channel)
         if not vc or not vc.is_connected():
             return False
+        if not hasattr(vc, "listen"):
+            raise RuntimeError("current voice client does not support listen(); reconnect with VoiceRecvClient")
         if self._vc_is_listening(vc):
-            self._vc_text_channels[guild.id] = text_channel
+            self._vc_text_channels[key] = text_channel
+            self._vc_voice_channels[key] = voice_channel or getattr(vc, "channel", None)
             return False
-        sink = LiveSpeechSink(loop=asyncio.get_running_loop(), on_utterance=lambda user, wav_path, dur: self._handle_vc_utterance(guild, text_channel, user, wav_path, dur), guild_id=guild.id, control=self._control, self_user_id=(self.user.id if self.user else 0), debug=self._control.get("vc_debug", False))
-        vc.listen(sink)
+        if LiveSpeechSink is None:
+            raise RuntimeError(f"LiveSpeechSink unavailable: {_voice_recv_import_error}")
+        loop = asyncio.get_running_loop()
+        sink = LiveSpeechSink(loop=loop, on_utterance=lambda user, wav_path, dur: self._handle_vc_utterance(guild, text_channel, user, wav_path, dur), guild_id=key, control=self._control, self_user_id=(self.user.id if self.user else 0), debug=self._control.get("vc_debug", False))
+
+        def after(exc):
+            def finish():
+                if exc:
+                    logger.warning("VC receive stopped for key=%s: %s", key, exc)
+                if getattr(vc, "_maxwell_sink", None) is sink:
+                    vc._maxwell_sink = None
+                self._vc_sinks.pop(key, None)
+                sink.cleanup()
+                if exc and vc and vc.is_connected():
+                    async def restart():
+                        await asyncio.sleep(1.5)
+                        if vc.is_connected() and not self._vc_is_listening(vc):
+                            try:
+                                await self._vc_start_listening(guild, text_channel, voice_channel or getattr(vc, "channel", None))
+                            except Exception:
+                                logger.exception("VC receive restart failed")
+                    loop.create_task(restart())
+            loop.call_soon_threadsafe(finish)
+
+        vc.listen(sink, after=after)
         vc._maxwell_sink = sink
-        self._vc_sinks[guild.id] = sink
-        self._vc_text_channels[guild.id] = text_channel
-        self._vc_reply_locks.setdefault(guild.id, asyncio.Lock())
+        self._vc_sinks[key] = sink
+        self._vc_text_channels[key] = text_channel
+        self._vc_voice_channels[key] = voice_channel or getattr(vc, "channel", None)
+        self._vc_reply_locks.setdefault(key, asyncio.Lock())
         return True
 
-    async def _vc_stop_listening(self, guild):
-        if not guild:
+    async def _vc_stop_listening(self, guild, voice_channel=None, text_channel=None):
+        key = self._vc_context_key(guild, voice_channel, text_channel)
+        if not key:
             return
-        vc = self._vc_get_client(guild)
-        sink = self._vc_sinks.pop(guild.id, None) or (getattr(vc, "_maxwell_sink", None) if vc else None)
+        vc = self._vc_get_client(guild, voice_channel or self._vc_voice_channels.get(key))
+        sink = self._vc_sinks.pop(key, None) or (getattr(vc, "_maxwell_sink", None) if vc else None)
+        self._vc_text_channels.pop(key, None)
+        self._vc_voice_channels.pop(key, None)
         if vc and hasattr(vc, "stop_listening"):
             try:
                 vc.stop_listening()
@@ -1649,12 +1729,16 @@ class MaxwellBot(commands.Bot):
                 wav_bytes = f.read()
             media = {"b64": base64.b64encode(wav_bytes).decode("utf-8"), "mime_type": "audio/wav", "filename": Path(wav_path).name, "is_image": False, "is_text": False, "text": ""}
             facts = []
+            guild_id = str(guild.id) if guild else ""
+            guild_name = getattr(guild, "name", "DM/group call")
+            channel_id = str(getattr(text_channel, "id", ""))
+            is_dm = guild is None
             if self._control.get("cross_context_enabled", True):
-                facts = await self.memory.get_relevant_shared_context(user_id=str(user.id), guild_id=str(guild.id), channel_id=str(text_channel.id), is_dm=False, is_admin=self._is_admin(user.id), max_items=max(1, min(int(self._control.get("cross_context_max_items", 10) or 10), 50)), budget=max(1000, min(int(self._control.get("cross_context_budget", 5000) or 5000), 20000)))
+                facts = await self.memory.get_relevant_shared_context(user_id=str(user.id), guild_id=guild_id, channel_id=channel_id, is_dm=is_dm, is_admin=self._is_admin(user.id), max_items=max(1, min(int(self._control.get("cross_context_max_items", 10) or 10), 50)), budget=max(1000, min(int(self._control.get("cross_context_budget", 5000) or 5000), 20000)))
             sys_msg = (
                 f"Style: {self._control.get('base_personality', DEFAULT_CONTROL['base_personality'])}\n"
                 f"You are listening to a Discord voice channel. Speaker: {user.display_name} ({user.id}). "
-                f"Guild: {guild.name} ({guild.id}), Text channel: {getattr(text_channel, 'name', 'unknown')} ({text_channel.id}). "
+                f"Guild/context: {guild_name} ({guild_id or 'none'}), Text channel: {getattr(text_channel, 'name', 'unknown')} ({channel_id}). "
                 f"Reply mode: {self._control.get('vc_reply_mode', 'voice')}. "
                 f"Response mode: {self._control.get('vc_response_mode', 'addressed')}. "
                 "The attached audio is the latest user message. Listen to it directly."
@@ -1667,7 +1751,7 @@ class MaxwellBot(commands.Bot):
             if facts:
                 sys_msg += "\nCross-context facts:\n" + "\n".join(f"- [{f.get('scope')}, i{f.get('importance')}] {f.get('content')}" for f in facts)
             messages = [{"role": "system", "content": sys_msg}]
-            memory = await self.memory.get_channel_memory(str(text_channel.id))
+            memory = await self.memory.get_channel_memory(channel_id)
             for msg in memory[-10:]:
                 role = "assistant" if msg.get("author") == (self.user.display_name if self.user else self.bot_name) else "user"
                 messages.append({"role": role, "content": f"{msg.get('author', 'user')}: {msg.get('content', '')[:600]}"})
@@ -1678,25 +1762,27 @@ class MaxwellBot(commands.Bot):
                 return
             mode = str(self._control.get("vc_reply_mode", "voice")).lower()
             if mode in {"text", "both"}:
-                await text_channel.send(self._render_custom_emojis(resp, guild))
+                await text_channel.send(self._render_custom_emojis(resp, guild) if guild else resp)
             if mode in {"voice", "both"}:
                 await self._play_vc_response(guild, text_channel, resp)
             if self._control.get("store_memory", False):
-                await self.memory.add_to_channel_memory(str(text_channel.id), {"author": user.display_name, "author_id": str(user.id), "author_is_bot": bool(user.bot), "content": f"[voice message, {duration:.1f}s]"})
-                await self.memory.add_to_channel_memory(str(text_channel.id), {"author": (self.user.display_name if self.user else self.bot_name), "author_id": str(self.user.id if self.user else 0), "author_is_bot": True, "content": resp})
+                await self.memory.add_to_channel_memory(channel_id, {"author": user.display_name, "author_id": str(user.id), "author_is_bot": bool(getattr(user, "bot", False)), "content": f"[voice message, {duration:.1f}s]"})
+                await self.memory.add_to_channel_memory(channel_id, {"author": (self.user.display_name if self.user else self.bot_name), "author_id": str(self.user.id if self.user else 0), "author_is_bot": True, "content": resp})
         except Exception as e:
-            logger.error(f"VC utterance handling failed: {e}")
+            logger.error(f"VC utterance handling failed: {e}\n{traceback.format_exc()}")
         finally:
             Path(wav_path).unlink(missing_ok=True)
 
     async def _play_vc_response(self, guild, text_channel, response: str):
-        lock = self._vc_reply_locks.setdefault(guild.id, asyncio.Lock())
+        key = self._vc_context_key(guild, None, text_channel)
+        voice_channel = self._vc_voice_channels.get(key)
+        lock = self._vc_reply_locks.setdefault(key, asyncio.Lock())
         async with lock:
-            vc = self._vc_get_client(guild)
+            vc = self._vc_get_client(guild, voice_channel)
             if not vc or not vc.is_connected():
                 await text_channel.send(response)
                 return
-            sink = self._vc_sinks.get(guild.id)
+            sink = self._vc_sinks.get(key)
             done = asyncio.Event()
             loop = asyncio.get_running_loop()
             with tempfile.TemporaryDirectory(prefix="maxwell-vc-reply-") as tmp:
@@ -3059,7 +3145,10 @@ class MaxwellBot(commands.Bot):
             await self._acquire_ai_slot(timeout=ai_timeout)
             try:
                 if self._control.get("typing_indicator", True):
-                    async with message.channel.typing():
+                    try:
+                        async with message.channel.typing():
+                            response = await self.ai_provider.generate_response(messages, media=active_media, timeout=ai_timeout)
+                    except discord.Forbidden:
                         response = await self.ai_provider.generate_response(messages, media=active_media, timeout=ai_timeout)
                 else:
                     response = await self.ai_provider.generate_response(messages, media=active_media, timeout=ai_timeout)
@@ -3219,7 +3308,10 @@ class MaxwellBot(commands.Bot):
                     tool_results.append(f"Tool {name}: {result_text}")
                     await remember_tool_call(name, params, result_text)
         if self._control.get("typing_indicator", True):
-            async with message.channel.typing():
+            try:
+                async with message.channel.typing():
+                    await run_calls()
+            except discord.Forbidden:
                 await run_calls()
         else:
             await run_calls()

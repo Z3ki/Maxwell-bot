@@ -32,6 +32,7 @@ class LiveSpeechSink(voice_recv.AudioSink):
     sample_width = 2
 
     def __init__(self, *, loop, on_utterance, guild_id, control, self_user_id, debug=False):
+        super().__init__()
         self.loop = loop
         self.on_utterance = on_utterance
         self.guild_id = guild_id
@@ -154,6 +155,8 @@ class LiveSpeechSink(voice_recv.AudioSink):
     def _rms16le(buf: bytes) -> float:
         if len(buf) < 2:
             return 0.0
+        if len(buf) % 2:
+            buf = buf[:-1]
         mv = memoryview(buf).cast("h")
         n = len(mv)
         if n == 0:
