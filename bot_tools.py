@@ -2086,3 +2086,31 @@ class TtsTool(Tool):
                             pass
         else:
             return f"Error: Audio file {filename} was not generated"
+
+
+class LeaveVcTool(Tool):
+    """Leave the active voice channel"""
+
+    def get_description(self):
+        return (
+            "Immediately disconnect from the active voice channel in this server. "
+            "Use this when the user or conversation indicates that you should leave the voice channel."
+        )
+
+    async def execute(self, message: Message, **kwargs) -> str:
+        if not message.guild:
+            return "Error: This tool can only be used within a server/guild."
+        vc = None
+        for client in self.bot.voice_clients:
+            if client.guild.id == message.guild.id:
+                vc = client
+                break
+        if not vc or not vc.is_connected():
+            return "Error: I am not currently connected to any voice channel in this server."
+        try:
+            if hasattr(self.bot, "_vc_stop_listening"):
+                await self.bot._vc_stop_listening(message.guild, vc.channel, message.channel)
+            await vc.disconnect(force=True)
+            return "Successfully disconnected from the voice channel."
+        except Exception as e:
+            return f"Error leaving voice channel: {e}"

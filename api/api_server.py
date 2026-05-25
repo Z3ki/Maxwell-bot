@@ -149,7 +149,7 @@ KNOWN_TOOLS = [
     "forward_message", "typing", "list_servers", "change_avatar", "create_site",
     "list_admin_servers", "create_category", "create_channel", "edit_channel", "delete_channel",
     "list_sites", "web_search", "no_response", "shell", "fetch_url",
-    "send_meme", "send_media", "send_message", "reasoning_log",
+    "send_meme", "send_media", "send_message", "reasoning_log", "leave_vc",
 ]
 
 

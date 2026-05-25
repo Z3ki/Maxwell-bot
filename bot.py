@@ -153,6 +153,7 @@ from bot_tools import (
     TypingTool,
     TtsTool,
     WebSearchTool,
+    LeaveVcTool,
     OWNER_IDS,
     close_shared_session,
     _get_shared_session,
@@ -942,7 +943,7 @@ DEFAULT_CONTROL = {
         "or gives Maxwell an obvious funny/sassy opening. Say no for random chatter between others, bot commands, one-word noise, "
         "emoji/laugh spam, greetings with no hook, or anything where Maxwell would be awkwardly butting in. If unsure, say no."
     ),
-    "vc_rms_threshold": 650,
+    "vc_rms_threshold": 1200,
     "vc_pause_seconds": 0.8,
     "vc_min_seconds": 0.55,
     "vc_max_seconds": 18,
@@ -957,7 +958,7 @@ DEFAULT_CONTROL = {
     "vc_response_mode": "addressed",
     "vc_wake_words": ["maxwell"],
     "vc_interrupt_enabled": True,
-    "vc_debug": False,
+    "vc_debug": True,
 }
 
 
@@ -1131,6 +1132,7 @@ class MaxwellBot(commands.Bot):
         self.tools["send_meme"] = SendMemeTool(self)
         self.tools["send_media"] = SendMediaTool(self)
         self.tools["kilo_run"] = KiloTool(self)
+        self.tools["leave_vc"] = LeaveVcTool(self)
 
     def _build_activities(self):
         activities = []
