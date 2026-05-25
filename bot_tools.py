@@ -646,7 +646,7 @@ class ChangePresenceTool(Tool):
     """Change bot online status"""
 
     def get_description(self):
-        return "Set your online status. Params: status (online/idle/dnd/invisible)."
+        return "Set your online availability/status dot. Params: status (online/idle/dnd/invisible). Use set_activity for the visible custom status text."
 
     async def execute(self, message: Message, status: str = "online", **kwargs) -> str:
         valid = ["online", "idle", "dnd", "invisible"]
@@ -663,7 +663,7 @@ class SetActivityTool(Tool):
 
     def get_description(self):
         return (
-            "Set your activity or custom status message (the text under your name). "
+            "Set your activity or custom status message (the visible text under your name). Use this whenever a user asks you to change/update your status, activity, vibe, or what you are doing. "
             "Params: type (playing/watching/listening/competing/custom), text (the status text), "
             "elapsed (optional, show time played, e.g. '2h 30m' or '45m'). "
             "Use type='custom' for a plain status message like 'chilling'. "
