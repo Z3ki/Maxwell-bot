@@ -35,6 +35,7 @@ def _patch_voice_recv_decoder():
         return
     try:
         from discord.ext.voice_recv import opus as voice_recv_opus
+        import davey
     except Exception:
         logger = logging.getLogger(__name__)
         logger.exception("Failed to import voice receive opus decoder for patching")
@@ -47,16 +48,67 @@ def _patch_voice_recv_decoder():
     original_decode_packet = decoder_cls._decode_packet
 
     def _decode_packet_drop_bad_opus(self, packet):
+        user_id = getattr(self, "_cached_id", None)
+        if user_id is None:
+            try:
+                user_id = self.sink.voice_client._get_id_from_ssrc(self.ssrc)
+                if user_id is not None:
+                    self._cached_id = user_id
+            except Exception:
+                user_id = None
+        if packet and user_id is not None:
+            try:
+                vc = self.sink.voice_client
+                session = getattr(getattr(vc, "_connection", None), "dave_session", None)
+                if session is not None and getattr(session, "ready", False):
+                    packet.decrypted_data = session.decrypt(int(user_id), davey.MediaType.audio, packet.decrypted_data)
+            except Exception as exc:
+                if "UnencryptedWhenPassthroughDisabled" in str(exc):
+                    try:
+                        if hasattr(session, "can_passthrough"):
+                            session.can_passthrough(int(user_id))
+                        if hasattr(session, "set_passthrough_mode"):
+                            session.set_passthrough_mode(True, 10)
+                    except Exception:
+                        logging.getLogger(__name__).debug("Failed to enable DAVE passthrough", exc_info=True)
+                log_key = "_maxwell_dave_decrypt_errors"
+                count = getattr(self, log_key, 0) + 1
+                setattr(self, log_key, count)
+                if count <= 3 or count % 100 == 0:
+                    logging.getLogger(__name__).warning(
+                        "DAVE decrypt failed ssrc=%s user=%s seq=%s count=%s: %s",
+                        getattr(packet, "ssrc", "?"),
+                        user_id,
+                        getattr(packet, "sequence", "?"),
+                        count,
+                        exc,
+                    )
         try:
             return original_decode_packet(self, packet)
         except discord.opus.OpusError as exc:
-            logging.getLogger(__name__).warning(
-                "Dropping corrupted voice packet ssrc=%s seq=%s: %s",
-                getattr(packet, "ssrc", "?"),
-                getattr(packet, "sequence", "?"),
-                exc,
-            )
-            return packet, b"\x00" * 3840
+            log_key = "_maxwell_bad_opus_packets"
+            count = getattr(self, log_key, 0) + 1
+            setattr(self, log_key, count)
+            try:
+                sink = getattr(self, "sink", None)
+                if sink is not None and user_id is not None and hasattr(sink, "record_decode_drop"):
+                    sink.record_decode_drop(int(user_id))
+            except Exception:
+                logging.getLogger(__name__).debug("Failed to record voice decode drop", exc_info=True)
+            try:
+                if not self.sink.wants_opus():
+                    self._decoder = voice_recv_opus.Decoder()
+            except Exception:
+                logging.getLogger(__name__).exception("Failed to reset voice Opus decoder")
+            if count <= 3 or count % 100 == 0:
+                logging.getLogger(__name__).warning(
+                    "Dropping corrupted voice packet ssrc=%s seq=%s count=%s: %s",
+                    getattr(packet, "ssrc", "?"),
+                    getattr(packet, "sequence", "?"),
+                    count,
+                    exc,
+                )
+            return packet, b""
 
     decoder_cls._decode_packet = _decode_packet_drop_bad_opus
     decoder_cls._maxwell_opus_patch = True
@@ -848,9 +900,15 @@ DEFAULT_CONTROL = {
     "vc_min_seconds": 0.75,
     "vc_max_seconds": 18,
     "vc_preroll_seconds": 0.25,
+    "vc_ai_timeout_seconds": 25,
+    "vc_ai_max_tokens": 90,
+    "vc_memory_history_messages": 2,
+    "vc_cross_context_enabled": False,
+    "vc_max_response_chars": 260,
     "vc_reply_mode": "voice",
     "vc_response_mode": "addressed",
     "vc_wake_words": ["maxwell"],
+    "vc_interrupt_enabled": True,
     "vc_debug": False,
 }
 
@@ -1763,20 +1821,19 @@ class MaxwellBot(commands.Bot):
             with open(wav_path, "rb") as f:
                 wav_bytes = f.read()
             media = {"b64": base64.b64encode(wav_bytes).decode("utf-8"), "mime_type": "audio/wav", "filename": Path(wav_path).name, "is_image": False, "is_text": False, "text": ""}
-            facts = []
             guild_id = str(guild.id) if guild else ""
             guild_name = getattr(guild, "name", "DM/group call")
             channel_id = str(getattr(text_channel, "id", ""))
-            is_dm = guild is None
-            if self._control.get("cross_context_enabled", True):
-                facts = await self.memory.get_relevant_shared_context(user_id=str(user.id), guild_id=guild_id, channel_id=channel_id, is_dm=is_dm, is_admin=self._is_admin(user.id), max_items=max(1, min(int(self._control.get("cross_context_max_items", 10) or 10), 50)), budget=max(1000, min(int(self._control.get("cross_context_budget", 5000) or 5000), 20000)))
+            facts = []
+            if self._control.get("vc_cross_context_enabled", False):
+                facts = await self.memory.get_relevant_shared_context(user_id=str(user.id), guild_id=guild_id, channel_id=channel_id, is_dm=(guild is None), is_admin=self._is_admin(user.id), max_items=3, budget=1500)
+            base_style = str(self._control.get('base_personality', DEFAULT_CONTROL['base_personality']))
+            style_bits = base_style.split("Discord style:", 1)[-1].strip() if "Discord style:" in base_style else "short, casual, blunt/sassy when it fits."
             sys_msg = (
-                f"Style: {self._control.get('base_personality', DEFAULT_CONTROL['base_personality'])}\n"
-                f"You are listening to a Discord voice channel. Speaker: {user.display_name} ({user.id}). "
-                f"Guild/context: {guild_name} ({guild_id or 'none'}), Text channel: {getattr(text_channel, 'name', 'unknown')} ({channel_id}). "
-                f"Reply mode: {self._control.get('vc_reply_mode', 'voice')}. "
-                f"Response mode: {self._control.get('vc_response_mode', 'addressed')}. "
-                "The attached audio is the latest user message. Listen to it directly."
+                f"You are Maxwell in a Discord voice call. Speaker: {user.display_name}. Context: {guild_name}. "
+                f"Style: {style_bits} Voice replies must be fast: answer in 1-2 short sentences, no lists unless asked. "
+                "Do not expose reasoning, analysis, chain-of-thought, JSON, tool calls, or hidden notes. "
+                "Listen to the attached audio and reply directly."
             )
             if self._control.get("vc_response_mode", "addressed") == "addressed":
                 sys_msg += (
@@ -1786,16 +1843,25 @@ class MaxwellBot(commands.Bot):
             if facts:
                 sys_msg += "\nCross-context facts:\n" + "\n".join(f"- [{f.get('scope')}, i{f.get('importance')}] {f.get('content')}" for f in facts)
             messages = [{"role": "system", "content": sys_msg}]
-            memory = await self.memory.get_channel_memory(channel_id)
-            for msg in memory[-10:]:
+            memory_count = max(0, min(int(self._control.get("vc_memory_history_messages", 2) or 0), 5))
+            memory = await self.memory.get_channel_memory(channel_id) if memory_count else []
+            for msg in memory[-memory_count:]:
                 role = "assistant" if msg.get("author") == (self.user.display_name if self.user else self.bot_name) else "user"
-                messages.append({"role": role, "content": f"{msg.get('author', 'user')}: {msg.get('content', '')[:600]}"})
-            messages.append({"role": "user", "content": f"Latest Discord VC utterance from {user.display_name}. Audio is attached. Reply naturally."})
-            resp = await self.ai_provider.generate_response(messages, media=[media], timeout=max(20, min(int(self._control.get('ai_timeout_seconds', 180) or 180), 600)))
+                messages.append({"role": role, "content": f"{msg.get('author', 'user')}: {msg.get('content', '')[:220]}"})
+            messages.append({"role": "user", "content": f"Latest VC utterance from {user.display_name}. Audio is attached. Reply quickly and naturally."})
+            logger.info("VC utterance captured user=%s dur=%.2fs file=%s bytes=%s", getattr(user, "id", "?"), duration, Path(wav_path).name, len(wav_bytes))
+            vc_timeout = max(8, min(int(self._control.get("vc_ai_timeout_seconds", 25) or 25), 90))
+            vc_max_tokens = max(24, min(int(self._control.get("vc_ai_max_tokens", 90) or 90), 240))
+            resp = await self.ai_provider.generate_response(messages, media=[media], timeout=vc_timeout, max_tokens=vc_max_tokens, temperature=0.6, disable_reasoning=True)
             resp = strip_tool_payload_leaks((resp or "").strip())
             if not resp or resp == "__NO_RESPONSE__":
+                logger.info("VC utterance produced no response user=%s dur=%.2fs", getattr(user, "id", "?"), duration)
                 return
+            max_chars = max(80, min(int(self._control.get("vc_max_response_chars", 260) or 260), 600))
+            if len(resp) > max_chars:
+                resp = resp[:max_chars].rsplit(" ", 1)[0].rstrip(".,;: ") + "..."
             mode = str(self._control.get("vc_reply_mode", "voice")).lower()
+            logger.info("VC utterance response user=%s mode=%s chars=%s", getattr(user, "id", "?"), mode, len(resp))
             if mode in {"text", "both"}:
                 await text_channel.send(self._render_custom_emojis(resp, guild) if guild else resp)
             if mode in {"voice", "both"}:

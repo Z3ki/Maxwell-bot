@@ -131,14 +131,19 @@ class OllamaProvider:
         chat_messages: list[dict],
         tools: list[dict] = None,
         model: str = None,
+        max_tokens: int = None,
+        temperature: float = None,
+        disable_reasoning: bool = None,
     ) -> dict:
         data = {
             "model": model or endpoint.model if endpoint.name == "primary" else endpoint.model,
             "messages": chat_messages,
-            "temperature": self.temperature,
+            "temperature": self.temperature if temperature is None else temperature,
             "stream": False,
         }
-        if endpoint.disable_reasoning:
+        if max_tokens is not None:
+            data["max_tokens"] = max_tokens
+        if endpoint.disable_reasoning or disable_reasoning:
             data["reasoning"] = {"exclude": True}
         if tools:
             data["tools"] = tools
@@ -175,10 +180,10 @@ class OllamaProvider:
         return initialized
 
     async def generate_response(
-        self, messages: list[dict], images: list[str] = None, media: list[dict] = None, timeout: int = 60
+        self, messages: list[dict], images: list[str] = None, media: list[dict] = None, timeout: int = 60, **kwargs
     ) -> str:
         """Generate response. images is legacy b64 list, media is list of {b64, mime_type}."""
-        message = await self.generate_chat_completion(messages, images=images, media=media, timeout=timeout)
+        message = await self.generate_chat_completion(messages, images=images, media=media, timeout=timeout, **kwargs)
         content = message.get("content", "")
         if not content:
             raise RuntimeError("Empty response from provider")
@@ -192,6 +197,9 @@ class OllamaProvider:
         tools: list[dict] = None,
         model: str = None,
         timeout: int = 60,
+        max_tokens: int = None,
+        temperature: float = None,
+        disable_reasoning: bool = None,
     ) -> dict:
         """Generate an OpenAI-compatible assistant message, optionally with tools."""
         if not self.available:
@@ -260,7 +268,7 @@ class OllamaProvider:
         last_usage_error = None
         for attempt in range(1, self.retry_attempts + 1):
             endpoint = self._attempt_endpoint(attempt)
-            data = self._request_payload(endpoint, chat_messages, tools=tools, model=model)
+            data = self._request_payload(endpoint, chat_messages, tools=tools, model=model, max_tokens=max_tokens, temperature=temperature, disable_reasoning=disable_reasoning)
             try:
                 async with session.post(
                     f"{endpoint.base_url}/chat/completions",

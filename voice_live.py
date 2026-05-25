@@ -18,6 +18,8 @@ class _SpeakerState:
     active: bytearray = field(default_factory=bytearray)
     currently_speaking: bool = False
     voiced_frames: int = 0
+    voiced_seconds: float = 0.0
+    decode_drops: int = 0
     first_voice_time: float = 0.0
     last_voice_time: float = 0.0
     last_packet_time: float = 0.0
@@ -53,6 +55,14 @@ class LiveSpeechSink(voice_recv.AudioSink):
         with self._lock:
             self._ignore_until = max(self._ignore_until, float(monotonic_ts))
 
+    def record_decode_drop(self, user_id: int):
+        with self._lock:
+            st = self._states.get(int(user_id))
+            if st is None:
+                st = _SpeakerState()
+                self._states[int(user_id)] = st
+            st.decode_drops += 1
+
     def write(self, user, data):
         if not self._running or user is None:
             return
@@ -67,6 +77,15 @@ class LiveSpeechSink(voice_recv.AudioSink):
         frame_dur = len(frame) / (self.sample_rate * self.channels * self.sample_width)
         rms = self._rms16le(frame)
         with self._lock:
+            if now < self._ignore_until:
+                if rms >= int(self.control.get("vc_rms_threshold", 500)) and self.control.get("vc_interrupt_enabled", True):
+                    vc = self.voice_client
+                    if vc and vc.is_playing():
+                        logger.info("VC playback interrupted by user=%s", uid)
+                        vc.stop()
+                    self._ignore_until = 0.0
+                else:
+                    return
             if now < self._ignore_until:
                 return
             st = self._states.get(uid)
@@ -85,10 +104,13 @@ class LiveSpeechSink(voice_recv.AudioSink):
                     st.currently_speaking = True
                     st.first_voice_time = now
                     st.voiced_frames = 0
+                    st.voiced_seconds = 0.0
+                    st.decode_drops = 0
                     st.active = bytearray()
                     for p in st.pre_roll:
                         st.active.extend(p)
                 st.voiced_frames += 1
+                st.voiced_seconds += frame_dur
                 st.active.extend(frame)
                 max_secs = float(self.control.get("vc_max_seconds", 18.0))
                 if len(st.active) >= int(max_secs * self.sample_rate * self.channels * self.sample_width):
@@ -103,13 +125,20 @@ class LiveSpeechSink(voice_recv.AudioSink):
             return
         duration = len(st.active) / (self.sample_rate * self.channels * self.sample_width)
         min_secs = float(self.control.get("vc_min_seconds", 0.75))
-        if duration >= min_secs and st.user_obj is not None:
+        min_voiced_secs = float(self.control.get("vc_min_voiced_seconds", min(0.35, max(0.12, min_secs * 0.45))))
+        min_voiced_frames = int(self.control.get("vc_min_voiced_frames", 8))
+        max_decode_drops = int(self.control.get("vc_max_decode_drops", max(8, int(st.voiced_frames * 0.25))))
+        if duration >= min_secs and st.voiced_seconds >= min_voiced_secs and st.voiced_frames >= min_voiced_frames and st.decode_drops <= max_decode_drops and st.user_obj is not None:
             self._ready.append((st.user_obj, bytes(st.active), duration))
             if self.debug:
-                logger.info("VC utterance ready guild=%s user=%s dur=%.2fs (%s)", self.guild_id, getattr(st.user_obj, 'id', '?'), duration, why)
+                logger.info("VC utterance ready guild=%s user=%s dur=%.2fs voiced=%.2fs frames=%s drops=%s (%s)", self.guild_id, getattr(st.user_obj, 'id', '?'), duration, st.voiced_seconds, st.voiced_frames, st.decode_drops, why)
+        elif self.debug:
+            logger.info("VC utterance discarded guild=%s user=%s dur=%.2fs voiced=%.2fs frames=%s drops=%s max_drops=%s (%s)", self.guild_id, getattr(st.user_obj, 'id', '?'), duration, st.voiced_seconds, st.voiced_frames, st.decode_drops, max_decode_drops, why)
         st.currently_speaking = False
         st.active = bytearray()
         st.voiced_frames = 0
+        st.voiced_seconds = 0.0
+        st.decode_drops = 0
 
     async def _flush_loop(self):
         try:
