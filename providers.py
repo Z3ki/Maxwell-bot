@@ -3,6 +3,7 @@
 import asyncio
 import aiohttp
 import logging
+import time
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -269,6 +270,20 @@ class OllamaProvider:
         for attempt in range(1, self.retry_attempts + 1):
             endpoint = self._attempt_endpoint(attempt)
             data = self._request_payload(endpoint, chat_messages, tools=tools, model=model, max_tokens=max_tokens, temperature=temperature, disable_reasoning=disable_reasoning)
+            request_start = time.perf_counter()
+            media_parts = sum(1 for msg in chat_messages for part in (msg.get("content") if isinstance(msg.get("content"), list) else []) if isinstance(part, dict) and part.get("type") != "text")
+            logger.info(
+                "Provider timing start endpoint=%s model=%s attempt=%s/%s messages=%s media_parts=%s timeout=%s max_tokens=%s reasoning_disabled=%s",
+                endpoint.name,
+                data.get("model"),
+                attempt,
+                self.retry_attempts,
+                len(chat_messages),
+                media_parts,
+                timeout,
+                data.get("max_tokens"),
+                bool(data.get("reasoning")),
+            )
             try:
                 async with session.post(
                     f"{endpoint.base_url}/chat/completions",
@@ -276,13 +291,16 @@ class OllamaProvider:
                     timeout=aiohttp.ClientTimeout(total=timeout, connect=10),
                     headers=self._headers(endpoint),
                 ) as resp:
+                    headers_ms = (time.perf_counter() - request_start) * 1000
                     if resp.status == 503:
                         error_text = await resp.text()
+                        logger.warning("Provider timing status endpoint=%s status=%s headers_ms=%.1f body_chars=%s", endpoint.name, resp.status, headers_ms, len(error_text))
                         if await self._retry_after_attempt(attempt, endpoint, f"Provider {endpoint.name} 503"):
                             continue
                         raise RuntimeError(f"Provider overloaded after retries: {error_text[:200]}")
                     if resp.status == 429:
                         error_text = await resp.text()
+                        logger.warning("Provider timing status endpoint=%s status=%s headers_ms=%.1f body_chars=%s", endpoint.name, resp.status, headers_ms, len(error_text))
                         if _is_usage_exhausted_error(resp.status, error_text):
                             last_usage_error = ProviderUsageExhaustedError(
                                 f"Provider {endpoint.name} usage exhausted: {error_text[:200]}"
@@ -297,11 +315,13 @@ class OllamaProvider:
                         raise RuntimeError(f"Provider rate limited after retries: {error_text[:200]}")
                     if resp.status != 200:
                         error_text = await resp.text()
+                        logger.warning("Provider timing status endpoint=%s status=%s headers_ms=%.1f body_chars=%s", endpoint.name, resp.status, headers_ms, len(error_text))
                         raise RuntimeError(
                             f"Provider API error: {resp.status} - {error_text}"
                         )
 
                     result = await resp.json()
+                    json_ms = (time.perf_counter() - request_start) * 1000
                     choices = result.get("choices", [])
                     if not choices:
                         raise RuntimeError("No response from provider")
@@ -313,8 +333,18 @@ class OllamaProvider:
                             continue
                         raise RuntimeError("Empty response from provider")
 
+                    logger.info(
+                        "Provider timing done endpoint=%s status=%s headers_ms=%.1f total_ms=%.1f content_chars=%s tool_calls=%s",
+                        endpoint.name,
+                        resp.status,
+                        headers_ms,
+                        json_ms,
+                        len(content or ""),
+                        len(message.get("tool_calls") or []),
+                    )
                     return message
             except asyncio.TimeoutError:
+                logger.warning("Provider timing timeout endpoint=%s elapsed_ms=%.1f timeout=%s", endpoint.name, (time.perf_counter() - request_start) * 1000, timeout)
                 if await self._retry_after_attempt(attempt, endpoint, f"Provider {endpoint.name} timeout"):
                     continue
                 raise RuntimeError(f"Provider request timed out after {timeout}s")

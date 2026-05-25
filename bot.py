@@ -11,6 +11,7 @@ import random
 import shutil
 import sys
 import tempfile
+import time
 import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -228,7 +229,53 @@ TEXT_MIME_TYPES = {
 }
 
 
-async def _synthesize_tts_wav(text: str, output_path: str) -> str:
+async def _synthesize_local_tts_wav(text: str, output_path: str) -> str | None:
+    espeak = shutil.which("espeak-ng") or shutil.which("espeak")
+    if not espeak:
+        return None
+    raw_path = output_path + ".local.wav"
+    voice = os.environ.get("TTS_LOCAL_VOICE", "en-us")
+    speed = os.environ.get("TTS_LOCAL_SPEED", "185")
+    pitch = os.environ.get("TTS_LOCAL_PITCH", "45")
+    proc = await asyncio.create_subprocess_exec(
+        espeak,
+        "-v", voice,
+        "-s", speed,
+        "-p", pitch,
+        "-w", raw_path,
+        text,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _stdout, stderr = await proc.communicate()
+    if proc.returncode != 0 or not os.path.exists(raw_path):
+        logger.warning("Local espeak TTS failed: %s", stderr.decode("utf-8", "ignore")[:300])
+        return None
+    convert = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", raw_path, "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", output_path,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    _stdout, stderr = await convert.communicate()
+    try:
+        Path(raw_path).unlink(missing_ok=True)
+    except Exception:
+        pass
+    if convert.returncode != 0 or not os.path.exists(output_path):
+        logger.warning("Local espeak conversion failed: %s", stderr.decode("utf-8", "ignore")[:300])
+        return None
+    logger.info("Local VC TTS synthesized audio with espeak voice=%r speed=%r", voice, speed)
+    return output_path
+
+
+async def _synthesize_tts_wav(text: str, output_path: str, *, prefer_local: bool = False) -> str:
+    if prefer_local or os.environ.get("TTS_ENGINE", "").lower() in {"local", "espeak", "espeak-ng"}:
+        local = await _synthesize_local_tts_wav(text, output_path)
+        if local:
+            return local
+        if os.environ.get("TTS_ENGINE", "").lower() in {"local", "espeak", "espeak-ng"}:
+            logger.warning("Configured local TTS failed; falling back to remote TTS")
+
     nvidia_api_key = os.environ.get("NVIDIA_API_KEY", "")
     if nvidia_api_key:
         try:
@@ -905,6 +952,7 @@ DEFAULT_CONTROL = {
     "vc_memory_history_messages": 2,
     "vc_cross_context_enabled": False,
     "vc_max_response_chars": 260,
+    "vc_tts_engine": "riva",
     "vc_reply_mode": "voice",
     "vc_response_mode": "addressed",
     "vc_wake_words": ["maxwell"],
@@ -1686,7 +1734,8 @@ class MaxwellBot(commands.Bot):
                 return
             with tempfile.TemporaryDirectory(prefix="maxwell-vc-") as tmp:
                 wav_path = str(Path(tmp) / "tts.wav")
-                await _synthesize_tts_wav(rest[:400], wav_path)
+                prefer_local_tts = str(self._control.get("vc_tts_engine", "local")).lower() in {"local", "espeak", "espeak-ng"}
+                await _synthesize_tts_wav(rest[:400], wav_path, prefer_local=prefer_local_tts)
                 key = self._vc_context_key(message.guild, getattr(vc, "channel", target_channel), message.channel)
                 sink = self._vc_sinks.get(key)
                 if sink:
@@ -1813,6 +1862,8 @@ class MaxwellBot(commands.Bot):
             sink.cleanup()
 
     async def _handle_vc_utterance(self, guild, text_channel, user, wav_path, duration):
+        t_total = time.perf_counter()
+        t_stage = t_total
         try:
             if not self.user or user.id == self.user.id:
                 return
@@ -1821,12 +1872,14 @@ class MaxwellBot(commands.Bot):
             with open(wav_path, "rb") as f:
                 wav_bytes = f.read()
             media = {"b64": base64.b64encode(wav_bytes).decode("utf-8"), "mime_type": "audio/wav", "filename": Path(wav_path).name, "is_image": False, "is_text": False, "text": ""}
+            t_media = time.perf_counter()
             guild_id = str(guild.id) if guild else ""
             guild_name = getattr(guild, "name", "DM/group call")
             channel_id = str(getattr(text_channel, "id", ""))
             facts = []
             if self._control.get("vc_cross_context_enabled", False):
                 facts = await self.memory.get_relevant_shared_context(user_id=str(user.id), guild_id=guild_id, channel_id=channel_id, is_dm=(guild is None), is_admin=self._is_admin(user.id), max_items=3, budget=1500)
+            t_context = time.perf_counter()
             base_style = str(self._control.get('base_personality', DEFAULT_CONTROL['base_personality']))
             style_bits = base_style.split("Discord style:", 1)[-1].strip() if "Discord style:" in base_style else "short, casual, blunt/sassy when it fits."
             sys_msg = (
@@ -1849,23 +1902,41 @@ class MaxwellBot(commands.Bot):
                 role = "assistant" if msg.get("author") == (self.user.display_name if self.user else self.bot_name) else "user"
                 messages.append({"role": role, "content": f"{msg.get('author', 'user')}: {msg.get('content', '')[:220]}"})
             messages.append({"role": "user", "content": f"Latest VC utterance from {user.display_name}. Audio is attached. Reply quickly and naturally."})
-            logger.info("VC utterance captured user=%s dur=%.2fs file=%s bytes=%s", getattr(user, "id", "?"), duration, Path(wav_path).name, len(wav_bytes))
+            t_prompt = time.perf_counter()
+            logger.info(
+                "VC timing start user=%s audio_dur=%.2fs file=%s bytes=%s media_ms=%.1f context_ms=%.1f prompt_ms=%.1f messages=%s facts=%s",
+                getattr(user, "id", "?"),
+                duration,
+                Path(wav_path).name,
+                len(wav_bytes),
+                (t_media - t_stage) * 1000,
+                (t_context - t_media) * 1000,
+                (t_prompt - t_context) * 1000,
+                len(messages),
+                len(facts),
+            )
             vc_timeout = max(8, min(int(self._control.get("vc_ai_timeout_seconds", 25) or 25), 90))
             vc_max_tokens = max(24, min(int(self._control.get("vc_ai_max_tokens", 90) or 90), 240))
+            t_ai = time.perf_counter()
             resp = await self.ai_provider.generate_response(messages, media=[media], timeout=vc_timeout, max_tokens=vc_max_tokens, temperature=0.6, disable_reasoning=True)
+            t_ai_done = time.perf_counter()
             resp = strip_tool_payload_leaks((resp or "").strip())
             if not resp or resp == "__NO_RESPONSE__":
-                logger.info("VC utterance produced no response user=%s dur=%.2fs", getattr(user, "id", "?"), duration)
+                logger.info("VC timing no_response user=%s ai_ms=%.1f total_ms=%.1f", getattr(user, "id", "?"), (t_ai_done - t_ai) * 1000, (time.perf_counter() - t_total) * 1000)
                 return
             max_chars = max(80, min(int(self._control.get("vc_max_response_chars", 260) or 260), 600))
             if len(resp) > max_chars:
                 resp = resp[:max_chars].rsplit(" ", 1)[0].rstrip(".,;: ") + "..."
             mode = str(self._control.get("vc_reply_mode", "voice")).lower()
-            logger.info("VC utterance response user=%s mode=%s chars=%s", getattr(user, "id", "?"), mode, len(resp))
+            logger.info("VC timing response user=%s mode=%s chars=%s ai_ms=%.1f preplay_total_ms=%.1f", getattr(user, "id", "?"), mode, len(resp), (t_ai_done - t_ai) * 1000, (time.perf_counter() - t_total) * 1000)
             if mode in {"text", "both"}:
+                t_text = time.perf_counter()
                 await text_channel.send(self._render_custom_emojis(resp, guild) if guild else resp)
+                logger.info("VC timing text_send user=%s ms=%.1f", getattr(user, "id", "?"), (time.perf_counter() - t_text) * 1000)
             if mode in {"voice", "both"}:
+                t_play = time.perf_counter()
                 await self._play_vc_response(guild, text_channel, resp)
+                logger.info("VC timing play_done user=%s play_call_ms=%.1f total_ms=%.1f", getattr(user, "id", "?"), (time.perf_counter() - t_play) * 1000, (time.perf_counter() - t_total) * 1000)
             if self._control.get("store_memory", False):
                 await self.memory.add_to_channel_memory(channel_id, {"author": user.display_name, "author_id": str(user.id), "author_is_bot": bool(getattr(user, "bot", False)), "content": f"[voice message, {duration:.1f}s]"})
                 await self.memory.add_to_channel_memory(channel_id, {"author": (self.user.display_name if self.user else self.bot_name), "author_id": str(self.user.id if self.user else 0), "author_is_bot": True, "content": resp})
@@ -1875,30 +1946,48 @@ class MaxwellBot(commands.Bot):
             Path(wav_path).unlink(missing_ok=True)
 
     async def _play_vc_response(self, guild, text_channel, response: str):
+        t_total = time.perf_counter()
         key = self._vc_context_key(guild, None, text_channel)
         voice_channel = self._vc_voice_channels.get(key)
         lock = self._vc_reply_locks.setdefault(key, asyncio.Lock())
         async with lock:
+            t_lock = time.perf_counter()
             vc = self._vc_get_client(guild, voice_channel)
             if not vc or not vc.is_connected():
                 await text_channel.send(response)
+                logger.info("VC timing fallback_text reason=not_connected total_ms=%.1f", (time.perf_counter() - t_total) * 1000)
                 return
             sink = self._vc_sinks.get(key)
             done = asyncio.Event()
             loop = asyncio.get_running_loop()
             with tempfile.TemporaryDirectory(prefix="maxwell-vc-reply-") as tmp:
                 wav_path = str(Path(tmp) / "reply.wav")
-                await _synthesize_tts_wav(response[:400], wav_path)
+                t_tts = time.perf_counter()
+                prefer_local_tts = str(self._control.get("vc_tts_engine", "local")).lower() in {"local", "espeak", "espeak-ng"}
+                await _synthesize_tts_wav(response[:400], wav_path, prefer_local=prefer_local_tts)
+                t_tts_done = time.perf_counter()
                 if sink:
                     sink.set_ignore_until(loop.time() + 90.0)
                 if vc.is_playing():
                     vc.stop()
                 try:
+                    t_play_start = time.perf_counter()
                     vc.play(discord.FFmpegPCMAudio(wav_path), after=lambda _e: loop.call_soon_threadsafe(done.set))
+                    t_play_called = time.perf_counter()
+                    logger.info(
+                        "VC timing tts_ready chars=%s lock_wait_ms=%.1f tts_ms=%.1f play_setup_ms=%.1f total_to_audio_start_ms=%.1f",
+                        len(response),
+                        (t_lock - t_total) * 1000,
+                        (t_tts_done - t_tts) * 1000,
+                        (t_play_called - t_play_start) * 1000,
+                        (t_play_called - t_total) * 1000,
+                    )
                     await asyncio.wait_for(done.wait(), timeout=120)
+                    logger.info("VC timing playback_finished chars=%s playback_wait_ms=%.1f total_ms=%.1f", len(response), (time.perf_counter() - t_play_called) * 1000, (time.perf_counter() - t_total) * 1000)
                     if sink:
                         sink.set_ignore_until(loop.time() + 0.5)
                 except Exception:
+                    logger.exception("VC playback failed after %.1fms", (time.perf_counter() - t_total) * 1000)
                     await text_channel.send(response)
 
     async def _handle_context_command(self, message, args: str | None):
