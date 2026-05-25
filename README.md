@@ -116,6 +116,14 @@ All commands use the `,` prefix. Admin commands require the user to be in the ad
 | `,rem on` / `,rem off` | Yes | Enable or disable REM for this process |
 | `,rem audit [N]` | Yes | Show recent REM run audits |
 | `,rem fix` | Yes | Restore REM prompt/interval/max-turn defaults |
+| `,vc join` | No | Join your current VC and start live listening |
+| `,vc leave` | No | Stop listening and disconnect from VC |
+| `,vc listen` | No | Start live VC listening while staying connected |
+| `,vc unlisten` | No | Stop live VC listening while staying connected |
+| `,vc status` | No | Show VC connection/listening and voice settings |
+| `,vc say <text>` | No | Speak text in VC with TTS |
+
+Live VC replies require `discord-ext-voice-recv`, `PyNaCl`, `ffmpeg`, and an audio-capable OpenAI-compatible provider.
 
 ## Memory and REM
 
