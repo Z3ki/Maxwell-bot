@@ -29,6 +29,41 @@ except Exception as e:
 else:
     _voice_recv_import_error = None
 
+
+def _patch_voice_recv_decoder():
+    if voice_recv is None:
+        return
+    try:
+        from discord.ext.voice_recv import opus as voice_recv_opus
+    except Exception:
+        logger = logging.getLogger(__name__)
+        logger.exception("Failed to import voice receive opus decoder for patching")
+        return
+
+    decoder_cls = getattr(voice_recv_opus, "PacketDecoder", None)
+    if decoder_cls is None or getattr(decoder_cls, "_maxwell_opus_patch", False):
+        return
+
+    original_decode_packet = decoder_cls._decode_packet
+
+    def _decode_packet_drop_bad_opus(self, packet):
+        try:
+            return original_decode_packet(self, packet)
+        except discord.opus.OpusError as exc:
+            logging.getLogger(__name__).warning(
+                "Dropping corrupted voice packet ssrc=%s seq=%s: %s",
+                getattr(packet, "ssrc", "?"),
+                getattr(packet, "sequence", "?"),
+                exc,
+            )
+            return packet, b"\x00" * 3840
+
+    decoder_cls._decode_packet = _decode_packet_drop_bad_opus
+    decoder_cls._maxwell_opus_patch = True
+
+
+_patch_voice_recv_decoder()
+
 from bot_tools import (
     ChangeAvatarTool,
     ChangePresenceTool,
