@@ -1931,11 +1931,12 @@ class TtsTool(Tool):
             import riva.client
             from riva.client.proto.riva_audio_pb2 import AudioEncoding
 
+            function_id = os.environ.get("TTS_RIVA_FUNCTION_ID", "877104f7-e885-42b9-8de8-f6e4c6303969")
             auth = riva.client.Auth(
                 use_ssl=True,
                 uri="grpc.nvcf.nvidia.com:443",
                 metadata_args=[
-                    ["function-id", "877104f7-e885-42b9-8de8-f6e4c6303969"],
+                    ["function-id", function_id],
                     ["authorization", f"Bearer {nvidia_api_key}"]
                 ],
                 options=[

@@ -269,13 +269,14 @@ async def _synthesize_tts_wav(text: str, output_path: str, *, prefer_local: bool
             import riva.client
             from riva.client.proto.riva_audio_pb2 import AudioEncoding
 
+            function_id = os.environ.get("TTS_RIVA_FUNCTION_ID", "877104f7-e885-42b9-8de8-f6e4c6303969")
             voice_name = os.environ.get("TTS_RIVA_VOICE", "Magpie-Multilingual.EN-US.Jason.Angry")
             language_code = os.environ.get("TTS_RIVA_LANGUAGE", "en-US")
             auth = riva.client.Auth(
                 uri="grpc.nvcf.nvidia.com:443",
                 use_ssl=True,
                 metadata_args=[
-                    ["function-id", "877104f7-e885-42b9-8de8-f6e4c6303969"],
+                    ["function-id", function_id],
                     ["authorization", f"Bearer {nvidia_api_key}"],
                 ],
                 options=[
@@ -300,10 +301,22 @@ async def _synthesize_tts_wav(text: str, output_path: str, *, prefer_local: bool
                 f.setframerate(48000)
                 f.writeframesraw(response.audio)
             if os.path.exists(output_path):
-                logger.info(f"Riva VC TTS synthesized audio with voice={voice_name!r}, language={language_code!r}")
+                logger.info(
+                    "Riva VC TTS synthesized audio with function_id=%r voice=%r language=%r",
+                    function_id,
+                    voice_name,
+                    language_code,
+                )
                 return output_path
         except Exception as e:
-            logger.warning(f"NVIDIA Riva TTS failed for VC playback: {e}. Falling back to gTTS.")
+            logger.warning(
+                "NVIDIA Riva TTS failed for VC playback function_id=%r: %s. Falling back to local TTS, then gTTS if needed.",
+                function_id,
+                e,
+            )
+            local = await _synthesize_local_tts_wav(text, output_path)
+            if local:
+                return local
 
     from gtts import gTTS
     mp3_path = output_path + ".mp3"
