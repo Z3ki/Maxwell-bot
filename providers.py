@@ -116,9 +116,11 @@ class OllamaProvider:
             return {}
         return {"Authorization": f"Bearer {api_key}"}
 
-    def _attempt_endpoint(self, attempt: int) -> ProviderEndpoint:
+    def _attempt_endpoint(self, attempt: int, *, fast_fallback: bool = False) -> ProviderEndpoint:
         if len(self._endpoints) < 2:
             return self._endpoints[0]
+        if fast_fallback:
+            return self._endpoints[0] if attempt == 1 else self._endpoints[1]
         # Attempt 1 and 2: primary (main)
         # Attempt 3 and beyond: fallback (second provider)
         return self._endpoints[0] if attempt <= 2 else self._endpoints[1]
@@ -201,6 +203,7 @@ class OllamaProvider:
         max_tokens: int = None,
         temperature: float = None,
         disable_reasoning: bool = None,
+        fast_fallback: bool = False,
     ) -> dict:
         """Generate an OpenAI-compatible assistant message, optionally with tools."""
         if not self.available:
@@ -267,8 +270,9 @@ class OllamaProvider:
         session = await self._get_session()
         last_error = None
         last_usage_error = None
-        for attempt in range(1, self.retry_attempts + 1):
-            endpoint = self._attempt_endpoint(attempt)
+        max_attempts = min(self.retry_attempts, 2) if fast_fallback and len(self._endpoints) > 1 else self.retry_attempts
+        for attempt in range(1, max_attempts + 1):
+            endpoint = self._attempt_endpoint(attempt, fast_fallback=fast_fallback)
             data = self._request_payload(endpoint, chat_messages, tools=tools, model=model, max_tokens=max_tokens, temperature=temperature, disable_reasoning=disable_reasoning)
             request_start = time.perf_counter()
             media_parts = sum(1 for msg in chat_messages for part in (msg.get("content") if isinstance(msg.get("content"), list) else []) if isinstance(part, dict) and part.get("type") != "text")
@@ -277,7 +281,7 @@ class OllamaProvider:
                 endpoint.name,
                 data.get("model"),
                 attempt,
-                self.retry_attempts,
+                max_attempts,
                 len(chat_messages),
                 media_parts,
                 timeout,
@@ -295,7 +299,7 @@ class OllamaProvider:
                     if resp.status == 503:
                         error_text = await resp.text()
                         logger.warning("Provider timing status endpoint=%s status=%s headers_ms=%.1f body_chars=%s", endpoint.name, resp.status, headers_ms, len(error_text))
-                        if await self._retry_after_attempt(attempt, endpoint, f"Provider {endpoint.name} 503"):
+                        if await self._retry_after_attempt(attempt, endpoint, f"Provider {endpoint.name} 503", max_attempts=max_attempts, fast_fallback=fast_fallback):
                             continue
                         raise RuntimeError(f"Provider overloaded after retries: {error_text[:200]}")
                     if resp.status == 429:
@@ -307,10 +311,10 @@ class OllamaProvider:
                             )
                             if len(self._endpoints) == 1:
                                 raise last_usage_error
-                            if await self._retry_after_attempt(attempt, endpoint, f"Provider {endpoint.name} usage exhausted"):
+                            if await self._retry_after_attempt(attempt, endpoint, f"Provider {endpoint.name} usage exhausted", max_attempts=max_attempts, fast_fallback=fast_fallback):
                                 continue
                             raise last_usage_error
-                        if await self._retry_after_attempt(attempt, endpoint, f"Provider {endpoint.name} 429 rate limited"):
+                        if await self._retry_after_attempt(attempt, endpoint, f"Provider {endpoint.name} 429 rate limited", max_attempts=max_attempts, fast_fallback=fast_fallback):
                             continue
                         raise RuntimeError(f"Provider rate limited after retries: {error_text[:200]}")
                     if resp.status != 200:
@@ -329,7 +333,7 @@ class OllamaProvider:
                     message = choices[0].get("message", {})
                     content = message.get("content", "")
                     if not content and not message.get("tool_calls"):
-                        if await self._retry_after_attempt(attempt, endpoint, f"Provider {endpoint.name} returned empty response"):
+                        if await self._retry_after_attempt(attempt, endpoint, f"Provider {endpoint.name} returned empty response", max_attempts=max_attempts, fast_fallback=fast_fallback):
                             continue
                         raise RuntimeError("Empty response from provider")
 
@@ -345,29 +349,30 @@ class OllamaProvider:
                     return message
             except asyncio.TimeoutError:
                 logger.warning("Provider timing timeout endpoint=%s elapsed_ms=%.1f timeout=%s", endpoint.name, (time.perf_counter() - request_start) * 1000, timeout)
-                if await self._retry_after_attempt(attempt, endpoint, f"Provider {endpoint.name} timeout"):
+                if await self._retry_after_attempt(attempt, endpoint, f"Provider {endpoint.name} timeout", max_attempts=max_attempts, fast_fallback=fast_fallback):
                     continue
                 raise RuntimeError(f"Provider request timed out after {timeout}s")
             except ProviderUsageExhaustedError:
                 raise
             except RuntimeError as e:
                 last_error = e
-                if await self._retry_after_attempt(attempt, endpoint, f"Provider {endpoint.name} error: {e}"):
+                if await self._retry_after_attempt(attempt, endpoint, f"Provider {endpoint.name} error: {e}", max_attempts=max_attempts, fast_fallback=fast_fallback):
                     continue
                 raise
             except Exception as e:
                 last_error = e
-                if await self._retry_after_attempt(attempt, endpoint, f"Provider {endpoint.name} error: {e}"):
+                if await self._retry_after_attempt(attempt, endpoint, f"Provider {endpoint.name} error: {e}", max_attempts=max_attempts, fast_fallback=fast_fallback):
                     continue
                 raise RuntimeError(f"Provider call failed: {last_error}")
         if last_usage_error:
             raise last_usage_error
         raise RuntimeError("Provider call failed after retries")
 
-    async def _retry_after_attempt(self, attempt: int, endpoint: ProviderEndpoint, reason: str) -> bool:
-        if attempt >= self.retry_attempts:
+    async def _retry_after_attempt(self, attempt: int, endpoint: ProviderEndpoint, reason: str, *, max_attempts: int = None, fast_fallback: bool = False) -> bool:
+        max_attempts = max_attempts or self.retry_attempts
+        if attempt >= max_attempts:
             return False
-        next_endpoint = self._attempt_endpoint(attempt + 1)
+        next_endpoint = self._attempt_endpoint(attempt + 1, fast_fallback=fast_fallback)
         if self._should_wait_before_retry(endpoint, next_endpoint):
             wait = attempt * 2
             logger.warning(f"{reason} (attempt {attempt}/{self.retry_attempts}), retrying in {wait}s...")

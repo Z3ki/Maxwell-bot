@@ -89,6 +89,17 @@ See `.env.example` for a full template. Key variables:
 | `REM_EVENT_BUFFER_MAX` | No | Global visible event buffer cap (default: `500`) |
 | `REM_RUN_HISTORY` | No | REM audit history length (default: `50`) |
 
+### Temporary Free Model
+
+For a temporary free multimodal fallback, OpenRouter currently offers NVIDIA Nemotron Nano Omni:
+
+- Model page: `https://openrouter.ai/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`
+- `OLLAMA_FALLBACK_BASE_URL=https://openrouter.ai/api/v1`
+- `OLLAMA_FALLBACK_MODEL=nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`
+- `OLLAMA_FALLBACK_DISABLE_REASONING=true`
+
+It is omni-modal and useful as a free temporary fallback, but expect weaker reasoning and worse answers than a good paid model.
+
 ## Commands
 
 All commands use the `,` prefix. Admin commands require the user to be in the admin list.

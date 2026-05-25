@@ -1918,7 +1918,7 @@ class MaxwellBot(commands.Bot):
             vc_timeout = max(8, min(int(self._control.get("vc_ai_timeout_seconds", 25) or 25), 90))
             vc_max_tokens = max(24, min(int(self._control.get("vc_ai_max_tokens", 90) or 90), 240))
             t_ai = time.perf_counter()
-            resp = await self.ai_provider.generate_response(messages, media=[media], timeout=vc_timeout, max_tokens=vc_max_tokens, temperature=0.6, disable_reasoning=True)
+            resp = await self.ai_provider.generate_response(messages, media=[media], timeout=vc_timeout, max_tokens=vc_max_tokens, temperature=0.6, disable_reasoning=True, fast_fallback=True)
             t_ai_done = time.perf_counter()
             resp = strip_tool_payload_leaks((resp or "").strip())
             if not resp or resp == "__NO_RESPONSE__":
