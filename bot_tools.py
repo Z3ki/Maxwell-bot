@@ -1272,10 +1272,10 @@ class CreateSiteTool(Tool):
             f"Create a temporary website at {self.base_url}/<name>. Auto-deletes after 24h. "
             "Params: name (short slug, lowercase/numbers/hyphens), title (headline), "
             "body (FULL HTML document — write complete <!DOCTYPE html> pages with all styles/JS inline. "
-            "Written as-is to file, no template wrapping)."
+            "Written as-is to file, no template wrapping), encoding (optional: text or base64; use base64 for exact full HTML)."
         )
 
-    async def execute(self, message: Message, name: str = None, title: str = None, body: str = None, **kwargs) -> str:
+    async def execute(self, message: Message, name: str = None, title: str = None, body: str = None, encoding: str = "text", **kwargs) -> str:
         if not name or not title or body is None:
             missing = []
             if not name:
@@ -1285,6 +1285,15 @@ class CreateSiteTool(Tool):
             if body is None:
                 missing.append("body")
             return f"Error: missing required params — {', '.join(missing)}. All three (name, title, body) are needed to create a site."
+
+        mode = str(encoding or "text").strip().lower()
+        if mode in {"base64", "b64"}:
+            try:
+                body = base64.b64decode(str(body), validate=True).decode("utf-8")
+            except Exception as e:
+                return f"Error: could not decode base64 site body: {e}"
+        elif mode not in {"text", "utf8", "utf-8"}:
+            return "Error: encoding must be text or base64"
 
         # Sanitize name
         slug = re.sub(r"[^a-z0-9-]", "-", name.lower().strip())[:30].strip("-")
@@ -1465,6 +1474,7 @@ class SendFileTool(Tool):
         return (
             "Create a file with any filename/extension and send it as an attachment. "
             "Use this for .txt, .py, .json, .html, binary files, etc. "
+            "For code/HTML/JSON or exact file bytes, prefer encoding=base64 so markup/backticks are preserved exactly. "
             "Params: filename (required), content (required), encoding (optional: text or base64; default text)."
         )
 

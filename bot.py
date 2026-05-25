@@ -424,11 +424,19 @@ def _find_xml_tag_end(text: str, start: int) -> int:
             elif ch == quote_char:
                 quote_char = ""
             continue
-        if ch in {'"', "'"}:
+        if ch in {'"', "'"} and text[start:i].rstrip().endswith("="):
             quote_char = ch
         elif ch == ">":
             return i
     return -1
+
+
+def _fenced_code_ranges(text: str) -> list[tuple[int, int]]:
+    return [match.span() for match in re.finditer(r"```.*?```", text or "", re.DOTALL)]
+
+
+def _in_ranges(index: int, ranges: list[tuple[int, int]]) -> bool:
+    return any(start <= index < end for start, end in ranges)
 
 
 def _parse_xml_open_tag(raw_tag: str) -> tuple[str | None, str, bool]:
@@ -438,6 +446,12 @@ def _parse_xml_open_tag(raw_tag: str) -> tuple[str | None, str, bool]:
     self_closing = inner.endswith("/")
     if self_closing:
         inner = inner[:-1].rstrip()
+    function_match = re.match(r"function\s*=\s*([A-Za-z_]\w*)(?:\s+(.*))?$", inner, re.DOTALL | re.IGNORECASE)
+    if function_match:
+        return function_match.group(1), function_match.group(2) or "", self_closing
+    tool_alias_match = re.match(r"tool:([A-Za-z_]\w*)(?:['\"]?:[A-Za-z_]\w*)?(?:\s+(.*))?$", inner, re.DOTALL | re.IGNORECASE)
+    if tool_alias_match:
+        return tool_alias_match.group(1), tool_alias_match.group(2) or "", self_closing
     match = re.match(r"(?:tool:)?([A-Za-z_]\w*)(?:\s+(.*))?$", inner, re.DOTALL)
     if not match:
         return None, "", False
@@ -458,7 +472,7 @@ def _parse_xml_attrs(attrs_str: str) -> dict:
 
 
 def _find_tool_close(text: str, name: str, start: int) -> re.Match | None:
-    close_re = re.compile(rf"</\s*(?:(?:tool:)?{re.escape(name)}|tool)\s*>", re.IGNORECASE)
+    close_re = re.compile(rf"</\s*(?:(?:tool:)?{re.escape(name)}|function|tool|tool_call)\s*>", re.IGNORECASE)
     return close_re.search(text, start)
 
 
@@ -476,6 +490,7 @@ ARTIFACT_BLOCK_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 PIPE_MARKER_RE = re.compile(r"<\|/?(?:tool:[A-Za-z_]\w*|tool_call_begin|tool_call_end|end)\|?>", re.IGNORECASE)
+LEAKED_TOOL_CLOSE_RE = re.compile(r"</\s*(?:tool_call|function)\s*>", re.IGNORECASE)
 
 
 def _strip_leading_reasoning_json(text: str) -> str:
@@ -497,6 +512,7 @@ def strip_model_artifact_leaks(text: str, strip_pipe_markers: bool = True) -> st
     cleaned = ARTIFACT_BLOCK_RE.sub("", cleaned)
     if strip_pipe_markers:
         cleaned = PIPE_MARKER_RE.sub("", cleaned)
+    cleaned = LEAKED_TOOL_CLOSE_RE.sub("", cleaned)
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
@@ -517,12 +533,17 @@ def _parse_loose_tool_params(raw: str) -> dict:
 
 def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = None):
     text = str(response or "")
+    code_ranges = _fenced_code_ranges(text)
     pipe_matches = []
     for match in PIPE_TOOL_RE.finditer(text):
+        if _in_ranges(match.start(), code_ranges):
+            continue
         name = match.group(1)
         if available_tools is None or name in available_tools:
             pipe_matches.append((match.start(), match.end(), name, match.group(2), match.group(3), False))
     for match in PIPE_TOOL_CALL_RE.finditer(text):
+        if _in_ranges(match.start(), code_ranges):
+            continue
         name = match.group(1)
         if available_tools is None or name in available_tools:
             pipe_matches.append((match.start(), match.end(), name, match.group(2), "", True))
@@ -535,6 +556,10 @@ def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = 
         start = text.find("<", pos)
         if start == -1:
             break
+        if _in_ranges(start, code_ranges):
+            containing = next((end for range_start, end in code_ranges if range_start <= start < end), start + 1)
+            pos = containing
+            continue
         if start > 0 and not (text[start - 1].isspace() or text[start - 1] == ">"):
             pos = start + 1
             continue
@@ -563,6 +588,16 @@ def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = 
 def _parse_tool_body_params(name: str, body: str) -> dict:
     params = {}
     consumed = []
+    parameter_re = re.compile(r"<?parameter\s*=\s*([A-Za-z_]\w*)\s*>\s*(.*?)</\s*parameter\s*>", re.DOTALL | re.IGNORECASE)
+    for match in parameter_re.finditer(body or ""):
+        key = match.group(1)
+        if key not in TOOL_PARAM_TAGS:
+            continue
+        val = match.group(2).strip()
+        if key not in {"content", "code", "body", "command"}:
+            val = html.unescape(val)
+        params[key] = val
+        consumed.append(match.span())
     child_re = re.compile(r"<([A-Za-z_]\w*)(?:\s+[^>]*)?>(.*?)</\s*\1\s*>", re.DOTALL | re.IGNORECASE)
     for match in child_re.finditer(body or ""):
         key = match.group(1)
@@ -3528,16 +3563,20 @@ class MaxwellBot(commands.Bot):
         return (
             "Tools are optional. Use them only when they actually help. Available tools: "
             + " | ".join(descriptions)
-            + "\nTool-call format is strict. Output tool calls using XML-like tags: "
+            + "\nTool-call format is strict. Output only real user-visible text OR tool calls, never pseudo-markup shown to the user. "
+            + "Use this XML-like tag format: "
             + "<tool:tool_name param1=\"value\" param2=\"value\" /> or <tool:tool_name><param1>value</param1></tool:tool_name>. "
             + "Valid examples: <tool:react emoji=\"catjam\" /> or "
             + "<tool:send_file><filename>script.py</filename><content>print('hi')</content></tool:send_file>. "
+            + "Do NOT use provider/function-call syntax like <function=web_search>, <parameter=query>, </tool_call>, JSON tool objects, or markdown tool fences. "
             + "If a parameter is multi-line, use sub-tags inside the main tool tag. "
+            + "For exact code, HTML, JSON, or any file content where angle brackets/backticks might matter, prefer send_file with encoding=\"base64\" and base64 content so the parser cannot alter it. "
+            + "For create_site with full HTML, prefer <encoding>base64</encoding> and put base64 HTML in <body>...</body> so literal HTML tags are preserved. "
             + "If a tool takes only a single default parameter (e.g. content for send_message, thoughts for reasoning_log, text for tts), you can put it directly inside the tag: <tool:send_message>hello</tool:send_message>. "
             + "You may call multiple tools in one assistant response. If you call reasoning_log, it is internal only and does NOT answer the user. "
-            + "Only top-level tool tags execute. Never put literal <tool:...> tags inside reasoning_log fields; describe planned tools in plain text instead. "
+            + "Only top-level tool tags execute. Never put literal <tool:...> tags inside reasoning_log fields, send_message text, or normal chat unless the user explicitly asked to see tool syntax; describe planned tools in plain text instead. "
             + "Every tool-using turn must end with exactly one terminal visible decision: <tool:send_message>reply text</tool:send_message> to reply, or <tool:no_response /> to stay silent. "
-            + "Never stop after reasoning_log. Never output reasoning_log as the only tool. "
+            + "Never stop after reasoning_log. Never output reasoning_log as the only tool. Never send raw tool calls as a visible chat message. "
             + "Status changes are tool actions: use set_activity more readily when the user asks to update your visible status/activity/vibe, and use change_presence for the online/idle/dnd dot. "
             + "Order: reasoning_log first when using terminal tools, any helper tools next, then send_message/no_response last. Do not wrap tool calls in markdown fences. "
             + "IMPORTANT: The character limit does NOT apply to tool tag parameters."
