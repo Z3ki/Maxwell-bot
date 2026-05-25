@@ -584,7 +584,10 @@ def _parse_tool_body_params(name: str, body: str) -> dict:
         key = match.group(1)
         if key not in TOOL_PARAM_TAGS:
             continue
-        params[key] = html.unescape(match.group(2).strip())
+        val = match.group(2).strip()
+        if key not in {"content", "code", "body", "command"}:
+            val = html.unescape(val)
+        params[key] = val
         consumed.append(match.span())
     if params:
         leftovers = body
@@ -593,13 +596,19 @@ def _parse_tool_body_params(name: str, body: str) -> dict:
         if leftovers.strip():
             default_param = DEFAULT_TOOL_PARAMS.get(name)
             if default_param and default_param not in params:
-                params[default_param] = html.unescape(body.strip())
+                val = body.strip()
+                if default_param not in {"content", "code", "body", "command"}:
+                    val = html.unescape(val)
+                params[default_param] = val
         return params
 
     cleaned_body = (body or "").strip()
     default_param = DEFAULT_TOOL_PARAMS.get(name)
     if cleaned_body and default_param:
-        params[default_param] = html.unescape(cleaned_body)
+        val = cleaned_body
+        if default_param not in {"content", "code", "body", "command"}:
+            val = html.unescape(val)
+        params[default_param] = val
     return params
 
 
