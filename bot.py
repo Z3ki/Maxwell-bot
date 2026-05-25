@@ -1505,6 +1505,9 @@ class MaxwellBot(commands.Bot):
 
 
     async def _handle_vc_command(self, message, args: str | None):
+        if not message.guild:
+            await message.channel.send("VC commands are only supported in server channels.")
+            return
         arg = (args or "").strip()
         parts = arg.split(maxsplit=1)
         sub = (parts[0].lower() if parts else "")
@@ -1538,8 +1541,12 @@ class MaxwellBot(commands.Bot):
                 logger.exception("Voice channel join failed")
                 await message.channel.send(f"couldn't join voice: {e}")
                 return
-            listening = await self._vc_start_listening(message.guild, message.channel)
-            await message.channel.send(f"joined **{target.channel.name}** | listening: **{listening}**")
+            try:
+                listening = await self._vc_start_listening(message.guild, message.channel)
+                await message.channel.send(f"joined **{target.channel.name}** | listening: **{listening}**")
+            except Exception as e:
+                logger.exception("Voice listening start failed")
+                await message.channel.send(f"joined **{target.channel.name}** | listening failed: {e}")
             return
         if sub == "leave":
             vc = self._vc_get_client(message.guild)
@@ -1558,8 +1565,12 @@ class MaxwellBot(commands.Bot):
             if not vc or not vc.is_connected():
                 await message.channel.send("not connected; use `,vc join` first")
                 return
-            listening = await self._vc_start_listening(message.guild, message.channel)
-            await message.channel.send("listening enabled" if listening else "already listening")
+            try:
+                listening = await self._vc_start_listening(message.guild, message.channel)
+                await message.channel.send("listening enabled" if listening else "already listening")
+            except Exception as e:
+                logger.exception("Voice listen failed")
+                await message.channel.send(f"failed to start listening: {e}")
             return
         if sub == "unlisten":
             await self._vc_stop_listening(message.guild)

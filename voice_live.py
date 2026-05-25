@@ -7,6 +7,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from discord.ext import voice_recv
+
 logger = logging.getLogger(__name__)
 
 
@@ -22,7 +24,7 @@ class _SpeakerState:
     user_obj: object | None = None
 
 
-class LiveSpeechSink:
+class LiveSpeechSink(voice_recv.AudioSink):
     """RMS-based speech detector for discord-ext-voice-recv decoded PCM."""
 
     sample_rate = 48000
