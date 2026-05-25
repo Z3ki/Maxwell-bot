@@ -5,6 +5,7 @@ All API and data routes require Basic username/password auth by default.
 """
 import asyncio
 import base64
+import hashlib
 import hmac
 import json
 import os
@@ -398,6 +399,20 @@ def _normalize_context_content(content: str) -> str:
     return " ".join(str(content or "").split())[:1200]
 
 
+def _context_entry_id(raw: dict) -> str:
+    existing = str(raw.get("id") or "").strip()
+    if existing:
+        return existing[:32]
+    stable = json.dumps({
+        "scope": raw.get("scope") or "global",
+        "content": _normalize_context_content(raw.get("content", "")),
+        "created_at": raw.get("created_at") or "",
+        "source_user_id": raw.get("source_user_id") or "",
+        "source_channel_id": raw.get("source_channel_id") or "",
+    }, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha1(stable.encode("utf-8")).hexdigest()[:8]
+
+
 def _load_context_entries():
     data = _load(_context_path())
     if not isinstance(data, list):
@@ -430,7 +445,7 @@ def _load_context_entries():
         if not isinstance(tags, list):
             tags = []
         out.append({
-            "id": str(raw.get("id") or str(_uuid.uuid4())[:8])[:32],
+            "id": _context_entry_id(raw),
             "scope": str(raw.get("scope") or "global")[:80],
             "visibility": visibility,
             "importance": max(1, min(importance, 10)),
