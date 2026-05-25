@@ -942,9 +942,9 @@ DEFAULT_CONTROL = {
         "or gives Maxwell an obvious funny/sassy opening. Say no for random chatter between others, bot commands, one-word noise, "
         "emoji/laugh spam, greetings with no hook, or anything where Maxwell would be awkwardly butting in. If unsure, say no."
     ),
-    "vc_rms_threshold": 500,
-    "vc_pause_seconds": 0.9,
-    "vc_min_seconds": 0.75,
+    "vc_rms_threshold": 650,
+    "vc_pause_seconds": 0.8,
+    "vc_min_seconds": 0.55,
     "vc_max_seconds": 18,
     "vc_preroll_seconds": 0.25,
     "vc_ai_timeout_seconds": 25,
@@ -1885,7 +1885,9 @@ class MaxwellBot(commands.Bot):
             sys_msg = (
                 f"You are Maxwell in a Discord voice call. Speaker: {user.display_name}. Context: {guild_name}. "
                 f"Style: {style_bits} Voice replies must be fast: answer in 1-2 short sentences, no lists unless asked. "
-                "Do not expose reasoning, analysis, chain-of-thought, JSON, tool calls, or hidden notes. "
+                "Do not use markdown, emojis, asterisks, hash tags, lists, bold text, code blocks, JSON, or tool tags. "
+                "Speak in plain, clean English text suited for Text-to-Speech synthesis. "
+                "Do not expose reasoning, analysis, chain-of-thought, or hidden notes. "
                 "Listen to the attached audio and reply directly."
             )
             if self._control.get("vc_response_mode", "addressed") == "addressed":
