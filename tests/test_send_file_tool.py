@@ -116,3 +116,90 @@ def test_reasoning_log_tool_records_verbose_payload():
         "data": {"raw": [1, 2, 3]},
     }]
     assert list(bot.traces[0])[:1] == ["thoughts"]
+
+
+def test_reasoning_log_strips_nested_xml_from_thoughts():
+    class FakeBot:
+        def __init__(self):
+            self.traces = []
+
+        async def _record_llm_trace(self, message, payload):
+            self.traces.append(payload)
+
+    bot = FakeBot()
+    tool = ReasoningLogTool(bot=bot)
+    message = FakeMessage()
+
+    async def run():
+        result = await tool.execute(
+            message,
+            thoughts="<thoughts>User wants a site</thoughts><intent>create</intent><decision>build</decision> and some extra text",
+        )
+        assert result == "__REASONING_RECORDED__"
+
+    asyncio.run(run())
+
+    trace = bot.traces[0]
+    assert "<thoughts>" not in trace["thoughts"]
+    assert "<intent>" not in trace["thoughts"]
+    assert "some extra text" in trace["thoughts"]
+    assert trace["intent"] == "create"
+    assert trace["decision"] == "build"
+
+
+def test_reasoning_log_preserves_valid_compact_payload():
+    class FakeBot:
+        def __init__(self):
+            self.traces = []
+
+        async def _record_llm_trace(self, message, payload):
+            self.traces.append(payload)
+
+    bot = FakeBot()
+    tool = ReasoningLogTool(bot=bot)
+    message = FakeMessage()
+
+    async def run():
+        result = await tool.execute(
+            message,
+            thoughts="User asked for a site, so I should create one.",
+            intent="create_site",
+            decision="use_create_site",
+            confidence="high",
+        )
+        assert result == "__REASONING_RECORDED__"
+
+    asyncio.run(run())
+
+    trace = bot.traces[0]
+    assert trace["thoughts"] == "User asked for a site, so I should create one."
+    assert trace["intent"] == "create_site"
+    assert trace["decision"] == "use_create_site"
+    assert trace["confidence"] == "high"
+
+
+def test_reasoning_log_clamps_long_fields():
+    class FakeBot:
+        def __init__(self):
+            self.traces = []
+
+        async def _record_llm_trace(self, message, payload):
+            self.traces.append(payload)
+
+    bot = FakeBot()
+    tool = ReasoningLogTool(bot=bot)
+    message = FakeMessage()
+
+    async def run():
+        result = await tool.execute(
+            message,
+            thoughts="x" * 1000,
+            intent="y" * 600,
+        )
+        assert result == "__REASONING_RECORDED__"
+
+    asyncio.run(run())
+
+    trace = bot.traces[0]
+    assert len(trace["thoughts"]) <= 500
+    assert len(trace["intent"]) <= 500

@@ -1403,11 +1403,12 @@ class WebSearchTool(Tool):
 
 
 class SendMessageTool(Tool):
-    """Send a plain text reply to the current message."""
+    """Send a reply to the current message with Discord markdown formatting."""
 
     def get_description(self):
         return (
             "Send a message to the current chat. Prefer this for final user-facing output. "
+            "Content supports Discord markdown: **bold**, *italic*, `code`, ```code blocks```, > quotes, bullet lists. "
             "Params: content (required), reply (optional bool, default true)."
         )
 
@@ -1432,20 +1433,46 @@ class ReasoningLogTool(Tool):
 
     def get_description(self):
         return (
-            "Store detailed reasoning metadata for inspection. Use this before send_message/no_response. "
-            "Put thoughts first so you decide what to do before selecting the final action. "
-            "Be verbose and include all useful internal decision data. Params, in order: thoughts, intent, confidence, decision, "
-            "assumptions, evidence, alternatives, risks, tool_plan, response_plan, data, and any other JSON fields. "
-            "This does not reply to users."
+            "Record a short reasoning trace before send_message/no_response. "
+            "thoughts: one plain-English sentence only, no XML or JSON. "
+            "intent: short label. decision: short label. "
+            "confidence: optional low/medium/high. "
+            "All values must be plain text. This does not reply to users."
         )
 
+    _NESTED_TAG_RE = re.compile(
+        r"</?(?:thoughts|intent|decision|confidence|assumptions|evidence|alternatives|risks|tool_plan|response_plan|data)\b[^>]*>",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _sanitize_payload(raw: dict) -> dict:
+        payload = {"thoughts": str(raw.get("thoughts", "")).strip()}
+        payload.update({k: v for k, v in raw.items() if k != "thoughts"})
+        thoughts = payload.get("thoughts", "")
+        if "<" in thoughts and ">" in thoughts:
+            extracted = {}
+            for tag in ("intent", "decision", "confidence"):
+                m = re.search(rf"<{tag}>(.*?)</{tag}>", thoughts, re.IGNORECASE | re.DOTALL)
+                if m:
+                    extracted[tag] = m.group(1).strip()
+            thoughts = ReasoningLogTool._NESTED_TAG_RE.sub("", thoughts).strip()
+            if not thoughts:
+                thoughts = " (no plain-text thoughts provided)"
+            payload["thoughts"] = thoughts
+            for k, v in extracted.items():
+                payload.setdefault(k, v)
+        for key in ("thoughts", "intent", "decision"):
+            val = payload.get(key)
+            if isinstance(val, str) and len(val) > 500:
+                payload[key] = val[:497] + "..."
+        payload.setdefault("intent", payload.get("decision", "reply"))
+        payload.setdefault("confidence", payload.get("confidence", None))
+        return payload
+
     async def execute(self, message: Message, **kwargs) -> str:
-        raw_payload = dict(kwargs or {})
-        payload = {"thoughts": raw_payload.get("thoughts", "")}
-        payload.update({k: v for k, v in raw_payload.items() if k != "thoughts"})
         try:
-            payload.setdefault("intent", payload.get("decision", "reply"))
-            payload.setdefault("confidence", payload.get("confidence", None))
+            payload = self._sanitize_payload(dict(kwargs or {}))
             await self.bot._record_llm_trace(message, payload)
             return "__REASONING_RECORDED__"
         except Exception as e:

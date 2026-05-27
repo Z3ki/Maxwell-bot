@@ -82,6 +82,7 @@ class OllamaProvider:
         max_tokens: int,
         temperature: float,
         api_key: str = "",
+        disable_reasoning: bool = True,
         fallback_base_url: str = "",
         fallback_model: str = "",
         fallback_api_key: str = "",
@@ -95,7 +96,7 @@ class OllamaProvider:
         self.api_key = api_key.strip()
         self.retry_attempts = max(1, retry_attempts)
         self._endpoints = [
-            ProviderEndpoint("primary", self.base_url, self.model, self.api_key),
+            ProviderEndpoint("primary", self.base_url, self.model, self.api_key, disable_reasoning),
         ]
         if fallback_base_url and fallback_model:
             self._endpoints.append(
@@ -252,13 +253,10 @@ class OllamaProvider:
                     if mime.startswith("image/"):
                         parts.append({"type": "image_url", "image_url": {"url": uri}})
                     elif mime.startswith("audio/"):
-                        audio_format = AUDIO_FORMATS.get(mime.split(";", 1)[0].lower())
-                        if audio_format:
-                            parts.append({"type": "input_audio", "input_audio": {"data": b64, "format": audio_format}})
-                        else:
-                            parts.append({"type": "audio_url", "audio_url": {"url": uri}})
+                        audio_format = AUDIO_FORMATS.get(mime.split(";", 1)[0].lower(), "wav")
+                        parts.append({"type": "input_audio", "input_audio": {"data": b64, "format": audio_format}})
                     elif mime.startswith("video/"):
-                        parts.append({"type": "file", "file": {"filename": m.get("filename", "video.mp4"), "file_data": b64}})
+                        parts.append({"type": "video_url", "video_url": {"url": uri}})
                     else:
                         continue
                     attached += 1

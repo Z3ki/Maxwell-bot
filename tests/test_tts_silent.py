@@ -1,7 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from bot import MaxwellBot, _telegram_html, _tool_results_need_followup
+from bot import MaxwellBot, _telegram_html, _tool_results_need_followup, _auto_format_discord
 
 
 class FakeTool:
@@ -354,3 +354,62 @@ def test_reasoning_log_with_send_message_does_not_trigger_followup():
         "Tool reasoning_log: __REASONING_RECORDED__",
         "Tool send_message: __MESSAGE_SENT__ Sent 10 chars"
     ])
+
+
+def test_tool_prompt_has_no_nested_tags_rule():
+    bot = SimpleNamespace(
+        _control={"tools_enabled": True, "disabled_tools": []},
+        tools={"reasoning_log": FakeTool("__REASONING_RECORDED__")},
+    )
+
+    prompt = MaxwellBot._tool_system_prompt(bot, "discord")
+
+    assert "plain text" in prompt.lower()
+    assert "never put" in prompt.lower()
+
+
+def test_build_messages_has_single_formatting_instruction():
+    memory = FakeMemory()
+    bot = SimpleNamespace(
+        _control={
+            "base_personality": "test",
+            "cross_context_enabled": False,
+            "emoji_context_enabled": False,
+            "long_term_memory_enabled": False,
+            "memory_context_budget": 30000,
+            "memory_history_messages": 20,
+            "music_context_enabled": False,
+            "tools_enabled": False,
+        },
+        _drugged_until={},
+        _guild_emojis={},
+        _tool_system_prompt=lambda: "",
+        bot_name="Maxwell",
+        memory=memory,
+        user=SimpleNamespace(display_name="Maxwell"),
+    )
+    message = SimpleNamespace(
+        author=SimpleNamespace(bot=False, display_name="alice", id=456),
+        channel=SimpleNamespace(id=123),
+        guild=None,
+        id=789,
+        mentions=[],
+        reference=None,
+    )
+
+    async def run():
+        messages = await MaxwellBot._build_messages(bot, message, "hello")
+        system_content = messages[0]["content"]
+        assert "MANDATORY" not in system_content
+        assert "MUST format every response" not in system_content
+        assert "Do not force markdown into tiny greetings" in system_content
+
+    asyncio.run(run())
+
+
+def test_auto_format_does_not_bold_casual_text():
+    assert _auto_format_discord("hey what's up") == "hey what's up"
+    assert _auto_format_discord("lol that's funny") == "lol that's funny"
+    assert _auto_format_discord("nah I'm good") == "nah I'm good"
+    assert _auto_format_discord("ok") == "ok"
+    assert _auto_format_discord("hi") == "hi"
