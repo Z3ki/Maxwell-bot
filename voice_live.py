@@ -82,7 +82,8 @@ class LiveSpeechSink(voice_recv.AudioSink):
                     vc = self.voice_client
                     if vc and vc.is_playing():
                         logger.info("VC playback interrupted by user=%s", uid)
-                        vc.stop()
+                        # Schedule stop on the event loop thread, not the audio thread
+                        self.loop.call_soon_threadsafe(vc.stop)
                     self._ignore_until = 0.0
                 else:
                     return
@@ -154,11 +155,18 @@ class LiveSpeechSink(voice_recv.AudioSink):
                     if self._ready:
                         out = self._ready[:]
                         self._ready.clear()
+                # Dispatch utterances as background tasks to avoid blocking pause detection
                 for user, pcm, dur in out:
-                    wav_path = await self._write_temp_wav(user, pcm)
-                    await self.on_utterance(user, wav_path, dur)
+                    asyncio.ensure_future(self._process_utterance(user, pcm, dur))
         except asyncio.CancelledError:
             return
+
+    async def _process_utterance(self, user, pcm: bytes, dur: float):
+        try:
+            wav_path = await self._write_temp_wav(user, pcm)
+            await self.on_utterance(user, wav_path, dur)
+        except Exception as e:
+            logger.warning("Utterance processing error: %s", e)
 
     async def _write_temp_wav(self, user, pcm: bytes) -> str:
         name = f"vc-{self.guild_id}-{getattr(user, 'id', 'u')}-{int(time.time()*1000)}.wav"

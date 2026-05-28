@@ -27,8 +27,8 @@ function loadEnvFile(filePath) {
 const appRoot = process.env.MAXWELL_APP_ROOT || __dirname;
 const fileEnv = loadEnvFile(process.env.MAXWELL_ENV_FILE || path.join(appRoot, '.env'));
 const baseEnv = {
-  ...process.env,
   ...fileEnv,
+  ...process.env,
   NODE_ENV: 'production',
   PYTHONUNBUFFERED: '1'
 };

@@ -22,13 +22,13 @@ import random
 from datetime import datetime, timezone, timedelta
 from discord import Message, File, Activity, Status
 from io import BytesIO
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 from tools import Tool
 from ddgs import DDGS as _DDGS
 
 logger = logging.getLogger(__name__)
 
-OWNER_IDS = {"1471821513824014480"}
+OWNER_IDS = set(filter(None, os.environ.get("MAXWELL_OWNER_IDS", "1471821513824014480").split(",")))
 TTS_LANGUAGE_ALIASES = {
     "en": "english",
     "en-us": "english",

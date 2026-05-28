@@ -220,8 +220,9 @@ async def run_rem_once(
         response = await _provider_message(provider, messages, [], model, timeout)
         audit = _message_content(response).strip() or "DONE"
         finished = utcnow_iso()
+        # Use 'started' as watermark so events recorded during the run are not lost
         run = {"ts": finished, "turns_used": turns_used, "audit": audit[:4000], "tool_counts": dict(tool_counts), "events": len(events)}
-        await store.patch_state({"last_rem_run_ts": finished, "last_audit": audit[:4000], "running": False, "running_since": ""})
+        await store.patch_state({"last_rem_run_ts": started, "last_audit": audit[:4000], "running": False, "running_since": ""})
         await store.append_run(run)
         return run
     except Exception:

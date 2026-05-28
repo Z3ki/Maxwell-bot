@@ -223,10 +223,6 @@ function esc(t){const d=document.createElement('div');d.textContent=t;return d.i
 function pill(cls,v){return '<span class="pill '+cls+'">'+esc(v)+'</span>'}
 
 function getAuthHeaders(){
-  try{
-    const creds=JSON.parse(localStorage.getItem('maxwellAuth')||'{}');
-    if(creds.u&&creds.p)return{'Authorization':'Basic '+btoa(creds.u+':'+creds.p)};
-  }catch(e){}
   return{};
 }
 async function apiFetch(url,options={}){
@@ -310,123 +306,25 @@ function fmtBytes(b){if(b<1024)return b+'B';if(b<1048576)return(b/1024).toFixed(
 
 async function loadData(){
   try{
-    const[memories,sites,prompts,channelMemory,autoChannels,blacklist,controlData,statusData,commands]=await Promise.all([
-      apiFetch('/data/long_term_memory.json').then(r=>r.ok?r.json():[]).catch(()=>[]),
-      apiFetch('/data/sites.json').then(r=>r.ok?r.json():{}).catch(()=>{}),
-      apiFetch('/data/prompts.json').then(r=>r.ok?r.json():{}).catch(()=>{}),
-      apiFetch('/data/memory.json').then(r=>r.ok?r.json():{}).catch(()=>{}),
-      apiFetch('/data/auto_channels.json').then(r=>r.ok?r.json():[]).catch(()=>[]),
-      apiFetch('/data/blacklist.json').then(r=>r.ok?r.json():[]).catch(()=>[]),
-      apiFetch('/data/bot_control.json').then(r=>r.ok?r.json():{}).catch(()=>{}),
-      apiFetch('/api/status').then(r=>r.ok?r.json():null).catch(()=>null),
-      apiFetch('/api/commands').then(r=>r.ok?r.json():[]).catch(()=>[])
+    const[statusData]=await Promise.all([
+      apiFetch('/api/status').then(r=>r.ok?r.json():null).catch(()=>null)
     ]);
 
-    const memArr=Array.isArray(memories)?memories:[];
-    const sitesObj=sites&&typeof sites==='object'&&!Array.isArray(sites)?sites:{};
-    const promptObj=prompts&&typeof prompts==='object'&&!Array.isArray(prompts)?prompts:{};
-    const chObj=channelMemory&&typeof channelMemory==='object'&&!Array.isArray(channelMemory)?channelMemory:{};
-    const auto=Array.isArray(autoChannels)?autoChannels:[];
-    const bl=Array.isArray(blacklist)?blacklist:[];
-    const ctrl=controlData&&controlData.control?controlData.control:{};
-    const tools=controlData&&Array.isArray(controlData.tools)?controlData.tools:[];
-    const cmds=Array.isArray(commands)?commands:[];
-    const enabled=tools.filter(t=>!(ctrl.disabled_tools||[]).includes(t));
-
-    if(statusData&&statusData.pm2&&statusData.pm2.bot&&statusData.pm2.bot.uptime)startTs=statusData.pm2.bot.uptime;
+    if(!statusData){
+      // Auth required - redirect to admin
+      window.location.href='/admin/';
+      return;
+    }
 
     const isOnline=statusData?!!statusData.online:false;
     const tag=$('statusTag');tag.textContent=isOnline?'ONLINE':'OFFLINE';tag.className='status-tag'+(isOnline?'':' off');
     const dot=$('liveDot');dot.className='live-dot'+(isOnline?'':' off');
-
-    renderControls(ctrl);
-
-    if(statusData&&statusData.pm2){
-      const b=statusData.pm2.bot,a=statusData.pm2.api;
-      if(b){tx('pm2Bot',b.status||'unknown');tx('pm2BotR',b.restart_time??'0')}
-      if(a)tx('pm2Api',a.status||'unknown');
-    }
-
-    const totalMsgs=Object.values(chObj).reduce((s,v)=>s+(Array.isArray(v)?v.length:0),0);
-    tx('hChannels',Object.keys(chObj).length);
-    tx('hMessages',totalMsgs+' messages tracked');
-    tx('hMemories',memArr.length);
-    tx('hAuto',auto.length+' auto channels / '+(statusData?.stats?.context??0)+' context facts');
-    tx('hSites',Object.keys(sitesObj).length);
-    tx('hBlocked',bl.length+' blocked users');
-
-    tx('sLTM',memArr.length);
-    tx('sPrompts',Object.keys(promptObj).length);
-    tx('sAuto',auto.length);
-    tx('sBlack',bl.length);
-    tx('sTools',enabled.length+'/'+tools.length);
-    tx('sCmds',cmds.length);
-
-    $('bLTM').style.width=Math.min(100,(memArr.length/500)*100)+'%';
-    $('bPrompts').style.width=Math.min(100,(Object.keys(promptObj).length/10)*100)+'%';
-    $('bAuto').style.width=Math.min(100,(auto.length/10)*100)+'%';
-    $('bBlack').style.width=Math.min(100,(bl.length/30)*100)+'%';
-    $('bTools').style.width=Math.min(100,(enabled.length/Math.max(1,tools.length))*100)+'%';
-    $('bCmds').style.width=Math.min(100,(cmds.length/100)*100)+'%';
-
-    // Memory
-    const mdb=$('memoriesBody');
-    if(!memArr.length)mdb.innerHTML='<div class="empty">No long-term memories.</div>';
-    else{mdb.innerHTML=memArr.slice(-10).reverse().map(m=>'<div class="li"><span class="li-id">#'+esc(m.id??'?')+'</span><span class="li-content">'+esc(m.content??'')+'</span></div>').join('');tx('cMemories',memArr.length+' total')}
-
-    // Sites
-    const sdb=$('sitesBody');
-    if(!Object.keys(sitesObj).length)sdb.innerHTML='<div class="empty">No active sites.</div>';
-    else{sdb.innerHTML=Object.entries(sitesObj).map(([k,v])=>'<div class="li"><span class="li-content"><a class="li-link" href="/bot/'+encodeURIComponent(k)+'/"><b>'+esc(v.title||k)+'</b></a><div class="li-sub">by '+esc(v.user_name||'?')+' &mdash; '+fmtAge(v.created_at)+' / '+fmtRemain(v.created_at)+'</div></span></div>').join('');tx('cSites',Object.keys(sitesObj).length+' live')}
-
-    // Prompts
-    const pdb=$('promptsBody');
-    const pe=Object.entries(promptObj);
-    if(!pe.length)pdb.innerHTML='<div class="empty">No custom prompts.</div>';
-    else{pdb.innerHTML=pe.slice(0,8).map(([id,t])=>'<div class="li"><span class="li-id">'+esc(id)+'</span><span class="li-content">'+esc(String(t).substring(0,200))+'</span></div>').join('');tx('cPrompts',pe.length+' custom')}
-
-    // Blacklist
-    const bdb=$('blackBody');
-    if(!bl.length)bdb.innerHTML='<div class="empty">No blocked users.</div>';
-    else{bdb.innerHTML=bl.map(uid=>'<div class="li"><span class="li-id">'+esc(uid)+'</span><span class="li-content">Blocked user</span></div>').join('');tx('cBlack',bl.length+' total')}
-
-    // Commands
-    const cdb=$('commandsBody');
-    if(!cmds.length)cdb.innerHTML='<div class="empty">No actions logged.</div>';
-    else{cdb.innerHTML=cmds.slice(-10).reverse().map(c=>{let s=esc(c.type||'');if(c.channel_id)s+=' &rarr; #'+esc(c.channel_id);if(c.user_id)s+=' &rarr; @'+esc(c.user_id);if(c.command)s+=' <code>'+esc(c.command)+'</code>';return'<div class="li"><span class="li-id">['+esc(c.id||'')+']</span><span class="li-content"><b>'+s+'</b><div class="li-sub">'+esc(c.status||'')+(c.result?' &mdash; '+esc(String(c.result).substring(0,80)):'')+'</div></span></div>'}).join('');tx('cCmds',cmds.length+' actions')}
-
   }catch(e){console.error(e)}
 }
 
 async function loadSystem(){
-  try{
-    const r=await apiFetch('/api/system');
-    if(!r.ok)return;
-    const d=await r.json();
-    if(d.load){
-      tx('sysLoad',d.load[0]);
-      tx('sysCpu',d.load[0]);
-      const loadPct=Math.min(100,parseFloat(d.load[0])*100/4);
-      $('sysCpuBar').style.width=loadPct+'%';
-    }
-    if(d.memory){
-      tx('sysMem',d.memory.used_mb+'/'+d.memory.total_mb+' MB');
-      const pct=d.memory.total_mb>0?Math.round(d.memory.used_mb/d.memory.total_mb*100):0;
-      tx('sysRamDetail',pct+'% ('+d.memory.used_mb+'/'+d.memory.total_mb+' MB)');
-      $('sysRamBar').style.width=pct+'%';
-    }
-    if(d.disk){
-      const pct=d.disk.total_bytes>0?Math.round(d.disk.used_bytes/d.disk.total_bytes*100):0;
-      tx('sysDisk',fmtBytes(d.disk.used_bytes)+'/'+fmtBytes(d.disk.total_bytes));
-      tx('sysDiskDetail',pct+'% ('+fmtBytes(d.disk.used_bytes)+'/'+fmtBytes(d.disk.total_bytes)+')');
-      $('sysDiskBar').style.width=pct+'%';
-    }
-    if(d.uptime_seconds){
-      const days=Math.floor(d.uptime_seconds/86400);
-      const hours=Math.floor((d.uptime_seconds%86400)/3600);
-      tx('sysUptime',(days>0?days+'d ':'')+hours+'h');
-    }
-  }catch(e){}
+  // System stats require auth - skip if not authenticated
+  return;
 }
 
 setInterval(()=>{

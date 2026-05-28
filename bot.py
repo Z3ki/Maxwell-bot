@@ -190,14 +190,6 @@ MEDIA_CONTEXT_USES = 11
 CUSTOM_EMOJI_ALIAS_RE = re.compile(r"(?<!<)(?<!<a):([A-Za-z0-9_]{2,32}):(?!\d)")
 TOOL_LINE_RE = re.compile(r"(?im)^\s*(?:TOOL|CALL)\s+([A-Za-z_]\w*)\s*[:\-]?\s*")
 TOOL_TRACE_LINE_RE = re.compile(r"(?im)^\s*Called\s+[A-Za-z_]\w*\s+with\s+\{.*?\}\s*->\s*__\w+__.*$")
-JSON_TOOL_LINE_RE = re.compile(r'(?im)^\s*\{(?=[^\n]*"(?:tool|name|action)"\s*:)[^\n]*\}\s*$')
-FENCED_JSON_BLOCK_RE = re.compile(r"(?is)```[ \t]*(?:json|tool|tools)?[^\n`]*\n(?P<body>.*?)```")
-CREATE_SITE_BLOCK_RE = re.compile(
-    r"(?is)\[create_site\]\s*"
-    r"name\s*:\s*(?P<name>[^\n]+)\n"
-    r"title\s*:\s*(?P<title>[^\n]+)\n"
-    r"body\s*:\s*\n(?P<body>.*?)\s*\[/create_site\]"
-)
 TEXT_MIME_TYPES = {
     "application/json",
     "application/javascript",
@@ -960,7 +952,7 @@ DEFAULT_CONTROL = {
     "reply_mentions": True,
     "reply_to_bots": True,
     "auto_mode_enabled": False,
-    "auto_eval_every": 1,
+    "auto_eval_every": 5,
     "auto_max_recent_replies": 5,
     "auto_recent_window_minutes": 10,
     "auto_inactivity_minutes": 30,
@@ -972,7 +964,7 @@ DEFAULT_CONTROL = {
     "memory_history_messages": 20,
     "memory_context_budget": 30000,
     "max_tool_iterations": 10,
-    "max_response_chars": 1000,
+    "max_response_chars": 500,
     "tools_enabled": False,
     "disabled_tools": [],
     "ignore_users": [],
@@ -2731,8 +2723,7 @@ class MaxwellBot(commands.Bot):
             try:
                 if not path.exists():
                     continue
-                with open(path, "r", encoding="utf-8") as f:
-                    commands_data = json.load(f)
+                commands_data = await asyncio.to_thread(lambda: json.loads(path.read_text(encoding="utf-8")))
                 if not isinstance(commands_data, list):
                     continue
                 changed = False
@@ -2812,7 +2803,7 @@ class MaxwellBot(commands.Bot):
                         cmd["result"] = f"error: {e}"
                     cmd["status"] = "done"
                 if changed:
-                    _atomic_json_write(path, commands_data)
+                    await asyncio.to_thread(_atomic_json_write, path, commands_data)
             except Exception as e:
                 logger.error(f"Command queue error: {e}")
 
@@ -2865,7 +2856,7 @@ class MaxwellBot(commands.Bot):
                 path = (base / slug).resolve()
                 if path == base or base in path.parents:
                     if path.exists():
-                        shutil.rmtree(path)
+                        await asyncio.to_thread(shutil.rmtree, path)
                         logger.info(f"Deleted expired site {slug}")
             except Exception as e:
                 logger.error(f"Failed to delete site {slug}: {e}")
@@ -2873,7 +2864,7 @@ class MaxwellBot(commands.Bot):
         if expired:
             for slug in expired:
                 self._sites.pop(slug, None)
-            _atomic_json_write(Path(self.config.DATA_DIR) / "sites.json", self._sites)
+            await asyncio.to_thread(_atomic_json_write, Path(self.config.DATA_DIR) / "sites.json", self._sites)
 
     @staticmethod
     def _split_response(text: str, limit: int = 1900) -> list[str]:
@@ -2920,6 +2911,11 @@ class MaxwellBot(commands.Bot):
             ext = "." + attachment.filename.rsplit(".", 1)[-1].lower() if "." in attachment.filename else ""
             is_media = ext in media_exts or content_type.startswith(("image/", "video/", "audio/"))
             is_known_text = _is_text_attachment(attachment.filename, content_type)
+            # Enforce absolute size limit for ALL attachments including text
+            absolute_max = 50 * 1024 * 1024  # 50MB hard cap
+            if attachment.size > absolute_max:
+                logger.warning(f"Skipping attachment {attachment.filename}: exceeds absolute limit ({attachment.size} bytes)")
+                continue
             if attachment.size > max_size and not is_known_text:
                 logger.warning(f"Skipping attachment {attachment.filename}: too large ({attachment.size} bytes)")
                 continue
@@ -3016,12 +3012,14 @@ class MaxwellBot(commands.Bot):
                 video_path = tmp_path / f"input{suffix}"
                 video_path.write_bytes(blob)
 
-                # Extract frames at 2fps (1 every 0.5s), no limit
+                # Extract frames at 2fps, capped at 6 frames max and 15s duration
                 frame_pattern = str(tmp_path / "frame-%03d.jpg")
                 frame_cmd = [
                     "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                     "-i", str(video_path),
+                    "-t", "15",
                     "-vf", "fps=2,scale='min(768,iw)':-2",
+                    "-frames:v", "6",
                     frame_pattern,
                 ]
                 proc = await asyncio.create_subprocess_exec(
@@ -3276,6 +3274,9 @@ class MaxwellBot(commands.Bot):
                 # request plus later handled messages in the same channel.
                 "uses_left": MEDIA_CONTEXT_USES,
             })
+        # Enforce cap: keep only the most recent MAX_VISUAL_MEMORY_IMAGES
+        if len(cached) > MAX_VISUAL_MEMORY_IMAGES:
+            cached = cached[-MAX_VISUAL_MEMORY_IMAGES:]
         self._media_context[channel_id] = cached
         logger.info(f"Cached {len(image_media)} image(s) for channel {channel_id}; visual memory={len(self._media_context[channel_id])}")
 
@@ -3556,7 +3557,7 @@ class MaxwellBot(commands.Bot):
         path = Path(self.config.DATA_DIR) / "llm_traces.json"
         now = datetime.now(timezone.utc).isoformat()
         try:
-            traces = json.loads(path.read_text(encoding="utf-8"))
+            traces = await asyncio.to_thread(lambda: json.loads(path.read_text(encoding="utf-8")) if path.exists() else [])
             if not isinstance(traces, list):
                 traces = []
         except Exception:
@@ -3568,7 +3569,7 @@ class MaxwellBot(commands.Bot):
             "platform": self._message_tool_platform(message),
             "payload": payload or {},
         })
-        _atomic_json_write(path, traces[-300:])
+        await asyncio.to_thread(_atomic_json_write, path, traces[-300:])
 
     def _message_tool_platform(self, message) -> str:
         return str(getattr(message, "tool_platform", "discord") or "discord")
@@ -3793,7 +3794,7 @@ class MaxwellBot(commands.Bot):
                     user_username = str(user.get("username") or "").strip().lower()
 
                     # Only admins are allowed to talk to the bot on Telegram
-                    if not self._is_admin(user_id) and user_username != "z3kilol":
+                    if not self._is_admin(user_id):
                         logger.warning(f"Unauthorized Telegram access attempt by {user_name} ({user_id}, username: {user.get('username')})")
                         continue
                     
@@ -3815,7 +3816,7 @@ class MaxwellBot(commands.Bot):
                                     download_url = f"https://api.telegram.org/file/bot{token}/{file_path}"
                                     async with session.get(download_url) as download_resp:
                                         if download_resp.status == 200:
-                                            blob = await download_resp.read()
+                                            blob = await _read_response_limited(download_resp, 25 * 1024 * 1024)
                                             # Derive WAV mono 16khz using ffmpeg normalized audio pipeline
                                             with tempfile.TemporaryDirectory(prefix="maxwell-tg-audio-") as tmp:
                                                 tmp_path = Path(tmp)

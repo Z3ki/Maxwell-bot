@@ -201,6 +201,7 @@ class MemoryManager:
         self._lock = asyncio.Lock()
         self._dirty = False
         self._save_task = None
+        self._pending_save = None
 
     def load_from_disk(self):
         try:
@@ -277,7 +278,8 @@ class MemoryManager:
         if self._dirty:
             self._dirty = False
             snapshot = json.loads(json.dumps(self.memory, ensure_ascii=False))
-            asyncio.ensure_future(self._atomic_save(self.memory_file, snapshot))
+            # Track the save task so flush() can wait for it
+            self._pending_save = asyncio.ensure_future(self._atomic_save(self.memory_file, snapshot))
         self._save_task = None
 
     async def flush(self):
@@ -285,6 +287,13 @@ class MemoryManager:
         if self._save_task is not None:
             self._save_task.cancel()
             self._save_task = None
+        # Wait for any in-flight save
+        if hasattr(self, '_pending_save') and self._pending_save is not None:
+            try:
+                await self._pending_save
+            except Exception:
+                pass
+            self._pending_save = None
         if self._dirty:
             self._dirty = False
             snapshot = json.loads(json.dumps(self.memory, ensure_ascii=False))

@@ -7,7 +7,8 @@ from dotenv.main import load_dotenv
 
 APP_ROOT = Path(__file__).resolve().parent
 ENV_FILE = Path(os.getenv("MAXWELL_ENV_FILE", APP_ROOT / ".env"))
-load_dotenv(ENV_FILE, override=True)
+# Don't override real environment - .env is fallback only
+load_dotenv(ENV_FILE, override=False)
 
 
 def _int_env(name: str, default: int, min_value: int = None, max_value: int = None) -> int:

@@ -145,8 +145,8 @@ class OllamaProvider:
             "temperature": self.temperature if temperature is None else temperature,
             "stream": False,
         }
-        if max_tokens is not None:
-            data["max_tokens"] = max_tokens
+        # Always include max_tokens from config or override
+        data["max_tokens"] = max_tokens if max_tokens is not None else self.max_tokens
         if endpoint.disable_reasoning or disable_reasoning:
             data["reasoning"] = {"exclude": True}
         if tools:

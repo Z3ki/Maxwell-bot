@@ -13,6 +13,7 @@ import re
 import shutil
 import tempfile
 import time
+from collections import defaultdict
 from pathlib import Path
 
 from aiohttp import web
@@ -165,12 +166,28 @@ def _json_response(data, status=200):
     )
 
 def _needs_auth(request) -> bool:
-    """Mutations need auth; GETs and OPTIONS are public read."""
+    """All requests need auth except OPTIONS preflight and /api/login."""
     if request.method == "OPTIONS":
         return False
-    if request.method == "GET":
-        return False
     return True
+
+
+# --- Rate limiting for login/auth ---
+_auth_failures: dict[str, list[float]] = defaultdict(list)
+_AUTH_RATE_WINDOW = 300  # 5 minutes
+_AUTH_RATE_MAX = 10  # max failures per window
+
+def _check_rate_limit(request) -> bool:
+    """Return True if request is rate-limited (should be rejected)."""
+    ip = getattr(request, 'remote', None) or "unknown"
+    now = time.time()
+    # Prune old entries
+    _auth_failures[ip] = [t for t in _auth_failures[ip] if now - t < _AUTH_RATE_WINDOW]
+    return len(_auth_failures[ip]) >= _AUTH_RATE_MAX
+
+def _record_auth_failure(request):
+    ip = getattr(request, 'remote', None) or "unknown"
+    _auth_failures[ip].append(time.time())
 
 
 def _basic_credentials(request):
@@ -215,9 +232,12 @@ async def _auth_middleware(app, handler):
 
 
 async def _auth_middleware_unless_login(app, handler):
-    """Middleware that requires auth for mutations, except /api/login."""
+    """Middleware that requires auth for all requests, except OPTIONS and /api/login."""
     async def middleware(request):
         if request.method == "POST" and request.path == "/api/login":
+            # Rate limit login attempts
+            if _check_rate_limit(request):
+                return _json_response({"error": "too many attempts, try again later"}, 429)
             return await handler(request)
         if _needs_auth(request):
             _load_admin_creds()
@@ -228,8 +248,17 @@ async def _auth_middleware_unless_login(app, handler):
                 hmac.compare_digest(username or "", ADMIN_USER)
                 and hmac.compare_digest(password or "", ADMIN_PASSWORD)
             ):
+                _record_auth_failure(request)
                 return _json_response({"error": "unauthorized"}, 401)
-        return await handler(request)
+        # Add security headers to all responses
+        resp = await handler(request)
+        if isinstance(resp, web.Response):
+            resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+            resp.headers.setdefault("X-Frame-Options", "DENY")
+            resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+            resp.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+            resp.headers.setdefault("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'")
+        return resp
     return middleware
 
 
@@ -505,18 +534,18 @@ async def atomic_text_write(path: Path, text: str):
     await asyncio.to_thread(_sync_write)
 
 
-# ---------- Public data ----------
+# ---------- Data (all authenticated) ----------
 async def data_file(request):
     file = request.match_info.get("file", "")
     if ".." in file or "/" in file or not file.endswith(".json"):
         return _json_response({"error": "bad file"}, 403)
-    # Allowlist: only these public JSON files may be served
-    ALLOWED_PUBLIC = {
+    # All data files require auth
+    ALLOWED_FILES = {
         "sites.json", "prompts.json", "memory.json",
         "long_term_memory.json", "blacklist.json", "auto_channels.json",
         "bot_control.json",
     }
-    if file not in ALLOWED_PUBLIC:
+    if file not in ALLOWED_FILES:
         return _json_response({"error": "forbidden"}, 403)
     if file == "long_term_memory.json":
         return _json_response(_memory_json())
@@ -851,6 +880,8 @@ def _llm_traces_path():
 
 
 async def llm_traces(request):
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
     traces = _safe_list(_load(_llm_traces_path()))
     limit = _int_env_safe("MAXWELL_TRACE_API_LIMIT", 200)
     try:
@@ -967,9 +998,9 @@ async def commands_post(request):
     elif cmd_type == "change_avatar":
         command["url"] = str(body.get("url", "")).strip()[:2048]
     elif cmd_type == "shell":
-        command["command"] = str(body.get("command", "")).strip()
-        if not command["command"]:
-            return _json_response({"error": "command required"}, 400)
+        # Shell commands via web API are disabled for security.
+        # Use the bot's Discord shell tool or SSH directly instead.
+        return _json_response({"error": "shell commands are not allowed via the web API"}, 403)
     elif cmd_type == "clear_memory":
         command["channel_id"] = str(body.get("channel_id", "")).strip()
     elif cmd_type == "reload_controls":
@@ -1092,11 +1123,13 @@ async def pm2_logs(request):
             clean.append(ln)
         text = "\n".join(clean)
         return _json_response({"process": process, "lines": lines_int, "log": text})
-    except Exception as e:
-        return _json_response({"error": str(e)}, 500)
+    except Exception:
+        return _json_response({"error": "internal error"}, 500)
 
 
 async def pm2_restart(request):
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
     target = request.query.get("target", "maxwell-bot")
     if target not in {"maxwell-bot", "maxwell-api", "all"}:
         return _json_response({"error": "bad target"}, 400)
@@ -1110,8 +1143,8 @@ async def pm2_restart(request):
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
         text = (stdout + stderr).decode("utf-8", errors="replace")
         return _json_response({"ok": True, "output": text})
-    except Exception as e:
-        return _json_response({"error": str(e)}, 500)
+    except Exception:
+        return _json_response({"error": "internal error"}, 500)
 
 
 async def channel_list(request):
@@ -1141,6 +1174,8 @@ async def chat_history(request):
 
 
 async def bot_status(request):
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
     control = _load_control()
     mem = _safe_object(_load(DATA_DIR / "memory.json"))
     pm2 = await _pm2_json()
@@ -1186,12 +1221,15 @@ async def login_post(request):
     if not ADMIN_USER or not ADMIN_PASSWORD:
         return _json_response({"error": "admin auth not configured"}, 503)
     if not (hmac.compare_digest(user, ADMIN_USER) and hmac.compare_digest(pwd, ADMIN_PASSWORD)):
+        _record_auth_failure(request)
         return _json_response({"error": "unauthorized"}, 401)
     return _json_response({"ok": True, "message": "credentials valid"})
 
 
 # ---------- System Stats ----------
 async def system_stats(request):
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
     try:
         loadavg = [f"{x:.2f}" for x in os.getloadavg()]
     except Exception:
