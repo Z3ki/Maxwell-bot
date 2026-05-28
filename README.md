@@ -91,14 +91,14 @@ See `.env.example` for a full template. Key variables:
 
 ### Temporary Free Model
 
-For a temporary free multimodal fallback, OpenRouter currently offers NVIDIA Nemotron Nano Omni:
+For a temporary free OpenRouter fallback, the current recommended model is Moonshot AI Kimi K2.6:
 
-- Model page: `https://openrouter.ai/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`
+- Model page: `https://openrouter.ai/moonshotai/kimi-k2.6:free`
 - `OLLAMA_FALLBACK_BASE_URL=https://openrouter.ai/api/v1`
-- `OLLAMA_FALLBACK_MODEL=nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`
+- `OLLAMA_FALLBACK_MODEL=moonshotai/kimi-k2.6:free`
 - `OLLAMA_FALLBACK_DISABLE_REASONING=true`
 
-It is omni-modal and useful as a free temporary fallback, but expect weaker reasoning and worse answers than a good paid model.
+It is useful as a free temporary fallback, but check OpenRouter for current availability, modality support, and rate limits.
 
 ## Commands
 
