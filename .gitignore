@@ -15,8 +15,7 @@ public/bot/
 *.log
 dump.pm2
 .DS_Store
-.kilo/node_modules/
-.kilo/package*.json
+.kilo/
 .coverage
 htmlcov/
 dist/
