@@ -123,7 +123,6 @@ async def _get_shared_session() -> aiohttp.ClientSession:
 
 
 async def close_shared_session():
-    global _SHARED_SESSION
     if _SHARED_SESSION and not _SHARED_SESSION.closed:
         await _SHARED_SESSION.close()
 
@@ -420,113 +419,6 @@ class HDImageGeneratorTool(Tool):
             {"author": "Tool", "content": f"Generated HD image: {revised_prompt or prompt[:200]}", "is_tool": True},
         )
         return f"HD image generated and sent successfully: {(revised_prompt or prompt)[:100]}"
-
-
-class SendDMTool(Tool):
-    """Send a DM to a user on behalf of the bot"""
-
-    def get_description(self):
-        return (
-            "DM a user. They MUST have messaged you first — no cold DMs (Discord blocks them). "
-            "Params: user_id (required), text (required)."
-        )
-
-    async def execute(
-        self, message: Message, user_id: str = None, text: str = None, **kwargs
-    ) -> str:
-        if not user_id:
-            return "Error: user_id is required"
-        if not text:
-            return "Error: text is required"
-
-        try:
-            user = await self.bot.fetch_user(int(user_id))
-            if not user:
-                return f"Error: User {user_id} not found"
-
-            dm_channel = user.dm_channel
-            if dm_channel is None:
-                dm_channel = await user.create_dm()
-
-            dm_channel_id = str(dm_channel.id)
-            existing_memory = await self.bot.memory.get_channel_memory(dm_channel_id)
-            if not existing_memory:
-                return (
-                    f"Cannot DM {user.display_name} — they haven't messaged me "
-                    f"first. Discord requires the user to initiate the DM to "
-                    f"avoid captcha. Tell the user they need to DM me first, "
-                    f"then I can reply."
-                )
-
-            await dm_channel.send(text)
-
-            if not isinstance(message.channel, discord.DMChannel):
-                channel_id = str(message.channel.id)
-                recent = await self.bot.memory.get_channel_memory(channel_id)
-                if recent:
-                    context_lines = []
-                    for msg in recent[-5:]:
-                        author = msg.get("author", "?")
-                        content = msg.get("content", "")
-                        if msg.get("is_tool"):
-                            context_lines.append(f"[{content[:150]}]")
-                        else:
-                            context_lines.append(f"{author}: {content[:150]}")
-                    channel_name = getattr(message.channel, "name", "unknown")
-                    guild_name = message.guild.name if message.guild else "Group"
-                    context_summary = (
-                        f"[CONTEXT: I DM'd {user.display_name} from "
-                        f"#{channel_name} in {guild_name}. "
-                        f"Recent server messages: "
-                        + " | ".join(context_lines) + "]"
-                    )
-                    await self.bot.memory.add_to_channel_memory(
-                        dm_channel_id,
-                        {
-                            "author": "System",
-                            "content": context_summary[:500],
-                            "is_tool": True,
-                        },
-                    )
-
-            await self.bot.memory.add_to_channel_memory(
-                dm_channel_id,
-                {
-                    "author": self.bot.bot_name,
-                    "content": text,
-                    "is_tool": True,
-                },
-            )
-
-            if not isinstance(message.channel, discord.DMChannel):
-                channel_id = str(message.channel.id)
-                await self.bot.memory.add_to_channel_memory(
-                    channel_id,
-                    {
-                        "author": "Tool",
-                        "content": f"Sent DM to {user.display_name} (ID: {user_id}): {text[:200]}",
-                        "is_tool": True,
-                    },
-                )
-
-            logger.info(f"Sent DM to {user.display_name} ({user_id})")
-            return f"DM sent to {user.display_name}: {text[:100]}"
-
-        except discord.NotFound:
-            return f"Error: User {user_id} not found on Discord"
-        except discord.Forbidden:
-            return f"Error: Cannot DM user {user_id} — they may have blocked me"
-        except ValueError:
-            return f"Error: Invalid user_id: {user_id}"
-        except Exception as e:
-            if "captcha" in str(e).lower():
-                logger.warning(f"Captcha required when DMing {user_id}")
-                return (
-                    f"Error: Discord captcha triggered when trying to DM "
-                    f"{user_id}. They need to message me first, then I can reply."
-                )
-            logger.error(f"DM tool error: {e}")
-            return f"Error sending DM: {e}"
 
 
 class MemoryTool(Tool):
@@ -1982,8 +1874,6 @@ class TtsTool(Tool):
         nvidia_api_key = os.environ.get("NVIDIA_API_KEY", "") or getattr(getattr(self, "bot", None).config, "NVIDIA_API_KEY", "")
         filename = f"tts_{message.id}.wav"
         voice_filename = f"tts_{message.id}.ogg"
-        used_fallback = False
-        error_details = ""
 
         try:
             # Try NVIDIA Riva TTS
@@ -2032,7 +1922,6 @@ class TtsTool(Tool):
                 out_f.writeframesraw(resp.audio)
 
         except Exception as e:
-            error_details = str(e)
             logger.warning(f"Riva TTS synthesis failed: {e}. Falling back to gTTS.")
             # Fallback to local basic gTTS
             try:
@@ -2044,7 +1933,6 @@ class TtsTool(Tool):
 
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(None, run_gtts)
-                used_fallback = True
                 logger.warning("TTS used gTTS fallback; voice selection/emotion is unavailable in fallback audio")
             except Exception as fallback_err:
                 return f"Error: Riva TTS failed ({e}) and fallback gTTS failed ({fallback_err})"

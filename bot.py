@@ -762,7 +762,6 @@ def _telegram_html_chunks(text: str, limit: int = 3900) -> list[str]:
                 current += piece
 
     def add_code(code_text: str, lang: str):
-        nonlocal current
         lang = re.sub(r"[^A-Za-z0-9_+-]", "", lang.strip())[:30]
         open_tag = f'<pre><code class="language-{lang}">' if lang else "<pre>"
         close_tag = "</code></pre>" if lang else "</pre>"

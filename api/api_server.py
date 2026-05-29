@@ -157,14 +157,17 @@ DEFAULT_CONTROL = {
 }
 import uuid as _uuid
 MAX_COMMANDS = 200
+# Keep this in sync with MaxwellBot._setup_tools(). Do not add command-queue
+# types here; this list is only for LLM tools. Dead entries make the admin UI lie.
 KNOWN_TOOLS = [
-    "image_generator", "hd_image", "change_presence", "set_activity", "send_dm",
+    "image_generator", "hd_image", "change_presence", "set_activity",
     "memory_edit", "react", "edit_message", "delete_message", "create_poll",
     "create_invite", "lookup_user", "search_messages", "set_nickname",
-    "forward_message", "typing", "list_servers", "change_avatar", "create_site",
-    "list_admin_servers", "create_category", "create_channel", "edit_channel", "delete_channel",
-    "list_sites", "web_search", "no_response", "shell", "fetch_url",
-    "send_meme", "send_media", "send_message", "reasoning_log", "leave_vc",
+    "forward_message", "typing", "tts", "list_servers", "list_admin_servers",
+    "create_category", "create_channel", "edit_channel", "delete_channel",
+    "change_avatar", "create_site", "list_sites", "web_search", "no_response",
+    "shell", "fetch_url", "send_file", "send_message", "reasoning_log",
+    "send_meme", "send_media", "kilo_run", "leave_vc",
 ]
 
 
@@ -227,22 +230,6 @@ def _has_admin_auth(request) -> bool:
         hmac.compare_digest(username or "", ADMIN_USER)
         and hmac.compare_digest(password or "", ADMIN_PASSWORD)
     )
-
-
-async def _auth_middleware(app, handler):
-    async def middleware(request):
-        if _needs_auth(request):
-            if not ADMIN_USER or not ADMIN_PASSWORD:
-                return _json_response({"error": "admin auth not configured"}, 503)
-            username, password = _basic_credentials(request)
-            if not (
-                hmac.compare_digest(username or "", ADMIN_USER)
-                and hmac.compare_digest(password or "", ADMIN_PASSWORD)
-            ):
-                return _json_response({"error": "unauthorized"}, 401)
-        return await handler(request)
-
-    return middleware
 
 
 async def _auth_middleware_unless_login(app, handler):
