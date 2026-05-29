@@ -336,6 +336,21 @@ class OllamaProvider:
                     if resp.status != 200:
                         error_text = await resp.text()
                         logger.warning("Provider timing status endpoint=%s status=%s headers_ms=%.1f body_chars=%s", endpoint.name, resp.status, headers_ms, len(error_text))
+                        # Auto-clamp max_tokens on context overflow (OpenRouter returns 400)
+                        if resp.status == 400 and "maximum context length" in error_text.lower() and max_tokens is None:
+                            import re as _re
+                            ctx_match = _re.search(r"maximum context length is (\d+) tokens", error_text)
+                            req_match = _re.search(r"you requested about (\d+) tokens", error_text)
+                            if ctx_match and req_match:
+                                ctx_limit = int(ctx_match.group(1))
+                                requested = int(req_match.group(1))
+                                estimated_input = requested - int(data.get("max_tokens", self.max_tokens))
+                                safe_output = max(4096, ctx_limit - estimated_input - 512)
+                                if safe_output < int(data.get("max_tokens", self.max_tokens)):
+                                    logger.warning("Clamping max_tokens from %s to %s due to context limit %s", data.get("max_tokens"), safe_output, ctx_limit)
+                                    data["max_tokens"] = safe_output
+                                    if await self._retry_after_attempt(attempt, endpoint, f"Context overflow, clamped max_tokens to {safe_output}", max_attempts=max_attempts, fast_fallback=fast_fallback):
+                                        continue
                         raise RuntimeError(
                             f"Provider API error: {resp.status} - {error_text}"
                         )

@@ -1428,8 +1428,15 @@ class MaxwellBot(commands.Bot):
                 return
 
             if isinstance(message.channel, discord.GroupChannel):
-                if self._control.get("reply_groups", True) and await self._should_reply_in_group(message):
+                mentioned = self.user in message.mentions if self.user else False
+                reply_to_bot = bool(message.reference and message.reference.resolved and hasattr(message.reference.resolved, "author") and self.user and message.reference.resolved.author.id == self.user.id)
+                if not self._control.get("reply_groups", True):
+                    return
+                if mentioned or reply_to_bot:
                     await self._handle_message(message, (message.content or "look at this") + self._get_reply_context(message))
+                elif self._control.get("auto_mode_enabled", True) and channel_id in self._auto_channels:
+                    if await self._should_reply_auto(message):
+                        await self._handle_message(message, (message.content or "look at this") + self._get_reply_context(message))
                 return
 
             if message.guild:
@@ -2215,6 +2222,9 @@ class MaxwellBot(commands.Bot):
             return True
         if message.reference and message.reference.resolved and hasattr(message.reference.resolved, "author") and self.user and message.reference.resolved.author.id == self.user.id:
             return True
+        channel_id = str(message.channel.id)
+        if channel_id not in self._auto_channels:
+            return False
         return await self._should_reply_auto(message)
 
     def _get_reply_context(self, message) -> str:
