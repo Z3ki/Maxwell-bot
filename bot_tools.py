@@ -117,7 +117,7 @@ class _SafeResolver(aiohttp.abc.AbstractResolver):
 async def _get_shared_session() -> aiohttp.ClientSession:
     global _SHARED_SESSION
     if _SHARED_SESSION is None or _SHARED_SESSION.closed:
-        connector = aiohttp.TCPConnector(resolver=_SafeResolver())
+        connector = aiohttp.TCPConnector(resolver=_SafeResolver(), limit=30, limit_per_host=5)
         _SHARED_SESSION = aiohttp.ClientSession(connector=connector)
     return _SHARED_SESSION
 
@@ -1223,6 +1223,18 @@ class CreateSiteTool(Tool):
         try:
             os.makedirs(site_dir, exist_ok=True)
             index_path = os.path.join(site_dir, "index.html")
+            # Inject CSP meta tag to mitigate XSS from arbitrary HTML
+            csp_meta = (
+                '<meta http-equiv="Content-Security-Policy" '
+                'content="default-src \'self\'; script-src \'unsafe-inline\' \'unsafe-eval\'; '
+                'style-src \'unsafe-inline\'; img-src * data:; connect-src \'self\'">'
+            )
+            if "<head" in body.lower():
+                body = re.sub(r"(<head[^>]*>)", r"\\1\n" + csp_meta, body, count=1, flags=re.IGNORECASE)
+            elif "<html" in body.lower():
+                body = re.sub(r"(<html[^>]*>)", r"\1\n<head>" + csp_meta + "</head>", body, count=1, flags=re.IGNORECASE)
+            else:
+                body = "<head>" + csp_meta + "</head>\n" + body
             async with aiofiles.open(index_path, "w", encoding="utf-8") as f:
                 await f.write(body)
 
@@ -1910,7 +1922,7 @@ class TtsTool(Tool):
                     encoding=AudioEncoding.LINEAR_PCM,
                 )
 
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             resp = await loop.run_in_executor(None, run_riva)
             logger.info(f"Riva TTS synthesized audio with voice={tts_voice_name!r}, language={tts_language_code!r}")
 
@@ -1931,7 +1943,7 @@ class TtsTool(Tool):
                     tts = gTTS(text=text, lang='es' if lang_is_spanish else 'en')
                     tts.save(filename)
 
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, run_gtts)
                 logger.warning("TTS used gTTS fallback; voice selection/emotion is unavailable in fallback audio")
             except Exception as fallback_err:
@@ -1946,7 +1958,13 @@ class TtsTool(Tool):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            _stdout, stderr = await proc.communicate()
+            try:
+                _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                logger.warning("TTS OGG conversion timed out")
+                return source
             if proc.returncode == 0 and os.path.exists(voice_filename):
                 return voice_filename
             logger.warning(f"Failed to convert TTS to voice OGG: {stderr.decode(errors='replace')[-300:]}")
@@ -1961,7 +1979,12 @@ class TtsTool(Tool):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, _stderr = await proc.communicate()
+            try:
+                stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return 1.0
             if proc.returncode != 0:
                 return 1.0
             try:
@@ -1977,7 +2000,12 @@ class TtsTool(Tool):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, _stderr = await proc.communicate()
+            try:
+                stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return base64.b64encode(bytes([128] * 256)).decode("ascii")
             if proc.returncode != 0 or len(stdout) < 2:
                 return base64.b64encode(bytes([128] * 256)).decode("ascii")
 

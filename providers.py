@@ -156,7 +156,25 @@ class OllamaProvider:
 
     async def _get_session(self):
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            # Use SSRF-safe resolver to block private/internal addresses
+            import ipaddress as _ip
+            class _SafeResolver(aiohttp.abc.AbstractResolver):
+                def __init__(self):
+                    self._resolver = aiohttp.resolver.DefaultResolver()
+                async def resolve(self, host, port=0, family=0):
+                    results = await self._resolver.resolve(host, port, family)
+                    for item in results:
+                        try:
+                            ip = _ip.ip_address(item["host"])
+                            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                                raise OSError(f"blocked unsafe resolved address for {host}")
+                        except ValueError:
+                            pass
+                    return results
+                async def close(self):
+                    await self._resolver.close()
+            connector = aiohttp.TCPConnector(resolver=_SafeResolver(), limit=10, limit_per_host=3)
+            self._session = aiohttp.ClientSession(connector=connector)
         return self._session
 
     async def close(self):

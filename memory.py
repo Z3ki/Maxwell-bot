@@ -566,8 +566,7 @@ class MemoryManager:
                 with open(prompts_file, "r", encoding="utf-8") as f:
                     prompts = json.load(f)
             prompts[server_id] = prompt
-            with open(prompts_file, "w", encoding="utf-8") as f:
-                json.dump(prompts, f, indent=2, ensure_ascii=False)
+            _atomic_json_write_sync(prompts_file, prompts)
             logger.info(f"Set prompt for server {server_id}")
         except Exception as e:
             logger.error(f"Failed to set server prompt: {e}")
@@ -580,8 +579,7 @@ class MemoryManager:
                     prompts = json.load(f)
                 if server_id in prompts:
                     del prompts[server_id]
-                with open(prompts_file, "w", encoding="utf-8") as f:
-                    json.dump(prompts, f, indent=2, ensure_ascii=False)
+                    _atomic_json_write_sync(prompts_file, prompts)
                 logger.info(f"Cleared prompt for server {server_id}")
         except Exception as e:
             logger.error(f"Failed to clear server prompt: {e}")

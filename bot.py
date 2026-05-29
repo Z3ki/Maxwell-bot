@@ -225,7 +225,13 @@ async def _synthesize_local_tts_wav(text: str, output_path: str) -> str | None:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    _stdout, stderr = await proc.communicate()
+    try:
+        _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        logger.warning("Local espeak TTS timed out")
+        return None
     if proc.returncode != 0 or not os.path.exists(raw_path):
         logger.warning("Local espeak TTS failed: %s", stderr.decode("utf-8", "ignore")[:300])
         return None
@@ -234,11 +240,18 @@ async def _synthesize_local_tts_wav(text: str, output_path: str) -> str | None:
         "-i", raw_path, "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", output_path,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
-    _stdout, stderr = await convert.communicate()
     try:
-        Path(raw_path).unlink(missing_ok=True)
-    except Exception:
-        pass
+        _stdout, stderr = await asyncio.wait_for(convert.communicate(), timeout=30)
+    except asyncio.TimeoutError:
+        convert.kill()
+        await convert.wait()
+        logger.warning("Local espeak ffmpeg conversion timed out")
+        return None
+    finally:
+        try:
+            Path(raw_path).unlink(missing_ok=True)
+        except Exception:
+            pass
     if convert.returncode != 0 or not os.path.exists(output_path):
         logger.warning("Local espeak conversion failed: %s", stderr.decode("utf-8", "ignore")[:300])
         return None
@@ -323,7 +336,12 @@ async def _synthesize_tts_wav(text: str, output_path: str, *, prefer_local: bool
         "-i", mp3_path, "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", output_path,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
-    _stdout, _stderr = await proc.communicate()
+    try:
+        _stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError("TTS ffmpeg conversion timed out")
     if proc.returncode != 0 or not os.path.exists(output_path):
         raise RuntimeError("Failed to synthesize TTS audio")
     return output_path
@@ -331,7 +349,7 @@ async def _synthesize_tts_wav(text: str, output_path: str, *, prefer_local: bool
 TEXT_ATTACHMENT_EXTS = {
     ".1", ".2", ".3", ".4", ".5", ".6", ".7", ".8", ".9",
     ".asm", ".bat", ".c", ".cfg", ".clj", ".cmake", ".cmd", ".conf",
-    ".cpp", ".cs", ".css", ".csv", ".cxx", ".diff", ".dockerfile", ".env",
+    ".cpp", ".cs", ".css", ".csv", ".cxx", ".diff", ".dockerfile",
     ".erl", ".ex", ".exs", ".fish", ".go", ".h", ".hpp", ".hrl", ".hs",
     ".htm", ".html", ".inc", ".ini", ".java", ".js", ".json", ".jsx", ".kt",
     ".kts", ".less", ".lisp", ".log", ".lua", ".m", ".make", ".markdown",
@@ -1042,7 +1060,7 @@ FOLLOWUP_TOOL_NAMES = {
     "image_generator", "hd_image", "lookup_user", "search_messages", "create_invite", "create_poll",
     "forward_message", "edit_message", "list_servers", "create_site", "list_sites", "web_search",
     "fetch_url", "shell", "list_admin_servers", "create_category", "create_channel", "edit_channel", "delete_channel",
-    "reasoning_log",
+    "reasoning_log", "send_meme", "send_media", "kilo_run", "leave_vc",
 }
 
 TELEGRAM_COMPATIBLE_TOOL_NAMES = {
@@ -1120,6 +1138,7 @@ class MaxwellBot(commands.Bot):
         self._vc_voice_channels: dict[int, object] = {}
         self._vc_reply_locks: dict[int, asyncio.Lock] = {}
         self._vc_playback_until: dict[int, float] = {}
+        self._trace_lock = asyncio.Lock()
         self._tasks = []
         self._setup_ai()
         self._setup_memory()
@@ -2999,7 +3018,13 @@ class MaxwellBot(commands.Bot):
                 proc = await asyncio.create_subprocess_exec(
                     *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
                 )
-                _stdout, stderr = await proc.communicate()
+                try:
+                    _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    logger.warning(f"Video normalization timed out for {filename}")
+                    return None
                 if proc.returncode != 0 or not output_path.exists():
                     logger.warning(f"Video normalization failed for {filename}: {stderr.decode(errors='replace')[-300:]}")
                     return None
@@ -3037,7 +3062,13 @@ class MaxwellBot(commands.Bot):
                 proc = await asyncio.create_subprocess_exec(
                     *frame_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
                 )
-                _stdout, stderr = await proc.communicate()
+                try:
+                    _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    logger.warning(f"Video frame extraction timed out for {filename}")
+                    stderr = b"timeout"
                 if proc.returncode == 0:
                     for frame_path in sorted(tmp_path.glob("frame-*.jpg")):
                         frame_blob = frame_path.read_bytes()
@@ -3067,7 +3098,13 @@ class MaxwellBot(commands.Bot):
                 proc = await asyncio.create_subprocess_exec(
                     *audio_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
                 )
-                _stdout, stderr = await proc.communicate()
+                try:
+                    _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    logger.info(f"Video audio extraction timed out for {filename}")
+                    stderr = b"timeout"
                 if proc.returncode == 0 and audio_path.exists() and audio_path.stat().st_size > 44:
                     audio_blob = audio_path.read_bytes()
                     if len(audio_blob) <= max_size:
@@ -3108,7 +3145,13 @@ class MaxwellBot(commands.Bot):
                 proc = await asyncio.create_subprocess_exec(
                     *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
                 )
-                _stdout, stderr = await proc.communicate()
+                try:
+                    _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    logger.warning(f"GIF normalization timed out for {filename}")
+                    return None
                 if proc.returncode != 0 or not output_path.exists():
                     logger.warning(f"GIF normalization failed for {filename}: {stderr.decode(errors='replace')[-300:]}")
                     return None
@@ -3568,20 +3611,21 @@ class MaxwellBot(commands.Bot):
     async def _record_llm_trace(self, message, payload: dict):
         path = Path(self.config.DATA_DIR) / "llm_traces.json"
         now = datetime.now(timezone.utc).isoformat()
-        try:
-            traces = await asyncio.to_thread(lambda: json.loads(path.read_text(encoding="utf-8")) if path.exists() else [])
-            if not isinstance(traces, list):
+        async with self._trace_lock:
+            try:
+                traces = await asyncio.to_thread(lambda: json.loads(path.read_text(encoding="utf-8")) if path.exists() else [])
+                if not isinstance(traces, list):
+                    traces = []
+            except Exception:
                 traces = []
-        except Exception:
-            traces = []
-        traces.append({
-            "ts": now,
-            "channel_id": str(getattr(getattr(message, "channel", None), "id", "")),
-            "user_id": str(getattr(getattr(message, "author", None), "id", "")),
-            "platform": self._message_tool_platform(message),
-            "payload": payload or {},
-        })
-        await asyncio.to_thread(_atomic_json_write, path, traces[-300:])
+            traces.append({
+                "ts": now,
+                "channel_id": str(getattr(getattr(message, "channel", None), "id", "")),
+                "user_id": str(getattr(getattr(message, "author", None), "id", "")),
+                "platform": self._message_tool_platform(message),
+                "payload": payload or {},
+            })
+            await asyncio.to_thread(_atomic_json_write, path, traces[-300:])
 
     def _message_tool_platform(self, message) -> str:
         return str(getattr(message, "tool_platform", "discord") or "discord")
@@ -3791,6 +3835,8 @@ class MaxwellBot(commands.Bot):
                     continue
                     
                 updates = data.get("result", [])
+                chat_id = None
+                message = None
                 for update in updates:
                     offset = max(offset, update.get("update_id", 0) + 1)
                     message = update.get("message")
@@ -3845,7 +3891,11 @@ class MaxwellBot(commands.Bot):
                                                 proc = await asyncio.create_subprocess_exec(
                                                     *audio_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
                                                 )
-                                                await proc.communicate()
+                                                try:
+                                                    await asyncio.wait_for(proc.communicate(), timeout=30)
+                                                except asyncio.TimeoutError:
+                                                    proc.kill()
+                                                    await proc.wait()
                                                 if proc.returncode == 0 and output_path.exists():
                                                     normal_wav = output_path.read_bytes()
                                                     b64 = base64.b64encode(normal_wav).decode("utf-8")
@@ -4001,9 +4051,9 @@ class MaxwellBot(commands.Bot):
                 logger.error(f"Telegram polling loop exception: {e}")
                 if self._control.get("error_replies", True):
                     try:
-                        failed_chat_id = locals().get("chat_id")
+                        failed_chat_id = chat_id
                         if failed_chat_id:
-                            failed_message_id = (locals().get("message") or {}).get("message_id") if isinstance(locals().get("message"), dict) else None
+                            failed_message_id = (message or {}).get("message_id") if isinstance(message, dict) else None
                             tg_reply = TelegramMessageAdapter(session, url_base, failed_chat_id, failed_message_id)
                             await tg_reply.reply("something went wrong... try again")
                     except Exception:

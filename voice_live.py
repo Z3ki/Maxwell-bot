@@ -187,6 +187,17 @@ class LiveSpeechSink(voice_recv.AudioSink):
         with self._lock:
             self._states.clear()
             self._ready.clear()
+        # Clean up stale temp WAV files from this guild
+        try:
+            temp_dir = Path("temp")
+            if temp_dir.exists():
+                prefix = f"vc-{self.guild_id}-"
+                now = time.time()
+                for f in temp_dir.glob(f"{prefix}*.wav"):
+                    if now - f.stat().st_mtime > 60:
+                        f.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     @staticmethod
     def _rms16le(buf: bytes) -> float:
@@ -198,7 +209,5 @@ class LiveSpeechSink(voice_recv.AudioSink):
         n = len(mv)
         if n == 0:
             return 0.0
-        total = 0
-        for s in mv:
-            total += s * s
+        total = sum(s * s for s in mv)
         return (total / n) ** 0.5
