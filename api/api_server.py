@@ -47,6 +47,20 @@ def _int_env_safe(name: str, default: int) -> int:
         return default
 
 
+def _parse_bool(value, default: bool = False) -> bool:
+    # Do not replace with bool(value). bool("false") is True. Yes, really.
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 _load_env_file(ENV_FILE)
 DATA_DIR = Path(os.getenv("DATA_DIR", APP_ROOT / "data"))
 CORS_ORIGIN = os.getenv("MAXWELL_CORS_ORIGIN", os.getenv("MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com")).rstrip("/")
@@ -55,7 +69,7 @@ API_PORT = _int_env_safe("MAXWELL_API_PORT", 8765)
 BASE_SITE_DIR = Path(os.getenv("MAXWELL_SITE_DIR", APP_ROOT / "public" / "bot")).resolve()
 ADMIN_USER = os.getenv("MAXWELL_ADMIN_USER", "").strip()
 ADMIN_PASSWORD = os.getenv("MAXWELL_ADMIN_PASSWORD", "").strip()
-REM_ENABLED_DEFAULT = str(os.getenv("REM_ENABLED", "false")).strip().lower() in {"1", "true", "yes", "on"}
+REM_ENABLED_DEFAULT = _parse_bool(os.getenv("REM_ENABLED"), False)
 REM_INTERVAL_DEFAULT = _int_env_safe("REM_INTERVAL_SECONDS", 600)
 REM_RUN_HISTORY_DEFAULT = _int_env_safe("REM_RUN_HISTORY", 50)
 
@@ -321,7 +335,7 @@ def _load_rem_control():
     except (TypeError, ValueError):
         pass
     return {
-        "enabled": bool(control.get("enabled", REM_ENABLED_DEFAULT)),
+        "enabled": _parse_bool(control.get("enabled"), REM_ENABLED_DEFAULT),
         "interval_seconds": interval,
         "max_turns": max_turns,
         "prompt": str(control.get("prompt") or ""),
@@ -360,7 +374,7 @@ def _sanitize_control(control):
     for key, default in DEFAULT_CONTROL.items():
         value = control.get(key, default)
         if isinstance(default, bool):
-            out[key] = bool(value)
+            out[key] = _parse_bool(value, default)
         elif isinstance(default, int):
             try:
                 out[key] = int(value)
@@ -990,7 +1004,8 @@ async def commands_post(request):
         if not command["user_id"] or not command["content"]:
             return _json_response({"error": "user_id and content required"}, 400)
     elif cmd_type == "set_presence":
-        command["status"] = str(body.get("status", "online")).strip()
+        # "status" is the queue lifecycle field. Do not reuse it for Discord presence.
+        command["presence_status"] = str(body.get("status", "online")).strip()
         command["activity_type"] = str(body.get("activity_type", "")).strip()
         command["activity_text"] = str(body.get("activity_text", "")).strip()[:128]
     elif cmd_type == "set_custom_status":

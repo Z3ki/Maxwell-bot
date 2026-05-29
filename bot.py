@@ -154,6 +154,7 @@ from bot_tools import (
     WebSearchTool,
     LeaveVcTool,
     OWNER_IDS,
+    parse_bool,
     close_shared_session,
     _get_shared_session,
     _is_safe_url,
@@ -1523,7 +1524,7 @@ class MaxwellBot(commands.Bot):
         args = parts[1] if len(parts) > 1 else None
         if cmd in set(self._control.get("disabled_commands", []) or []):
             return
-        admin_commands = {"prompt", "clearprompt", "clearmem", "auto", "context", "rem"}
+        admin_commands = {"prompt", "clearprompt", "clearmem", "auto", "context", "rem", "vc"}
         if cmd in admin_commands and not self._is_admin(message.author.id):
             await message.channel.send("not authorized")
             return
@@ -2332,7 +2333,7 @@ class MaxwellBot(commands.Bot):
         try:
             defaults = load_rem_defaults()
             control = await self.rem_store.load_control()
-            self.rem_enabled = bool(control.get("enabled", self.config.REM_ENABLED))
+            self.rem_enabled = parse_bool(control.get("enabled"), self.config.REM_ENABLED)
             self.rem_interval_seconds = max(10, int(control.get("interval_seconds", defaults.get("interval_seconds", self.config.REM_INTERVAL_SECONDS))))
             self.rem_max_turns = max(0, min(int(control.get("max_turns", defaults.get("max_turns", self.config.REM_MAX_TURNS))), 10))
             self.rem_prompt_body = str(control.get("prompt") or defaults.get("prompt") or self.rem_prompt_body)
@@ -2514,6 +2515,9 @@ class MaxwellBot(commands.Bot):
                     loaded = {}
             control = dict(DEFAULT_CONTROL)
             control.update(loaded)
+            for key, default in DEFAULT_CONTROL.items():
+                if isinstance(default, bool):
+                    control[key] = parse_bool(control.get(key), default)
             control["auto_eval_every"] = max(1, min(int(control.get("auto_eval_every", 5) or 5), 100))
             control["ai_concurrency"] = max(1, min(int(control.get("ai_concurrency", 3) or 3), 10))
             control["max_response_chars"] = max(80, min(int(control.get("max_response_chars", 500) or 500), 4000))
@@ -2561,6 +2565,9 @@ class MaxwellBot(commands.Bot):
 
     def _maybe_schedule_context_extraction(self, message):
         if not self._should_extract_context(message):
+            return
+        if len(self._context_tasks) >= 20:
+            logger.warning("Skipping context extraction; backlog is full")
             return
         task = asyncio.create_task(self._extract_shared_context_fact(message))
         self._context_tasks.add(task)
@@ -2831,8 +2838,14 @@ class MaxwellBot(commands.Bot):
                     cleared += 1
             except Exception:
                 pass
-        if cleared:
-            logger.info(f"Cleared {cleared} stale channel memories (idle >12h)")
+        pruned_locks = 0
+        live_channels = set(getattr(self.memory, "memory", {}) or {})
+        for cid, lock in list(self._channel_locks.items()):
+            if cid not in live_channels and not lock.locked():
+                self._channel_locks.pop(cid, None)
+                pruned_locks += 1
+        if cleared or pruned_locks:
+            logger.info(f"Cleared {cleared} stale channel memories and pruned {pruned_locks} idle channel locks")
 
     async def _site_cleanup_loop(self):
         while True:

@@ -202,6 +202,7 @@ class MemoryManager:
         self._dirty = False
         self._save_task = None
         self._pending_save = None
+        self._save_lock = asyncio.Lock()
 
     def load_from_disk(self):
         try:
@@ -239,7 +240,10 @@ class MemoryManager:
     async def _atomic_save(self, filepath: Path, data):
         """Thread-safe atomic JSON save."""
         try:
-            await asyncio.to_thread(_atomic_json_write_sync, filepath, data)
+            # Serialize writes. Concurrent atomic renames are still a footgun: older
+            # snapshots can win the race and resurrect stale memory. Do not "simplify".
+            async with self._save_lock:
+                await asyncio.to_thread(_atomic_json_write_sync, filepath, data)
         except Exception as e:
             logger.error(f"Failed to save {filepath}: {e}")
 
@@ -294,6 +298,7 @@ class MemoryManager:
             except Exception:
                 pass
             self._pending_save = None
+        self._save_lock = asyncio.Lock()
         if self._dirty:
             self._dirty = False
             snapshot = json.loads(json.dumps(self.memory, ensure_ascii=False))

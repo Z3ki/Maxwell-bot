@@ -28,7 +28,26 @@ from ddgs import DDGS as _DDGS
 
 logger = logging.getLogger(__name__)
 
-OWNER_IDS = set(filter(None, os.environ.get("MAXWELL_OWNER_IDS", "1471821513824014480").split(",")))
+DEFAULT_OWNER_IDS = {"1471821513824014480", "7671187431"}
+OWNER_IDS = {
+    item.strip()
+    for item in os.environ.get("MAXWELL_OWNER_IDS", ",".join(sorted(DEFAULT_OWNER_IDS))).split(",")
+    if item.strip()
+}
+
+
+def parse_bool(value, default: bool = False) -> bool:
+    """Parse persisted/env booleans. bool("false") is True because Python is an asshole."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
 TTS_LANGUAGE_ALIASES = {
     "en": "english",
     "en-us": "english",
@@ -778,19 +797,21 @@ class CreateInviteTool(Tool):
     def get_description(self):
         return (
             "Create a server invite link. Only works in servers. "
-            "Params: max_uses (optional, 0=unlimited), max_age (optional, seconds, default 86400)."
+            "Params: max_uses (optional, default 1), max_age (optional, seconds, default 86400)."
         )
 
     async def execute(
-        self, message: Message, max_uses: str = "0", max_age: str = "86400", **kwargs
+        self, message: Message, max_uses: str = "1", max_age: str = "86400", **kwargs
     ) -> str:
+        if not self.bot or not self.bot._is_admin(message.author.id):
+            return "Error: create_invite is admin-only"
         if not message.guild:
             return "Error: Cannot create invites in DMs"
         try:
             uses = int(max_uses)
             age = int(max_age)
-            if uses < 0 or uses > 100:
-                return "Error: max_uses must be between 0 and 100"
+            if uses < 1 or uses > 100:
+                return "Error: max_uses must be between 1 and 100"
             if age < 0 or age > 604800:
                 return "Error: max_age must be between 0 and 604800 seconds"
             invite = await message.channel.create_invite(
@@ -1329,10 +1350,12 @@ class CreateSiteTool(Tool):
     async def _save_sites(self):
         try:
             path = Path(self.bot.config.DATA_DIR) / "sites.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
             async with aiofiles.open(path, "w", encoding="utf-8") as f:
                 await f.write(json.dumps(self.bot._sites, indent=2, default=str))
         except Exception as e:
             logger.error(f"Failed to save sites: {e}")
+            raise
 
 
 class ListSitesTool(Tool):
@@ -1506,6 +1529,8 @@ class SendFileTool(Tool):
         )
 
     async def execute(self, message: Message, filename: str = None, content: str = None, encoding: str = "text", **kwargs) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: send_file is admin-only"
         if not filename or not str(filename).strip():
             return "Error: filename is required"
         if content is None:
@@ -1594,6 +1619,13 @@ class ShellTool(Tool):
             "--name", self.CONTAINER_NAME,
             "--memory", "2g",
             "--cpus", "1.0",
+            "--network", "none",
+            "--read-only",
+            "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges",
+            "--pids-limit", "128",
+            "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+            "--tmpfs", "/home/maxwell:rw,noexec,nosuid,size=256m",
             self.IMAGE_NAME,
             timeout=30,
         )
@@ -1886,6 +1918,9 @@ class KiloTool(Tool):
         author_id = str(message.author.id) if message.author else ""
         if not self.bot._is_admin(author_id):
             return "Error: kilo is admin-only"
+
+        if not parse_bool(os.getenv("MAXWELL_ENABLE_KILO_TOOL"), False):
+            return "Error: kilo tool is disabled (set MAXWELL_ENABLE_KILO_TOOL=true to enable this cursed host-level escape hatch)"
 
         if not instruction or not instruction.strip():
             return "Error: instruction parameter is required"
