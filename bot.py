@@ -187,10 +187,22 @@ logging.basicConfig(level=logging.INFO, handlers=[_stdout_handler, _stderr_handl
 logger = logging.getLogger(__name__)
 
 MAX_VISUAL_MEMORY_IMAGES = 3
-MEDIA_CONTEXT_USES = 11
+# Keep visual carryover short. Long-lived image payloads make the model randomly
+# talk about old screenshots in unrelated replies. That bug is creepy as hell.
+MEDIA_CONTEXT_USES = 2
+VISUAL_REFERENCE_RE = re.compile(
+    r"(?i)\b("
+    r"image|img|picture|pic|photo|screenshot|screen ?shot|attachment|media|"
+    r"gif|meme|frame|video|clip|thumbnail|look at|see (?:it|this|that)|"
+    r"what(?:'s| is) (?:in|on) (?:it|this|that)|describe (?:it|this|that)"
+    r")\b"
+)
+PRIOR_VISUAL_REFERENCE_RE = re.compile(r"(?i)\b(previous|prior|earlier|last|old|recent|before|compare|again)\b")
 CUSTOM_EMOJI_ALIAS_RE = re.compile(r"(?<!<)(?<!<a):([A-Za-z0-9_]{2,32}):(?!\d)")
 TOOL_LINE_RE = re.compile(r"(?im)^\s*(?:TOOL|CALL)\s+([A-Za-z_]\w*)\s*[:\-]?\s*")
 TOOL_TRACE_LINE_RE = re.compile(r"(?im)^\s*Called\s+[A-Za-z_]\w*\s+with\s+\{.*?\}\s*->\s*__\w+__.*$")
+TEXT_ATTACHMENT_MAX_BYTES = 512 * 1024
+TEXT_ATTACHMENT_MAX_CHARS = 50_000
 TEXT_MIME_TYPES = {
     "application/json",
     "application/javascript",
@@ -933,6 +945,13 @@ def _decode_readable_text(blob: bytes) -> str:
         try:
             text = blob.decode(encoding)
             if _decoded_looks_readable(text):
+                if len(text) > TEXT_ATTACHMENT_MAX_CHARS:
+                    # Huge logs in prompts are context-window napalm. Keep enough
+                    # to be useful and make the truncation explicit.
+                    head = TEXT_ATTACHMENT_MAX_CHARS // 2
+                    tail = TEXT_ATTACHMENT_MAX_CHARS - head
+                    omitted = len(text) - TEXT_ATTACHMENT_MAX_CHARS
+                    return text[:head] + f"\n\n[... truncated {omitted} chars from middle ...]\n\n" + text[-tail:]
                 return text
         except UnicodeError:
             continue
@@ -968,7 +987,7 @@ DEFAULT_CONTROL = {
     "reply_dms": False,
     "reply_groups": False,
     "reply_mentions": True,
-    "reply_to_bots": True,
+    "reply_to_bots": False,
     "auto_mode_enabled": False,
     "auto_eval_every": 5,
     "auto_max_recent_replies": 5,
@@ -981,6 +1000,8 @@ DEFAULT_CONTROL = {
     "ai_concurrency": 3,
     "memory_history_messages": 20,
     "memory_context_budget": 30000,
+    "tool_history_messages": 3,
+    "prompt_context_budget": 60000,
     "max_tool_iterations": 10,
     "max_response_chars": 500,
     "tools_enabled": False,
@@ -1085,10 +1106,16 @@ def _tool_results_need_followup(tool_results: list[str]) -> bool:
 
 def _atomic_json_write(path: Path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2, default=str)
-    tmp.replace(path)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 class MaxwellBot(commands.Bot):
@@ -1121,6 +1148,7 @@ class MaxwellBot(commands.Bot):
         self._stop_until: dict[str, float] = {}
         self._drugged_until: dict[str, float] = {}
         self._sites: dict[str, dict] = {}
+        self._sites_mtime = 0.0
         self._auto_channels: set[str] = set()
         self._auto_counter: dict[str, int] = {}
         self._blacklist: set[str] = set()
@@ -2257,17 +2285,25 @@ class MaxwellBot(commands.Bot):
                     break
         return "\n".join(parts)
 
-    def _load_sites(self):
+    def _load_sites(self, quiet: bool = False):
         try:
             path = Path(self.config.DATA_DIR) / "sites.json"
+            mtime = path.stat().st_mtime if path.exists() else 0.0
+            if mtime == self._sites_mtime:
+                return
             if path.exists():
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 self._sites = {k: v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
+            else:
+                self._sites = {}
+            self._sites_mtime = mtime
+            if not quiet:
                 logger.info(f"Loaded {len(self._sites)} tracked sites from disk")
         except Exception as e:
+            # Keep previous in-memory map. Resetting to {} after one corrupt read
+            # turns recoverable disk damage into deleted sites.
             logger.error(f"Failed to load sites: {e}")
-            self._sites = {}
 
     def _load_auto_channels(self, quiet: bool = False):
         try:
@@ -2396,17 +2432,22 @@ class MaxwellBot(commands.Bot):
         self._rem_running = True
         await self.rem_store.patch_state({"running": True, "running_since": datetime.now(timezone.utc).isoformat()})
         try:
-            run = await run_rem_once(
-                memory_manager=self.memory,
-                rem_log=self.rem_log,
-                provider=self.ai_provider,
-                data_dir=self.config.DATA_DIR,
-                model=self.config.OLLAMA_REM_MODEL,
-                max_turns=self.rem_max_turns,
-                run_history=self.config.REM_RUN_HISTORY,
-                prompt_body=self.rem_prompt_body,
-                timeout=max(10, min(int(self._control.get("ai_timeout_seconds", 180) or 180), 600)),
-            )
+            timeout = max(10, min(int(self._control.get("ai_timeout_seconds", 180) or 180), 600))
+            await self._acquire_ai_slot(timeout=timeout)
+            try:
+                run = await run_rem_once(
+                    memory_manager=self.memory,
+                    rem_log=self.rem_log,
+                    provider=self.ai_provider,
+                    data_dir=self.config.DATA_DIR,
+                    model=self.config.OLLAMA_REM_MODEL,
+                    max_turns=self.rem_max_turns,
+                    run_history=self.config.REM_RUN_HISTORY,
+                    prompt_body=self.rem_prompt_body,
+                    timeout=timeout,
+                )
+            finally:
+                await self._release_ai_slot()
             logger.info(f"REM pass complete: {run.get('audit', '')[:160]}")
             return True, "ok", run
         except Exception as e:
@@ -2549,6 +2590,8 @@ class MaxwellBot(commands.Bot):
             control["auto_eval_every"] = max(1, min(int(control.get("auto_eval_every", 5) or 5), 100))
             control["ai_concurrency"] = max(1, min(int(control.get("ai_concurrency", 3) or 3), 10))
             control["max_response_chars"] = max(80, min(int(control.get("max_response_chars", 500) or 500), 4000))
+            control["tool_history_messages"] = max(0, min(int(control.get("tool_history_messages", 3) or 0), 20))
+            control["prompt_context_budget"] = max(10000, min(int(control.get("prompt_context_budget", 60000) or 60000), 200000))
             if control["ai_concurrency"] != self._ai_concurrency:
                 self._ai_concurrency = control["ai_concurrency"]
                 self._notify_ai_waiters()
@@ -2564,6 +2607,7 @@ class MaxwellBot(commands.Bot):
             self._load_admins(quiet=True)
             self._load_auto_channels(quiet=True)
             self._load_blacklist(quiet=True)
+            self._load_sites(quiet=True)
             self._load_control()
             await self._load_rem_control()
 
@@ -2884,6 +2928,7 @@ class MaxwellBot(commands.Bot):
                 logger.error(f"Site cleanup error: {e}")
 
     async def _cleanup_sites(self):
+        self._load_sites(quiet=True)
         base = Path(self.config.MAXWELL_SITE_DIR).resolve()
         now = datetime.now(timezone.utc).timestamp()
         expired = []
@@ -2905,7 +2950,12 @@ class MaxwellBot(commands.Bot):
         if expired:
             for slug in expired:
                 self._sites.pop(slug, None)
-            await asyncio.to_thread(_atomic_json_write, Path(self.config.DATA_DIR) / "sites.json", self._sites)
+            sites_path = Path(self.config.DATA_DIR) / "sites.json"
+            await asyncio.to_thread(_atomic_json_write, sites_path, self._sites)
+            try:
+                self._sites_mtime = sites_path.stat().st_mtime
+            except OSError:
+                self._sites_mtime = 0.0
 
     @staticmethod
     def _split_response(text: str, limit: int = 1900) -> list[str]:
@@ -2959,6 +3009,9 @@ class MaxwellBot(commands.Bot):
                 continue
             if attachment.size > max_size and not is_known_text:
                 logger.warning(f"Skipping attachment {attachment.filename}: too large ({attachment.size} bytes)")
+                continue
+            if is_known_text and attachment.size > TEXT_ATTACHMENT_MAX_BYTES:
+                logger.warning(f"Skipping text attachment {attachment.filename}: too large ({attachment.size} bytes)")
                 continue
             try:
                 blob = await attachment.read()
@@ -3335,8 +3388,8 @@ class MaxwellBot(commands.Bot):
                 "mime_type": item["mime_type"],
                 "filename": item.get("filename", "attachment"),
                 "message_id": item.get("message_id"),
-                # Decremented after each handled message, so new images survive this
-                # request plus later handled messages in the same channel.
+                # Decremented after each handled message. Do not "clean this up"
+                # back to a big number unless you enjoy haunted image context.
                 "uses_left": MEDIA_CONTEXT_USES,
             })
         # Enforce cap: keep only the most recent MAX_VISUAL_MEMORY_IMAGES
@@ -3345,9 +3398,11 @@ class MaxwellBot(commands.Bot):
         self._media_context[channel_id] = cached
         logger.info(f"Cached {len(image_media)} image(s) for channel {channel_id}; visual memory={len(self._media_context[channel_id])}")
 
-    def _get_media_context(self, channel_id: str) -> list[dict]:
+    def _get_media_context(self, channel_id: str, message_id=None) -> list[dict]:
         active = []
         for item in self._media_context.get(channel_id, []):
+            if message_id is not None and str(item.get("message_id")) != str(message_id):
+                continue
             active.append({
                 "b64": item["b64"],
                 "mime_type": item["mime_type"],
@@ -3355,6 +3410,29 @@ class MaxwellBot(commands.Bot):
                 "message_id": item.get("message_id"),
             })
         return active
+
+    @staticmethod
+    def _should_use_cached_media_context(message, content: str) -> bool:
+        """Only attach old images when the latest turn actually points at them."""
+        return bool(VISUAL_REFERENCE_RE.search(str(content or ""))) or MaxwellBot._reply_media_message_id(message) is not None
+
+    @staticmethod
+    def _reply_media_message_id(message):
+        ref = getattr(getattr(message, "reference", None), "resolved", None)
+        if ref is None:
+            return None
+        if getattr(ref, "attachments", None):
+            return getattr(ref, "id", None)
+        for embed in getattr(ref, "embeds", []) or []:
+            if MaxwellBot._embed_media_urls(embed):
+                return getattr(ref, "id", None)
+        return None
+
+    @staticmethod
+    def _should_mix_cached_with_current(content: str) -> bool:
+        # A new image plus "look at this" should mean the new image, not every
+        # cached meme in the channel. Only mix when the user asks for history.
+        return bool(PRIOR_VISUAL_REFERENCE_RE.search(str(content or "")))
 
     @staticmethod
     def _current_binary_media(media: list[dict]) -> list[dict]:
@@ -3378,7 +3456,7 @@ class MaxwellBot(commands.Bot):
                 label = "new" if any(item.get("message_id") == cur.get("message_id") and filename == cur.get("filename") for cur in current_images) else "recent"
                 lines.append(f"{i}. {filename} ({mime}, {label})")
             parts.append(
-                "Images available to inspect, oldest to newest. Use these actual image attachments when answering:\n"
+                "Images available to inspect, oldest to newest. Only discuss them when relevant to the latest message:\n"
                 + "\n".join(lines)
             )
         if active_non_images:
@@ -3433,10 +3511,18 @@ class MaxwellBot(commands.Bot):
         _images, media = await self._extract_media(message)
         media.extend(await self._extract_embeds(message))
         media.extend(await self._extract_gif_links(message))
-        self._cache_media_context(channel_id, media)
-        cached_media = self._get_media_context(channel_id)
-        active_media = cached_media + self._current_binary_media(media)
+        current_images = [item for item in media if item.get("is_image")]
+        cached_media = []
+        reply_media_id = self._reply_media_message_id(message)
+        if reply_media_id is not None:
+            cached_media = self._get_media_context(channel_id, message_id=reply_media_id)
+        elif self._should_use_cached_media_context(message, content) and (not current_images or self._should_mix_cached_with_current(content)):
+            cached_media = self._get_media_context(channel_id)
+        # Current attachments always go through. Cached images are gated above;
+        # otherwise normal chat gets polluted by yesterday's meme/screenshot.
+        active_media = current_images + cached_media + self._current_binary_media(media)
         media_summary = self._format_media_summary(media, active_media)
+        self._cache_media_context(channel_id, media)
         messages = await self._build_messages(message, content, has_media=bool(active_media), media_summary=media_summary)
         try:
             await self._acquire_ai_slot(timeout=ai_timeout)
@@ -3462,11 +3548,14 @@ class MaxwellBot(commands.Bot):
                     break
                 if not _tool_results_need_followup(tool_results):
                     break
-                result_messages = await self._build_messages(message, content, has_media=bool(active_media), media_summary=media_summary)
-                result_messages.append({"role": "user", "content": "=== TOOL RESULTS ===\n" + "\n".join(tool_results) + "\n=== END ===\nContinue from these results. If the user still needs a visible reply, finish now with <tool:send_message>reply text</tool:send_message>. If no visible reply is appropriate, finish with <tool:no_response />. If you only called reasoning_log, you have not answered the user yet. Do not stop after reasoning_log."})
+                result_messages = await self._build_messages(message, content, has_media=False, media_summary="")
+                result_messages.append({"role": "user", "content": "=== TOOL RESULTS ===\n" + "\n".join(tool_results) + "\n=== END ===\nContinue from these results. Media from the original user message is not reattached to this tool-result follow-up; do not claim to inspect media here unless the tool results include it as text. If the user still needs a visible reply, finish now with <tool:send_message>reply text</tool:send_message>. If no visible reply is appropriate, finish with <tool:no_response />. If you only called reasoning_log, you have not answered the user yet. Do not stop after reasoning_log."})
                 await self._acquire_ai_slot(timeout=ai_timeout)
                 try:
-                    followup = await self.ai_provider.generate_response(result_messages, media=active_media, timeout=ai_timeout)
+                    # Tool-result followups are text-only. Resending the same
+                    # images/video every iteration is expensive and causes stale
+                    # visual context to haunt unrelated tool continuations.
+                    followup = await self.ai_provider.generate_response(result_messages, media=[], timeout=ai_timeout)
                     if followup and followup.strip():
                         response = followup
                     else:
@@ -3578,10 +3667,18 @@ class MaxwellBot(commands.Bot):
 
         async def run_calls():
             nonlocal last
+            terminal_seen = False
             for start, end, name, params in calls:
                 segments.append(response[last:start])
                 last = end
                 try:
+                    is_terminal = name in {"send_message", "no_response"}
+                    if is_terminal and terminal_seen:
+                        result_text = "Skipped duplicate terminal tool call"
+                        tool_results.append(f"Tool {name}: {result_text}")
+                        await remember_tool_call(name, params, result_text)
+                        continue
+
                     if name == "send_message" and message.guild and isinstance(params.get("content"), str):
                         params = dict(params)
                         params["content"] = self._render_custom_emojis(params.get("content", ""), message.guild)
@@ -3595,6 +3692,8 @@ class MaxwellBot(commands.Bot):
                         tool_results.append(f"Tool {name}: {result_text}")
                         await remember_tool_call(name, params, result_text)
                         continue
+                    if is_terminal:
+                        terminal_seen = True
                     result = await self.tools[name].execute(message, **params)
                     result_text = str(result) if result else "executed successfully"
                     tool_results.append(f"Tool {name}: {result_text}")
@@ -3683,6 +3782,71 @@ class MaxwellBot(commands.Bot):
             + "<tool:reasoning_log><thoughts>User asked for a site, so I should create one.</thoughts><intent>create_site</intent><decision>use_create_site</decision><confidence>high</confidence></tool:reasoning_log>"
         )
 
+    @staticmethod
+    def _topic_tokens(text: str) -> set[str]:
+        stop = {"the", "and", "for", "you", "that", "this", "with", "what", "when", "where", "why", "how", "are", "was", "were", "from", "have", "has", "had", "not", "but", "just", "like", "about"}
+        return {t for t in re.findall(r"[a-z0-9_]{4,}", str(text or "").lower()) if t not in stop}
+
+    @classmethod
+    def _shared_fact_relevant(cls, latest: str, fact: dict) -> bool:
+        scope = str(fact.get("scope") or "")
+        if scope.startswith(("user:", "channel:", "dm:")):
+            return True
+        latest_tokens = cls._topic_tokens(latest)
+        # Short vague turns like "lol" should not drag in guild/global lore.
+        if len(latest_tokens) < 2:
+            return False
+        fact_text = str(fact.get("content") or "") + " " + " ".join(fact.get("tags") or [])
+        return bool(latest_tokens & cls._topic_tokens(fact_text))
+
+    @staticmethod
+    def _message_content_chars(message: dict) -> int:
+        content = message.get("content", "")
+        if isinstance(content, str):
+            return len(content)
+        if isinstance(content, list):
+            return sum(len(str(part.get("text", ""))) for part in content if isinstance(part, dict))
+        return len(str(content or ""))
+
+    @staticmethod
+    def _trim_middle(text: str, limit: int) -> str:
+        text = str(text or "")
+        if len(text) <= limit:
+            return text
+        if limit <= 200:
+            return text[:limit]
+        keep = max(80, (limit - 80) // 2)
+        omitted = len(text) - (keep * 2)
+        return text[:keep] + f"\n\n[... prompt budget trimmed {omitted} chars ...]\n\n" + text[-keep:]
+
+    def _apply_prompt_budget(self, messages: list[dict]) -> list[dict]:
+        budget = max(10000, min(int(self._control.get("prompt_context_budget", 60000) or 60000), 200000))
+        total = sum(MaxwellBot._message_content_chars(m) for m in messages)
+        if total <= budget:
+            return messages
+        out = [dict(m) for m in messages]
+        # Trim low-priority system blocks first. Do not drop the core identity
+        # wholesale; some providers get weird if the first system vanishes.
+        for idx in range(len(out) - 1, 0, -1):
+            if total <= budget:
+                break
+            if out[idx].get("role") != "system" or not isinstance(out[idx].get("content"), str):
+                continue
+            old = out[idx]["content"]
+            target = max(1000, len(old) - (total - budget))
+            target = min(target, 8000)
+            out[idx]["content"] = MaxwellBot._trim_middle(old, target)
+            total -= len(old) - len(out[idx]["content"])
+        if total > budget and isinstance(out[0].get("content"), str):
+            old = out[0]["content"]
+            out[0]["content"] = MaxwellBot._trim_middle(old, max(12000, budget // 3))
+            total -= len(old) - len(out[0]["content"])
+        if total > budget and isinstance(out[-1].get("content"), str):
+            old = out[-1]["content"]
+            out[-1]["content"] = MaxwellBot._trim_middle(old, max(8000, budget - (total - len(old))))
+        logger.info("Trimmed prompt to budget=%s chars messages=%s", budget, len(out))
+        return out
+
     async def _build_messages(self, message, user_message: str, has_media: bool = False, media_summary: str = "") -> list[dict]:
         channel_id = str(message.channel.id)
         system_parts = [
@@ -3730,11 +3894,14 @@ class MaxwellBot(commands.Bot):
                 if facts:
                     lines = []
                     for fact in facts:
+                        if not self._shared_fact_relevant(user_message, fact):
+                            continue
                         lines.append(f"- [{fact.get('scope')}, i{fact.get('importance')}] {fact.get('content')}")
-                    system_parts.append(
-                        "Cross-context facts (background only; do not reveal private source or say where you learned them):\n"
-                        + "\n".join(lines)
-                    )
+                    if lines:
+                        system_parts.append(
+                            "Cross-context facts (background only; do not reveal private source or say where you learned them):\n"
+                            + "\n".join(lines)
+                        )
             except Exception as e:
                 logger.warning(f"Failed to build shared context: {e}")
         if message.guild and self._control.get("emoji_context_enabled", True):
@@ -3771,7 +3938,8 @@ class MaxwellBot(commands.Bot):
             current_message_id = getattr(message, "id", None)
             recent_memory = memory[-count:] if count else []
             recent_ids = {id(msg) for msg in recent_memory}
-            tool_history = [msg for msg in memory if msg.get("is_tool") and id(msg) not in recent_ids]
+            tool_limit = max(0, min(int(self._control.get("tool_history_messages", 3) or 0), 20))
+            tool_history = [msg for msg in memory if msg.get("is_tool") and id(msg) not in recent_ids][-tool_limit:] if tool_limit else []
             context_memory = tool_history + list(recent_memory)
             for msg in reversed(context_memory):
                 if current_message_id is not None and msg.get("message_id") == current_message_id:
@@ -3816,7 +3984,7 @@ class MaxwellBot(commands.Bot):
             messages[-1]["content"] += "\n\n" + current
         else:
             messages.append({"role": "user", "content": current})
-        return messages
+        return MaxwellBot._apply_prompt_budget(self, messages)
 
     async def _telegram_loop(self):
         token = self.config.TELEGRAM_TOKEN
@@ -3945,11 +4113,14 @@ class MaxwellBot(commands.Bot):
                             if facts:
                                 lines = []
                                 for fact in facts:
+                                    if not self._shared_fact_relevant(text, fact):
+                                        continue
                                     lines.append(f"- [{fact.get('scope')}, i{fact.get('importance')}] {fact.get('content')}")
-                                system_parts.append(
-                                    "Cross-context facts (background only; do not reveal private source):\n"
-                                    + "\n".join(lines)
-                                )
+                                if lines:
+                                    system_parts.append(
+                                        "Cross-context facts (background only; do not reveal private source):\n"
+                                        + "\n".join(lines)
+                                    )
                         except Exception as e:
                             logger.warning(f"Telegram context fetching error: {e}")
 
@@ -4012,15 +4183,18 @@ class MaxwellBot(commands.Bot):
                             if not _tool_results_need_followup(tool_results):
                                 break
                             result_messages = [dict(m) for m in messages]
+                            for msg_item in result_messages:
+                                if msg_item.get("role") == "user" and isinstance(msg_item.get("content"), str):
+                                    msg_item["content"] = msg_item["content"].replace("\nMedia available to inspect in the multimodal payload.", "")
                             result_messages.append({
                                 "role": "user",
-                                "content": "=== TOOL RESULTS ===\n" + "\n".join(tool_results) + "\n=== END ===\nContinue from these results. If the user still needs a visible reply, finish now with <tool:send_message>reply text</tool:send_message>. If no visible reply is appropriate, finish with <tool:no_response />. If you only called reasoning_log, you have not answered the user yet. Do not stop after reasoning_log.",
+                                "content": "=== TOOL RESULTS ===\n" + "\n".join(tool_results) + "\n=== END ===\nContinue from these results. Media from the original Telegram message is not reattached to this tool-result follow-up; do not claim to inspect media here unless the tool results include it as text. If the user still needs a visible reply, finish now with <tool:send_message>reply text</tool:send_message>. If no visible reply is appropriate, finish with <tool:no_response />. If you only called reasoning_log, you have not answered the user yet. Do not stop after reasoning_log.",
                             })
                             await self._acquire_ai_slot(timeout=30)
                             try:
                                 async with session.post(f"{url_base}/sendChatAction", json={"chat_id": chat_id, "action": "typing"}):
                                     pass
-                                followup = await self.ai_provider.generate_response(result_messages, media=tg_media, timeout=30)
+                                followup = await self.ai_provider.generate_response(result_messages, media=[], timeout=30)
                                 if followup and followup.strip():
                                     response_text = followup.strip()
                                 else:

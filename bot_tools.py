@@ -11,6 +11,7 @@ import json
 import os
 import re
 from pathlib import Path
+import tempfile
 
 import asyncio
 import base64
@@ -178,6 +179,20 @@ def _clean_channel_name(value: str) -> str:
     text = _clean_discord_name(value, max_len=100).lower()
     text = re.sub(r"\s+", "-", text).strip("-")
     return text[:100]
+
+
+def _atomic_json_write_sync(path: Path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 async def _resolve_guild(bot, message: Message, guild_id: str | None = None):
@@ -814,6 +829,8 @@ class ForwardMessageTool(Tool):
     ) -> str:
         if not message_id or not channel_id:
             return "Error: message_id and channel_id are required"
+        if not getattr(self.bot, "_is_admin", lambda _uid: False)(getattr(message.author, "id", "")):
+            return "Error: forward_message is admin-only"
         try:
             dest = self.bot.get_channel(int(channel_id))
             if not dest:
@@ -824,6 +841,10 @@ class ForwardMessageTool(Tool):
             orig = await message.channel.fetch_message(int(message_id))
             if not orig:
                 return f"Error: Message {message_id} not found"
+            src_guild = getattr(message.channel, "guild", None)
+            dest_guild = getattr(dest, "guild", None)
+            if src_guild and dest_guild and getattr(src_guild, "id", None) != getattr(dest_guild, "id", None):
+                return "Error: refusing to forward across servers"
 
             await orig.forward(dest)
             channel_name = getattr(dest, "name", channel_id)
@@ -1214,6 +1235,8 @@ class CreateSiteTool(Tool):
             return "Error: name must be at least 2 valid characters"
 
         user_id = str(message.author.id)
+        if hasattr(self.bot, "_load_sites"):
+            self.bot._load_sites(quiet=True)
         sites = self.bot._sites
 
         if len(body) > self.MAX_CONTENT_SIZE:
@@ -1254,9 +1277,9 @@ class CreateSiteTool(Tool):
     async def _save_sites(self):
         try:
             path = Path(self.bot.config.DATA_DIR) / "sites.json"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            async with aiofiles.open(path, "w", encoding="utf-8") as f:
-                await f.write(json.dumps(self.bot._sites, indent=2, default=str))
+            await asyncio.to_thread(_atomic_json_write_sync, path, self.bot._sites)
+            if hasattr(self.bot, "_sites_mtime"):
+                self.bot._sites_mtime = path.stat().st_mtime
         except Exception as e:
             logger.error(f"Failed to save sites: {e}")
             raise
@@ -1270,6 +1293,8 @@ class ListSitesTool(Tool):
 
     async def execute(self, message: Message, **kwargs) -> str:
         user_id = str(message.author.id)
+        if hasattr(self.bot, "_load_sites"):
+            self.bot._load_sites(quiet=True)
         sites = self.bot._sites
         user_sites = {k: v for k, v in sites.items() if v.get("user_id") == user_id}
 
@@ -1339,16 +1364,38 @@ class SendMessageTool(Tool):
             "Params: content (required), reply (optional bool, default true)."
         )
 
+    @staticmethod
+    def _chunks(text: str, limit: int = 1900) -> list[str]:
+        # Discord hard-fails over 2000 chars. Keep this dumb and reliable; fancy
+        # code-fence stitching lives in bot.py, but tools must not explode.
+        chunks = []
+        remaining = text
+        while remaining:
+            if len(remaining) <= limit:
+                chunks.append(remaining)
+                break
+            cut = remaining.rfind("\n", 0, limit)
+            if cut < limit // 2:
+                cut = limit
+            chunks.append(remaining[:cut].rstrip())
+            remaining = remaining[cut:].lstrip()
+        return chunks or [""]
+
     async def execute(self, message: Message, content: str = None, reply: bool = True, **kwargs) -> str:
         text = str(content or "").strip()
         if not text:
             return "Error: content is required"
         try:
-            if str(reply).lower() in {"0", "false", "no", "off"}:
-                await message.channel.send(text)
-            else:
-                await message.reply(text)
-            return f"__MESSAGE_SENT__ Sent {len(text)} chars"
+            chunks = self._chunks(text)
+            use_reply = str(reply).lower() not in {"0", "false", "no", "off"}
+            for i, chunk in enumerate(chunks):
+                if i == 0 and use_reply:
+                    await message.reply(chunk)
+                else:
+                    await message.channel.send(chunk)
+                if len(chunks) > 1:
+                    await asyncio.sleep(0.2)
+            return f"__MESSAGE_SENT__ Sent {len(text)} chars in {len(chunks)} chunk(s)"
         except discord.Forbidden:
             return "Error: missing permissions to send message"
         except Exception as e:

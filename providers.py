@@ -206,6 +206,11 @@ class OllamaProvider:
     ) -> str:
         """Generate response. images is legacy b64 list, media is list of {b64, mime_type}."""
         message = await self.generate_chat_completion(messages, images=images, media=media, timeout=timeout, **kwargs)
+        if message.get("tool_calls"):
+            # This bot intentionally uses XML-ish text tool tags. Native provider
+            # tool_calls need a totally different message loop; pretending they are
+            # text is how tool orchestration gets cursed.
+            raise RuntimeError("Native provider tool_calls are not supported in generate_response; use XML tool tags")
         content = message.get("content", "")
         if not content:
             raise RuntimeError("Empty response from provider")
@@ -348,6 +353,10 @@ class OllamaProvider:
                                 safe_output = max(4096, ctx_limit - estimated_input - 512)
                                 if safe_output < int(data.get("max_tokens", self.max_tokens)):
                                     logger.warning("Clamping max_tokens from %s to %s due to context limit %s", data.get("max_tokens"), safe_output, ctx_limit)
+                                    # The loop rebuilds payloads every attempt. Mutating only
+                                    # data["max_tokens"] here is a fake fix; keep the clamp in
+                                    # loop state or we retry the same busted request like idiots.
+                                    max_tokens = safe_output
                                     data["max_tokens"] = safe_output
                                     if await self._retry_after_attempt(attempt, endpoint, f"Context overflow, clamped max_tokens to {safe_output}", max_attempts=max_attempts, fast_fallback=fast_fallback):
                                         continue

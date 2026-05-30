@@ -1,4 +1,5 @@
 import asyncio
+import copy
 
 import pytest
 
@@ -21,6 +22,11 @@ class FakeResponse:
         return ""
 
 
+class FakeToolCallResponse(FakeResponse):
+    async def json(self):
+        return {"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": [{"id": "1"}]}}]}
+
+
 class FakeErrorResponse(FakeResponse):
     def __init__(self, status, text):
         self.status = status
@@ -39,7 +45,7 @@ class FakeSession:
 
     def post(self, url, json=None, timeout=None, headers=None):
         self.urls.append(url)
-        self.payloads.append(json)
+        self.payloads.append(copy.deepcopy(json))
         return self.response
 
 
@@ -50,7 +56,7 @@ class FakeSequenceSession(FakeSession):
 
     def post(self, url, json=None, timeout=None, headers=None):
         self.urls.append(url)
-        self.payloads.append(json)
+        self.payloads.append(copy.deepcopy(json))
         return self.responses.pop(0)
 
 
@@ -152,3 +158,38 @@ def test_generate_chat_completion_retries_primary_before_fallback():
     ]
     assert session.payloads[0]["model"] == "primary-model"
     assert session.payloads[1]["model"] == "primary-model"
+
+
+def test_generate_response_rejects_native_tool_calls():
+    provider = OllamaProvider("http://example.test", "base-model", 10, 0.5)
+    provider.available = True
+    provider._session = FakeSession(FakeToolCallResponse())
+
+    async def run():
+        with pytest.raises(RuntimeError, match="Native provider tool_calls"):
+            await provider.generate_response([{"role": "user", "content": "hi"}])
+
+    asyncio.run(run())
+
+
+def test_context_overflow_clamp_survives_retry():
+    provider = OllamaProvider("http://example.test", "base-model", 12000, 0.5, retry_attempts=2)
+    provider.available = True
+    session = FakeSequenceSession([
+        FakeErrorResponse(400, "maximum context length is 10000 tokens. you requested about 13000 tokens"),
+        FakeResponse(),
+    ])
+    provider._session = session
+
+    async def no_wait_retry(*args, **kwargs):
+        return True
+
+    provider._retry_after_attempt = no_wait_retry
+
+    async def run():
+        message = await provider.generate_chat_completion([{"role": "user", "content": "hi"}])
+        assert message["content"] == "ok"
+
+    asyncio.run(run())
+    assert session.payloads[0]["max_tokens"] == 12000
+    assert session.payloads[1]["max_tokens"] == 8488

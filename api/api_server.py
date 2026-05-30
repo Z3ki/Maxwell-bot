@@ -278,6 +278,19 @@ def _safe_object(value):
     return value if isinstance(value, dict) else {}
 
 
+def _load_for_write(path, expected_type, default):
+    if not path.exists():
+        return default
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
+        # Mutating a corrupt file as []/{} silently deletes data. Nope.
+        raise ValueError(f"refusing to overwrite corrupt {path.name}: {exc}") from exc
+    if not isinstance(data, expected_type):
+        raise ValueError(f"refusing to overwrite malformed {path.name}")
+    return data
+
+
 def _clean_id(value: str) -> str:
     return str(value or "").strip()[:MAX_ID_CHARS]
 
@@ -302,8 +315,8 @@ def _rem_control_path():
     return DATA_DIR / "rem_control.json"
 
 
-def _load_rem_control():
-    control = _safe_object(_load(_rem_control_path()))
+def _sanitize_rem_control(control):
+    control = _safe_object(control)
     interval = REM_INTERVAL_DEFAULT
     try:
         if control.get("interval_seconds") is not None:
@@ -327,6 +340,14 @@ def _load_rem_control():
         "max_turns": max_turns,
         "prompt": str(control.get("prompt") or ""),
     }
+
+
+def _load_rem_control():
+    return _sanitize_rem_control(_load(_rem_control_path()))
+
+
+def _load_rem_control_for_write():
+    return _sanitize_rem_control(_load_for_write(_rem_control_path(), dict, {}))
 
 
 async def _save_rem_control(control):
@@ -390,6 +411,8 @@ def _sanitize_control(control):
     out["ai_concurrency"] = max(1, min(out["ai_concurrency"], 10))
     out["memory_history_messages"] = max(0, min(out["memory_history_messages"], 100))
     out["memory_context_budget"] = max(1000, min(out["memory_context_budget"], 100000))
+    out["tool_history_messages"] = max(0, min(int(out.get("tool_history_messages", 3)), 20))
+    out["prompt_context_budget"] = max(10000, min(int(out.get("prompt_context_budget", 60000)), 200000))
     out["cross_context_max_items"] = max(1, min(int(out.get("cross_context_max_items", 10)), 50))
     out["cross_context_budget"] = max(1000, min(int(out.get("cross_context_budget", 5000)), 20000))
     out["cross_context_min_importance"] = max(1, min(int(out.get("cross_context_min_importance", 5)), 10))
@@ -443,8 +466,7 @@ def _context_entry_id(raw: dict) -> str:
     return hashlib.sha1(stable.encode("utf-8")).hexdigest()[:8]
 
 
-def _load_context_entries():
-    data = _load(_context_path())
+def _sanitize_context_entries(data):
     if not isinstance(data, list):
         return []
     now = time.time()
@@ -491,6 +513,14 @@ def _load_context_entries():
         })
     out.sort(key=lambda e: (e.get("last_seen_at", ""), e.get("created_at", "")), reverse=True)
     return out[:1000]
+
+
+def _load_context_entries():
+    return _sanitize_context_entries(_load(_context_path()))
+
+
+def _load_context_entries_for_write():
+    return _sanitize_context_entries(_load_for_write(_context_path(), list, []))
 
 
 async def _save_context_entries(entries):
@@ -668,7 +698,10 @@ async def context_post(request):
         "expires_at": str(body.get("expires_at") or "")[:64],
     }
     async with _file_lock:
-        entries = _load_context_entries()
+        try:
+            entries = _load_context_entries_for_write()
+        except ValueError as exc:
+            return _json_response({"error": str(exc)}, 409)
         entries.insert(0, entry)
         await _save_context_entries(entries)
     return _json_response({"ok": True, "id": entry["id"], "entry": entry})
@@ -684,7 +717,10 @@ async def context_put(request):
         return _json_response({"error": "id required"}, 400)
     allowed = {"scope", "visibility", "importance", "content", "tags", "expires_at"}
     async with _file_lock:
-        entries = _load_context_entries()
+        try:
+            entries = _load_context_entries_for_write()
+        except ValueError as exc:
+            return _json_response({"error": str(exc)}, 409)
         for entry in entries:
             if str(entry.get("id")) == context_id:
                 for key in allowed:
@@ -701,7 +737,10 @@ async def context_delete(request):
     if not context_id:
         return _json_response({"error": "id required"}, 400)
     async with _file_lock:
-        entries = _load_context_entries()
+        try:
+            entries = _load_context_entries_for_write()
+        except ValueError as exc:
+            return _json_response({"error": str(exc)}, 409)
         kept = [e for e in entries if str(e.get("id")) != context_id]
         if len(kept) == len(entries):
             return _json_response({"error": "not found"}, 404)
@@ -721,7 +760,10 @@ async def prompt_save(request):
         return _json_response({"error": "no id"}, 400)
     path = DATA_DIR / "prompts.json"
     async with _file_lock:
-        p = _safe_object(_load(path))
+        try:
+            p = _load_for_write(path, dict, {})
+        except ValueError as exc:
+            return _json_response({"error": str(exc)}, 409)
         if not text:
             p.pop(pid, None)
         else:
@@ -736,7 +778,10 @@ async def prompt_delete(request):
         return _json_response({"error": "no id"}, 400)
     path = DATA_DIR / "prompts.json"
     async with _file_lock:
-        p = _safe_object(_load(path))
+        try:
+            p = _load_for_write(path, dict, {})
+        except ValueError as exc:
+            return _json_response({"error": str(exc)}, 409)
         if pid not in p:
             return _json_response({"error": "not found"}, 404)
         p.pop(pid, None)
@@ -755,7 +800,10 @@ async def blacklist_post(request):
         return _json_response({"error": "empty"}, 400)
     path = DATA_DIR / "blacklist.json"
     async with _file_lock:
-        bl = _safe_list(_load(path))
+        try:
+            bl = _load_for_write(path, list, [])
+        except ValueError as exc:
+            return _json_response({"error": str(exc)}, 409)
         if uid not in bl:
             bl.append(uid)
             await atomic_json_write(path, bl)
@@ -766,7 +814,10 @@ async def blacklist_del(request):
     uid = _clean_id(request.query.get("id", ""))
     path = DATA_DIR / "blacklist.json"
     async with _file_lock:
-        bl = _safe_list(_load(path))
+        try:
+            bl = _load_for_write(path, list, [])
+        except ValueError as exc:
+            return _json_response({"error": str(exc)}, 409)
         if uid not in bl:
             return _json_response({"error": "not found"}, 404)
         bl.remove(uid)
@@ -785,7 +836,10 @@ async def auto_channel_post(request):
         return _json_response({"error": "empty"}, 400)
     path = DATA_DIR / "auto_channels.json"
     async with _file_lock:
-        channels = [str(x) for x in _safe_list(_load(path))]
+        try:
+            channels = [str(x) for x in _load_for_write(path, list, [])]
+        except ValueError as exc:
+            return _json_response({"error": str(exc)}, 409)
         if cid not in channels:
             channels.append(cid)
             await atomic_json_write(path, channels)
@@ -796,7 +850,10 @@ async def auto_channel_del(request):
     cid = _clean_id(request.query.get("id", ""))
     path = DATA_DIR / "auto_channels.json"
     async with _file_lock:
-        channels = [str(x) for x in _safe_list(_load(path))]
+        try:
+            channels = [str(x) for x in _load_for_write(path, list, [])]
+        except ValueError as exc:
+            return _json_response({"error": str(exc)}, 409)
         if cid not in channels:
             return _json_response({"error": "not found"}, 404)
         channels.remove(cid)
@@ -821,7 +878,10 @@ async def site_update(request):
         return _json_response({"error": "bad slug"}, 400)
     path = DATA_DIR / "sites.json"
     async with _file_lock:
-        sites = _safe_object(_load(path))
+        try:
+            sites = _load_for_write(path, dict, {})
+        except ValueError as exc:
+            return _json_response({"error": str(exc)}, 409)
         if slug not in sites or not isinstance(sites.get(slug), dict):
             return _json_response({"error": "not found"}, 404)
         site = dict(sites[slug])
@@ -843,7 +903,10 @@ async def site_delete(request):
         return _json_response({"error": "bad path"}, 400)
     path = DATA_DIR / "sites.json"
     async with _file_lock:
-        sites = _safe_object(_load(path))
+        try:
+            sites = _load_for_write(path, dict, {})
+        except ValueError as exc:
+            return _json_response({"error": str(exc)}, 409)
         if slug not in sites:
             return _json_response({"error": "not found"}, 404)
         sites.pop(slug, None)
@@ -861,15 +924,21 @@ async def control_put(request):
         return _json_response({"error": "invalid json"}, 400)
     if not isinstance(body, dict):
         return _json_response({"error": "invalid control"}, 400)
-    current = _load_control()
-    current.update({k: v for k, v in body.items() if k in DEFAULT_CONTROL})
-    control = _sanitize_control(current)
-    await atomic_json_write(_control_path(), control)
+    async with _file_lock:
+        try:
+            current = dict(DEFAULT_CONTROL)
+            current.update(_load_for_write(_control_path(), dict, {}))
+        except ValueError as exc:
+            return _json_response({"error": str(exc)}, 409)
+        current.update({k: v for k, v in body.items() if k in DEFAULT_CONTROL})
+        control = _sanitize_control(current)
+        await atomic_json_write(_control_path(), control)
     return _json_response({"ok": True, "control": control})
 
 
 async def control_reset(request):
-    await atomic_json_write(_control_path(), DEFAULT_CONTROL)
+    async with _file_lock:
+        await atomic_json_write(_control_path(), DEFAULT_CONTROL)
     return _json_response({"ok": True, "control": dict(DEFAULT_CONTROL)})
 
 
@@ -916,7 +985,10 @@ async def rem_runs(request):
 
 async def _queue_rem_command(cmd_type: str):
     async with _file_lock:
-        cmds = _load_commands()
+        try:
+            cmds = _load_commands_for_write()
+        except ValueError as exc:
+            return "", str(exc)
         cmd_id = str(_uuid.uuid4())[:8]
         cmds.append({
             "id": cmd_id,
@@ -928,30 +1000,53 @@ async def _queue_rem_command(cmd_type: str):
         if len(cmds) > MAX_COMMANDS:
             cmds = cmds[-MAX_COMMANDS:]
         await atomic_json_write(_commands_path(), cmds)
-    return cmd_id
+    return cmd_id, ""
 
 
 async def rem_run(request):
     status = _load_rem_status()
     if status.get("running"):
         return _json_response({"ok": True, "started": False, "reason": "already running"})
-    cmd_id = await _queue_rem_command("rem_run")
+    cmd_id, err = await _queue_rem_command("rem_run")
+    if err:
+        return _json_response({"error": err}, 409)
     return _json_response({"ok": True, "started": True, "id": cmd_id})
 
 
+async def _set_rem_enabled(enabled: bool, cmd_type: str):
+    async with _file_lock:
+        try:
+            control = _load_rem_control_for_write()
+            cmds = _load_commands_for_write()
+        except ValueError as exc:
+            return "", str(exc)
+        control["enabled"] = enabled
+        cmd_id = str(_uuid.uuid4())[:8]
+        cmds.append({
+            "id": cmd_id,
+            "type": cmd_type,
+            "status": "pending",
+            "result": "",
+            "created_at": time.time(),
+        })
+        if len(cmds) > MAX_COMMANDS:
+            cmds = cmds[-MAX_COMMANDS:]
+        await _save_rem_control(control)
+        await atomic_json_write(_commands_path(), cmds)
+        return cmd_id, ""
+
+
 async def rem_enable(request):
-    control = _load_rem_control()
-    control["enabled"] = True
-    await _save_rem_control(control)
-    cmd_id = await _queue_rem_command("rem_enable")
+    cmd_id, err = await _set_rem_enabled(True, "rem_enable")
+    if err:
+        return _json_response({"error": err}, 409)
     return _json_response({"ok": True, "enabled": True, "id": cmd_id})
 
 
 async def rem_disable(request):
-    control = _load_rem_control()
-    control["enabled"] = False
-    await _save_rem_control(control)
-    cmd_id = await _queue_rem_command("rem_disable")
+    cmd_id, err = await _set_rem_enabled(False, "rem_disable")
+    if err:
+        return _json_response({"error": err}, 409)
     return _json_response({"ok": True, "enabled": False, "id": cmd_id})
 
 
@@ -962,6 +1057,10 @@ def _commands_path():
 
 def _load_commands():
     return _safe_list(_load(_commands_path()))
+
+
+def _load_commands_for_write():
+    return _load_for_write(_commands_path(), list, [])
 
 
 async def commands_post(request):
@@ -1012,7 +1111,10 @@ async def commands_post(request):
     else:
         return _json_response({"error": f"unknown command type: {cmd_type}"}, 400)
     async with _file_lock:
-        cmds = _load_commands()
+        try:
+            cmds = _load_commands_for_write()
+        except ValueError as exc:
+            return _json_response({"error": str(exc)}, 409)
         cmds.append(command)
         if len(cmds) > MAX_COMMANDS:
             cmds = cmds[-MAX_COMMANDS:]
@@ -1030,7 +1132,10 @@ async def commands_get(request):
 async def commands_del(request):
     cid = request.query.get("id", "")
     async with _file_lock:
-        cmds = _load_commands()
+        try:
+            cmds = _load_commands_for_write()
+        except ValueError as exc:
+            return _json_response({"error": str(exc)}, 409)
         cmds = [c for c in cmds if c.get("id") != cid]
         await atomic_json_write(_commands_path(), cmds)
     return _json_response({"ok": True})

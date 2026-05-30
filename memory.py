@@ -97,6 +97,8 @@ class RemEventLog:
         self._lock = asyncio.Lock()
         self._dirty = False
         self._save_task = None
+        self._pending_save = None
+        self._save_lock = asyncio.Lock()
 
     def load_from_disk(self):
         try:
@@ -128,10 +130,13 @@ class RemEventLog:
         return clean[-self.max_events:]
 
     async def _atomic_save(self, snapshot: list):
-        try:
-            await asyncio.to_thread(_atomic_json_write_sync, self.events_file, snapshot)
-        except Exception as e:
-            logger.error(f"Failed to save REM events: {e}")
+        # Serialize writes. Atomic rename stops torn files, not stale snapshots
+        # winning the race after a newer save. That's the annoying part.
+        async with self._save_lock:
+            try:
+                await asyncio.to_thread(_atomic_json_write_sync, self.events_file, snapshot)
+            except Exception as e:
+                logger.error(f"Failed to save REM events: {e}")
 
     def _schedule_save(self):
         self._dirty = True
@@ -147,7 +152,7 @@ class RemEventLog:
         if self._dirty:
             self._dirty = False
             snapshot = json.loads(json.dumps(self.events, ensure_ascii=False))
-            asyncio.ensure_future(self._atomic_save(snapshot))
+            self._pending_save = asyncio.ensure_future(self._atomic_save(snapshot))
         self._save_task = None
 
     async def record(self, event: dict):
@@ -180,6 +185,9 @@ class RemEventLog:
         if self._save_task is not None:
             self._save_task.cancel()
             self._save_task = None
+        if self._pending_save is not None and not self._pending_save.done():
+            await self._pending_save
+            self._pending_save = None
         if self._dirty:
             self._dirty = False
             snapshot = json.loads(json.dumps(self.events, ensure_ascii=False))
@@ -203,6 +211,8 @@ class MemoryManager:
         self._save_task = None
         self._pending_save = None
         self._save_lock = asyncio.Lock()
+        self._ltm_mtime = 0.0
+        self._shared_context_mtime = 0.0
 
     def load_from_disk(self):
         try:
@@ -217,12 +227,7 @@ class MemoryManager:
 
         try:
             if self.ltm_file.exists():
-                lines = self.ltm_file.read_text(encoding="utf-8").splitlines()
-                self.long_term_memory = [
-                    {"id": i + 1, "content": line.strip()}
-                    for i, line in enumerate(lines[:MAX_LTM_LINES])
-                    if line.strip()
-                ]
+                self._reload_ltm_from_disk()
                 logger.info(f"Loaded {len(self.long_term_memory)} long-term memory lines")
         except OSError as e:
             logger.error(f"Failed to load long-term memory: {e}")
@@ -230,8 +235,7 @@ class MemoryManager:
 
         try:
             if self.shared_context_file.exists():
-                data = json.loads(self.shared_context_file.read_text(encoding="utf-8"))
-                self.shared_context = self._sanitize_shared_context(data if isinstance(data, list) else [])
+                self._reload_shared_context_from_disk()
                 logger.info(f"Loaded {len(self.shared_context)} shared context facts")
         except (json.JSONDecodeError, OSError) as e:
             logger.error(f"Failed to load shared context: {e}")
@@ -305,6 +309,25 @@ class MemoryManager:
             await self._atomic_save(self.memory_file, snapshot)
             logger.info("Memory flushed to disk")
 
+    def _reload_ltm_from_disk(self):
+        lines = self.ltm_file.read_text(encoding="utf-8").splitlines() if self.ltm_file.exists() else []
+        clean = [_normalize_ltm_line(line) for line in lines if line.strip()][:MAX_LTM_LINES]
+        self.long_term_memory = [{"id": i + 1, "content": line} for i, line in enumerate(clean)]
+        try:
+            self._ltm_mtime = self.ltm_file.stat().st_mtime
+        except OSError:
+            self._ltm_mtime = 0.0
+
+    def _reload_ltm_if_changed(self):
+        try:
+            mtime = self.ltm_file.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        if mtime != self._ltm_mtime:
+            # Dashboard edits/deletes this file too. Reload before full-file
+            # rewrites or we'll casually resurrect stale admin-deleted data.
+            self._reload_ltm_from_disk()
+
     async def _save_ltm(self):
         """Save long-term memory as one editable text file."""
         lines = [_normalize_ltm_line(entry.get("content", "")) for entry in self.long_term_memory]
@@ -316,6 +339,10 @@ class MemoryManager:
         self.long_term_memory = [
             {"id": i + 1, "content": line} for i, line in enumerate(lines)
         ]
+        try:
+            self._ltm_mtime = self.ltm_file.stat().st_mtime
+        except OSError:
+            self._ltm_mtime = 0.0
 
     def _sanitize_shared_context(self, entries: list) -> list:
         now = _utcnow()
@@ -364,14 +391,35 @@ class MemoryManager:
         sanitized.sort(key=lambda e: (str(e.get("last_seen_at", "")), str(e.get("created_at", ""))), reverse=True)
         return sanitized[:MAX_SHARED_CONTEXT]
 
+    def _reload_shared_context_from_disk(self):
+        data = json.loads(self.shared_context_file.read_text(encoding="utf-8")) if self.shared_context_file.exists() else []
+        self.shared_context = self._sanitize_shared_context(data if isinstance(data, list) else [])
+        try:
+            self._shared_context_mtime = self.shared_context_file.stat().st_mtime
+        except OSError:
+            self._shared_context_mtime = 0.0
+
+    def _reload_shared_context_if_changed(self):
+        try:
+            mtime = self.shared_context_file.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        if mtime != self._shared_context_mtime:
+            self._reload_shared_context_from_disk()
+
     async def _save_shared_context(self):
         self.shared_context = self._sanitize_shared_context(self.shared_context)
         await asyncio.to_thread(_atomic_json_write_sync, self.shared_context_file, self.shared_context)
+        try:
+            self._shared_context_mtime = self.shared_context_file.stat().st_mtime
+        except OSError:
+            self._shared_context_mtime = 0.0
 
     async def add_shared_context(self, entry: dict) -> str:
         if not isinstance(entry, dict):
             return ""
         async with self._lock:
+            self._reload_shared_context_if_changed()
             now = _utcnow_iso()
             clean = self._sanitize_shared_context([{**entry, "created_at": entry.get("created_at") or now, "last_seen_at": entry.get("last_seen_at") or now}])
             if not clean:
@@ -391,6 +439,7 @@ class MemoryManager:
 
     async def remove_shared_context(self, context_id: str) -> bool:
         async with self._lock:
+            self._reload_shared_context_if_changed()
             before = len(self.shared_context)
             self.shared_context = [e for e in self.shared_context if str(e.get("id")) != str(context_id)]
             if len(self.shared_context) < before:
@@ -403,6 +452,7 @@ class MemoryManager:
         if not isinstance(updates, dict):
             return False
         async with self._lock:
+            self._reload_shared_context_if_changed()
             for entry in self.shared_context:
                 if str(entry.get("id")) == str(context_id):
                     allowed = {"scope", "visibility", "importance", "content", "tags", "expires_at"}
@@ -418,6 +468,7 @@ class MemoryManager:
 
     async def list_shared_context(self, limit: int = 200) -> list:
         async with self._lock:
+            self._reload_shared_context_if_changed()
             self.shared_context = self._sanitize_shared_context(self.shared_context)
             return [dict(e) for e in self.shared_context[:max(1, min(int(limit or 200), MAX_SHARED_CONTEXT))]]
 
@@ -438,6 +489,7 @@ class MemoryManager:
         if channel_id:
             scopes.add(f"channel:{channel_id}")
         async with self._lock:
+            self._reload_shared_context_if_changed()
             self.shared_context = self._sanitize_shared_context(self.shared_context)
             candidates = []
             for entry in self.shared_context:
@@ -511,6 +563,7 @@ class MemoryManager:
         if not content:
             return "0"
         async with self._lock:
+            self._reload_ltm_if_changed()
             self.long_term_memory.append({"id": len(self.long_term_memory) + 1, "content": content})
             if len(self.long_term_memory) > MAX_LTM_LINES:
                 self.long_term_memory = self.long_term_memory[-MAX_LTM_LINES:]
@@ -523,6 +576,7 @@ class MemoryManager:
     async def edit_long_term_memory(self, memory_id: str, content: str) -> bool:
         content = _normalize_ltm_line(content)
         async with self._lock:
+            self._reload_ltm_if_changed()
             for entry in self.long_term_memory:
                 if str(entry["id"]) == str(memory_id):
                     entry["content"] = content
@@ -533,6 +587,7 @@ class MemoryManager:
 
     async def remove_long_term_memory(self, memory_id: str) -> bool:
         async with self._lock:
+            self._reload_ltm_if_changed()
             before = len(self.long_term_memory)
             self.long_term_memory = [
                 m for m in self.long_term_memory if str(m["id"]) != str(memory_id)
@@ -544,6 +599,7 @@ class MemoryManager:
         return False
 
     def get_long_term_memory(self) -> list:
+        self._reload_ltm_if_changed()
         return list(self.long_term_memory)
 
     def get_server_prompt(self, server_id: str) -> Optional[str]:

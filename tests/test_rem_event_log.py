@@ -28,3 +28,33 @@ def test_rem_event_log_drain_since_and_blacklist_exclusion_by_caller(tmp_path):
         assert [e["content"] for e in await log.drain_slice("2025-12-31T23:59:59+00:00")] == ["keep"]
         assert await log.drain_slice("2026-01-01T00:00:00+00:00") == []
     asyncio.run(run())
+
+
+def test_rem_event_log_flush_waits_for_in_flight_save(tmp_path):
+    class SlowLog(RemEventLog):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.snapshots = []
+
+        async def _atomic_save(self, snapshot):
+            self.started.set()
+            await self.release.wait()
+            self.snapshots.append(snapshot)
+
+    async def run():
+        log = SlowLog(str(tmp_path), max_events=10)
+        await log.record({"role": "user", "channel_id": "c", "user_id": "u", "user_name": "a", "content": "keep"})
+        log._do_save()
+        await log.started.wait()
+
+        flush_task = asyncio.create_task(log.flush())
+        await asyncio.sleep(0)
+        assert not flush_task.done()
+
+        log.release.set()
+        await flush_task
+        assert log.snapshots and log.snapshots[-1][0]["content"] == "keep"
+
+    asyncio.run(run())

@@ -288,10 +288,13 @@ def test_ensure_reasoning_trace_skips_existing_trace():
     assert reasoning.calls == []
 
 
-def test_build_messages_includes_tool_history_outside_recent_count():
+def test_build_messages_caps_tool_history_outside_recent_count():
     memory = FakeMemory(
         [
-            {"author": "Tool", "content": "Called search_messages with {} -> old result", "is_tool": True},
+            {"author": "Tool", "content": "Called search_messages with {} -> tool 1", "is_tool": True},
+            {"author": "Tool", "content": "Called search_messages with {} -> tool 2", "is_tool": True},
+            {"author": "Tool", "content": "Called search_messages with {} -> tool 3", "is_tool": True},
+            {"author": "Tool", "content": "Called search_messages with {} -> tool 4", "is_tool": True},
             {"author": "alice", "content": "old user message"},
             {"author": "alice", "content": "recent user message"},
         ]
@@ -304,6 +307,7 @@ def test_build_messages_includes_tool_history_outside_recent_count():
             "long_term_memory_enabled": False,
             "memory_context_budget": 30000,
             "memory_history_messages": 1,
+            "tool_history_messages": 3,
             "music_context_enabled": False,
             "tools_enabled": False,
         },
@@ -326,9 +330,36 @@ def test_build_messages_includes_tool_history_outside_recent_count():
     async def run():
         messages = await MaxwellBot._build_messages(bot, message, "latest")
         context = "\n".join(m["content"] for m in messages)
-        assert "[Tool] Called search_messages with {} -> old result" in context
+        assert "tool 1" not in context
+        assert "tool 2" in context
+        assert "tool 3" in context
+        assert "tool 4" in context
         assert "recent user message" in context
         assert "old user message" not in context
+
+    asyncio.run(run())
+
+
+def test_process_tool_calls_skips_duplicate_terminal_tools():
+    first = FakeTool("__MESSAGE_SENT__ Sent 1 chars")
+    second = FakeTool("__MESSAGE_SENT__ Sent 2 chars")
+    bot = SimpleNamespace(
+        _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False, "store_memory": False},
+        tools={"send_message": first, "no_response": second},
+        _message_tool_platform=lambda _message: "discord",
+        _compatible_tool_names=lambda _platform: {"send_message", "no_response"},
+    )
+    message = SimpleNamespace(guild=None, channel=SimpleNamespace())
+
+    async def run():
+        _response, tool_results = await MaxwellBot._process_tool_calls(
+            bot,
+            message,
+            "<tool:send_message>hi</tool:send_message><tool:no_response />",
+        )
+        assert first.calls == [{"content": "hi"}]
+        assert second.calls == []
+        assert "Skipped duplicate terminal tool call" in tool_results[-1]
 
     asyncio.run(run())
 
@@ -368,6 +399,26 @@ def test_tool_prompt_has_no_nested_tags_rule():
     assert "never put" in prompt.lower()
 
 
+def test_prompt_budget_trims_large_background_blocks():
+    bot = SimpleNamespace(_control={"prompt_context_budget": 10000})
+    messages = [
+        {"role": "system", "content": "core"},
+        {"role": "system", "content": "x" * 50000},
+        {"role": "user", "content": "latest"},
+    ]
+
+    trimmed = MaxwellBot._apply_prompt_budget(bot, messages)
+
+    assert sum(MaxwellBot._message_content_chars(m) for m in trimmed) <= 10000
+    assert "prompt budget trimmed" in trimmed[1]["content"]
+
+
+def test_shared_fact_relevance_filters_broad_vague_context():
+    assert MaxwellBot._shared_fact_relevant("lol", {"scope": "guild:1", "content": "project alpha uses postgres"}) is False
+    assert MaxwellBot._shared_fact_relevant("what database does project alpha use", {"scope": "guild:1", "content": "project alpha uses postgres"}) is True
+    assert MaxwellBot._shared_fact_relevant("lol", {"scope": "user:1", "content": "likes terse replies"}) is True
+
+
 def test_build_messages_has_single_formatting_instruction():
     memory = FakeMemory()
     bot = SimpleNamespace(
@@ -405,6 +456,48 @@ def test_build_messages_has_single_formatting_instruction():
         assert "Do not force markdown into tiny greetings" in system_content
 
     asyncio.run(run())
+
+
+def test_cached_media_context_requires_latest_visual_reference():
+    message = SimpleNamespace(reference=None)
+
+    assert not MaxwellBot._should_use_cached_media_context(message, "lol ok")
+    assert MaxwellBot._should_use_cached_media_context(message, "what's in that image?")
+    assert MaxwellBot._should_use_cached_media_context(message, "look at this")
+
+
+def test_cached_media_context_allowed_for_attachment_reply():
+    replied = SimpleNamespace(id=123, attachments=[SimpleNamespace(filename="old.png")], embeds=[])
+    message = SimpleNamespace(reference=SimpleNamespace(resolved=replied))
+
+    assert MaxwellBot._should_use_cached_media_context(message, "what is that")
+
+
+def test_cached_media_context_can_filter_by_reply_message_id():
+    bot = SimpleNamespace(_media_context={
+        "c": [
+            {"b64": "old", "mime_type": "image/png", "filename": "old.png", "message_id": 1},
+            {"b64": "right", "mime_type": "image/png", "filename": "right.png", "message_id": 2},
+        ]
+    })
+
+    media = MaxwellBot._get_media_context(bot, "c", message_id=2)
+
+    assert [item["filename"] for item in media] == ["right.png"]
+
+
+def test_current_image_does_not_mix_cached_media_without_prior_reference():
+    assert not MaxwellBot._should_mix_cached_with_current("look at this")
+    assert MaxwellBot._should_mix_cached_with_current("compare this with the previous image")
+
+
+def test_media_summary_does_not_tell_model_to_force_old_images():
+    active = [{"filename": "old.png", "mime_type": "image/png", "message_id": 1}]
+
+    summary = MaxwellBot._format_media_summary([], active)
+
+    assert "Only discuss them when relevant to the latest message" in summary
+    assert "Use these actual image attachments when answering" not in summary
 
 
 def test_auto_format_does_not_bold_casual_text():
