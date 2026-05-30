@@ -1253,7 +1253,7 @@ class CreateSiteTool(Tool):
                 'style-src \'unsafe-inline\'; img-src * data:; connect-src \'self\'">'
             )
             if "<head" in body.lower():
-                body = re.sub(r"(<head[^>]*>)", r"\\1\n" + csp_meta, body, count=1, flags=re.IGNORECASE)
+                body = re.sub(r"(<head[^>]*>)", r"\1\n" + csp_meta, body, count=1, flags=re.IGNORECASE)
             elif "<html" in body.lower():
                 body = re.sub(r"(<html[^>]*>)", r"\1\n<head>" + csp_meta + "</head>", body, count=1, flags=re.IGNORECASE)
             else:

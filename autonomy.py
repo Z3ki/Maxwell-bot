@@ -95,6 +95,15 @@ class SyntheticMessage:
     async def reply(self, content=None, **kwargs):
         return await self.channel.send(content, **kwargs)
 
+    async def add_reaction(self, emoji):
+        pass  # no-op — reacting to a synthetic msg is pointless, nobody sees it
+
+    async def edit(self, **kwargs):
+        raise NotImplementedError("Cannot edit a SyntheticMessage")
+
+    async def delete(self, *args, **kwargs):
+        pass  # silently ignore
+
 
 # ---------------------------------------------------------------------------
 # AutonomyStore — JSON-backed persistence
