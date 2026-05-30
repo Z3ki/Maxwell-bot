@@ -690,8 +690,21 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
             if not isinstance(action, dict):
                 continue
             kind = str(action.get("kind", "")).strip().lower()
+            # LLM keeps inventing action kind names — map common aliases
+            _KIND_ALIASES = {
+                "send_message": "post_channel",
+                "send_msg": "post_channel",
+                "message": "post_channel",
+                "reply": "post_channel",
+                "dm": "send_dm",
+                "direct_message": "send_dm",
+                "reasoning_log": "do_nothing",  # LLM sometimes adds a reasoning step — just skip it
+                "think": "do_nothing",
+                "log": "do_nothing",
+            }
+            kind = _KIND_ALIASES.get(kind, kind)
             if kind not in AUTONOMY_VALID_KINDS:
-                logger.info(f"Dropping unknown action kind: {kind} | raw: {json.dumps(action, default=str)[:300]}")
+                logger.info(f"Dropping unknown action kind: {action.get('kind', '')!r} | raw: {json.dumps(action, default=str)[:300]}")
                 continue
 
             if kind == "send_dm":
@@ -714,8 +727,17 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
                 cid_raw = str(action.get("target_channel_id", ""))
                 cid = re.sub(r"[^0-9]", "", cid_raw)
                 content = str(action.get("content", "")).strip()
-                if not cid or not content:
-                    logger.info(f"Dropping post_channel: cid_raw={cid_raw!r} cid={cid!r} content_len={len(content)} | full action: {json.dumps(action, default=str)[:500]}")
+                if not content:
+                    logger.info(f"Dropping post_channel: empty content")
+                    continue
+                # if no channel specified, fill in from auto_channels at validation time
+                if not cid:
+                    for auto_cid in (self.bot._auto_channels or set()):
+                        cid = re.sub(r"[^0-9]", "", str(auto_cid))
+                        if cid:
+                            break
+                if not cid:
+                    logger.info(f"Dropping post_channel: no cid and no auto_channels available")
                     continue
                 valid.append({
                     "kind": "post_channel",
