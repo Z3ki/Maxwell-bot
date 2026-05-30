@@ -1623,7 +1623,8 @@ class ShellTool(Tool):
     def get_description(self):
         return (
             "Run a shell command in the isolated maxwell-shell Docker sandbox with bash -lc. Output sent directly to chat. "
-            "Params: command (required)."
+            "Params: command (required), files (optional: comma-separated file paths or JSON array to send as attachments after the command runs, "
+            "e.g. 'output.png' or '[\"report.pdf\", \"data.csv\"]'. Files are copied from the container's /home/maxwell directory and sent to chat)."
         )
 
     async def _run_docker(self, *args: str, timeout: int = 30):
@@ -1707,7 +1708,7 @@ class ShellTool(Tool):
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.TIMEOUT)
         return stdout, stderr, proc.returncode
 
-    async def execute(self, message: Message, command: str = None, **kwargs) -> str:
+    async def execute(self, message: Message, command: str = None, files: str = None, **kwargs) -> str:
         normalized = self._normalize_command(command)
         if not normalized:
             return "Error: command is required (tool-call markup was detected or command was empty)"
@@ -1761,7 +1762,81 @@ class ShellTool(Tool):
             if len(chunks) > 1:
                 await asyncio.sleep(0.3)
 
-        return f"__SHELL_SENT__\n{text}"
+        result = f"__SHELL_SENT__\n{text}"
+
+        # Send requested files from the container
+        if files:
+            file_paths = self._parse_file_list(files)
+            sent_files = []
+            for fpath in file_paths:
+                sent = await self._send_container_file(message, fpath)
+                if sent:
+                    sent_files.append(sent)
+            if sent_files:
+                result += f"\nSent files: {', '.join(sent_files)}"
+
+        return result
+
+    @staticmethod
+    def _parse_file_list(files: str) -> list[str]:
+        raw = str(files or "").strip()
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [str(f).strip() for f in parsed if str(f).strip()]
+            if isinstance(parsed, str):
+                return [parsed.strip()] if parsed.strip() else []
+        except (json.JSONDecodeError, ValueError):
+            pass
+        # Fall back to comma-separated
+        return [f.strip() for f in raw.split(",") if f.strip()]
+
+    async def _send_container_file(self, message: Message, rel_path: str) -> str | None:
+        """Copy a file out of the container and send it to Discord. Returns filename on success."""
+        # Sanitize — no path traversal escapes from /home/maxwell
+        clean = rel_path.lstrip("/")
+        if ".." in clean:
+            logger.warning(f"Shell file send blocked — path traversal: {rel_path}")
+            return None
+
+        container_path = f"/home/maxwell/{clean}"
+        tmp_dir = tempfile.mkdtemp(prefix="maxwell_shell_")
+        local_path = os.path.join(tmp_dir, os.path.basename(clean))
+
+        try:
+            (_stdout, stderr), code = await self._run_docker(
+                "cp", f"{self.CONTAINER_NAME}:{container_path}", local_path, timeout=15
+            )
+            if code != 0:
+                logger.warning(f"docker cp failed for {container_path}: {stderr.decode(errors='replace')}")
+                return None
+
+            if not os.path.isfile(local_path):
+                logger.warning(f"File not found after docker cp: {local_path}")
+                return None
+
+            file_size = os.path.getsize(local_path)
+            if file_size > 25 * 1024 * 1024:
+                logger.warning(f"Shell file too large to send: {file_size} bytes")
+                return None
+
+            filename = os.path.basename(clean)
+            await message.channel.send(file=File(local_path, filename=filename))
+            logger.info(f"Sent shell file: {filename} ({file_size} bytes)")
+            return filename
+        except asyncio.TimeoutError:
+            logger.warning(f"docker cp timed out for {container_path}")
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to send shell file {rel_path}: {e}")
+            return None
+        finally:
+            try:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
 
 
 class FetchUrlTool(Tool):
