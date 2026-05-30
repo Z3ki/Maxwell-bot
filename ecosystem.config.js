@@ -27,8 +27,8 @@ function loadEnvFile(filePath) {
 const appRoot = process.env.MAXWELL_APP_ROOT || __dirname;
 const fileEnv = loadEnvFile(process.env.MAXWELL_ENV_FILE || path.join(appRoot, '.env'));
 const baseEnv = {
-  ...process.env,
-  ...fileEnv,
+  ...fileEnv,       // .env as fallback
+  ...process.env,   // real environment takes precedence
   NODE_ENV: 'production',
   PYTHONUNBUFFERED: '1'
 };
@@ -44,6 +44,8 @@ module.exports = {
       autorestart: true,
       watch: false,
       max_memory_restart: '1G',
+      kill_timeout: 15000,  // 15s for graceful shutdown (memory/REM flush)
+      kill_signal: 'SIGTERM',
       env: baseEnv,
       log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
       merge_logs: true
@@ -57,6 +59,8 @@ module.exports = {
       autorestart: true,
       watch: false,
       max_memory_restart: '512M',
+      kill_timeout: 5000,
+      kill_signal: 'SIGTERM',
       env: baseEnv,
       log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
       merge_logs: true

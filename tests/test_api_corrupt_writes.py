@@ -1,7 +1,4 @@
 import asyncio
-from types import SimpleNamespace
-
-from aiohttp import web
 
 import api.api_server as api
 

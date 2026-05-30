@@ -3,9 +3,9 @@ import pytest
 
 discord = pytest.importorskip("discord")
 
-from bot import MaxwellBot
-from memory import RemEventLog
-from rem import RemStore
+from bot import MaxwellBot  # noqa: E402
+from memory import RemEventLog  # noqa: E402
+from rem import RemStore  # noqa: E402
 
 
 class FakeChannel:

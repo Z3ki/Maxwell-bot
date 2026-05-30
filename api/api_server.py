@@ -13,6 +13,7 @@ import re
 import shutil
 import tempfile
 import time
+import uuid as _uuid
 from collections import defaultdict
 from pathlib import Path
 
@@ -110,7 +111,7 @@ DEFAULT_CONTROL = {
     "reply_dms": False,
     "reply_groups": False,
     "reply_mentions": True,
-    "reply_to_bots": True,
+    "reply_to_bots": False,
     "auto_mode_enabled": False,
     "auto_eval_every": 5,
     "auto_max_recent_replies": 5,
@@ -123,6 +124,8 @@ DEFAULT_CONTROL = {
     "ai_concurrency": 3,
     "memory_history_messages": 20,
     "memory_context_budget": 30000,
+    "tool_history_messages": 3,
+    "prompt_context_budget": 60000,
     "max_tool_iterations": 10,
     "max_response_chars": 500,
     "tools_enabled": False,
@@ -154,11 +157,27 @@ DEFAULT_CONTROL = {
         "- It is a bot command, automated status/log output, or a message meant for someone else. "
         "- You have nothing interesting, funny, or blunt to add. If in doubt, output 'no'."
     ),
+    "vc_rms_threshold": 1200,
+    "vc_pause_seconds": 0.8,
+    "vc_min_seconds": 0.55,
+    "vc_max_seconds": 18,
+    "vc_preroll_seconds": 0.25,
+    "vc_ai_timeout_seconds": 25,
+    "vc_ai_max_tokens": 90,
+    "vc_memory_history_messages": 2,
+    "vc_cross_context_enabled": False,
+    "vc_max_response_chars": 260,
+    "vc_tts_engine": "riva",
+    "vc_reply_mode": "voice",
+    "vc_response_mode": "addressed",
+    "vc_wake_words": ["maxwell"],
+    "vc_interrupt_enabled": True,
+    "vc_debug": True,
     "autonomy_enabled": False,
     "autonomy_interval_seconds": 300,
 }
-import uuid as _uuid
 MAX_COMMANDS = 200
+MAX_AUTONOMY_GOALS = 50
 # Keep this in sync with MaxwellBot._setup_tools(). Do not add command-queue
 # types here; this list is only for LLM tools. Dead entries make the admin UI lie.
 KNOWN_TOOLS = [
@@ -387,12 +406,16 @@ def _load_rem_status():
 def _load_control():
     control = dict(DEFAULT_CONTROL)
     loaded = _safe_object(_load(_control_path()))
-    control.update({k: v for k, v in loaded.items() if k in DEFAULT_CONTROL})
+    control.update(loaded)
     return _sanitize_control(control)
 
 
 def _sanitize_control(control):
-    out = dict(DEFAULT_CONTROL)
+    control = _safe_object(control)
+    # Preserve newer bot-side settings this API build doesn't understand yet.
+    # Dashboard saves should not casually delete config just because the UI lags.
+    out = {k: v for k, v in control.items() if k not in DEFAULT_CONTROL}
+    out.update(DEFAULT_CONTROL)
     for key, default in DEFAULT_CONTROL.items():
         value = control.get(key, default)
         if isinstance(default, bool):
@@ -426,13 +449,23 @@ def _sanitize_control(control):
     out["autonomy_interval_seconds"] = max(30, int(out.get("autonomy_interval_seconds", 300) or 300))
     out["memory_history_messages"] = max(0, min(out["memory_history_messages"], 100))
     out["memory_context_budget"] = max(1000, min(out["memory_context_budget"], 100000))
-    out["tool_history_messages"] = max(0, min(int(out.get("tool_history_messages", 3)), 20))
-    out["prompt_context_budget"] = max(10000, min(int(out.get("prompt_context_budget", 60000)), 200000))
+    out["tool_history_messages"] = max(0, min(int(out.get("tool_history_messages", 3) or 3), 20))
+    out["prompt_context_budget"] = max(10000, min(int(out.get("prompt_context_budget", 60000) or 60000), 200000))
     out["cross_context_max_items"] = max(1, min(int(out.get("cross_context_max_items", 10)), 50))
     out["cross_context_budget"] = max(1000, min(int(out.get("cross_context_budget", 5000)), 20000))
     out["cross_context_min_importance"] = max(1, min(int(out.get("cross_context_min_importance", 5)), 10))
     out["max_tool_iterations"] = max(0, min(out["max_tool_iterations"], 25))
     out["max_response_chars"] = max(80, min(out["max_response_chars"], 4000))
+    out["vc_rms_threshold"] = max(100, min(int(out.get("vc_rms_threshold", 1200) or 1200), 10000))
+    out["vc_pause_seconds"] = max(0.1, min(float(out.get("vc_pause_seconds", 0.8) or 0.8), 5.0))
+    out["vc_min_seconds"] = max(0.1, min(float(out.get("vc_min_seconds", 0.55) or 0.55), 10.0))
+    out["vc_max_seconds"] = max(1.0, min(float(out.get("vc_max_seconds", 18) or 18), 120.0))
+    out["vc_preroll_seconds"] = max(0.0, min(float(out.get("vc_preroll_seconds", 0.25) or 0.25), 3.0))
+    out["vc_ai_timeout_seconds"] = max(5, min(int(out.get("vc_ai_timeout_seconds", 25) or 25), 180))
+    out["vc_ai_max_tokens"] = max(16, min(int(out.get("vc_ai_max_tokens", 90) or 90), 1000))
+    out["vc_memory_history_messages"] = max(0, min(int(out.get("vc_memory_history_messages", 2) or 2), 20))
+    out["vc_max_response_chars"] = max(40, min(int(out.get("vc_max_response_chars", 260) or 260), 2000))
+    out["vc_wake_words"] = [str(x).strip()[:32] for x in out.get("vc_wake_words", []) if str(x).strip()][:20]
     out["base_personality"] = str(out.get("base_personality", DEFAULT_CONTROL["base_personality"]))[:12000]
     out["auto_decider_prompt"] = str(out.get("auto_decider_prompt", DEFAULT_CONTROL["auto_decider_prompt"]))[:8000]
     return out
@@ -1252,12 +1285,17 @@ async def autonomy_goal_add(request):
         "last_acted_on": None,
     }
     async with _file_lock:
-        data = _safe_object(_load(_autonomy_goals_path()))
+        try:
+            data = _load_for_write(_autonomy_goals_path(), dict, {})
+        except ValueError as exc:
+            return _json_response({"error": str(exc)}, 409)
         goals = data.get("goals", [])
         if not isinstance(goals, list):
-            goals = []
+            return _json_response({"error": "refusing to overwrite malformed autonomy_goals.json"}, 409)
+        if len(goals) >= MAX_AUTONOMY_GOALS:
+            return _json_response({"error": f"goal limit reached ({MAX_AUTONOMY_GOALS})"}, 409)
         goals.append(goal)
-        await atomic_json_write(_autonomy_goals_path(), {"goals": goals})
+        await atomic_json_write(_autonomy_goals_path(), {"goals": goals[-MAX_AUTONOMY_GOALS:]})
     return _json_response({"ok": True, "goal": goal})
 
 
@@ -1268,10 +1306,13 @@ async def autonomy_goal_delete(request):
     if not goal_id:
         return _json_response({"error": "goal_id required"}, 400)
     async with _file_lock:
-        data = _safe_object(_load(_autonomy_goals_path()))
+        try:
+            data = _load_for_write(_autonomy_goals_path(), dict, {})
+        except ValueError as exc:
+            return _json_response({"error": str(exc)}, 409)
         goals = data.get("goals", [])
         if not isinstance(goals, list):
-            goals = []
+            return _json_response({"error": "refusing to overwrite malformed autonomy_goals.json"}, 409)
         before = len(goals)
         goals = [g for g in goals if g.get("id") != goal_id]
         if len(goals) == before:

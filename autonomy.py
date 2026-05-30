@@ -121,9 +121,13 @@ def _utcnow_iso() -> str:
 
 def _truncate(text: str, budget: int) -> str:
     """Truncate text to budget, adding ellipsis if cut."""
+    budget = max(0, int(budget or 0))
     if len(text) <= budget:
         return text
-    return text[:budget - 20] + "\n... [truncated]"
+    suffix = "\n... [truncated]"
+    if budget <= len(suffix):
+        return text[:budget]
+    return text[:budget - len(suffix)] + suffix
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +322,51 @@ class AutonomyEngine:
         # Validation failures from last tick (fed back into context)
         self._last_validation_failures: list[str] = []
 
+    def _auto_channel_candidates(self) -> list[str]:
+        """Stable, cooldown-aware target list for autonomous posts/tools."""
+        now_ts = time.time()
+        channels = []
+        for raw_cid in sorted(self.bot._auto_channels or set(), key=str):
+            cid = re.sub(r"[^0-9]", "", str(raw_cid))
+            if not cid:
+                continue
+            last_post = self._channel_cooldowns.get(cid, 0)
+            if now_ts - last_post >= CHANNEL_COOLDOWN_SECONDS:
+                channels.append(cid)
+        return channels
+
+    def _channel_allowed(self, channel_id: str) -> bool:
+        """Check if autonomy should interact with this channel.
+        
+        CRITICAL: must stay in sync with bot.py on_message channel guards.
+        Autonomy was posting to blocked/missing-allowed channels because
+        nobody remembered this check exists. Don't remove it.
+        """
+        control = self.bot._control or {}
+        cid = str(channel_id)
+        if not control.get("bot_enabled", True):
+            return False
+        if cid in set(control.get("blocked_channels", []) or []):
+            return False
+        allowed = set(control.get("allowed_channels", []) or [])
+        return not allowed or cid in allowed
+
+    def _autonomy_tool_allowed(self, name: str) -> bool:
+        """Check if autonomy can use a tool, respecting dashboard controls.
+        
+        CRITICAL: without this, autonomy bypasses tools_enabled/disabled_tools.
+        The LLM was calling shell/kilo/create_channel through autonomy even when
+        the admin disabled them in the dashboard. Don't remove this gate.
+        """
+        if name in AUTONOMY_DISABLED_TOOLS:
+            return False
+        control = self.bot._control or {}
+        if not control.get("tools_enabled", True):
+            return False
+        if name in set(control.get("disabled_tools", []) or []):
+            return False
+        return True
+
     # -- lifecycle (idempotent) --
 
     async def start(self):
@@ -344,12 +393,16 @@ class AutonomyEngine:
 
     async def _loop(self):
         consecutive_failures = 0
+        MAX_AUTONOMY_INTERVAL = 86400  # 24h cap — don't let a bad value sleep forever
         while self._running:
             try:
                 control = self.bot._control or {}
                 if control.get("autonomy_enabled", False):
-                    await self.tick()
-                    consecutive_failures = 0
+                    tick_result = await self.tick()
+                    if tick_result.get("error"):
+                        consecutive_failures += 1
+                    elif not tick_result.get("skipped"):
+                        consecutive_failures = 0
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -362,7 +415,7 @@ class AutonomyEngine:
             # read interval from bot control (source of truth)
             try:
                 control = self.bot._control or {}
-                interval = int(control.get("autonomy_interval_seconds", 300) or 300)
+                interval = max(30, min(int(control.get("autonomy_interval_seconds", 300) or 300), MAX_AUTONOMY_INTERVAL))
             except (ValueError, TypeError):
                 interval = 300
             # Smoother backoff: cap at 6x instead of 10x
@@ -378,19 +431,23 @@ class AutonomyEngine:
             logger.debug("Autonomy tick skipped — previous still running")
             return {"skipped": True}
         async with self._lock:
+            # BUG FIX: capture tick START time as watermark. Events recorded during
+            # plan/execute have timestamps between start and end. Using end-of-tick
+            # as watermark (old behavior) drops those events from the next tick.
+            tick_start_iso = _utcnow_iso()
             start = time.time()
             try:
                 context = await self.gather_context()
                 actions = await self.plan(context)
                 results = await self.execute(actions)
                 duration = time.time() - start
-                await self._log_tick(context, actions, results, duration)
+                await self._log_tick(context, actions, results, duration, tick_start_iso)
                 return {"skipped": False, "actions": len(results), "duration": duration}
             except Exception as e:
                 duration = time.time() - start
                 logger.error(f"Autonomy tick failed: {e}")
                 await self.store.patch_state({
-                    "last_tick": _utcnow_iso(),
+                    "last_tick": tick_start_iso,
                     "last_tick_duration": round(duration, 2),
                     "last_error": str(e)[:2000],
                 })
@@ -425,7 +482,7 @@ class AutonomyEngine:
                     for g in active_goals
                 ]
                 sections.append(_truncate(
-                    f"=== ACTIVE GOALS ===\n" + "\n".join(goal_lines),
+                    "=== ACTIVE GOALS ===\n" + "\n".join(goal_lines),
                     CTX_BUDGET_GOALS,
                 ))
             else:
@@ -446,7 +503,7 @@ class AutonomyEngine:
                     content = str(ev.get("content", ""))[:200]
                     ev_lines.append(f"[{role}] {content}")
                 sections.append(_truncate(
-                    f"=== RECENT CONVERSATIONS (since last check) ===\n" + "\n".join(ev_lines),
+                    "=== RECENT CONVERSATIONS (since last check) ===\n" + "\n".join(ev_lines),
                     CTX_BUDGET_RECENT_EVENTS,
                 ))
             else:
@@ -470,6 +527,8 @@ class AutonomyEngine:
 
         ch_lines = []
         for cid in list(channel_ids_to_check)[:10]:
+            if not self._channel_allowed(cid):
+                continue
             try:
                 ch = self.bot.get_channel(int(cid))
                 if ch is None:
@@ -480,7 +539,7 @@ class AutonomyEngine:
                 if ch is None:
                     continue
                 messages = [m async for m in ch.history(limit=10)]
-                for m in messages:
+                for m in reversed(messages):
                     author_name = getattr(m.author, "display_name", None) or getattr(m.author, "name", "?")
                     content = (m.content or "")[:150]
                     if content:
@@ -491,7 +550,7 @@ class AutonomyEngine:
                 continue
         if ch_lines:
             sections.append(_truncate(
-                f"=== CHANNEL ACTIVITY ===\n" + "\n".join(ch_lines[-40:]),
+                "=== CHANNEL ACTIVITY ===\n" + "\n".join(ch_lines[-40:]),
                 CTX_BUDGET_CHANNEL_ACTIVITY,
             ))
         else:
@@ -521,7 +580,7 @@ class AutonomyEngine:
 
         if action_feedback:
             sections.append(_truncate(
-                f"=== YOUR RECENT ACTIONS ===\n" + "\n\n".join(action_feedback),
+                "=== YOUR RECENT ACTIONS ===\n" + "\n\n".join(action_feedback),
                 CTX_BUDGET_RECENT_ACTIONS,
             ))
 
@@ -535,7 +594,7 @@ class AutonomyEngine:
         for channel in list(getattr(self.bot, "private_channels", []) or [])[:20]:
             try:
                 messages = [m async for m in channel.history(limit=20)]
-                for m in messages:
+                for m in reversed(messages):
                     author_name = getattr(m.author, "display_name", None) or getattr(m.author, "name", "?")
                     content = (m.content or "")[:200]
                     if content:
@@ -546,7 +605,7 @@ class AutonomyEngine:
                 continue
         if dm_lines:
             sections.append(_truncate(
-                f"=== DM HISTORY ===\n" + "\n".join(dm_lines[-40:]),
+                "=== DM HISTORY ===\n" + "\n".join(dm_lines[-40:]),
                 CTX_BUDGET_DM_HISTORY,
             ))
         else:
@@ -570,23 +629,31 @@ class AutonomyEngine:
             for ch in guild.text_channels:
                 try:
                     perms = ch.permissions_for(guild.me)
-                    if perms.send_messages:
+                    if perms.send_messages and self._channel_allowed(ch.id):
                         ch_map_lines.append(f"  #{ch.name} ({ch.id}) in {guild.name}")
                 except Exception:
                     continue
         if ch_map_lines:
             sections.append(_truncate(
-                f"=== AVAILABLE CHANNELS (use these IDs for post_channel) ===\n" + "\n".join(ch_map_lines[:30]),
+                "=== AVAILABLE CHANNELS (use these IDs for post_channel) ===\n" + "\n".join(ch_map_lines[:30]),
                 CTX_BUDGET_CHANNELS_MAP,
             ))
 
         # 10. Shared context
         try:
-            shared = await self.bot.memory.list_shared_context() if hasattr(self.bot.memory, "list_shared_context") else []
+            shared = await self.bot.memory.get_relevant_shared_context(
+                user_id="",
+                guild_id="",
+                channel_id="",
+                is_dm=False,
+                is_admin=False,
+                max_items=20,
+                budget=CTX_BUDGET_SHARED,
+            ) if hasattr(self.bot.memory, "get_relevant_shared_context") else []
             if shared:
-                ctx_lines = [f"- {c}" for c in shared[:20]]
+                ctx_lines = [f"- [{c.get('scope', '?')}, i{c.get('importance', '?')}] {c.get('content', '')}" for c in shared[:20]]
                 sections.append(_truncate(
-                    f"=== SHARED CONTEXT ===\n" + "\n".join(ctx_lines),
+                    "=== SHARED CONTEXT ===\n" + "\n".join(ctx_lines),
                     CTX_BUDGET_SHARED,
                 ))
         except Exception:
@@ -653,7 +720,7 @@ class AutonomyEngine:
         # build tool descriptions (excluding autonomy-incompatible tools)
         tool_desc_lines = []
         for name, tool in self.bot.tools.items():
-            if name in AUTONOMY_DISABLED_TOOLS:
+            if not self._autonomy_tool_allowed(name):
                 continue
             try:
                 desc = tool.get_description()
@@ -725,6 +792,13 @@ Return ONLY valid JSON in this exact format:
       "target_user_id": "123456789",
       "content": "hey, about that thing...",
       "reason": "following up on earlier conversation"
+    }},
+    {{
+      "kind": "run_tool",
+      "tool_name": "web_search",
+      "tool_args": {{"query": "something worth checking"}},
+      "target_channel_id": "123456789",
+      "reason": "need fresh info before posting"
     }},
     {{
       "kind": "update_memory",
@@ -874,7 +948,7 @@ Do NOT invent other action kinds — they will be rejected."""
                 uid = re.sub(r"[^0-9]", "", uid_raw)
                 content = str(action.get("content", "")).strip()
                 if not uid or not content:
-                    validation_failures.append(f"send_dm: missing user_id or content")
+                    validation_failures.append("send_dm: missing user_id or content")
                     continue
                 valid.append({
                     "kind": "send_dm",
@@ -891,10 +965,9 @@ Do NOT invent other action kinds — they will be rejected."""
                     validation_failures.append("post_channel: empty content")
                     continue
                 if not cid:
-                    for auto_cid in (self.bot._auto_channels or set()):
-                        cid = re.sub(r"[^0-9]", "", str(auto_cid))
-                        if cid:
-                            break
+                    candidates = self._auto_channel_candidates()
+                    if candidates:
+                        cid = candidates[0]
                 if not cid:
                     validation_failures.append("post_channel: no channel_id and no auto_channels")
                     continue
@@ -908,7 +981,7 @@ Do NOT invent other action kinds — they will be rejected."""
                 valid.append({
                     "kind": "post_channel",
                     "target_channel_id": cid,
-                    "content": content[:2000],
+                    "content": content[:MAX_CONTENT_CHARS],
                     "reason": str(action.get("reason", ""))[:500],
                 })
 
@@ -917,8 +990,8 @@ Do NOT invent other action kinds — they will be rejected."""
                 if not tool_name:
                     validation_failures.append("run_tool: missing tool_name")
                     continue
-                if tool_name in AUTONOMY_DISABLED_TOOLS:
-                    validation_failures.append(f"run_tool: '{tool_name}' is disabled for autonomy")
+                if not self._autonomy_tool_allowed(tool_name):
+                    validation_failures.append(f"run_tool: '{tool_name}' is disabled or not allowed")
                     continue
                 if tool_name not in self.bot.tools:
                     validation_failures.append(f"run_tool: tool '{tool_name}' not found")
@@ -1129,6 +1202,11 @@ Do NOT invent other action kinds — they will be rejected."""
         result["tool_args"] = tool_args
         result["content_summary"] = f"{tool_name}({json.dumps(tool_args, default=str)[:150]})"
 
+        if not self._autonomy_tool_allowed(tool_name):
+            result["result"] = "error"
+            result["error"] = f"tool disabled for autonomy: {tool_name}"
+            return
+
         tool = self.bot.tools.get(tool_name)
         if tool is None:
             result["result"] = "error"
@@ -1148,7 +1226,7 @@ Do NOT invent other action kinds — they will be rejected."""
 
         # if no channel and we can find a default, use the first auto_channel
         if channel is None:
-            for cid in (self.bot._auto_channels or set()):
+            for cid in self._auto_channel_candidates():
                 try:
                     channel = self.bot.get_channel(int(cid))
                     if channel is None:
@@ -1203,12 +1281,15 @@ Do NOT invent other action kinds — they will be rejected."""
         goal = await self.store.add_goal(desc)
         result["tool_called"] = "create_goal"
         result["goal_id"] = goal.get("id")
+        if goal.get("error"):
+            result["result"] = "error"
+            result["error"] = goal["error"]
 
     # -----------------------------------------------------------------------
     # logging
     # -----------------------------------------------------------------------
 
-    async def _log_tick(self, context: str, actions: list[dict], results: list[dict], duration: float):
+    async def _log_tick(self, context: str, actions: list[dict], results: list[dict], duration: float, tick_start_iso: str | None = None):
         """Record tick results to state and action log."""
         thought = self._last_thought or ""
 
@@ -1216,8 +1297,10 @@ Do NOT invent other action kinds — they will be rejected."""
         total_exec = sum(1 for r in results if r.get("result") == "success")
         total_fail = sum(1 for r in results if r.get("result") == "error")
 
+        # BUG FIX: use tick START time as watermark so events recorded during
+        # plan/execute are not dropped from the next tick.
         def _update(s):
-            s["last_tick"] = _utcnow_iso()
+            s["last_tick"] = tick_start_iso or _utcnow_iso()
             s["last_tick_duration"] = round(duration, 2)
             s["last_error"] = None
             s["last_thought"] = thought[:2000]

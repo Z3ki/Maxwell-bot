@@ -254,6 +254,8 @@ class ImageGeneratorTool(Tool):
     async def execute(self, message: Message, prompt: str = None, **kwargs) -> str:
         if not prompt:
             return "Error: prompt parameter is required"
+        if not self.bot.config.NVIDIA_API_KEY:
+            return "Error: image generation is not configured (missing NVIDIA_API_KEY)"
         return await self._nvidia_generate(message, prompt)
 
     async def _nvidia_generate(self, message: Message, prompt: str) -> str:
@@ -752,7 +754,7 @@ class LookupUserTool(Tool):
                 f"ID: {user.id}\n"
                 f"Created: {created}\n"
                 f"Bot: {user.bot}\n"
-                f"Avatar: {user.avatar_url}"
+                f"Avatar: {getattr(user.display_avatar, 'url', 'none') if hasattr(user, 'display_avatar') else getattr(user, 'avatar_url', 'none')}"
             )
             return info
         except discord.NotFound:
@@ -1010,6 +1012,8 @@ class CreateChannelTool(Tool):
         slowmode_seconds: str = "0",
         **kwargs,
     ) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: create_channel is admin-only"
         clean = _clean_channel_name(name)
         if not clean:
             return "Error: name is required"
@@ -1069,6 +1073,8 @@ class EditChannelTool(Tool):
         nsfw: str = None,
         **kwargs,
     ) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: edit_channel is admin-only"
         if not channel_id:
             return "Error: channel_id is required"
         try:
@@ -1125,6 +1131,8 @@ class DeleteChannelTool(Tool):
         )
 
     async def execute(self, message: Message, channel_id: str = None, confirm_name: str = None, **kwargs) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: delete_channel is admin-only"
         if not channel_id or not confirm_name:
             return "Error: channel_id and confirm_name are required"
         try:
@@ -1210,6 +1218,8 @@ class CreateSiteTool(Tool):
         )
 
     async def execute(self, message: Message, name: str = None, title: str = None, body: str = None, encoding: str = "text", **kwargs) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: create_site is admin-only"
         if not name or not title or body is None:
             missing = []
             if not name:

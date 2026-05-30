@@ -22,3 +22,5 @@ dist/
 build/
 *.egg-info/
 
+subagents/
+progress.md

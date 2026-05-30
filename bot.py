@@ -116,7 +116,7 @@ def _patch_voice_recv_decoder():
 
 _patch_voice_recv_decoder()
 
-from bot_tools import (
+from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before these imports
     ChangeAvatarTool,
     ChangePresenceTool,
     CreateCategoryTool,
@@ -160,11 +160,11 @@ from bot_tools import (
     _is_safe_url,
     _read_response_limited,
 )
-from config import Config
-from memory import MemoryManager, RemEventLog
-from providers import MIME_MAP, OllamaProvider, ProviderUsageExhaustedError
-from rem import RemStore, load_rem_defaults, run_rem_once
-from autonomy import AutonomyEngine
+from config import Config  # noqa: E402
+from memory import MemoryManager, RemEventLog  # noqa: E402
+from providers import MIME_MAP, OllamaProvider, ProviderUsageExhaustedError  # noqa: E402
+from rem import RemStore, load_rem_defaults, run_rem_once  # noqa: E402
+from autonomy import AutonomyEngine  # noqa: E402
 
 class _MaxLevelFilter(logging.Filter):
     def __init__(self, max_level: int):
@@ -1379,12 +1379,18 @@ class MaxwellBot(commands.Bot):
                 preview = "[hidden]"
             logger.info(f"MSG from {message.author.display_name} ({message.author.id}) in {getattr(message.channel, 'name', 'DM')}: {preview}")
 
+        # BUG FIX: blacklist/ignore must be checked BEFORE command handling.
+        # Previously, blacklisted users could still run ,stop, ,drug, etc.
+        # because the blacklist check was after the command prefix check.
+        # Admins bypass so they can manage the blacklist.
+        if str(message.author.id) in self._blacklist or str(message.author.id) in set(self._control.get("ignore_users", []) or []):
+            if not self._is_admin(message.author.id):
+                return
+
         if message.content and message.content.startswith(self.command_prefix) and not message.author.bot:
             await self._handle_command(message)
             return
 
-        if str(message.author.id) in self._blacklist or str(message.author.id) in set(self._control.get("ignore_users", []) or []):
-            return
         if not self._control.get("bot_enabled", True):
             return
 
@@ -1557,7 +1563,7 @@ class MaxwellBot(commands.Bot):
 
             result = result.strip()
             if not result or "__SKIP__" in result or "__skip__" in result.lower() or len(result) < 2:
-                logger.info(f"Reaction handler: skipping (LLM said skip)")
+                logger.info("Reaction handler: skipping (LLM said skip)")
                 return
 
             # Send as a new standalone message, not a reply
@@ -2359,6 +2365,7 @@ class MaxwellBot(commands.Bot):
                 logger.info(f"Loaded {len(self._shell_whitelist)} whitelisted shell users")
         except Exception as e:
             logger.error(f"Failed to load shell whitelist: {e}")
+            self._shell_whitelist = set()
 
     def _save_shell_whitelist(self):
         try:
@@ -2440,6 +2447,7 @@ class MaxwellBot(commands.Bot):
             return False, "REM is already running", None
         self._rem_running = True
         await self.rem_store.patch_state({"running": True, "running_since": datetime.now(timezone.utc).isoformat()})
+        success = False
         try:
             timeout = max(10, min(int(self._control.get("ai_timeout_seconds", 180) or 180), 600))
             await self._acquire_ai_slot(timeout=timeout)
@@ -2458,13 +2466,20 @@ class MaxwellBot(commands.Bot):
             finally:
                 await self._release_ai_slot()
             logger.info(f"REM pass complete: {run.get('audit', '')[:160]}")
+            success = True
             return True, "ok", run
         except Exception as e:
             logger.warning(f"REM pass failed: {e}")
-            await self.rem_store.patch_state({"running": False, "running_since": ""})
             return False, str(e), None
         finally:
             self._rem_running = False
+            # BUG FIX: CancelledError is BaseException since Python 3.9.
+            # PM2 SIGTERM during REM left running:True stuck in rem_state.json.
+            if not success:
+                try:
+                    await self.rem_store.patch_state({"running": False, "running_since": ""})
+                except Exception:
+                    pass
 
     async def _rem_scheduler_loop(self):
         while True:
@@ -4137,7 +4152,6 @@ class MaxwellBot(commands.Bot):
                     user = message.get("from", {})
                     user_name = user.get("first_name", "Telegram User")
                     user_id = str(user.get("id", "unknown"))
-                    user_username = str(user.get("username") or "").strip().lower()
 
                     # Only admins are allowed to talk to the bot on Telegram
                     if not self._is_admin(user_id):
@@ -4372,6 +4386,11 @@ async def main():
                 await task
             except asyncio.CancelledError:
                 pass
+        for task in list(getattr(bot, "_context_tasks", []) or []):
+            task.cancel()
+        if getattr(bot, "_context_tasks", None):
+            await asyncio.gather(*list(bot._context_tasks), return_exceptions=True)
+            bot._context_tasks.clear()
         try:
             await bot.memory.flush()
         except Exception as e:

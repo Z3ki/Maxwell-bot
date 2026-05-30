@@ -302,7 +302,6 @@ class MemoryManager:
             except Exception:
                 pass
             self._pending_save = None
-        self._save_lock = asyncio.Lock()
         if self._dirty:
             self._dirty = False
             snapshot = json.loads(json.dumps(self.memory, ensure_ascii=False))
