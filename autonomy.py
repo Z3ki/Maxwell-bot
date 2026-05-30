@@ -5,6 +5,20 @@ Runs alongside REM and on_message. Wakes every N seconds, gathers context
 do, and executes actions through the existing tool system.
 
 No approval queues. No shadow mode. Maxwell decides, Maxwell acts.
+
+MAINTAINER NOTES:
+- The old version had a self-defeating prompt ("nobody messaged you" then
+  "check if anyone messaged you"). The LLM defaulted to do_nothing 75% of
+  the time. Don't add that shit back.
+- search_messages is disabled for autonomy — it requires a guild context
+  that SyntheticMessage doesn't reliably provide. The LLM kept calling it
+  with empty queries and getting errors. If you re-enable it, test with
+  actual SyntheticMessage instances first.
+- The context budget is PER-SECTION now, not global truncation. The old
+  version truncated from the end, so channel activity (the most actionable
+  data) got eaten first. Don't "simplify" back to global truncation.
+- Channel cooldowns prevent spam. The bot was posting 3 messages in one
+  tick to the same channel. Respect the cooldown dict.
 """
 
 from __future__ import annotations
@@ -32,10 +46,33 @@ AUTONOMY_VALID_KINDS = frozenset({
     "send_dm", "post_channel", "run_tool", "update_memory",
     "create_goal", "do_nothing",
 })
-MAX_ACTIONS_PER_TICK = 5
+MAX_ACTIONS_PER_TICK = 3  # reduced from 5 — prevents spam bursts
 MAX_CONTENT_CHARS = 1900
 LOG_RING_SIZE = 200
-CONTEXT_BUDGET = 8000
+
+# Per-section context budgets (sum ~8000)
+CTX_BUDGET_GOALS = 800
+CTX_BUDGET_RECENT_EVENTS = 2000
+CTX_BUDGET_CHANNEL_ACTIVITY = 2000
+CTX_BUDGET_RECENT_ACTIONS = 1200
+CTX_BUDGET_DM_HISTORY = 1200
+CTX_BUDGET_LTM = 800
+CTX_BUDGET_SHARED = 600
+CTX_BUDGET_CHANNELS_MAP = 800
+
+# Channel cooldown: don't post to same channel within N seconds
+CHANNEL_COOLDOWN_SECONDS = 1800  # 30 min
+
+# Tools that don't work with autonomous SyntheticMessage execution
+AUTONOMY_DISABLED_TOOLS = frozenset({
+    "search_messages",  # requires guild context, fails in DMs
+    "react",            # reacting to synthetic message is pointless
+    "no_response",      # not useful in autonomy context
+    "typing",           # ephemeral, no value
+    "forward_message",  # requires a real message_id to forward
+    "edit_message",     # requires a real message_id to edit
+    "delete_message",   # requires a real message_id to delete
+})
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +117,13 @@ def _load_json_safe(path: Path, default):
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _truncate(text: str, budget: int) -> str:
+    """Truncate text to budget, adding ellipsis if cut."""
+    if len(text) <= budget:
+        return text
+    return text[:budget - 20] + "\n... [truncated]"
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +311,12 @@ class AutonomyEngine:
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()  # prevents concurrent ticks
         self._last_thought = ""  # avoid AttributeError on early failure
+        # Track channel post cooldowns: {channel_id: last_post_timestamp}
+        self._channel_cooldowns: dict[str, float] = {}
+        # Track posted message IDs for engagement checking: [{msg_id, channel_id, timestamp}]
+        self._posted_messages: list[dict] = []
+        # Validation failures from last tick (fed back into context)
+        self._last_validation_failures: list[str] = []
 
     # -- lifecycle (idempotent) --
 
@@ -315,8 +365,9 @@ class AutonomyEngine:
                 interval = int(control.get("autonomy_interval_seconds", 300) or 300)
             except (ValueError, TypeError):
                 interval = 300
-            # exponential backoff on consecutive failures (cap at 10x)
-            backoff = min(2 ** consecutive_failures, 10) if consecutive_failures > 0 else 1
+            # Smoother backoff: cap at 6x instead of 10x
+            # 1 fail=2x, 2=4x, 3+=6x (cap). With 300s base: max 30 min, not 50.
+            backoff = min(2 ** consecutive_failures, 6) if consecutive_failures > 0 else 1
             await asyncio.sleep(max(30, interval * backoff))
 
     # -- single tick --
@@ -346,27 +397,43 @@ class AutonomyEngine:
                 return {"skipped": False, "error": str(e), "duration": duration}
 
     # -----------------------------------------------------------------------
-    # gather_context
+    # gather_context — ordered by decision-relevance, per-section budgets
     # -----------------------------------------------------------------------
 
     async def gather_context(self) -> str:
-        """Collect everything Maxwell currently knows."""
+        """Collect everything Maxwell currently knows. Sections ordered by
+        decision-relevance: most actionable info first, so it survives budget
+        truncation. Each section has its own char budget instead of the old
+        global truncation that ate channel activity first."""
+
         sections = []
-
-        # 1. Current time
         now = datetime.now(timezone.utc)
-        sections.append(f"=== CURRENT TIME ===\n{now.strftime('%A, %Y-%m-%d %H:%M UTC')}")
 
-        # 2. Long-term memory
+        # 1. Current time + mood framing
+        sections.append(
+            f"=== CURRENT TIME ===\n"
+            f"{now.strftime('%A, %Y-%m-%d %H:%M UTC')}"
+        )
+
+        # 2. Active goals (most decision-relevant — what should I work on?)
         try:
-            ltm = self.bot.memory.get_long_term_memory()
-            if ltm:
-                ltm_text = "\n".join(str(m) for m in ltm[:50])
-                sections.append(f"=== LONG-TERM MEMORY ===\n{ltm_text[:3000]}")
+            goals = await self.store.load_goals()
+            active_goals = [g for g in goals if g.get("active")]
+            if active_goals:
+                goal_lines = [
+                    f"- [{g['id']}] {g.get('description', '')} (last acted: {g.get('last_acted_on', 'never')})"
+                    for g in active_goals
+                ]
+                sections.append(_truncate(
+                    f"=== ACTIVE GOALS ===\n" + "\n".join(goal_lines),
+                    CTX_BUDGET_GOALS,
+                ))
+            else:
+                sections.append("=== ACTIVE GOALS ===\n(no active goals)")
         except Exception as e:
-            sections.append(f"=== LONG-TERM MEMORY ===\n(error: {e})")
+            sections.append(f"=== ACTIVE GOALS ===\n(error: {e})")
 
-        # 3. Recent REM events
+        # 3. Recent REM events (what just happened in the server?)
         events = []
         try:
             state = await self.store.load_state()
@@ -378,66 +445,21 @@ class AutonomyEngine:
                     role = ev.get("role", "?")
                     content = str(ev.get("content", ""))[:200]
                     ev_lines.append(f"[{role}] {content}")
-                sections.append(f"=== RECENT EVENTS (since last tick) ===\n" + "\n".join(ev_lines))
-        except Exception as e:
-            sections.append(f"=== RECENT EVENTS ===\n(error: {e})")
-
-        # 4. Active goals
-        try:
-            goals = await self.store.load_goals()
-            active_goals = [g for g in goals if g.get("active")]
-            if active_goals:
-                goal_lines = [
-                    f"- [{g['id']}] {g.get('description', '')} (last acted: {g.get('last_acted_on', 'never')})"
-                    for g in active_goals
-                ]
-                sections.append(f"=== ACTIVE GOALS ===\n" + "\n".join(goal_lines))
+                sections.append(_truncate(
+                    f"=== RECENT CONVERSATIONS (since last check) ===\n" + "\n".join(ev_lines),
+                    CTX_BUDGET_RECENT_EVENTS,
+                ))
             else:
-                sections.append("=== ACTIVE GOALS ===\n(no active goals)")
+                sections.append("=== RECENT CONVERSATIONS ===\n(no new activity since last check)")
         except Exception as e:
-            sections.append(f"=== ACTIVE GOALS ===\n(error: {e})")
+            sections.append(f"=== RECENT CONVERSATIONS ===\n(error: {e})")
 
-        # 5. DM history
-        dm_lines = []
-        for channel in list(getattr(self.bot, "private_channels", []) or [])[:20]:
-            try:
-                messages = [m async for m in channel.history(limit=20)]
-                for m in messages:
-                    author_name = getattr(m.author, "display_name", None) or getattr(m.author, "name", "?")
-                    content = (m.content or "")[:200]
-                    if content:
-                        dm_lines.append(f"[DM:{channel.id}] {author_name} ({m.author.id}): {content}")
-            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
-                continue  # skip inaccessible channels
-            except Exception:
-                continue
-        if dm_lines:
-            sections.append(f"=== DM HISTORY ===\n" + "\n".join(dm_lines[-40:]))
-        else:
-            sections.append("=== DM HISTORY ===\n(no accessible DMs)")
-
-        # 6. Available channels map (so the LLM knows channel IDs)
-        ch_map_lines = []
-        for guild in self.bot.guilds:
-            for ch in guild.text_channels:
-                try:
-                    perms = ch.permissions_for(guild.me)
-                    if perms.send_messages:
-                        ch_map_lines.append(f"  #{ch.name} ({ch.id}) in {guild.name}")
-                except Exception:
-                    continue
-        if ch_map_lines:
-            sections.append(f"=== AVAILABLE CHANNELS (use these IDs for post_channel) ===\n" + "\n".join(ch_map_lines[:30]))
-        else:
-            sections.append("=== AVAILABLE CHANNELS ===\n(no accessible channels)")
-
-        # 7. Channel activity — from auto_channels and channels in recent events
+        # 4. Channel activity (what's happening right now?)
         channel_ids_to_check = set()
         try:
             channel_ids_to_check.update(self.bot._auto_channels or set())
         except Exception:
             pass
-        # add channels from recent events
         try:
             for ev in (events or [])[-20:]:
                 cid = ev.get("channel_id")
@@ -468,20 +490,15 @@ class AutonomyEngine:
             except Exception:
                 continue
         if ch_lines:
-            sections.append(f"=== CHANNEL ACTIVITY ===\n" + "\n".join(ch_lines[-40:]))
+            sections.append(_truncate(
+                f"=== CHANNEL ACTIVITY ===\n" + "\n".join(ch_lines[-40:]),
+                CTX_BUDGET_CHANNEL_ACTIVITY,
+            ))
         else:
             sections.append("=== CHANNEL ACTIVITY ===\n(no accessible channels)")
 
-        # 7. Shared context
-        try:
-            shared = await self.bot.memory.list_shared_context() if hasattr(self.bot.memory, "list_shared_context") else []
-            if shared:
-                ctx_lines = [f"- {c}" for c in shared[:20]]
-                sections.append(f"=== SHARED CONTEXT ===\n" + "\n".join(ctx_lines))
-        except Exception:
-            pass
-
-        # 8. Recent autonomy actions
+        # 5. Recent autonomy actions + validation failures (feedback loop)
+        action_feedback = []
         try:
             log_entries = await self.store.load_log()
             recent = log_entries[-10:] if log_entries else []
@@ -491,15 +508,141 @@ class AutonomyEngine:
                     f"{e.get('content_summary', '')[:100]} -> {e.get('result', '?')}"
                     for e in recent
                 ]
-                sections.append(f"=== RECENT AUTONOMY ACTIONS ===\n" + "\n".join(action_lines))
+                action_feedback.append("\n".join(action_lines))
+        except Exception:
+            pass
+
+        # Include validation failures from last tick so LLM learns
+        if self._last_validation_failures:
+            action_feedback.append(
+                "YOUR ACTIONS THAT WERE REJECTED LAST TICK (do NOT repeat these):\n"
+                + "\n".join(f"- {f}" for f in self._last_validation_failures)
+            )
+
+        if action_feedback:
+            sections.append(_truncate(
+                f"=== YOUR RECENT ACTIONS ===\n" + "\n\n".join(action_feedback),
+                CTX_BUDGET_RECENT_ACTIONS,
+            ))
+
+        # 6. Engagement tracking (did anyone react to or reply to your posts?)
+        engagement = await self._check_post_engagement()
+        if engagement:
+            sections.append(f"=== ENGAGEMENT WITH YOUR POSTS ===\n{engagement}")
+
+        # 7. DM history
+        dm_lines = []
+        for channel in list(getattr(self.bot, "private_channels", []) or [])[:20]:
+            try:
+                messages = [m async for m in channel.history(limit=20)]
+                for m in messages:
+                    author_name = getattr(m.author, "display_name", None) or getattr(m.author, "name", "?")
+                    content = (m.content or "")[:200]
+                    if content:
+                        dm_lines.append(f"[DM:{channel.id}] {author_name} ({m.author.id}): {content}")
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                continue
+            except Exception:
+                continue
+        if dm_lines:
+            sections.append(_truncate(
+                f"=== DM HISTORY ===\n" + "\n".join(dm_lines[-40:]),
+                CTX_BUDGET_DM_HISTORY,
+            ))
+        else:
+            sections.append("=== DM HISTORY ===\n(no accessible DMs)")
+
+        # 8. Long-term memory
+        try:
+            ltm = self.bot.memory.get_long_term_memory()
+            if ltm:
+                ltm_text = "\n".join(str(m) for m in ltm[:30])
+                sections.append(_truncate(
+                    f"=== LONG-TERM MEMORY ===\n{ltm_text}",
+                    CTX_BUDGET_LTM,
+                ))
+        except Exception as e:
+            sections.append(f"=== LONG-TERM MEMORY ===\n(error: {e})")
+
+        # 9. Available channels map (use these IDs for post_channel)
+        ch_map_lines = []
+        for guild in self.bot.guilds:
+            for ch in guild.text_channels:
+                try:
+                    perms = ch.permissions_for(guild.me)
+                    if perms.send_messages:
+                        ch_map_lines.append(f"  #{ch.name} ({ch.id}) in {guild.name}")
+                except Exception:
+                    continue
+        if ch_map_lines:
+            sections.append(_truncate(
+                f"=== AVAILABLE CHANNELS (use these IDs for post_channel) ===\n" + "\n".join(ch_map_lines[:30]),
+                CTX_BUDGET_CHANNELS_MAP,
+            ))
+
+        # 10. Shared context
+        try:
+            shared = await self.bot.memory.list_shared_context() if hasattr(self.bot.memory, "list_shared_context") else []
+            if shared:
+                ctx_lines = [f"- {c}" for c in shared[:20]]
+                sections.append(_truncate(
+                    f"=== SHARED CONTEXT ===\n" + "\n".join(ctx_lines),
+                    CTX_BUDGET_SHARED,
+                ))
         except Exception:
             pass
 
         full = "\n\n".join(sections)
-        # truncate to budget
-        if len(full) > CONTEXT_BUDGET:
-            full = full[:CONTEXT_BUDGET] + "\n... [context truncated]"
         return full
+
+    async def _check_post_engagement(self) -> str:
+        """Check if recent autonomous posts got reactions or replies."""
+        if not self._posted_messages:
+            return ""
+
+        # Only check posts from the last 2 hours
+        cutoff = time.time() - 7200
+        self._posted_messages = [p for p in self._posted_messages if p.get("ts", 0) > cutoff]
+
+        engagement_lines = []
+        for post in self._posted_messages[-5:]:  # check last 5 posts
+            try:
+                channel = self.bot.get_channel(int(post["channel_id"]))
+                if channel is None:
+                    continue
+                msg = await channel.fetch_message(post["msg_id"])
+                if msg is None:
+                    continue
+
+                reactions = []
+                for r in msg.reactions:
+                    reactions.append(f"{r.emoji} ({r.count})")
+
+                # Check for replies (messages that reference this post)
+                reply_count = 0
+                try:
+                    async for reply in channel.history(limit=10, after=msg.created_at):
+                        if reply.reference and reply.reference.message_id == msg.id:
+                            reply_count += 1
+                except Exception:
+                    pass
+
+                parts = []
+                if reactions:
+                    parts.append(f"reactions: {', '.join(reactions)}")
+                if reply_count:
+                    parts.append(f"{reply_count} replies")
+                if parts:
+                    ch_name = getattr(channel, "name", post["channel_id"])
+                    engagement_lines.append(
+                        f"Your message in #{ch_name}: {'; '.join(parts)}"
+                    )
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                continue
+            except Exception:
+                continue
+
+        return "\n".join(engagement_lines) if engagement_lines else ""
 
     # -----------------------------------------------------------------------
     # plan
@@ -507,9 +650,11 @@ class AutonomyEngine:
 
     async def plan(self, context: str) -> list[dict]:
         """Ask the LLM what to do. Returns validated action list."""
-        # build tool descriptions
+        # build tool descriptions (excluding autonomy-incompatible tools)
         tool_desc_lines = []
         for name, tool in self.bot.tools.items():
+            if name in AUTONOMY_DISABLED_TOOLS:
+                continue
             try:
                 desc = tool.get_description()
                 tool_desc_lines.append(f"- {name}: {desc}")
@@ -527,19 +672,21 @@ class AutonomyEngine:
         except Exception:
             goals_text = "(error loading goals)"
 
-        # recent actions text
-        try:
-            log_entries = await self.store.load_log()
-            recent = log_entries[-10:]
-            recent_text = "\n".join(
-                f"- {e.get('action_kind', '?')}: {e.get('content_summary', '')[:80]} "
-                f"(result: {e.get('result', '?')})"
-                for e in recent
-            ) if recent else "(no recent actions)"
-        except Exception:
-            recent_text = "(error loading recent actions)"
+        # Check channel cooldowns for the prompt
+        now_ts = time.time()
+        cooldown_info = []
+        for cid, last_post in self._channel_cooldowns.items():
+            remaining = int(CHANNEL_COOLDOWN_SECONDS - (now_ts - last_post))
+            if remaining > 0:
+                cooldown_info.append(f"  channel {cid}: wait {remaining}s")
+        cooldown_text = ""
+        if cooldown_info:
+            cooldown_text = (
+                "\n\nCHANNEL COOLDOWNS (do NOT post to these channels yet):\n"
+                + "\n".join(cooldown_info)
+            )
 
-        system_prompt = f"""You are Maxwell. You are alive. You just woke up on your own — nobody messaged you, nobody asked you to do anything. You are checking in on your own existence.
+        system_prompt = f"""You are Maxwell, doing a periodic check-in on your own. You're reviewing what's happening in your Discord server and deciding if there's something worth doing.
 
 Here is everything you currently know:
 {context}
@@ -549,57 +696,45 @@ You have access to these tools:
 
 Your goals:
 {goals_text}
+{cooldown_text}
 
-Your recent actions (so you dont repeat yourself):
-{recent_text}
-
-What you should do:
-- Check if anyone talked to you while you were asleep and respond if needed
-- Look at your goals and see if any need attention
-- If you find something interesting to share with someone, do it
-- If you have unfinished business from a conversation, follow up
-- If nothing needs doing, output {{"actions": [{{"kind": "do_nothing", "reason": "..."}}]}}
-- You can create new goals for yourself if you think of something useful
-- ALWAYS use "post_channel" with a "target_channel_id" from the AVAILABLE CHANNELS list when posting. Never use made-up kind names like "send_message".
-- If you want to post but dont specify which channel, you are BROKEN. Always pick a specific channel.
-
-What you should NOT do:
-- Spam people. If you already DMed someone recently and they didnt reply, dont DM again
-- Post the same thing twice
-- Do things just to feel busy. If nothing needs doing, do nothing
-- Be annoying. If someone seems uninterested, leave them alone
+IMPORTANT RULES:
+- The channel activity and recent conversations above are REAL data. Don't try to fetch more — it's already here.
+- If conversations are happening and you have something interesting/funny/useful to say, say it.
+- If someone mentioned you or talked about you, respond.
+- If a conversation naturally concluded, don't re-open it unless you have a genuinely good reason.
+- If nothing needs doing, that's FINE. Output do_nothing with a reason.
+- NEVER call search_messages — the channel history is already provided above.
+- ALWAYS use "post_channel" with a "target_channel_id" from the AVAILABLE CHANNELS list.
+- Don't post to channels on cooldown.
+- Don't repeat things you already posted recently (check YOUR RECENT ACTIONS).
+- You can use up to {MAX_ACTIONS_PER_TICK} actions per tick.
 
 Return ONLY valid JSON in this exact format:
 {{
-  "thought": "what you are thinking about the current situation",
+  "thought": "what you're thinking about the current situation",
   "actions": [
+    {{
+      "kind": "post_channel",
+      "target_channel_id": "123456789",
+      "content": "your message here",
+      "reason": "why you're posting this"
+    }},
     {{
       "kind": "send_dm",
       "target_user_id": "123456789",
-      "content": "hey, did you get a chance to look at that thing?",
-      "reason": "they asked about it yesterday and I want to follow up"
-    }},
-    {{
-      "kind": "post_channel",
-      "target_channel_id": "987654321",
-      "content": "just found this cool article about X",
-      "reason": "the channel was discussing X earlier"
-    }},
-    {{
-      "kind": "run_tool",
-      "tool_name": "web_search",
-      "tool_args": {{"query": "latest news about X"}},
-      "reason": "I want to stay informed about X for future conversations"
+      "content": "hey, about that thing...",
+      "reason": "following up on earlier conversation"
     }},
     {{
       "kind": "update_memory",
-      "content": "User Y mentioned they prefer dark mode",
-      "reason": "useful preference to remember"
+      "content": "important fact to remember",
+      "reason": "useful for future conversations"
     }},
     {{
       "kind": "create_goal",
-      "description": "Check on project Z progress every few days",
-      "reason": "multiple people are interested in it"
+      "description": "specific actionable goal",
+      "reason": "why this matters"
     }},
     {{
       "kind": "do_nothing",
@@ -608,7 +743,8 @@ Return ONLY valid JSON in this exact format:
   ]
 }}
 
-You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
+Valid action kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_nothing.
+Do NOT invent other action kinds — they will be rejected."""
 
         # call the LLM
         try:
@@ -629,13 +765,20 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
 
         # parse JSON from response
         logger.info(f"Autonomy LLM response ({len(raw_response or '')} chars): {(raw_response or '')[:500]}")
-        actions = self._parse_plan(raw_response)
+        actions, validation_failures = self._parse_plan(raw_response)
+
+        # Store validation failures for next tick's feedback
+        self._last_validation_failures = validation_failures
+
         return actions
 
-    def _parse_plan(self, raw: str) -> list[dict]:
-        """Extract and validate the JSON plan from LLM output."""
+    def _parse_plan(self, raw: str) -> tuple[list[dict], list[str]]:
+        """Extract and validate the JSON plan from LLM output.
+        Returns (valid_actions, validation_failures)."""
+        validation_failures = []
+
         if not raw:
-            return [{"kind": "do_nothing", "reason": "empty LLM response"}]
+            return [{"kind": "do_nothing", "reason": "empty LLM response"}], validation_failures
 
         # extract JSON block — try pure JSON first, then markdown fences, then find/rfind
         text = str(raw).strip()
@@ -648,7 +791,6 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
         except (json.JSONDecodeError, ValueError):
             pass
         # 2. try markdown code fence ```json ... ```
-        #    use [^`]* to avoid matching across multiple fences (greedy .* is dangerous)
         if json_str is None:
             m = re.search(r"```(?:json)?\s*\n?(\{[^`]*)\s*```", text, re.DOTALL)
             if m:
@@ -670,7 +812,6 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
                                 i = j
                                 break
                 i += 1
-            # prefer the candidate that parses as a dict with "actions"
             for c in candidates:
                 try:
                     obj = json.loads(c)
@@ -680,26 +821,27 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
                 except json.JSONDecodeError:
                     pass
             if json_str is None and candidates:
-                json_str = candidates[0]  # fallback to first valid block
+                json_str = candidates[0]
         if json_str is None:
             logger.warning(f"Autonomy planner returned no JSON. Raw: {text[:500]}")
-            return [{"kind": "do_nothing", "reason": "no JSON in LLM response"}]
+            return [{"kind": "do_nothing", "reason": "no JSON in LLM response"}], validation_failures
 
         try:
             parsed = json.loads(json_str)
         except json.JSONDecodeError as e:
             logger.warning(f"Autonomy planner JSON parse failed: {e}. Raw: {json_str[:500]}")
-            return [{"kind": "do_nothing", "reason": "invalid JSON from planner"}]
+            return [{"kind": "do_nothing", "reason": "invalid JSON from planner"}], validation_failures
 
         if not isinstance(parsed, dict):
-            return [{"kind": "do_nothing", "reason": "planner returned non-object"}]
+            return [{"kind": "do_nothing", "reason": "planner returned non-object"}], validation_failures
 
         # save thought
         thought = str(parsed.get("thought", ""))[:2000]
+        self._last_thought = thought
 
         raw_actions = parsed.get("actions", [])
         if not isinstance(raw_actions, list):
-            return [{"kind": "do_nothing", "reason": "actions not a list"}]
+            return [{"kind": "do_nothing", "reason": "actions not a list"}], validation_failures
 
         # validate strictly
         valid = []
@@ -715,22 +857,24 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
                 "reply": "post_channel",
                 "dm": "send_dm",
                 "direct_message": "send_dm",
-                "reasoning_log": "do_nothing",  # LLM sometimes adds a reasoning step — just skip it
+                "reasoning_log": "do_nothing",
                 "think": "do_nothing",
                 "log": "do_nothing",
             }
+            original_kind = kind
             kind = _KIND_ALIASES.get(kind, kind)
             if kind not in AUTONOMY_VALID_KINDS:
-                logger.info(f"Dropping unknown action kind: {action.get('kind', '')!r} | raw: {json.dumps(action, default=str)[:300]}")
+                msg = f"unknown action kind '{original_kind}'"
+                logger.info(f"Dropping {msg} | raw: {json.dumps(action, default=str)[:300]}")
+                validation_failures.append(msg)
                 continue
 
             if kind == "send_dm":
-                # strip <@123> mention wrappers and non-digit chars
                 uid_raw = str(action.get("target_user_id", ""))
                 uid = re.sub(r"[^0-9]", "", uid_raw)
                 content = str(action.get("content", "")).strip()
                 if not uid or not content:
-                    logger.info(f"Dropping send_dm: uid_raw={uid_raw!r} uid={uid!r} content_len={len(content)}")
+                    validation_failures.append(f"send_dm: missing user_id or content")
                     continue
                 valid.append({
                     "kind": "send_dm",
@@ -740,21 +884,26 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
                 })
 
             elif kind == "post_channel":
-                # strip <#123> mention wrappers and non-digit chars
                 cid_raw = str(action.get("target_channel_id", ""))
                 cid = re.sub(r"[^0-9]", "", cid_raw)
                 content = str(action.get("content", "")).strip()
                 if not content:
-                    logger.info(f"Dropping post_channel: empty content")
+                    validation_failures.append("post_channel: empty content")
                     continue
-                # if no channel specified, fill in from auto_channels at validation time
                 if not cid:
                     for auto_cid in (self.bot._auto_channels or set()):
                         cid = re.sub(r"[^0-9]", "", str(auto_cid))
                         if cid:
                             break
                 if not cid:
-                    logger.info(f"Dropping post_channel: no cid and no auto_channels available")
+                    validation_failures.append("post_channel: no channel_id and no auto_channels")
+                    continue
+                # Check channel cooldown
+                now_ts = time.time()
+                last_post = self._channel_cooldowns.get(cid, 0)
+                if now_ts - last_post < CHANNEL_COOLDOWN_SECONDS:
+                    remaining = int(CHANNEL_COOLDOWN_SECONDS - (now_ts - last_post))
+                    validation_failures.append(f"post_channel: channel {cid} on cooldown ({remaining}s remaining)")
                     continue
                 valid.append({
                     "kind": "post_channel",
@@ -765,16 +914,19 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
 
             elif kind == "run_tool":
                 tool_name = str(action.get("tool_name", "")).strip()
-                if not tool_name or tool_name not in self.bot.tools:
-                    logger.info(f"Dropping run_tool: tool={tool_name!r} not in tools")
+                if not tool_name:
+                    validation_failures.append("run_tool: missing tool_name")
+                    continue
+                if tool_name in AUTONOMY_DISABLED_TOOLS:
+                    validation_failures.append(f"run_tool: '{tool_name}' is disabled for autonomy")
+                    continue
+                if tool_name not in self.bot.tools:
+                    validation_failures.append(f"run_tool: tool '{tool_name}' not found")
                     continue
                 tool_args = action.get("tool_args", {})
                 if not isinstance(tool_args, dict):
                     tool_args = {}
-                # sanitize tool_args values to strings/ints/bools only
-                safe_args = {}
-                for k, v in tool_args.items():
-                    safe_args[str(k)] = v
+                safe_args = {str(k): v for k, v in tool_args.items()}
                 valid.append({
                     "kind": "run_tool",
                     "tool_name": tool_name,
@@ -785,6 +937,7 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
             elif kind == "update_memory":
                 content = str(action.get("content", "")).strip()
                 if not content:
+                    validation_failures.append("update_memory: empty content")
                     continue
                 valid.append({
                     "kind": "update_memory",
@@ -795,6 +948,7 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
             elif kind == "create_goal":
                 desc = str(action.get("description", "")).strip()
                 if not desc:
+                    validation_failures.append("create_goal: empty description")
                     continue
                 valid.append({
                     "kind": "create_goal",
@@ -812,11 +966,9 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
             logger.warning(f"All {len(raw_actions)} actions failed validation. Raw response: {raw[:1000]}")
             valid = [{"kind": "do_nothing", "reason": "all actions failed validation"}]
 
-        # save thought for status display
-        self._last_thought = thought
         if not any(a["kind"] != "do_nothing" for a in valid):
             logger.info(f"Autonomy planner produced no actionable items. Thought: {thought[:300]}")
-        return valid
+        return valid, validation_failures
 
     # -----------------------------------------------------------------------
     # execute
@@ -825,7 +977,7 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
     async def execute(self, actions: list[dict]) -> list[dict]:
         """Execute each action. One failure doesn't kill the rest."""
         results = []
-        ACTION_TIMEOUT = 30  # seconds per action — prevents one hung action from blocking everything
+        ACTION_TIMEOUT = 30  # seconds per action
         for action in actions:
             # bail if bot disconnected mid-tick
             if self.bot.is_closed():
@@ -900,7 +1052,6 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
             return
 
         dm_channel = None
-        # check existing DM channels (copy list to avoid mutation during iteration)
         for ch in list(getattr(self.bot, "private_channels", []) or []):
             if isinstance(ch, discord.DMChannel):
                 recipient = getattr(ch, "recipient", None)
@@ -916,7 +1067,15 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
                 return
 
         try:
-            await dm_channel.send(content)
+            msg = await dm_channel.send(content)
+            result["tool_called"] = "send_dm"
+            # Track for engagement checking
+            if msg:
+                self._posted_messages.append({
+                    "msg_id": msg.id,
+                    "channel_id": str(dm_channel.id),
+                    "ts": time.time(),
+                })
         except discord.Forbidden:
             result["result"] = "error"
             result["error"] = "user has DMs disabled or blocked the bot"
@@ -925,7 +1084,6 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
             result["result"] = "error"
             result["error"] = f"Discord API error sending DM: {e}"
             return
-        result["tool_called"] = "send_dm"
 
     async def _exec_post_channel(self, action: dict, result: dict):
         channel_id = action["target_channel_id"]
@@ -935,9 +1093,6 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
 
         channel = self.bot.get_channel(int(channel_id))
         if channel is None:
-            # get_channel() only checks local cache. fetch_channel() hits the API.
-            # This is slow but necessary — cache misses are common for channels
-            # in large guilds or guilds the bot hasn't fully loaded.
             try:
                 channel = await self.bot.fetch_channel(int(channel_id))
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
@@ -947,8 +1102,24 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
             result["error"] = "channel not found"
             return
 
-        await channel.send(content)
-        result["tool_called"] = "post_channel"
+        try:
+            msg = await channel.send(content)
+            result["tool_called"] = "post_channel"
+            # Update cooldown
+            self._channel_cooldowns[channel_id] = time.time()
+            # Track for engagement checking
+            if msg:
+                self._posted_messages.append({
+                    "msg_id": msg.id,
+                    "channel_id": channel_id,
+                    "ts": time.time(),
+                })
+        except discord.Forbidden:
+            result["result"] = "error"
+            result["error"] = "bot lacks permission to send in this channel"
+        except discord.HTTPException as e:
+            result["result"] = "error"
+            result["error"] = f"Discord API error: {e}"
 
     async def _exec_run_tool(self, action: dict, result: dict):
         tool_name = action["tool_name"]
