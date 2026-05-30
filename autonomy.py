@@ -416,7 +416,22 @@ class AutonomyEngine:
         else:
             sections.append("=== DM HISTORY ===\n(no accessible DMs)")
 
-        # 6. Channel activity — from auto_channels and channels in recent events
+        # 6. Available channels map (so the LLM knows channel IDs)
+        ch_map_lines = []
+        for guild in self.bot.guilds:
+            for ch in guild.text_channels:
+                try:
+                    perms = ch.permissions_for(guild.me)
+                    if perms.send_messages:
+                        ch_map_lines.append(f"  #{ch.name} ({ch.id}) in {guild.name}")
+                except Exception:
+                    continue
+        if ch_map_lines:
+            sections.append(f"=== AVAILABLE CHANNELS (use these IDs for post_channel) ===\n" + "\n".join(ch_map_lines[:30]))
+        else:
+            sections.append("=== AVAILABLE CHANNELS ===\n(no accessible channels)")
+
+        # 7. Channel activity — from auto_channels and channels in recent events
         channel_ids_to_check = set()
         try:
             channel_ids_to_check.update(self.bot._auto_channels or set())
@@ -545,6 +560,8 @@ What you should do:
 - If you have unfinished business from a conversation, follow up
 - If nothing needs doing, output {{"actions": [{{"kind": "do_nothing", "reason": "..."}}]}}
 - You can create new goals for yourself if you think of something useful
+- ALWAYS use "post_channel" with a "target_channel_id" from the AVAILABLE CHANNELS list when posting. Never use made-up kind names like "send_message".
+- If you want to post but dont specify which channel, you are BROKEN. Always pick a specific channel.
 
 What you should NOT do:
 - Spam people. If you already DMed someone recently and they didnt reply, dont DM again
