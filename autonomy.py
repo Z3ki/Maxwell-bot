@@ -50,7 +50,7 @@ MAX_ACTIONS_PER_TICK = 3  # reduced from 5 — prevents spam bursts
 MAX_CONTENT_CHARS = 1900
 LOG_RING_SIZE = 200
 
-# Per-section context budgets (sum ~8000)
+# Per-section context budgets (sum ~8800, bumped for enriched channel map)
 CTX_BUDGET_GOALS = 800
 CTX_BUDGET_RECENT_EVENTS = 2000
 CTX_BUDGET_CHANNEL_ACTIVITY = 2000
@@ -58,7 +58,7 @@ CTX_BUDGET_RECENT_ACTIONS = 1200
 CTX_BUDGET_DM_HISTORY = 1200
 CTX_BUDGET_LTM = 800
 CTX_BUDGET_SHARED = 600
-CTX_BUDGET_CHANNELS_MAP = 800
+CTX_BUDGET_CHANNELS_MAP = 1600  # bumped from 800 — enriched with topic/cooldown/recency
 
 # Channel cooldown: don't post to same channel within N seconds
 CHANNEL_COOLDOWN_SECONDS = 1800  # 30 min
@@ -66,12 +66,13 @@ CHANNEL_COOLDOWN_SECONDS = 1800  # 30 min
 # Tools that don't work with autonomous SyntheticMessage execution
 AUTONOMY_DISABLED_TOOLS = frozenset({
     "search_messages",  # requires guild context, fails in DMs
-    "react",            # reacting to synthetic message is pointless
+    "react",            # reacting to synthetic message is pointless — nobody sees it
     "no_response",      # not useful in autonomy context
     "typing",           # ephemeral, no value
     "forward_message",  # requires a real message_id to forward
     "edit_message",     # requires a real message_id to edit
     "delete_message",   # requires a real message_id to delete
+    "reasoning_log",    # meta-tool, autonomy has its own thought logging
 })
 
 
@@ -546,7 +547,7 @@ class AutonomyEngine:
                     author_name = getattr(m.author, "display_name", None) or getattr(m.author, "name", "?")
                     content = (m.content or "")[:150]
                     if content:
-                        ch_lines.append(f"[#{getattr(ch, 'name', cid)}] {author_name}: {content}")
+                        ch_lines.append(f"[#{getattr(ch, 'name', cid)}:{cid}] {author_name}: {content}")
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 continue
             except Exception:
@@ -626,19 +627,53 @@ class AutonomyEngine:
         except Exception as e:
             sections.append(f"=== LONG-TERM MEMORY ===\n(error: {e})")
 
-        # 9. Available channels map (use these IDs for post_channel)
+        # 9. Available channels map — enriched with activity, topic, cooldown status
+        # so the LLM can pick the right channel without cross-referencing CHANNEL ACTIVITY.
+        now_ts = time.time()
         ch_map_lines = []
         for guild in self.bot.guilds:
             for ch in guild.text_channels:
                 try:
                     perms = ch.permissions_for(guild.me)
-                    if perms.send_messages and self._channel_allowed(ch.id):
-                        ch_map_lines.append(f"  #{ch.name} ({ch.id}) in {guild.name}")
+                    if not perms.send_messages or not self._channel_allowed(ch.id):
+                        continue
+                    cid = str(ch.id)
+                    # build status tags
+                    tags = []
+                    if cid in (self.bot._auto_channels or set()):
+                        tags.append("auto")
+                    last_post = self._channel_cooldowns.get(cid, 0)
+                    cooldown_left = int(CHANNEL_COOLDOWN_SECONDS - (now_ts - last_post))
+                    if cooldown_left > 0:
+                        tags.append(f"cooldown:{cooldown_left}s")
+                    topic = getattr(ch, "topic", None) or ""
+                    topic_snippet = topic[:80].replace("\n", " ") if topic else ""
+                    # grab last message time for recency
+                    last_msg_ago = ""
+                    try:
+                        last_msg = [m async for m in ch.history(limit=1)]
+                        if last_msg:
+                            age_s = int(now_ts - last_msg[0].created_at.timestamp())
+                            if age_s < 60:
+                                last_msg_ago = "just now"
+                            elif age_s < 3600:
+                                last_msg_ago = f"{age_s // 60}m ago"
+                            elif age_s < 86400:
+                                last_msg_ago = f"{age_s // 3600}h ago"
+                            else:
+                                last_msg_ago = f"{age_s // 86400}d ago"
+                    except Exception:
+                        pass
+                    tag_str = f" [{', '.join(tags)}]" if tags else ""
+                    topic_str = f' — "{topic_snippet}"' if topic_snippet else ""
+                    recency_str = f" (last msg: {last_msg_ago})" if last_msg_ago else ""
+                    ch_map_lines.append(f"  {cid}: #{ch.name}{tag_str}{recency_str}{topic_str}")
                 except Exception:
                     continue
         if ch_map_lines:
             sections.append(_truncate(
-                "=== AVAILABLE CHANNELS (use these IDs for post_channel) ===\n" + "\n".join(ch_map_lines[:30]),
+                "=== AVAILABLE CHANNELS (use the numeric ID on the left for post_channel target_channel_id) ===\n"
+                + "\n".join(ch_map_lines[:30]),
                 CTX_BUDGET_CHANNELS_MAP,
             ))
 
@@ -770,13 +805,16 @@ Your goals:
 
 IMPORTANT RULES:
 - The channel activity and recent conversations above are REAL data. Don't try to fetch more — it's already here.
+- CHANNEL ACTIVITY lines show the format [#channel_name:CHANNEL_ID]. Use that numeric ID for target_channel_id.
+- AVAILABLE CHANNELS lists each channel as ID: #name [tags] (last msg: X) — topic. Use the numeric ID on the left.
+- If a conversation is happening in a channel, use that channel's ID to respond — don't pick a random channel.
 - If conversations are happening and you have something interesting/funny/useful to say, say it.
 - If someone mentioned you or talked about you, respond.
 - If a conversation naturally concluded, don't re-open it unless you have a genuinely good reason.
 - If nothing needs doing, that's FINE. Output do_nothing with a reason.
 - NEVER call search_messages — the channel history is already provided above.
-- ALWAYS use "post_channel" with a "target_channel_id" from the AVAILABLE CHANNELS list.
-- Don't post to channels on cooldown.
+- ALWAYS use "post_channel" with a "target_channel_id" — the numeric ID, not a channel name.
+- Don't post to channels marked [cooldown:Xs].
 - Don't repeat things you already posted recently (check YOUR RECENT ACTIONS).
 - You can use up to {MAX_ACTIONS_PER_TICK} actions per tick.
 
@@ -1220,23 +1258,49 @@ Do NOT invent other action kinds — they will be rejected."""
         channel = None
         target_cid = action.get("target_channel_id") or tool_args.get("channel_id")
         if target_cid:
-            try:
-                channel = self.bot.get_channel(int(target_cid))
-                if channel is None:
-                    channel = await self.bot.fetch_channel(int(target_cid))
-            except (ValueError, TypeError, discord.NotFound, discord.Forbidden, discord.HTTPException):
-                pass
+            # LLM sometimes passes channel names like "general" instead of IDs.
+            # int() throws ValueError, we'd silently fall back to auto_channel,
+            # and the message goes to the wrong place. Validate upfront.
+            clean_cid = re.sub(r"[^0-9]", "", str(target_cid))
+            if not clean_cid:
+                logger.warning(
+                    f"Autonomy run_tool '{tool_name}': target_channel_id '{target_cid}' "
+                    f"has no digits — LLM probably passed a channel name. "
+                    f"Available channels are listed by ID in context."
+                )
+            else:
+                try:
+                    channel = self.bot.get_channel(int(clean_cid))
+                    if channel is None:
+                        channel = await self.bot.fetch_channel(int(clean_cid))
+                except (ValueError, TypeError):
+                    logger.warning(f"Autonomy run_tool '{tool_name}': bad channel_id '{target_cid}'")
+                except discord.NotFound:
+                    logger.warning(f"Autonomy run_tool '{tool_name}': channel {clean_cid} not found (deleted?)")
+                except (discord.Forbidden, discord.HTTPException) as e:
+                    logger.warning(f"Autonomy run_tool '{tool_name}': can't access channel {clean_cid}: {e}")
 
         # if no channel and we can find a default, use the first auto_channel
+        # NOTE: this fallback means messages can end up in a channel the LLM didn't
+        # intend. We log it so it's at least diagnosable.
         if channel is None:
             for cid in self._auto_channel_candidates():
                 try:
-                    channel = self.bot.get_channel(int(cid))
-                    if channel is None:
-                        channel = await self.bot.fetch_channel(int(cid))
+                    ch = self.bot.get_channel(int(cid))
+                    if ch is None:
+                        ch = await self.bot.fetch_channel(int(cid))
                 except (ValueError, TypeError, discord.NotFound, discord.Forbidden, discord.HTTPException):
                     continue
-                if channel:
+                if ch:
+                    if not self._channel_allowed(cid):
+                        logger.debug(f"Autonomy run_tool: auto_channel {cid} not allowed, skipping")
+                        continue
+                    channel = ch
+                    if target_cid:
+                        logger.warning(
+                            f"Autonomy run_tool '{tool_name}': requested channel '{target_cid}' "
+                            f"not found, falling back to auto_channel {cid}"
+                        )
                     break
 
         if channel is None:
@@ -1254,8 +1318,8 @@ Do NOT invent other action kinds — they will be rejected."""
             content=tool_args.get("content", tool_args.get("prompt", "")),
         )
 
-        # extract tool kwargs (exclude meta fields)
-        exec_kwargs = {k: v for k, v in tool_args.items() if k not in {"channel_id"}}
+        # extract tool kwargs (exclude meta fields that aren't real tool params)
+        exec_kwargs = {k: v for k, v in tool_args.items() if k not in {"channel_id", "target_channel_id"}}
         try:
             tool_result = await tool.execute(syn_msg, **exec_kwargs)
             result["result"] = "success"
