@@ -154,6 +154,8 @@ DEFAULT_CONTROL = {
         "- It is a bot command, automated status/log output, or a message meant for someone else. "
         "- You have nothing interesting, funny, or blunt to add. If in doubt, output 'no'."
     ),
+    "autonomy_enabled": False,
+    "autonomy_interval_seconds": 300,
 }
 import uuid as _uuid
 MAX_COMMANDS = 200
@@ -315,6 +317,18 @@ def _rem_control_path():
     return DATA_DIR / "rem_control.json"
 
 
+def _autonomy_state_path():
+    return DATA_DIR / "autonomy_state.json"
+
+
+def _autonomy_goals_path():
+    return DATA_DIR / "autonomy_goals.json"
+
+
+def _autonomy_log_path():
+    return DATA_DIR / "autonomy_log.json"
+
+
 def _sanitize_rem_control(control):
     control = _safe_object(control)
     interval = REM_INTERVAL_DEFAULT
@@ -409,6 +423,7 @@ def _sanitize_control(control):
     out["max_image_size_mb"] = max(1, min(out["max_image_size_mb"], 25))
     out["ai_timeout_seconds"] = max(10, min(out["ai_timeout_seconds"], 600))
     out["ai_concurrency"] = max(1, min(out["ai_concurrency"], 10))
+    out["autonomy_interval_seconds"] = max(30, int(out.get("autonomy_interval_seconds", 300) or 300))
     out["memory_history_messages"] = max(0, min(out["memory_history_messages"], 100))
     out["memory_context_budget"] = max(1000, min(out["memory_context_budget"], 100000))
     out["tool_history_messages"] = max(0, min(int(out.get("tool_history_messages", 3)), 20))
@@ -1003,6 +1018,30 @@ async def _queue_rem_command(cmd_type: str):
     return cmd_id, ""
 
 
+async def _queue_command(cmd_type: str, extra: dict | None = None):
+    """Generic command queue helper (same pattern as _queue_rem_command)."""
+    async with _file_lock:
+        try:
+            cmds = _load_commands_for_write()
+        except ValueError as exc:
+            return "", str(exc)
+        cmd_id = str(_uuid.uuid4())[:8]
+        entry = {
+            "id": cmd_id,
+            "type": cmd_type,
+            "status": "pending",
+            "result": "",
+            "created_at": time.time(),
+        }
+        if extra:
+            entry.update(extra)
+        cmds.append(entry)
+        if len(cmds) > MAX_COMMANDS:
+            cmds = cmds[-MAX_COMMANDS:]
+        await atomic_json_write(_commands_path(), cmds)
+    return cmd_id, ""
+
+
 async def rem_run(request):
     status = _load_rem_status()
     if status.get("running"):
@@ -1048,6 +1087,204 @@ async def rem_disable(request):
     if err:
         return _json_response({"error": err}, 409)
     return _json_response({"ok": True, "enabled": False, "id": cmd_id})
+
+
+# ---------- Autonomy ----------
+
+
+def _load_autonomy_state():
+    return _safe_object(_load(_autonomy_state_path()))
+
+
+def _load_autonomy_goals():
+    data = _safe_object(_load(_autonomy_goals_path()))
+    goals = data.get("goals", [])
+    return goals if isinstance(goals, list) else []
+
+
+def _load_autonomy_log():
+    data = _safe_object(_load(_autonomy_log_path()))
+    entries = data.get("entries", [])
+    return entries if isinstance(entries, list) else []
+
+
+async def autonomy_status(request):
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
+    control = _load_control()
+    state = _load_autonomy_state()
+    return _json_response({
+        "enabled": control.get("autonomy_enabled", False),
+        "interval_seconds": control.get("autonomy_interval_seconds", 300),
+        "last_tick": state.get("last_tick"),
+        "last_tick_duration": state.get("last_tick_duration"),
+        "actions_executed_total": state.get("actions_executed_total", 0),
+        "actions_failed_total": state.get("actions_failed_total", 0),
+        "last_error": state.get("last_error"),
+        "last_thought": state.get("last_thought"),
+    })
+
+
+async def autonomy_log(request):
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
+    entries = _load_autonomy_log()
+    try:
+        limit = max(1, min(int(request.query.get("limit", "200")), 500))
+    except (TypeError, ValueError):
+        limit = 200
+    return _json_response({"entries": entries[-limit:]})
+
+
+async def autonomy_goals(request):
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
+    goals = _load_autonomy_goals()
+    return _json_response({"goals": goals})
+
+
+async def autonomy_run(request):
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
+    cmd_id, err = await _queue_command("autonomy_run")
+    if err:
+        return _json_response({"error": err}, 409)
+    return _json_response({"ok": True, "started": True, "id": cmd_id})
+
+
+async def _set_autonomy_enabled(enabled: bool):
+    async with _file_lock:
+        try:
+            control = dict(DEFAULT_CONTROL)
+            loaded = _load_for_write(_control_path(), dict, {})
+            control.update({k: v for k, v in loaded.items() if k in DEFAULT_CONTROL})
+            control["autonomy_enabled"] = enabled
+            control = _sanitize_control(control)
+            cmds = _load_commands_for_write()
+        except ValueError as exc:
+            return "", str(exc)
+        cmd_type = "autonomy_enable" if enabled else "autonomy_disable"
+        cmd_id = str(_uuid.uuid4())[:8]
+        cmds.append({
+            "id": cmd_id,
+            "type": cmd_type,
+            "status": "pending",
+            "result": "",
+            "created_at": time.time(),
+        })
+        if len(cmds) > MAX_COMMANDS:
+            cmds = cmds[-MAX_COMMANDS:]
+        await atomic_json_write(_control_path(), control)
+        await atomic_json_write(_commands_path(), cmds)
+        return cmd_id, ""
+
+
+async def autonomy_enable(request):
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
+    cmd_id, err = await _set_autonomy_enabled(True)
+    if err:
+        return _json_response({"error": err}, 409)
+    return _json_response({"ok": True, "enabled": True, "id": cmd_id})
+
+
+async def autonomy_disable(request):
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
+    cmd_id, err = await _set_autonomy_enabled(False)
+    if err:
+        return _json_response({"error": err}, 409)
+    return _json_response({"ok": True, "enabled": False, "id": cmd_id})
+
+
+async def autonomy_interval(request):
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
+    try:
+        body = await request.json()
+    except Exception:
+        return _json_response({"error": "invalid json"}, 400)
+    try:
+        new_interval = max(30, int(body.get("interval_seconds", 300)))
+    except (TypeError, ValueError):
+        return _json_response({"error": "invalid interval"}, 400)
+    async with _file_lock:
+        try:
+            control = dict(DEFAULT_CONTROL)
+            loaded = _load_for_write(_control_path(), dict, {})
+            control.update({k: v for k, v in loaded.items() if k in DEFAULT_CONTROL})
+            control["autonomy_interval_seconds"] = new_interval
+            control = _sanitize_control(control)
+            cmds = _load_commands_for_write()
+        except ValueError as exc:
+            return _json_response({"error": str(exc)}, 409)
+        cmd_id = str(_uuid.uuid4())[:8]
+        cmds.append({
+            "id": cmd_id,
+            "type": "autonomy_interval",
+            "status": "pending",
+            "interval_seconds": new_interval,
+            "result": "",
+            "created_at": time.time(),
+        })
+        if len(cmds) > MAX_COMMANDS:
+            cmds = cmds[-MAX_COMMANDS:]
+        await atomic_json_write(_control_path(), control)
+        await atomic_json_write(_commands_path(), cmds)
+    return _json_response({"ok": True, "interval_seconds": new_interval, "id": cmd_id})
+
+
+async def autonomy_goal_add(request):
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
+    try:
+        body = await request.json()
+    except Exception:
+        return _json_response({"error": "invalid json"}, 400)
+    description = str(body.get("description", "")).strip()[:500]
+    if not description:
+        return _json_response({"error": "description required"}, 400)
+    goal = {
+        "id": f"goal_{_uuid.uuid4().hex[:8]}",
+        "description": description,
+        "active": True,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
+        "last_acted_on": None,
+    }
+    async with _file_lock:
+        data = _safe_object(_load(_autonomy_goals_path()))
+        goals = data.get("goals", [])
+        if not isinstance(goals, list):
+            goals = []
+        goals.append(goal)
+        await atomic_json_write(_autonomy_goals_path(), {"goals": goals})
+    return _json_response({"ok": True, "goal": goal})
+
+
+async def autonomy_goal_delete(request):
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
+    goal_id = str(request.match_info.get("goal_id", "")).strip()
+    if not goal_id:
+        return _json_response({"error": "goal_id required"}, 400)
+    async with _file_lock:
+        data = _safe_object(_load(_autonomy_goals_path()))
+        goals = data.get("goals", [])
+        if not isinstance(goals, list):
+            goals = []
+        before = len(goals)
+        goals = [g for g in goals if g.get("id") != goal_id]
+        if len(goals) == before:
+            return _json_response({"error": "not found"}, 404)
+        await atomic_json_write(_autonomy_goals_path(), {"goals": goals})
+    return _json_response({"ok": True})
+
+
+async def autonomy_log_clear(request):
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
+    await atomic_json_write(_autonomy_log_path(), {"entries": []})
+    return _json_response({"ok": True})
 
 
 # ---------- Command queue ----------
@@ -1106,7 +1343,7 @@ async def commands_post(request):
         command["channel_id"] = str(body.get("channel_id", "")).strip()
     elif cmd_type == "reload_controls":
         pass
-    elif cmd_type in {"rem_run", "rem_enable", "rem_disable"}:
+    elif cmd_type in {"rem_run", "rem_enable", "rem_disable", "autonomy_run", "autonomy_enable", "autonomy_disable", "autonomy_interval"}:
         pass
     else:
         return _json_response({"error": f"unknown command type: {cmd_type}"}, 400)
@@ -1402,6 +1639,16 @@ app.router.add_get("/api/rem/runs", rem_runs)
 app.router.add_post("/api/rem/run", rem_run)
 app.router.add_post("/api/rem/enable", rem_enable)
 app.router.add_post("/api/rem/disable", rem_disable)
+app.router.add_get("/api/autonomy/status", autonomy_status)
+app.router.add_get("/api/autonomy/log", autonomy_log)
+app.router.add_get("/api/autonomy/goals", autonomy_goals)
+app.router.add_post("/api/autonomy/run", autonomy_run)
+app.router.add_post("/api/autonomy/enable", autonomy_enable)
+app.router.add_post("/api/autonomy/disable", autonomy_disable)
+app.router.add_put("/api/autonomy/interval", autonomy_interval)
+app.router.add_post("/api/autonomy/goals", autonomy_goal_add)
+app.router.add_delete("/api/autonomy/goals/{goal_id}", autonomy_goal_delete)
+app.router.add_delete("/api/autonomy/log", autonomy_log_clear)
 app.router.add_get("/api/commands", commands_get)
 app.router.add_post("/api/commands", commands_post)
 app.router.add_delete("/api/commands", commands_del)

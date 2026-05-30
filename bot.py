@@ -164,6 +164,7 @@ from config import Config
 from memory import MemoryManager, RemEventLog
 from providers import MIME_MAP, OllamaProvider, ProviderUsageExhaustedError
 from rem import RemStore, load_rem_defaults, run_rem_once
+from autonomy import AutonomyEngine
 
 class _MaxLevelFilter(logging.Filter):
     def __init__(self, max_level: int):
@@ -1047,6 +1048,8 @@ DEFAULT_CONTROL = {
     "vc_wake_words": ["maxwell"],
     "vc_interrupt_enabled": True,
     "vc_debug": True,
+    "autonomy_enabled": False,
+    "autonomy_interval_seconds": 300,
 }
 
 
@@ -1168,9 +1171,11 @@ class MaxwellBot(commands.Bot):
         self._vc_playback_until: dict[int, float] = {}
         self._trace_lock = asyncio.Lock()
         self._tasks = []
+        self.autonomy_engine = None  # initialized after tools
         self._setup_ai()
         self._setup_memory()
         self._setup_tools()
+        self.autonomy_engine = AutonomyEngine(self)
 
     def _setup_ai(self):
         self.ai_provider = OllamaProvider(
@@ -1289,6 +1294,7 @@ class MaxwellBot(commands.Bot):
             asyncio.create_task(self._discord_state_loop()),
             asyncio.create_task(self._rem_scheduler_loop()),
         ]
+        await self.autonomy_engine.start()
         if self.config.TELEGRAM_TOKEN:
             self._tasks.append(asyncio.create_task(self._telegram_loop()))
             logger.info("Telegram background loop scheduled")
@@ -1577,7 +1583,7 @@ class MaxwellBot(commands.Bot):
         args = parts[1] if len(parts) > 1 else None
         if cmd in set(self._control.get("disabled_commands", []) or []):
             return
-        admin_commands = {"prompt", "clearprompt", "clearmem", "auto", "context", "rem", "vc"}
+        admin_commands = {"prompt", "clearprompt", "clearmem", "auto", "context", "rem", "vc", "autonomy"}
         if cmd in admin_commands and not self._is_admin(message.author.id):
             await message.channel.send("not authorized")
             return
@@ -1615,6 +1621,8 @@ class MaxwellBot(commands.Bot):
                 await self._handle_context_command(message, args)
             elif cmd == "rem":
                 await self._handle_rem_command(message, args)
+            elif cmd == "autonomy":
+                await self._handle_autonomy_command(message, args)
             elif cmd == "drug":
                 now = asyncio.get_running_loop().time()
                 arg = (args or "").strip().lower()
@@ -1683,6 +1691,7 @@ class MaxwellBot(commands.Bot):
                     "` ,clearmem` - clear channel memory (admin)\n"
                     "` ,context ...` - manage memory/context (admin)\n"
                     "` ,rem ...` - manage/run REM (admin)\n"
+                    "` ,autonomy ...` - manage autonomy engine (admin)\n"
                     "` ,auto [list]` - toggle/list auto mode (admin)\n"
                     "` ,vc ...` - voice commands\n"
                     "` ,drug [minutes|off|status]` - drug mode timer\n"
@@ -2524,6 +2533,84 @@ class MaxwellBot(commands.Bot):
             return
         await message.channel.send("Usage: `,rem`, `,rem now`, `,rem on`, `,rem off`, `,rem audit [N]`, `,rem fix`")
 
+    async def _handle_autonomy_command(self, message, args: str | None):
+        arg = (args or "").strip().lower()
+        if not arg:
+            state = await self.autonomy_engine.store.load_state()
+            enabled = self._control.get("autonomy_enabled", False)
+            interval = self._control.get("autonomy_interval_seconds", 300)
+            last_tick = state.get("last_tick", "never")
+            thought = (state.get("last_thought") or "-")[:300]
+            await message.channel.send(
+                "Autonomy status\n"
+                f"enabled: {enabled} interval: {interval}s\n"
+                f"last tick: {last_tick or 'never'}\n"
+                f"actions executed: {state.get('actions_executed_total', 0)} failed: {state.get('actions_failed_total', 0)}\n"
+                f"last error: {state.get('last_error') or '-'}\n"
+                f"thought: {thought}"
+            )
+            return
+        if arg == "on":
+            control = dict(self._control)
+            control["autonomy_enabled"] = True
+            self._control = control
+            _atomic_json_write(Path(self.config.DATA_DIR) / "bot_control.json", control)
+            await message.channel.send("Autonomy enabled.")
+            return
+        if arg == "off":
+            control = dict(self._control)
+            control["autonomy_enabled"] = False
+            self._control = control
+            _atomic_json_write(Path(self.config.DATA_DIR) / "bot_control.json", control)
+            await message.channel.send("Autonomy disabled.")
+            return
+        if arg == "tick" or arg == "now":
+            await message.channel.send("Running autonomy tick...")
+            tick_result = await self.autonomy_engine.tick()
+            if tick_result.get("skipped"):
+                await message.channel.send("Tick skipped — previous tick still running.")
+            elif tick_result.get("error"):
+                await message.channel.send(f"Tick error: {tick_result['error'][:500]}")
+            else:
+                await message.channel.send(
+                    f"Tick done: {tick_result.get('actions', 0)} actions in {tick_result.get('duration', 0):.1f}s"
+                )
+            return
+        if arg == "log":
+            entries = await self.autonomy_engine.store.load_log()
+            recent = entries[-10:] if entries else []
+            if not recent:
+                await message.channel.send("No autonomy actions yet.")
+                return
+            lines = [
+                f"{e.get('timestamp', '?')[:19]} [{e.get('action_kind', '?')}] "
+                f"{e.get('content_summary', '')[:80]} -> {e.get('result', '?')}"
+                for e in recent
+            ]
+            for chunk in self._split_response("\n".join(lines), limit=1900):
+                await message.channel.send(chunk)
+            return
+        if arg.startswith("interval"):
+            parts = arg.split()
+            if len(parts) < 2:
+                await message.channel.send(f"Current interval: {self._control.get('autonomy_interval_seconds', 300)}s. Usage: `,autonomy interval <seconds>`")
+                return
+            try:
+                new_interval = max(30, int(parts[1]))
+            except ValueError:
+                await message.channel.send("Invalid number.")
+                return
+            control = dict(self._control)
+            control["autonomy_interval_seconds"] = new_interval
+            self._control = control
+            _atomic_json_write(Path(self.config.DATA_DIR) / "bot_control.json", control)
+            await message.channel.send(f"Autonomy interval set to {new_interval}s.")
+            return
+        await message.channel.send(
+            "Usage: `,autonomy`, `,autonomy on`, `,autonomy off`, `,autonomy tick`, "
+            "`,autonomy log`, `,autonomy interval <seconds>`"
+        )
+
     @staticmethod
     def _visible_event_content(message, content: str | None = None) -> str:
         text = content if content is not None else (getattr(message, "content", "") or "")
@@ -2592,6 +2679,7 @@ class MaxwellBot(commands.Bot):
             control["max_response_chars"] = max(80, min(int(control.get("max_response_chars", 500) or 500), 4000))
             control["tool_history_messages"] = max(0, min(int(control.get("tool_history_messages", 3) or 0), 20))
             control["prompt_context_budget"] = max(10000, min(int(control.get("prompt_context_budget", 60000) or 60000), 200000))
+            control["autonomy_interval_seconds"] = max(30, int(control.get("autonomy_interval_seconds", 300) or 300))
             if control["ai_concurrency"] != self._ai_concurrency:
                 self._ai_concurrency = control["ai_concurrency"]
                 self._notify_ai_waiters()
@@ -2876,6 +2964,28 @@ class MaxwellBot(commands.Bot):
                             self.rem_enabled = False
                             await self._save_rem_control()
                             cmd["result"] = "REM disabled"
+                        elif typ == "autonomy_run":
+                            tick_result = await self.autonomy_engine.tick()
+                            cmd["result"] = f"autonomy tick: {tick_result}"
+                        elif typ == "autonomy_enable":
+                            control = dict(self._control)
+                            control["autonomy_enabled"] = True
+                            self._control = control
+                            _atomic_json_write(Path(self.config.DATA_DIR) / "bot_control.json", control)
+                            cmd["result"] = "autonomy enabled"
+                        elif typ == "autonomy_disable":
+                            control = dict(self._control)
+                            control["autonomy_enabled"] = False
+                            self._control = control
+                            _atomic_json_write(Path(self.config.DATA_DIR) / "bot_control.json", control)
+                            cmd["result"] = "autonomy disabled"
+                        elif typ == "autonomy_interval":
+                            new_interval = int(cmd.get("interval_seconds", 300))
+                            control = dict(self._control)
+                            control["autonomy_interval_seconds"] = max(30, new_interval)
+                            self._control = control
+                            _atomic_json_write(Path(self.config.DATA_DIR) / "bot_control.json", control)
+                            cmd["result"] = f"autonomy interval set to {control['autonomy_interval_seconds']}s"
                         else:
                             cmd["result"] = "unknown command"
                     except Exception as e:
@@ -4252,6 +4362,10 @@ async def main():
         pass
     finally:
         logger.info("Shutting down Maxwell...")
+        try:
+            await bot.autonomy_engine.stop()
+        except Exception as e:
+            logger.error(f"Failed to stop autonomy engine: {e}")
         for task in getattr(bot, "_tasks", []):
             task.cancel()
             try:
