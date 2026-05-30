@@ -48,11 +48,17 @@ def _atomic_json_write_sync(path: Path, data):
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = -1  # fdopen took ownership — don't double-close
             json.dump(data, f, indent=2, ensure_ascii=False, default=str)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
     finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         if os.path.exists(tmp):
             os.unlink(tmp)
 
@@ -87,16 +93,28 @@ class SyntheticMessage:
         self.author = author
         self.guild = guild
         self.content = content
-        self.id = 0
+        self.id = None  # None instead of 0 — 0 is an invalid snowflake
         self.attachments = []
         self.embeds = []
         self.reference = None
+        # tools access these — without them you get AttributeError
+        self.mentions = []
+        self.role_mentions = []
+        self.channel_mentions = []
+        self.type = discord.MessageType.default
+        self.pinned = False
+        self.tts = False
+        self.flags = discord.MessageFlags()
+        self.created_at = datetime.now(timezone.utc)
 
     async def reply(self, content=None, **kwargs):
         return await self.channel.send(content, **kwargs)
 
     async def add_reaction(self, emoji):
         pass  # no-op — reacting to a synthetic msg is pointless, nobody sees it
+
+    async def remove_reaction(self, emoji, member):
+        pass  # same
 
     async def edit(self, **kwargs):
         raise NotImplementedError("Cannot edit a SyntheticMessage")
@@ -123,7 +141,7 @@ class AutonomyStore:
 
     async def load_state(self) -> dict:
         async with self._lock:
-            data = _load_json_safe(self.state_file, dict)
+            data = await asyncio.to_thread(_load_json_safe, self.state_file, dict)
             return data if isinstance(data, dict) else {}
 
     async def save_state(self, state: dict):
@@ -132,10 +150,20 @@ class AutonomyStore:
 
     async def patch_state(self, updates: dict) -> dict:
         async with self._lock:
-            state = _load_json_safe(self.state_file, dict)
+            state = await asyncio.to_thread(_load_json_safe, self.state_file, dict)
             if not isinstance(state, dict):
                 state = {}
             state.update(updates)
+            await asyncio.to_thread(_atomic_json_write_sync, self.state_file, state)
+            return state
+
+    async def update_state(self, fn) -> dict:
+        """Read-modify-write under a single lock. fn(state) mutates in-place."""
+        async with self._lock:
+            state = await asyncio.to_thread(_load_json_safe, self.state_file, dict)
+            if not isinstance(state, dict):
+                state = {}
+            fn(state)
             await asyncio.to_thread(_atomic_json_write_sync, self.state_file, state)
             return state
 
@@ -143,7 +171,7 @@ class AutonomyStore:
 
     async def load_goals(self) -> list[dict]:
         async with self._lock:
-            data = _load_json_safe(self.goals_file, dict)
+            data = await asyncio.to_thread(_load_json_safe, self.goals_file, dict)
             goals = data.get("goals", []) if isinstance(data, dict) else []
             return goals if isinstance(goals, list) else []
 
@@ -153,12 +181,17 @@ class AutonomyStore:
                 _atomic_json_write_sync, self.goals_file, {"goals": goals}
             )
 
+    MAX_GOALS = 50  # cap to prevent unbounded growth
+
     async def add_goal(self, description: str) -> dict:
         async with self._lock:
-            data = _load_json_safe(self.goals_file, dict)
+            data = await asyncio.to_thread(_load_json_safe, self.goals_file, dict)
             goals = data.get("goals", []) if isinstance(data, dict) else []
             if not isinstance(goals, list):
                 goals = []
+            if len(goals) >= self.MAX_GOALS:
+                logger.warning(f"Goal limit reached ({self.MAX_GOALS}), rejecting new goal")
+                return {"id": None, "description": description, "error": "goal limit reached"}
             goal = {
                 "id": f"goal_{uuid.uuid4().hex[:8]}",
                 "description": str(description)[:500],
@@ -174,7 +207,7 @@ class AutonomyStore:
 
     async def remove_goal(self, goal_id: str) -> bool:
         async with self._lock:
-            data = _load_json_safe(self.goals_file, dict)
+            data = await asyncio.to_thread(_load_json_safe, self.goals_file, dict)
             goals = data.get("goals", []) if isinstance(data, dict) else []
             if not isinstance(goals, list):
                 goals = []
@@ -191,13 +224,13 @@ class AutonomyStore:
 
     async def load_log(self) -> list[dict]:
         async with self._lock:
-            data = _load_json_safe(self.log_file, dict)
+            data = await asyncio.to_thread(_load_json_safe, self.log_file, dict)
             entries = data.get("entries", []) if isinstance(data, dict) else []
             return entries if isinstance(entries, list) else []
 
     async def append_log_entry(self, entry: dict):
         async with self._lock:
-            data = _load_json_safe(self.log_file, dict)
+            data = await asyncio.to_thread(_load_json_safe, self.log_file, dict)
             entries = data.get("entries", []) if isinstance(data, dict) else []
             if not isinstance(entries, list):
                 entries = []
@@ -260,26 +293,31 @@ class AutonomyEngine:
     # -- main loop --
 
     async def _loop(self):
+        consecutive_failures = 0
         while self._running:
             try:
                 control = self.bot._control or {}
                 if control.get("autonomy_enabled", False):
                     await self.tick()
+                    consecutive_failures = 0
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.error(f"AutonomyEngine tick error: {e}")
+                consecutive_failures += 1
+                logger.error(f"AutonomyEngine tick error: {e}", exc_info=True)
                 try:
                     await self.store.record_error(str(e))
-                except Exception:
-                    logger.error("Failed to record autonomy error to store")
+                except Exception as rec_err:
+                    logger.error(f"Failed to record autonomy error to store: {rec_err}")
             # read interval from bot control (source of truth)
             try:
                 control = self.bot._control or {}
                 interval = int(control.get("autonomy_interval_seconds", 300) or 300)
             except (ValueError, TypeError):
                 interval = 300
-            await asyncio.sleep(max(30, interval))
+            # exponential backoff on consecutive failures (cap at 10x)
+            backoff = min(2 ** consecutive_failures, 10) if consecutive_failures > 0 else 1
+            await asyncio.sleep(max(30, interval * backoff))
 
     # -- single tick --
 
@@ -368,7 +406,7 @@ class AutonomyEngine:
                     author_name = getattr(m.author, "display_name", None) or getattr(m.author, "name", "?")
                     content = (m.content or "")[:200]
                     if content:
-                        dm_lines.append(f"[DM:{channel.id}] {author_name}: {content}")
+                        dm_lines.append(f"[DM:{channel.id}] {author_name} ({m.author.id}): {content}")
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 continue  # skip inaccessible channels
             except Exception:
@@ -421,7 +459,7 @@ class AutonomyEngine:
 
         # 7. Shared context
         try:
-            shared = self.bot.memory.list_shared_context() if hasattr(self.bot.memory, "list_shared_context") else []
+            shared = await self.bot.memory.list_shared_context() if hasattr(self.bot.memory, "list_shared_context") else []
             if shared:
                 ctx_lines = [f"- {c}" for c in shared[:20]]
                 sections.append(f"=== SHARED CONTEXT ===\n" + "\n".join(ctx_lines))
@@ -573,6 +611,7 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
             return [{"kind": "do_nothing", "reason": f"LLM call failed: {e}"}]
 
         # parse JSON from response
+        logger.info(f"Autonomy LLM response ({len(raw_response or '')} chars): {(raw_response or '')[:500]}")
         actions = self._parse_plan(raw_response)
         return actions
 
@@ -592,27 +631,39 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
         except (json.JSONDecodeError, ValueError):
             pass
         # 2. try markdown code fence ```json ... ```
+        #    use [^`]* to avoid matching across multiple fences (greedy .* is dangerous)
         if json_str is None:
-            m = re.search(r"```(?:json)?\s*\n?(\{.*\})\s*```", text, re.DOTALL)
+            m = re.search(r"```(?:json)?\s*\n?(\{[^`]*)\s*```", text, re.DOTALL)
             if m:
                 json_str = m.group(1)
-        # 3. fallback: first balanced { ... } block
-        #    (don't use rfind — that grabs too much if LLM yaps after the JSON)
+        # 3. fallback: collect all balanced { ... } blocks, prefer the one with "actions"
         if json_str is None:
-            start_idx = text.find("{")
-            if start_idx != -1:
-                depth = 0
-                end_idx = -1
-                for i in range(start_idx, len(text)):
-                    if text[i] == "{":
-                        depth += 1
-                    elif text[i] == "}":
-                        depth -= 1
-                        if depth == 0:
-                            end_idx = i
-                            break
-                if end_idx > start_idx:
-                    json_str = text[start_idx:end_idx + 1]
+            candidates = []
+            i = 0
+            while i < len(text):
+                if text[i] == "{":
+                    depth = 0
+                    for j in range(i, len(text)):
+                        if text[j] == "{":
+                            depth += 1
+                        elif text[j] == "}":
+                            depth -= 1
+                            if depth == 0:
+                                candidates.append(text[i:j + 1])
+                                i = j
+                                break
+                i += 1
+            # prefer the candidate that parses as a dict with "actions"
+            for c in candidates:
+                try:
+                    obj = json.loads(c)
+                    if isinstance(obj, dict) and "actions" in obj:
+                        json_str = c
+                        break
+                except json.JSONDecodeError:
+                    pass
+            if json_str is None and candidates:
+                json_str = candidates[0]  # fallback to first valid block
         if json_str is None:
             logger.warning(f"Autonomy planner returned no JSON. Raw: {text[:500]}")
             return [{"kind": "do_nothing", "reason": "no JSON in LLM response"}]
@@ -735,26 +786,36 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
     async def execute(self, actions: list[dict]) -> list[dict]:
         """Execute each action. One failure doesn't kill the rest."""
         results = []
+        ACTION_TIMEOUT = 30  # seconds per action — prevents one hung action from blocking everything
         for action in actions:
+            # bail if bot disconnected mid-tick
+            if self.bot.is_closed():
+                logger.warning("Bot disconnected during autonomy tick, aborting remaining actions")
+                break
+
             kind = action.get("kind", "do_nothing")
             result = {"kind": kind, "result": "success", "error": None}
             try:
                 if kind == "send_dm":
-                    await self._exec_send_dm(action, result)
+                    await asyncio.wait_for(self._exec_send_dm(action, result), timeout=ACTION_TIMEOUT)
                 elif kind == "post_channel":
-                    await self._exec_post_channel(action, result)
+                    await asyncio.wait_for(self._exec_post_channel(action, result), timeout=ACTION_TIMEOUT)
                 elif kind == "run_tool":
-                    await self._exec_run_tool(action, result)
+                    await asyncio.wait_for(self._exec_run_tool(action, result), timeout=ACTION_TIMEOUT)
                 elif kind == "update_memory":
-                    await self._exec_update_memory(action, result)
+                    await asyncio.wait_for(self._exec_update_memory(action, result), timeout=ACTION_TIMEOUT)
                 elif kind == "create_goal":
-                    await self._exec_create_goal(action, result)
+                    await asyncio.wait_for(self._exec_create_goal(action, result), timeout=ACTION_TIMEOUT)
                 elif kind == "do_nothing":
                     result["result"] = "skipped"
                     result["content_summary"] = action.get("reason", "no reason")
                 else:
                     result["result"] = "skipped"
                     result["error"] = f"unknown kind: {kind}"
+            except asyncio.TimeoutError:
+                result["result"] = "error"
+                result["error"] = f"action timed out after {ACTION_TIMEOUT}s"
+                logger.warning(f"Autonomy action {kind} timed out after {ACTION_TIMEOUT}s")
             except Exception as e:
                 result["result"] = "error"
                 result["error"] = str(e)[:1000]
@@ -776,7 +837,7 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
                         "auto_mode": False,
                     })
                 except Exception as e:
-                    logger.debug(f"Failed to record autonomy REM event: {e}")
+                    logger.warning(f"Failed to record autonomy REM event: {e}")
 
         return results
 
@@ -788,24 +849,43 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
 
         user = self.bot.get_user(int(user_id))
         if user is None:
-            user = await self.bot.fetch_user(int(user_id))
+            try:
+                user = await self.bot.fetch_user(int(user_id))
+            except (discord.NotFound, discord.HTTPException, ValueError) as e:
+                result["result"] = "error"
+                result["error"] = f"user not found or API error: {e}"
+                return
         if user is None:
             result["result"] = "error"
             result["error"] = "user not found"
             return
 
         dm_channel = None
-        # check existing DM channels
-        for ch in getattr(self.bot, "private_channels", []):
+        # check existing DM channels (copy list to avoid mutation during iteration)
+        for ch in list(getattr(self.bot, "private_channels", []) or []):
             if isinstance(ch, discord.DMChannel):
                 recipient = getattr(ch, "recipient", None)
                 if recipient and str(recipient.id) == str(user_id):
                     dm_channel = ch
                     break
         if dm_channel is None:
-            dm_channel = await user.create_dm()
+            try:
+                dm_channel = await user.create_dm()
+            except discord.HTTPException as e:
+                result["result"] = "error"
+                result["error"] = f"failed to create DM channel (user may have DMs disabled): {e}"
+                return
 
-        await dm_channel.send(content)
+        try:
+            await dm_channel.send(content)
+        except discord.Forbidden:
+            result["result"] = "error"
+            result["error"] = "user has DMs disabled or blocked the bot"
+            return
+        except discord.HTTPException as e:
+            result["result"] = "error"
+            result["error"] = f"Discord API error sending DM: {e}"
+            return
         result["tool_called"] = "send_dm"
 
     async def _exec_post_channel(self, action: dict, result: dict):
@@ -922,18 +1002,19 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
         """Record tick results to state and action log."""
         thought = self._last_thought or ""
 
-        # update state + bump counters in one patch (avoids triple file read)
+        # update state + bump counters in ONE locked operation (no TOCTOU race)
         total_exec = sum(1 for r in results if r.get("result") == "success")
         total_fail = sum(1 for r in results if r.get("result") == "error")
-        state = await self.store.load_state()
-        await self.store.patch_state({
-            "last_tick": _utcnow_iso(),
-            "last_tick_duration": round(duration, 2),
-            "last_error": None,
-            "last_thought": thought[:2000],
-            "actions_executed_total": state.get("actions_executed_total", 0) + total_exec,
-            "actions_failed_total": state.get("actions_failed_total", 0) + total_fail,
-        })
+
+        def _update(s):
+            s["last_tick"] = _utcnow_iso()
+            s["last_tick_duration"] = round(duration, 2)
+            s["last_error"] = None
+            s["last_thought"] = thought[:2000]
+            s["actions_executed_total"] = s.get("actions_executed_total", 0) + total_exec
+            s["actions_failed_total"] = s.get("actions_failed_total", 0) + total_fail
+
+        await self.store.update_state(_update)
 
         # log each action
         for action, result in zip(actions, results):
