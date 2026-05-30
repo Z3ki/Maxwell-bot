@@ -31,7 +31,7 @@ import re
 import tempfile
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -464,12 +464,15 @@ class AutonomyEngine:
         global truncation that ate channel activity first."""
 
         sections = []
-        now = datetime.now(timezone.utc)
+        # Show local time (AST/UTC-4, Puerto Rico) so the LLM doesn't
+        # think it's night when it's 5pm. bot.py already hardcodes this offset.
+        _AST = timezone(timedelta(hours=-4))
+        now = datetime.now(_AST)
 
         # 1. Current time + mood framing
         sections.append(
             f"=== CURRENT TIME ===\n"
-            f"{now.strftime('%A, %Y-%m-%d %H:%M UTC')}"
+            f"{now.strftime('%A, %Y-%m-%d %H:%M')} (Puerto Rico local time)"
         )
 
         # 2. Active goals (most decision-relevant — what should I work on?)
