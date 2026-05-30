@@ -10,6 +10,7 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 import tempfile
 
@@ -248,15 +249,16 @@ class ImageGeneratorTool(Tool):
         return (
             "Generate an AI image FAST (~3s). Use this as the DEFAULT — quick, decent quality. "
             "Only switch to hd_image when someone specifically asks for 'high quality', 'HD', 'HQ', or 'better quality'. "
-            "Params: prompt (required)."
+            "Params: prompt (required), save_path (optional: save image to disk for later use, e.g. /tmp/site_hero.png). "
+            "When building a site with create_site, generate images first with save_path, then pass them via the images param."
         )
 
-    async def execute(self, message: Message, prompt: str = None, **kwargs) -> str:
+    async def execute(self, message: Message, prompt: str = None, save_path: str = None, **kwargs) -> str:
         if not prompt:
             return "Error: prompt parameter is required"
         if not self.bot.config.NVIDIA_API_KEY:
             return "Error: image generation is not configured (missing NVIDIA_API_KEY)"
-        return await self._nvidia_generate(message, prompt)
+        return await self._nvidia_generate(message, prompt, save_path=save_path)
 
     async def _nvidia_generate(self, message: Message, prompt: str) -> str:
         api_key = self.bot.config.NVIDIA_API_KEY
@@ -317,17 +319,35 @@ class ImageGeneratorTool(Tool):
                         break
                     image_bytes = base64.b64decode(image_b64)
                     logger.info(f"NVIDIA image generated successfully, size: {len(image_bytes)} bytes")
+                    # Save to disk if requested (for site building workflow)
+                    saved_path = None
+                    if save_path:
+                        try:
+                            save_dir = os.path.dirname(save_path)
+                            if save_dir:
+                                os.makedirs(save_dir, exist_ok=True)
+                            with open(save_path, "wb") as f:
+                                f.write(image_bytes)
+                            saved_path = os.path.abspath(save_path)
+                            logger.info(f"Image saved to {saved_path}")
+                        except Exception as e:
+                            logger.warning(f"Failed to save image to {save_path}: {e}")
                     file = File(BytesIO(image_bytes), filename="generated_image.png")
                     try:
                         await message.channel.send(file=file)
                     except discord.Forbidden:
                         logger.warning(f"Cannot send image in {message.channel.id} — missing permissions")
+                        if saved_path:
+                            return f"Image generated and saved to {saved_path} (could not send to chat)"
                         return "Error: Cannot send image — missing permissions"
                     await self.bot.memory.add_to_channel_memory(
                         str(message.channel.id),
                         {"author": "Tool", "content": f"Generated image: {prompt[:200]}", "is_tool": True},
                     )
-                    return f"Image generated and sent successfully: {prompt[:100]}"
+                    result = f"Image generated and sent successfully: {prompt[:100]}"
+                    if saved_path:
+                        result += f"\nSaved to: {saved_path}"
+                    return result
             except asyncio.TimeoutError:
                 logger.warning(f"NVIDIA image timeout, attempt {attempt + 1}/{max_retries}")
                 if attempt < max_retries - 1:
@@ -350,10 +370,12 @@ class HDImageGeneratorTool(Tool):
     def get_description(self):
         return (
             "Generate an HD AI image (~40s). Use ONLY when the user explicitly asks for 'high quality', 'HD', 'HQ', 'better quality', or similar. "
-            "Otherwise default to image_generator (fast/normal). Params: prompt (required), size (optional, e.g. '1024x1024')."
+            "Otherwise default to image_generator (fast/normal). Params: prompt (required), size (optional, e.g. '1024x1024'), "
+            "save_path (optional: save image to disk for later use, e.g. /tmp/site_hero.png). "
+            "When building a site with create_site, generate images first with save_path, then pass them via the images param."
         )
 
-    async def execute(self, message: Message, prompt: str = None, size: str = "1024x1024", **kwargs) -> str:
+    async def execute(self, message: Message, prompt: str = None, size: str = "1024x1024", save_path: str = None, **kwargs) -> str:
         if not prompt:
             return "Error: prompt parameter is required"
 
@@ -424,18 +446,37 @@ class HDImageGeneratorTool(Tool):
             logger.error(f"HD image download error: {e}")
             return f"Error downloading HD image: {e}"
 
+        # Save to disk if requested (for site building workflow)
+        saved_path = None
+        if save_path:
+            try:
+                save_dir = os.path.dirname(save_path)
+                if save_dir:
+                    os.makedirs(save_dir, exist_ok=True)
+                with open(save_path, "wb") as f:
+                    f.write(image_bytes)
+                saved_path = os.path.abspath(save_path)
+                logger.info(f"HD image saved to {saved_path}")
+            except Exception as e:
+                logger.warning(f"Failed to save HD image to {save_path}: {e}")
+
         file = File(BytesIO(image_bytes), filename="hd_generated_image.png")
         try:
             await message.channel.send(file=file)
         except discord.Forbidden:
             logger.warning(f"Cannot send HD image in {message.channel.id} — missing permissions")
+            if saved_path:
+                return f"HD image generated and saved to {saved_path} (could not send to chat)"
             return "Error: Cannot send HD image — missing permissions"
 
         await self.bot.memory.add_to_channel_memory(
             str(message.channel.id),
             {"author": "Tool", "content": f"Generated HD image: {revised_prompt or prompt[:200]}", "is_tool": True},
         )
-        return f"HD image generated and sent successfully: {(revised_prompt or prompt)[:100]}"
+        result = f"HD image generated and sent successfully: {(revised_prompt or prompt)[:100]}"
+        if saved_path:
+            result += f"\nSaved to: {saved_path}"
+        return result
 
 
 class MemoryTool(Tool):
@@ -1214,10 +1255,14 @@ class CreateSiteTool(Tool):
             f"Create a temporary website at {self.base_url}/<name>. Auto-deletes after 24h. "
             "Params: name (short slug, lowercase/numbers/hyphens), title (headline), "
             "body (FULL HTML document — write complete <!DOCTYPE html> pages with all styles/JS inline. "
-            "Written as-is to file, no template wrapping), encoding (optional: text or base64; use base64 for exact full HTML)."
+            "Written as-is to file, no template wrapping), encoding (optional: text or base64; use base64 for exact full HTML), "
+            'images (optional: JSON array of image objects to embed, e.g. [{"path": "/tmp/hero.png", "filename": "hero.png"}] — '
+            "each needs a path to a local file; filename defaults to the source filename if omitted. "
+            f"Images are copied into the site dir and accessible as {self.base_url}/<name>/images/<filename>). "
+            "Typical workflow: generate images with image_generator (save_path param), then pass saved paths here."
         )
 
-    async def execute(self, message: Message, name: str = None, title: str = None, body: str = None, encoding: str = "text", **kwargs) -> str:
+    async def execute(self, message: Message, name: str = None, title: str = None, body: str = None, encoding: str = "text", images: str = None, **kwargs) -> str:
         if self.bot and not self.bot._is_admin(message.author.id):
             return "Error: create_site is admin-only"
         if not name or not title or body is None:
@@ -1255,12 +1300,47 @@ class CreateSiteTool(Tool):
         site_dir = os.path.join(self.base_dir, slug)
         try:
             os.makedirs(site_dir, exist_ok=True)
+
+            # Copy images into site's images/ directory
+            image_urls = []
+            if images:
+                try:
+                    image_list = json.loads(images) if isinstance(images, str) else images
+                    if not isinstance(image_list, list):
+                        image_list = [image_list]
+                except json.JSONDecodeError:
+                    # Might be comma-separated paths
+                    image_list = [{"path": p.strip()} for p in images.split(",") if p.strip()]
+
+                img_dir = os.path.join(site_dir, "images")
+                os.makedirs(img_dir, exist_ok=True)
+                for entry in image_list:
+                    if isinstance(entry, str):
+                        entry = {"path": entry}
+                    src_path = entry.get("path", "")
+                    if not src_path or not os.path.isfile(src_path):
+                        logger.warning(f"Site image not found: {src_path}")
+                        continue
+                    filename = entry.get("filename") or os.path.basename(src_path)
+                    # Sanitize filename — only allow safe chars
+                    filename = re.sub(r"[^a-zA-Z0-9._-]", "_", filename)
+                    if not filename:
+                        continue
+                    dest = os.path.join(img_dir, filename)
+                    try:
+                        shutil.copy2(src_path, dest)
+                        public_url = f"{self.base_url}/{slug}/images/{filename}"
+                        image_urls.append(public_url)
+                        logger.info(f"Copied site image {src_path} -> {dest}")
+                    except Exception as e:
+                        logger.warning(f"Failed to copy image {src_path}: {e}")
+
             index_path = os.path.join(site_dir, "index.html")
             # Inject CSP meta tag to mitigate XSS from arbitrary HTML
             csp_meta = (
                 '<meta http-equiv="Content-Security-Policy" '
-                'content="default-src \'self\'; script-src \'unsafe-inline\' \'unsafe-eval\'; '
-                'style-src \'unsafe-inline\'; img-src * data:; connect-src \'self\'">'
+                "content=\"default-src 'self'; script-src 'unsafe-inline' 'unsafe-eval'; "
+                "style-src 'unsafe-inline'; img-src * data:; connect-src 'self'\">"
             )
             if "<head" in body.lower():
                 body = re.sub(r"(<head[^>]*>)", r"\1\n" + csp_meta, body, count=1, flags=re.IGNORECASE)
@@ -1279,7 +1359,10 @@ class CreateSiteTool(Tool):
                 "path": site_dir,
             }
             await self._save_sites()
-            return f"Site created: {self.base_url}/{slug}/"
+            result = f"Site created: {self.base_url}/{slug}/"
+            if image_urls:
+                result += f"\nEmbedded images ({len(image_urls)}):\n" + "\n".join(f"  - {url}" for url in image_urls)
+            return result
         except Exception as e:
             logger.error(f"Failed to create site {slug}: {e}")
             return f"Error creating site: {e}"
