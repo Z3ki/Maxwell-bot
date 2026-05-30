@@ -224,6 +224,7 @@ class AutonomyEngine:
         self._running = False
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()  # prevents concurrent ticks
+        self._last_thought = ""  # avoid AttributeError on early failure
 
     # -- lifecycle (idempotent) --
 
@@ -583,15 +584,26 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
             pass
         # 2. try markdown code fence ```json ... ```
         if json_str is None:
-            m = re.search(r"```(?:json)?\s*\n?(\{.*?\})\s*```", text, re.DOTALL)
+            m = re.search(r"```(?:json)?\s*\n?(\{.*\})\s*```", text, re.DOTALL)
             if m:
                 json_str = m.group(1)
-        # 3. fallback: first { to last }
+        # 3. fallback: first balanced { ... } block
+        #    (don't use rfind — that grabs too much if LLM yaps after the JSON)
         if json_str is None:
             start_idx = text.find("{")
-            end_idx = text.rfind("}")
-            if start_idx != -1 and end_idx > start_idx:
-                json_str = text[start_idx:end_idx + 1]
+            if start_idx != -1:
+                depth = 0
+                end_idx = -1
+                for i in range(start_idx, len(text)):
+                    if text[i] == "{":
+                        depth += 1
+                    elif text[i] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            end_idx = i
+                            break
+                if end_idx > start_idx:
+                    json_str = text[start_idx:end_idx + 1]
         if json_str is None:
             logger.warning(f"Autonomy planner returned no JSON. Raw: {text[:500]}")
             return [{"kind": "do_nothing", "reason": "no JSON in LLM response"}]
@@ -623,9 +635,11 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
                 continue
 
             if kind == "send_dm":
-                uid = str(action.get("target_user_id", "")).strip()
+                # strip <@123> mention wrappers and non-digit chars
+                uid = re.sub(r"[^0-9]", "", str(action.get("target_user_id", "")))
                 content = str(action.get("content", "")).strip()
-                if not uid or not content or not uid.isdigit():
+                if not uid or not content:
+                    logger.debug(f"Dropping send_dm: missing uid or content (uid={uid!r})")
                     continue
                 valid.append({
                     "kind": "send_dm",
@@ -635,9 +649,11 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
                 })
 
             elif kind == "post_channel":
-                cid = str(action.get("target_channel_id", "")).strip()
+                # strip <#123> mention wrappers and non-digit chars
+                cid = re.sub(r"[^0-9]", "", str(action.get("target_channel_id", "")))
                 content = str(action.get("content", "")).strip()
-                if not cid or not content or not cid.isdigit():
+                if not cid or not content:
+                    logger.debug(f"Dropping post_channel: missing cid or content (cid={cid!r})")
                     continue
                 valid.append({
                     "kind": "post_channel",
@@ -696,6 +712,8 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
 
         # save thought for status display
         self._last_thought = thought
+        if not any(a["kind"] != "do_nothing" for a in valid):
+            logger.info(f"Autonomy planner produced no actionable items. Thought: {thought[:300]}")
         return valid
 
     # -----------------------------------------------------------------------
@@ -890,21 +908,17 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
 
     async def _log_tick(self, context: str, actions: list[dict], results: list[dict], duration: float):
         """Record tick results to state and action log."""
-        thought = getattr(self, "_last_thought", None) or ""
+        thought = self._last_thought or ""
 
-        # update state
+        # update state + bump counters in one patch (avoids triple file read)
         total_exec = sum(1 for r in results if r.get("result") == "success")
         total_fail = sum(1 for r in results if r.get("result") == "error")
+        state = await self.store.load_state()
         await self.store.patch_state({
             "last_tick": _utcnow_iso(),
             "last_tick_duration": round(duration, 2),
             "last_error": None,
             "last_thought": thought[:2000],
-        })
-
-        # bump counters
-        state = await self.store.load_state()
-        await self.store.patch_state({
             "actions_executed_total": state.get("actions_executed_total", 0) + total_exec,
             "actions_failed_total": state.get("actions_failed_total", 0) + total_fail,
         })
