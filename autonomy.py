@@ -631,15 +631,16 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
                 continue
             kind = str(action.get("kind", "")).strip().lower()
             if kind not in AUTONOMY_VALID_KINDS:
-                logger.debug(f"Dropping unknown action kind: {kind}")
+                logger.info(f"Dropping unknown action kind: {kind} | raw: {json.dumps(action, default=str)[:300]}")
                 continue
 
             if kind == "send_dm":
                 # strip <@123> mention wrappers and non-digit chars
-                uid = re.sub(r"[^0-9]", "", str(action.get("target_user_id", "")))
+                uid_raw = str(action.get("target_user_id", ""))
+                uid = re.sub(r"[^0-9]", "", uid_raw)
                 content = str(action.get("content", "")).strip()
                 if not uid or not content:
-                    logger.debug(f"Dropping send_dm: missing uid or content (uid={uid!r})")
+                    logger.info(f"Dropping send_dm: uid_raw={uid_raw!r} uid={uid!r} content_len={len(content)}")
                     continue
                 valid.append({
                     "kind": "send_dm",
@@ -650,10 +651,11 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
 
             elif kind == "post_channel":
                 # strip <#123> mention wrappers and non-digit chars
-                cid = re.sub(r"[^0-9]", "", str(action.get("target_channel_id", "")))
+                cid_raw = str(action.get("target_channel_id", ""))
+                cid = re.sub(r"[^0-9]", "", cid_raw)
                 content = str(action.get("content", "")).strip()
                 if not cid or not content:
-                    logger.debug(f"Dropping post_channel: missing cid or content (cid={cid!r})")
+                    logger.info(f"Dropping post_channel: cid_raw={cid_raw!r} cid={cid!r} content_len={len(content)} | full action: {json.dumps(action, default=str)[:500]}")
                     continue
                 valid.append({
                     "kind": "post_channel",
@@ -665,7 +667,7 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
             elif kind == "run_tool":
                 tool_name = str(action.get("tool_name", "")).strip()
                 if not tool_name or tool_name not in self.bot.tools:
-                    logger.debug(f"Dropping run_tool with unknown tool: {tool_name}")
+                    logger.info(f"Dropping run_tool: tool={tool_name!r} not in tools")
                     continue
                 tool_args = action.get("tool_args", {})
                 if not isinstance(tool_args, dict):
@@ -708,6 +710,7 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
                 })
 
         if not valid:
+            logger.warning(f"All {len(raw_actions)} actions failed validation. Raw response: {raw[:1000]}")
             valid = [{"kind": "do_nothing", "reason": "all actions failed validation"}]
 
         # save thought for status display
