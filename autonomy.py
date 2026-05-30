@@ -388,6 +388,11 @@ class AutonomyEngine:
             try:
                 ch = self.bot.get_channel(int(cid))
                 if ch is None:
+                    try:
+                        ch = await self.bot.fetch_channel(int(cid))
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                        continue
+                if ch is None:
                     continue
                 messages = [m async for m in ch.history(limit=10)]
                 for m in messages:
@@ -781,6 +786,14 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
 
         channel = self.bot.get_channel(int(channel_id))
         if channel is None:
+            # get_channel() only checks local cache. fetch_channel() hits the API.
+            # This is slow but necessary — cache misses are common for channels
+            # in large guilds or guilds the bot hasn't fully loaded.
+            try:
+                channel = await self.bot.fetch_channel(int(channel_id))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                channel = None
+        if channel is None:
             result["result"] = "error"
             result["error"] = "channel not found"
             return
@@ -808,13 +821,20 @@ You can use MULTIPLE actions in one tick. Max 5 actions per tick."""
         if target_cid:
             try:
                 channel = self.bot.get_channel(int(target_cid))
-            except (ValueError, TypeError):
+                if channel is None:
+                    channel = await self.bot.fetch_channel(int(target_cid))
+            except (ValueError, TypeError, discord.NotFound, discord.Forbidden, discord.HTTPException):
                 pass
 
         # if no channel and we can find a default, use the first auto_channel
         if channel is None:
             for cid in (self.bot._auto_channels or set()):
-                channel = self.bot.get_channel(int(cid))
+                try:
+                    channel = self.bot.get_channel(int(cid))
+                    if channel is None:
+                        channel = await self.bot.fetch_channel(int(cid))
+                except (ValueError, TypeError, discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    continue
                 if channel:
                     break
 
