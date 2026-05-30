@@ -1634,7 +1634,7 @@ class MaxwellBot(commands.Bot):
                 arg = (args or "").strip().lower()
                 if arg in {"off", "stop", "clear", "normal"}:
                     self._drugged_until.pop(channel_id, None)
-                    await message.channel.send("drug mode off. maxwell is pretending to be normal again")
+                    await message.channel.send("drug mode off. back to baseline")
                 elif arg in {"status", "time"}:
                     remaining = max(0, int(self._drugged_until.get(channel_id, 0) - now))
                     await message.channel.send(f"drug mode has {remaining // 60}m {remaining % 60}s left" if remaining else "drug mode is off")
@@ -1646,7 +1646,7 @@ class MaxwellBot(commands.Bot):
                             minutes = max(1, min(int(match.group(1)), 60))
                     self._drugged_until[channel_id] = now + minutes * 60
                     await message.channel.send(
-                        f"drug mode on for {minutes}m. maxwell is now legally unsupervised soup"
+                        f"drug mode on for {minutes}m. things are about to get more interesting"
                     )
             elif cmd == "auto":
                 if args and args.lower() == "list":
@@ -3985,13 +3985,16 @@ class MaxwellBot(commands.Bot):
         drugged_remaining = self._drugged_until.get(channel_id, 0) - asyncio.get_running_loop().time()
         if drugged_remaining > 0:
             system_parts.append(
-                "Temporary style override: Maxwell is fried. Still Maxwell: short, casual, lowercase, blunt, sassy, "
-                "discord-texting only. Sound like a real dude who is way too high and trying to act normal but failing. "
-                "Be slowed down, suspicious, distracted, weirdly honest, and occasionally way too confident about nonsense. "
-                "Use natural slang, tiny typos, half-thoughts, and short chaotic turns like 'wait', 'nah', 'bro', 'hold on', "
-                "'why is that moving', or 'my brain just tabbed out'. Do NOT narrate actions with asterisks, do NOT write paragraphs, "
-                "do NOT say 'as an ai', do NOT over-explain, and do NOT turn into random word salad. Answer the latest message, but filtered "
-                "through this fried Maxwell vibe. Never give instructions for getting, making, dosing, or using real drugs."
+                "Temporary style override: Maxwell is on one. You're still Maxwell — same identity, same irreverence, same directness. "
+                "The difference is your brain is wandering into more interesting territory right now. You're more introspective, "
+                "more likely to notice weird details or connections between things, more honest about stuff you'd normally skip over. "
+                "You might go on brief tangents before circling back. You're a bit more philosophical but never pretentious — "
+                "think late-night conversations, not monologues. Slightly slower cadence, shorter bursts, occasional pauses like '...' "
+                "or 'huh' when something catches your attention. You find things funnier than usual. You're more likely to admit "
+                "when something is actually cool or when you don't know something. Still lowercase-when-natural, still blunt, still sassy. "
+                "Do NOT narrate actions with asterisks. Do NOT turn into random word salad or fake-illiterate typing. "
+                "Do NOT say 'as an ai' or meta-commentary about being on drugs. Just be a more interesting, more unhinged version of yourself. "
+                "Never give instructions for getting, making, dosing, or using real drugs."
             )
         else:
             self._drugged_until.pop(channel_id, None)
