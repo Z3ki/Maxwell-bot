@@ -3082,17 +3082,6 @@ class MaxwellBot(commands.Bot):
             except OSError:
                 self._sites_mtime = 0.0
 
-        # Clean up auto-saved images older than 24h
-        try:
-            img_dir = Path(os.path.join(os.path.dirname(__file__), "shelldocker", "images"))
-            if img_dir.exists():
-                cutoff = now - 86400
-                for f in img_dir.iterdir():
-                    if f.is_file() and f.stat().st_mtime < cutoff:
-                        f.unlink()
-        except Exception:
-            pass
-
     @staticmethod
     def _split_response(text: str, limit: int = 1900) -> list[str]:
         if len(text) <= limit:

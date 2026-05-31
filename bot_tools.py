@@ -250,25 +250,18 @@ class ImageGeneratorTool(Tool):
         return (
             "Generate an AI image FAST (~3s). Use this as the DEFAULT — quick, decent quality. "
             "Only switch to hd_image when someone specifically asks for 'high quality', 'HD', 'HQ', or 'better quality'. "
-            "Params: prompt (required), save_path (optional, defaults to /home/maxwell/images/). "
-            "Images are ALWAYS saved to disk automatically. The result includes the saved file path. "
-            "When building a site with create_site, pass the saved path in the images param."
+            "Params: prompt (required). "
+            "Returns a Discord CDN URL for the image. Use that URL directly in HTML <img> tags for sites."
         )
 
-    async def execute(self, message: Message, prompt: str = None, save_path: str = None, **kwargs) -> str:
+    async def execute(self, message: Message, prompt: str = None, **kwargs) -> str:
         if not prompt:
             return "Error: prompt parameter is required"
         if not self.bot.config.NVIDIA_API_KEY:
             return "Error: image generation is not configured (missing NVIDIA_API_KEY)"
-        # Always save so create_site can find it later. The model never
-        # remembers to pass save_path, so we do it for it.
-        if not save_path:
-            tmp_dir = os.path.join(os.path.dirname(__file__), "shelldocker", "images")
-            os.makedirs(tmp_dir, exist_ok=True)
-            save_path = os.path.join(tmp_dir, f"img_{int(time.time())}_{random.randint(1000,9999)}.png")
-        return await self._nvidia_generate(message, prompt, save_path=save_path)
+        return await self._nvidia_generate(message, prompt)
 
-    async def _nvidia_generate(self, message: Message, prompt: str, save_path: str = None) -> str:
+    async def _nvidia_generate(self, message: Message, prompt: str) -> str:
         api_key = self.bot.config.NVIDIA_API_KEY
         api_url = self.bot.config.NVIDIA_IMAGE_URL
         payload = {
@@ -327,34 +320,26 @@ class ImageGeneratorTool(Tool):
                         break
                     image_bytes = base64.b64decode(image_b64)
                     logger.info(f"NVIDIA image generated successfully, size: {len(image_bytes)} bytes")
-                    # Save to disk if requested (for site building workflow)
-                    saved_path = None
-                    if save_path:
-                        try:
-                            save_dir = os.path.dirname(save_path)
-                            if save_dir:
-                                os.makedirs(save_dir, exist_ok=True)
-                            with open(save_path, "wb") as f:
-                                f.write(image_bytes)
-                            saved_path = os.path.abspath(save_path)
-                            logger.info(f"Image saved to {saved_path}")
-                        except Exception as e:
-                            logger.warning(f"Failed to save image to {save_path}: {e}")
+                    # Upload to Discord and grab the CDN URL
                     file = File(BytesIO(image_bytes), filename="generated_image.png")
+                    sent_msg = None
                     try:
-                        await message.channel.send(file=file)
+                        sent_msg = await message.channel.send(file=file)
                     except discord.Forbidden:
                         logger.warning(f"Cannot send image in {message.channel.id} — missing permissions")
-                        if saved_path:
-                            return f"Image generated and saved to {saved_path} (could not send to chat)"
                         return "Error: Cannot send image — missing permissions"
+                    # Grab the Discord CDN URL from the attachment
+                    cdn_url = None
+                    if sent_msg and sent_msg.attachments:
+                        cdn_url = sent_msg.attachments[0].url
                     await self.bot.memory.add_to_channel_memory(
                         str(message.channel.id),
                         {"author": "Tool", "content": f"Generated image: {prompt[:200]}", "is_tool": True},
                     )
-                    result = f"Image generated and sent successfully: {prompt[:100]}"
-                    if saved_path:
-                        result += f"\nSaved to: {saved_path}"
+                    result = f"Image generated successfully: {prompt[:100]}"
+                    if cdn_url:
+                        result += f"\nImage URL: {cdn_url}"
+                        result += f"\nUse this URL directly in HTML <img> tags."
                     return result
             except asyncio.TimeoutError:
                 logger.warning(f"NVIDIA image timeout, attempt {attempt + 1}/{max_retries}")
@@ -378,21 +363,13 @@ class HDImageGeneratorTool(Tool):
     def get_description(self):
         return (
             "Generate an HD AI image (~40s). Use ONLY when the user explicitly asks for 'high quality', 'HD', 'HQ', 'better quality', or similar. "
-            "Otherwise default to image_generator (fast/normal). Params: prompt (required), size (optional, e.g. '1024x1024'), "
-            "save_path (optional, defaults to /home/maxwell/images/). "
-            "Images are ALWAYS saved to disk automatically. The result includes the saved file path. "
-            "When building a site with create_site, pass the saved path in the images param."
+            "Otherwise default to image_generator (fast/normal). Params: prompt (required), size (optional, e.g. '1024x1024'). "
+            "Returns a Discord CDN URL for the image. Use that URL directly in HTML <img> tags for sites."
         )
 
-    async def execute(self, message: Message, prompt: str = None, size: str = "1024x1024", save_path: str = None, **kwargs) -> str:
+    async def execute(self, message: Message, prompt: str = None, size: str = "1024x1024", **kwargs) -> str:
         if not prompt:
             return "Error: prompt parameter is required"
-
-        # Always save so create_site can find it later.
-        if not save_path:
-            tmp_dir = os.path.join(os.path.dirname(__file__), "shelldocker", "images")
-            os.makedirs(tmp_dir, exist_ok=True)
-            save_path = os.path.join(tmp_dir, f"hd_{int(time.time())}_{random.randint(1000,9999)}.png")
 
         api_url = getattr(self.bot.config, "GPT_IMAGE_URL", "")
         api_key = getattr(self.bot.config, "GPT_IMAGE_API_KEY", "")
@@ -461,36 +438,28 @@ class HDImageGeneratorTool(Tool):
             logger.error(f"HD image download error: {e}")
             return f"Error downloading HD image: {e}"
 
-        # Save to disk if requested (for site building workflow)
-        saved_path = None
-        if save_path:
-            try:
-                save_dir = os.path.dirname(save_path)
-                if save_dir:
-                    os.makedirs(save_dir, exist_ok=True)
-                with open(save_path, "wb") as f:
-                    f.write(image_bytes)
-                saved_path = os.path.abspath(save_path)
-                logger.info(f"HD image saved to {saved_path}")
-            except Exception as e:
-                logger.warning(f"Failed to save HD image to {save_path}: {e}")
-
+        # Upload to Discord and grab the CDN URL
         file = File(BytesIO(image_bytes), filename="hd_generated_image.png")
+        sent_msg = None
         try:
-            await message.channel.send(file=file)
+            sent_msg = await message.channel.send(file=file)
         except discord.Forbidden:
             logger.warning(f"Cannot send HD image in {message.channel.id} — missing permissions")
-            if saved_path:
-                return f"HD image generated and saved to {saved_path} (could not send to chat)"
             return "Error: Cannot send HD image — missing permissions"
+
+        # Grab the Discord CDN URL from the attachment
+        cdn_url = None
+        if sent_msg and sent_msg.attachments:
+            cdn_url = sent_msg.attachments[0].url
 
         await self.bot.memory.add_to_channel_memory(
             str(message.channel.id),
             {"author": "Tool", "content": f"Generated HD image: {revised_prompt or prompt[:200]}", "is_tool": True},
         )
-        result = f"HD image generated and sent successfully: {(revised_prompt or prompt)[:100]}"
-        if saved_path:
-            result += f"\nSaved to: {saved_path}"
+        result = f"HD image generated successfully: {(revised_prompt or prompt)[:100]}"
+        if cdn_url:
+            result += f"\nImage URL: {cdn_url}"
+            result += f"\nUse this URL directly in HTML <img> tags."
         return result
 
 
@@ -1270,11 +1239,9 @@ class CreateSiteTool(Tool):
             f"Create a temporary website at {self.base_url}/<name>. Auto-deletes after 24h. "
             "Params: name (short slug, lowercase/numbers/hyphens), title (headline), "
             "body (FULL HTML document — write complete <!DOCTYPE html> pages with all styles/JS inline. "
-            "Written as-is to file, no template wrapping), encoding (optional: text or base64; use base64 for exact full HTML), "
-            'images (optional: JSON array of image objects to embed, e.g. [{"path": "/tmp/hero.png", "filename": "hero.png"}] — '
-            "each needs a path to a local file; filename defaults to the source filename if omitted. "
-            f"Images are copied into the site dir and accessible as {self.base_url}/<name>/images/<filename>). "
-            "Typical workflow: generate images with image_generator (save_path param), then pass saved paths here."
+            "Written as-is to file, no template wrapping), encoding (optional: text or base64; use base64 for exact full HTML). "
+            "To include images: first generate them with image_generator, which returns a Discord CDN URL. "
+            "Then use that URL directly in your HTML <img> tags. No file paths needed."
         )
 
     async def execute(self, message: Message, name: str = None, title: str = None, body: str = None, encoding: str = "text", images: str = None, **kwargs) -> str:
