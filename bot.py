@@ -3765,7 +3765,7 @@ class MaxwellBot(commands.Bot):
         compatible = MaxwellBot._compatible_tool_names(self, MaxwellBot._message_tool_platform(self, message))
         calls = collect_tool_calls(response, set(self.tools), disabled, include_disabled=True)
         if not calls:
-            return response, []
+            return response, [], []
         calls.sort(key=lambda x: (1 if x[2] in {"send_message", "no_response"} else 0, x[0]))
         segments = []
         last = 0
