@@ -248,10 +248,11 @@ class ImageGeneratorTool(Tool):
 
     def get_description(self):
         return (
-            "Generate an AI image FAST (~3s). Use this as the DEFAULT — quick, decent quality. "
+            "Generate an AI image FAST (~5s). Use this as the DEFAULT — quick, decent quality. "
             "Only switch to hd_image when someone specifically asks for 'high quality', 'HD', 'HQ', or 'better quality'. "
             "Params: prompt (required). "
-            "Returns a Discord CDN URL for the image. Use that URL directly in HTML <img> tags for sites."
+            "The image is posted to chat so you can SEE it. If it looks bad, call image_generator again with an improved prompt. "
+            "Returns a Discord CDN URL. Use that URL in HTML <img> tags for sites."
         )
 
     async def execute(self, message: Message, prompt: str = None, **kwargs) -> str:
@@ -320,7 +321,7 @@ class ImageGeneratorTool(Tool):
                         break
                     image_bytes = base64.b64decode(image_b64)
                     logger.info(f"NVIDIA image generated successfully, size: {len(image_bytes)} bytes")
-                    # Upload to Discord and grab the CDN URL
+                    # Send to Discord so the model can SEE it in chat
                     file = File(BytesIO(image_bytes), filename="generated_image.png")
                     sent_msg = None
                     try:
@@ -328,7 +329,7 @@ class ImageGeneratorTool(Tool):
                     except discord.Forbidden:
                         logger.warning(f"Cannot send image in {message.channel.id} — missing permissions")
                         return "Error: Cannot send image — missing permissions"
-                    # Grab the Discord CDN URL from the attachment
+                    # Grab the Discord CDN URL
                     cdn_url = None
                     if sent_msg and sent_msg.attachments:
                         cdn_url = sent_msg.attachments[0].url
@@ -336,10 +337,11 @@ class ImageGeneratorTool(Tool):
                         str(message.channel.id),
                         {"author": "Tool", "content": f"Generated image: {prompt[:200]}", "is_tool": True},
                     )
-                    result = f"Image generated successfully: {prompt[:100]}"
+                    result = f"Image sent to chat: {prompt[:100]}"
                     if cdn_url:
                         result += f"\nImage URL: {cdn_url}"
-                        result += f"\nUse this URL directly in HTML <img> tags."
+                    result += "\nLook at the image you just posted. If it looks good, mention the URL or use it for the site. "
+                    result += "If it looks bad, call image_generator again with an improved prompt."
                     return result
             except asyncio.TimeoutError:
                 logger.warning(f"NVIDIA image timeout, attempt {attempt + 1}/{max_retries}")

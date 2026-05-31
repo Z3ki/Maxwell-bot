@@ -3666,21 +3666,22 @@ class MaxwellBot(commands.Bot):
                 return
             max_iters = max(0, min(int(self._control.get("max_tool_iterations", 10) or 0), 25))
             all_tool_results = []
+            all_tool_images = []
             for iteration in range(max_iters):
-                response, tool_results = await self._process_tool_calls(message, response)
+                response, tool_results, iter_images = await self._process_tool_calls(message, response)
                 all_tool_results.extend(tool_results)
+                all_tool_images.extend(iter_images)
                 if not tool_results:
                     break
                 if not _tool_results_need_followup(tool_results):
                     break
                 result_messages = await self._build_messages(message, content, has_media=False, media_summary="")
-                result_messages.append({"role": "user", "content": "=== TOOL RESULTS ===\n" + "\n".join(tool_results) + "\n=== END ===\nContinue from these results. Media from the original user message is not reattached to this tool-result follow-up; do not claim to inspect media here unless the tool results include it as text. If the user still needs a visible reply, finish now with <tool:send_message>reply text</tool:send_message>. If no visible reply is appropriate, finish with <tool:no_response />. If you only called reasoning_log, you have not answered the user yet. Do not stop after reasoning_log."})
+                result_messages.append({"role": "user", "content": "=== TOOL RESULTS ===\n" + "\n".join(tool_results) + "\n=== END ===\nThe image(s) from the tool are attached — you can SEE them. If you generated an image and it looks good, call send_media to post it. If it's bad, call image_generator again with a better prompt. Do NOT send a text-only reply if the user asked for an image."})
                 await self._acquire_ai_slot(timeout=ai_timeout)
                 try:
-                    # Tool-result followups are text-only. Resending the same
-                    # images/video every iteration is expensive and causes stale
-                    # visual context to haunt unrelated tool continuations.
-                    followup = await self.ai_provider.generate_response(result_messages, media=[], timeout=ai_timeout)
+                    # Attach images from tools so the model can SEE them
+                    followup_images = all_tool_images if all_tool_images else []
+                    followup = await self.ai_provider.generate_response(result_messages, images=followup_images, media=[], timeout=ai_timeout)
                     if followup and followup.strip():
                         response = followup
                     else:
@@ -3756,9 +3757,10 @@ class MaxwellBot(commands.Bot):
 
     async def _process_tool_calls(self, message, response: str):
         tool_results = []
+        tool_images = []  # base64 images from tools for model to see
         response = strip_model_artifact_leaks(response, strip_pipe_markers=False)
         if not self._control.get("tools_enabled", True):
-            return strip_tool_payload_leaks(response), []
+            return strip_tool_payload_leaks(response), [], []
         disabled = set(self._control.get("disabled_tools", []) or [])
         compatible = MaxwellBot._compatible_tool_names(self, MaxwellBot._message_tool_platform(self, message))
         calls = collect_tool_calls(response, set(self.tools), disabled, include_disabled=True)
@@ -3840,7 +3842,15 @@ class MaxwellBot(commands.Bot):
         cleaned = strip_tool_payload_leaks("".join(segments))
         cleaned = re.sub(r"\[/?(?:TOOL_CALL:)?[\w-]+.*?\]", "", cleaned).strip()
         cleaned = re.sub(r"(?is)```[ \t]*(?:json|tool|tools)?[^\n`]*\n\s*```", "", cleaned).strip()
-        return cleaned, tool_results
+        # Extract embedded images from tool results (e.g. image_generator)
+        _IMG_RE = re.compile(r"__IMAGE_B64__([A-Za-z0-9+/=\s]+)__END_IMAGE_B64__")
+        for tr in tool_results:
+            for m in _IMG_RE.finditer(tr):
+                raw = m.group(1).replace("\n", "").replace(" ", "")
+                tool_images.append(raw)
+        # Strip the b64 markers from text results (too large for memory)
+        tool_results = [_IMG_RE.sub("", tr).strip() for tr in tool_results]
+        return cleaned, tool_results, tool_images
 
     async def _record_llm_trace(self, message, payload: dict):
         path = Path(self.config.DATA_DIR) / "llm_traces.json"
