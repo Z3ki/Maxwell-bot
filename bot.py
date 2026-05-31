@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import contextlib
 import html
 import json
 import logging
@@ -241,6 +242,9 @@ def _format_context_timestamp(value, *, now: datetime | None = None) -> str:
     local = dt.astimezone().strftime("%a %Y-%m-%d %H:%M")
     return f"{rel} / {local} local"
 CUSTOM_EMOJI_ALIAS_RE = re.compile(r"(?<!<)(?<!<a):([A-Za-z0-9_]{2,32}):(?!\d)")
+USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
+CHANNEL_MENTION_RE = re.compile(r"<#(\d+)>")
+ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
 TOOL_LINE_RE = re.compile(r"(?im)^\s*(?:TOOL|CALL)\s+([A-Za-z_]\w*)\s*[:\-]?\s*")
 TOOL_TRACE_LINE_RE = re.compile(r"(?im)^\s*Called\s+[A-Za-z_]\w*\s+with\s+\{.*?\}\s*->\s*__\w+__.*$")
 TEXT_ATTACHMENT_MAX_BYTES = 512 * 1024
@@ -426,6 +430,58 @@ def render_custom_emoji_aliases(text: str, emojis: dict[str, str]) -> str:
         return emojis.get(match.group(1).lower()) or match.group(0)
 
     return CUSTOM_EMOJI_ALIAS_RE.sub(replace, text)
+
+
+def _discord_display_name(obj: Any) -> str:
+    return str(getattr(obj, "display_name", None) or getattr(obj, "name", None) or getattr(obj, "id", "unknown"))
+
+
+def _discord_id(obj: Any) -> str:
+    return str(getattr(obj, "id", "unknown"))
+
+
+def render_discord_context_text(message: Any, content: str | None = None) -> str:
+    """Make Discord tokens readable for prompts/logged context without mutating the real message."""
+    text = str(content if content is not None else (getattr(message, "content", "") or ""))
+    if not text:
+        return text
+
+    guild = getattr(message, "guild", None)
+    users = {_discord_id(user): user for user in list(getattr(message, "mentions", []) or [])}
+    channels = {_discord_id(ch): ch for ch in list(getattr(message, "channel_mentions", []) or [])}
+    roles = {_discord_id(role): role for role in list(getattr(message, "role_mentions", []) or [])}
+
+    def replace_user(match: re.Match) -> str:
+        user_id = match.group(1)
+        user = users.get(user_id)
+        if user is None and guild is not None:
+            user = guild.get_member(int(user_id))
+        if user is None:
+            return f"@unknown-user({user_id})"
+        return f"@{_discord_display_name(user)}({user_id})"
+
+    def replace_channel(match: re.Match) -> str:
+        channel_id = match.group(1)
+        channel = channels.get(channel_id)
+        if channel is None and guild is not None:
+            channel = guild.get_channel(int(channel_id))
+        if channel is None:
+            return f"#unknown-channel({channel_id})"
+        return f"#{getattr(channel, 'name', channel_id)}({channel_id})"
+
+    def replace_role(match: re.Match) -> str:
+        role_id = match.group(1)
+        role = roles.get(role_id)
+        if role is None and guild is not None:
+            role = guild.get_role(int(role_id))
+        if role is None:
+            return f"@unknown-role({role_id})"
+        return f"@{getattr(role, 'name', role_id)}({role_id})"
+
+    text = USER_MENTION_RE.sub(replace_user, text)
+    text = CHANNEL_MENTION_RE.sub(replace_channel, text)
+    text = ROLE_MENTION_RE.sub(replace_role, text)
+    return text
 
 
 def extract_json_object(text: str, start: int = 0) -> tuple[str, int] | None:
@@ -1351,7 +1407,14 @@ class MaxwellBot(commands.Bot):
 
         if self.user and message.author.id == self.user.id:
             if message.content and self._control.get("store_memory", True):
-                await self.memory.add_to_channel_memory(channel_id, {"author": self.bot_name, "content": message.content, "message_id": message.id, "timestamp": _message_created_at_iso(message)})
+                await self.memory.add_to_channel_memory(channel_id, {
+                    "author": self.bot_name,
+                    "author_id": str(self.user.id),
+                    "author_is_bot": True,
+                    "content": render_discord_context_text(message, message.content),
+                    "message_id": str(message.id),
+                    "timestamp": _message_created_at_iso(message),
+                })
             return
 
         if not has_content and not has_attachment and not has_embed:
@@ -1380,14 +1443,29 @@ class MaxwellBot(commands.Bot):
                         embed_titles.append(str(title)[:120])
                     embed_note = "[embeds: " + "; ".join(embed_titles) + "]"
                     memory_content = f"{memory_content} {embed_note}".strip()
-                await self.memory.add_to_channel_memory(channel_id, {
+                memory_item = {
                     "author": message.author.display_name,
                     "author_id": str(message.author.id),
                     "author_is_bot": bool(message.author.bot),
-                    "content": memory_content or "[media attached]",
-                    "message_id": message.id,
+                    "content": render_discord_context_text(message, memory_content or "[media attached]"),
+                    "message_id": str(message.id),
                     "timestamp": _message_created_at_iso(message),
-                })
+                }
+                mention_rows = [
+                    {"id": str(user.id), "name": getattr(user, "display_name", str(user.id))}
+                    for user in list(message.mentions or [])[:10]
+                ]
+                if mention_rows:
+                    memory_item["mentions"] = mention_rows
+                ref = getattr(getattr(message, "reference", None), "resolved", None)
+                if ref and hasattr(ref, "author"):
+                    memory_item.update({
+                        "reply_to_message_id": str(getattr(ref, "id", "")),
+                        "reply_to_author": getattr(ref.author, "display_name", str(getattr(ref.author, "id", "unknown"))),
+                        "reply_to_author_id": str(getattr(ref.author, "id", "")),
+                        "reply_to_self": bool(self.user and getattr(ref.author, "id", None) == self.user.id),
+                    })
+                await self.memory.add_to_channel_memory(channel_id, memory_item)
                 if self.rem_log:
                     await self._record_rem_event(message, "user", memory_content)
             self._maybe_schedule_context_extraction(message)
@@ -2002,12 +2080,19 @@ class MaxwellBot(commands.Bot):
         if not message.reference or not isinstance(message.reference, discord.MessageReference):
             return ""
         ref = cast(Any, message.reference.resolved)
-        if not ref or not hasattr(ref, "author") or (self.user and ref.author.id == self.user.id):
+        if not ref or not hasattr(ref, "author"):
             return ""
-        ref_content = ref.content or ""
+        ref_content = render_discord_context_text(ref, ref.content or "")
         if ref.attachments:
             ref_content = (ref_content + " [media attached]").strip()
-        return f"\n[Replying to {ref.author.display_name}: {ref_content[:500]}]" if ref_content else ""
+        if not ref_content:
+            return ""
+        ref_author_id = str(getattr(ref.author, "id", "unknown"))
+        if self.user and ref.author.id == self.user.id:
+            ref_label = f"you/Maxwell({ref_author_id})"
+        else:
+            ref_label = f"{ref.author.display_name}({ref_author_id})"
+        return f"\n[Latest message replies to {ref_label}: {ref_content[:500]}]"
 
     _spotify_seen: dict[str, str] = {}
 
@@ -2356,7 +2441,7 @@ class MaxwellBot(commands.Bot):
 
     @staticmethod
     def _visible_event_content(message, content: str | None = None) -> str:
-        text = content if content is not None else (getattr(message, "content", "") or "")
+        text = render_discord_context_text(message, content if content is not None else (getattr(message, "content", "") or ""))
         text = re.sub(r"<think\b[^>]*>.*?</think>", "", str(text), flags=re.IGNORECASE | re.DOTALL).strip()
         parts = [text] if text else []
         for attachment in list(getattr(message, "attachments", []) or [])[:5]:
@@ -3634,7 +3719,7 @@ class MaxwellBot(commands.Bot):
             + "\nTool-call format is strict. Output only real user-visible text OR tool calls, never pseudo-markup shown to the user. "
             + "Use this XML-like tag format: "
             + "<tool:tool_name param1=\"value\" param2=\"value\" /> or <tool:tool_name><param1>value</param1></tool:tool_name>. "
-            + "Valid examples: <tool:react emoji=\"catjam\" /> or "
+            + "Valid examples: <tool:react emoji=\"👍\" /> or "
             + "<tool:send_file><filename>script.py</filename><content>print('hi')</content></tool:send_file>. "
             + "Do NOT use provider/function-call syntax like <function=web_search>, <parameter=query>, </tool_call>, JSON tool objects, or markdown tool fences. "
             + "If a parameter is multi-line, use sub-tags inside the main tool tag. "
@@ -3817,19 +3902,43 @@ class MaxwellBot(commands.Bot):
             tool_history = [msg for msg in memory if msg.get("is_tool") and id(msg) not in recent_ids][-tool_limit:] if tool_limit else []
             context_memory = tool_history + list(recent_memory)
             context_now = datetime.now(timezone.utc)
+            self_user_id = str(getattr(self.user, "id", "")) if self.user else ""
             for msg in reversed(context_memory):
-                if current_message_id is not None and msg.get("message_id") == current_message_id:
+                if current_message_id is not None and str(msg.get("message_id")) == str(current_message_id):
                     continue
                 stamp = _format_context_timestamp(msg.get("timestamp"), now=context_now)
                 prefix = f"[{stamp}] " if stamp else ""
                 if msg.get("is_tool"):
                     line = f"{prefix}[Tool] {msg.get('content', '')[:4000]}"
-                elif msg.get("author") == (self.user.display_name if self.user else self.bot_name):
-                    line = f"{prefix}You: {msg.get('content', '')[:4000]}"
                 else:
-                    author = msg.get("author", "?")
-                    author_label = f"{author} [bot]" if msg.get("author_is_bot") else author
-                    line = f"{prefix}{author_label}: {msg.get('content', '')[:4000]}"
+                    author = str(msg.get("author", "?"))
+                    author_id = str(msg.get("author_id") or "")
+                    is_self = bool(self_user_id and author_id == self_user_id) or (
+                        not author_id and author == (self.user.display_name if self.user else self.bot_name)
+                    )
+                    if is_self:
+                        author_label = f"You/Maxwell({author_id})" if author_id else "You/Maxwell"
+                    else:
+                        author_label = f"{author}({author_id})" if author_id else author
+                        if msg.get("author_is_bot"):
+                            author_label += " [bot]"
+                    relation_bits = []
+                    if msg.get("reply_to_author"):
+                        reply_label = str(msg.get("reply_to_author"))
+                        reply_id = str(msg.get("reply_to_author_id") or "")
+                        if msg.get("reply_to_self"):
+                            reply_label = "you/Maxwell"
+                        relation_bits.append(f"reply_to={reply_label}({reply_id})" if reply_id else f"reply_to={reply_label}")
+                    mentions = msg.get("mentions") if isinstance(msg.get("mentions"), list) else []
+                    mention_bits = [
+                        f"@{item.get('name', 'unknown')}({item.get('id', 'unknown')})"
+                        for item in mentions[:10]
+                        if isinstance(item, dict)
+                    ]
+                    if mention_bits:
+                        relation_bits.append("mentions=" + ",".join(mention_bits))
+                    relation = f" [{'; '.join(relation_bits)}]" if relation_bits else ""
+                    line = f"{prefix}{author_label}{relation}: {str(msg.get('content', ''))[:4000]}"
                 if used + len(line) > budget:
                     break
                 lines.append(line)
@@ -3839,11 +3948,19 @@ class MaxwellBot(commands.Bot):
                     "role": "system",
                     "content": "Recent context (background only; do not answer these; bracketed ages are recalculated now):\n" + "\n".join(reversed(lines)),
                 })
-        author_label = f"{message.author.display_name} [bot]" if message.author.bot else message.author.display_name
-        user_parts = [f"Latest message to answer from {author_label}: {user_message}"]
-        mention_names = [getattr(user, "display_name", str(getattr(user, "id", "unknown"))) for user in (message.mentions or [])]
+        latest_text = render_discord_context_text(message, user_message)
+        author_id = str(getattr(message.author, "id", "unknown"))
+        author_label = f"{message.author.display_name}({author_id})"
+        if message.author.bot:
+            author_label += " [bot]"
+        user_parts = [f"Latest message to answer from {author_label}: {latest_text}"]
+        mention_names = [
+            f"{getattr(user, 'display_name', str(getattr(user, 'id', 'unknown')))}({getattr(user, 'id', 'unknown')})"
+            for user in (message.mentions or [])
+        ]
         if mention_names:
-            mentions_maxwell = bool(self.user and any(getattr(user, "id", None) == self.user.id for user in message.mentions))
+            self_user_id = getattr(self.user, "id", None) if self.user else None
+            mentions_maxwell = bool(self_user_id is not None and any(getattr(user, "id", None) == self_user_id for user in message.mentions))
             user_parts.append(
                 "Mentioned users in latest message: "
                 + ", ".join(mention_names)
@@ -3851,8 +3968,10 @@ class MaxwellBot(commands.Bot):
             )
         ref = getattr(getattr(message, "reference", None), "resolved", None)
         if ref and hasattr(ref, "author"):
-            reply_target = getattr(ref.author, "display_name", str(getattr(ref.author, "id", "unknown")))
-            user_parts.append(f"Latest message is a reply to: {reply_target}.")
+            reply_id = str(getattr(ref.author, "id", "unknown"))
+            self_user_id = getattr(self.user, "id", None) if self.user else None
+            reply_target = "you/Maxwell" if self_user_id is not None and getattr(ref.author, "id", None) == self_user_id else getattr(ref.author, "display_name", reply_id)
+            user_parts.append(f"Latest message is a reply to: {reply_target}({reply_id}).")
         if media_summary:
             user_parts.append(media_summary)
         elif has_media:
@@ -4140,10 +4259,8 @@ async def main():
             logger.error(f"Failed to stop autonomy engine: {e}")
         for task in getattr(bot, "_tasks", []):
             task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await task
-            except asyncio.CancelledError:
-                pass
         for task in list(getattr(bot, "_context_tasks", []) or []):
             task.cancel()
         if getattr(bot, "_context_tasks", None):

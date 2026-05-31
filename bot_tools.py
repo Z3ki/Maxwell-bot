@@ -589,12 +589,25 @@ class MemoryTool(Tool):
 class ReactTool(Tool):
     """React to a message with an emoji"""
 
+    _CUSTOM_EMOJI_RE = re.compile(r"^<(?P<animated>a?):(?P<name>[A-Za-z0-9_]{2,32}):(?P<id>\d{15,25})>$")
+    _BROKEN_CUSTOM_EMOJI_RE = re.compile(r"^<a?:(?P<name>[A-Za-z0-9_]{2,32}):?>$")
+    _ALIAS_RE = re.compile(r"^:(?P<name>[A-Za-z0-9_]{2,32}):$")
+    _BARE_CUSTOM_NAME_RE = re.compile(r"^[A-Za-z0-9_]{2,32}$")
+
     def get_description(self):
         return (
             "React to the current message with an emoji. "
-            "Standard emoji: 👍 🐱 🔥. Custom emoji: use name like dave, pepe, catjam. "
+            "Standard emoji: 👍 🐱 🔥. Custom emoji: use an available guild emoji name like dave, or a full <:name:id> emoji. "
             "Params: emoji (required)."
         )
+
+    def _available_custom_emoji_hint(self, guild_id: str | None) -> str:
+        if not guild_id:
+            return "No guild custom emojis are available here; use a normal Unicode emoji like 👍."
+        names = sorted((self.bot._guild_emojis.get(guild_id, {}) or {}).keys())[:20]
+        if not names:
+            return "This guild has no custom emojis cached; use a normal Unicode emoji like 👍."
+        return "Available custom emoji names: " + ", ".join(names)
 
     async def execute(
         self, message: Message, emoji: str | None = None, **kwargs
@@ -602,28 +615,65 @@ class ReactTool(Tool):
         if not emoji:
             return "Error: emoji parameter is required"
 
-        # Try custom emoji by name from the message's guild
-        lookup = emoji.strip().lower()
+        raw = str(emoji).strip()
+        if not raw:
+            return "Error: emoji parameter is required"
+
         guild = message.guild
         guild_id = str(guild.id) if guild else None
-        if guild_id and guild:
-            guild_emojis = self.bot._guild_emojis.get(guild_id, {})
+        guild_emojis = self.bot._guild_emojis.get(guild_id, {}) if guild_id else {}
+
+        full_match = self._CUSTOM_EMOJI_RE.match(raw)
+        if full_match and guild:
+            emoji_id = int(full_match.group("id"))
+            for e in guild.emojis:
+                if int(e.id) == emoji_id:
+                    try:
+                        await message.add_reaction(e)
+                        return f"Reacted with {e}"
+                    except discord.HTTPException as ex:
+                        return f"Error: Could not add reaction — {ex}"
+            # Full emoji strings can still be valid if Discord lets this bot use
+            # the emoji cross-guild. Try it, but don't try malformed nonsense.
+            try:
+                await message.add_reaction(raw)
+                return f"Reacted with {raw}"
+            except discord.NotFound:
+                return f"Error: Emoji '{raw}' not found or invalid"
+            except discord.HTTPException as e:
+                return f"Error: Could not add reaction — {e}"
+
+        alias_match = self._ALIAS_RE.match(raw)
+        broken_match = self._BROKEN_CUSTOM_EMOJI_RE.match(raw)
+        custom_name_match = alias_match if alias_match is not None else broken_match
+        if custom_name_match is not None:
+            lookup = custom_name_match.group("name").lower()
+        else:
+            lookup = raw.lower()
+
+        if guild and self._BARE_CUSTOM_NAME_RE.match(lookup):
             if lookup in guild_emojis:
-                emoji_str = guild_emojis[lookup]
                 for e in guild.emojis:
                     if e.name.lower() == lookup:
                         try:
                             await message.add_reaction(e)
-                            return f"Reacted with {emoji_str}"
+                            return f"Reacted with {e}"
                         except discord.HTTPException as ex:
                             return f"Error: Could not add reaction — {ex}"
+            if alias_match or broken_match or raw == lookup or self._BARE_CUSTOM_NAME_RE.match(raw):
+                # Discord treats unknown custom names as a 400. Returning a local
+                # error keeps the LLM from faceplanting into Unknown Emoji loops.
+                return f"Error: custom emoji '{lookup}' is not available in this guild. {self._available_custom_emoji_hint(guild_id)}"
 
-        # Fallback: try the emoji string directly (unicode or <:name:id> format)
+        if alias_match or broken_match or (not guild and self._BARE_CUSTOM_NAME_RE.match(lookup)):
+            return f"Error: custom emoji '{lookup}' is not available here. {self._available_custom_emoji_hint(guild_id)}"
+
+        # Fallback: Unicode emoji or another Discord-supported reaction string.
         try:
-            await message.add_reaction(emoji)
-            return f"Reacted with {emoji}"
+            await message.add_reaction(raw)
+            return f"Reacted with {raw}"
         except discord.NotFound:
-            return f"Error: Emoji '{emoji}' not found or invalid"
+            return f"Error: Emoji '{raw}' not found or invalid"
         except discord.HTTPException as e:
             return f"Error: Could not add reaction — {e}"
 

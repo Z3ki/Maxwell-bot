@@ -22,6 +22,7 @@ MAINTAINER NOTES:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -41,6 +42,51 @@ if TYPE_CHECKING:
     from bot import MaxwellBot
 
 logger = logging.getLogger(__name__)
+
+USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
+CHANNEL_MENTION_RE = re.compile(r"<#(\d+)>")
+ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
+
+
+def _discord_display_name(obj: Any) -> str:
+    return str(getattr(obj, "display_name", None) or getattr(obj, "name", None) or getattr(obj, "id", "unknown"))
+
+
+def _render_discord_context_text(message: Any, content: str | None = None) -> str:
+    text = str(content if content is not None else (getattr(message, "content", "") or ""))
+    if not text:
+        return text
+
+    guild = getattr(message, "guild", None)
+    users = {str(getattr(user, "id", "")): user for user in list(getattr(message, "mentions", []) or [])}
+    channels = {str(getattr(ch, "id", "")): ch for ch in list(getattr(message, "channel_mentions", []) or [])}
+    roles = {str(getattr(role, "id", "")): role for role in list(getattr(message, "role_mentions", []) or [])}
+
+    def replace_user(match: re.Match) -> str:
+        user_id = match.group(1)
+        user = users.get(user_id)
+        if user is None and guild is not None:
+            user = guild.get_member(int(user_id))
+        return f"@{_discord_display_name(user)}({user_id})" if user is not None else f"@unknown-user({user_id})"
+
+    def replace_channel(match: re.Match) -> str:
+        channel_id = match.group(1)
+        channel = channels.get(channel_id)
+        if channel is None and guild is not None:
+            channel = guild.get_channel(int(channel_id))
+        return f"#{getattr(channel, 'name', channel_id)}({channel_id})" if channel is not None else f"#unknown-channel({channel_id})"
+
+    def replace_role(match: re.Match) -> str:
+        role_id = match.group(1)
+        role = roles.get(role_id)
+        if role is None and guild is not None:
+            role = guild.get_role(int(role_id))
+        return f"@{getattr(role, 'name', role_id)}({role_id})" if role is not None else f"@unknown-role({role_id})"
+
+    text = USER_MENTION_RE.sub(replace_user, text)
+    text = CHANNEL_MENTION_RE.sub(replace_channel, text)
+    text = ROLE_MENTION_RE.sub(replace_role, text)
+    return text
 
 AUTONOMY_VALID_KINDS = frozenset({
     "send_dm", "post_channel", "run_tool", "update_memory",
@@ -557,16 +603,22 @@ class AutonomyEngine:
                 ev_lines = []
                 for ev in events[-30:]:
                     role = ev.get("role", "?")
-                    content = str(ev.get("content", ""))[:200]
+                    content = str(ev.get("content", ""))[:240]
                     ts = ev.get("ts", "")
                     age = ""
                     if ts:
-                        try:
+                        with contextlib.suppress(Exception):
                             ev_dt = _coerce_utc_datetime(ts)
                             age = f" ({_context_time(ev_dt)})" if ev_dt else ""
-                        except Exception:
-                            pass
-                    ev_lines.append(f"[{role}{age}] {content}")
+                    cid = str(ev.get("channel_id") or "?")
+                    ch_name = cid
+                    with contextlib.suppress(Exception):
+                        ch_obj = self.bot.get_channel(int(cid)) if cid != "?" else None
+                        ch_name = getattr(ch_obj, "name", cid) if ch_obj is not None else cid
+                    uid = str(ev.get("user_id") or "?")
+                    uname = str(ev.get("user_name") or "?")
+                    self_tag = " [you]" if self.bot.user and uid == str(self.bot.user.id) else ""
+                    ev_lines.append(f"[{role}{age}] #{ch_name}:{cid} {uname}({uid}){self_tag}: {content}")
                 sections.append(_truncate(
                     "=== RECENT CONVERSATIONS (since last check) ===\n" + "\n".join(ev_lines),
                     CTX_BUDGET_RECENT_EVENTS,
@@ -578,17 +630,13 @@ class AutonomyEngine:
 
         # 4. Channel activity (what's happening right now?)
         channel_ids_to_check = set()
-        try:
+        with contextlib.suppress(Exception):
             channel_ids_to_check.update(self.bot._auto_channels or set())
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             for ev in (events or [])[-20:]:
                 cid = ev.get("channel_id")
                 if cid:
                     channel_ids_to_check.add(str(cid))
-        except Exception:
-            pass
 
         ch_lines = []
         for cid in list(channel_ids_to_check)[:10]:
@@ -606,10 +654,24 @@ class AutonomyEngine:
                 messages = [m async for m in ch.history(limit=10)]
                 for m in reversed(messages):
                     author_name = getattr(m.author, "display_name", None) or getattr(m.author, "name", "?")
-                    content = (m.content or "")[:150]
+                    author_id = str(getattr(m.author, "id", "?"))
+                    content = _render_discord_context_text(m, m.content or "")[:220]
                     if content:
                         age = _context_time(getattr(m, 'created_at', None))
-                        ch_lines.append(f"[{age}] #{getattr(ch, 'name', cid)}:{cid} {author_name}: {content}")
+                        tags = []
+                        if self.bot.user and getattr(m.author, "id", None) == self.bot.user.id:
+                            tags.append("you")
+                        elif getattr(m.author, "bot", False):
+                            tags.append("bot")
+                        ref = getattr(getattr(m, "reference", None), "resolved", None)
+                        if ref and hasattr(ref, "author"):
+                            reply_id = str(getattr(ref.author, "id", "?"))
+                            reply_name = "you/Maxwell" if self.bot.user and getattr(ref.author, "id", None) == self.bot.user.id else _discord_display_name(ref.author)
+                            tags.append(f"reply_to={reply_name}({reply_id})")
+                        if self.bot.user and any(getattr(user, "id", None) == self.bot.user.id for user in list(getattr(m, "mentions", []) or [])):
+                            tags.append("mentions_you")
+                        tag_text = f" [{'; '.join(tags)}]" if tags else ""
+                        ch_lines.append(f"[{age}] #{getattr(ch, 'name', cid)}:{cid} {author_name}({author_id}){tag_text}: {content}")
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 continue
             except Exception:
@@ -659,10 +721,11 @@ class AutonomyEngine:
                 messages = [m async for m in channel.history(limit=20)]
                 for m in reversed(messages):
                     author_name = getattr(m.author, "display_name", None) or getattr(m.author, "name", "?")
-                    content = (m.content or "")[:200]
+                    content = _render_discord_context_text(m, m.content or "")[:240]
                     if content:
                         age = _context_time(getattr(m, 'created_at', None))
-                        dm_lines.append(f"[{age}] DM:{channel.id} {author_name} ({m.author.id}): {content}")
+                        side = " [you]" if self.bot.user and getattr(m.author, "id", None) == self.bot.user.id else ""
+                        dm_lines.append(f"[{age}] DM:{channel.id} {author_name}({m.author.id}){side}: {content}")
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 continue
             except Exception:
@@ -784,20 +847,22 @@ class AutonomyEngine:
                     reactions.append(f"{r.emoji} ({r.count})")
 
                 # Check for replies (messages that reference this post)
-                reply_count = 0
-                try:
+                reply_snippets = []
+                with contextlib.suppress(Exception):
                     if hasattr(channel, "history"):
                         async for reply in channel.history(limit=10, after=msg.created_at):
                             if reply.reference and reply.reference.message_id == msg.id:
-                                reply_count += 1
-                except Exception:
-                    pass
+                                author = getattr(reply.author, "display_name", None) or getattr(reply.author, "name", "?")
+                                content = _render_discord_context_text(reply, reply.content or "")[:160]
+                                reply_snippets.append(f"{author}({reply.author.id}): {content or '[media/reaction-only]'}")
 
                 parts = []
                 if reactions:
                     parts.append(f"reactions: {', '.join(reactions)}")
-                if reply_count:
-                    parts.append(f"{reply_count} replies")
+                if reply_snippets:
+                    shown = "; ".join(reply_snippets[:2])
+                    more = f" (+{len(reply_snippets) - 2} more)" if len(reply_snippets) > 2 else ""
+                    parts.append(f"replies: {shown}{more}")
                 if parts:
                     ch_name = getattr(channel, "name", post["channel_id"])
                     engagement_lines.append(
@@ -862,6 +927,8 @@ IMPORTANT RULES:
 - CHANNEL ACTIVITY lines show the format [#channel_name:CHANNEL_ID]. Use that numeric ID for target_channel_id.
 - AVAILABLE CHANNELS lists each channel as ID: #name [tags] (last msg: X) — topic. Use the numeric ID on the left.
 - If a conversation is happening in a channel, use that channel's ID to respond — don't pick a random channel.
+- Context lines include names, IDs, [you]/[bot], mentions_you, and reply_to metadata. Use that to tell who is talking to whom.
+- If joining an active multi-person conversation, address the right person by name unless a plain channel message is obviously enough.
 - If conversations are happening and you have something interesting/funny/useful to say, say it.
 - If someone mentioned you or talked about you, respond.
 - If a conversation naturally concluded, don't re-open it unless you have a genuinely good reason.
