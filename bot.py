@@ -3084,7 +3084,7 @@ class MaxwellBot(commands.Bot):
 
         # Clean up auto-saved images older than 24h
         try:
-            img_dir = Path("/tmp/maxwell_images")
+            img_dir = Path(os.path.join(os.path.dirname(__file__), "shelldocker", "images"))
             if img_dir.exists():
                 cutoff = now - 86400
                 for f in img_dir.iterdir():

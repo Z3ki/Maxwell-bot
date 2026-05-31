@@ -250,7 +250,7 @@ class ImageGeneratorTool(Tool):
         return (
             "Generate an AI image FAST (~3s). Use this as the DEFAULT — quick, decent quality. "
             "Only switch to hd_image when someone specifically asks for 'high quality', 'HD', 'HQ', or 'better quality'. "
-            "Params: prompt (required), save_path (optional, defaults to /tmp/maxwell_images/). "
+            "Params: prompt (required), save_path (optional, defaults to /home/maxwell/images/). "
             "Images are ALWAYS saved to disk automatically. The result includes the saved file path. "
             "When building a site with create_site, pass the saved path in the images param."
         )
@@ -260,10 +260,10 @@ class ImageGeneratorTool(Tool):
             return "Error: prompt parameter is required"
         if not self.bot.config.NVIDIA_API_KEY:
             return "Error: image generation is not configured (missing NVIDIA_API_KEY)"
-        # Always save to a temp dir so create_site can find it later.
-        # The model never remembers to pass save_path, so we do it for it.
+        # Always save so create_site can find it later. The model never
+        # remembers to pass save_path, so we do it for it.
         if not save_path:
-            tmp_dir = "/tmp/maxwell_images"
+            tmp_dir = os.path.join(os.path.dirname(__file__), "shelldocker", "images")
             os.makedirs(tmp_dir, exist_ok=True)
             save_path = os.path.join(tmp_dir, f"img_{int(time.time())}_{random.randint(1000,9999)}.png")
         return await self._nvidia_generate(message, prompt, save_path=save_path)
@@ -379,7 +379,7 @@ class HDImageGeneratorTool(Tool):
         return (
             "Generate an HD AI image (~40s). Use ONLY when the user explicitly asks for 'high quality', 'HD', 'HQ', 'better quality', or similar. "
             "Otherwise default to image_generator (fast/normal). Params: prompt (required), size (optional, e.g. '1024x1024'), "
-            "save_path (optional, defaults to /tmp/maxwell_images/). "
+            "save_path (optional, defaults to /home/maxwell/images/). "
             "Images are ALWAYS saved to disk automatically. The result includes the saved file path. "
             "When building a site with create_site, pass the saved path in the images param."
         )
@@ -388,9 +388,9 @@ class HDImageGeneratorTool(Tool):
         if not prompt:
             return "Error: prompt parameter is required"
 
-        # Always save to a temp dir so create_site can find it later.
+        # Always save so create_site can find it later.
         if not save_path:
-            tmp_dir = "/tmp/maxwell_images"
+            tmp_dir = os.path.join(os.path.dirname(__file__), "shelldocker", "images")
             os.makedirs(tmp_dir, exist_ok=True)
             save_path = os.path.join(tmp_dir, f"hd_{int(time.time())}_{random.randint(1000,9999)}.png")
 
@@ -1689,7 +1689,7 @@ class ShellTool(Tool):
             "--security-opt", "no-new-privileges",
             "--pids-limit", "128",
             "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
-            "--tmpfs", "/home/maxwell:rw,noexec,nosuid,size=256m",
+            "-v", f"{os.path.join(os.path.dirname(__file__), 'shelldocker')}:/home/maxwell:rw",
             self.IMAGE_NAME,
             timeout=30,
         )
