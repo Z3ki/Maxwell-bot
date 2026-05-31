@@ -53,7 +53,7 @@ LOG_RING_SIZE = 200
 # Per-section context budgets (sum ~8800, bumped for enriched channel map)
 CTX_BUDGET_GOALS = 800
 CTX_BUDGET_RECENT_EVENTS = 2000
-CTX_BUDGET_CHANNEL_ACTIVITY = 2000
+CTX_BUDGET_CHANNEL_ACTIVITY = 2800
 CTX_BUDGET_RECENT_ACTIONS = 1200
 CTX_BUDGET_DM_HISTORY = 1200
 CTX_BUDGET_LTM = 800
@@ -129,6 +129,27 @@ def _truncate(text: str, budget: int) -> str:
     if budget <= len(suffix):
         return text[:budget]
     return text[:budget - len(suffix)] + suffix
+
+
+def _relative_time(dt) -> str:
+    """Human-readable relative time like '2m ago', '3h ago', 'just now'."""
+    if dt is None:
+        return "?"
+    try:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        age_s = int((datetime.now(timezone.utc) - dt).total_seconds())
+        if age_s < 0:
+            return "just now"
+        if age_s < 60:
+            return f"{age_s}s ago"
+        if age_s < 3600:
+            return f"{age_s // 60}m ago"
+        if age_s < 86400:
+            return f"{age_s // 3600}h ago"
+        return f"{age_s // 86400}d ago"
+    except Exception:
+        return "?"
 
 
 # ---------------------------------------------------------------------------
@@ -505,7 +526,15 @@ class AutonomyEngine:
                 for ev in events[-30:]:
                     role = ev.get("role", "?")
                     content = str(ev.get("content", ""))[:200]
-                    ev_lines.append(f"[{role}] {content}")
+                    ts = ev.get("ts", "")
+                    age = ""
+                    if ts:
+                        try:
+                            ev_dt = datetime.fromisoformat(str(ts))
+                            age = f" ({_relative_time(ev_dt)})"
+                        except Exception:
+                            pass
+                    ev_lines.append(f"[{role}{age}] {content}")
                 sections.append(_truncate(
                     "=== RECENT CONVERSATIONS (since last check) ===\n" + "\n".join(ev_lines),
                     CTX_BUDGET_RECENT_EVENTS,
@@ -547,7 +576,8 @@ class AutonomyEngine:
                     author_name = getattr(m.author, "display_name", None) or getattr(m.author, "name", "?")
                     content = (m.content or "")[:150]
                     if content:
-                        ch_lines.append(f"[#{getattr(ch, 'name', cid)}:{cid}] {author_name}: {content}")
+                        age = _relative_time(getattr(m, 'created_at', None))
+                        ch_lines.append(f"[{age}] #{getattr(ch, 'name', cid)}:{cid} {author_name}: {content}")
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 continue
             except Exception:
@@ -602,7 +632,8 @@ class AutonomyEngine:
                     author_name = getattr(m.author, "display_name", None) or getattr(m.author, "name", "?")
                     content = (m.content or "")[:200]
                     if content:
-                        dm_lines.append(f"[DM:{channel.id}] {author_name} ({m.author.id}): {content}")
+                        age = _relative_time(getattr(m, 'created_at', None))
+                        dm_lines.append(f"[{age}] DM:{channel.id} {author_name} ({m.author.id}): {content}")
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 continue
             except Exception:
