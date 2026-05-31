@@ -999,10 +999,10 @@ DEFAULT_CONTROL = {
     "max_image_size_mb": 10,
     "ai_timeout_seconds": 180,
     "ai_concurrency": 3,
-    "memory_history_messages": 20,
-    "memory_context_budget": 30000,
-    "tool_history_messages": 3,
-    "prompt_context_budget": 60000,
+    "memory_history_messages": 40,
+    "memory_context_budget": 50000,
+    "tool_history_messages": 10,
+    "prompt_context_budget": 80000,
     "max_tool_iterations": 10,
     "max_response_chars": 500,
     "tools_enabled": False,
@@ -2692,8 +2692,8 @@ class MaxwellBot(commands.Bot):
             control["auto_eval_every"] = max(1, min(int(control.get("auto_eval_every", 5) or 5), 100))
             control["ai_concurrency"] = max(1, min(int(control.get("ai_concurrency", 3) or 3), 10))
             control["max_response_chars"] = max(80, min(int(control.get("max_response_chars", 500) or 500), 4000))
-            control["tool_history_messages"] = max(0, min(int(control.get("tool_history_messages", 3) or 0), 20))
-            control["prompt_context_budget"] = max(10000, min(int(control.get("prompt_context_budget", 60000) or 60000), 200000))
+            control["tool_history_messages"] = max(0, min(int(control.get("tool_history_messages", 10) or 0), 30))
+            control["prompt_context_budget"] = max(10000, min(int(control.get("prompt_context_budget", 80000) or 80000), 200000))
             control["autonomy_interval_seconds"] = max(30, int(control.get("autonomy_interval_seconds", 300) or 300))
             if control["ai_concurrency"] != self._ai_concurrency:
                 self._ai_concurrency = control["ai_concurrency"]
@@ -4059,8 +4059,8 @@ class MaxwellBot(commands.Bot):
         messages = [{"role": "system", "content": "\n\n".join(system_parts)}]
         memory = await self.memory.get_channel_memory(channel_id)
         if memory:
-            budget = max(1000, min(int(self._control.get("memory_context_budget", 30000) or 30000), 100000))
-            count = max(0, min(int(self._control.get("memory_history_messages", 20) or 20), 100))
+            budget = max(1000, min(int(self._control.get("memory_context_budget", 50000) or 50000), 100000))
+            count = max(0, min(int(self._control.get("memory_history_messages", 40) or 40), 100))
             used = 0
             lines = []
             current_message_id = getattr(message, "id", None)
