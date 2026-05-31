@@ -17,8 +17,6 @@ MAINTAINER NOTES:
 - The context budget is PER-SECTION now, not global truncation. The old
   version truncated from the end, so channel activity (the most actionable
   data) got eaten first. Don't "simplify" back to global truncation.
-- Channel cooldowns prevent spam. The bot was posting 3 messages in one
-  tick to the same channel. Respect the cooldown dict.
 """
 
 from __future__ import annotations
@@ -60,10 +58,7 @@ CTX_BUDGET_RECENT_ACTIONS = 1200
 CTX_BUDGET_DM_HISTORY = 1200
 CTX_BUDGET_LTM = 800
 CTX_BUDGET_SHARED = 600
-CTX_BUDGET_CHANNELS_MAP = 1600  # bumped from 800 — enriched with topic/cooldown/recency
-
-# Channel cooldown: don't post to same channel within N seconds
-CHANNEL_COOLDOWN_SECONDS = 1800  # 30 min
+CTX_BUDGET_CHANNELS_MAP = 1600  # bumped from 800 — enriched with topic/recency
 
 # Tools that don't work with autonomous SyntheticMessage execution
 AUTONOMY_DISABLED_TOOLS = frozenset({
@@ -339,23 +334,17 @@ class AutonomyEngine:
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()  # prevents concurrent ticks
         self._last_thought = ""  # avoid AttributeError on early failure
-        # Track channel post cooldowns: {channel_id: last_post_timestamp}
-        self._channel_cooldowns: dict[str, float] = {}
         # Track posted message IDs for engagement checking: [{msg_id, channel_id, timestamp}]
         self._posted_messages: list[dict] = []
         # Validation failures from last tick (fed back into context)
         self._last_validation_failures: list[str] = []
 
     def _auto_channel_candidates(self) -> list[str]:
-        """Stable, cooldown-aware target list for autonomous posts/tools."""
-        now_ts = time.time()
+        """Stable target list for autonomous posts/tools."""
         channels = []
         for raw_cid in sorted(self.bot._auto_channels or set(), key=str):
             cid = re.sub(r"[^0-9]", "", str(raw_cid))
-            if not cid:
-                continue
-            last_post = self._channel_cooldowns.get(cid, 0)
-            if now_ts - last_post >= CHANNEL_COOLDOWN_SECONDS:
+            if cid:
                 channels.append(cid)
         return channels
 
@@ -660,7 +649,7 @@ class AutonomyEngine:
         except Exception as e:
             sections.append(f"=== LONG-TERM MEMORY ===\n(error: {e})")
 
-        # 9. Available channels map — enriched with activity, topic, cooldown status
+        # 9. Available channels map — enriched with activity and topic
         # so the LLM can pick the right channel without cross-referencing CHANNEL ACTIVITY.
         now_ts = time.time()
         ch_map_lines = []
@@ -675,10 +664,6 @@ class AutonomyEngine:
                     tags = []
                     if cid in (self.bot._auto_channels or set()):
                         tags.append("auto")
-                    last_post = self._channel_cooldowns.get(cid, 0)
-                    cooldown_left = int(CHANNEL_COOLDOWN_SECONDS - (now_ts - last_post))
-                    if cooldown_left > 0:
-                        tags.append(f"cooldown:{cooldown_left}s")
                     topic = getattr(ch, "topic", None) or ""
                     topic_snippet = topic[:80].replace("\n", " ") if topic else ""
                     # grab last message time for recency
@@ -810,20 +795,6 @@ class AutonomyEngine:
         except Exception:
             goals_text = "(error loading goals)"
 
-        # Check channel cooldowns for the prompt
-        now_ts = time.time()
-        cooldown_info = []
-        for cid, last_post in self._channel_cooldowns.items():
-            remaining = int(CHANNEL_COOLDOWN_SECONDS - (now_ts - last_post))
-            if remaining > 0:
-                cooldown_info.append(f"  channel {cid}: wait {remaining}s")
-        cooldown_text = ""
-        if cooldown_info:
-            cooldown_text = (
-                "\n\nCHANNEL COOLDOWNS (do NOT post to these channels yet):\n"
-                + "\n".join(cooldown_info)
-            )
-
         # Pull the real personality so autonomy posts sound like the same bot
         base_personality = str(
             (self.bot._control or {}).get('base_personality', DEFAULT_CONTROL.get('base_personality', ''))
@@ -842,7 +813,6 @@ You have access to these tools:
 
 Your goals:
 {goals_text}
-{cooldown_text}
 
 IMPORTANT RULES:
 - The channel activity and recent conversations above are REAL data. Don't try to fetch more — it's already here.
@@ -855,7 +825,6 @@ IMPORTANT RULES:
 - If nothing needs doing, that's FINE. Output do_nothing with a reason.
 - NEVER call search_messages — the channel history is already provided above.
 - ALWAYS use "post_channel" with a "target_channel_id" — the numeric ID, not a channel name.
-- Don't post to channels marked [cooldown:Xs].
 - Don't repeat things you already posted recently (check YOUR RECENT ACTIONS).
 - You can use up to {MAX_ACTIONS_PER_TICK} actions per tick.
 
@@ -1052,13 +1021,6 @@ Do NOT invent other action kinds — they will be rejected."""
                         cid = candidates[0]
                 if not cid:
                     validation_failures.append("post_channel: no channel_id and no auto_channels")
-                    continue
-                # Check channel cooldown
-                now_ts = time.time()
-                last_post = self._channel_cooldowns.get(cid, 0)
-                if now_ts - last_post < CHANNEL_COOLDOWN_SECONDS:
-                    remaining = int(CHANNEL_COOLDOWN_SECONDS - (now_ts - last_post))
-                    validation_failures.append(f"post_channel: channel {cid} on cooldown ({remaining}s remaining)")
                     continue
                 valid.append({
                     "kind": "post_channel",
@@ -1260,8 +1222,6 @@ Do NOT invent other action kinds — they will be rejected."""
         try:
             msg = await channel.send(content)
             result["tool_called"] = "post_channel"
-            # Update cooldown
-            self._channel_cooldowns[channel_id] = time.time()
             # Track for engagement checking
             if msg:
                 self._posted_messages.append({

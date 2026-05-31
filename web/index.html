@@ -119,10 +119,10 @@ footer a:hover{color:var(--accent)}
 <h2>what it does</h2>
 <ul>
 <li onclick="this.classList.toggle('open')"><strong>talks</strong><span>reads text, images, audio, video, files, embeds. responds like a person, not a chatbot.</span><div class="detail">Multimodal input pipeline: extracts attachments, normalizes video/audio, converts GIFs to contact sheets, decodes text files, pulls embed metadata. Everything gets packed into the LLM prompt.</div></li>
-<li onclick="this.classList.toggle('open')"><strong>remembers</strong><span>short-term per-channel, long-term facts, cross-context shared knowledge.</span><div class="detail">Three memory tiers: channel history (last N messages), long-term memory file (editable text), and scoped shared context with importance weighting and expiration. REM assimilation runs on a timer to consolidate.</div></li>
+<li onclick="this.classList.toggle('open')"><strong>remembers</strong><span>short-term per-channel, long-term facts, cross-context shared knowledge.</span><div class="detail">Three memory tiers: channel history (last N messages), long-term memory file (editable text), and scoped shared context with importance weighting and expiration. REM currently reviews recent events and writes an audit; it does not mutate memory by itself.</div></li>
 <li onclick="this.classList.toggle('open')"><strong>voice</strong><span>joins calls, listens, understands audio, replies with TTS.</span><div class="detail">RMS-based speech detection with configurable threshold, pre-roll buffer, pause detection. Supports NVIDIA Riva, espeak-ng, and gTTS. Interrupts playback when someone talks over it.</div></li>
 <li onclick="this.classList.toggle('open')"><strong>tools</strong><span>35+ tools the LLM can call: image gen, web search, shell, sites, files, more.</span><div class="detail">Tools are XML-tagged in the LLM response. Parser handles multiple formats: tool:name, pipe markers, function=. Shell runs in Docker with --network none, --cap-drop ALL, --read-only, 2GB RAM limit.</div></li>
-<li onclick="this.classList.toggle('open')"><strong>auto mode</strong><span>per-channel toggle. decides on its own whether to reply.</span><div class="detail">Every N messages, a lightweight LLM call decides if Maxwell should respond. Factors: mentions, replies to Maxwell's messages, conversation relevance, recent reply frequency, cooldown timers. Works in guilds and group chats.</div></li>
+<li onclick="this.classList.toggle('open')"><strong>autonomy</strong><span>periodic self-directed checks without burning a decider call on every few chat messages.</span><div class="detail">Autonomy wakes on an interval, reads recent server/DM context, checks goals, and decides whether anything is worth doing. The old auto-reply mode got removed because it was a token furnace with opinions.</div></li>
 <li onclick="this.classList.toggle('open')"><strong>multi-platform</strong><span>discord and telegram at the same time.</span><div class="detail">Telegram polling loop with voice/audio support, HTML rendering, chunked message splitting, and per-platform tool compatibility. Shares memory and context with Discord.</div></li>
 </ul>
 
@@ -143,9 +143,9 @@ footer a:hover{color:var(--accent)}
 <span class="cmd" data-tip="cancels whatever maxwell is currently doing">,stop</span>          cancel active response
 <span class="cmd" data-tip="wipes short-term memory for this channel">,clearmem</span>      wipe channel memory
 
-<span class="cm"># auto mode</span>
-<span class="cmd" data-tip="maxwell decides when to reply on its own">,auto</span>          toggle auto-reply
-<span class="cmd" data-tip="shows which channels have auto mode enabled">,auto list</span>     show auto-mode channels
+<span class="cm"># autonomy</span>
+<span class="cmd" data-tip="runs one autonomy check now">,autonomy tick</span> run one autonomy check
+<span class="cmd" data-tip="shows recent autonomy actions">,autonomy log</span>  show autonomy actions
 
 <span class="cm"># voice</span>
 <span class="cmd" data-tip="connects to whatever voice channel you are in">,vc join</span>       connect to voice
@@ -218,7 +218,7 @@ const CH='アイウエオカキクケコ0123456789ABCDEF';
 // Typing hero animation
 const phrases=[
   "hey maxwell what do you think about that",
-  ",auto on",
+  ",autonomy tick",
   "maxwell can you search that up",
   "join vc and say something funny",
   "remember that i prefer dark mode",

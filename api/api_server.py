@@ -56,7 +56,7 @@ _load_env_file(ENV_FILE)
 # Add parent dir to path so we can import shared modules
 import sys as _sys
 _sys.path.insert(0, str(APP_ROOT))
-from control_defaults import DEFAULT_CONTROL, KNOWN_TOOLS, parse_bool as _parse_bool  # noqa: E402
+from control_defaults import DEAD_CONTROL_KEYS, DEFAULT_CONTROL, KNOWN_TOOLS, parse_bool as _parse_bool  # noqa: E402
 
 DATA_DIR = Path(os.getenv("DATA_DIR", APP_ROOT / "data"))
 CORS_ORIGIN = os.getenv("MAXWELL_CORS_ORIGIN", os.getenv("MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com")).rstrip("/")
@@ -315,7 +315,7 @@ def _sanitize_control(control):
     control = _safe_object(control)
     # Preserve newer bot-side settings this API build doesn't understand yet.
     # Dashboard saves should not casually delete config just because the UI lags.
-    out = {k: v for k, v in control.items() if k not in DEFAULT_CONTROL}
+    out = {k: v for k, v in control.items() if k not in DEFAULT_CONTROL and k not in DEAD_CONTROL_KEYS}
     out.update(DEFAULT_CONTROL)
     for key, default in DEFAULT_CONTROL.items():
         value = control.get(key, default)
@@ -339,10 +339,6 @@ def _sanitize_control(control):
                 out[key] = []
         else:
             out[key] = value
-    out["auto_eval_every"] = max(1, min(out["auto_eval_every"], 100))
-    out["auto_max_recent_replies"] = max(0, min(out["auto_max_recent_replies"], 100))
-    out["auto_recent_window_minutes"] = max(1, min(out["auto_recent_window_minutes"], 1440))
-    out["auto_inactivity_minutes"] = max(0, min(out["auto_inactivity_minutes"], 10080))
     out["per_user_cooldown_seconds"] = max(0, min(out["per_user_cooldown_seconds"], 3600))
     out["max_image_size_mb"] = max(1, min(out["max_image_size_mb"], 25))
     out["ai_timeout_seconds"] = max(10, min(out["ai_timeout_seconds"], 600))
@@ -368,7 +364,8 @@ def _sanitize_control(control):
     out["vc_max_response_chars"] = max(40, min(int(out.get("vc_max_response_chars", 260) or 260), 2000))
     out["vc_wake_words"] = [str(x).strip()[:32] for x in out.get("vc_wake_words", []) if str(x).strip()][:20]
     out["base_personality"] = str(out.get("base_personality", DEFAULT_CONTROL["base_personality"]))[:12000]
-    out["auto_decider_prompt"] = str(out.get("auto_decider_prompt", DEFAULT_CONTROL["auto_decider_prompt"]))[:8000]
+    for dead_key in DEAD_CONTROL_KEYS:
+        out.pop(dead_key, None)
     return out
 
 
@@ -1471,7 +1468,7 @@ async def bot_status(request):
         "online": bool(bot_proc and bot_proc.get("pm2_env", {}).get("status") == "online"),
         "control": {k: control.get(k) for k in [
             "bot_enabled", "reply_dms", "reply_groups", "reply_mentions",
-            "auto_mode_enabled", "tools_enabled", "store_memory", "cross_context_enabled",
+            "tools_enabled", "store_memory", "cross_context_enabled",
             "cross_context_extract_enabled"
         ]},
         "stats": {

@@ -9,11 +9,10 @@ Maxwell is a Discord self-bot backed by any OpenAI-compatible API. It reads text
 - Multimodal input: images, audio, video, text files, and Discord embeds are forwarded to the model with normalized video, extracted frames, and extracted audio.
 - Visual memory: recent images persist across messages per channel (configurable depth).
 - Tool system: image generation (Pollinations, NVIDIA NIM, GPT-compatible), web search, URL fetch, arbitrary file sending, meme/media sending, shell execution, polls, invites, site generation, avatar/presence/nickname changes, message editing/forwarding/deletion, and more.
-- Auto mode: per-channel opt-in where Maxwell decides whether to respond to each message via a lightweight decider prompt.
-- Reaction handler: responds to emoji reactions on its own messages in auto-mode channels.
+- Autonomy: periodic self-directed checks where Maxwell reviews context/goals and decides whether to act without running a decider on every few messages.
 - Per-server custom prompts, long-term memory, and scoped cross-context facts across DMs, servers, groups, and channels.
 - Opt-in REM "dreaming" pass that periodically consolidates recent visible traffic into long-term memory.
-- Web dashboard with public read-only GET endpoints and auth-protected mutations.
+- Web dashboard/admin API protected by HTTP Basic auth.
 - Temporary site hosting: generates HTML sites served under a configurable public URL.
 
 ## Project Structure
@@ -110,8 +109,11 @@ All commands use the `,` prefix. Admin commands require the user to be in the ad
 | `,prompt [text]` | Yes | View or set a custom server prompt |
 | `,clearprompt` | Yes | Clear the custom server prompt |
 | `,clearmem` | Yes | Clear channel memory and all cached state |
-| `,auto` | Yes | Toggle auto-mode for this channel |
-| `,auto list` | Yes | List all auto-mode channels |
+| `,autonomy` | Yes | Show autonomy status |
+| `,autonomy tick` | Yes | Trigger one autonomy check immediately |
+| `,autonomy on` / `,autonomy off` | Yes | Enable or disable autonomy |
+| `,autonomy log` | Yes | Show recent autonomy actions |
+| `,autonomy interval <seconds>` | Yes | Set autonomy check interval |
 | `,drug [minutes]` | No | Temporary "fried" personality override |
 | `,drug off` | No | Turn off drug mode |
 | `,blacklist [user]` | Yes | Add/view/clear blacklisted users |
@@ -138,20 +140,25 @@ Live VC replies require `discord-ext-voice-recv`, `PyNaCl`, `ffmpeg`, and an aud
 
 ## Memory and REM
 
-Maxwell keeps its existing memory surfaces: `memory.json` for per-channel short-term chat history and `long_term_memory.txt` for durable line-oriented memory. REM adds a separate visible-only ring at `data/rem_events.json` and, when enabled, periodically "dreams" over events since the previous run.
+Maxwell keeps its existing memory surfaces: `memory.json` for per-channel short-term chat history, `long_term_memory.txt` / long-term memory APIs for durable facts, and scoped shared context for cross-channel facts. REM adds a separate visible-only ring at `data/rem_events.json` and, when enabled, periodically reviews events since the previous run.
 
-The dreamer is not a live chat response and never posts to Discord. It sends a bounded short-term slice to the configured OpenAI-compatible provider, consults current long-term memory, and can privately add, edit, search, or remove durable memory lines through `MemoryManager`. Tool turns are capped by `REM_MAX_TURNS`, and each pass writes an audit row to `data/rem_runs.json`.
+The REM pass is not a live chat response and never posts to Discord. Current code sends a bounded short-term slice plus a long-term memory snapshot to the configured OpenAI-compatible provider and stores an audit row in `data/rem_runs.json`. It does **not** currently run memory-edit tools despite the name; treat it as review/audit unless that loop gets rebuilt.
 
-REM is opt-in with `REM_ENABLED=false` by default. Configure `REM_INTERVAL_SECONDS`, `REM_EVENT_BUFFER_MAX`, `REM_RUN_HISTORY`, and `OLLAMA_REM_MODEL` in `.env`. Admins can use `,rem*` commands or the dashboard REM card; public read endpoints expose status and run history, while mutations require Basic auth.
+REM is opt-in with `REM_ENABLED=false` by default. Configure `REM_INTERVAL_SECONDS`, `REM_EVENT_BUFFER_MAX`, `REM_RUN_HISTORY`, and `OLLAMA_REM_MODEL` in `.env`. Admins can use `,rem*` commands or the dashboard REM card.
+
+## Autonomy
+
+Autonomy is separate from the removed `,auto` auto-reply mode. It wakes on `autonomy_interval_seconds`, gathers recent conversations, DMs, goals, memory, and available channels, then asks the LLM for a JSON action plan. Supported actions are channel posts, DMs, tool calls, memory updates, goal creation, or doing nothing.
+
+Channel post cooldowns were removed. The engine can post to the same channel on consecutive ticks if the planner decides to. Keep the interval sane if you do not want spam; the code is no longer pretending a hardcoded 30-minute cooldown is wisdom.
 
 ## Dashboard / API
 
 The API server (`api/api_server.py`) serves a dashboard and admin interface.
 
-- **GET dashboard endpoints** are public so the public dashboard can load data.
-- **Admin context endpoints** and all **POST/PUT/DELETE endpoints** require HTTP Basic auth with `MAXWELL_ADMIN_USER` / `MAXWELL_ADMIN_PASSWORD`.
-- **`POST /api/login`** is exempt from middleware; credentials are validated by the handler.
-- The admin HTML can be served publicly; protected actions still require API credentials inside the UI.
+- All API/data requests require HTTP Basic auth with `MAXWELL_ADMIN_USER` / `MAXWELL_ADMIN_PASSWORD`, except `OPTIONS` preflight and `POST /api/login`.
+- `POST /api/login` is exempt from middleware; credentials are validated by the handler and rate-limited.
+- The admin HTML can be served publicly, but it will not load data or mutate anything until credentials are supplied.
 
 Static files (`web/index.html`, `web/admin/index.html`) should be copied to a web root. Reverse proxy `/api/*` and `/data/*` to `MAXWELL_API_HOST:MAXWELL_API_PORT`. See `examples/Caddyfile.example`.
 

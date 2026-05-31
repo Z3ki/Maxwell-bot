@@ -1,11 +1,9 @@
 import asyncio
 import json
-import time
 from types import SimpleNamespace
 
 from autonomy import (
     AUTONOMY_DISABLED_TOOLS,
-    CHANNEL_COOLDOWN_SECONDS,
     AutonomyEngine,
     AutonomyStore,
     _truncate,
@@ -29,9 +27,8 @@ def _engine(tmp_path, *, auto_channels=None, tools=None):
     return AutonomyEngine(bot)
 
 
-def test_parse_plan_fallback_channel_skips_cooldown(tmp_path):
+def test_parse_plan_fallback_channel_uses_first_auto_channel(tmp_path):
     engine = _engine(tmp_path, auto_channels={"100", "200"})
-    engine._channel_cooldowns["100"] = time.time() - CHANNEL_COOLDOWN_SECONDS + 10
 
     raw = json.dumps({
         "thought": "say something",
@@ -42,7 +39,7 @@ def test_parse_plan_fallback_channel_skips_cooldown(tmp_path):
     assert failures == []
     assert actions == [{
         "kind": "post_channel",
-        "target_channel_id": "200",
+        "target_channel_id": "100",
         "content": "hello",
         "reason": "",
     }]

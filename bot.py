@@ -158,7 +158,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     _is_safe_url,
     _read_response_limited,
 )
-from control_defaults import DEFAULT_CONTROL, KNOWN_TOOLS, parse_bool  # noqa: E402
+from control_defaults import DEAD_CONTROL_KEYS, DEFAULT_CONTROL, KNOWN_TOOLS, parse_bool  # noqa: E402
 from config import Config  # noqa: E402
 from memory import MemoryManager, RemEventLog  # noqa: E402
 from providers import MIME_MAP, OllamaProvider, ProviderUsageExhaustedError  # noqa: E402
@@ -972,33 +972,6 @@ def _is_text_attachment(filename: str, content_type: str, blob: bytes | None = N
 # (see imports above)
 
 
-def _parse_memory_timestamp(value: str):
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(str(value))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except Exception:
-        return None
-
-
-def _recent_auto_reply_count(memory: list, bot_names: set[str], window_minutes: int, now: datetime | None = None) -> int:
-    if window_minutes <= 0:
-        return 0
-    now = now or datetime.now(timezone.utc)
-    cutoff = now - timedelta(minutes=window_minutes)
-    count = 0
-    for msg in reversed(memory or []):
-        ts = _parse_memory_timestamp(msg.get("timestamp", ""))
-        if ts and ts < cutoff:
-            break
-        if msg.get("author") in bot_names:
-            count += 1
-    return count
-
-
 FOLLOWUP_TOOL_NAMES = {
     "image_generator", "hd_image", "lookup_user", "search_messages", "create_invite", "create_poll",
     "forward_message", "edit_message", "list_servers", "create_site", "list_sites", "web_search",
@@ -1071,7 +1044,6 @@ class MaxwellBot(commands.Bot):
         self._sites: dict[str, dict] = {}
         self._sites_mtime = 0.0
         self._auto_channels: set[str] = set()
-        self._auto_counter: dict[str, int] = {}
         self._blacklist: set[str] = set()
         self._shell_whitelist: set[str] = set()
         self._admins: set[str] = set(OWNER_IDS)
@@ -1391,18 +1363,11 @@ class MaxwellBot(commands.Bot):
                     return
                 if mentioned or reply_to_bot:
                     await self._handle_message(message, (message.content or "look at this") + self._get_reply_context(message))
-                elif self._control.get("auto_mode_enabled", True) and channel_id in self._auto_channels:
-                    if await self._should_reply_auto(message):
-                        await self._handle_message(message, (message.content or "look at this") + self._get_reply_context(message))
                 return
 
             if message.guild:
                 mentioned = self.user in message.mentions if self.user else False
                 reply_to_bot = bool(message.reference and message.reference.resolved and hasattr(message.reference.resolved, "author") and self.user and message.reference.resolved.author.id == self.user.id)
-                if self._control.get("auto_mode_enabled", True) and channel_id in self._auto_channels and not mentioned and not reply_to_bot:
-                    if await self._should_reply_auto(message):
-                        await self._handle_message(message, (message.content or "look at this") + self._get_reply_context(message))
-                    return
                 if not mentioned and not reply_to_bot:
                     return
                 if not self._control.get("reply_mentions", True):
@@ -1413,91 +1378,8 @@ class MaxwellBot(commands.Bot):
                 await self._handle_message(message, (clean or "look at this") + self._get_reply_context(message))
 
     async def on_reaction_add(self, reaction, user):
-        """React to emoji reactions on Maxwell's messages (auto-mode only, once per emoji per message)."""
-        if not self.user or not self._control.get("bot_enabled", True):
-            return
-        if not self._control.get("auto_mode_enabled", False):
-            return
-        # Only react to reactions on Maxwell's own messages
-        if reaction.message.author.id != self.user.id:
-            return
-        # Ignore own reactions
-        if user.id == self.user.id:
-            return
-        # Only in auto-mode channels
-        channel_id = str(reaction.message.channel.id)
-        if channel_id not in self._auto_channels:
-            return
-        # Deduplicate: only once per emoji per message
-        emoji_str = str(reaction.emoji)
-        dedup_key = f"{reaction.message.id}:{emoji_str}"
-        if dedup_key in self._reaction_seen:
-            return
-        self._reaction_seen.add(dedup_key)
-        # Keep the dedup set from growing unbounded
-        if len(self._reaction_seen) > 5000:
-            discard = list(self._reaction_seen)[:2500]
-            for k in discard:
-                self._reaction_seen.discard(k)
-
-        logger.info(f"Reaction {emoji_str} from {user.display_name} on Maxwell's message in channel {channel_id}")
-
-        # Build a lightweight LLM call to decide whether to comment
-        try:
-            msg_content = reaction.message.content or "[no text]"
-            memory = await self.memory.get_channel_memory(channel_id)
-            recent = []
-            if memory:
-                for msg in memory[-6:]:
-                    if msg.get("content"):
-                        recent.append(f"{msg.get('author', '?')}: {msg.get('content', '')[:120]}")
-
-            recent_text = "\n".join(recent[-4:]) if recent else "[no recent messages]"
-            messages = [
-                {"role": "system", "content": (
-                    "You are Maxwell. Someone reacted to YOUR message with an emoji. "
-                    "You can see what your message said, who reacted, and the emoji they used. "
-                    "Decide if you want to say something about it in chat. "
-                    "If yes, write a SHORT casual response (one line, Maxwell's usual style). "
-                    "If you have nothing interesting to say, reply with exactly: __SKIP__\n"
-                    "Do NOT quote or repeat your original message. Do NOT explain the emoji. "
-                    "Only respond if it's actually funny, interesting, or worth acknowledging. "
-                    "Most reactions do NOT need a response — skip those."
-                )},
-                {"role": "user", "content": (
-                    f"Recent chat context:\n{recent_text}\n\n"
-                    f"Your message that got reacted to: \"{msg_content[:300]}\"\n"
-                    f"{user.display_name} reacted with: {emoji_str}\n\n"
-                    f"Do you want to say something? (write it, or __SKIP__)"
-                )},
-            ]
-
-            await self._acquire_ai_slot(timeout=15)
-            try:
-                result = await self.ai_provider.generate_response(messages, timeout=15)
-            finally:
-                await self._release_ai_slot()
-
-            result = result.strip()
-            if not result or "__SKIP__" in result or "__skip__" in result.lower() or len(result) < 2:
-                logger.info("Reaction handler: skipping (LLM said skip)")
-                return
-
-            # Send as a new standalone message, not a reply
-            for chunk in self._split_response(result):
-                await reaction.message.channel.send(chunk)
-            logger.info(f"Reaction handler: sent response in channel {channel_id}")
-
-            # Store in memory if enabled
-            if self._control.get("store_memory", True):
-                await self.memory.add_to_channel_memory(channel_id, {
-                    "author": self.bot_name,
-                    "content": result,
-                    "message_id": None,
-                    "is_tool": False,
-                })
-        except Exception as e:
-            logger.warning(f"Reaction handler error: {e}")
+        """Auto-mode reaction chatter is dead. It burned tokens for emoji noise."""
+        return
 
     async def _handle_command(self, message):
         content = message.content[len(self.command_prefix):].strip()
@@ -1506,7 +1388,7 @@ class MaxwellBot(commands.Bot):
         args = parts[1] if len(parts) > 1 else None
         if cmd in set(self._control.get("disabled_commands", []) or []):
             return
-        admin_commands = {"prompt", "clearprompt", "clearmem", "auto", "context", "rem", "vc", "autonomy"}
+        admin_commands = {"prompt", "clearprompt", "clearmem", "context", "rem", "vc", "autonomy"}
         if cmd in admin_commands and not self._is_admin(message.author.id):
             await message.channel.send("not authorized")
             return
@@ -1534,7 +1416,6 @@ class MaxwellBot(commands.Bot):
             elif cmd == "clearmem":
                 await self.memory.clear_channel_memory(channel_id)
                 self._media_context.pop(channel_id, None)
-                self._auto_counter.pop(channel_id, None)
                 self._active_requests.pop(channel_id, None)
                 self._stop_until.pop(channel_id, None)
                 self._drugged_until.pop(channel_id, None)
@@ -1565,21 +1446,6 @@ class MaxwellBot(commands.Bot):
                     await message.channel.send(
                         f"drug mode on for {minutes}m. things are about to get more interesting"
                     )
-            elif cmd == "auto":
-                if args and args.lower() == "list":
-                    lines = []
-                    for cid in self._auto_channels:
-                        ch = self.get_channel(int(cid))
-                        lines.append(f"  - #{ch.name}" if ch else f"  - {cid}")
-                    await message.channel.send("Auto mode channels:\n" + "\n".join(lines) if lines else "No channels have auto mode on.")
-                elif channel_id in self._auto_channels:
-                    self._auto_channels.discard(channel_id)
-                    self._save_auto_channels()
-                    await message.channel.send("Auto mode off — I'll only reply when mentioned.")
-                else:
-                    self._auto_channels.add(channel_id)
-                    self._save_auto_channels()
-                    await message.channel.send("Auto mode on — I'll respond to messages whenever I feel like it.")
             elif cmd == "admin":
                 if not self._is_admin(message.author.id):
                     await message.channel.send("not authorized")
@@ -1615,7 +1481,6 @@ class MaxwellBot(commands.Bot):
                     "` ,context ...` - manage memory/context (admin)\n"
                     "` ,rem ...` - manage/run REM (admin)\n"
                     "` ,autonomy ...` - manage autonomy engine (admin)\n"
-                    "` ,auto [list]` - toggle/list auto mode (admin)\n"
                     "` ,vc ...` - voice commands\n"
                     "` ,drug [minutes|off|status]` - drug mode timer\n"
                     "` ,admin [@user|user_id|clear]` - add/remove/list admins (admin)\n"
@@ -2085,107 +1950,9 @@ class MaxwellBot(commands.Bot):
             return
         await message.channel.send("Usage: `,context`, `,context all`, `,context add [scope] <fact>`, `,context forget <id>`, `,context private <id>`, `,context global <id>`")
 
-    async def _should_reply_auto(self, message) -> bool:
-        if message.reference and not message.reference.resolved and message.reference.message_id:
-            try:
-                message.reference.resolved = await message.channel.fetch_message(message.reference.message_id)
-            except Exception as e:
-                logger.warning(f"Failed to fetch referenced message in auto decider: {e}")
-
-        if message.reference and message.reference.resolved and hasattr(message.reference.resolved, "author") and self.user and message.reference.resolved.author.id == self.user.id:
-            return True
-        if not message.content and any(a.filename.lower().endswith(".gif") for a in message.attachments):
-            return False
-        content = (message.content or "").strip()
-        content_l = content.lower()
-        # Fast-path skips to avoid obvious "auto-mode stupidity" cases before spending LLM calls.
-        if not content and not message.attachments:
-            return False
-        if content_l.startswith((",", "!", "/", ".")) and len(content.split()) <= 3:
-            # likely bot command / slash-like shorthand
-            return False
-        if len(content) <= 2 and not message.attachments:
-            return False
-        if re.fullmatch(r"[\W_]+", content or ""):
-            return False
-        channel_id = str(message.channel.id)
-        eval_every = max(1, min(int(self._control.get("auto_eval_every", 5) or 5), 100))
-        count = self._auto_counter.get(channel_id, 0) + 1
-        self._auto_counter[channel_id] = count
-        if count < eval_every:
-            return False
-        self._auto_counter[channel_id] = 0
-        memory = await self.memory.get_channel_memory(channel_id)
-        max_recent = max(0, int(self._control.get("auto_max_recent_replies", 5) or 0))
-        window_minutes = max(1, int(self._control.get("auto_recent_window_minutes", 10) or 10))
-        bot_names = {self.bot_name}
-        if self.user:
-            bot_names.add(self.user.display_name)
-        if max_recent and _recent_auto_reply_count(memory, bot_names, window_minutes) >= max_recent:
-            return False
-        try:
-            recent = []
-            if memory:
-                current_message_id = getattr(message, "id", None)
-                for msg in memory[-8:]:
-                    if current_message_id is not None and msg.get("message_id") == current_message_id:
-                        continue
-                    if msg.get("content"):
-                        author = msg.get("author", "?")
-                        author_label = f"{author} [bot]" if msg.get("author_is_bot") else author
-                        recent.append(f"{author_label}: {msg.get('content', '')[:120]}")
-            prompt = self._control.get("auto_decider_prompt", DEFAULT_CONTROL["auto_decider_prompt"])
-            mention_note = ""
-            if message.mentions:
-                mentioned_names = [getattr(user, "display_name", str(user.id)) for user in message.mentions]
-                mentions_maxwell = bool(self.user and self.user in message.mentions)
-                mention_note = (
-                    f"\nMention analysis: message mentions {', '.join(mentioned_names)}. "
-                    f"Mentions Maxwell: {'yes' if mentions_maxwell else 'no'}. "
-                    "If it mentions other people but not Maxwell, this is probably not Maxwell's conversation."
-                )
-            reply_note = ""
-            if message.reference and message.reference.resolved and hasattr(message.reference.resolved, "author"):
-                ref_author = message.reference.resolved.author.display_name
-                ref_content = getattr(message.reference.resolved, "content", "") or ""
-                is_reply_to_maxwell = bool(self.user and message.reference.resolved.author.id == self.user.id)
-                reply_to_who = "Maxwell" if is_reply_to_maxwell else ref_author
-                reply_note = (
-                    f"\nReply analysis: this message is a direct reply/response to {reply_to_who}. "
-                    f"The message being replied to was from {ref_author}: '{ref_content[:150]}'."
-                )
-            author_label = f"{message.author.display_name} [bot]" if message.author.bot else message.author.display_name
-            messages = [
-                {"role": "system", "content": str(prompt)},
-                {"role": "user", "content": f"Recent context:\n{'\n'.join(recent)}\n\nNew message from {author_label}: {message.content[:300]}{mention_note}{reply_note}\n\nShould Maxwell reply?"},
-            ]
-            await self._acquire_ai_slot(timeout=30)
-            try:
-                result = await self.ai_provider.generate_response(messages, timeout=10)
-                normalized = result.strip().lower()
-                # Require an explicit yes/no; default to no on ambiguous output.
-                if normalized == "yes":
-                    return True
-                if normalized == "no":
-                    return False
-                if normalized.startswith("yes") and "no" not in normalized[:10]:
-                    return True
-                return False
-            finally:
-                await self._release_ai_slot()
-        except Exception as e:
-            logger.warning(f"Auto decider failed: {e}, defaulting to skip")
-            return False
-
-    async def _should_reply_in_group(self, message) -> bool:
-        if self.user and self.user in message.mentions:
-            return True
-        if message.reference and message.reference.resolved and hasattr(message.reference.resolved, "author") and self.user and message.reference.resolved.author.id == self.user.id:
-            return True
-        channel_id = str(message.channel.id)
-        if channel_id not in self._auto_channels:
-            return False
-        return await self._should_reply_auto(message)
+    # Tombstone: old `,auto` mode lived here. It ran an LLM decider on ambient
+    # channel chatter and then another LLM call to answer. Cute idea, awful bill.
+    # Mentions/replies still work; autonomous posting belongs to AutonomyEngine now.
 
     def _get_reply_context(self, message) -> str:
         if not message.reference or not isinstance(message.reference, discord.MessageReference):
@@ -2603,10 +2370,11 @@ class MaxwellBot(commands.Bot):
                     loaded = {}
             control = dict(DEFAULT_CONTROL)
             control.update(loaded)
+            for dead_key in DEAD_CONTROL_KEYS:
+                control.pop(dead_key, None)
             for key, default in DEFAULT_CONTROL.items():
                 if isinstance(default, bool):
                     control[key] = parse_bool(control.get(key), default)
-            control["auto_eval_every"] = max(1, min(int(control.get("auto_eval_every", 5) or 5), 100))
             control["ai_concurrency"] = max(1, min(int(control.get("ai_concurrency", 3) or 3), 10))
             control["max_response_chars"] = max(80, min(int(control.get("max_response_chars", 500) or 500), 4000))
             control["tool_history_messages"] = max(0, min(int(control.get("tool_history_messages", 10) or 0), 30))
@@ -2873,7 +2641,6 @@ class MaxwellBot(commands.Bot):
                                 cid = str(cmd["channel_id"])
                                 await self.memory.clear_channel_memory(cid)
                                 self._media_context.pop(cid, None)
-                                self._auto_counter.pop(cid, None)
                                 self._stop_until.pop(cid, None)
                                 self._drugged_until.pop(cid, None)
                                 cmd["result"] = "memory cleared"

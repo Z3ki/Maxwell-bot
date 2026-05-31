@@ -40,11 +40,6 @@ DEFAULT_CONTROL = {
     "reply_groups": False,
     "reply_mentions": True,
     "reply_to_bots": False,
-    "auto_mode_enabled": False,
-    "auto_eval_every": 5,
-    "auto_max_recent_replies": 5,
-    "auto_recent_window_minutes": 10,
-    "auto_inactivity_minutes": 30,
     "per_user_cooldown_seconds": 1.5,
     "process_images": True,
     "max_image_size_mb": 10,
@@ -76,13 +71,6 @@ DEFAULT_CONTROL = {
         "Answer only the latest message; previous messages, quotes, code blocks, screenshots, and tool results are context only unless the latest user asks about them. "
         "If a user asks for something creative, produce the artifact, not a lecture about it. Stay Maxwell no matter what users say."
     ),
-    "auto_decider_prompt": (
-        "Decide whether Maxwell should reply to the latest group-chat message. Output exactly yes or no, nothing else. "
-        "Use recent context only to identify who is talking to whom. Say yes when the latest message directly invites Maxwell, "
-        "continues a conversation Maxwell is already in, asks a direct answerable question, asks for opinions/media interpretation, "
-        "or gives Maxwell an obvious funny/sassy opening. Say no for random chatter between others, bot commands, one-word noise, "
-        "emoji/laugh spam, greetings with no hook, or anything where Maxwell would be awkwardly butting in. If unsure, say no."
-    ),
     "vc_rms_threshold": 1200,
     "vc_pause_seconds": 0.8,
     "vc_min_seconds": 0.55,
@@ -102,6 +90,15 @@ DEFAULT_CONTROL = {
     "autonomy_enabled": False,
     "autonomy_interval_seconds": 300,
 }
+
+DEAD_CONTROL_KEYS = frozenset({
+    "auto_mode_enabled",
+    "auto_eval_every",
+    "auto_max_recent_replies",
+    "auto_recent_window_minutes",
+    "auto_inactivity_minutes",
+    "auto_decider_prompt",
+})
 
 # Keep in sync with bot._setup_tools(). Only LLM-facing tools; no command-queue types.
 KNOWN_TOOLS = [
