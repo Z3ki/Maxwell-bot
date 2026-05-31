@@ -260,7 +260,7 @@ class ImageGeneratorTool(Tool):
             return "Error: image generation is not configured (missing NVIDIA_API_KEY)"
         return await self._nvidia_generate(message, prompt, save_path=save_path)
 
-    async def _nvidia_generate(self, message: Message, prompt: str) -> str:
+    async def _nvidia_generate(self, message: Message, prompt: str, save_path: str = None) -> str:
         api_key = self.bot.config.NVIDIA_API_KEY
         api_url = self.bot.config.NVIDIA_IMAGE_URL
         payload = {
