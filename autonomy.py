@@ -37,6 +37,8 @@ from typing import TYPE_CHECKING
 
 import discord
 
+from control_defaults import DEFAULT_CONTROL  # noqa: E402
+
 if TYPE_CHECKING:
     from bot import MaxwellBot
 
@@ -822,7 +824,15 @@ class AutonomyEngine:
                 + "\n".join(cooldown_info)
             )
 
+        # Pull the real personality so autonomy posts sound like the same bot
+        base_personality = str(
+            (self.bot._control or {}).get('base_personality', DEFAULT_CONTROL.get('base_personality', ''))
+        )
+
         system_prompt = f"""You are Maxwell, doing a periodic check-in on your own. You're reviewing what's happening in your Discord server and deciding if there's something worth doing.
+
+YOUR PERSONALITY AND STYLE (this is who you are — your posts must match this voice):
+{base_personality}
 
 Here is everything you currently know:
 {context}
