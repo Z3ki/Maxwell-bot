@@ -21,6 +21,7 @@ import aiohttp
 import aiofiles
 import logging
 import random
+import time
 from datetime import datetime, timezone, timedelta
 from discord import Message, File, Activity, Status
 from io import BytesIO
@@ -249,8 +250,9 @@ class ImageGeneratorTool(Tool):
         return (
             "Generate an AI image FAST (~3s). Use this as the DEFAULT — quick, decent quality. "
             "Only switch to hd_image when someone specifically asks for 'high quality', 'HD', 'HQ', or 'better quality'. "
-            "Params: prompt (required), save_path (optional: save image to disk for later use, e.g. /tmp/site_hero.png). "
-            "When building a site with create_site, generate images first with save_path, then pass them via the images param."
+            "Params: prompt (required), save_path (optional, defaults to /tmp/maxwell_images/). "
+            "Images are ALWAYS saved to disk automatically. The result includes the saved file path. "
+            "When building a site with create_site, pass the saved path in the images param."
         )
 
     async def execute(self, message: Message, prompt: str = None, save_path: str = None, **kwargs) -> str:
@@ -258,6 +260,12 @@ class ImageGeneratorTool(Tool):
             return "Error: prompt parameter is required"
         if not self.bot.config.NVIDIA_API_KEY:
             return "Error: image generation is not configured (missing NVIDIA_API_KEY)"
+        # Always save to a temp dir so create_site can find it later.
+        # The model never remembers to pass save_path, so we do it for it.
+        if not save_path:
+            tmp_dir = "/tmp/maxwell_images"
+            os.makedirs(tmp_dir, exist_ok=True)
+            save_path = os.path.join(tmp_dir, f"img_{int(time.time())}_{random.randint(1000,9999)}.png")
         return await self._nvidia_generate(message, prompt, save_path=save_path)
 
     async def _nvidia_generate(self, message: Message, prompt: str, save_path: str = None) -> str:
@@ -371,13 +379,20 @@ class HDImageGeneratorTool(Tool):
         return (
             "Generate an HD AI image (~40s). Use ONLY when the user explicitly asks for 'high quality', 'HD', 'HQ', 'better quality', or similar. "
             "Otherwise default to image_generator (fast/normal). Params: prompt (required), size (optional, e.g. '1024x1024'), "
-            "save_path (optional: save image to disk for later use, e.g. /tmp/site_hero.png). "
-            "When building a site with create_site, generate images first with save_path, then pass them via the images param."
+            "save_path (optional, defaults to /tmp/maxwell_images/). "
+            "Images are ALWAYS saved to disk automatically. The result includes the saved file path. "
+            "When building a site with create_site, pass the saved path in the images param."
         )
 
     async def execute(self, message: Message, prompt: str = None, size: str = "1024x1024", save_path: str = None, **kwargs) -> str:
         if not prompt:
             return "Error: prompt parameter is required"
+
+        # Always save to a temp dir so create_site can find it later.
+        if not save_path:
+            tmp_dir = "/tmp/maxwell_images"
+            os.makedirs(tmp_dir, exist_ok=True)
+            save_path = os.path.join(tmp_dir, f"hd_{int(time.time())}_{random.randint(1000,9999)}.png")
 
         api_url = getattr(self.bot.config, "GPT_IMAGE_URL", "")
         api_key = getattr(self.bot.config, "GPT_IMAGE_API_KEY", "")
@@ -1303,6 +1318,7 @@ class CreateSiteTool(Tool):
 
             # Copy images into site's images/ directory
             image_urls = []
+            missing_images = []
             if images:
                 try:
                     image_list = json.loads(images) if isinstance(images, str) else images
@@ -1319,6 +1335,7 @@ class CreateSiteTool(Tool):
                         entry = {"path": entry}
                     src_path = entry.get("path", "")
                     if not src_path or not os.path.isfile(src_path):
+                        missing_images.append(src_path or "(empty path)")
                         logger.warning(f"Site image not found: {src_path}")
                         continue
                     filename = entry.get("filename") or os.path.basename(src_path)
@@ -1362,6 +1379,8 @@ class CreateSiteTool(Tool):
             result = f"Site created: {self.base_url}/{slug}/"
             if image_urls:
                 result += f"\nEmbedded images ({len(image_urls)}):\n" + "\n".join(f"  - {url}" for url in image_urls)
+            if missing_images:
+                result += f"\nWARNING: {len(missing_images)} image(s) NOT found on disk and skipped: " + ", ".join(missing_images)
             return result
         except Exception as e:
             logger.error(f"Failed to create site {slug}: {e}")
