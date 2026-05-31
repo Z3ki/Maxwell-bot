@@ -764,13 +764,17 @@ class LookupUserTool(Tool):
     """Look up information about a Discord user"""
 
     def get_description(self):
-        return "Look up a Discord user by ID. Returns name, creation date, avatar. Params: user_id (required)."
+        return "Look up a Discord user by ID or mention. Params: user_id (required, numeric ID or @mention). Returns name, creation date, avatar."
 
     async def execute(self, message: Message, user_id: str = None, **kwargs) -> str:
         if not user_id:
             return "Error: user_id is required"
+        # Strip mention syntax like <@123456> or <@!123456>
+        cleaned = re.sub(r"[^0-9]", "", str(user_id))
+        if not cleaned:
+            return f"Error: Could not extract a numeric user ID from '{user_id}'"
         try:
-            user = await self.bot.fetch_user(int(user_id))
+            user = await self.bot.fetch_user(int(cleaned))
             if not user:
                 return f"Error: User {user_id} not found"
             created = user.created_at.strftime("%Y-%m-%d") if user.created_at else "unknown"
@@ -1240,8 +1244,8 @@ class CreateSiteTool(Tool):
             "Params: name (short slug, lowercase/numbers/hyphens), title (headline), "
             "body (FULL HTML document — write complete <!DOCTYPE html> pages with all styles/JS inline. "
             "Written as-is to file, no template wrapping), encoding (optional: text or base64; use base64 for exact full HTML). "
-            "To include images: first generate them with image_generator, which returns a Discord CDN URL. "
-            "Then use that URL directly in your HTML <img> tags. No file paths needed."
+            "Only generate images with image_generator if the site NEEDS images (visual showcase, portfolio, etc). "
+            "Plain text/CSS sites do NOT need images. If you do generate images, use the returned Discord CDN URL in <img> tags."
         )
 
     async def execute(self, message: Message, name: str = None, title: str = None, body: str = None, encoding: str = "text", images: str = None, **kwargs) -> str:
