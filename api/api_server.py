@@ -48,21 +48,16 @@ def _int_env_safe(name: str, default: int) -> int:
         return default
 
 
-def _parse_bool(value, default: bool = False) -> bool:
-    # Do not replace with bool(value). bool("false") is True. Yes, really.
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "on"}:
-        return True
-    if text in {"0", "false", "no", "off"}:
-        return False
-    return default
+
 
 
 _load_env_file(ENV_FILE)
+
+# Add parent dir to path so we can import shared modules
+import sys as _sys
+_sys.path.insert(0, str(APP_ROOT))
+from control_defaults import DEFAULT_CONTROL, KNOWN_TOOLS, parse_bool as _parse_bool  # noqa: E402
+
 DATA_DIR = Path(os.getenv("DATA_DIR", APP_ROOT / "data"))
 CORS_ORIGIN = os.getenv("MAXWELL_CORS_ORIGIN", os.getenv("MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com")).rstrip("/")
 API_HOST = os.getenv("MAXWELL_API_HOST", "127.0.0.1")
@@ -93,103 +88,9 @@ MAX_LTM_CHARS = 1000
 MAX_PROMPT_CHARS = 12000
 MAX_ID_CHARS = 64
 _file_lock = asyncio.Lock()
-DEFAULT_CONTROL = {
-    "bot_enabled": True,
-    "log_messages": False,
-    "error_replies": True,
-    "typing_indicator": True,
-    "store_memory": False,
-    "long_term_memory_enabled": True,
-    "cross_context_enabled": True,
-    "cross_context_extract_enabled": True,
-    "cross_context_max_items": 10,
-    "cross_context_budget": 5000,
-    "cross_context_min_importance": 5,
-    "cross_context_dm_to_global_admin_only": True,
-    "emoji_context_enabled": True,
-    "music_context_enabled": True,
-    "reply_dms": False,
-    "reply_groups": False,
-    "reply_mentions": True,
-    "reply_to_bots": False,
-    "auto_mode_enabled": False,
-    "auto_eval_every": 5,
-    "auto_max_recent_replies": 5,
-    "auto_recent_window_minutes": 10,
-    "auto_inactivity_minutes": 30,
-    "per_user_cooldown_seconds": 1.5,
-    "process_images": True,
-    "max_image_size_mb": 10,
-    "ai_timeout_seconds": 180,
-    "ai_concurrency": 3,
-    "memory_history_messages": 20,
-    "memory_context_budget": 30000,
-    "tool_history_messages": 3,
-    "prompt_context_budget": 60000,
-    "max_tool_iterations": 10,
-    "max_response_chars": 500,
-    "tools_enabled": False,
-    "disabled_tools": [],
-    "ignore_users": [],
-    "allowed_channels": [],
-    "blocked_channels": [],
-    "disabled_commands": [],
-    "base_personality": (
-        "You are Maxwell. NOT an AI assistant. You're a person in a group chat. "
-        "Talk like texting - short, casual, lowercase, minimal punctuation. "
-        "NO asterisk actions, roleplay brackets, paragraphs, over-explaining, line breaks, or newlines. "
-        "ONE SINGLE LINE per response. Be sassy, sarcastic, blunt. Use slang. "
-        "Never add disclaimers or warnings. Use tools only when they make sense, not every message."
-    ),
-    "auto_decider_prompt": (
-        "You are Maxwell, a real person in this group chat. Decide if you should reply to the latest message. "
-        "Output ONLY 'yes' or 'no'. Be conservative and avoid butting into conversations that are not for you. "
-        "Use the recent context to understand who is talking to whom; do not treat older context as something to answer. "
-        "Say 'yes' if: "
-        "- Someone directly pings you or replies to your message. "
-        "- Someone asks a direct question that you can answer or give a strong/funny opinion on. "
-        "- A bot message directly addresses Maxwell, quotes Maxwell, or clearly invites a response. "
-        "- The topic is highly chaotic, funny, controversial, or interesting, and you can add a short, blunt, or sassy one-liner. "
-        "- Someone uploads media (image/video/audio) asking for your thoughts. "
-        "Say 'no' if: "
-        "- It is random chatter between other people or bots where you'd be awkward or butting in. "
-        "- It is just hello/goodbye, boring greetings, simple agreement (e.g. 'ok', 'yeah'), or laughing/emoji spam. "
-        "- It is a bot command, automated status/log output, or a message meant for someone else. "
-        "- You have nothing interesting, funny, or blunt to add. If in doubt, output 'no'."
-    ),
-    "vc_rms_threshold": 1200,
-    "vc_pause_seconds": 0.8,
-    "vc_min_seconds": 0.55,
-    "vc_max_seconds": 18,
-    "vc_preroll_seconds": 0.25,
-    "vc_ai_timeout_seconds": 25,
-    "vc_ai_max_tokens": 90,
-    "vc_memory_history_messages": 2,
-    "vc_cross_context_enabled": False,
-    "vc_max_response_chars": 260,
-    "vc_tts_engine": "riva",
-    "vc_reply_mode": "voice",
-    "vc_response_mode": "addressed",
-    "vc_wake_words": ["maxwell"],
-    "vc_interrupt_enabled": True,
-    "vc_debug": True,
-    "autonomy_enabled": False,
-    "autonomy_interval_seconds": 300,
-}
+# DEFAULT_CONTROL, KNOWN_TOOLS, _parse_bool imported from control_defaults.py above
 MAX_COMMANDS = 200
 MAX_AUTONOMY_GOALS = 50
-# Keep this in sync with MaxwellBot._setup_tools(). Do not add command-queue
-# types here; this list is only for LLM tools. Dead entries make the admin UI lie.
-KNOWN_TOOLS = [
-    "image_generator", "hd_image", "change_presence", "set_activity",
-    "memory_edit", "react", "edit_message", "delete_message", "create_poll",
-    "create_invite", "lookup_user", "search_messages", "set_nickname",
-    "forward_message", "typing", "tts", "list_servers", "list_admin_servers",
-    "create_category", "create_channel", "edit_channel", "delete_channel",
-    "change_avatar", "create_site", "list_sites", "web_search", "no_response",
-    "shell", "fetch_url", "send_file", "send_message", "reasoning_log",
-    "send_meme", "send_media", "kilo_run", "leave_vc",
-]
 
 
 def _json_response(data, status=200):

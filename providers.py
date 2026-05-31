@@ -140,7 +140,7 @@ class OllamaProvider:
         disable_reasoning: bool = None,
     ) -> dict:
         data = {
-            "model": model or endpoint.model if endpoint.name == "primary" else endpoint.model,
+            "model": (model or endpoint.model) if endpoint.name == "primary" else endpoint.model,
             "messages": chat_messages,
             "temperature": self.temperature if temperature is None else temperature,
             "stream": False,

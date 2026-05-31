@@ -149,11 +149,11 @@ class RemEventLog:
         self._save_task = loop.call_later(5, self._do_save)
 
     def _do_save(self):
+        self._save_task = None
         if self._dirty:
             self._dirty = False
             snapshot = json.loads(json.dumps(self.events, ensure_ascii=False))
             self._pending_save = asyncio.ensure_future(self._atomic_save(snapshot))
-        self._save_task = None
 
     async def record(self, event: dict):
         async with self._lock:
@@ -185,6 +185,8 @@ class RemEventLog:
         if self._save_task is not None:
             self._save_task.cancel()
             self._save_task = None
+        # If a timer was cancelled before _do_save ran, we still have dirty data.
+        # Flush it synchronously instead of silently losing it.
         if self._pending_save is not None and not self._pending_save.done():
             await self._pending_save
             self._pending_save = None
@@ -283,12 +285,12 @@ class MemoryManager:
 
     def _do_save(self):
         """Actually save if dirty — snapshot data so we don't race mutations."""
+        self._save_task = None
         if self._dirty:
             self._dirty = False
             snapshot = json.loads(json.dumps(self.memory, ensure_ascii=False))
             # Track the save task so flush() can wait for it
             self._pending_save = asyncio.ensure_future(self._atomic_save(self.memory_file, snapshot))
-        self._save_task = None
 
     async def flush(self):
         """Flush any pending memory save immediately. Call on shutdown."""
@@ -296,12 +298,13 @@ class MemoryManager:
             self._save_task.cancel()
             self._save_task = None
         # Wait for any in-flight save
-        if hasattr(self, '_pending_save') and self._pending_save is not None:
+        if hasattr(self, '_pending_save') and self._pending_save is not None and not self._pending_save.done():
             try:
                 await self._pending_save
             except Exception:
                 pass
             self._pending_save = None
+        # If a timer was cancelled before _do_save ran, we still have dirty data.
         if self._dirty:
             self._dirty = False
             snapshot = json.loads(json.dumps(self.memory, ensure_ascii=False))

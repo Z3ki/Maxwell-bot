@@ -31,26 +31,15 @@ from ddgs import DDGS as _DDGS
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_OWNER_IDS = {"1471821513824014480", "7671187431"}
+# Owner IDs come from env var only — no hardcoded defaults to leak in open-source.
 OWNER_IDS = {
     item.strip()
-    for item in os.environ.get("MAXWELL_OWNER_IDS", ",".join(sorted(DEFAULT_OWNER_IDS))).split(",")
+    for item in os.environ.get("MAXWELL_OWNER_IDS", "").split(",")
     if item.strip()
 }
 
 
-def parse_bool(value, default: bool = False) -> bool:
-    """Parse persisted/env booleans. bool("false") is True because Python is an asshole."""
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "on"}:
-        return True
-    if text in {"0", "false", "no", "off"}:
-        return False
-    return default
+from control_defaults import parse_bool  # Single source of truth; bool("false") is True because Python is an asshole.
 TTS_LANGUAGE_ALIASES = {
     "en": "english",
     "en-us": "english",
@@ -1329,7 +1318,7 @@ class CreateSiteTool(Tool):
             # Inject CSP meta tag to mitigate XSS from arbitrary HTML
             csp_meta = (
                 '<meta http-equiv="Content-Security-Policy" '
-                "content=\"default-src 'self'; script-src 'unsafe-inline' 'unsafe-eval'; "
+                "content=\"default-src 'self'; script-src 'self'; "
                 "style-src 'unsafe-inline'; img-src * data:; connect-src 'self'\">"
             )
             if "<head" in body.lower():
@@ -2016,57 +2005,8 @@ class SendMediaTool(Tool):
         return f"__MEDIA_SENT__ Sent media: {filename}"
 
 
-class KiloTool(Tool):
-    """Execute kilo command directly via Kilo's CLI to perform complex multi-step coding/research tasks (ADMINS ONLY)"""
-
-    def get_description(self):
-        return (
-            "Run kilo command directly via Kilo's CLI to perform complex multi-step coding/research tasks (ADMINS ONLY). "
-            "Params: instruction (required, the instruction for Kilo)."
-        )
-
-    async def execute(self, message: Message, instruction: str = None, **kwargs) -> str:
-        author_id = str(message.author.id) if message.author else ""
-        if not self.bot._is_admin(author_id):
-            return "Error: kilo is admin-only"
-
-        if not parse_bool(os.getenv("MAXWELL_ENABLE_KILO_TOOL"), False):
-            return "Error: kilo tool is disabled (set MAXWELL_ENABLE_KILO_TOOL=true to enable this cursed host-level escape hatch)"
-
-        if not instruction or not instruction.strip():
-            return "Error: instruction parameter is required"
-
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "kilo", "run", "--auto", instruction,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-        except asyncio.TimeoutError:
-            return "Error: Kilo command timed out after 300 seconds"
-        except Exception as e:
-            return f"Error executing Kilo: {e}"
-
-        out = stdout.decode(errors="replace").strip()
-        err = stderr.decode(errors="replace").strip()
-
-        # Remove ANSI color codes
-        out = re.sub(r'\x1b\[[0-9;]*m', '', out)
-        err = re.sub(r'\x1b\[[0-9;]*m', '', err)
-
-        combined = ""
-        if out:
-            combined += out
-        if err:
-            if combined:
-                combined += "\n"
-            combined += f"[stderr] {err}"
-
-        if len(combined) > 5000:
-            combined = combined[:5000] + "\n...[output truncated]..."
-
-        return combined if combined else "Kilo ran successfully with no output."
+# KiloTool removed — it was a host-level RCE escape hatch that bypassed
+# the Docker sandbox. One prompt injection and the LLM owns your box.
 
 
 class TtsTool(Tool):
