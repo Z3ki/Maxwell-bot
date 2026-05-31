@@ -12,6 +12,8 @@ import os
 import re
 import shutil
 from pathlib import Path
+from typing import Any, cast
+import socket
 import tempfile
 
 import asyncio
@@ -21,7 +23,6 @@ import aiohttp
 import aiofiles
 import logging
 import random
-import time
 from datetime import datetime, timezone, timedelta
 from discord import Message, File, Activity, Status
 from io import BytesIO
@@ -39,7 +40,6 @@ OWNER_IDS = {
 }
 
 
-from control_defaults import parse_bool  # Single source of truth; bool("false") is True because Python is an asshole.
 TTS_LANGUAGE_ALIASES = {
     "en": "english",
     "en-us": "english",
@@ -59,19 +59,37 @@ TTS_RIVA_DEFAULTS = {
     "spanish": ("Magpie-Multilingual.ES-US.Jason.Angry", "es-US"),
 }
 
-_SHARED_SESSION: aiohttp.ClientSession = None
+_SHARED_SESSION: aiohttp.ClientSession | None = None
 
 
-def _tts_language_key(language: str | None = None, lang: str | None = None, **kwargs) -> str:
-    requested = str(language or lang or kwargs.get("language") or kwargs.get("lang") or "english").strip().lower()
+def _tts_language_key(
+    language: str | None = None, lang: str | None = None, **kwargs
+) -> str:
+    requested = (
+        str(
+            language
+            or lang
+            or kwargs.get("language")
+            or kwargs.get("lang")
+            or "english"
+        )
+        .strip()
+        .lower()
+    )
     return TTS_LANGUAGE_ALIASES.get(requested, "english")
 
 
 def _tts_riva_voice_config(language_key: str) -> tuple[str, str]:
     voice_env = "TTS_RIVA_VOICE_ES" if language_key == "spanish" else "TTS_RIVA_VOICE"
-    lang_env = "TTS_RIVA_LANGUAGE_ES" if language_key == "spanish" else "TTS_RIVA_LANGUAGE"
-    default_voice, default_code = TTS_RIVA_DEFAULTS.get(language_key, TTS_RIVA_DEFAULTS["english"])
-    return os.environ.get(voice_env, default_voice), os.environ.get(lang_env, default_code)
+    lang_env = (
+        "TTS_RIVA_LANGUAGE_ES" if language_key == "spanish" else "TTS_RIVA_LANGUAGE"
+    )
+    default_voice, default_code = TTS_RIVA_DEFAULTS.get(
+        language_key, TTS_RIVA_DEFAULTS["english"]
+    )
+    return os.environ.get(voice_env, default_voice), os.environ.get(
+        lang_env, default_code
+    )
 
 
 def _is_safe_ip(value: str) -> bool:
@@ -89,13 +107,15 @@ def _is_safe_ip(value: str) -> bool:
     )
 
 
-class _SafeResolver(aiohttp.abc.AbstractResolver):
+class _SafeResolver:
     """Resolver that blocks private/internal addresses at request time."""
 
     def __init__(self):
         self._resolver = aiohttp.resolver.DefaultResolver()
 
-    async def resolve(self, host, port=0, family=0):
+    async def resolve(
+        self, host, port=0, family: socket.AddressFamily = socket.AF_UNSPEC
+    ):
         results = await self._resolver.resolve(host, port, family)
         for item in results:
             if not _is_safe_ip(item["host"]):
@@ -109,7 +129,9 @@ class _SafeResolver(aiohttp.abc.AbstractResolver):
 async def _get_shared_session() -> aiohttp.ClientSession:
     global _SHARED_SESSION
     if _SHARED_SESSION is None or _SHARED_SESSION.closed:
-        connector = aiohttp.TCPConnector(resolver=_SafeResolver(), limit=30, limit_per_host=5)
+        connector = aiohttp.TCPConnector(
+            resolver=cast(Any, _SafeResolver()), limit=30, limit_per_host=5
+        )
         _SHARED_SESSION = aiohttp.ClientSession(connector=connector)
     return _SHARED_SESSION
 
@@ -119,7 +141,9 @@ async def close_shared_session():
         await _SHARED_SESSION.close()
 
 
-async def _read_response_limited(response: aiohttp.ClientResponse, max_bytes: int) -> bytes:
+async def _read_response_limited(
+    response: aiohttp.ClientResponse, max_bytes: int
+) -> bytes:
     content_length = response.headers.get("Content-Length")
     if content_length:
         try:
@@ -159,14 +183,14 @@ def _is_safe_url(url: str) -> bool:
         return False
 
 
-def _clean_discord_name(value: str, *, max_len: int = 100) -> str:
+def _clean_discord_name(value: str | None, *, max_len: int = 100) -> str:
     text = str(value or "").strip()
     text = re.sub(r"[\r\n\t]+", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text[:max_len].strip()
 
 
-def _clean_channel_name(value: str) -> str:
+def _clean_channel_name(value: str | None) -> str:
     text = _clean_discord_name(value, max_len=100).lower()
     text = re.sub(r"\s+", "-", text).strip("-")
     return text[:100]
@@ -214,9 +238,26 @@ def _admin_caps(guild) -> tuple[set[str], str]:
         return set(), "permissions are not cached"
     caps = set()
     if getattr(perms, "administrator", False):
-        caps.update({"administrator", "manage_channels", "manage_roles", "manage_guild", "manage_messages", "kick_members", "ban_members"})
+        caps.update(
+            {
+                "administrator",
+                "manage_channels",
+                "manage_roles",
+                "manage_guild",
+                "manage_messages",
+                "kick_members",
+                "ban_members",
+            }
+        )
     else:
-        for name in ("manage_channels", "manage_roles", "manage_guild", "manage_messages", "kick_members", "ban_members"):
+        for name in (
+            "manage_channels",
+            "manage_roles",
+            "manage_guild",
+            "manage_messages",
+            "kick_members",
+            "ban_members",
+        ):
             if getattr(perms, name, False):
                 caps.add(name)
     return caps, ""
@@ -244,7 +285,9 @@ class ImageGeneratorTool(Tool):
             "Returns a Discord CDN URL. Use that URL in HTML <img> tags for sites."
         )
 
-    async def execute(self, message: Message, prompt: str = None, **kwargs) -> str:
+    async def execute(
+        self, message: Message, prompt: str | None = None, **kwargs
+    ) -> str:
         if not prompt:
             return "Error: prompt parameter is required"
         if not self.bot.config.NVIDIA_API_KEY:
@@ -274,49 +317,65 @@ class ImageGeneratorTool(Tool):
         for attempt in range(max_retries):
             try:
                 async with session.post(
-                    api_url, json=payload, headers=headers,
+                    api_url,
+                    json=payload,
+                    headers=headers,
                     timeout=aiohttp.ClientTimeout(total=120),
                 ) as response:
                     if response.status == 429:
                         wait_time = (attempt + 1) * 10
-                        logger.warning(f"NVIDIA image rate limited, retry {attempt + 1}/{max_retries}")
+                        logger.warning(
+                            f"NVIDIA image rate limited, retry {attempt + 1}/{max_retries}"
+                        )
                         await asyncio.sleep(wait_time)
                         continue
                     if 500 <= response.status < 600:
                         error_text = await response.text()
-                        logger.warning(f"NVIDIA image server error {response.status}, retry {attempt + 1}/{max_retries}: {error_text[:200]}")
+                        logger.warning(
+                            f"NVIDIA image server error {response.status}, retry {attempt + 1}/{max_retries}: {error_text[:200]}"
+                        )
                         wait_time = (attempt + 1) * 15
                         await asyncio.sleep(wait_time)
                         continue
                     if response.status != 200:
                         error_text = await response.text()
-                        logger.error(f"NVIDIA image error: {response.status} - {error_text[:500]}")
+                        logger.error(
+                            f"NVIDIA image error: {response.status} - {error_text[:500]}"
+                        )
                         last_error = f"Error generating image: API returned status {response.status}. Try again later."
                         break
                     data = await response.json()
                     if "artifacts" not in data or not data["artifacts"]:
-                        logger.error(f"NVIDIA image response missing artifacts: {list(data.keys())}")
+                        logger.error(
+                            f"NVIDIA image response missing artifacts: {list(data.keys())}"
+                        )
                         last_error = "Error: No image data in response"
                         break
                     artifact = data["artifacts"][0]
                     image_b64 = artifact.get("base64")
                     finish_reason = artifact.get("finishReason")
                     if finish_reason != "SUCCESS" or not image_b64:
-                        logger.error(f"NVIDIA image artifact issue: finishReason={finish_reason}, base64_present={bool(image_b64)}")
+                        logger.error(
+                            f"NVIDIA image artifact issue: finishReason={finish_reason}, base64_present={bool(image_b64)}"
+                        )
                         if finish_reason == "CONTENT_FILTERED":
                             last_error = "Error: Image was filtered by safety guardrails. Try a different prompt."
                         else:
                             last_error = "Error: No base64 image data in response"
                         break
                     image_bytes = base64.b64decode(image_b64)
-                    logger.info(f"NVIDIA image generated successfully, size: {len(image_bytes)} bytes")
+                    logger.info(
+                        f"NVIDIA image generated successfully, size: {len(image_bytes)} bytes"
+                    )
                     # Send to Discord so the model can SEE it in chat
                     file = File(BytesIO(image_bytes), filename="generated_image.png")
                     sent_msg = None
                     try:
                         sent_msg = await message.channel.send(file=file)
                     except discord.Forbidden:
-                        logger.warning(f"Cannot send image in {message.channel.id} — missing permissions")
+                        logger.warning(
+                            f"Cannot send image in {message.channel.id} — missing permissions"
+                        )
                         return "Error: Cannot send image — missing permissions"
                     # Grab the Discord CDN URL
                     cdn_url = None
@@ -324,7 +383,11 @@ class ImageGeneratorTool(Tool):
                         cdn_url = sent_msg.attachments[0].url
                     await self.bot.memory.add_to_channel_memory(
                         str(message.channel.id),
-                        {"author": "Tool", "content": f"Generated image: {prompt[:200]}", "is_tool": True},
+                        {
+                            "author": "Tool",
+                            "content": f"Generated image: {prompt[:200]}",
+                            "is_tool": True,
+                        },
                     )
                     result = f"Image sent to chat: {prompt[:100]}"
                     if cdn_url:
@@ -333,7 +396,9 @@ class ImageGeneratorTool(Tool):
                     result += "If it looks bad, call image_generator again with an improved prompt."
                     return result
             except asyncio.TimeoutError:
-                logger.warning(f"NVIDIA image timeout, attempt {attempt + 1}/{max_retries}")
+                logger.warning(
+                    f"NVIDIA image timeout, attempt {attempt + 1}/{max_retries}"
+                )
                 if attempt < max_retries - 1:
                     await asyncio.sleep(5)
                     continue
@@ -358,7 +423,13 @@ class HDImageGeneratorTool(Tool):
             "Returns a Discord CDN URL for the image. Use that URL directly in HTML <img> tags for sites."
         )
 
-    async def execute(self, message: Message, prompt: str = None, size: str = "1024x1024", **kwargs) -> str:
+    async def execute(
+        self,
+        message: Message,
+        prompt: str | None = None,
+        size: str = "1024x1024",
+        **kwargs,
+    ) -> str:
         if not prompt:
             return "Error: prompt parameter is required"
 
@@ -390,7 +461,9 @@ class HDImageGeneratorTool(Tool):
             ) as response:
                 if response.status != 200:
                     error_text = await response.text()
-                    logger.error(f"HD image API error: {response.status} - {error_text[:500]}")
+                    logger.error(
+                        f"HD image API error: {response.status} - {error_text[:500]}"
+                    )
                     return f"Error generating HD image: API returned status {response.status}"
                 data = await response.json()
                 if "data" not in data or not data["data"]:
@@ -419,8 +492,12 @@ class HDImageGeneratorTool(Tool):
                 allow_redirects=False,
             ) as img_resp:
                 if img_resp.status != 200:
-                    logger.error(f"HD image download error: {img_resp.status} for {image_url}")
-                    return f"Error: Could not download HD image (status {img_resp.status})"
+                    logger.error(
+                        f"HD image download error: {img_resp.status} for {image_url}"
+                    )
+                    return (
+                        f"Error: Could not download HD image (status {img_resp.status})"
+                    )
                 image_bytes = await _read_response_limited(img_resp, 25 * 1024 * 1024)
         except asyncio.TimeoutError:
             logger.warning(f"HD image download timed out for {image_url}")
@@ -435,7 +512,9 @@ class HDImageGeneratorTool(Tool):
         try:
             sent_msg = await message.channel.send(file=file)
         except discord.Forbidden:
-            logger.warning(f"Cannot send HD image in {message.channel.id} — missing permissions")
+            logger.warning(
+                f"Cannot send HD image in {message.channel.id} — missing permissions"
+            )
             return "Error: Cannot send HD image — missing permissions"
 
         # Grab the Discord CDN URL from the attachment
@@ -445,12 +524,16 @@ class HDImageGeneratorTool(Tool):
 
         await self.bot.memory.add_to_channel_memory(
             str(message.channel.id),
-            {"author": "Tool", "content": f"Generated HD image: {revised_prompt or prompt[:200]}", "is_tool": True},
+            {
+                "author": "Tool",
+                "content": f"Generated HD image: {revised_prompt or prompt[:200]}",
+                "is_tool": True,
+            },
         )
         result = f"HD image generated successfully: {(revised_prompt or prompt)[:100]}"
         if cdn_url:
             result += f"\nImage URL: {cdn_url}"
-            result += f"\nUse this URL directly in HTML <img> tags."
+            result += "\nUse this URL directly in HTML <img> tags."
         return result
 
 
@@ -465,8 +548,12 @@ class MemoryTool(Tool):
         )
 
     async def execute(
-        self, message: Message, action: str = None, content: str = None,
-        memory_id: str = None, **kwargs
+        self,
+        message: Message,
+        action: str | None = None,
+        content: str | None = None,
+        memory_id: str | None = None,
+        **kwargs,
     ) -> str:
         if not action:
             return "Error: action is required (add/edit/remove)"
@@ -509,18 +596,21 @@ class ReactTool(Tool):
             "Params: emoji (required)."
         )
 
-    async def execute(self, message: Message, emoji: str = None, **kwargs) -> str:
+    async def execute(
+        self, message: Message, emoji: str | None = None, **kwargs
+    ) -> str:
         if not emoji:
             return "Error: emoji parameter is required"
 
         # Try custom emoji by name from the message's guild
         lookup = emoji.strip().lower()
-        guild_id = str(message.guild.id) if message.guild else None
-        if guild_id:
+        guild = message.guild
+        guild_id = str(guild.id) if guild else None
+        if guild_id and guild:
             guild_emojis = self.bot._guild_emojis.get(guild_id, {})
             if lookup in guild_emojis:
                 emoji_str = guild_emojis[lookup]
-                for e in message.guild.emojis:
+                for e in guild.emojis:
                     if e.name.lower() == lookup:
                         try:
                             await message.add_reaction(e)
@@ -545,7 +635,11 @@ class EditMessageTool(Tool):
         return "Edit your own message. Params: message_id (required), content (required, new text)."
 
     async def execute(
-        self, message: Message, message_id: str = None, content: str = None, **kwargs
+        self,
+        message: Message,
+        message_id: str | None = None,
+        content: str | None = None,
+        **kwargs,
     ) -> str:
         if not message_id or not content:
             return "Error: message_id and content are required"
@@ -569,7 +663,9 @@ class DeleteMessageTool(Tool):
     def get_description(self):
         return "Delete your own message. Params: message_id (required)."
 
-    async def execute(self, message: Message, message_id: str = None, **kwargs) -> str:
+    async def execute(
+        self, message: Message, message_id: str | None = None, **kwargs
+    ) -> str:
         if not message_id:
             return "Error: message_id is required"
         try:
@@ -598,7 +694,11 @@ class ChangePresenceTool(Tool):
             return f"Error: status must be one of {', '.join(valid)}"
         status_obj = getattr(Status, status, Status.online)
         activities = self.bot._build_activities()
-        await self.bot.change_presence(status=status_obj, activities=activities, edit_settings=bool(self.bot._custom_status))
+        await self.bot.change_presence(
+            status=status_obj,
+            activities=activities,
+            edit_settings=bool(self.bot._custom_status),
+        )
         return f"Status set to {status}"
 
 
@@ -617,6 +717,7 @@ class SetActivityTool(Tool):
 
     def _parse_elapsed(self, elapsed: str) -> int:
         import re as _re
+
         total_ms = 0
         for match in _re.finditer(r"(\d+)\s*(h|m|s|d)", elapsed.lower()):
             val = int(match.group(1))
@@ -636,7 +737,14 @@ class SetActivityTool(Tool):
                 total_ms = 0
         return total_ms
 
-    async def execute(self, message: Message, type: str = None, text: str = None, elapsed: str = None, **kwargs) -> str:
+    async def execute(
+        self,
+        message: Message,
+        type: str | None = None,
+        text: str | None = None,
+        elapsed: str | None = None,
+        **kwargs,
+    ) -> str:
         activity_type = (type or "custom").lower()
 
         if not text:
@@ -648,7 +756,9 @@ class SetActivityTool(Tool):
             if not activities:
                 await self.bot.change_presence(activity=None, edit_settings=True)
             else:
-                await self.bot.change_presence(activities=activities, edit_settings=bool(self.bot._custom_status))
+                await self.bot.change_presence(
+                    activities=activities, edit_settings=bool(self.bot._custom_status)
+                )
             return "Cleared"
 
         if activity_type == "custom":
@@ -662,13 +772,17 @@ class SetActivityTool(Tool):
                 ms = self._parse_elapsed(elapsed)
                 if ms > 0:
                     start_time = datetime.now(timezone.utc) - timedelta(milliseconds=ms)
-                    act_kwargs["timestamps"] = discord.ActivityTimestamps(start=start_time)
+                    act_kwargs["timestamps"] = discord.ActivityTimestamps(
+                        start=start_time
+                    )
             self.bot._current_game = Activity(**act_kwargs)
         else:
             return "Error: type must be playing/watching/listening/competing/custom"
 
         activities = self.bot._build_activities()
-        await self.bot.change_presence(activities=activities, edit_settings=bool(self.bot._custom_status))
+        await self.bot.change_presence(
+            activities=activities, edit_settings=bool(self.bot._custom_status)
+        )
         if activity_type == "custom":
             return f"Custom status set: {text}"
         elapsed_str = f" ({elapsed} elapsed)" if elapsed else ""
@@ -685,8 +799,12 @@ class CreatePollTool(Tool):
         )
 
     async def execute(
-        self, message: Message, question: str = None, options: str = None,
-        duration_hours: str = "24", **kwargs
+        self,
+        message: Message,
+        question: str | None = None,
+        options: str | None = None,
+        duration_hours: str = "24",
+        **kwargs,
     ) -> str:
         if not question or not options:
             return "Error: question and options are required"
@@ -698,6 +816,7 @@ class CreatePollTool(Tool):
                 return "Error: Maximum 10 options allowed"
 
             import datetime
+
             hours = int(duration_hours)
             if hours < 1 or hours > 168:
                 return "Error: duration_hours must be between 1 and 168"
@@ -739,10 +858,13 @@ class CreateInviteTool(Tool):
                 return "Error: max_uses must be between 1 and 100"
             if age < 0 or age > 604800:
                 return "Error: max_age must be between 0 and 604800 seconds"
-            invite = await message.channel.create_invite(
-                max_uses=uses, max_age=age
+            channel = cast(Any, message.channel)
+            if not hasattr(channel, "create_invite"):
+                return "Error: Cannot create invites from this channel type"
+            invite = await channel.create_invite(max_uses=uses, max_age=age)
+            return (
+                f"Invite created: {invite.url} (max uses: {uses}, expires in: {age}s)"
             )
-            return f"Invite created: {invite.url} (max uses: {uses}, expires in: {age}s)"
         except discord.Forbidden:
             return "Error: I don't have permission to create invites here"
         except ValueError:
@@ -757,7 +879,9 @@ class LookupUserTool(Tool):
     def get_description(self):
         return "Look up a Discord user by ID or mention. Params: user_id (required, numeric ID or @mention). Returns name, creation date, avatar."
 
-    async def execute(self, message: Message, user_id: str = None, **kwargs) -> str:
+    async def execute(
+        self, message: Message, user_id: str | None = None, **kwargs
+    ) -> str:
         if not user_id:
             return "Error: user_id is required"
         # Strip mention syntax like <@123456> or <@!123456>
@@ -768,7 +892,9 @@ class LookupUserTool(Tool):
             user = await self.bot.fetch_user(int(cleaned))
             if not user:
                 return f"Error: User {user_id} not found"
-            created = user.created_at.strftime("%Y-%m-%d") if user.created_at else "unknown"
+            created = (
+                user.created_at.strftime("%Y-%m-%d") if user.created_at else "unknown"
+            )
             info = (
                 f"Name: {user.display_name} (@{user.name})\n"
                 f"ID: {user.id}\n"
@@ -792,7 +918,7 @@ class SearchMessagesTool(Tool):
         return "Search messages in this server. Params: query (required), limit (optional, default 5)."
 
     async def execute(
-        self, message: Message, query: str = None, limit: str = "5", **kwargs
+        self, message: Message, query: str | None = None, limit: str = "5", **kwargs
     ) -> str:
         if not query:
             return "Error: query is required"
@@ -801,13 +927,9 @@ class SearchMessagesTool(Tool):
         try:
             search_limit = max(1, min(int(limit), 25))
             results = []
-            async for msg in message.guild.search(
-                content=query, limit=search_limit
-            ):
+            async for msg in message.guild.search(content=query, limit=search_limit):
                 snippet = msg.content[:150] + ("..." if len(msg.content) > 150 else "")
-                results.append(
-                    f"[{msg.id}] {msg.author.display_name}: {snippet}"
-                )
+                results.append(f"[{msg.id}] {msg.author.display_name}: {snippet}")
             if not results:
                 return f"No messages found matching '{query}'"
             return "Search results:\n" + "\n".join(results)
@@ -823,14 +945,19 @@ class SetNicknameTool(Tool):
     def get_description(self):
         return "Change your nickname in this server. Params: nickname (required, 'reset' to remove)."
 
-    async def execute(self, message: Message, nickname: str = None, **kwargs) -> str:
+    async def execute(
+        self, message: Message, nickname: str | None = None, **kwargs
+    ) -> str:
         if not nickname:
             return "Error: nickname is required"
         if not message.guild:
             return "Error: Cannot set nickname in DMs"
         try:
             nick = None if nickname.lower() == "reset" else nickname
-            await message.guild.me.edit(nick=nick)
+            me = getattr(message.guild, "me", None)
+            if me is None:
+                return "Error: bot member is not cached"
+            await me.edit(nick=nick)
             if nick:
                 return f"Nickname changed to '{nickname}'"
             return "Nickname removed"
@@ -847,11 +974,17 @@ class ForwardMessageTool(Tool):
         return "Forward a message to another channel. Params: message_id (required), channel_id (required)."
 
     async def execute(
-        self, message: Message, message_id: str = None, channel_id: str = None, **kwargs
+        self,
+        message: Message,
+        message_id: str | None = None,
+        channel_id: str | None = None,
+        **kwargs,
     ) -> str:
         if not message_id or not channel_id:
             return "Error: message_id and channel_id are required"
-        if not getattr(self.bot, "_is_admin", lambda _uid: False)(getattr(message.author, "id", "")):
+        if not getattr(self.bot, "_is_admin", lambda _uid: False)(
+            getattr(message.author, "id", "")
+        ):
             return "Error: forward_message is admin-only"
         try:
             dest = self.bot.get_channel(int(channel_id))
@@ -865,12 +998,18 @@ class ForwardMessageTool(Tool):
                 return f"Error: Message {message_id} not found"
             src_guild = getattr(message.channel, "guild", None)
             dest_guild = getattr(dest, "guild", None)
-            if src_guild and dest_guild and getattr(src_guild, "id", None) != getattr(dest_guild, "id", None):
+            if (
+                src_guild
+                and dest_guild
+                and getattr(src_guild, "id", None) != getattr(dest_guild, "id", None)
+            ):
                 return "Error: refusing to forward across servers"
 
             await orig.forward(dest)
             channel_name = getattr(dest, "name", channel_id)
-            guild_name = getattr(dest.guild, "name", "DM") if hasattr(dest, "guild") else "DM"
+            guild_name = (
+                getattr(dest.guild, "name", "DM") if hasattr(dest, "guild") else "DM"
+            )
             return f"Forwarded message {message_id} to #{channel_name} in {guild_name}"
         except discord.NotFound:
             return "Error: Message or channel not found"
@@ -878,7 +1017,6 @@ class ForwardMessageTool(Tool):
             return "Error: I don't have permission to forward messages"
         except Exception as e:
             return f"Error forwarding message: {e}"
-
 
 
 class TypingTool(Tool):
@@ -912,7 +1050,8 @@ class ListServersTool(Tool):
                 lines.append(f"  ... and {len(self.bot.guilds) - 20} more")
 
         group_channels = [
-            ch for ch in self.bot.private_channels
+            ch
+            for ch in self.bot.private_channels
             if isinstance(ch, discord.GroupChannel)
         ]
         if group_channels:
@@ -964,20 +1103,35 @@ class CreateCategoryTool(Tool):
             "Use list_admin_servers first to pick a server where manage_channels is available."
         )
 
-    async def execute(self, message: Message, name: str = None, guild_id: str = None, position: str = None, **kwargs) -> str:
+    async def execute(
+        self,
+        message: Message,
+        name: str | None = None,
+        guild_id: str | None = None,
+        position: str | None = None,
+        **kwargs,
+    ) -> str:
         clean = _clean_discord_name(name)
         if not clean:
             return "Error: name is required"
         guild, error = await _resolve_guild(self.bot, message, guild_id)
         if error:
             return error
+        if guild is None:
+            return "Error: guild is unavailable"
+        guild = cast(Any, guild)
         if not _has_guild_cap(guild, "manage_channels"):
             return f"Error: I do not have manage_channels/admin in {guild.name}. Run list_admin_servers first."
         try:
-            category = await guild.create_category(clean, reason=f"Maxwell admin tool requested by {message.author}")
+            category = await guild.create_category(
+                clean, reason=f"Maxwell admin tool requested by {message.author}"
+            )
             if position is not None:
                 try:
-                    await category.edit(position=max(0, int(position)), reason="Maxwell admin tool position update")
+                    await category.edit(
+                        position=max(0, int(position)),
+                        reason="Maxwell admin tool position update",
+                    )
                 except (TypeError, ValueError):
                     return f"Created category {category.name} ({category.id}), but position was invalid"
             return f"Created category {category.name} ({category.id}) in {guild.name}"
@@ -998,7 +1152,9 @@ class CreateChannelTool(Tool):
             "Use create_category first when the user wants a new channel group/section."
         )
 
-    def _find_category(self, guild, category_id: str = None, category_name: str = None):
+    def _find_category(
+        self, guild, category_id: str | None = None, category_name: str | None = None
+    ):
         if category_id:
             try:
                 cid = int(str(category_id).strip())
@@ -1010,24 +1166,34 @@ class CreateChannelTool(Tool):
             return category, ""
         if category_name:
             wanted = str(category_name).strip().lower()
-            matches = [cat for cat in (getattr(guild, "categories", []) or []) if cat.name.lower() == wanted]
+            matches = [
+                cat
+                for cat in (getattr(guild, "categories", []) or [])
+                if cat.name.lower() == wanted
+            ]
             if not matches:
-                return None, f"Error: category named '{category_name}' not found in {guild.name}"
+                return (
+                    None,
+                    f"Error: category named '{category_name}' not found in {guild.name}",
+                )
             if len(matches) > 1:
-                return None, f"Error: multiple categories named '{category_name}', use category_id"
+                return (
+                    None,
+                    f"Error: multiple categories named '{category_name}', use category_id",
+                )
             return matches[0], ""
         return None, ""
 
     async def execute(
         self,
         message: Message,
-        name: str = None,
-        kind: str = None,
-        type: str = None,
-        guild_id: str = None,
-        category_id: str = None,
-        category_name: str = None,
-        topic: str = None,
+        name: str | None = None,
+        kind: str | None = None,
+        type: str | None = None,
+        guild_id: str | None = None,
+        category_id: str | None = None,
+        category_name: str | None = None,
+        topic: str | None = None,
         nsfw: str = "false",
         slowmode_seconds: str = "0",
         **kwargs,
@@ -1040,15 +1206,23 @@ class CreateChannelTool(Tool):
         guild, error = await _resolve_guild(self.bot, message, guild_id)
         if error:
             return error
+        if guild is None:
+            return "Error: guild is unavailable"
+        guild = cast(Any, guild)
         if not _has_guild_cap(guild, "manage_channels"):
             return f"Error: I do not have manage_channels/admin in {guild.name}. Run list_admin_servers first."
         category, error = self._find_category(guild, category_id, category_name)
+        category = cast(Any, category)
         if error:
             return error
         channel_kind = str(kind or type or "text").strip().lower()
         try:
             if channel_kind in {"voice", "vc"}:
-                channel = await guild.create_voice_channel(clean, category=category, reason=f"Maxwell admin tool requested by {message.author}")
+                channel = await guild.create_voice_channel(
+                    clean,
+                    category=category,
+                    reason=f"Maxwell admin tool requested by {message.author}",
+                )
             elif channel_kind in {"text", "chat"}:
                 try:
                     slowmode = max(0, min(int(slowmode_seconds or 0), 21600))
@@ -1057,7 +1231,7 @@ class CreateChannelTool(Tool):
                 channel = await guild.create_text_channel(
                     clean,
                     category=category,
-                    topic=str(topic or "")[:1024] or None,
+                    topic=str(topic or "")[:1024],
                     nsfw=str(nsfw).lower() in {"1", "true", "yes", "on"},
                     slowmode_delay=slowmode,
                     reason=f"Maxwell admin tool requested by {message.author}",
@@ -1084,13 +1258,13 @@ class EditChannelTool(Tool):
     async def execute(
         self,
         message: Message,
-        channel_id: str = None,
-        name: str = None,
-        category_id: str = None,
-        category_name: str = None,
-        topic: str = None,
-        slowmode_seconds: str = None,
-        nsfw: str = None,
+        channel_id: str | None = None,
+        name: str | None = None,
+        category_id: str | None = None,
+        category_name: str | None = None,
+        topic: str | None = None,
+        slowmode_seconds: str | None = None,
+        nsfw: str | None = None,
         **kwargs,
     ) -> str:
         if self.bot and not self.bot._is_admin(message.author.id):
@@ -1098,7 +1272,9 @@ class EditChannelTool(Tool):
         if not channel_id:
             return "Error: channel_id is required"
         try:
-            channel = self.bot.get_channel(int(channel_id)) or await self.bot.fetch_channel(int(channel_id))
+            channel = self.bot.get_channel(
+                int(channel_id)
+            ) or await self.bot.fetch_channel(int(channel_id))
         except (TypeError, ValueError):
             return f"Error: invalid channel_id: {channel_id}"
         except Exception as e:
@@ -1110,11 +1286,17 @@ class EditChannelTool(Tool):
             return f"Error: I do not have manage_channels/admin in {guild.name}. Run list_admin_servers first."
         updates = {}
         if name:
-            clean = _clean_channel_name(name) if not isinstance(channel, discord.CategoryChannel) else _clean_discord_name(name)
+            clean = (
+                _clean_channel_name(name)
+                if not isinstance(channel, discord.CategoryChannel)
+                else _clean_discord_name(name)
+            )
             if clean:
                 updates["name"] = clean
         if category_id or category_name:
-            category, error = CreateChannelTool(self.bot)._find_category(guild, category_id, category_name)
+            category, error = CreateChannelTool(self.bot)._find_category(
+                guild, category_id, category_name
+            )
             if error:
                 return error
             updates["category"] = category
@@ -1123,17 +1305,23 @@ class EditChannelTool(Tool):
                 updates["topic"] = str(topic)[:1024]
             if slowmode_seconds is not None:
                 try:
-                    updates["slowmode_delay"] = max(0, min(int(slowmode_seconds), 21600))
+                    updates["slowmode_delay"] = max(
+                        0, min(int(slowmode_seconds), 21600)
+                    )
                 except (TypeError, ValueError):
                     return "Error: slowmode_seconds must be a number"
             if nsfw is not None:
                 updates["nsfw"] = str(nsfw).lower() in {"1", "true", "yes", "on"}
         elif topic is not None or slowmode_seconds is not None or nsfw is not None:
-            return "Error: topic, slowmode_seconds, and nsfw only apply to text channels"
+            return (
+                "Error: topic, slowmode_seconds, and nsfw only apply to text channels"
+            )
         if not updates:
             return "Error: provide at least one edit field"
         try:
-            await channel.edit(**updates, reason=f"Maxwell admin tool requested by {message.author}")
+            await channel.edit(
+                **updates, reason=f"Maxwell admin tool requested by {message.author}"
+            )
             return f"Edited {_channel_label(channel)} in {guild.name}: {', '.join(sorted(updates))}"
         except discord.Forbidden:
             return f"Error: Discord denied editing {_channel_label(channel)}; missing manage_channels or role hierarchy issue"
@@ -1150,13 +1338,21 @@ class DeleteChannelTool(Tool):
             "Params: channel_id (required), confirm_name (required and must exactly match the channel/category name)."
         )
 
-    async def execute(self, message: Message, channel_id: str = None, confirm_name: str = None, **kwargs) -> str:
+    async def execute(
+        self,
+        message: Message,
+        channel_id: str | None = None,
+        confirm_name: str | None = None,
+        **kwargs,
+    ) -> str:
         if self.bot and not self.bot._is_admin(message.author.id):
             return "Error: delete_channel is admin-only"
         if not channel_id or not confirm_name:
             return "Error: channel_id and confirm_name are required"
         try:
-            channel = self.bot.get_channel(int(channel_id)) or await self.bot.fetch_channel(int(channel_id))
+            channel = self.bot.get_channel(
+                int(channel_id)
+            ) or await self.bot.fetch_channel(int(channel_id))
         except (TypeError, ValueError):
             return f"Error: invalid channel_id: {channel_id}"
         except Exception as e:
@@ -1171,7 +1367,9 @@ class DeleteChannelTool(Tool):
             return f"Error: confirm_name must exactly match '{actual}'"
         try:
             label = _channel_label(channel)
-            await channel.delete(reason=f"Maxwell admin tool requested by {message.author}")
+            await channel.delete(
+                reason=f"Maxwell admin tool requested by {message.author}"
+            )
             return f"Deleted {label} from {guild.name}"
         except discord.Forbidden:
             return f"Error: Discord denied deleting {_channel_label(channel)}; missing manage_channels or role hierarchy issue"
@@ -1185,7 +1383,7 @@ class ChangeAvatarTool(Tool):
     def get_description(self):
         return "Change your profile picture. 30-min cooldown. Params: url (required, direct image URL jpg/png/gif/webp)."
 
-    async def execute(self, message: Message, url: str = None, **kwargs) -> str:
+    async def execute(self, message: Message, url: str | None = None, **kwargs) -> str:
         if not url:
             return "Error: url is required"
 
@@ -1195,14 +1393,18 @@ class ChangeAvatarTool(Tool):
         cooldown = 1800  # 30 minutes
 
         if self.bot._last_avatar_change:
-            elapsed = datetime.now(timezone.utc).timestamp() - self.bot._last_avatar_change
+            elapsed = (
+                datetime.now(timezone.utc).timestamp() - self.bot._last_avatar_change
+            )
             if elapsed < cooldown:
                 remaining = int(cooldown - elapsed)
                 return f"Error: Avatar on cooldown. Wait {remaining} more seconds."
 
         try:
             session = await _get_shared_session()
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30), allow_redirects=False) as resp:
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=30), allow_redirects=False
+            ) as resp:
                 if resp.status != 200:
                     return f"Error: Could not download image (status {resp.status})"
                 content_type = resp.headers.get("Content-Type", "")
@@ -1227,7 +1429,12 @@ class CreateSiteTool(Tool):
     def __init__(self, bot):
         super().__init__(bot)
         self.base_dir = getattr(bot.config, "MAXWELL_SITE_DIR", "public/bot")
-        self.base_url = getattr(bot.config, "MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com").rstrip("/") + "/bot"
+        self.base_url = (
+            getattr(
+                bot.config, "MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com"
+            ).rstrip("/")
+            + "/bot"
+        )
 
     def get_description(self):
         return (
@@ -1239,7 +1446,16 @@ class CreateSiteTool(Tool):
             "Plain text/CSS sites do NOT need images. If you do generate images, use the returned Discord CDN URL in <img> tags."
         )
 
-    async def execute(self, message: Message, name: str = None, title: str = None, body: str = None, encoding: str = "text", images: str = None, **kwargs) -> str:
+    async def execute(
+        self,
+        message: Message,
+        name: str | None = None,
+        title: str | None = None,
+        body: str | None = None,
+        encoding: str = "text",
+        images: str | None = None,
+        **kwargs,
+    ) -> str:
         if self.bot and not self.bot._is_admin(message.author.id):
             return "Error: create_site is admin-only"
         if not name or not title or body is None:
@@ -1283,12 +1499,16 @@ class CreateSiteTool(Tool):
             missing_images = []
             if images:
                 try:
-                    image_list = json.loads(images) if isinstance(images, str) else images
+                    image_list = (
+                        json.loads(images) if isinstance(images, str) else images
+                    )
                     if not isinstance(image_list, list):
                         image_list = [image_list]
                 except json.JSONDecodeError:
                     # Might be comma-separated paths
-                    image_list = [{"path": p.strip()} for p in images.split(",") if p.strip()]
+                    image_list = [
+                        {"path": p.strip()} for p in images.split(",") if p.strip()
+                    ]
 
                 img_dir = os.path.join(site_dir, "images")
                 os.makedirs(img_dir, exist_ok=True)
@@ -1322,9 +1542,21 @@ class CreateSiteTool(Tool):
                 "style-src 'unsafe-inline'; img-src * data:; connect-src 'self'\">"
             )
             if "<head" in body.lower():
-                body = re.sub(r"(<head[^>]*>)", r"\1\n" + csp_meta, body, count=1, flags=re.IGNORECASE)
+                body = re.sub(
+                    r"(<head[^>]*>)",
+                    r"\1\n" + csp_meta,
+                    body,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
             elif "<html" in body.lower():
-                body = re.sub(r"(<html[^>]*>)", r"\1\n<head>" + csp_meta + "</head>", body, count=1, flags=re.IGNORECASE)
+                body = re.sub(
+                    r"(<html[^>]*>)",
+                    r"\1\n<head>" + csp_meta + "</head>",
+                    body,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
             else:
                 body = "<head>" + csp_meta + "</head>\n" + body
             async with aiofiles.open(index_path, "w", encoding="utf-8") as f:
@@ -1340,9 +1572,14 @@ class CreateSiteTool(Tool):
             await self._save_sites()
             result = f"Site created: {self.base_url}/{slug}/"
             if image_urls:
-                result += f"\nEmbedded images ({len(image_urls)}):\n" + "\n".join(f"  - {url}" for url in image_urls)
+                result += f"\nEmbedded images ({len(image_urls)}):\n" + "\n".join(
+                    f"  - {url}" for url in image_urls
+                )
             if missing_images:
-                result += f"\nWARNING: {len(missing_images)} image(s) NOT found on disk and skipped: " + ", ".join(missing_images)
+                result += (
+                    f"\nWARNING: {len(missing_images)} image(s) NOT found on disk and skipped: "
+                    + ", ".join(missing_images)
+                )
             return result
         except Exception as e:
             logger.error(f"Failed to create site {slug}: {e}")
@@ -1384,8 +1621,14 @@ class ListSitesTool(Tool):
             hours = int(remaining // 3600)
             mins = int((remaining % 3600) // 60)
             title = data.get("title", "untitled")
-            base_url = getattr(self.bot.config, "MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com").rstrip("/")
-            lines.append(f"  • {base_url}/bot/{slug}/ — '{title}' ({hours}h {mins}m left)")
+            base_url = getattr(
+                self.bot.config,
+                "MAXWELL_PUBLIC_BASE_URL",
+                "https://maxwell.example.com",
+            ).rstrip("/")
+            lines.append(
+                f"  • {base_url}/bot/{slug}/ — '{title}' ({hours}h {mins}m left)"
+            )
         return "Your active sites:\n" + "\n".join(lines)
 
 
@@ -1398,7 +1641,13 @@ class WebSearchTool(Tool):
             "Don't search for casual conversation. Params: query (required), max_results (optional, default 5, max 10)."
         )
 
-    async def execute(self, message: Message, query: str = None, max_results: str = "5", **kwargs) -> str:
+    async def execute(
+        self,
+        message: Message,
+        query: str | None = None,
+        max_results: str = "5",
+        **kwargs,
+    ) -> str:
         if not query:
             return "Error: query is required"
 
@@ -1409,7 +1658,9 @@ class WebSearchTool(Tool):
 
         try:
             loop = asyncio.get_running_loop()
-            results = await loop.run_in_executor(None, lambda: list(_DDGS().text(query, max_results=limit)))
+            results = await loop.run_in_executor(
+                None, lambda: list(_DDGS().text(query, max_results=limit))
+            )
 
             if not results:
                 return f"No results found for '{query}'"
@@ -1424,8 +1675,6 @@ class WebSearchTool(Tool):
         except Exception as e:
             logger.error(f"Web search error: {e}")
             return f"Error searching: {e}"
-
-
 
 
 class SendMessageTool(Tool):
@@ -1455,7 +1704,9 @@ class SendMessageTool(Tool):
             remaining = remaining[cut:].lstrip()
         return chunks or [""]
 
-    async def execute(self, message: Message, content: str = None, reply: bool = True, **kwargs) -> str:
+    async def execute(
+        self, message: Message, content: str | None = None, reply: bool = True, **kwargs
+    ) -> str:
         text = str(content or "").strip()
         if not text:
             return "Error: content is required"
@@ -1501,7 +1752,9 @@ class ReasoningLogTool(Tool):
         if "<" in thoughts and ">" in thoughts:
             extracted = {}
             for tag in ("intent", "decision", "confidence"):
-                m = re.search(rf"<{tag}>(.*?)</{tag}>", thoughts, re.IGNORECASE | re.DOTALL)
+                m = re.search(
+                    rf"<{tag}>(.*?)</{tag}>", thoughts, re.IGNORECASE | re.DOTALL
+                )
                 if m:
                     extracted[tag] = m.group(1).strip()
             thoughts = ReasoningLogTool._NESTED_TAG_RE.sub("", thoughts).strip()
@@ -1515,7 +1768,7 @@ class ReasoningLogTool(Tool):
             if isinstance(val, str) and len(val) > 500:
                 payload[key] = val[:497] + "..."
         payload.setdefault("intent", payload.get("decision", "reply"))
-        payload.setdefault("confidence", payload.get("confidence", None))
+        payload.setdefault("confidence", str(payload.get("confidence") or ""))
         return payload
 
     async def execute(self, message: Message, **kwargs) -> str:
@@ -1553,7 +1806,14 @@ class SendFileTool(Tool):
             "Params: filename (required), content (required), encoding (optional: text or base64; default text)."
         )
 
-    async def execute(self, message: Message, filename: str = None, content: str = None, encoding: str = "text", **kwargs) -> str:
+    async def execute(
+        self,
+        message: Message,
+        filename: str | None = None,
+        content: str | None = None,
+        encoding: str = "text",
+        **kwargs,
+    ) -> str:
         if self.bot and not self.bot._is_admin(message.author.id):
             return "Error: send_file is admin-only"
         if not filename or not str(filename).strip():
@@ -1615,7 +1875,9 @@ class ShellTool(Tool):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        return await asyncio.wait_for(proc.communicate(), timeout=timeout), proc.returncode
+        return await asyncio.wait_for(
+            proc.communicate(), timeout=timeout
+        ), proc.returncode
 
     async def _ensure_container(self):
         try:
@@ -1625,10 +1887,14 @@ class ShellTool(Tool):
             if code == 0:
                 if stdout.decode(errors="replace").strip().lower() == "true":
                     return
-                (_stdout, stderr), start_code = await self._run_docker("start", self.CONTAINER_NAME, timeout=15)
+                (_stdout, stderr), start_code = await self._run_docker(
+                    "start", self.CONTAINER_NAME, timeout=15
+                )
                 if start_code == 0:
                     return
-                raise RuntimeError(stderr.decode(errors="replace").strip() or "docker start failed")
+                raise RuntimeError(
+                    stderr.decode(errors="replace").strip() or "docker start failed"
+                )
         except FileNotFoundError:
             raise RuntimeError("docker is not installed or not on PATH")
         except asyncio.TimeoutError:
@@ -1638,27 +1904,41 @@ class ShellTool(Tool):
             "build", "-t", self.IMAGE_NAME, self.DOCKERFILE_DIR, timeout=180
         )
         if build_code != 0:
-            raise RuntimeError(stderr.decode(errors="replace").strip() or "docker build failed")
+            raise RuntimeError(
+                stderr.decode(errors="replace").strip() or "docker build failed"
+            )
 
         (_stdout, stderr), run_code = await self._run_docker(
-            "run", "-d",
-            "--name", self.CONTAINER_NAME,
-            "--memory", "2g",
-            "--cpus", "1.0",
-            "--network", "none",
+            "run",
+            "-d",
+            "--name",
+            self.CONTAINER_NAME,
+            "--memory",
+            "2g",
+            "--cpus",
+            "1.0",
+            "--network",
+            "none",
             "--read-only",
-            "--cap-drop", "ALL",
-            "--security-opt", "no-new-privileges",
-            "--pids-limit", "128",
-            "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
-            "-v", f"{os.path.join(os.path.dirname(__file__), 'shelldocker')}:/home/maxwell:rw",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            "128",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=64m",
+            "-v",
+            f"{os.path.join(os.path.dirname(__file__), 'shelldocker')}:/home/maxwell:rw",
             self.IMAGE_NAME,
             timeout=30,
         )
         if run_code != 0:
-            raise RuntimeError(stderr.decode(errors="replace").strip() or "docker run failed")
+            raise RuntimeError(
+                stderr.decode(errors="replace").strip() or "docker run failed"
+            )
 
-    def _normalize_command(self, command: str) -> str:
+    def _normalize_command(self, command: str | None) -> str:
         raw = str(command or "").strip()
         if not raw:
             return ""
@@ -1679,23 +1959,37 @@ class ShellTool(Tool):
         proc = await asyncio.create_subprocess_exec(
             "docker",
             "exec",
-            "--workdir", "/home/maxwell",
-            "--user", "maxwell",
+            "--workdir",
+            "/home/maxwell",
+            "--user",
+            "maxwell",
             self.CONTAINER_NAME,
-            "bash", "-lc", sanitized,
+            "bash",
+            "-lc",
+            sanitized,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.TIMEOUT)
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=self.TIMEOUT
+        )
         return stdout, stderr, proc.returncode
 
-    async def execute(self, message: Message, command: str = None, files: str = None, **kwargs) -> str:
+    async def execute(
+        self,
+        message: Message,
+        command: str | None = None,
+        files: str | None = None,
+        **kwargs,
+    ) -> str:
         normalized = self._normalize_command(command)
         if not normalized:
             return "Error: command is required (tool-call markup was detected or command was empty)"
 
         author_id = str(message.author.id)
-        if not (self.bot._is_admin(author_id) or author_id in self.bot._shell_whitelist):
+        if not (
+            self.bot._is_admin(author_id) or author_id in self.bot._shell_whitelist
+        ):
             return "Error: You do not have permission to use the shell tool. Ask an admin to whitelist you with `,shell <user_id>`."
 
         try:
@@ -1722,7 +2016,7 @@ class ShellTool(Tool):
             combined += f"\n[exit code: {exit_code}]"
 
         if len(combined) > self.MAX_OUTPUT:
-            combined = combined[:self.MAX_OUTPUT] + "\n... (truncated)"
+            combined = combined[: self.MAX_OUTPUT] + "\n... (truncated)"
 
         text = f"$ {normalized}\n{combined}"
         chunks = []
@@ -1791,7 +2085,9 @@ class ShellTool(Tool):
                 "cp", f"{self.CONTAINER_NAME}:{container_path}", local_path, timeout=15
             )
             if code != 0:
-                logger.warning(f"docker cp failed for {container_path}: {stderr.decode(errors='replace')}")
+                logger.warning(
+                    f"docker cp failed for {container_path}: {stderr.decode(errors='replace')}"
+                )
                 return None
 
             if not os.path.isfile(local_path):
@@ -1832,7 +2128,13 @@ class FetchUrlTool(Tool):
             "Params: url (required), max_length (optional, default 15000)."
         )
 
-    async def execute(self, message: Message, url: str = None, max_length: str = "15000", **kwargs) -> str:
+    async def execute(
+        self,
+        message: Message,
+        url: str | None = None,
+        max_length: str = "15000",
+        **kwargs,
+    ) -> str:
         if not url:
             return "Error: url is required"
 
@@ -1846,7 +2148,9 @@ class FetchUrlTool(Tool):
 
         try:
             session = await _get_shared_session()
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30), allow_redirects=False) as resp:
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=30), allow_redirects=False
+            ) as resp:
                 if resp.status != 200:
                     return f"Error: HTTP {resp.status}"
                 content_type = resp.headers.get("Content-Type", "")
@@ -1860,17 +2164,39 @@ class FetchUrlTool(Tool):
             if "json" in content_type or url.endswith(".json"):
                 text = raw.decode(errors="replace")
                 import json as _json
+
                 try:
                     text = _json.dumps(_json.loads(text), indent=2, ensure_ascii=False)
                 except Exception:
                     pass
-            elif "html" in content_type or "<html" in raw[:500].decode(errors="replace").lower():
+            elif (
+                "html" in content_type
+                or "<html" in raw[:500].decode(errors="replace").lower()
+            ):
                 html_text = raw.decode(errors="replace")
                 text = html_text
-                for tag in ["script", "style", "noscript", "header", "footer", "nav", "aside"]:
-                    text = re.sub(rf"<{tag}[^>]*>.*?</{tag}>", "", text, flags=re.DOTALL | re.IGNORECASE)
+                for tag in [
+                    "script",
+                    "style",
+                    "noscript",
+                    "header",
+                    "footer",
+                    "nav",
+                    "aside",
+                ]:
+                    text = re.sub(
+                        rf"<{tag}[^>]*>.*?</{tag}>",
+                        "",
+                        text,
+                        flags=re.DOTALL | re.IGNORECASE,
+                    )
                 text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
-                text = re.sub(r"</?(?:p|div|li|h[1-6]|tr|blockquote)[^>]*>", "\n", text, flags=re.IGNORECASE)
+                text = re.sub(
+                    r"</?(?:p|div|li|h[1-6]|tr|blockquote)[^>]*>",
+                    "\n",
+                    text,
+                    flags=re.IGNORECASE,
+                )
                 text = re.sub(r"<[^>]+>", "", text)
                 text = re.sub(r"&nbsp;", " ", text)
                 text = re.sub(r"&amp;", "&", text)
@@ -1904,7 +2230,9 @@ class SendMemeTool(Tool):
             "No params = random from r/memes."
         )
 
-    async def execute(self, message: Message, subreddit: str = None, **kwargs) -> str:
+    async def execute(
+        self, message: Message, subreddit: str | None = None, **kwargs
+    ) -> str:
         url = self.MEME_API
         if subreddit:
             sub = subreddit.strip().removeprefix("r/")
@@ -1914,7 +2242,9 @@ class SendMemeTool(Tool):
 
         try:
             session = await _get_shared_session()
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
                 if resp.status != 200:
                     return f"Error: meme API returned {resp.status}"
                 data = await resp.json()
@@ -1937,7 +2267,9 @@ class SendMemeTool(Tool):
             return "Error: meme API returned an unsafe media URL"
 
         try:
-            async with session.get(meme_url, timeout=aiohttp.ClientTimeout(total=30), allow_redirects=False) as img_resp:
+            async with session.get(
+                meme_url, timeout=aiohttp.ClientTimeout(total=30), allow_redirects=False
+            ) as img_resp:
                 if img_resp.status != 200:
                     return f"Error: could not download meme image ({img_resp.status})"
                 img_bytes = await _read_response_limited(img_resp, self.MAX_SIZE)
@@ -1957,7 +2289,7 @@ class SendMemeTool(Tool):
         except discord.HTTPException as e:
             return f"Error sending meme: {e}"
 
-        return f"__MEME_SENT__ Sent meme: \"{title}\" from r/{sub} ({ups} upvotes)"
+        return f'__MEME_SENT__ Sent meme: "{title}" from r/{sub} ({ups} upvotes)'
 
 
 class SendMediaTool(Tool):
@@ -1971,7 +2303,7 @@ class SendMediaTool(Tool):
             "Params: url (required, direct link to media file)."
         )
 
-    async def execute(self, message: Message, url: str = None, **kwargs) -> str:
+    async def execute(self, message: Message, url: str | None = None, **kwargs) -> str:
         if not url:
             return "Error: url is required"
 
@@ -1980,7 +2312,9 @@ class SendMediaTool(Tool):
 
         try:
             session = await _get_shared_session()
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30), allow_redirects=False) as resp:
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=30), allow_redirects=False
+            ) as resp:
                 if resp.status != 200:
                     return f"Error: HTTP {resp.status}"
                 media_bytes = await _read_response_limited(resp, self.MAX_SIZE)
@@ -1991,7 +2325,17 @@ class SendMediaTool(Tool):
 
         filename = url.rsplit("/", 1)[-1].split("?")[0] or "media"
         ext = os.path.splitext(filename)[1].lower()
-        if ext not in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".webm", ".weba", ".mp3"):
+        if ext not in (
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".webp",
+            ".mp4",
+            ".webm",
+            ".weba",
+            ".mp3",
+        ):
             filename += ".png"
 
         file = File(BytesIO(media_bytes), filename=filename)
@@ -2018,7 +2362,14 @@ class TtsTool(Tool):
             "Params: text (required string), language/lang (optional: english or spanish)."
         )
 
-    async def execute(self, message: Message, text: str = None, language: str = None, lang: str = None, **kwargs) -> str:
+    async def execute(
+        self,
+        message: Message,
+        text: str | None = None,
+        language: str | None = None,
+        lang: str | None = None,
+        **kwargs,
+    ) -> str:
         if not text or not text.strip():
             return "Error: text parameter is required"
 
@@ -2030,7 +2381,10 @@ class TtsTool(Tool):
         import discord
 
         # Determine API Key and Setup File
-        nvidia_api_key = os.environ.get("NVIDIA_API_KEY", "") or getattr(getattr(self, "bot", None).config, "NVIDIA_API_KEY", "")
+        bot_config = getattr(getattr(self, "bot", None), "config", None)
+        nvidia_api_key = os.environ.get("NVIDIA_API_KEY", "") or getattr(
+            bot_config, "NVIDIA_API_KEY", ""
+        )
         filename = f"tts_{message.id}.wav"
         voice_filename = f"tts_{message.id}.ogg"
 
@@ -2040,20 +2394,25 @@ class TtsTool(Tool):
                 raise RuntimeError("NVIDIA_API_KEY is not configured")
 
             import riva.client
-            from riva.client.proto.riva_audio_pb2 import AudioEncoding
+            from riva.client.proto import riva_audio_pb2
 
-            function_id = os.environ.get("TTS_RIVA_FUNCTION_ID", "877104f7-e885-42b9-8de8-f6e4c6303969")
+            function_id = os.environ.get(
+                "TTS_RIVA_FUNCTION_ID", "877104f7-e885-42b9-8de8-f6e4c6303969"
+            )
             auth = riva.client.Auth(
                 use_ssl=True,
                 uri="grpc.nvcf.nvidia.com:443",
                 metadata_args=[
                     ["function-id", function_id],
-                    ["authorization", f"Bearer {nvidia_api_key}"]
+                    ["authorization", f"Bearer {nvidia_api_key}"],
                 ],
-                options=[
-                    ('grpc.max_receive_message_length', 64 * 1024 * 1024),
-                    ('grpc.max_send_message_length', 64 * 1024 * 1024)
-                ]
+                options=cast(
+                    Any,
+                    [
+                        ("grpc.max_receive_message_length", 64 * 1024 * 1024),
+                        ("grpc.max_send_message_length", 64 * 1024 * 1024),
+                    ],
+                ),
             )
             service = riva.client.SpeechSynthesisService(auth)
 
@@ -2066,19 +2425,21 @@ class TtsTool(Tool):
                     voice_name=tts_voice_name,
                     language_code=tts_language_code,
                     sample_rate_hz=44100,
-                    encoding=AudioEncoding.LINEAR_PCM,
+                    encoding=cast(Any, riva_audio_pb2).AudioEncoding.LINEAR_PCM,
                 )
 
             loop = asyncio.get_running_loop()
             resp = await loop.run_in_executor(None, run_riva)
-            logger.info(f"Riva TTS synthesized audio with voice={tts_voice_name!r}, language={tts_language_code!r}")
+            logger.info(
+                f"Riva TTS synthesized audio with voice={tts_voice_name!r}, language={tts_language_code!r}"
+            )
 
             # Save the WAV file
-            with wave.open(filename, 'wb') as out_f:
+            with wave.open(filename, "wb") as out_f:
                 out_f.setnchannels(1)
                 out_f.setsampwidth(2)
                 out_f.setframerate(44100)
-                out_f.writeframesraw(resp.audio)
+                out_f.writeframesraw(getattr(resp, "audio"))
 
         except Exception as e:
             logger.warning(f"Riva TTS synthesis failed: {e}. Falling back to gTTS.")
@@ -2087,20 +2448,35 @@ class TtsTool(Tool):
                 from gtts import gTTS
 
                 def run_gtts():
-                    tts = gTTS(text=text, lang='es' if lang_is_spanish else 'en')
+                    tts = gTTS(text=text, lang="es" if lang_is_spanish else "en")
                     tts.save(filename)
 
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, run_gtts)
-                logger.warning("TTS used gTTS fallback; voice selection/emotion is unavailable in fallback audio")
+                logger.warning(
+                    "TTS used gTTS fallback; voice selection/emotion is unavailable in fallback audio"
+                )
             except Exception as fallback_err:
                 return f"Error: Riva TTS failed ({e}) and fallback gTTS failed ({fallback_err})"
 
         async def make_voice_ogg(source: str) -> str:
             proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-i", source,
-                "-vn", "-ac", "1", "-ar", "48000", "-c:a", "libopus", "-b:a", "32k",
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                source,
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "48000",
+                "-c:a",
+                "libopus",
+                "-b:a",
+                "32k",
                 voice_filename,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -2114,14 +2490,20 @@ class TtsTool(Tool):
                 return source
             if proc.returncode == 0 and os.path.exists(voice_filename):
                 return voice_filename
-            logger.warning(f"Failed to convert TTS to voice OGG: {stderr.decode(errors='replace')[-300:]}")
+            logger.warning(
+                f"Failed to convert TTS to voice OGG: {stderr.decode(errors='replace')[-300:]}"
+            )
             return source
 
         async def get_audio_duration(source: str) -> float:
             proc = await asyncio.create_subprocess_exec(
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
                 source,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -2141,9 +2523,19 @@ class TtsTool(Tool):
 
         async def make_waveform(source: str) -> str:
             proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-i", source,
-                "-f", "s16le", "-ac", "1", "-ar", "8000", "pipe:1",
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                source,
+                "-f",
+                "s16le",
+                "-ac",
+                "1",
+                "-ar",
+                "8000",
+                "pipe:1",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -2159,12 +2551,16 @@ class TtsTool(Tool):
             sample_count = len(stdout) // 2
             bucket_size = max(1, sample_count // 256)
             waveform = bytearray()
-            for bucket_start in range(0, min(sample_count, bucket_size * 256), bucket_size):
+            for bucket_start in range(
+                0, min(sample_count, bucket_size * 256), bucket_size
+            ):
                 bucket_end = min(sample_count, bucket_start + bucket_size)
                 peak = 0
                 for sample_index in range(bucket_start, bucket_end):
                     byte_index = sample_index * 2
-                    sample = int.from_bytes(stdout[byte_index:byte_index + 2], "little", signed=True)
+                    sample = int.from_bytes(
+                        stdout[byte_index : byte_index + 2], "little", signed=True
+                    )
                     peak = max(peak, abs(sample))
                 waveform.append(min(255, int(peak / 32767 * 255)))
 
@@ -2197,7 +2593,12 @@ class TtsTool(Tool):
             flags.voice = True
             duration = await get_audio_duration(source)
             waveform = await make_waveform(source)
-            voice_file = VoiceMessageFile(source, filename="voice-message.ogg", duration=duration, waveform=waveform)
+            voice_file = VoiceMessageFile(
+                source,
+                filename="voice-message.ogg",
+                duration=duration,
+                waveform=waveform,
+            )
             with handle_message_parameters(file=voice_file, flags=flags) as params:
                 await state.http.send_message(channel.id, params=params)
 
@@ -2207,7 +2608,7 @@ class TtsTool(Tool):
             try:
                 send_path = await make_voice_ogg(filename)
                 if hasattr(message, "send_voice_file"):
-                    await message.send_voice_file(send_path)
+                    await cast(Any, message).send_voice_file(send_path)
                 else:
                     await send_discord_voice_message(send_path)
                 return "__NO_RESPONSE__"
@@ -2245,7 +2646,9 @@ class LeaveVcTool(Tool):
             return "Error: I am not currently connected to any voice channel in this server."
         try:
             if hasattr(self.bot, "_vc_stop_listening"):
-                await self.bot._vc_stop_listening(message.guild, vc.channel, message.channel)
+                await self.bot._vc_stop_listening(
+                    message.guild, vc.channel, message.channel
+                )
             await vc.disconnect(force=True)
             return "Successfully disconnected from the voice channel."
         except Exception as e:

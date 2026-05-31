@@ -1,6 +1,8 @@
 """Base Tool class for Maxwell Bot"""
 
 from abc import ABC, abstractmethod
+from typing import Any
+
 from discord import Message
 
 
@@ -16,5 +18,5 @@ class Tool(ABC):
         pass
 
     @abstractmethod
-    async def execute(self, message: Message, **kwargs):
+    async def execute(self, message: Message, **kwargs) -> Any:
         pass
