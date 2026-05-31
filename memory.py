@@ -541,7 +541,8 @@ class MemoryManager:
             if channel_id not in self.memory:
                 self.memory[channel_id] = []
 
-            message["timestamp"] = datetime.now(timezone.utc).isoformat()
+            ts = _parse_iso(message.get("timestamp", "")) or _utcnow()
+            message["timestamp"] = ts.isoformat()
             self.memory[channel_id].append(message)
 
             if len(self.memory[channel_id]) > self.max_messages:

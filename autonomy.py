@@ -31,7 +31,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import discord
 
@@ -128,14 +128,29 @@ def _truncate(text: str, budget: int) -> str:
     return text[:budget - len(suffix)] + suffix
 
 
-def _relative_time(dt) -> str:
+def _coerce_utc_datetime(value) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _relative_time(dt, *, now: datetime | None = None) -> str:
     """Human-readable relative time like '2m ago', '3h ago', 'just now'."""
+    dt = _coerce_utc_datetime(dt)
     if dt is None:
         return "?"
     try:
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        age_s = int((datetime.now(timezone.utc) - dt).total_seconds())
+        now = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
+        age_s = int((now - dt).total_seconds())
         if age_s < 0:
             return "just now"
         if age_s < 60:
@@ -147,6 +162,32 @@ def _relative_time(dt) -> str:
         return f"{age_s // 86400}d ago"
     except Exception:
         return "?"
+
+
+def _context_time(value, *, now: datetime | None = None) -> str:
+    dt = _coerce_utc_datetime(value)
+    if dt is None:
+        return "?"
+    return f"{_relative_time(dt, now=now)} / {dt.astimezone().strftime('%a %Y-%m-%d %H:%M')} local"
+
+
+def _action_feedback_line(entry: dict, *, now: datetime | None = None) -> str:
+    when = _context_time(entry.get("timestamp"), now=now)
+    kind = str(entry.get("action_kind") or "unknown")
+    result = str(entry.get("result") or "?")
+    target = str(entry.get("target") or "")
+    summary = str(entry.get("content_summary") or "").replace("\n", " ")[:180]
+    if kind == "do_nothing":
+        # Do not feed old do_nothing prose back into the model. It loves to quote
+        # stale "5 minutes ago" guesses like they're fresh facts. Ask me how I know.
+        return f"[{when}] did nothing -> {result}"
+    if kind in {"post_channel", "send_dm"}:
+        where = f" to {target}" if target else ""
+        return f"[{when}] {kind}{where}: {summary} -> {result}"
+    if kind == "run_tool":
+        tool = entry.get("tool_called") or target
+        return f"[{when}] ran {tool}: {summary} -> {result}"
+    return f"[{when}] {kind}: {summary} -> {result}"
 
 
 # ---------------------------------------------------------------------------
@@ -350,7 +391,7 @@ class AutonomyEngine:
 
     def _channel_allowed(self, channel_id: str) -> bool:
         """Check if autonomy should interact with this channel.
-        
+
         CRITICAL: must stay in sync with bot.py on_message channel guards.
         Autonomy was posting to blocked/missing-allowed channels because
         nobody remembered this check exists. Don't remove it.
@@ -366,7 +407,7 @@ class AutonomyEngine:
 
     def _autonomy_tool_allowed(self, name: str) -> bool:
         """Check if autonomy can use a tool, respecting dashboard controls.
-        
+
         CRITICAL: without this, autonomy bypasses tools_enabled/disabled_tools.
         The LLM was calling shell/kilo/create_channel through autonomy even when
         the admin disabled them in the dashboard. Don't remove this gate.
@@ -521,8 +562,8 @@ class AutonomyEngine:
                     age = ""
                     if ts:
                         try:
-                            ev_dt = datetime.fromisoformat(str(ts))
-                            age = f" ({_relative_time(ev_dt)})"
+                            ev_dt = _coerce_utc_datetime(ts)
+                            age = f" ({_context_time(ev_dt)})" if ev_dt else ""
                         except Exception:
                             pass
                     ev_lines.append(f"[{role}{age}] {content}")
@@ -554,20 +595,20 @@ class AutonomyEngine:
             if not self._channel_allowed(cid):
                 continue
             try:
-                ch = self.bot.get_channel(int(cid))
+                ch = cast(Any, self.bot.get_channel(int(cid)))
                 if ch is None:
                     try:
-                        ch = await self.bot.fetch_channel(int(cid))
+                        ch = cast(Any, await self.bot.fetch_channel(int(cid)))
                     except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                         continue
-                if ch is None:
+                if ch is None or not hasattr(ch, "history"):
                     continue
                 messages = [m async for m in ch.history(limit=10)]
                 for m in reversed(messages):
                     author_name = getattr(m.author, "display_name", None) or getattr(m.author, "name", "?")
                     content = (m.content or "")[:150]
                     if content:
-                        age = _relative_time(getattr(m, 'created_at', None))
+                        age = _context_time(getattr(m, 'created_at', None))
                         ch_lines.append(f"[{age}] #{getattr(ch, 'name', cid)}:{cid} {author_name}: {content}")
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 continue
@@ -587,11 +628,8 @@ class AutonomyEngine:
             log_entries = await self.store.load_log()
             recent = log_entries[-10:] if log_entries else []
             if recent:
-                action_lines = [
-                    f"[{e.get('timestamp', '?')}] {e.get('action_kind', '?')}: "
-                    f"{e.get('content_summary', '')[:100]} -> {e.get('result', '?')}"
-                    for e in recent
-                ]
+                action_now = datetime.now(timezone.utc)
+                action_lines = [_action_feedback_line(e, now=action_now) for e in recent]
                 action_feedback.append("\n".join(action_lines))
         except Exception:
             pass
@@ -623,7 +661,7 @@ class AutonomyEngine:
                     author_name = getattr(m.author, "display_name", None) or getattr(m.author, "name", "?")
                     content = (m.content or "")[:200]
                     if content:
-                        age = _relative_time(getattr(m, 'created_at', None))
+                        age = _context_time(getattr(m, 'created_at', None))
                         dm_lines.append(f"[{age}] DM:{channel.id} {author_name} ({m.author.id}): {content}")
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 continue
@@ -639,7 +677,8 @@ class AutonomyEngine:
 
         # 8. Long-term memory
         try:
-            ltm = self.bot.memory.get_long_term_memory()
+            memory = cast(Any, getattr(self.bot, "memory", None))
+            ltm = memory.get_long_term_memory() if memory else []
             if ltm:
                 ltm_text = "\n".join(str(m) for m in ltm[:30])
                 sections.append(_truncate(
@@ -656,8 +695,10 @@ class AutonomyEngine:
         for guild in self.bot.guilds:
             for ch in guild.text_channels:
                 try:
+                    if guild.me is None:
+                        continue
                     perms = ch.permissions_for(guild.me)
-                    if not perms.send_messages or not self._channel_allowed(ch.id):
+                    if not perms.send_messages or not self._channel_allowed(str(ch.id)):
                         continue
                     cid = str(ch.id)
                     # build status tags
@@ -697,7 +738,8 @@ class AutonomyEngine:
 
         # 10. Shared context
         try:
-            shared = await self.bot.memory.get_relevant_shared_context(
+            memory = cast(Any, getattr(self.bot, "memory", None))
+            shared = await memory.get_relevant_shared_context(
                 user_id="",
                 guild_id="",
                 channel_id="",
@@ -705,7 +747,7 @@ class AutonomyEngine:
                 is_admin=False,
                 max_items=20,
                 budget=CTX_BUDGET_SHARED,
-            ) if hasattr(self.bot.memory, "get_relevant_shared_context") else []
+            ) if memory and hasattr(memory, "get_relevant_shared_context") else []
             if shared:
                 ctx_lines = [f"- [{c.get('scope', '?')}, i{c.get('importance', '?')}] {c.get('content', '')}" for c in shared[:20]]
                 sections.append(_truncate(
@@ -730,8 +772,8 @@ class AutonomyEngine:
         engagement_lines = []
         for post in self._posted_messages[-5:]:  # check last 5 posts
             try:
-                channel = self.bot.get_channel(int(post["channel_id"]))
-                if channel is None:
+                channel = cast(Any, self.bot.get_channel(int(post["channel_id"])))
+                if channel is None or not hasattr(channel, "fetch_message"):
                     continue
                 msg = await channel.fetch_message(post["msg_id"])
                 if msg is None:
@@ -744,9 +786,10 @@ class AutonomyEngine:
                 # Check for replies (messages that reference this post)
                 reply_count = 0
                 try:
-                    async for reply in channel.history(limit=10, after=msg.created_at):
-                        if reply.reference and reply.reference.message_id == msg.id:
-                            reply_count += 1
+                    if hasattr(channel, "history"):
+                        async for reply in channel.history(limit=10, after=msg.created_at):
+                            if reply.reference and reply.reference.message_id == msg.id:
+                                reply_count += 1
                 except Exception:
                     pass
 
@@ -825,7 +868,7 @@ IMPORTANT RULES:
 - If nothing needs doing, that's FINE. Output do_nothing with a reason.
 - NEVER call search_messages — the channel history is already provided above.
 - ALWAYS use "post_channel" with a "target_channel_id" — the numeric ID, not a channel name.
-- Don't repeat things you already posted recently (check YOUR RECENT ACTIONS).
+- Don't repeat things you already posted recently (check YOUR RECENT ACTIONS). Use the bracketed timestamps there; they are recalculated for this tick.
 - You can use up to {MAX_ACTIONS_PER_TICK} actions per tick.
 
 Return ONLY valid JSON in this exact format:
@@ -879,7 +922,8 @@ Do NOT invent other action kinds — they will be rejected."""
             ))
             await self.bot._acquire_ai_slot(timeout=timeout)
             try:
-                raw_response = await self.bot.ai_provider.generate_response(
+                ai_provider = cast(Any, getattr(self.bot, "ai_provider", None))
+                raw_response = await ai_provider.generate_response(
                     messages, timeout=timeout
                 )
             finally:
@@ -1134,7 +1178,10 @@ Do NOT invent other action kinds — they will be rejected."""
             if kind != "do_nothing":
                 try:
                     summary = result.get("content_summary", action.get("reason", kind))
-                    await self.bot.rem_log.record({
+                    rem_log = cast(Any, getattr(self.bot, "rem_log", None))
+                    if rem_log is None:
+                        continue
+                    await rem_log.record({
                         "ts": _utcnow_iso(),
                         "channel_id": "",
                         "guild_id": None,
@@ -1208,10 +1255,10 @@ Do NOT invent other action kinds — they will be rejected."""
         result["target"] = f"channel:{channel_id}"
         result["content_summary"] = content[:200]
 
-        channel = self.bot.get_channel(int(channel_id))
+        channel = cast(Any, self.bot.get_channel(int(channel_id)))
         if channel is None:
             try:
-                channel = await self.bot.fetch_channel(int(channel_id))
+                channel = cast(Any, await self.bot.fetch_channel(int(channel_id)))
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 channel = None
         if channel is None:
@@ -1220,6 +1267,10 @@ Do NOT invent other action kinds — they will be rejected."""
             return
 
         try:
+            if not hasattr(channel, "send"):
+                result["result"] = "error"
+                result["error"] = "channel cannot receive messages"
+                return
             msg = await channel.send(content)
             result["tool_called"] = "post_channel"
             # Track for engagement checking
@@ -1335,7 +1386,12 @@ Do NOT invent other action kinds — they will be rejected."""
         result["target"] = "memory"
 
         try:
-            await self.bot.memory.add_long_term_memory(content)
+            memory = cast(Any, getattr(self.bot, "memory", None))
+            if memory is None:
+                result["result"] = "error"
+                result["error"] = "memory manager unavailable"
+                return
+            await memory.add_long_term_memory(content)
             result["tool_called"] = "add_long_term_memory"
         except Exception as e:
             result["result"] = "error"
@@ -1378,7 +1434,7 @@ Do NOT invent other action kinds — they will be rejected."""
         await self.store.update_state(_update)
 
         # log each action
-        for action, result in zip(actions, results):
+        for action, result in zip(actions, results, strict=False):
             entry = {
                 "id": f"action_{uuid.uuid4().hex[:8]}",
                 "timestamp": _utcnow_iso(),
