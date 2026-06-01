@@ -8,7 +8,7 @@ import tempfile
 import re
 import uuid
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -78,6 +78,19 @@ def _parse_iso(ts: str) -> Optional[datetime]:
         return dt
     except Exception:
         return None
+
+
+def _text_similarity(a: str, b: str) -> float:
+    """Token-based Jaccard similarity for fuzzy memory dedup."""
+    if not a or not b:
+        return 0.0
+    tokens_a = set(a.lower().split())
+    tokens_b = set(b.lower().split())
+    if not tokens_a or not tokens_b:
+        return 0.0
+    intersection = tokens_a & tokens_b
+    union = tokens_a | tokens_b
+    return len(intersection) / len(union)
 
 
 def _strip_reasoning_text(content: str) -> str:
@@ -391,6 +404,36 @@ class MemoryManager:
                 "expires_at": expires_at,
             })
         sanitized.sort(key=lambda e: (str(e.get("last_seen_at", "")), str(e.get("created_at", ""))), reverse=True)
+        # Fuzzy dedup: merge entries with >80% similar content in same scope
+        deduped = []
+        for entry in sanitized:
+            merged = False
+            for existing in deduped:
+                if (entry.get("scope") == existing.get("scope")
+                        and _text_similarity(entry.get("content", ""), existing.get("content", "")) > 0.8):
+                    # Keep the one with higher importance, update last_seen_at
+                    if entry.get("importance", 5) > existing.get("importance", 5):
+                        existing["content"] = entry["content"]
+                        existing["importance"] = entry["importance"]
+                    existing["last_seen_at"] = max(
+                        str(entry.get("last_seen_at", "")),
+                        str(existing.get("last_seen_at", "")),
+                    )
+                    merged = True
+                    break
+            if not merged:
+                deduped.append(entry)
+        sanitized = deduped
+        # LRU eviction: remove low-importance entries not seen in 7+ days
+        now = _utcnow()
+        eviction_cutoff = now - timedelta(days=7)
+        pruned = []
+        for entry in sanitized:
+            last_seen = _parse_iso(entry.get("last_seen_at", ""))
+            if entry.get("importance", 5) < 3 and last_seen and last_seen < eviction_cutoff:
+                continue
+            pruned.append(entry)
+        sanitized = pruned
         return sanitized[:MAX_SHARED_CONTEXT]
 
     def _reload_shared_context_from_disk(self):

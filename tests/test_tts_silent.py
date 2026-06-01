@@ -1,7 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from bot import MaxwellBot, _telegram_html, _tool_results_need_followup, _auto_format_discord
+from bot import MaxwellBot, ToolCircuitBreaker, _telegram_html, _tool_results_need_followup, _auto_format_discord
 
 
 class FakeTool:
@@ -35,6 +35,7 @@ class FakeMemory:
 def test_process_tool_calls_preserves_no_response_marker_for_tts():
     tts = FakeTool("__NO_RESPONSE__")
     bot = SimpleNamespace(
+        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False},
         tools={"tts": tts},
     )
@@ -56,6 +57,7 @@ def test_process_tool_calls_preserves_no_response_marker_for_tts():
 def test_process_tool_calls_still_returns_other_tool_results():
     react = FakeTool("Reacted with <:catjam:123>")
     bot = SimpleNamespace(
+        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False},
         tools={"react": react},
     )
@@ -77,6 +79,7 @@ def test_process_tool_calls_still_returns_other_tool_results():
 def test_process_tool_calls_handles_unclosed_send_message_without_leaking_environment_details():
     send_message = FakeTool("__MESSAGE_SENT__ Sent 6 chars")
     bot = SimpleNamespace(
+        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False},
         tools={"send_message": send_message},
     )
@@ -95,6 +98,7 @@ def test_process_tool_calls_handles_unclosed_send_message_without_leaking_enviro
 def test_process_tool_calls_handles_reasoning_json_tts_without_leaking_system_reminder():
     tts = FakeTool("__NO_RESPONSE__")
     bot = SimpleNamespace(
+        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False},
         tools={"tts": tts},
     )
@@ -120,6 +124,7 @@ def test_process_tool_calls_handles_reasoning_json_tts_without_leaking_system_re
 def test_process_tool_calls_handles_pipe_tts_format():
     tts = FakeTool("__NO_RESPONSE__")
     bot = SimpleNamespace(
+        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False},
         tools={"tts": tts},
     )
@@ -142,6 +147,7 @@ def test_process_tool_calls_records_tool_history_in_memory():
     react = FakeTool("Reacted with <:catjam:123>")
     memory = FakeMemory()
     bot = SimpleNamespace(
+        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False, "store_memory": True},
         tools={"react": react},
         memory=memory,
@@ -176,6 +182,7 @@ def test_process_tool_calls_records_tool_history_in_memory():
 def test_process_tool_calls_strips_disabled_tool_call():
     react = FakeTool("Reacted with <:catjam:123>")
     bot = SimpleNamespace(
+        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={"tools_enabled": True, "disabled_tools": ["react"], "typing_indicator": False},
         tools={"react": react},
     )
@@ -197,6 +204,7 @@ def test_process_tool_calls_strips_disabled_tool_call():
 def test_process_tool_calls_strips_platform_incompatible_tool_call():
     react = FakeTool("Reacted")
     bot = SimpleNamespace(
+        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False},
         tools={"react": react},
     )
@@ -217,6 +225,7 @@ def test_process_tool_calls_strips_platform_incompatible_tool_call():
 
 def test_tool_prompt_filters_discord_only_tools_for_telegram():
     bot = SimpleNamespace(
+        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={"tools_enabled": True, "disabled_tools": []},
         tools={"send_file": FakeTool("sent"), "react": FakeTool("Reacted")},
     )
@@ -229,6 +238,7 @@ def test_tool_prompt_filters_discord_only_tools_for_telegram():
 
 def test_tool_prompt_keeps_discord_tools_for_discord():
     bot = SimpleNamespace(
+        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={"tools_enabled": True, "disabled_tools": []},
         tools={"send_file": FakeTool("sent"), "react": FakeTool("Reacted")},
     )
@@ -241,6 +251,7 @@ def test_tool_prompt_keeps_discord_tools_for_discord():
 
 def test_tool_prompt_requires_reasoning_before_terminal_action():
     bot = SimpleNamespace(
+        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={"tools_enabled": True, "disabled_tools": []},
         tools={"reasoning_log": FakeTool("__REASONING_RECORDED__"), "send_message": FakeTool("sent")},
     )
@@ -253,7 +264,7 @@ def test_tool_prompt_requires_reasoning_before_terminal_action():
 
 def test_ensure_reasoning_trace_backfills_missing_trace():
     reasoning = FakeTool("__REASONING_RECORDED__")
-    bot = SimpleNamespace(tools={"reasoning_log": reasoning})
+    bot = SimpleNamespace(_tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0), tools={"reasoning_log": reasoning})
     message = SimpleNamespace()
 
     async def run():
@@ -277,7 +288,7 @@ def test_ensure_reasoning_trace_backfills_missing_trace():
 
 def test_ensure_reasoning_trace_skips_existing_trace():
     reasoning = FakeTool("__REASONING_RECORDED__")
-    bot = SimpleNamespace(tools={"reasoning_log": reasoning})
+    bot = SimpleNamespace(_tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0), tools={"reasoning_log": reasoning})
     message = SimpleNamespace()
 
     async def run():
@@ -300,6 +311,7 @@ def test_build_messages_caps_tool_history_outside_recent_count():
         ]
     )
     bot = SimpleNamespace(
+        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={
             "base_personality": "test",
             "cross_context_enabled": False,
@@ -344,6 +356,7 @@ def test_process_tool_calls_skips_duplicate_terminal_tools():
     first = FakeTool("__MESSAGE_SENT__ Sent 1 chars")
     second = FakeTool("__MESSAGE_SENT__ Sent 2 chars")
     bot = SimpleNamespace(
+        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False, "store_memory": False},
         tools={"send_message": first, "no_response": second},
         _message_tool_platform=lambda _message: "discord",
@@ -389,6 +402,7 @@ def test_reasoning_log_with_send_message_does_not_trigger_followup():
 
 def test_tool_prompt_has_no_nested_tags_rule():
     bot = SimpleNamespace(
+        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={"tools_enabled": True, "disabled_tools": []},
         tools={"reasoning_log": FakeTool("__REASONING_RECORDED__")},
     )
@@ -400,7 +414,7 @@ def test_tool_prompt_has_no_nested_tags_rule():
 
 
 def test_prompt_budget_trims_large_background_blocks():
-    bot = SimpleNamespace(_control={"prompt_context_budget": 10000})
+    bot = SimpleNamespace(_tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0), _control={"prompt_context_budget": 10000})
     messages = [
         {"role": "system", "content": "core"},
         {"role": "system", "content": "x" * 50000},
@@ -422,6 +436,7 @@ def test_shared_fact_relevance_filters_broad_vague_context():
 def test_build_messages_has_single_formatting_instruction():
     memory = FakeMemory()
     bot = SimpleNamespace(
+        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={
             "base_personality": "test",
             "cross_context_enabled": False,
@@ -474,7 +489,7 @@ def test_cached_media_context_allowed_for_attachment_reply():
 
 
 def test_cached_media_context_can_filter_by_reply_message_id():
-    bot = SimpleNamespace(_media_context={
+    bot = SimpleNamespace(_tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0), _media_context={
         "c": [
             {"b64": "old", "mime_type": "image/png", "filename": "old.png", "message_id": 1},
             {"b64": "right", "mime_type": "image/png", "filename": "right.png", "message_id": 2},

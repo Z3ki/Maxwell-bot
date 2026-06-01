@@ -45,6 +45,8 @@ def _bool_env(name: str, default: bool) -> bool:
 class Config:
     DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
+    TELEGRAM_WEBHOOK_URL = os.getenv("TELEGRAM_WEBHOOK_URL", "").strip()
+    TELEGRAM_WEBHOOK_PORT = _int_env("TELEGRAM_WEBHOOK_PORT", 8443, min_value=1024, max_value=65535)
 
     OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", os.getenv("OPENAI_COMPAT_API_KEY", ""))

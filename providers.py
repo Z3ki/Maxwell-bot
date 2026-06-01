@@ -110,6 +110,7 @@ class OllamaProvider:
             )
         self._session = None
         self.available = False
+        self._last_usage: dict = {}
 
     def _headers(self, endpoint: ProviderEndpoint = None) -> dict[str, str]:
         api_key = self.api_key if endpoint is None else endpoint.api_key
@@ -366,14 +367,21 @@ class OllamaProvider:
                             continue
                         raise RuntimeError("Empty response from provider")
 
+                    usage = result.get("usage", {})
+                    self._last_usage = {
+                        "prompt_tokens": usage.get("prompt_tokens", 0),
+                        "completion_tokens": usage.get("completion_tokens", 0),
+                        "total_tokens": usage.get("total_tokens", 0),
+                    }
                     logger.info(
-                        "Provider timing done endpoint=%s status=%s headers_ms=%.1f total_ms=%.1f content_chars=%s tool_calls=%s",
+                        "Provider timing done endpoint=%s status=%s headers_ms=%.1f total_ms=%.1f content_chars=%s tool_calls=%s tokens=%s",
                         endpoint.name,
                         resp.status,
                         headers_ms,
                         json_ms,
                         len(content or ""),
                         len(message.get("tool_calls") or []),
+                        self._last_usage.get("total_tokens", 0),
                     )
                     return message
             except asyncio.TimeoutError:
