@@ -120,6 +120,7 @@ def test_reaction_on_maxwell_message_invokes_handler():
     assert message.author is reacting_user
     assert message.reference.resolved is original
     assert message.mentions == [maxwell_user]
+    assert message.suppress_typing is True
 
     asyncio.run(message.reply("hi"))
     assert replies == [("hi", {})]

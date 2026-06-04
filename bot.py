@@ -2151,6 +2151,7 @@ class MaxwellBot(commands.Bot):
                     message_id=getattr(message, "id", None),
                 ),
                 created_at=datetime.now(timezone.utc),
+                suppress_typing=True,
             )
 
             async def fake_reply(reply_content=None, **kwargs):
@@ -4834,7 +4835,9 @@ class MaxwellBot(commands.Bot):
         try:
             await self._acquire_ai_slot(timeout=ai_timeout)
             try:
-                if self._control.get("typing_indicator", True):
+                if self._control.get("typing_indicator", True) and not getattr(
+                    message, "suppress_typing", False
+                ):
                     try:
                         async with message.channel.typing():
                             response = await self.ai_provider.generate_response(
@@ -5097,7 +5100,9 @@ class MaxwellBot(commands.Bot):
                     tool_results.append(f"Tool {name}: {result_text}")
                     await remember_tool_call(name, params, result_text)
 
-        if self._control.get("typing_indicator", True):
+        if self._control.get("typing_indicator", True) and not getattr(
+            message, "suppress_typing", False
+        ):
             try:
                 async with message.channel.typing():
                     await run_calls()
