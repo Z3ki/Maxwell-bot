@@ -2110,7 +2110,7 @@ class MaxwellBot(commands.Bot):
             if not self._control.get("reply_mentions", True):
                 return
             emoji = str(getattr(reaction, "emoji", ""))[:120]
-            dedupe_key = f"{getattr(message, 'id', '')}:{getattr(user, 'id', '')}:{emoji}"
+            dedupe_key = f"{getattr(message, 'id', '')}:{emoji}"
             if dedupe_key in self._reaction_seen:
                 return
             now = asyncio.get_running_loop().time()
@@ -2132,8 +2132,13 @@ class MaxwellBot(commands.Bot):
 
             content = (
                 f"{getattr(user, 'display_name', getattr(user, 'name', user.id))} "
-                f"reacted to your message with {emoji}. Reply only if the reaction genuinely calls for it; "
-                "a silent no_response is fine for low-signal emoji."
+                f"reacted to your message with {emoji}. "
+                "ONLY respond if this reaction genuinely needs a text reply "
+                "(e.g. they asked a question, the emoji is a clear signal like ❓🤔❗, or it's a reaction "
+                "to something you said that warrants clarification). "
+                "For casual reactions (😂👍❤️🔥 etc.) or low-signal emoji, "
+                "you MUST use <tool:no_response /> to stay silent. "
+                "Do not chat just because someone reacted."
             )
             fake_message = SimpleNamespace(
                 id=f"reaction:{getattr(message, 'id', '')}:{getattr(user, 'id', '')}:{emoji}",
