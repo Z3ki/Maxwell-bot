@@ -4,7 +4,6 @@ from datetime import datetime
 from types import SimpleNamespace
 
 from autonomy import (
-    AUTONOMY_DISABLED_TOOLS,
     AutonomyEngine,
     AutonomyStore,
     _truncate,
@@ -20,11 +19,15 @@ class DummyTool:
 
 
 class FakeMemory:
-    def __init__(self):
+    def __init__(self, channel_rows=None):
         self.added = []
+        self.channel_rows = channel_rows or {}
 
     async def add_to_channel_memory(self, channel_id, message):
         self.added.append((channel_id, message))
+
+    async def get_channel_memory(self, channel_id):
+        return list(self.channel_rows.get(str(channel_id), []))
 
 
 def _engine(tmp_path, *, auto_channels=None, tools=None, control=None):
@@ -84,15 +87,128 @@ def test_parse_plan_preserves_reply_to_message_id(tmp_path):
     ]
 
 
-def test_exec_run_tool_refuses_disabled_tools(tmp_path):
-    disabled = next(iter(AUTONOMY_DISABLED_TOOLS))
-    engine = _engine(tmp_path, auto_channels={"100"}, tools={disabled: DummyTool()})
+def test_parse_plan_preserves_run_tool_target_channel_id(tmp_path):
+    engine = _engine(tmp_path, auto_channels={"100"}, tools={"react": DummyTool()})
+
+    raw = json.dumps(
+        {
+            "thought": "react in the right room",
+            "actions": [
+                {
+                    "kind": "run_tool",
+                    "tool_name": "react",
+                    "target_channel_id": "100",
+                    "tool_args": {"emoji": "😂", "target_message_id": "555"},
+                }
+            ],
+        }
+    )
+    actions, failures = engine._parse_plan(raw)
+
+    assert failures == []
+    assert actions == [
+        {
+            "kind": "run_tool",
+            "tool_name": "react",
+            "target_channel_id": "100",
+            "tool_args": {"emoji": "😂", "target_message_id": "555"},
+            "reason": "",
+        }
+    ]
+
+
+def test_exec_run_tool_respects_dashboard_disabled_tools(tmp_path):
+    disabled = "react"
+    engine = _engine(
+        tmp_path,
+        auto_channels={"100"},
+        tools={disabled: DummyTool()},
+        control={"tools_enabled": True, "disabled_tools": [disabled]},
+    )
     result = {"kind": "run_tool", "result": "success", "error": None}
 
     asyncio.run(engine._exec_run_tool({"tool_name": disabled, "tool_args": {}}, result))
 
     assert result["result"] == "error"
     assert "disabled" in result["error"]
+
+
+def test_exec_run_tool_refuses_blocked_explicit_channel(tmp_path):
+    engine = _engine(
+        tmp_path,
+        auto_channels={"100"},
+        tools={"dummy": DummyTool()},
+        control={"tools_enabled": True, "disabled_tools": [], "blocked_channels": ["100"]},
+    )
+    channel = SimpleNamespace(id=100, guild=SimpleNamespace(id=9))
+    engine.bot.get_channel = lambda channel_id: channel if channel_id == 100 else None
+    engine.bot.fetch_channel = None
+    result = {"kind": "run_tool", "result": "success", "error": None}
+
+    asyncio.run(
+        engine._exec_run_tool(
+            {"tool_name": "dummy", "target_channel_id": "100", "tool_args": {}},
+            result,
+        )
+    )
+
+    assert result["result"] == "error"
+    assert result["error"] == "channel not allowed for autonomy"
+
+
+def test_exec_run_tool_react_uses_target_message_id(tmp_path):
+    class ReactTool:
+        def get_description(self):
+            return "react"
+
+        async def execute(self, message, emoji=None, **kwargs):
+            await message.add_reaction(emoji)
+            return "reacted"
+
+    class TargetMessage:
+        def __init__(self):
+            self.reactions = []
+
+        async def add_reaction(self, emoji):
+            self.reactions.append(emoji)
+
+    class Channel:
+        id = 100
+        guild = SimpleNamespace(id=9)
+
+        def __init__(self):
+            self.target = TargetMessage()
+
+        async def fetch_message(self, message_id):
+            assert message_id == 555
+            return self.target
+
+    channel = Channel()
+    bot = SimpleNamespace(
+        config=SimpleNamespace(DATA_DIR=str(tmp_path)),
+        _auto_channels={"100"},
+        _control={"tools_enabled": True, "disabled_tools": []},
+        tools={"react": ReactTool()},
+        user=SimpleNamespace(id=42, display_name="Maxwell", name="Maxwell"),
+        get_channel=lambda channel_id: channel if channel_id == 100 else None,
+        fetch_channel=None,
+    )
+    engine = AutonomyEngine(bot)
+    result = {"kind": "run_tool", "result": "success", "error": None}
+
+    asyncio.run(
+        engine._exec_run_tool(
+            {
+                "tool_name": "react",
+                "target_channel_id": "100",
+                "tool_args": {"emoji": "😂", "target_message_id": "555"},
+            },
+            result,
+        )
+    )
+
+    assert result["result"] == "success"
+    assert channel.target.reactions == ["😂"]
 
 
 def test_exec_post_channel_replies_to_specific_message(tmp_path):
@@ -148,7 +264,7 @@ def test_exec_post_channel_replies_to_specific_message(tmp_path):
 
     assert result["result"] == "success"
     assert result["sent_as_reply"] is True
-    assert channel.ref.replies == [("threaded correctly", {"mention_author": False})]
+    assert channel.ref.replies == [("threaded correctly", {"mention_author": True})]
     assert channel.sent == []
 
 
@@ -250,3 +366,68 @@ def test_truncate_handles_tiny_budgets():
     assert _truncate("abcdef", 0) == ""
     assert _truncate("abcdef", 3) == "abc"
     assert _truncate("abcdef", 99) == "abcdef"
+
+
+def test_gather_context_includes_normal_channel_memory(tmp_path):
+    class Store:
+        async def load_goals(self):
+            return []
+
+        async def load_state(self):
+            return {}
+
+        async def load_log(self):
+            return []
+
+    class RemLog:
+        async def drain_slice(self, since):
+            return []
+
+    class Channel:
+        id = 100
+        name = "general"
+        topic = ""
+
+        async def history(self, limit=1):
+            if False:
+                yield None
+
+    memory = FakeMemory(
+        {
+            "100": [
+                {
+                    "author": "Maxwell",
+                    "author_id": "42",
+                    "author_is_bot": True,
+                    "content": "i already said this like maxwell",
+                },
+                {
+                    "author": "Maxwell",
+                    "author_is_bot": True,
+                    "content": "old self row with missing id",
+                }
+            ]
+        }
+    )
+    channel = Channel()
+    bot = SimpleNamespace(
+        config=SimpleNamespace(DATA_DIR=str(tmp_path)),
+        _auto_channels={"100"},
+        _control={"bot_enabled": True},
+        tools={},
+        user=SimpleNamespace(id=42, display_name="Maxwell", name="Maxwell"),
+        guilds=[SimpleNamespace(text_channels=[], me=SimpleNamespace())],
+        private_channels=[],
+        rem_log=RemLog(),
+        memory=memory,
+        get_channel=lambda channel_id: channel if channel_id == 100 else None,
+        fetch_channel=None,
+    )
+    engine = AutonomyEngine(bot)
+    engine.store = Store()
+
+    context = asyncio.run(engine.gather_context())
+
+    assert "RECENT CONTEXT MEMORY" in context
+    assert "You/Maxwell(42): i already said this like maxwell" in context
+    assert "You/Maxwell: old self row with missing id" in context

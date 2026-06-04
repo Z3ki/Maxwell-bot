@@ -15,6 +15,7 @@ import time
 import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Literal, overload, cast
 from urllib.parse import urlparse
 
@@ -1597,6 +1598,7 @@ class MaxwellBot(commands.Bot):
         self._control = dict(DEFAULT_CONTROL)
         self._control_mtime = 0
         self._reaction_seen: set[str] = set()  # "{message_id}:{emoji}" dedup
+        self._reaction_seen_order: list[str] = []
         self._recorded_rem_msg_ids: set[int] = (
             set()
         )  # "message_id" dedup for REM events
@@ -2063,8 +2065,113 @@ class MaxwellBot(commands.Bot):
                 )
 
     async def on_reaction_add(self, reaction, user):
-        """Auto-mode reaction chatter is dead. It burned tokens for emoji noise."""
-        return
+        """Treat reactions on Maxwell's messages like tiny replies.
+
+        This used to be a hard return because emoji chatter got expensive. User
+        asked for it back, so here we are, touching the cursed stove again.
+        """
+        try:
+            if not self.user or getattr(user, "id", None) == self.user.id:
+                return
+            self._load_control()
+            if not self._control.get("bot_enabled", True):
+                return
+            uid = str(getattr(user, "id", ""))
+            if uid in getattr(self, "_blacklist", set()) or uid in set(
+                self._control.get("ignore_users", []) or []
+            ):
+                return
+            if getattr(user, "bot", False) and not self._control.get(
+                "reply_to_bots", True
+            ):
+                return
+            message = getattr(reaction, "message", None)
+            if message is None or not getattr(message, "author", None):
+                return
+            if getattr(message.author, "id", None) != self.user.id:
+                return
+            channel = getattr(message, "channel", None)
+            channel_id = str(getattr(channel, "id", ""))
+            if not channel_id:
+                return
+            if isinstance(channel, discord.DMChannel) and not self._control.get(
+                "reply_dms", True
+            ):
+                return
+            if isinstance(channel, discord.GroupChannel) and not self._control.get(
+                "reply_groups", True
+            ):
+                return
+            if channel_id in set(self._control.get("blocked_channels", []) or []):
+                return
+            allowed = set(self._control.get("allowed_channels", []) or [])
+            if allowed and channel_id not in allowed:
+                return
+            if not self._control.get("reply_mentions", True):
+                return
+            emoji = str(getattr(reaction, "emoji", ""))[:120]
+            dedupe_key = f"{getattr(message, 'id', '')}:{getattr(user, 'id', '')}:{emoji}"
+            if dedupe_key in self._reaction_seen:
+                return
+            now = asyncio.get_running_loop().time()
+            if now < self._stop_until.get(channel_id, 0):
+                return
+            cooldown = float(self._control.get("per_user_cooldown_seconds", 1.5) or 0)
+            last = self._cooldowns.get(uid, 0)
+            if cooldown > 0 and now - last < cooldown:
+                return
+            self._cooldowns[uid] = now
+
+            self._reaction_seen.add(dedupe_key)
+            if not hasattr(self, "_reaction_seen_order"):
+                self._reaction_seen_order = []
+            self._reaction_seen_order.append(dedupe_key)
+            while len(self._reaction_seen_order) > 1000:
+                old_key = self._reaction_seen_order.pop(0)
+                self._reaction_seen.discard(old_key)
+
+            content = (
+                f"{getattr(user, 'display_name', getattr(user, 'name', user.id))} "
+                f"reacted to your message with {emoji}. Reply only if the reaction genuinely calls for it; "
+                "a silent no_response is fine for low-signal emoji."
+            )
+            fake_message = SimpleNamespace(
+                id=f"reaction:{getattr(message, 'id', '')}:{getattr(user, 'id', '')}:{emoji}",
+                author=user,
+                channel=channel,
+                guild=getattr(message, "guild", None),
+                content=content,
+                attachments=[],
+                embeds=[],
+                mentions=[self.user],
+                role_mentions=[],
+                channel_mentions=[],
+                reference=SimpleNamespace(
+                    resolved=message,
+                    message_id=getattr(message, "id", None),
+                ),
+                created_at=datetime.now(timezone.utc),
+            )
+
+            async def fake_reply(reply_content=None, **kwargs):
+                if hasattr(message, "reply"):
+                    return await message.reply(reply_content, **kwargs)
+                return await channel.send(reply_content, **kwargs)
+
+            fake_message.reply = fake_reply
+
+            async def fake_add_reaction(emoji_to_add):
+                if hasattr(message, "add_reaction"):
+                    return await message.add_reaction(emoji_to_add)
+                return None
+
+            fake_message.add_reaction = fake_add_reaction
+
+            context_content = content + self._get_reply_context(fake_message)
+            async with self._get_channel_lock(channel_id):
+                await self._handle_message(fake_message, context_content)
+        except Exception as e:
+            logger.warning(f"Failed handling reaction on Maxwell message: {e}")
 
     async def _handle_command(self, message):
         content = message.content[1:].strip()

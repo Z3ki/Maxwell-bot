@@ -10,10 +10,9 @@ MAINTAINER NOTES:
 - The old version had a self-defeating prompt ("nobody messaged you" then
   "check if anyone messaged you"). The LLM defaulted to do_nothing 75% of
   the time. Don't add that shit back.
-- search_messages is disabled for autonomy — it requires a guild context
-  that SyntheticMessage doesn't reliably provide. The LLM kept calling it
-  with empty queries and getting errors. If you re-enable it, test with
-  actual SyntheticMessage instances first.
+- Autonomy now exposes every dashboard-enabled tool. If a tool needs a real
+  Discord message, SyntheticMessage has to point at target_message_id. Yes,
+  this is more annoying. The user explicitly asked for all tools.
 - The context budget is PER-SECTION now, not global truncation. The old
   version truncated from the end, so channel activity (the most actionable
   data) got eaten first. Don't "simplify" back to global truncation.
@@ -32,6 +31,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import discord
@@ -119,6 +119,49 @@ def _message_relation_tags(
     return tags
 
 
+def _format_memory_context_line(msg: dict, *, bot_user: Any = None, now=None) -> str:
+    stamp = _context_time(msg.get("timestamp"), now=now)
+    prefix = f"[{stamp}] " if stamp else ""
+    author = str(msg.get("author", "?"))
+    author_id = str(msg.get("author_id") or "")
+    bot_id = str(getattr(bot_user, "id", "")) if bot_user is not None else ""
+    bot_name = str(
+        getattr(bot_user, "display_name", None) or getattr(bot_user, "name", "") or ""
+    )
+
+    if msg.get("is_tool"):
+        return f"{prefix}[Tool] {str(msg.get('content', ''))[:600]}"
+
+    if (bot_id and author_id == bot_id) or (
+        not author_id and bot_name and author == bot_name
+    ):
+        label = f"You/Maxwell({author_id})" if author_id else "You/Maxwell"
+    else:
+        label = f"{author}({author_id})" if author_id else author
+        if msg.get("author_is_bot"):
+            label += " [bot]"
+
+    relation_bits = []
+    if msg.get("reply_to_author"):
+        reply_label = str(msg.get("reply_to_author"))
+        reply_id = str(msg.get("reply_to_author_id") or "")
+        if msg.get("reply_to_self"):
+            reply_label = "you/Maxwell"
+        relation_bits.append(
+            f"reply_to={reply_label}({reply_id})" if reply_id else f"reply_to={reply_label}"
+        )
+    mentions = msg.get("mentions") if isinstance(msg.get("mentions"), list) else []
+    mention_bits = [
+        f"@{item.get('name', 'unknown')}({item.get('id', 'unknown')})"
+        for item in mentions[:10]
+        if isinstance(item, dict)
+    ]
+    if mention_bits:
+        relation_bits.append("mentions=" + ",".join(mention_bits))
+    relation = f" [{'; '.join(relation_bits)}]" if relation_bits else ""
+    return f"{prefix}{label}{relation}: {str(msg.get('content', ''))[:600]}"
+
+
 def _render_discord_context_text(message: Any, content: str | None = None) -> str:
     text = str(
         content if content is not None else (getattr(message, "content", "") or "")
@@ -197,26 +240,18 @@ LOG_RING_SIZE = 200
 CTX_BUDGET_GOALS = 800
 CTX_BUDGET_RECENT_EVENTS = 2000
 CTX_BUDGET_CHANNEL_ACTIVITY = 2800
+CTX_BUDGET_CHANNEL_MEMORY = 2200
 CTX_BUDGET_RECENT_ACTIONS = 1200
 CTX_BUDGET_DM_HISTORY = 1200
 CTX_BUDGET_LTM = 800
 CTX_BUDGET_SHARED = 600
 CTX_BUDGET_CHANNELS_MAP = 1600  # bumped from 800 — enriched with topic/recency
 
-# Tools that don't work with autonomous SyntheticMessage execution
-AUTONOMY_DISABLED_TOOLS = frozenset(
-    {
-        "search_messages",  # requires guild context, fails in DMs
-        "react",  # reacting to synthetic message is pointless — nobody sees it
-        "no_response",  # not useful in autonomy context
-        "typing",  # ephemeral, no value
-        "forward_message",  # requires a real message_id to forward
-        "edit_message",  # requires a real message_id to edit
-        "delete_message",  # requires a real message_id to delete
-        "reasoning_log",  # meta-tool, autonomy has its own thought logging
-        "send_message",  # conflicts with post_channel and can fall back to the wrong channel
-    }
-)
+# Autonomy can use every registered tool unless dashboard controls disable it.
+# Yeah, this used to be a graveyard of "this is annoying in synthetic messages"
+# exceptions. The requirement is all tools, so the synthetic message shim now has
+# to eat the pain instead of hiding tools from Maxwell.
+AUTONOMY_DISABLED_TOOLS = frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +306,17 @@ def _truncate(text: str, budget: int) -> str:
     if budget <= len(suffix):
         return text[:budget]
     return text[: budget - len(suffix)] + suffix
+
+
+def _truncate_keep_tail(text: str, budget: int) -> str:
+    """Keep newest lines when context gets too fat. Front truncation betrayed us."""
+    budget = max(0, int(budget or 0))
+    if len(text) <= budget:
+        return text
+    prefix = "[older context truncated] ...\n"
+    if budget <= len(prefix):
+        return text[-budget:]
+    return prefix + text[-max(0, budget - len(prefix)) :]
 
 
 def _coerce_utc_datetime(value) -> datetime | None:
@@ -343,11 +389,12 @@ def _action_feedback_line(entry: dict, *, now: datetime | None = None) -> str:
 class SyntheticMessage:
     """Minimal message-like object for tool execution outside on_message."""
 
-    def __init__(self, channel, author, guild, content: str):
+    def __init__(self, channel, author, guild, content: str, target_message=None):
         self.channel = channel
         self.author = author
         self.guild = guild
         self.content = content
+        self._target_message = target_message
         self.id = None  # None instead of 0 — 0 is an invalid snowflake
         self.attachments = []
         self.embeds = []
@@ -363,10 +410,16 @@ class SyntheticMessage:
         self.created_at = datetime.now(timezone.utc)
 
     async def reply(self, content=None, **kwargs):
+        if self._target_message is not None and hasattr(self._target_message, "reply"):
+            return await self._target_message.reply(content, **kwargs)
         return await self.channel.send(content, **kwargs)
 
     async def add_reaction(self, emoji):
-        pass  # no-op — reacting to a synthetic msg is pointless, nobody sees it
+        if self._target_message is not None and hasattr(
+            self._target_message, "add_reaction"
+        ):
+            return await self._target_message.add_reaction(emoji)
+        raise discord.NotFound(response=None, message="target message not found")
 
     async def remove_reaction(self, emoji, member):
         pass  # same
@@ -567,8 +620,6 @@ class AutonomyEngine:
         The LLM was calling shell/kilo/create_channel through autonomy even when
         the admin disabled them in the dashboard. Don't remove this gate.
         """
-        if name in AUTONOMY_DISABLED_TOOLS:
-            return False
         control = getattr(self.bot, "_control", None) or {}
         if not control.get("tools_enabled", True):
             return False
@@ -909,7 +960,97 @@ class AutonomyEngine:
         else:
             sections.append("=== CHANNEL ACTIVITY ===\n(no accessible channels)")
 
-        # 5. Recent autonomy actions + validation failures (feedback loop)
+        # 5. The same short-term channel memory normal Maxwell sees.
+        # This is the glue that stops autonomy from acting like some weird second
+        # intern who skimmed the logs but missed the actual relationship history.
+        try:
+            memory = cast(Any, getattr(self.bot, "memory", None))
+            mem_lines = []
+            memory_now = datetime.now(timezone.utc)
+            memory_budget = max(
+                1000,
+                min(
+                    int(
+                        (getattr(self.bot, "_control", None) or {}).get(
+                            "memory_context_budget", CTX_BUDGET_CHANNEL_MEMORY
+                        )
+                        or CTX_BUDGET_CHANNEL_MEMORY
+                    ),
+                    20000,
+                ),
+            )
+            if memory and hasattr(memory, "get_channel_memory"):
+                for cid in reversed(channel_ids_to_check[:8]):
+                    if not self._channel_allowed(cid):
+                        continue
+                    rows = await memory.get_channel_memory(cid)
+                    if not rows:
+                        continue
+                    ch_name = cid
+                    with contextlib.suppress(Exception):
+                        ch_obj = self.bot.get_channel(int(cid))
+                        ch_name = getattr(ch_obj, "name", cid) if ch_obj else cid
+                    history_count = max(
+                        1,
+                        min(
+                            int(
+                                (getattr(self.bot, "_control", None) or {}).get(
+                                    "memory_history_messages", 40
+                                )
+                                or 40
+                            ),
+                            100,
+                        ),
+                    )
+                    tool_limit = max(
+                        0,
+                        min(
+                            int(
+                                (getattr(self.bot, "_control", None) or {}).get(
+                                    "tool_history_messages", 3
+                                )
+                                or 0
+                            ),
+                            20,
+                        ),
+                    )
+                    recent_rows = rows[-history_count:]
+                    recent_ids = {id(row) for row in recent_rows}
+                    tool_rows = (
+                        [row for row in rows if isinstance(row, dict) and row.get("is_tool") and id(row) not in recent_ids][
+                            -tool_limit:
+                        ]
+                        if tool_limit
+                        else []
+                    )
+                    channel_rows = tool_rows + list(recent_rows)
+                    channel_lines = []
+                    used = 0
+                    for msg in reversed(channel_rows):
+                        if not isinstance(msg, dict):
+                            continue
+                        line = _format_memory_context_line(
+                            msg, bot_user=self.bot.user, now=memory_now
+                        )
+                        if channel_lines and used + len(line) > memory_budget:
+                            break
+                        channel_lines.append(line)
+                        used += len(line)
+                    if channel_lines:
+                        mem_lines.append(f"# {ch_name}({cid})")
+                        mem_lines.extend(reversed(channel_lines))
+            if mem_lines:
+                sections.append(
+                    _truncate_keep_tail(
+                        "=== RECENT CONTEXT MEMORY (same continuity normal Maxwell sees; background only) ===\n"
+                        + "\n".join(mem_lines[-80:]),
+                        memory_budget,
+                    )
+                )
+        except Exception as e:
+            sections.append(f"=== RECENT CONTEXT MEMORY ===\n(error: {e})")
+
+        # 6. Recent autonomy actions + validation failures (feedback loop)
         action_feedback = []
         try:
             log_entries = await self.store.load_log()
@@ -1222,7 +1363,8 @@ IMPORTANT RULES:
 - If someone mentioned you or talked about you, respond.
 - If a conversation naturally concluded, don't re-open it unless you have a genuinely good reason.
 - If nothing needs doing, that's FINE. Output do_nothing with a reason.
-- NEVER call search_messages — the channel history is already provided above.
+- You may use any listed tool when it helps. Dashboard-disabled tools are not listed.
+- For tools that need a real message target (react, edit_message, delete_message, forward_message), pass "target_message_id" and "target_channel_id" from CHANNEL ACTIVITY when possible.
 - ALWAYS use "post_channel" with an explicit "target_channel_id" — the numeric ID, not a channel name.
 - Don't repeat things you already posted recently (check YOUR RECENT ACTIONS). Use the bracketed timestamps there; they are recalculated for this tick.
 - You can use up to {MAX_ACTIONS_PER_TICK} actions per tick.
@@ -1246,10 +1388,10 @@ Return ONLY valid JSON in this exact format:
     }},
     {{
       "kind": "run_tool",
-      "tool_name": "web_search",
-      "tool_args": {{"query": "something worth checking"}},
+      "tool_name": "react",
+      "tool_args": {{"emoji": "😂", "target_message_id": "987654321"}},
       "target_channel_id": "123456789",
-      "reason": "need fresh info before posting"
+      "reason": "reacting to a specific message"
     }},
     {{
       "kind": "update_memory",
@@ -1476,14 +1618,22 @@ Do NOT invent other action kinds — they will be rejected."""
                 if not isinstance(tool_args, dict):
                     tool_args = {}
                 safe_args = {str(k): v for k, v in tool_args.items()}
-                valid.append(
-                    {
-                        "kind": "run_tool",
-                        "tool_name": tool_name,
-                        "tool_args": safe_args,
-                        "reason": str(action.get("reason", ""))[:500],
-                    }
-                )
+                parsed_action = {
+                    "kind": "run_tool",
+                    "tool_name": tool_name,
+                    "tool_args": safe_args,
+                    "reason": str(action.get("reason", ""))[:500],
+                }
+                target_cid_raw = str(action.get("target_channel_id", ""))
+                target_cid = re.sub(r"[^0-9]", "", target_cid_raw)
+                if target_cid_raw.strip() and not target_cid:
+                    validation_failures.append(
+                        "run_tool: target_channel_id must be numeric"
+                    )
+                    continue
+                if target_cid:
+                    parsed_action["target_channel_id"] = target_cid
+                valid.append(parsed_action)
 
             elif kind == "update_memory":
                 content = str(action.get("content", "")).strip()
@@ -1718,7 +1868,7 @@ Do NOT invent other action kinds — they will be rejected."""
                 try:
                     ref = await channel.fetch_message(int(reply_to_message_id))
                     if ref is not None and hasattr(ref, "reply"):
-                        msg = await ref.reply(content, mention_author=False)
+                        msg = await ref.reply(content, mention_author=True)
                         result["sent_as_reply"] = True
                         memory_reply = ref
                 except (
@@ -1828,7 +1978,17 @@ Do NOT invent other action kinds — they will be rejected."""
 
         # resolve a channel if the action provides one
         channel = None
-        target_cid = action.get("target_channel_id") or tool_args.get("channel_id")
+        explicit_target = bool(
+            action.get("target_channel_id")
+            or tool_args.get("target_channel_id")
+            or tool_args.get("source_channel_id")
+        )
+        target_cid = (
+            action.get("target_channel_id")
+            or tool_args.get("target_channel_id")
+            or tool_args.get("source_channel_id")
+            or tool_args.get("channel_id")
+        )
         if target_cid:
             # LLM sometimes passes channel names like "general" instead of IDs.
             # int() throws ValueError, we'd silently fall back to auto_channel,
@@ -1840,11 +2000,19 @@ Do NOT invent other action kinds — they will be rejected."""
                     f"has no digits — LLM probably passed a channel name. "
                     f"Available channels are listed by ID in context."
                 )
+                if explicit_target:
+                    result["result"] = "error"
+                    result["error"] = "invalid explicit target_channel_id"
+                    return
             else:
                 try:
                     channel = self.bot.get_channel(int(clean_cid))
                     if channel is None:
                         channel = await self.bot.fetch_channel(int(clean_cid))
+                    if channel is not None and not self._channel_allowed(clean_cid):
+                        result["result"] = "error"
+                        result["error"] = "channel not allowed for autonomy"
+                        return
                 except (ValueError, TypeError):
                     logger.warning(
                         f"Autonomy run_tool '{tool_name}': bad channel_id '{target_cid}'"
@@ -1853,10 +2021,23 @@ Do NOT invent other action kinds — they will be rejected."""
                     logger.warning(
                         f"Autonomy run_tool '{tool_name}': channel {clean_cid} not found (deleted?)"
                     )
+                    if explicit_target:
+                        result["result"] = "error"
+                        result["error"] = "explicit target channel not found"
+                        return
                 except (discord.Forbidden, discord.HTTPException) as e:
                     logger.warning(
                         f"Autonomy run_tool '{tool_name}': can't access channel {clean_cid}: {e}"
                     )
+                    if explicit_target:
+                        result["result"] = "error"
+                        result["error"] = "explicit target channel unavailable"
+                        return
+
+        if explicit_target and channel is None:
+            result["result"] = "error"
+            result["error"] = "explicit target channel unavailable"
+            return
 
         # if no channel and we can find a default, use the first auto_channel
         # NOTE: this fallback means messages can end up in a channel the LLM didn't
@@ -1894,22 +2075,48 @@ Do NOT invent other action kinds — they will be rejected."""
             result["error"] = "no channel available for tool execution"
             return
 
+        target_message = None
+        target_mid = tool_args.get("target_message_id") or tool_args.get("message_id")
+        if target_mid and hasattr(channel, "fetch_message"):
+            clean_mid = re.sub(r"[^0-9]", "", str(target_mid))
+            if clean_mid:
+                try:
+                    target_message = await channel.fetch_message(int(clean_mid))
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    target_message = None
+
+        if tool_name == "react" and target_message is None:
+            result["result"] = "error"
+            result["error"] = "react requires target_message_id for autonomy"
+            return
+
         # build synthetic message
-        author = self.bot.user
+        bot_user = getattr(self.bot, "user", None)
+        author = SimpleNamespace(
+            id="autonomy",
+            display_name=getattr(bot_user, "display_name", None)
+            or getattr(bot_user, "name", None)
+            or getattr(self.bot, "bot_name", "Maxwell"),
+            name=getattr(bot_user, "name", None) or getattr(self.bot, "bot_name", "Maxwell"),
+            bot=True,
+        )
         guild = channel.guild if hasattr(channel, "guild") else None
         syn_msg = SyntheticMessage(
             channel=channel,
             author=author,
             guild=guild,
             content=tool_args.get("content", tool_args.get("prompt", "")),
+            target_message=target_message,
         )
 
         # extract tool kwargs (exclude meta fields that aren't real tool params)
         exec_kwargs = {
             k: v
             for k, v in tool_args.items()
-            if k not in {"channel_id", "target_channel_id"}
+            if k not in {"target_channel_id"}
         }
+        if "target_message_id" in exec_kwargs and "message_id" not in exec_kwargs:
+            exec_kwargs["message_id"] = exec_kwargs["target_message_id"]
         try:
             tool_result = await tool.execute(syn_msg, **exec_kwargs)
             result["result"] = "success"

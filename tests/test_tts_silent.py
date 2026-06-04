@@ -62,6 +62,69 @@ def test_process_tool_calls_preserves_no_response_marker_for_tts():
     asyncio.run(run())
 
 
+def test_reaction_on_maxwell_message_invokes_handler():
+    class NoopAsyncLock:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    calls = []
+    replies = []
+    maxwell_user = SimpleNamespace(id=42, display_name="Maxwell", bot=True)
+    reacting_user = SimpleNamespace(id=99, display_name="alice", name="alice", bot=False)
+    channel = SimpleNamespace(id=123)
+    original = SimpleNamespace(
+        id=777,
+        author=maxwell_user,
+        channel=channel,
+        guild=SimpleNamespace(id=9),
+    )
+
+    async def original_reply(content=None, **kwargs):
+        replies.append((content, kwargs))
+
+    original.reply = original_reply
+    reaction = SimpleNamespace(message=original, emoji="😂")
+
+    async def handle_message(message, content):
+        calls.append((message, content))
+
+    bot = SimpleNamespace(
+        user=maxwell_user,
+        _load_control=lambda: None,
+        _control={
+            "bot_enabled": True,
+            "reply_to_bots": True,
+            "blocked_channels": [],
+            "allowed_channels": [],
+            "reply_mentions": True,
+            "per_user_cooldown_seconds": 0,
+        },
+        _blacklist=set(),
+        _cooldowns={},
+        _stop_until={},
+        _reaction_seen=set(),
+        _get_channel_lock=lambda channel_id: NoopAsyncLock(),
+        _get_reply_context=lambda message: "\nReplied-to message: Maxwell said hi",
+        _handle_message=handle_message,
+    )
+
+    asyncio.run(MaxwellBot.on_reaction_add(bot, reaction, reacting_user))
+
+    assert len(calls) == 1
+    message, content = calls[0]
+    assert "reacted to your message with 😂" in content
+    assert "Replied-to message: Maxwell said hi" in content
+    assert message.author is reacting_user
+    assert message.reference.resolved is original
+    assert message.mentions == [maxwell_user]
+
+    asyncio.run(message.reply("hi"))
+    assert replies == [("hi", {})]
+
+
 def test_process_tool_calls_still_returns_other_tool_results():
     react = FakeTool("Reacted with <:catjam:123>")
     bot = SimpleNamespace(

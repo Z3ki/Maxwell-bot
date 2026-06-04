@@ -1172,6 +1172,8 @@ class CreateCategoryTool(Tool):
         position: str | None = None,
         **kwargs,
     ) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: create_category is admin-only"
         clean = _clean_discord_name(name)
         if not clean:
             return "Error: name is required"
