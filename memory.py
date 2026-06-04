@@ -692,14 +692,34 @@ class MemoryManager:
             if channel_id not in self.memory:
                 self.memory[channel_id] = []
 
+            ts = _parse_iso(message.get("timestamp", "")) or _utcnow()
+            message["timestamp"] = ts.isoformat()
+
             message_id = str(message.get("message_id") or "")
             if message_id:
                 for existing in self.memory[channel_id]:
                     if str(existing.get("message_id") or "") == message_id:
+                        changed = False
+                        metadata_keys = {
+                            "author",
+                            "author_id",
+                            "author_is_bot",
+                            "reply_to_message_id",
+                            "reply_to_author",
+                            "reply_to_author_id",
+                            "reply_to_self",
+                            "mentions",
+                        }
+                        for key, value in message.items():
+                            if value in (None, "", [], {}):
+                                continue
+                            if not existing.get(key) or key in metadata_keys:
+                                if existing.get(key) != value:
+                                    existing[key] = value
+                                    changed = True
+                        if changed:
+                            self._schedule_save()
                         return
-
-            ts = _parse_iso(message.get("timestamp", "")) or _utcnow()
-            message["timestamp"] = ts.isoformat()
             self.memory[channel_id].append(message)
 
             if len(self.memory[channel_id]) > self.max_messages:

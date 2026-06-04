@@ -101,3 +101,42 @@ def test_channel_memory_dedupes_by_message_id(tmp_path):
         assert memory[0]["content"] == "autonomy said this"
 
     asyncio.run(run())
+
+
+def test_channel_memory_duplicate_merges_self_attribution_and_reply_metadata(tmp_path):
+    async def run():
+        mgr = MemoryManager(str(tmp_path))
+        mgr.load_from_disk()
+
+        await mgr.add_to_channel_memory(
+            "100",
+            {
+                "author": "Some stale label",
+                "content": "autonomy replied",
+                "message_id": "777",
+            },
+        )
+        await mgr.add_to_channel_memory(
+            "100",
+            {
+                "author": "Maxwell",
+                "author_id": "42",
+                "author_is_bot": True,
+                "content": "autonomy replied",
+                "message_id": "777",
+                "reply_to_message_id": "555",
+                "reply_to_author": "alice",
+                "reply_to_author_id": "99",
+                "reply_to_self": False,
+            },
+        )
+
+        memory = await mgr.get_channel_memory("100")
+        assert len(memory) == 1
+        assert memory[0]["author"] == "Maxwell"
+        assert memory[0]["author_id"] == "42"
+        assert memory[0]["author_is_bot"] is True
+        assert memory[0]["reply_to_message_id"] == "555"
+        assert memory[0]["reply_to_author_id"] == "99"
+
+    asyncio.run(run())

@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import datetime
 from types import SimpleNamespace
 
 from autonomy import (
@@ -188,19 +189,17 @@ def test_exec_post_channel_records_autonomy_message_as_self_memory(tmp_path):
     )
 
     assert result["result"] == "success"
-    assert memory.added == [
-        (
-            "100",
-            {
-                "author": "Maxwell",
-                "author_id": "42",
-                "author_is_bot": True,
-                "content": "that was me",
-                "message_id": "777",
-                "timestamp": memory.added[0][1]["timestamp"],
-            },
-        )
-    ]
+    assert len(memory.added) == 1
+    channel_id, item = memory.added[0]
+    datetime.fromisoformat(item.pop("timestamp"))
+    assert channel_id == "100"
+    assert item == {
+        "author": "Maxwell",
+        "author_id": "42",
+        "author_is_bot": True,
+        "content": "that was me",
+        "message_id": "777",
+    }
 
 
 def test_exec_post_channel_refuses_blocked_channel(tmp_path):
