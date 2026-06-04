@@ -16,6 +16,8 @@ public/bot/
 dump.pm2
 .DS_Store
 .kilo/
+.pi-lens/
+shelldocker/
 .coverage
 htmlcov/
 dist/
