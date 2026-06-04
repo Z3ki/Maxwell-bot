@@ -68,3 +68,36 @@ def test_shared_context_reloads_external_file_deletion(tmp_path):
         assert contents == ["new fact"]
 
     asyncio.run(run())
+
+
+def test_channel_memory_dedupes_by_message_id(tmp_path):
+    async def run():
+        mgr = MemoryManager(str(tmp_path))
+        mgr.load_from_disk()
+
+        await mgr.add_to_channel_memory(
+            "100",
+            {
+                "author": "Maxwell",
+                "author_id": "42",
+                "author_is_bot": True,
+                "content": "autonomy said this",
+                "message_id": "777",
+            },
+        )
+        await mgr.add_to_channel_memory(
+            "100",
+            {
+                "author": "Maxwell",
+                "author_id": "42",
+                "author_is_bot": True,
+                "content": "autonomy said this",
+                "message_id": "777",
+            },
+        )
+
+        memory = await mgr.get_channel_memory("100")
+        assert len(memory) == 1
+        assert memory[0]["content"] == "autonomy said this"
+
+    asyncio.run(run())

@@ -1667,6 +1667,7 @@ Do NOT invent other action kinds — they will be rejected."""
                         "ts": time.time(),
                     }
                 )
+                await self._remember_visible_self_message(dm_channel, msg, content)
         except discord.Forbidden:
             result["result"] = "error"
             result["error"] = "user has DMs disabled or blocked the bot"
@@ -1711,12 +1712,15 @@ Do NOT invent other action kinds — they will be rejected."""
                 return
 
             msg = None
+            ref = None
+            memory_reply = None
             if reply_to_message_id and hasattr(channel, "fetch_message"):
                 try:
                     ref = await channel.fetch_message(int(reply_to_message_id))
                     if ref is not None and hasattr(ref, "reply"):
                         msg = await ref.reply(content, mention_author=False)
                         result["sent_as_reply"] = True
+                        memory_reply = ref
                 except (
                     discord.NotFound,
                     discord.Forbidden,
@@ -1742,12 +1746,64 @@ Do NOT invent other action kinds — they will be rejected."""
                         "ts": time.time(),
                     }
                 )
+                await self._remember_visible_self_message(
+                    channel, msg, content, reply=memory_reply
+                )
         except discord.Forbidden:
             result["result"] = "error"
             result["error"] = "bot lacks permission to send in this channel"
         except discord.HTTPException as e:
             result["result"] = "error"
             result["error"] = f"Discord API error: {e}"
+
+    async def _remember_visible_self_message(
+        self, channel: Any, sent_message: Any, content: str, *, reply: Any = None
+    ):
+        if not bool(getattr(self.bot, "_control", {}).get("store_memory", True)):
+            return
+        memory = cast(Any, getattr(self.bot, "memory", None))
+        if memory is None or not hasattr(memory, "add_to_channel_memory"):
+            return
+        bot_user = getattr(self.bot, "user", None)
+        channel_id = str(getattr(channel, "id", ""))
+        if not channel_id:
+            return
+
+        author_name = (
+            getattr(bot_user, "display_name", None)
+            or getattr(bot_user, "name", None)
+            or getattr(self.bot, "bot_name", "Maxwell")
+        )
+        item = {
+            "author": author_name,
+            "author_id": str(getattr(bot_user, "id", "")),
+            "author_is_bot": True,
+            "content": _render_discord_context_text(sent_message, content),
+            "message_id": str(getattr(sent_message, "id", "")),
+            "timestamp": (
+                getattr(sent_message, "created_at", None) or datetime.now(timezone.utc)
+            ).isoformat(),
+        }
+        if reply is not None and hasattr(reply, "author"):
+            item.update(
+                {
+                    "reply_to_message_id": str(getattr(reply, "id", "")),
+                    "reply_to_author": getattr(
+                        reply.author,
+                        "display_name",
+                        str(getattr(reply.author, "id", "unknown")),
+                    ),
+                    "reply_to_author_id": str(getattr(reply.author, "id", "")),
+                    "reply_to_self": bool(
+                        bot_user and getattr(reply.author, "id", None) == bot_user.id
+                    ),
+                }
+            )
+
+        try:
+            await memory.add_to_channel_memory(channel_id, item)
+        except Exception as e:
+            logger.warning(f"Failed to record autonomy self-message memory: {e}")
 
     async def _exec_run_tool(self, action: dict, result: dict):
         tool_name = action["tool_name"]

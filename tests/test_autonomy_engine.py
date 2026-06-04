@@ -18,6 +18,14 @@ class DummyTool:
         raise AssertionError("disabled tool executed")
 
 
+class FakeMemory:
+    def __init__(self):
+        self.added = []
+
+    async def add_to_channel_memory(self, channel_id, message):
+        self.added.append((channel_id, message))
+
+
 def _engine(tmp_path, *, auto_channels=None, tools=None, control=None):
     bot = SimpleNamespace(
         config=SimpleNamespace(DATA_DIR=str(tmp_path)),
@@ -141,6 +149,58 @@ def test_exec_post_channel_replies_to_specific_message(tmp_path):
     assert result["sent_as_reply"] is True
     assert channel.ref.replies == [("threaded correctly", {"mention_author": False})]
     assert channel.sent == []
+
+
+def test_exec_post_channel_records_autonomy_message_as_self_memory(tmp_path):
+    class SentMessage:
+        id = 777
+        created_at = None
+
+    class Channel:
+        id = 100
+        guild = SimpleNamespace(id=9)
+
+        async def send(self, content):
+            self.sent = content
+            return SentMessage()
+
+    memory = FakeMemory()
+    channel = Channel()
+    bot = SimpleNamespace(
+        config=SimpleNamespace(DATA_DIR=str(tmp_path)),
+        _auto_channels={"100"},
+        _control={"store_memory": True},
+        tools={},
+        user=SimpleNamespace(id=42, display_name="Maxwell", name="Maxwell"),
+        bot_name="Maxwell",
+        memory=memory,
+        get_channel=lambda channel_id: channel if channel_id == 100 else None,
+        fetch_channel=None,
+    )
+    engine = AutonomyEngine(bot)
+    result = {"kind": "post_channel", "result": "success", "error": None}
+
+    asyncio.run(
+        engine._exec_post_channel(
+            {"target_channel_id": "100", "content": "that was me"},
+            result,
+        )
+    )
+
+    assert result["result"] == "success"
+    assert memory.added == [
+        (
+            "100",
+            {
+                "author": "Maxwell",
+                "author_id": "42",
+                "author_is_bot": True,
+                "content": "that was me",
+                "message_id": "777",
+                "timestamp": memory.added[0][1]["timestamp"],
+            },
+        )
+    ]
 
 
 def test_exec_post_channel_refuses_blocked_channel(tmp_path):

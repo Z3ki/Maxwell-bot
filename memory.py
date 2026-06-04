@@ -692,6 +692,12 @@ class MemoryManager:
             if channel_id not in self.memory:
                 self.memory[channel_id] = []
 
+            message_id = str(message.get("message_id") or "")
+            if message_id:
+                for existing in self.memory[channel_id]:
+                    if str(existing.get("message_id") or "") == message_id:
+                        return
+
             ts = _parse_iso(message.get("timestamp", "")) or _utcnow()
             message["timestamp"] = ts.isoformat()
             self.memory[channel_id].append(message)
