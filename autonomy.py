@@ -32,14 +32,11 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import discord
 
 from control_defaults import DEFAULT_CONTROL  # noqa: E402
-
-if TYPE_CHECKING:
-    from bot import MaxwellBot
 
 logger = logging.getLogger(__name__)
 
@@ -49,49 +46,149 @@ ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
 
 
 def _discord_display_name(obj: Any) -> str:
-    return str(getattr(obj, "display_name", None) or getattr(obj, "name", None) or getattr(obj, "id", "unknown"))
+    return str(
+        getattr(obj, "display_name", None)
+        or getattr(obj, "name", None)
+        or getattr(obj, "id", "unknown")
+    )
+
+
+def _discord_id(obj: Any) -> str:
+    return str(getattr(obj, "id", "unknown"))
+
+
+def _user_ref(obj: Any, bot_user: Any = None) -> str:
+    uid = _discord_id(obj)
+    if bot_user is not None and uid == str(getattr(bot_user, "id", "")):
+        return f"you/Maxwell({uid})"
+    return f"{_discord_display_name(obj)}({uid})"
+
+
+def _visible_message_content(message: Any, content: str | None = None) -> str:
+    text = _render_discord_context_text(message, content)
+    parts = [text] if text else []
+    for attachment in list(getattr(message, "attachments", []) or [])[:5]:
+        content_type = getattr(attachment, "content_type", "") or ""
+        if content_type.startswith("image/"):
+            kind = "image"
+        elif content_type.startswith("audio/"):
+            kind = "audio"
+        elif content_type.startswith("video/"):
+            kind = "video"
+        else:
+            kind = "file"
+        name = getattr(attachment, "filename", "")
+        parts.append(f"[{kind}: {name}]" if name else f"[{kind}]")
+    if getattr(message, "embeds", None):
+        parts.append("[embed]")
+    return " ".join(p for p in parts if p).strip()
+
+
+def _message_relation_tags(
+    message: Any, *, bot_user: Any = None, reply: Any = None
+) -> list[str]:
+    tags: list[str] = []
+    addressed: list[str] = []
+
+    if getattr(getattr(message, "author", None), "bot", False):
+        tags.append("speaker_kind=bot")
+    else:
+        tags.append("speaker_kind=human")
+
+    if reply is not None and hasattr(reply, "author"):
+        ref = _user_ref(reply.author, bot_user)
+        tags.append(f"reply_to={ref}")
+        addressed.append(f"reply_to:{ref}")
+
+    mentions = list(getattr(message, "mentions", []) or [])[:10]
+    if mentions:
+        mention_refs = [_user_ref(user, bot_user) for user in mentions]
+        tags.append("mentions=[" + ", ".join(mention_refs) + "]")
+        addressed.extend(f"mention:{ref}" for ref in mention_refs)
+        if bot_user is not None and any(
+            str(getattr(user, "id", "")) == str(getattr(bot_user, "id", ""))
+            for user in mentions
+        ):
+            tags.append("mentions_you")
+
+    tags.append(
+        "addressed_to=[" + "; ".join(addressed) + "]"
+        if addressed
+        else "addressed_to=channel"
+    )
+    return tags
 
 
 def _render_discord_context_text(message: Any, content: str | None = None) -> str:
-    text = str(content if content is not None else (getattr(message, "content", "") or ""))
+    text = str(
+        content if content is not None else (getattr(message, "content", "") or "")
+    )
     if not text:
         return text
 
     guild = getattr(message, "guild", None)
-    users = {str(getattr(user, "id", "")): user for user in list(getattr(message, "mentions", []) or [])}
-    channels = {str(getattr(ch, "id", "")): ch for ch in list(getattr(message, "channel_mentions", []) or [])}
-    roles = {str(getattr(role, "id", "")): role for role in list(getattr(message, "role_mentions", []) or [])}
+    users = {
+        str(getattr(user, "id", "")): user
+        for user in list(getattr(message, "mentions", []) or [])
+    }
+    channels = {
+        str(getattr(ch, "id", "")): ch
+        for ch in list(getattr(message, "channel_mentions", []) or [])
+    }
+    roles = {
+        str(getattr(role, "id", "")): role
+        for role in list(getattr(message, "role_mentions", []) or [])
+    }
 
     def replace_user(match: re.Match) -> str:
         user_id = match.group(1)
         user = users.get(user_id)
         if user is None and guild is not None:
             user = guild.get_member(int(user_id))
-        return f"@{_discord_display_name(user)}({user_id})" if user is not None else f"@unknown-user({user_id})"
+        return (
+            f"@{_discord_display_name(user)}({user_id})"
+            if user is not None
+            else f"@unknown-user({user_id})"
+        )
 
     def replace_channel(match: re.Match) -> str:
         channel_id = match.group(1)
         channel = channels.get(channel_id)
         if channel is None and guild is not None:
             channel = guild.get_channel(int(channel_id))
-        return f"#{getattr(channel, 'name', channel_id)}({channel_id})" if channel is not None else f"#unknown-channel({channel_id})"
+        return (
+            f"#{getattr(channel, 'name', channel_id)}({channel_id})"
+            if channel is not None
+            else f"#unknown-channel({channel_id})"
+        )
 
     def replace_role(match: re.Match) -> str:
         role_id = match.group(1)
         role = roles.get(role_id)
         if role is None and guild is not None:
             role = guild.get_role(int(role_id))
-        return f"@{getattr(role, 'name', role_id)}({role_id})" if role is not None else f"@unknown-role({role_id})"
+        return (
+            f"@{getattr(role, 'name', role_id)}({role_id})"
+            if role is not None
+            else f"@unknown-role({role_id})"
+        )
 
     text = USER_MENTION_RE.sub(replace_user, text)
     text = CHANNEL_MENTION_RE.sub(replace_channel, text)
     text = ROLE_MENTION_RE.sub(replace_role, text)
     return text
 
-AUTONOMY_VALID_KINDS = frozenset({
-    "send_dm", "post_channel", "run_tool", "update_memory",
-    "create_goal", "do_nothing",
-})
+
+AUTONOMY_VALID_KINDS = frozenset(
+    {
+        "send_dm",
+        "post_channel",
+        "run_tool",
+        "update_memory",
+        "create_goal",
+        "do_nothing",
+    }
+)
 MAX_ACTIONS_PER_TICK = 3  # reduced from 5 — prevents spam bursts
 MAX_CONTENT_CHARS = 1900
 LOG_RING_SIZE = 200
@@ -107,21 +204,25 @@ CTX_BUDGET_SHARED = 600
 CTX_BUDGET_CHANNELS_MAP = 1600  # bumped from 800 — enriched with topic/recency
 
 # Tools that don't work with autonomous SyntheticMessage execution
-AUTONOMY_DISABLED_TOOLS = frozenset({
-    "search_messages",  # requires guild context, fails in DMs
-    "react",            # reacting to synthetic message is pointless — nobody sees it
-    "no_response",      # not useful in autonomy context
-    "typing",           # ephemeral, no value
-    "forward_message",  # requires a real message_id to forward
-    "edit_message",     # requires a real message_id to edit
-    "delete_message",   # requires a real message_id to delete
-    "reasoning_log",    # meta-tool, autonomy has its own thought logging
-})
+AUTONOMY_DISABLED_TOOLS = frozenset(
+    {
+        "search_messages",  # requires guild context, fails in DMs
+        "react",  # reacting to synthetic message is pointless — nobody sees it
+        "no_response",  # not useful in autonomy context
+        "typing",  # ephemeral, no value
+        "forward_message",  # requires a real message_id to forward
+        "edit_message",  # requires a real message_id to edit
+        "delete_message",  # requires a real message_id to delete
+        "reasoning_log",  # meta-tool, autonomy has its own thought logging
+        "send_message",  # conflicts with post_channel and can fall back to the wrong channel
+    }
+)
 
 
 # ---------------------------------------------------------------------------
 # Atomic JSON helpers (same pattern as memory.py / rem.py)
 # ---------------------------------------------------------------------------
+
 
 def _atomic_json_write_sync(path: Path, data):
     """Atomic JSON write: temp file -> fsync -> rename."""
@@ -136,10 +237,8 @@ def _atomic_json_write_sync(path: Path, data):
         os.replace(tmp, path)
     finally:
         if fd >= 0:
-            try:
+            with contextlib.suppress(OSError):
                 os.close(fd)
-            except OSError:
-                pass
         if os.path.exists(tmp):
             os.unlink(tmp)
 
@@ -171,7 +270,7 @@ def _truncate(text: str, budget: int) -> str:
     suffix = "\n... [truncated]"
     if budget <= len(suffix):
         return text[:budget]
-    return text[:budget - len(suffix)] + suffix
+    return text[: budget - len(suffix)] + suffix
 
 
 def _coerce_utc_datetime(value) -> datetime | None:
@@ -240,8 +339,10 @@ def _action_feedback_line(entry: dict, *, now: datetime | None = None) -> str:
 # Synthetic message for tools that expect a discord.Message
 # ---------------------------------------------------------------------------
 
+
 class SyntheticMessage:
     """Minimal message-like object for tool execution outside on_message."""
+
     def __init__(self, channel, author, guild, content: str):
         self.channel = channel
         self.author = author
@@ -280,6 +381,7 @@ class SyntheticMessage:
 # ---------------------------------------------------------------------------
 # AutonomyStore — JSON-backed persistence
 # ---------------------------------------------------------------------------
+
 
 class AutonomyStore:
     """Manages the three autonomy data files with atomic writes."""
@@ -344,8 +446,14 @@ class AutonomyStore:
             if not isinstance(goals, list):
                 goals = []
             if len(goals) >= self.MAX_GOALS:
-                logger.warning(f"Goal limit reached ({self.MAX_GOALS}), rejecting new goal")
-                return {"id": None, "description": description, "error": "goal limit reached"}
+                logger.warning(
+                    f"Goal limit reached ({self.MAX_GOALS}), rejecting new goal"
+                )
+                return {
+                    "id": None,
+                    "description": description,
+                    "error": "goal limit reached",
+                }
             goal = {
                 "id": f"goal_{uuid.uuid4().hex[:8]}",
                 "description": str(description)[:500],
@@ -411,10 +519,11 @@ class AutonomyStore:
 # AutonomyEngine
 # ---------------------------------------------------------------------------
 
+
 class AutonomyEngine:
     """Background async loop that gives Maxwell self-directed agency."""
 
-    def __init__(self, bot: "MaxwellBot"):
+    def __init__(self, bot: Any):
         self.bot = bot
         self.store = AutonomyStore(bot.config.DATA_DIR)
         self._running = False
@@ -442,7 +551,7 @@ class AutonomyEngine:
         Autonomy was posting to blocked/missing-allowed channels because
         nobody remembered this check exists. Don't remove it.
         """
-        control = self.bot._control or {}
+        control = getattr(self.bot, "_control", None) or {}
         cid = str(channel_id)
         if not control.get("bot_enabled", True):
             return False
@@ -460,12 +569,10 @@ class AutonomyEngine:
         """
         if name in AUTONOMY_DISABLED_TOOLS:
             return False
-        control = self.bot._control or {}
+        control = getattr(self.bot, "_control", None) or {}
         if not control.get("tools_enabled", True):
             return False
-        if name in set(control.get("disabled_tools", []) or []):
-            return False
-        return True
+        return name not in set(control.get("disabled_tools", []) or [])
 
     # -- lifecycle (idempotent) --
 
@@ -482,10 +589,8 @@ class AutonomyEngine:
         self._running = False
         if self._task:
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
             self._task = None
         logger.info("AutonomyEngine stopped")
 
@@ -496,7 +601,7 @@ class AutonomyEngine:
         MAX_AUTONOMY_INTERVAL = 86400  # 24h cap — don't let a bad value sleep forever
         while self._running:
             try:
-                control = self.bot._control or {}
+                control = getattr(self.bot, "_control", None) or {}
                 if control.get("autonomy_enabled", False):
                     tick_result = await self.tick()
                     if tick_result.get("error"):
@@ -514,13 +619,19 @@ class AutonomyEngine:
                     logger.error(f"Failed to record autonomy error to store: {rec_err}")
             # read interval from bot control (source of truth)
             try:
-                control = self.bot._control or {}
-                interval = max(30, min(int(control.get("autonomy_interval_seconds", 300) or 300), MAX_AUTONOMY_INTERVAL))
+                control = getattr(self.bot, "_control", None) or {}
+                interval = max(
+                    30,
+                    min(
+                        int(control.get("autonomy_interval_seconds", 300) or 300),
+                        MAX_AUTONOMY_INTERVAL,
+                    ),
+                )
             except (ValueError, TypeError):
                 interval = 300
             # Smoother backoff: cap at 6x instead of 10x
             # 1 fail=2x, 2=4x, 3+=6x (cap). With 300s base: max 30 min, not 50.
-            backoff = min(2 ** consecutive_failures, 6) if consecutive_failures > 0 else 1
+            backoff = min(2**consecutive_failures, 6) if consecutive_failures > 0 else 1
             await asyncio.sleep(max(30, interval * backoff))
 
     # -- single tick --
@@ -541,17 +652,66 @@ class AutonomyEngine:
                 actions = await self.plan(context)
                 results = await self.execute(actions)
                 duration = time.time() - start
-                await self._log_tick(context, actions, results, duration, tick_start_iso)
+                await self._log_tick(
+                    context, actions, results, duration, tick_start_iso
+                )
                 return {"skipped": False, "actions": len(results), "duration": duration}
             except Exception as e:
                 duration = time.time() - start
                 logger.error(f"Autonomy tick failed: {e}")
-                await self.store.patch_state({
-                    "last_tick": tick_start_iso,
-                    "last_tick_duration": round(duration, 2),
-                    "last_error": str(e)[:2000],
-                })
+                await self.store.patch_state(
+                    {
+                        "last_tick": tick_start_iso,
+                        "last_tick_duration": round(duration, 2),
+                        "last_error": str(e)[:2000],
+                    }
+                )
                 return {"skipped": False, "error": str(e), "duration": duration}
+
+    async def _resolve_reference(
+        self, message: Any, cache: dict[tuple[str, str], Any]
+    ) -> Any | None:
+        ref_obj = getattr(message, "reference", None)
+        if ref_obj is None:
+            return None
+
+        resolved = getattr(ref_obj, "resolved", None)
+        if resolved is not None and hasattr(resolved, "author"):
+            return resolved
+
+        msg_id = getattr(ref_obj, "message_id", None)
+        channel = cast(Any, getattr(message, "channel", None))
+        channel_id = str(getattr(channel, "id", ""))
+        if not msg_id or not channel_id or not hasattr(channel, "fetch_message"):
+            return None
+
+        key = (channel_id, str(msg_id))
+        if key in cache:
+            return cache[key]
+        if len(cache) >= 25:
+            # Reply lookups are nice, Discord rate limits are not. Twenty-five is
+            # plenty for one autonomy tick unless the server is doing reply soup.
+            return None
+
+        try:
+            resolved = await channel.fetch_message(int(msg_id))
+        except (
+            discord.NotFound,
+            discord.Forbidden,
+            discord.HTTPException,
+            ValueError,
+            TypeError,
+        ):
+            return None
+        except Exception:
+            return None
+
+        if resolved is not None and hasattr(resolved, "author"):
+            cache[key] = resolved
+            with contextlib.suppress(Exception):
+                ref_obj.resolved = resolved
+            return resolved
+        return None
 
     # -----------------------------------------------------------------------
     # gather_context — ordered by decision-relevance, per-section budgets
@@ -571,8 +731,7 @@ class AutonomyEngine:
         # 1. Current time + mood framing
         tz_name = now.tzname() or "local time"
         sections.append(
-            f"=== CURRENT TIME ===\n"
-            f"{now.strftime('%A, %Y-%m-%d %H:%M')} ({tz_name})"
+            f"=== CURRENT TIME ===\n{now.strftime('%A, %Y-%m-%d %H:%M')} ({tz_name})"
         )
 
         # 2. Active goals (most decision-relevant — what should I work on?)
@@ -584,10 +743,12 @@ class AutonomyEngine:
                     f"- [{g['id']}] {g.get('description', '')} (last acted: {g.get('last_acted_on', 'never')})"
                     for g in active_goals
                 ]
-                sections.append(_truncate(
-                    "=== ACTIVE GOALS ===\n" + "\n".join(goal_lines),
-                    CTX_BUDGET_GOALS,
-                ))
+                sections.append(
+                    _truncate(
+                        "=== ACTIVE GOALS ===\n" + "\n".join(goal_lines),
+                        CTX_BUDGET_GOALS,
+                    )
+                )
             else:
                 sections.append("=== ACTIVE GOALS ===\n(no active goals)")
         except Exception as e:
@@ -602,44 +763,111 @@ class AutonomyEngine:
             if events:
                 ev_lines = []
                 for ev in events[-30:]:
-                    role = ev.get("role", "?")
-                    content = str(ev.get("content", ""))[:240]
+                    content = str(ev.get("content", "")).replace("\n", " ")[:260]
                     ts = ev.get("ts", "")
-                    age = ""
+                    when = "?"
                     if ts:
                         with contextlib.suppress(Exception):
                             ev_dt = _coerce_utc_datetime(ts)
-                            age = f" ({_context_time(ev_dt)})" if ev_dt else ""
+                            when = _context_time(ev_dt) if ev_dt else "?"
                     cid = str(ev.get("channel_id") or "?")
                     ch_name = cid
                     with contextlib.suppress(Exception):
                         ch_obj = self.bot.get_channel(int(cid)) if cid != "?" else None
-                        ch_name = getattr(ch_obj, "name", cid) if ch_obj is not None else cid
+                        ch_name = (
+                            getattr(ch_obj, "name", cid) if ch_obj is not None else cid
+                        )
                     uid = str(ev.get("user_id") or "?")
                     uname = str(ev.get("user_name") or "?")
-                    self_tag = " [you]" if self.bot.user and uid == str(self.bot.user.id) else ""
-                    ev_lines.append(f"[{role}{age}] #{ch_name}:{cid} {uname}({uid}){self_tag}: {content}")
-                sections.append(_truncate(
-                    "=== RECENT CONVERSATIONS (since last check) ===\n" + "\n".join(ev_lines),
-                    CTX_BUDGET_RECENT_EVENTS,
-                ))
+                    role = str(ev.get("role") or "?")
+                    speaker_kind = (
+                        "you/Maxwell"
+                        if self.bot.user and uid == str(self.bot.user.id)
+                        else role
+                    )
+
+                    tags = []
+                    if ev.get("message_id"):
+                        tags.append(f"msg={ev.get('message_id')}")
+
+                    addressed = []
+                    if ev.get("reply_to_author_id"):
+                        reply_name = str(ev.get("reply_to_author") or "unknown")
+                        reply_id = str(ev.get("reply_to_author_id") or "")
+                        reply_ref = (
+                            f"you/Maxwell({reply_id})"
+                            if ev.get("reply_to_self")
+                            else f"{reply_name}({reply_id})"
+                        )
+                        tags.append(f"reply_to={reply_ref}")
+                        addressed.append(f"reply_to:{reply_ref}")
+                    mentions = []
+                    for row in list(ev.get("mentions") or [])[:10]:
+                        if not isinstance(row, dict):
+                            continue
+                        mid = str(row.get("id") or "")
+                        if not mid:
+                            continue
+                        mname = str(row.get("name") or mid)
+                        mref = (
+                            f"you/Maxwell({mid})"
+                            if self.bot.user and mid == str(self.bot.user.id)
+                            else f"{mname}({mid})"
+                        )
+                        mentions.append(mref)
+                    if mentions:
+                        tags.append("mentions=[" + ", ".join(mentions) + "]")
+                        addressed.extend(f"mention:{ref}" for ref in mentions)
+                        if self.bot.user and any(
+                            ref.endswith(f"({self.bot.user.id})") for ref in mentions
+                        ):
+                            tags.append("mentions_you")
+                    tags.append(
+                        "addressed_to=[" + "; ".join(addressed) + "]"
+                        if addressed
+                        else "addressed_to=channel"
+                    )
+                    tag_text = " ".join(tags)
+                    ev_lines.append(
+                        f'time={when} channel=#{ch_name}({cid}) speaker={uname}({uid}, {speaker_kind}) {tag_text} content="{content}"'
+                    )
+                sections.append(
+                    _truncate(
+                        "=== RECENT CONVERSATIONS (since last check) ===\n"
+                        + "\n".join(ev_lines),
+                        CTX_BUDGET_RECENT_EVENTS,
+                    )
+                )
             else:
-                sections.append("=== RECENT CONVERSATIONS ===\n(no new activity since last check)")
+                sections.append(
+                    "=== RECENT CONVERSATIONS ===\n(no new activity since last check)"
+                )
         except Exception as e:
             sections.append(f"=== RECENT CONVERSATIONS ===\n(error: {e})")
 
         # 4. Channel activity (what's happening right now?)
-        channel_ids_to_check = set()
+        channel_ids_to_check = []
+        seen_channel_ids = set()
+
+        def add_channel_id(raw_cid):
+            cid = re.sub(r"[^0-9]", "", str(raw_cid or ""))
+            if cid and cid not in seen_channel_ids:
+                seen_channel_ids.add(cid)
+                channel_ids_to_check.append(cid)
+
+        # New event channels first. If somebody pinged/replied, this is the room
+        # where context matters. Sets made this random before; random context is
+        # how you get bot improv jazz.
         with contextlib.suppress(Exception):
-            channel_ids_to_check.update(self.bot._auto_channels or set())
+            for ev in reversed(events or []):
+                add_channel_id(ev.get("channel_id"))
         with contextlib.suppress(Exception):
-            for ev in (events or [])[-20:]:
-                cid = ev.get("channel_id")
-                if cid:
-                    channel_ids_to_check.add(str(cid))
+            for cid in self._auto_channel_candidates():
+                add_channel_id(cid)
 
         ch_lines = []
-        for cid in list(channel_ids_to_check)[:10]:
+        ref_cache: dict[tuple[str, str], Any] = {}
+        for cid in channel_ids_to_check[:10]:
             if not self._channel_allowed(cid):
                 continue
             try:
@@ -651,36 +879,33 @@ class AutonomyEngine:
                         continue
                 if ch is None or not hasattr(ch, "history"):
                     continue
-                messages = [m async for m in ch.history(limit=10)]
+                messages = [m async for m in ch.history(limit=12)]
                 for m in reversed(messages):
-                    author_name = getattr(m.author, "display_name", None) or getattr(m.author, "name", "?")
-                    author_id = str(getattr(m.author, "id", "?"))
-                    content = _render_discord_context_text(m, m.content or "")[:220]
-                    if content:
-                        age = _context_time(getattr(m, 'created_at', None))
-                        tags = []
-                        if self.bot.user and getattr(m.author, "id", None) == self.bot.user.id:
-                            tags.append("you")
-                        elif getattr(m.author, "bot", False):
-                            tags.append("bot")
-                        ref = getattr(getattr(m, "reference", None), "resolved", None)
-                        if ref and hasattr(ref, "author"):
-                            reply_id = str(getattr(ref.author, "id", "?"))
-                            reply_name = "you/Maxwell" if self.bot.user and getattr(ref.author, "id", None) == self.bot.user.id else _discord_display_name(ref.author)
-                            tags.append(f"reply_to={reply_name}({reply_id})")
-                        if self.bot.user and any(getattr(user, "id", None) == self.bot.user.id for user in list(getattr(m, "mentions", []) or [])):
-                            tags.append("mentions_you")
-                        tag_text = f" [{'; '.join(tags)}]" if tags else ""
-                        ch_lines.append(f"[{age}] #{getattr(ch, 'name', cid)}:{cid} {author_name}({author_id}){tag_text}: {content}")
+                    content = _visible_message_content(m, m.content or "")[:260]
+                    if not content:
+                        continue
+                    age = _context_time(getattr(m, "created_at", None))
+                    reply = await self._resolve_reference(m, ref_cache)
+                    tags = _message_relation_tags(
+                        m, bot_user=self.bot.user, reply=reply
+                    )
+                    tag_text = " ".join(tags)
+                    msg_id = str(getattr(m, "id", "?"))
+                    author = _user_ref(getattr(m, "author", None), self.bot.user)
+                    ch_lines.append(
+                        f'time={age} channel=#{getattr(ch, "name", cid)}({cid}) msg={msg_id} speaker={author} {tag_text} content="{content}"'
+                    )
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 continue
             except Exception:
                 continue
         if ch_lines:
-            sections.append(_truncate(
-                "=== CHANNEL ACTIVITY ===\n" + "\n".join(ch_lines[-40:]),
-                CTX_BUDGET_CHANNEL_ACTIVITY,
-            ))
+            sections.append(
+                _truncate(
+                    "=== CHANNEL ACTIVITY ===\n" + "\n".join(ch_lines[-40:]),
+                    CTX_BUDGET_CHANNEL_ACTIVITY,
+                )
+            )
         else:
             sections.append("=== CHANNEL ACTIVITY ===\n(no accessible channels)")
 
@@ -691,7 +916,9 @@ class AutonomyEngine:
             recent = log_entries[-10:] if log_entries else []
             if recent:
                 action_now = datetime.now(timezone.utc)
-                action_lines = [_action_feedback_line(e, now=action_now) for e in recent]
+                action_lines = [
+                    _action_feedback_line(e, now=action_now) for e in recent
+                ]
                 action_feedback.append("\n".join(action_lines))
         except Exception:
             pass
@@ -704,10 +931,12 @@ class AutonomyEngine:
             )
 
         if action_feedback:
-            sections.append(_truncate(
-                "=== YOUR RECENT ACTIONS ===\n" + "\n\n".join(action_feedback),
-                CTX_BUDGET_RECENT_ACTIONS,
-            ))
+            sections.append(
+                _truncate(
+                    "=== YOUR RECENT ACTIONS ===\n" + "\n\n".join(action_feedback),
+                    CTX_BUDGET_RECENT_ACTIONS,
+                )
+            )
 
         # 6. Engagement tracking (did anyone react to or reply to your posts?)
         engagement = await self._check_post_engagement()
@@ -715,26 +944,47 @@ class AutonomyEngine:
             sections.append(f"=== ENGAGEMENT WITH YOUR POSTS ===\n{engagement}")
 
         # 7. DM history
-        dm_lines = []
+        dm_blocks = []
         for channel in list(getattr(self.bot, "private_channels", []) or [])[:20]:
             try:
+                recipient = getattr(channel, "recipient", None)
+                recipient_ref = (
+                    _user_ref(recipient, self.bot.user)
+                    if recipient
+                    else f"channel({channel.id})"
+                )
+                lines = [f"DM with {recipient_ref} channel={channel.id}"]
                 messages = [m async for m in channel.history(limit=20)]
                 for m in reversed(messages):
-                    author_name = getattr(m.author, "display_name", None) or getattr(m.author, "name", "?")
-                    content = _render_discord_context_text(m, m.content or "")[:240]
-                    if content:
-                        age = _context_time(getattr(m, 'created_at', None))
-                        side = " [you]" if self.bot.user and getattr(m.author, "id", None) == self.bot.user.id else ""
-                        dm_lines.append(f"[{age}] DM:{channel.id} {author_name}({m.author.id}){side}: {content}")
+                    content = _visible_message_content(m, m.content or "")[:260]
+                    if not content:
+                        continue
+                    age = _context_time(getattr(m, "created_at", None))
+                    author_is_self = bool(
+                        self.bot.user
+                        and getattr(m.author, "id", None) == self.bot.user.id
+                    )
+                    direction = (
+                        f"from=you/Maxwell({getattr(self.bot.user, 'id', '?')}) to={recipient_ref}"
+                        if author_is_self
+                        else f"from={_user_ref(m.author, self.bot.user)} to=you/Maxwell({getattr(self.bot.user, 'id', '?')})"
+                    )
+                    lines.append(
+                        f'time={age} msg={getattr(m, "id", "?")} {direction} content="{content}"'
+                    )
+                if len(lines) > 1:
+                    dm_blocks.append("\n".join(lines))
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 continue
             except Exception:
                 continue
-        if dm_lines:
-            sections.append(_truncate(
-                "=== DM HISTORY ===\n" + "\n".join(dm_lines[-40:]),
-                CTX_BUDGET_DM_HISTORY,
-            ))
+        if dm_blocks:
+            sections.append(
+                _truncate(
+                    "=== DM HISTORY ===\n" + "\n\n".join(dm_blocks[-20:]),
+                    CTX_BUDGET_DM_HISTORY,
+                )
+            )
         else:
             sections.append("=== DM HISTORY ===\n(no accessible DMs)")
 
@@ -744,10 +994,12 @@ class AutonomyEngine:
             ltm = memory.get_long_term_memory() if memory else []
             if ltm:
                 ltm_text = "\n".join(str(m) for m in ltm[:30])
-                sections.append(_truncate(
-                    f"=== LONG-TERM MEMORY ===\n{ltm_text}",
-                    CTX_BUDGET_LTM,
-                ))
+                sections.append(
+                    _truncate(
+                        f"=== LONG-TERM MEMORY ===\n{ltm_text}",
+                        CTX_BUDGET_LTM,
+                    )
+                )
         except Exception as e:
             sections.append(f"=== LONG-TERM MEMORY ===\n(error: {e})")
 
@@ -789,34 +1041,47 @@ class AutonomyEngine:
                     tag_str = f" [{', '.join(tags)}]" if tags else ""
                     topic_str = f' — "{topic_snippet}"' if topic_snippet else ""
                     recency_str = f" (last msg: {last_msg_ago})" if last_msg_ago else ""
-                    ch_map_lines.append(f"  {cid}: #{ch.name}{tag_str}{recency_str}{topic_str}")
+                    ch_map_lines.append(
+                        f"  {cid}: #{ch.name}{tag_str}{recency_str}{topic_str}"
+                    )
                 except Exception:
                     continue
         if ch_map_lines:
-            sections.append(_truncate(
-                "=== AVAILABLE CHANNELS (use the numeric ID on the left for post_channel target_channel_id) ===\n"
-                + "\n".join(ch_map_lines[:30]),
-                CTX_BUDGET_CHANNELS_MAP,
-            ))
+            sections.append(
+                _truncate(
+                    "=== AVAILABLE CHANNELS (use the numeric ID on the left for post_channel target_channel_id) ===\n"
+                    + "\n".join(ch_map_lines[:30]),
+                    CTX_BUDGET_CHANNELS_MAP,
+                )
+            )
 
         # 10. Shared context
         try:
             memory = cast(Any, getattr(self.bot, "memory", None))
-            shared = await memory.get_relevant_shared_context(
-                user_id="",
-                guild_id="",
-                channel_id="",
-                is_dm=False,
-                is_admin=False,
-                max_items=20,
-                budget=CTX_BUDGET_SHARED,
-            ) if memory and hasattr(memory, "get_relevant_shared_context") else []
+            shared = (
+                await memory.get_relevant_shared_context(
+                    user_id="",
+                    guild_id="",
+                    channel_id="",
+                    is_dm=False,
+                    is_admin=False,
+                    max_items=20,
+                    budget=CTX_BUDGET_SHARED,
+                )
+                if memory and hasattr(memory, "get_relevant_shared_context")
+                else []
+            )
             if shared:
-                ctx_lines = [f"- [{c.get('scope', '?')}, i{c.get('importance', '?')}] {c.get('content', '')}" for c in shared[:20]]
-                sections.append(_truncate(
-                    "=== SHARED CONTEXT ===\n" + "\n".join(ctx_lines),
-                    CTX_BUDGET_SHARED,
-                ))
+                ctx_lines = [
+                    f"- [{c.get('scope', '?')}, i{c.get('importance', '?')}] {c.get('content', '')}"
+                    for c in shared[:20]
+                ]
+                sections.append(
+                    _truncate(
+                        "=== SHARED CONTEXT ===\n" + "\n".join(ctx_lines),
+                        CTX_BUDGET_SHARED,
+                    )
+                )
         except Exception:
             pass
 
@@ -830,7 +1095,9 @@ class AutonomyEngine:
 
         # Only check posts from the last 2 hours
         cutoff = time.time() - 7200
-        self._posted_messages = [p for p in self._posted_messages if p.get("ts", 0) > cutoff]
+        self._posted_messages = [
+            p for p in self._posted_messages if p.get("ts", 0) > cutoff
+        ]
 
         engagement_lines = []
         for post in self._posted_messages[-5:]:  # check last 5 posts
@@ -850,18 +1117,30 @@ class AutonomyEngine:
                 reply_snippets = []
                 with contextlib.suppress(Exception):
                     if hasattr(channel, "history"):
-                        async for reply in channel.history(limit=10, after=msg.created_at):
+                        async for reply in channel.history(
+                            limit=10, after=msg.created_at
+                        ):
                             if reply.reference and reply.reference.message_id == msg.id:
-                                author = getattr(reply.author, "display_name", None) or getattr(reply.author, "name", "?")
-                                content = _render_discord_context_text(reply, reply.content or "")[:160]
-                                reply_snippets.append(f"{author}({reply.author.id}): {content or '[media/reaction-only]'}")
+                                author = getattr(
+                                    reply.author, "display_name", None
+                                ) or getattr(reply.author, "name", "?")
+                                content = _render_discord_context_text(
+                                    reply, reply.content or ""
+                                )[:160]
+                                reply_snippets.append(
+                                    f"{author}({reply.author.id}): {content or '[media/reaction-only]'}"
+                                )
 
                 parts = []
                 if reactions:
                     parts.append(f"reactions: {', '.join(reactions)}")
                 if reply_snippets:
                     shown = "; ".join(reply_snippets[:2])
-                    more = f" (+{len(reply_snippets) - 2} more)" if len(reply_snippets) > 2 else ""
+                    more = (
+                        f" (+{len(reply_snippets) - 2} more)"
+                        if len(reply_snippets) > 2
+                        else ""
+                    )
                     parts.append(f"replies: {shown}{more}")
                 if parts:
                     ch_name = getattr(channel, "name", post["channel_id"])
@@ -891,21 +1170,29 @@ class AutonomyEngine:
                 tool_desc_lines.append(f"- {name}: {desc}")
             except Exception:
                 tool_desc_lines.append(f"- {name}: (description unavailable)")
-        tool_descriptions = "\n".join(tool_desc_lines) if tool_desc_lines else "(no tools available)"
+        tool_descriptions = (
+            "\n".join(tool_desc_lines) if tool_desc_lines else "(no tools available)"
+        )
 
         # goals text
         try:
             goals = await self.store.load_goals()
             active_goals = [g for g in goals if g.get("active")]
-            goals_text = "\n".join(
-                f"- [{g['id']}] {g.get('description', '')}" for g in active_goals
-            ) if active_goals else "(no active goals)"
+            goals_text = (
+                "\n".join(
+                    f"- [{g['id']}] {g.get('description', '')}" for g in active_goals
+                )
+                if active_goals
+                else "(no active goals)"
+            )
         except Exception:
             goals_text = "(error loading goals)"
 
         # Pull the real personality so autonomy posts sound like the same bot
         base_personality = str(
-            (self.bot._control or {}).get('base_personality', DEFAULT_CONTROL.get('base_personality', ''))
+            (getattr(self.bot, "_control", None) or {}).get(
+                "base_personality", DEFAULT_CONTROL.get("base_personality", "")
+            )
         )
 
         system_prompt = f"""You are Maxwell, doing a periodic check-in on your own. You're reviewing what's happening in your Discord server and deciding if there's something worth doing.
@@ -924,17 +1211,19 @@ Your goals:
 
 IMPORTANT RULES:
 - The channel activity and recent conversations above are REAL data. Don't try to fetch more — it's already here.
-- CHANNEL ACTIVITY lines show the format [#channel_name:CHANNEL_ID]. Use that numeric ID for target_channel_id.
-- AVAILABLE CHANNELS lists each channel as ID: #name [tags] (last msg: X) — topic. Use the numeric ID on the left.
+- CHANNEL ACTIVITY and RECENT CONVERSATIONS lines are structured: channel=#name(ID), msg=ID, speaker=Name(user_id), reply_to=..., mentions=[...], addressed_to=..., content="...".
+- Discord is multi-user. Each unique user_id is a separate person/account even if display names are similar or changed. Never attribute one user's message to another.
+- Use target_channel_id from the channel=... field or AVAILABLE CHANNELS. It must be a numeric ID, not a channel name.
+- If responding to one specific message, include reply_to_message_id with that msg ID so Discord threads the response correctly.
 - If a conversation is happening in a channel, use that channel's ID to respond — don't pick a random channel.
-- Context lines include names, IDs, [you]/[bot], mentions_you, and reply_to metadata. Use that to tell who is talking to whom.
+- Use reply_to, mentions, addressed_to, names, and IDs to tell who is talking to whom.
 - If joining an active multi-person conversation, address the right person by name unless a plain channel message is obviously enough.
 - If conversations are happening and you have something interesting/funny/useful to say, say it.
 - If someone mentioned you or talked about you, respond.
 - If a conversation naturally concluded, don't re-open it unless you have a genuinely good reason.
 - If nothing needs doing, that's FINE. Output do_nothing with a reason.
 - NEVER call search_messages — the channel history is already provided above.
-- ALWAYS use "post_channel" with a "target_channel_id" — the numeric ID, not a channel name.
+- ALWAYS use "post_channel" with an explicit "target_channel_id" — the numeric ID, not a channel name.
 - Don't repeat things you already posted recently (check YOUR RECENT ACTIONS). Use the bracketed timestamps there; they are recalculated for this tick.
 - You can use up to {MAX_ACTIONS_PER_TICK} actions per tick.
 
@@ -945,6 +1234,7 @@ Return ONLY valid JSON in this exact format:
     {{
       "kind": "post_channel",
       "target_channel_id": "123456789",
+      "reply_to_message_id": "987654321",
       "content": "your message here",
       "reason": "why you're posting this"
     }},
@@ -984,9 +1274,15 @@ Do NOT invent other action kinds — they will be rejected."""
         # call the LLM
         try:
             messages = [{"role": "system", "content": system_prompt}]
-            timeout = max(30, int(
-                (self.bot._control or {}).get("ai_timeout_seconds", 180) or 180
-            ))
+            timeout = max(
+                30,
+                int(
+                    (getattr(self.bot, "_control", None) or {}).get(
+                        "ai_timeout_seconds", 180
+                    )
+                    or 180
+                ),
+            )
             await self.bot._acquire_ai_slot(timeout=timeout)
             try:
                 ai_provider = cast(Any, getattr(self.bot, "ai_provider", None))
@@ -1000,7 +1296,9 @@ Do NOT invent other action kinds — they will be rejected."""
             return [{"kind": "do_nothing", "reason": f"LLM call failed: {e}"}]
 
         # parse JSON from response
-        logger.info(f"Autonomy LLM response ({len(raw_response or '')} chars): {(raw_response or '')[:500]}")
+        logger.info(
+            f"Autonomy LLM response ({len(raw_response or '')} chars): {(raw_response or '')[:500]}"
+        )
         actions, validation_failures = self._parse_plan(raw_response)
 
         # Store validation failures for next tick's feedback
@@ -1014,7 +1312,9 @@ Do NOT invent other action kinds — they will be rejected."""
         validation_failures = []
 
         if not raw:
-            return [{"kind": "do_nothing", "reason": "empty LLM response"}], validation_failures
+            return [
+                {"kind": "do_nothing", "reason": "empty LLM response"}
+            ], validation_failures
 
         # extract JSON block — try pure JSON first, then markdown fences, then find/rfind
         text = str(raw).strip()
@@ -1044,7 +1344,7 @@ Do NOT invent other action kinds — they will be rejected."""
                         elif text[j] == "}":
                             depth -= 1
                             if depth == 0:
-                                candidates.append(text[i:j + 1])
+                                candidates.append(text[i : j + 1])
                                 i = j
                                 break
                 i += 1
@@ -1060,16 +1360,24 @@ Do NOT invent other action kinds — they will be rejected."""
                 json_str = candidates[0]
         if json_str is None:
             logger.warning(f"Autonomy planner returned no JSON. Raw: {text[:500]}")
-            return [{"kind": "do_nothing", "reason": "no JSON in LLM response"}], validation_failures
+            return [
+                {"kind": "do_nothing", "reason": "no JSON in LLM response"}
+            ], validation_failures
 
         try:
             parsed = json.loads(json_str)
         except json.JSONDecodeError as e:
-            logger.warning(f"Autonomy planner JSON parse failed: {e}. Raw: {json_str[:500]}")
-            return [{"kind": "do_nothing", "reason": "invalid JSON from planner"}], validation_failures
+            logger.warning(
+                f"Autonomy planner JSON parse failed: {e}. Raw: {json_str[:500]}"
+            )
+            return [
+                {"kind": "do_nothing", "reason": "invalid JSON from planner"}
+            ], validation_failures
 
         if not isinstance(parsed, dict):
-            return [{"kind": "do_nothing", "reason": "planner returned non-object"}], validation_failures
+            return [
+                {"kind": "do_nothing", "reason": "planner returned non-object"}
+            ], validation_failures
 
         # save thought
         thought = str(parsed.get("thought", ""))[:2000]
@@ -1077,7 +1385,9 @@ Do NOT invent other action kinds — they will be rejected."""
 
         raw_actions = parsed.get("actions", [])
         if not isinstance(raw_actions, list):
-            return [{"kind": "do_nothing", "reason": "actions not a list"}], validation_failures
+            return [
+                {"kind": "do_nothing", "reason": "actions not a list"}
+            ], validation_failures
 
         # validate strictly
         valid = []
@@ -1101,7 +1411,9 @@ Do NOT invent other action kinds — they will be rejected."""
             kind = _KIND_ALIASES.get(kind, kind)
             if kind not in AUTONOMY_VALID_KINDS:
                 msg = f"unknown action kind '{original_kind}'"
-                logger.info(f"Dropping {msg} | raw: {json.dumps(action, default=str)[:300]}")
+                logger.info(
+                    f"Dropping {msg} | raw: {json.dumps(action, default=str)[:300]}"
+                )
                 validation_failures.append(msg)
                 continue
 
@@ -1112,12 +1424,14 @@ Do NOT invent other action kinds — they will be rejected."""
                 if not uid or not content:
                     validation_failures.append("send_dm: missing user_id or content")
                     continue
-                valid.append({
-                    "kind": "send_dm",
-                    "target_user_id": uid,
-                    "content": content[:MAX_CONTENT_CHARS],
-                    "reason": str(action.get("reason", ""))[:500],
-                })
+                valid.append(
+                    {
+                        "kind": "send_dm",
+                        "target_user_id": uid,
+                        "content": content[:MAX_CONTENT_CHARS],
+                        "reason": str(action.get("reason", ""))[:500],
+                    }
+                )
 
             elif kind == "post_channel":
                 cid_raw = str(action.get("target_channel_id", ""))
@@ -1127,18 +1441,21 @@ Do NOT invent other action kinds — they will be rejected."""
                     validation_failures.append("post_channel: empty content")
                     continue
                 if not cid:
-                    candidates = self._auto_channel_candidates()
-                    if candidates:
-                        cid = candidates[0]
-                if not cid:
-                    validation_failures.append("post_channel: no channel_id and no auto_channels")
+                    validation_failures.append(
+                        "post_channel: missing explicit numeric target_channel_id"
+                    )
                     continue
-                valid.append({
+                reply_to_raw = str(action.get("reply_to_message_id", ""))
+                reply_to = re.sub(r"[^0-9]", "", reply_to_raw)
+                parsed_action = {
                     "kind": "post_channel",
                     "target_channel_id": cid,
                     "content": content[:MAX_CONTENT_CHARS],
                     "reason": str(action.get("reason", ""))[:500],
-                })
+                }
+                if reply_to:
+                    parsed_action["reply_to_message_id"] = reply_to
+                valid.append(parsed_action)
 
             elif kind == "run_tool":
                 tool_name = str(action.get("tool_name", "")).strip()
@@ -1146,56 +1463,72 @@ Do NOT invent other action kinds — they will be rejected."""
                     validation_failures.append("run_tool: missing tool_name")
                     continue
                 if not self._autonomy_tool_allowed(tool_name):
-                    validation_failures.append(f"run_tool: '{tool_name}' is disabled or not allowed")
+                    validation_failures.append(
+                        f"run_tool: '{tool_name}' is disabled or not allowed"
+                    )
                     continue
                 if tool_name not in self.bot.tools:
-                    validation_failures.append(f"run_tool: tool '{tool_name}' not found")
+                    validation_failures.append(
+                        f"run_tool: tool '{tool_name}' not found"
+                    )
                     continue
                 tool_args = action.get("tool_args", {})
                 if not isinstance(tool_args, dict):
                     tool_args = {}
                 safe_args = {str(k): v for k, v in tool_args.items()}
-                valid.append({
-                    "kind": "run_tool",
-                    "tool_name": tool_name,
-                    "tool_args": safe_args,
-                    "reason": str(action.get("reason", ""))[:500],
-                })
+                valid.append(
+                    {
+                        "kind": "run_tool",
+                        "tool_name": tool_name,
+                        "tool_args": safe_args,
+                        "reason": str(action.get("reason", ""))[:500],
+                    }
+                )
 
             elif kind == "update_memory":
                 content = str(action.get("content", "")).strip()
                 if not content:
                     validation_failures.append("update_memory: empty content")
                     continue
-                valid.append({
-                    "kind": "update_memory",
-                    "content": content[:MAX_CONTENT_CHARS],
-                    "reason": str(action.get("reason", ""))[:500],
-                })
+                valid.append(
+                    {
+                        "kind": "update_memory",
+                        "content": content[:MAX_CONTENT_CHARS],
+                        "reason": str(action.get("reason", ""))[:500],
+                    }
+                )
 
             elif kind == "create_goal":
                 desc = str(action.get("description", "")).strip()
                 if not desc:
                     validation_failures.append("create_goal: empty description")
                     continue
-                valid.append({
-                    "kind": "create_goal",
-                    "description": desc[:500],
-                    "reason": str(action.get("reason", ""))[:500],
-                })
+                valid.append(
+                    {
+                        "kind": "create_goal",
+                        "description": desc[:500],
+                        "reason": str(action.get("reason", ""))[:500],
+                    }
+                )
 
             elif kind == "do_nothing":
-                valid.append({
-                    "kind": "do_nothing",
-                    "reason": str(action.get("reason", "no reason"))[:500],
-                })
+                valid.append(
+                    {
+                        "kind": "do_nothing",
+                        "reason": str(action.get("reason", "no reason"))[:500],
+                    }
+                )
 
         if not valid:
-            logger.warning(f"All {len(raw_actions)} actions failed validation. Raw response: {raw[:1000]}")
+            logger.warning(
+                f"All {len(raw_actions)} actions failed validation. Raw response: {raw[:1000]}"
+            )
             valid = [{"kind": "do_nothing", "reason": "all actions failed validation"}]
 
         if not any(a["kind"] != "do_nothing" for a in valid):
-            logger.info(f"Autonomy planner produced no actionable items. Thought: {thought[:300]}")
+            logger.info(
+                f"Autonomy planner produced no actionable items. Thought: {thought[:300]}"
+            )
         return valid, validation_failures
 
     # -----------------------------------------------------------------------
@@ -1209,22 +1542,34 @@ Do NOT invent other action kinds — they will be rejected."""
         for action in actions:
             # bail if bot disconnected mid-tick
             if self.bot.is_closed():
-                logger.warning("Bot disconnected during autonomy tick, aborting remaining actions")
+                logger.warning(
+                    "Bot disconnected during autonomy tick, aborting remaining actions"
+                )
                 break
 
             kind = action.get("kind", "do_nothing")
             result = {"kind": kind, "result": "success", "error": None}
             try:
                 if kind == "send_dm":
-                    await asyncio.wait_for(self._exec_send_dm(action, result), timeout=ACTION_TIMEOUT)
+                    await asyncio.wait_for(
+                        self._exec_send_dm(action, result), timeout=ACTION_TIMEOUT
+                    )
                 elif kind == "post_channel":
-                    await asyncio.wait_for(self._exec_post_channel(action, result), timeout=ACTION_TIMEOUT)
+                    await asyncio.wait_for(
+                        self._exec_post_channel(action, result), timeout=ACTION_TIMEOUT
+                    )
                 elif kind == "run_tool":
-                    await asyncio.wait_for(self._exec_run_tool(action, result), timeout=ACTION_TIMEOUT)
+                    await asyncio.wait_for(
+                        self._exec_run_tool(action, result), timeout=ACTION_TIMEOUT
+                    )
                 elif kind == "update_memory":
-                    await asyncio.wait_for(self._exec_update_memory(action, result), timeout=ACTION_TIMEOUT)
+                    await asyncio.wait_for(
+                        self._exec_update_memory(action, result), timeout=ACTION_TIMEOUT
+                    )
                 elif kind == "create_goal":
-                    await asyncio.wait_for(self._exec_create_goal(action, result), timeout=ACTION_TIMEOUT)
+                    await asyncio.wait_for(
+                        self._exec_create_goal(action, result), timeout=ACTION_TIMEOUT
+                    )
                 elif kind == "do_nothing":
                     result["result"] = "skipped"
                     result["content_summary"] = action.get("reason", "no reason")
@@ -1234,7 +1579,9 @@ Do NOT invent other action kinds — they will be rejected."""
             except asyncio.TimeoutError:
                 result["result"] = "error"
                 result["error"] = f"action timed out after {ACTION_TIMEOUT}s"
-                logger.warning(f"Autonomy action {kind} timed out after {ACTION_TIMEOUT}s")
+                logger.warning(
+                    f"Autonomy action {kind} timed out after {ACTION_TIMEOUT}s"
+                )
             except Exception as e:
                 result["result"] = "error"
                 result["error"] = str(e)[:1000]
@@ -1248,16 +1595,24 @@ Do NOT invent other action kinds — they will be rejected."""
                     rem_log = cast(Any, getattr(self.bot, "rem_log", None))
                     if rem_log is None:
                         continue
-                    await rem_log.record({
-                        "ts": _utcnow_iso(),
-                        "channel_id": "",
-                        "guild_id": None,
-                        "user_id": str(self.bot.user.id) if self.bot.user else "",
-                        "user_name": self.bot.bot_name,
-                        "role": "assistant",
-                        "content": f"[autonomy] {kind}: {str(summary)[:300]}",
-                        "auto_mode": False,
-                    })
+                    channel_id = str(result.get("channel_id") or "")
+                    guild_id = result.get("guild_id")
+                    await rem_log.record(
+                        {
+                            "ts": _utcnow_iso(),
+                            "channel_id": channel_id,
+                            "guild_id": str(guild_id) if guild_id else None,
+                            "user_id": str(self.bot.user.id) if self.bot.user else "",
+                            "user_name": self.bot.bot_name,
+                            "role": "assistant",
+                            "content": f"[autonomy] {kind}: {str(summary)[:300]}",
+                            "auto_mode": bool(
+                                channel_id
+                                and channel_id
+                                in (getattr(self.bot, "_auto_channels", None) or set())
+                            ),
+                        }
+                    )
                 except Exception as e:
                     logger.warning(f"Failed to record autonomy REM event: {e}")
 
@@ -1294,19 +1649,24 @@ Do NOT invent other action kinds — they will be rejected."""
                 dm_channel = await user.create_dm()
             except discord.HTTPException as e:
                 result["result"] = "error"
-                result["error"] = f"failed to create DM channel (user may have DMs disabled): {e}"
+                result["error"] = (
+                    f"failed to create DM channel (user may have DMs disabled): {e}"
+                )
                 return
 
         try:
             msg = await dm_channel.send(content)
             result["tool_called"] = "send_dm"
+            result["channel_id"] = str(getattr(dm_channel, "id", ""))
             # Track for engagement checking
             if msg:
-                self._posted_messages.append({
-                    "msg_id": msg.id,
-                    "channel_id": str(dm_channel.id),
-                    "ts": time.time(),
-                })
+                self._posted_messages.append(
+                    {
+                        "msg_id": msg.id,
+                        "channel_id": str(dm_channel.id),
+                        "ts": time.time(),
+                    }
+                )
         except discord.Forbidden:
             result["result"] = "error"
             result["error"] = "user has DMs disabled or blocked the bot"
@@ -1319,8 +1679,17 @@ Do NOT invent other action kinds — they will be rejected."""
     async def _exec_post_channel(self, action: dict, result: dict):
         channel_id = action["target_channel_id"]
         content = action["content"][:2000]
+        reply_to_message_id = action.get("reply_to_message_id")
         result["target"] = f"channel:{channel_id}"
+        result["channel_id"] = channel_id
         result["content_summary"] = content[:200]
+        if reply_to_message_id:
+            result["reply_to_message_id"] = str(reply_to_message_id)
+
+        if not self._channel_allowed(channel_id):
+            result["result"] = "error"
+            result["error"] = "channel not allowed for autonomy"
+            return
 
         channel = cast(Any, self.bot.get_channel(int(channel_id)))
         if channel is None:
@@ -1333,20 +1702,46 @@ Do NOT invent other action kinds — they will be rejected."""
             result["error"] = "channel not found"
             return
 
+        result["guild_id"] = str(getattr(getattr(channel, "guild", None), "id", ""))
+
         try:
             if not hasattr(channel, "send"):
                 result["result"] = "error"
                 result["error"] = "channel cannot receive messages"
                 return
-            msg = await channel.send(content)
+
+            msg = None
+            if reply_to_message_id and hasattr(channel, "fetch_message"):
+                try:
+                    ref = await channel.fetch_message(int(reply_to_message_id))
+                    if ref is not None and hasattr(ref, "reply"):
+                        msg = await ref.reply(content, mention_author=False)
+                        result["sent_as_reply"] = True
+                except (
+                    discord.NotFound,
+                    discord.Forbidden,
+                    discord.HTTPException,
+                    ValueError,
+                    TypeError,
+                ):
+                    logger.warning(
+                        f"Autonomy post_channel: couldn't reply to message {reply_to_message_id} in {channel_id}; falling back to channel.send"
+                    )
+
+            if msg is None:
+                msg = await channel.send(content)
+                result["sent_as_reply"] = False
+
             result["tool_called"] = "post_channel"
             # Track for engagement checking
             if msg:
-                self._posted_messages.append({
-                    "msg_id": msg.id,
-                    "channel_id": channel_id,
-                    "ts": time.time(),
-                })
+                self._posted_messages.append(
+                    {
+                        "msg_id": msg.id,
+                        "channel_id": channel_id,
+                        "ts": time.time(),
+                    }
+                )
         except discord.Forbidden:
             result["result"] = "error"
             result["error"] = "bot lacks permission to send in this channel"
@@ -1360,7 +1755,9 @@ Do NOT invent other action kinds — they will be rejected."""
         result["target"] = f"tool:{tool_name}"
         result["tool_called"] = tool_name
         result["tool_args"] = tool_args
-        result["content_summary"] = f"{tool_name}({json.dumps(tool_args, default=str)[:150]})"
+        result["content_summary"] = (
+            f"{tool_name}({json.dumps(tool_args, default=str)[:150]})"
+        )
 
         if not self._autonomy_tool_allowed(tool_name):
             result["result"] = "error"
@@ -1393,11 +1790,17 @@ Do NOT invent other action kinds — they will be rejected."""
                     if channel is None:
                         channel = await self.bot.fetch_channel(int(clean_cid))
                 except (ValueError, TypeError):
-                    logger.warning(f"Autonomy run_tool '{tool_name}': bad channel_id '{target_cid}'")
+                    logger.warning(
+                        f"Autonomy run_tool '{tool_name}': bad channel_id '{target_cid}'"
+                    )
                 except discord.NotFound:
-                    logger.warning(f"Autonomy run_tool '{tool_name}': channel {clean_cid} not found (deleted?)")
+                    logger.warning(
+                        f"Autonomy run_tool '{tool_name}': channel {clean_cid} not found (deleted?)"
+                    )
                 except (discord.Forbidden, discord.HTTPException) as e:
-                    logger.warning(f"Autonomy run_tool '{tool_name}': can't access channel {clean_cid}: {e}")
+                    logger.warning(
+                        f"Autonomy run_tool '{tool_name}': can't access channel {clean_cid}: {e}"
+                    )
 
         # if no channel and we can find a default, use the first auto_channel
         # NOTE: this fallback means messages can end up in a channel the LLM didn't
@@ -1408,11 +1811,19 @@ Do NOT invent other action kinds — they will be rejected."""
                     ch = self.bot.get_channel(int(cid))
                     if ch is None:
                         ch = await self.bot.fetch_channel(int(cid))
-                except (ValueError, TypeError, discord.NotFound, discord.Forbidden, discord.HTTPException):
+                except (
+                    ValueError,
+                    TypeError,
+                    discord.NotFound,
+                    discord.Forbidden,
+                    discord.HTTPException,
+                ):
                     continue
                 if ch:
                     if not self._channel_allowed(cid):
-                        logger.debug(f"Autonomy run_tool: auto_channel {cid} not allowed, skipping")
+                        logger.debug(
+                            f"Autonomy run_tool: auto_channel {cid} not allowed, skipping"
+                        )
                         continue
                     channel = ch
                     if target_cid:
@@ -1438,11 +1849,17 @@ Do NOT invent other action kinds — they will be rejected."""
         )
 
         # extract tool kwargs (exclude meta fields that aren't real tool params)
-        exec_kwargs = {k: v for k, v in tool_args.items() if k not in {"channel_id", "target_channel_id"}}
+        exec_kwargs = {
+            k: v
+            for k, v in tool_args.items()
+            if k not in {"channel_id", "target_channel_id"}
+        }
         try:
             tool_result = await tool.execute(syn_msg, **exec_kwargs)
             result["result"] = "success"
-            result["content_summary"] = str(tool_result)[:300] if tool_result else result["content_summary"]
+            result["content_summary"] = (
+                str(tool_result)[:300] if tool_result else result["content_summary"]
+            )
         except Exception as e:
             result["result"] = "error"
             result["error"] = str(e)[:1000]
@@ -1480,7 +1897,14 @@ Do NOT invent other action kinds — they will be rejected."""
     # logging
     # -----------------------------------------------------------------------
 
-    async def _log_tick(self, context: str, actions: list[dict], results: list[dict], duration: float, tick_start_iso: str | None = None):
+    async def _log_tick(
+        self,
+        context: str,
+        actions: list[dict],
+        results: list[dict],
+        duration: float,
+        tick_start_iso: str | None = None,
+    ):
         """Record tick results to state and action log."""
         thought = self._last_thought or ""
 
@@ -1495,7 +1919,9 @@ Do NOT invent other action kinds — they will be rejected."""
             s["last_tick_duration"] = round(duration, 2)
             s["last_error"] = None
             s["last_thought"] = thought[:2000]
-            s["actions_executed_total"] = s.get("actions_executed_total", 0) + total_exec
+            s["actions_executed_total"] = (
+                s.get("actions_executed_total", 0) + total_exec
+            )
             s["actions_failed_total"] = s.get("actions_failed_total", 0) + total_fail
 
         await self.store.update_state(_update)

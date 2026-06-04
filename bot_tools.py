@@ -589,7 +589,9 @@ class MemoryTool(Tool):
 class ReactTool(Tool):
     """React to a message with an emoji"""
 
-    _CUSTOM_EMOJI_RE = re.compile(r"^<(?P<animated>a?):(?P<name>[A-Za-z0-9_]{2,32}):(?P<id>\d{15,25})>$")
+    _CUSTOM_EMOJI_RE = re.compile(
+        r"^<(?P<animated>a?):(?P<name>[A-Za-z0-9_]{2,32}):(?P<id>\d{15,25})>$"
+    )
     _BROKEN_CUSTOM_EMOJI_RE = re.compile(r"^<a?:(?P<name>[A-Za-z0-9_]{2,32}):?>$")
     _ALIAS_RE = re.compile(r"^:(?P<name>[A-Za-z0-9_]{2,32}):$")
     _BARE_CUSTOM_NAME_RE = re.compile(r"^[A-Za-z0-9_]{2,32}$")
@@ -660,12 +662,21 @@ class ReactTool(Tool):
                             return f"Reacted with {e}"
                         except discord.HTTPException as ex:
                             return f"Error: Could not add reaction — {ex}"
-            if alias_match or broken_match or raw == lookup or self._BARE_CUSTOM_NAME_RE.match(raw):
+            if (
+                alias_match
+                or broken_match
+                or raw == lookup
+                or self._BARE_CUSTOM_NAME_RE.match(raw)
+            ):
                 # Discord treats unknown custom names as a 400. Returning a local
                 # error keeps the LLM from faceplanting into Unknown Emoji loops.
                 return f"Error: custom emoji '{lookup}' is not available in this guild. {self._available_custom_emoji_hint(guild_id)}"
 
-        if alias_match or broken_match or (not guild and self._BARE_CUSTOM_NAME_RE.match(lookup)):
+        if (
+            alias_match
+            or broken_match
+            or (not guild and self._BARE_CUSTOM_NAME_RE.match(lookup))
+        ):
             return f"Error: custom emoji '{lookup}' is not available here. {self._available_custom_emoji_hint(guild_id)}"
 
         # Fallback: Unicode emoji or another Discord-supported reaction string.

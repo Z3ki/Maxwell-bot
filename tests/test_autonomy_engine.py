@@ -18,31 +18,61 @@ class DummyTool:
         raise AssertionError("disabled tool executed")
 
 
-def _engine(tmp_path, *, auto_channels=None, tools=None):
+def _engine(tmp_path, *, auto_channels=None, tools=None, control=None):
     bot = SimpleNamespace(
         config=SimpleNamespace(DATA_DIR=str(tmp_path)),
         _auto_channels=set(auto_channels or []),
+        _control=control or {},
         tools=tools or {},
     )
     return AutonomyEngine(bot)
 
 
-def test_parse_plan_fallback_channel_uses_first_auto_channel(tmp_path):
+def test_parse_plan_requires_explicit_channel_id(tmp_path):
     engine = _engine(tmp_path, auto_channels={"100", "200"})
 
-    raw = json.dumps({
-        "thought": "say something",
-        "actions": [{"kind": "post_channel", "content": "hello"}],
-    })
+    raw = json.dumps(
+        {
+            "thought": "say something",
+            "actions": [{"kind": "post_channel", "content": "hello"}],
+        }
+    )
+    actions, failures = engine._parse_plan(raw)
+
+    assert "post_channel: missing explicit numeric target_channel_id" in failures
+    assert actions == [
+        {"kind": "do_nothing", "reason": "all actions failed validation"}
+    ]
+
+
+def test_parse_plan_preserves_reply_to_message_id(tmp_path):
+    engine = _engine(tmp_path, auto_channels={"100"})
+
+    raw = json.dumps(
+        {
+            "thought": "reply to the right line",
+            "actions": [
+                {
+                    "kind": "post_channel",
+                    "target_channel_id": "100",
+                    "reply_to_message_id": "555",
+                    "content": "yeah exactly",
+                }
+            ],
+        }
+    )
     actions, failures = engine._parse_plan(raw)
 
     assert failures == []
-    assert actions == [{
-        "kind": "post_channel",
-        "target_channel_id": "100",
-        "content": "hello",
-        "reason": "",
-    }]
+    assert actions == [
+        {
+            "kind": "post_channel",
+            "target_channel_id": "100",
+            "reply_to_message_id": "555",
+            "content": "yeah exactly",
+            "reason": "",
+        }
+    ]
 
 
 def test_exec_run_tool_refuses_disabled_tools(tmp_path):
@@ -54,6 +84,90 @@ def test_exec_run_tool_refuses_disabled_tools(tmp_path):
 
     assert result["result"] == "error"
     assert "disabled" in result["error"]
+
+
+def test_exec_post_channel_replies_to_specific_message(tmp_path):
+    class SentMessage:
+        id = 777
+
+    class ReferencedMessage:
+        def __init__(self):
+            self.replies = []
+
+        async def reply(self, content, **kwargs):
+            self.replies.append((content, kwargs))
+            return SentMessage()
+
+    class Channel:
+        id = 100
+        guild = SimpleNamespace(id=9)
+
+        def __init__(self):
+            self.ref = ReferencedMessage()
+            self.sent = []
+
+        async def fetch_message(self, message_id):
+            assert message_id == 555
+            return self.ref
+
+        async def send(self, content):  # pragma: no cover - reply path should win
+            self.sent.append(content)
+            return SentMessage()
+
+    channel = Channel()
+    bot = SimpleNamespace(
+        config=SimpleNamespace(DATA_DIR=str(tmp_path)),
+        _auto_channels={"100"},
+        _control={},
+        tools={},
+        get_channel=lambda channel_id: channel if channel_id == 100 else None,
+        fetch_channel=None,
+    )
+    engine = AutonomyEngine(bot)
+    result = {"kind": "post_channel", "result": "success", "error": None}
+
+    asyncio.run(
+        engine._exec_post_channel(
+            {
+                "target_channel_id": "100",
+                "reply_to_message_id": "555",
+                "content": "threaded correctly",
+            },
+            result,
+        )
+    )
+
+    assert result["result"] == "success"
+    assert result["sent_as_reply"] is True
+    assert channel.ref.replies == [("threaded correctly", {"mention_author": False})]
+    assert channel.sent == []
+
+
+def test_exec_post_channel_refuses_blocked_channel(tmp_path):
+    class Channel:
+        async def send(self, content):  # pragma: no cover - must not send
+            raise AssertionError("sent to blocked channel")
+
+    bot = SimpleNamespace(
+        config=SimpleNamespace(DATA_DIR=str(tmp_path)),
+        _auto_channels={"100"},
+        _control={"blocked_channels": ["100"]},
+        tools={},
+        get_channel=lambda channel_id: Channel(),
+        fetch_channel=None,
+    )
+    engine = AutonomyEngine(bot)
+    result = {"kind": "post_channel", "result": "success", "error": None}
+
+    asyncio.run(
+        engine._exec_post_channel(
+            {"target_channel_id": "100", "content": "nope"},
+            result,
+        )
+    )
+
+    assert result["result"] == "error"
+    assert result["error"] == "channel not allowed for autonomy"
 
 
 def test_create_goal_reports_store_limit_as_error(tmp_path):

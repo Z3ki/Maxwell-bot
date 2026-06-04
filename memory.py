@@ -1,15 +1,15 @@
 """Memory management for Maxwell Bot"""
 
+import asyncio
+import contextlib
 import json
 import logging
-import asyncio
 import os
-import tempfile
 import re
+import tempfile
 import uuid
-from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,7 @@ def _normalize_context_text(content: str) -> str:
     return " ".join(str(content or "").split())[:MAX_SHARED_CONTEXT_CHARS]
 
 
-def _parse_iso(ts: str) -> Optional[datetime]:
+def _parse_iso(ts: str) -> datetime | None:
     if not ts:
         return None
     try:
@@ -95,7 +95,9 @@ def _text_similarity(a: str, b: str) -> float:
 
 def _strip_reasoning_text(content: str) -> str:
     text = str(content or "")
-    text = re.sub(r"<think\b[^>]*>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(
+        r"<think\b[^>]*>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL
+    )
     return " ".join(text.split())
 
 
@@ -117,7 +119,9 @@ class RemEventLog:
         try:
             if self.events_file.exists():
                 data = json.loads(self.events_file.read_text(encoding="utf-8"))
-                self.events = self._sanitize_events(data if isinstance(data, list) else [])
+                self.events = self._sanitize_events(
+                    data if isinstance(data, list) else []
+                )
         except (json.JSONDecodeError, OSError) as e:
             logger.error(f"Failed to load REM events: {e}")
             self.events = []
@@ -130,24 +134,44 @@ class RemEventLog:
             role = str(raw.get("role") or "")
             if role not in {"user", "assistant"}:
                 continue
-            clean.append({
-                "ts": str(raw.get("ts") or _utcnow_iso()),
-                "channel_id": str(raw.get("channel_id") or ""),
-                "guild_id": str(raw.get("guild_id")) if raw.get("guild_id") is not None else None,
-                "user_id": str(raw.get("user_id") or ""),
-                "user_name": str(raw.get("user_name") or "")[:120],
-                "role": role,
-                "content": _strip_reasoning_text(raw.get("content", ""))[:4000],
-                "auto_mode": bool(raw.get("auto_mode", False)),
-            })
-        return clean[-self.max_events:]
+            mentions = []
+            for row in list(raw.get("mentions") or [])[:10]:
+                if not isinstance(row, dict):
+                    continue
+                mid = str(row.get("id") or "")
+                if not mid:
+                    continue
+                mentions.append({"id": mid, "name": str(row.get("name") or mid)[:120]})
+            clean.append(
+                {
+                    "ts": str(raw.get("ts") or _utcnow_iso()),
+                    "channel_id": str(raw.get("channel_id") or ""),
+                    "guild_id": str(raw.get("guild_id"))
+                    if raw.get("guild_id") is not None
+                    else None,
+                    "message_id": str(raw.get("message_id") or ""),
+                    "user_id": str(raw.get("user_id") or ""),
+                    "user_name": str(raw.get("user_name") or "")[:120],
+                    "role": role,
+                    "content": _strip_reasoning_text(raw.get("content", ""))[:4000],
+                    "mentions": mentions,
+                    "reply_to_message_id": str(raw.get("reply_to_message_id") or ""),
+                    "reply_to_author": str(raw.get("reply_to_author") or "")[:120],
+                    "reply_to_author_id": str(raw.get("reply_to_author_id") or ""),
+                    "reply_to_self": bool(raw.get("reply_to_self", False)),
+                    "auto_mode": bool(raw.get("auto_mode", False)),
+                }
+            )
+        return clean[-self.max_events :]
 
     async def _atomic_save(self, snapshot: list):
         # Serialize writes. Atomic rename stops torn files, not stale snapshots
         # winning the race after a newer save. That's the annoying part.
         async with self._save_lock:
             try:
-                await asyncio.to_thread(_atomic_json_write_sync, self.events_file, snapshot)
+                await asyncio.to_thread(
+                    _atomic_json_write_sync, self.events_file, snapshot
+                )
             except Exception as e:
                 logger.error(f"Failed to save REM events: {e}")
 
@@ -170,12 +194,14 @@ class RemEventLog:
 
     async def record(self, event: dict):
         async with self._lock:
-            clean = self._sanitize_events([{**(event or {}), "ts": (event or {}).get("ts") or _utcnow_iso()}])
+            clean = self._sanitize_events(
+                [{**(event or {}), "ts": (event or {}).get("ts") or _utcnow_iso()}]
+            )
             if not clean or not clean[0]["content"]:
                 return
             self.events.append(clean[0])
             if len(self.events) > self.max_events:
-                self.events = self.events[-self.max_events:]
+                self.events = self.events[-self.max_events :]
             self._schedule_save()
 
     async def drain_slice(self, since_ts: str | None = None) -> list:
@@ -232,7 +258,7 @@ class MemoryManager:
     def load_from_disk(self):
         try:
             if self.memory_file.exists():
-                with open(self.memory_file, "r", encoding="utf-8") as f:
+                with open(self.memory_file, encoding="utf-8") as f:
                     self.memory = json.load(f)
                 self._prune_short_term_memory()
                 logger.info(f"Loaded memory for {len(self.memory)} channels")
@@ -243,7 +269,9 @@ class MemoryManager:
         try:
             if self.ltm_file.exists():
                 self._reload_ltm_from_disk()
-                logger.info(f"Loaded {len(self.long_term_memory)} long-term memory lines")
+                logger.info(
+                    f"Loaded {len(self.long_term_memory)} long-term memory lines"
+                )
         except OSError as e:
             logger.error(f"Failed to load long-term memory: {e}")
             self.long_term_memory = []
@@ -274,7 +302,7 @@ class MemoryManager:
         pruned = {}
         for channel_id, messages in self.memory.items():
             if isinstance(messages, list):
-                pruned[str(channel_id)] = messages[-self.max_messages:]
+                pruned[str(channel_id)] = messages[-self.max_messages :]
 
         def latest_ts(item):
             messages = item[1]
@@ -303,7 +331,9 @@ class MemoryManager:
             self._dirty = False
             snapshot = json.loads(json.dumps(self.memory, ensure_ascii=False))
             # Track the save task so flush() can wait for it
-            self._pending_save = asyncio.ensure_future(self._atomic_save(self.memory_file, snapshot))
+            self._pending_save = asyncio.ensure_future(
+                self._atomic_save(self.memory_file, snapshot)
+            )
 
     async def flush(self):
         """Flush any pending memory save immediately. Call on shutdown."""
@@ -311,11 +341,13 @@ class MemoryManager:
             self._save_task.cancel()
             self._save_task = None
         # Wait for any in-flight save
-        if hasattr(self, '_pending_save') and self._pending_save is not None and not self._pending_save.done():
-            try:
+        if (
+            hasattr(self, "_pending_save")
+            and self._pending_save is not None
+            and not self._pending_save.done()
+        ):
+            with contextlib.suppress(Exception):
                 await self._pending_save
-            except Exception:
-                pass
             self._pending_save = None
         # If a timer was cancelled before _do_save ran, we still have dirty data.
         if self._dirty:
@@ -325,9 +357,17 @@ class MemoryManager:
             logger.info("Memory flushed to disk")
 
     def _reload_ltm_from_disk(self):
-        lines = self.ltm_file.read_text(encoding="utf-8").splitlines() if self.ltm_file.exists() else []
-        clean = [_normalize_ltm_line(line) for line in lines if line.strip()][:MAX_LTM_LINES]
-        self.long_term_memory = [{"id": i + 1, "content": line} for i, line in enumerate(clean)]
+        lines = (
+            self.ltm_file.read_text(encoding="utf-8").splitlines()
+            if self.ltm_file.exists()
+            else []
+        )
+        clean = [_normalize_ltm_line(line) for line in lines if line.strip()][
+            :MAX_LTM_LINES
+        ]
+        self.long_term_memory = [
+            {"id": i + 1, "content": line} for i, line in enumerate(clean)
+        ]
         try:
             self._ltm_mtime = self.ltm_file.stat().st_mtime
         except OSError:
@@ -345,7 +385,10 @@ class MemoryManager:
 
     async def _save_ltm(self):
         """Save long-term memory as one editable text file."""
-        lines = [_normalize_ltm_line(entry.get("content", "")) for entry in self.long_term_memory]
+        lines = [
+            _normalize_ltm_line(entry.get("content", ""))
+            for entry in self.long_term_memory
+        ]
         lines = [line for line in lines if line][:MAX_LTM_LINES]
         text = "\n".join(lines)
         if text:
@@ -388,22 +431,30 @@ class MemoryManager:
                 tags = []
             created_at = str(raw.get("created_at") or _utcnow_iso())
             last_seen_at = str(raw.get("last_seen_at") or created_at)
-            sanitized.append({
-                "id": str(raw.get("id") or uuid.uuid4().hex[:10])[:32],
-                "scope": scope,
-                "visibility": visibility,
-                "importance": max(1, min(importance, 10)),
-                "content": content,
-                "source_user_id": str(raw.get("source_user_id") or "")[:64],
-                "source_channel_id": str(raw.get("source_channel_id") or "")[:64],
-                "source_guild_id": str(raw.get("source_guild_id") or "")[:64],
-                "source_kind": str(raw.get("source_kind") or "unknown")[:32],
-                "tags": [str(t).strip()[:32] for t in tags if str(t).strip()][:12],
-                "created_at": created_at,
-                "last_seen_at": last_seen_at,
-                "expires_at": expires_at,
-            })
-        sanitized.sort(key=lambda e: (str(e.get("last_seen_at", "")), str(e.get("created_at", ""))), reverse=True)
+            sanitized.append(
+                {
+                    "id": str(raw.get("id") or uuid.uuid4().hex[:10])[:32],
+                    "scope": scope,
+                    "visibility": visibility,
+                    "importance": max(1, min(importance, 10)),
+                    "content": content,
+                    "source_user_id": str(raw.get("source_user_id") or "")[:64],
+                    "source_channel_id": str(raw.get("source_channel_id") or "")[:64],
+                    "source_guild_id": str(raw.get("source_guild_id") or "")[:64],
+                    "source_kind": str(raw.get("source_kind") or "unknown")[:32],
+                    "tags": [str(t).strip()[:32] for t in tags if str(t).strip()][:12],
+                    "created_at": created_at,
+                    "last_seen_at": last_seen_at,
+                    "expires_at": expires_at,
+                }
+            )
+        sanitized.sort(
+            key=lambda e: (
+                str(e.get("last_seen_at", "")),
+                str(e.get("created_at", "")),
+            ),
+            reverse=True,
+        )
         # Fuzzy dedup: merge entries with >80% similar content in same scope
         deduped = []
         for entry in sanitized:
@@ -437,8 +488,14 @@ class MemoryManager:
         return sanitized[:MAX_SHARED_CONTEXT]
 
     def _reload_shared_context_from_disk(self):
-        data = json.loads(self.shared_context_file.read_text(encoding="utf-8")) if self.shared_context_file.exists() else []
-        self.shared_context = self._sanitize_shared_context(data if isinstance(data, list) else [])
+        data = (
+            json.loads(self.shared_context_file.read_text(encoding="utf-8"))
+            if self.shared_context_file.exists()
+            else []
+        )
+        self.shared_context = self._sanitize_shared_context(
+            data if isinstance(data, list) else []
+        )
         try:
             self._shared_context_mtime = self.shared_context_file.stat().st_mtime
         except OSError:
@@ -454,7 +511,9 @@ class MemoryManager:
 
     async def _save_shared_context(self):
         self.shared_context = self._sanitize_shared_context(self.shared_context)
-        await asyncio.to_thread(_atomic_json_write_sync, self.shared_context_file, self.shared_context)
+        await asyncio.to_thread(
+            _atomic_json_write_sync, self.shared_context_file, self.shared_context
+        )
         try:
             self._shared_context_mtime = self.shared_context_file.stat().st_mtime
         except OSError:
@@ -466,27 +525,46 @@ class MemoryManager:
         async with self._lock:
             self._reload_shared_context_if_changed()
             now = _utcnow_iso()
-            clean = self._sanitize_shared_context([{**entry, "created_at": entry.get("created_at") or now, "last_seen_at": entry.get("last_seen_at") or now}])
+            clean = self._sanitize_shared_context(
+                [
+                    {
+                        **entry,
+                        "created_at": entry.get("created_at") or now,
+                        "last_seen_at": entry.get("last_seen_at") or now,
+                    }
+                ]
+            )
             if not clean:
                 return ""
             new_entry = clean[0]
             # Merge exact duplicate content/scope to avoid noisy repeated facts.
             for existing in self.shared_context:
-                if existing.get("scope") == new_entry.get("scope") and existing.get("content", "").lower() == new_entry.get("content", "").lower():
+                if (
+                    existing.get("scope") == new_entry.get("scope")
+                    and existing.get("content", "").lower()
+                    == new_entry.get("content", "").lower()
+                ):
                     existing["last_seen_at"] = now
-                    existing["importance"] = max(int(existing.get("importance", 5)), int(new_entry.get("importance", 5)))
+                    existing["importance"] = max(
+                        int(existing.get("importance", 5)),
+                        int(new_entry.get("importance", 5)),
+                    )
                     await self._save_shared_context()
                     return str(existing.get("id"))
             self.shared_context.insert(0, new_entry)
             await self._save_shared_context()
-            logger.info(f"Added shared context #{new_entry['id']} scope={new_entry['scope']}")
+            logger.info(
+                f"Added shared context #{new_entry['id']} scope={new_entry['scope']}"
+            )
             return str(new_entry["id"])
 
     async def remove_shared_context(self, context_id: str) -> bool:
         async with self._lock:
             self._reload_shared_context_if_changed()
             before = len(self.shared_context)
-            self.shared_context = [e for e in self.shared_context if str(e.get("id")) != str(context_id)]
+            self.shared_context = [
+                e for e in self.shared_context if str(e.get("id")) != str(context_id)
+            ]
             if len(self.shared_context) < before:
                 await self._save_shared_context()
                 logger.info(f"Removed shared context #{context_id}")
@@ -500,12 +578,21 @@ class MemoryManager:
             self._reload_shared_context_if_changed()
             for entry in self.shared_context:
                 if str(entry.get("id")) == str(context_id):
-                    allowed = {"scope", "visibility", "importance", "content", "tags", "expires_at"}
+                    allowed = {
+                        "scope",
+                        "visibility",
+                        "importance",
+                        "content",
+                        "tags",
+                        "expires_at",
+                    }
                     for key, value in updates.items():
                         if key in allowed:
                             entry[key] = value
                     entry["last_seen_at"] = _utcnow_iso()
-                    self.shared_context = self._sanitize_shared_context(self.shared_context)
+                    self.shared_context = self._sanitize_shared_context(
+                        self.shared_context
+                    )
                     await self._save_shared_context()
                     logger.info(f"Updated shared context #{context_id}")
                     return True
@@ -515,11 +602,22 @@ class MemoryManager:
         async with self._lock:
             self._reload_shared_context_if_changed()
             self.shared_context = self._sanitize_shared_context(self.shared_context)
-            return [dict(e) for e in self.shared_context[:max(1, min(int(limit or 200), MAX_SHARED_CONTEXT))]]
+            return [
+                dict(e)
+                for e in self.shared_context[
+                    : max(1, min(int(limit or 200), MAX_SHARED_CONTEXT))
+                ]
+            ]
 
     async def get_relevant_shared_context(
-        self, user_id: str, guild_id: str = "", channel_id: str = "", is_dm: bool = False,
-        is_admin: bool = False, max_items: int = 10, budget: int = 5000,
+        self,
+        user_id: str,
+        guild_id: str = "",
+        channel_id: str = "",
+        is_dm: bool = False,
+        is_admin: bool = False,
+        max_items: int = 10,
+        budget: int = 5000,
     ) -> list:
         user_id = str(user_id or "")
         guild_id = str(guild_id or "")
@@ -542,7 +640,11 @@ class MemoryManager:
                 scope = entry.get("scope", "global")
                 if visibility == "admin_only" and not is_admin:
                     continue
-                if visibility == "private" and not (is_admin or scope in {f"user:{user_id}", f"dm:{user_id}", f"channel:{channel_id}"}):
+                if visibility == "private" and not (
+                    is_admin
+                    or scope
+                    in {f"user:{user_id}", f"dm:{user_id}", f"channel:{channel_id}"}
+                ):
                     continue
                 if scope not in scopes:
                     continue
@@ -559,7 +661,11 @@ class MemoryManager:
                 exact = 2
             elif scope == "global":
                 exact = 1
-            ts = _parse_iso(entry.get("last_seen_at", "")) or _parse_iso(entry.get("created_at", "")) or datetime.fromtimestamp(0, timezone.utc)
+            ts = (
+                _parse_iso(entry.get("last_seen_at", ""))
+                or _parse_iso(entry.get("created_at", ""))
+                or datetime.fromtimestamp(0, timezone.utc)
+            )
             return (exact, int(entry.get("importance", 5)), ts.timestamp())
 
         candidates.sort(key=score, reverse=True)
@@ -567,7 +673,9 @@ class MemoryManager:
         used = 0
         for entry in candidates:
             line_len = len(entry.get("content", "")) + len(entry.get("scope", "")) + 20
-            if selected and used + line_len > max(1000, min(int(budget or 5000), 20000)):
+            if selected and used + line_len > max(
+                1000, min(int(budget or 5000), 20000)
+            ):
                 break
             selected.append(entry)
             used += line_len
@@ -589,7 +697,7 @@ class MemoryManager:
             self.memory[channel_id].append(message)
 
             if len(self.memory[channel_id]) > self.max_messages:
-                self.memory[channel_id] = self.memory[channel_id][-self.max_messages:]
+                self.memory[channel_id] = self.memory[channel_id][-self.max_messages :]
 
             # Evict oldest channels if over limit
             if len(self.memory) > MAX_CHANNELS:
@@ -610,7 +718,9 @@ class MemoryManager:
             return "0"
         async with self._lock:
             self._reload_ltm_if_changed()
-            self.long_term_memory.append({"id": len(self.long_term_memory) + 1, "content": content})
+            self.long_term_memory.append(
+                {"id": len(self.long_term_memory) + 1, "content": content}
+            )
             if len(self.long_term_memory) > MAX_LTM_LINES:
                 self.long_term_memory = self.long_term_memory[-MAX_LTM_LINES:]
 
@@ -648,11 +758,11 @@ class MemoryManager:
         self._reload_ltm_if_changed()
         return list(self.long_term_memory)
 
-    def get_server_prompt(self, server_id: str) -> Optional[str]:
+    def get_server_prompt(self, server_id: str) -> str | None:
         prompts_file = self.data_dir / "prompts.json"
         try:
             if prompts_file.exists():
-                with open(prompts_file, "r", encoding="utf-8") as f:
+                with open(prompts_file, encoding="utf-8") as f:
                     prompts = json.load(f)
                 return prompts.get(server_id)
         except Exception as e:
@@ -665,7 +775,7 @@ class MemoryManager:
             prompts_file.parent.mkdir(parents=True, exist_ok=True)
             prompts = {}
             if prompts_file.exists():
-                with open(prompts_file, "r", encoding="utf-8") as f:
+                with open(prompts_file, encoding="utf-8") as f:
                     prompts = json.load(f)
             prompts[server_id] = prompt
             _atomic_json_write_sync(prompts_file, prompts)
@@ -677,7 +787,7 @@ class MemoryManager:
         prompts_file = self.data_dir / "prompts.json"
         try:
             if prompts_file.exists():
-                with open(prompts_file, "r", encoding="utf-8") as f:
+                with open(prompts_file, encoding="utf-8") as f:
                     prompts = json.load(f)
                 if server_id in prompts:
                     del prompts[server_id]

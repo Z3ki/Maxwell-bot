@@ -1,7 +1,15 @@
 import asyncio
 from types import SimpleNamespace
 
-from bot import MaxwellBot, ToolCircuitBreaker, _telegram_html, _tool_results_need_followup, _auto_format_discord
+from bot import (
+    MaxwellBot,
+    ToolCircuitBreaker,
+    _auto_format_discord,
+    _telegram_html,
+    _telegram_latest_message_label,
+    _telegram_tool_followup_instruction,
+    _tool_results_need_followup,
+)
 
 
 class FakeTool:
@@ -387,6 +395,26 @@ def test_telegram_html_renders_code_blocks():
     assert "before" in rendered
     assert '<pre><code class="language-ansi">$ whoami\nmaxwell</code></pre>' in rendered
     assert "after &lt;ok&gt;" in rendered
+
+
+def test_telegram_audio_turn_uses_stable_latest_message_label():
+    assert _telegram_latest_message_label("", has_media=True) == "[audio message attached]"
+    assert _telegram_latest_message_label("make an image", has_media=True) == "make an image"
+
+
+def test_telegram_tool_followup_keeps_audio_turn_context_available():
+    instruction = _telegram_tool_followup_instruction(has_original_media=True)
+
+    assert "already attached to the first model pass" in instruction
+    assert "do not say you cannot hear" in instruction
+    assert "<tool:send_message>" in instruction
+
+
+def test_telegram_tool_followup_without_media_does_not_claim_audio_context():
+    instruction = _telegram_tool_followup_instruction(has_original_media=False)
+
+    assert "No original Telegram media" in instruction
+    assert "already attached to the first model pass" not in instruction
 
 
 def test_no_response_tool_results_do_not_trigger_followup():
