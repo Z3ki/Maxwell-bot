@@ -1248,6 +1248,9 @@ class AutonomyEngine:
                 "base_personality", DEFAULT_CONTROL.get("base_personality", "")
             )
         )
+        # Inject age dynamically — use bot's _get_personality if available
+        if hasattr(self.bot, "_get_personality"):
+            base_personality = self.bot._get_personality()
 
         system_prompt = f"""You are Maxwell, doing a periodic check-in on your own. You're reviewing what's happening in your Discord server and deciding if there's something worth doing.
 
