@@ -29,6 +29,7 @@ from io import BytesIO
 from urllib.parse import urlparse
 from tools import Tool
 from ddgs import DDGS as _DDGS
+from utils import _atomic_json_write_sync  # single source of truth, fd-safe
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ TTS_RIVA_DEFAULTS = {
 }
 
 _SHARED_SESSION: aiohttp.ClientSession | None = None
+_SESSION_LOCK = asyncio.Lock()
 
 
 def _tts_language_key(
@@ -128,12 +130,13 @@ class _SafeResolver:
 
 async def _get_shared_session() -> aiohttp.ClientSession:
     global _SHARED_SESSION
-    if _SHARED_SESSION is None or _SHARED_SESSION.closed:
-        connector = aiohttp.TCPConnector(
-            resolver=cast(Any, _SafeResolver()), limit=30, limit_per_host=5
-        )
-        _SHARED_SESSION = aiohttp.ClientSession(connector=connector)
-    return _SHARED_SESSION
+    async with _SESSION_LOCK:
+        if _SHARED_SESSION is None or _SHARED_SESSION.closed:
+            connector = aiohttp.TCPConnector(
+                resolver=cast(Any, _SafeResolver()), limit=30, limit_per_host=5
+            )
+            _SHARED_SESSION = aiohttp.ClientSession(connector=connector)
+        return _SHARED_SESSION
 
 
 async def close_shared_session():
@@ -196,18 +199,7 @@ def _clean_channel_name(value: str | None) -> str:
     return text[:100]
 
 
-def _atomic_json_write_sync(path: Path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False, default=str)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+# _atomic_json_write_sync imported from utils.py (fd-safe, single source of truth)
 
 
 async def _resolve_guild(bot, message: Message, guild_id: str | None = None):

@@ -37,24 +37,21 @@ from typing import Any, cast
 import discord
 
 from control_defaults import DEFAULT_CONTROL  # noqa: E402
+from utils import (  # noqa: E402
+    _atomic_json_write_sync,
+    _coerce_utc_datetime as _coerce_utc_dt_shared,
+    _discord_display_name as _discord_display_name_shared,
+    _discord_id as _discord_id_shared,
+    USER_MENTION_RE,
+    CHANNEL_MENTION_RE,
+    ROLE_MENTION_RE,
+    render_discord_context_text as _render_discord_context_text,
+)
 
 logger = logging.getLogger(__name__)
 
-USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
-CHANNEL_MENTION_RE = re.compile(r"<#(\d+)>")
-ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
-
-
-def _discord_display_name(obj: Any) -> str:
-    return str(
-        getattr(obj, "display_name", None)
-        or getattr(obj, "name", None)
-        or getattr(obj, "id", "unknown")
-    )
-
-
-def _discord_id(obj: Any) -> str:
-    return str(getattr(obj, "id", "unknown"))
+# Regex constants, _discord_display_name, _discord_id, _coerce_utc_datetime,
+# and _render_discord_context_text are now imported from utils.py
 
 
 def _user_ref(obj: Any, bot_user: Any = None) -> str:
@@ -162,64 +159,7 @@ def _format_memory_context_line(msg: dict, *, bot_user: Any = None, now=None) ->
     return f"{prefix}{label}{relation}: {str(msg.get('content', ''))[:600]}"
 
 
-def _render_discord_context_text(message: Any, content: str | None = None) -> str:
-    text = str(
-        content if content is not None else (getattr(message, "content", "") or "")
-    )
-    if not text:
-        return text
-
-    guild = getattr(message, "guild", None)
-    users = {
-        str(getattr(user, "id", "")): user
-        for user in list(getattr(message, "mentions", []) or [])
-    }
-    channels = {
-        str(getattr(ch, "id", "")): ch
-        for ch in list(getattr(message, "channel_mentions", []) or [])
-    }
-    roles = {
-        str(getattr(role, "id", "")): role
-        for role in list(getattr(message, "role_mentions", []) or [])
-    }
-
-    def replace_user(match: re.Match) -> str:
-        user_id = match.group(1)
-        user = users.get(user_id)
-        if user is None and guild is not None:
-            user = guild.get_member(int(user_id))
-        return (
-            f"@{_discord_display_name(user)}({user_id})"
-            if user is not None
-            else f"@unknown-user({user_id})"
-        )
-
-    def replace_channel(match: re.Match) -> str:
-        channel_id = match.group(1)
-        channel = channels.get(channel_id)
-        if channel is None and guild is not None:
-            channel = guild.get_channel(int(channel_id))
-        return (
-            f"#{getattr(channel, 'name', channel_id)}({channel_id})"
-            if channel is not None
-            else f"#unknown-channel({channel_id})"
-        )
-
-    def replace_role(match: re.Match) -> str:
-        role_id = match.group(1)
-        role = roles.get(role_id)
-        if role is None and guild is not None:
-            role = guild.get_role(int(role_id))
-        return (
-            f"@{getattr(role, 'name', role_id)}({role_id})"
-            if role is not None
-            else f"@unknown-role({role_id})"
-        )
-
-    text = USER_MENTION_RE.sub(replace_user, text)
-    text = CHANNEL_MENTION_RE.sub(replace_channel, text)
-    text = ROLE_MENTION_RE.sub(replace_role, text)
-    return text
+# _render_discord_context_text imported from utils.py
 
 
 AUTONOMY_VALID_KINDS = frozenset(
@@ -259,23 +199,7 @@ AUTONOMY_DISABLED_TOOLS = frozenset()
 # ---------------------------------------------------------------------------
 
 
-def _atomic_json_write_sync(path: Path, data):
-    """Atomic JSON write: temp file -> fsync -> rename."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            fd = -1  # fdopen took ownership — don't double-close
-            json.dump(data, f, indent=2, ensure_ascii=False, default=str)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    finally:
-        if fd >= 0:
-            with contextlib.suppress(OSError):
-                os.close(fd)
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+# _atomic_json_write_sync imported from utils.py
 
 
 def _load_json_safe(path: Path, default):
@@ -319,19 +243,8 @@ def _truncate_keep_tail(text: str, budget: int) -> str:
     return prefix + text[-max(0, budget - len(prefix)) :]
 
 
-def _coerce_utc_datetime(value) -> datetime | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        dt = value
-    else:
-        try:
-            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        except (TypeError, ValueError):
-            return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+# _coerce_utc_datetime imported from utils.py
+_coerce_utc_datetime = _coerce_utc_dt_shared  # local alias for backward compat
 
 
 def _relative_time(dt, *, now: datetime | None = None) -> str:

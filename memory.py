@@ -10,6 +10,7 @@ import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from utils import _atomic_json_write_sync, _atomic_text_write_sync  # fd-safe, single source of truth
 
 logger = logging.getLogger(__name__)
 
@@ -29,34 +30,7 @@ def _utcnow_iso() -> str:
     return _utcnow().isoformat()
 
 
-def _atomic_json_write_sync(path: Path, data):
-    """Atomic JSON write: temp file -> fsync -> rename."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False, default=str)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-
-
-def _atomic_text_write_sync(path: Path, text: str):
-    """Atomic text write: temp file -> fsync -> rename."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+# _atomic_json_write_sync and _atomic_text_write_sync imported from utils.py
 
 
 def _normalize_ltm_line(content: str) -> str:
@@ -340,14 +314,16 @@ class MemoryManager:
         if self._save_task is not None:
             self._save_task.cancel()
             self._save_task = None
-        # Wait for any in-flight save
+        # Wait for any in-flight save; if it fails, fall through to sync save below
         if (
             hasattr(self, "_pending_save")
             and self._pending_save is not None
             and not self._pending_save.done()
         ):
-            with contextlib.suppress(Exception):
+            try:
                 await self._pending_save
+            except Exception:
+                logger.warning("Pending memory save failed during flush, retrying synchronously")
             self._pending_save = None
         # If a timer was cancelled before _do_save ran, we still have dirty data.
         if self._dirty:

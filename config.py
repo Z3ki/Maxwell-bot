@@ -11,7 +11,7 @@ ENV_FILE = Path(os.getenv("MAXWELL_ENV_FILE", APP_ROOT / ".env"))
 load_dotenv(ENV_FILE, override=False)
 
 
-def _int_env(name: str, default: int, min_value: int = None, max_value: int = None) -> int:
+def _int_env(name: str, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
     try:
         value = int(os.getenv(name, str(default)))
     except (TypeError, ValueError):
@@ -23,7 +23,7 @@ def _int_env(name: str, default: int, min_value: int = None, max_value: int = No
     return value
 
 
-def _float_env(name: str, default: float, min_value: float = None, max_value: float = None) -> float:
+def _float_env(name: str, default: float, min_value: float | None = None, max_value: float | None = None) -> float:
     try:
         value = float(os.getenv(name, str(default)))
     except (TypeError, ValueError):
@@ -93,3 +93,7 @@ class Config:
     def validate(cls):
         if not cls.DISCORD_TOKEN:
             raise ValueError("DISCORD_TOKEN is required")
+        if not cls.OLLAMA_BASE_URL:
+            raise ValueError("OLLAMA_BASE_URL is required")
+        if cls.OLLAMA_MAX_TOKENS < 1:
+            raise ValueError("OLLAMA_MAX_TOKENS must be >= 1")

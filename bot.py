@@ -26,7 +26,7 @@ from discord.ext import commands
 try:
     from discord.ext import voice_recv
     from voice_live import LiveSpeechSink
-except Exception as e:
+except (ImportError, ModuleNotFoundError) as e:
     voice_recv = None
     LiveSpeechSink = None
     _voice_recv_import_error = e
@@ -73,13 +73,17 @@ def _patch_voice_recv_decoder():
             except Exception as exc:
                 if "UnencryptedWhenPassthroughDisabled" in str(exc):
                     try:
-                        session = locals().get("session")
-                        if session is not None and hasattr(session, "can_passthrough"):
-                            session.can_passthrough(int(user_id))
-                        if session is not None and hasattr(
-                            session, "set_passthrough_mode"
+                        # session was assigned above in the try block; grab it from the closure
+                        vc = self.sink.voice_client
+                        _session = getattr(
+                            getattr(vc, "_connection", None), "dave_session", None
+                        )
+                        if _session is not None and hasattr(_session, "can_passthrough"):
+                            _session.can_passthrough(int(user_id))
+                        if _session is not None and hasattr(
+                            _session, "set_passthrough_mode"
                         ):
-                            session.set_passthrough_mode(True, 10)
+                            _session.set_passthrough_mode(True, 10)
                     except Exception:
                         logging.getLogger(__name__).debug(
                             "Failed to enable DAVE passthrough", exc_info=True
@@ -1264,7 +1268,7 @@ class TelegramMessageAdapter:
             endpoint = "sendAnimation"
             field_name = "animation"
             content_type = "image/gif"
-        elif ext in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+        elif ext in {".png", ".jpg", ".jpeg", ".webp"}:
             endpoint = "sendPhoto"
             field_name = "photo"
             content_type = (
@@ -1447,25 +1451,16 @@ def _tool_results_need_followup(tool_results: list[str]) -> bool:
         return False
 
     for result in tool_results:
-        if "Error" in result:
+        # Check for error prefixes, not just the substring "Error" anywhere
+        # (prevents false positives like "Error handling in Python" search results)
+        if result.startswith("Error:") or result.startswith("Error ") or "\nError:" in result:
             return True
         if any(result.startswith(f"Tool {name}:") for name in FOLLOWUP_TOOL_NAMES):
             return True
     return False
 
 
-def _atomic_json_write(path: Path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+from utils import _atomic_json_write_sync  # fd-safe, single source of truth
 
 
 class ToolCircuitBreaker:
@@ -1826,7 +1821,7 @@ class MaxwellBot(commands.Bot):
             "dms": dms,
         }
         await asyncio.to_thread(
-            _atomic_json_write,
+            _atomic_json_write_sync,
             Path(self.config.DATA_DIR) / "discord_state.json",
             payload,
         )
@@ -3031,6 +3026,7 @@ class MaxwellBot(commands.Bot):
         return f"\n[Latest message replies to {ref_label}: {ref_content[:500]}]"
 
     _spotify_seen: dict[str, str] = {}
+    _SPOTIFY_SEEN_MAX = 5000  # cap to prevent unbounded growth
 
     def _get_music_context(self, message) -> str:
         parts = []
@@ -3050,6 +3046,11 @@ class MaxwellBot(commands.Bot):
                     uid = str(message.author.id)
                     if self._spotify_seen.get(uid) == key:
                         break
+                    # Cap dict size to prevent unbounded growth
+                    if len(self._spotify_seen) >= self._SPOTIFY_SEEN_MAX:
+                        # Clear half the entries (oldest insertion order in 3.7+)
+                        for old_key in list(self._spotify_seen)[:self._SPOTIFY_SEEN_MAX // 2]:
+                            del self._spotify_seen[old_key]
                     self._spotify_seen[uid] = key
                     artists = (
                         ", ".join(activity.artists)
@@ -3100,7 +3101,7 @@ class MaxwellBot(commands.Bot):
 
     def _save_auto_channels(self):
         try:
-            _atomic_json_write(
+            _atomic_json_write_sync(
                 Path(self.config.DATA_DIR) / "auto_channels.json",
                 list(self._auto_channels),
             )
@@ -3137,7 +3138,7 @@ class MaxwellBot(commands.Bot):
 
     def _save_shell_whitelist(self):
         try:
-            _atomic_json_write(
+            _atomic_json_write_sync(
                 Path(self.config.DATA_DIR) / "shell_whitelist.json",
                 list(self._shell_whitelist),
             )
@@ -3146,7 +3147,7 @@ class MaxwellBot(commands.Bot):
 
     def _save_blacklist(self):
         try:
-            _atomic_json_write(
+            _atomic_json_write_sync(
                 Path(self.config.DATA_DIR) / "blacklist.json", list(self._blacklist)
             )
         except Exception as e:
@@ -3178,7 +3179,7 @@ class MaxwellBot(commands.Bot):
 
     def _save_admins(self):
         try:
-            _atomic_json_write(
+            _atomic_json_write_sync(
                 Path(self.config.DATA_DIR) / "admins.json", sorted(self._admins)
             )
         except Exception as e:
@@ -3388,14 +3389,14 @@ class MaxwellBot(commands.Bot):
             control = dict(self._control)
             control["autonomy_enabled"] = True
             self._control = control
-            _atomic_json_write(Path(self.config.DATA_DIR) / "bot_control.json", control)
+            await asyncio.to_thread(_atomic_json_write_sync, Path(self.config.DATA_DIR) / "bot_control.json", control)
             await message.channel.send("Autonomy enabled.")
             return
         if arg == "off":
             control = dict(self._control)
             control["autonomy_enabled"] = False
             self._control = control
-            _atomic_json_write(Path(self.config.DATA_DIR) / "bot_control.json", control)
+            await asyncio.to_thread(_atomic_json_write_sync, Path(self.config.DATA_DIR) / "bot_control.json", control)
             await message.channel.send("Autonomy disabled.")
             return
         if arg == "tick" or arg == "now":
@@ -3441,7 +3442,7 @@ class MaxwellBot(commands.Bot):
             control = dict(self._control)
             control["autonomy_interval_seconds"] = new_interval
             self._control = control
-            _atomic_json_write(Path(self.config.DATA_DIR) / "bot_control.json", control)
+            await asyncio.to_thread(_atomic_json_write_sync, Path(self.config.DATA_DIR) / "bot_control.json", control)
             await message.channel.send(f"Autonomy interval set to {new_interval}s.")
             return
         await message.channel.send(
@@ -3971,7 +3972,8 @@ class MaxwellBot(commands.Bot):
                             control = dict(self._control)
                             control["autonomy_enabled"] = True
                             self._control = control
-                            _atomic_json_write(
+                            await asyncio.to_thread(
+                                _atomic_json_write_sync,
                                 Path(self.config.DATA_DIR) / "bot_control.json", control
                             )
                             cmd["result"] = "autonomy enabled"
@@ -3979,7 +3981,8 @@ class MaxwellBot(commands.Bot):
                             control = dict(self._control)
                             control["autonomy_enabled"] = False
                             self._control = control
-                            _atomic_json_write(
+                            await asyncio.to_thread(
+                                _atomic_json_write_sync,
                                 Path(self.config.DATA_DIR) / "bot_control.json", control
                             )
                             cmd["result"] = "autonomy disabled"
@@ -3988,7 +3991,8 @@ class MaxwellBot(commands.Bot):
                             control = dict(self._control)
                             control["autonomy_interval_seconds"] = max(30, new_interval)
                             self._control = control
-                            _atomic_json_write(
+                            await asyncio.to_thread(
+                                _atomic_json_write_sync,
                                 Path(self.config.DATA_DIR) / "bot_control.json", control
                             )
                             cmd["result"] = (
@@ -4000,7 +4004,7 @@ class MaxwellBot(commands.Bot):
                         cmd["result"] = f"error: {e}"
                     cmd["status"] = "done"
                 if changed:
-                    await asyncio.to_thread(_atomic_json_write, path, commands_data)
+                    await asyncio.to_thread(_atomic_json_write_sync, path, commands_data)
             except Exception as e:
                 logger.error(f"Command queue error: {e}")
 
@@ -4071,7 +4075,7 @@ class MaxwellBot(commands.Bot):
             for slug in expired:
                 self._sites.pop(slug, None)
             sites_path = Path(self.config.DATA_DIR) / "sites.json"
-            await asyncio.to_thread(_atomic_json_write, sites_path, self._sites)
+            await asyncio.to_thread(_atomic_json_write_sync, sites_path, self._sites)
             try:
                 self._sites_mtime = sites_path.stat().st_mtime
             except OSError:
@@ -4947,6 +4951,9 @@ class MaxwellBot(commands.Bot):
                     if len(chunks) > 1:
                         await asyncio.sleep(0.3)
                 await self._record_rem_event(message, "assistant", response)
+        except asyncio.CancelledError:
+            logger.info(f"Cancelled active request in channel {channel_id}")
+            raise
         except ProviderUsageExhaustedError as e:
             logger.warning(f"Provider usage exhausted while handling message: {e}")
             if self._control.get("error_replies", True):
@@ -4961,9 +4968,6 @@ class MaxwellBot(commands.Bot):
                     await message.channel.send("something went wrong... try again")
                 except discord.Forbidden:
                     pass
-        except asyncio.CancelledError:
-            logger.info(f"Cancelled active request in channel {channel_id}")
-            raise
         finally:
             if self._active_requests.get(channel_id) is current_task:
                 self._active_requests.pop(channel_id, None)
@@ -5162,7 +5166,7 @@ class MaxwellBot(commands.Bot):
                     "payload": payload or {},
                 }
             )
-            await asyncio.to_thread(_atomic_json_write, path, traces[-300:])
+            await asyncio.to_thread(_atomic_json_write_sync, path, traces[-300:])
 
     def _message_tool_platform(self, message) -> str:
         return str(getattr(message, "tool_platform", "discord") or "discord")

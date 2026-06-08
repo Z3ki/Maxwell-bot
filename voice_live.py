@@ -170,7 +170,7 @@ class LiveSpeechSink(voice_recv.AudioSink):
 
     async def _write_temp_wav(self, user, pcm: bytes) -> str:
         name = f"vc-{self.guild_id}-{getattr(user, 'id', 'u')}-{int(time.time()*1000)}.wav"
-        out_dir = Path("temp")
+        out_dir = Path(__file__).resolve().parent / "temp"
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / name
         with wave.open(str(path), "wb") as w:
@@ -189,7 +189,7 @@ class LiveSpeechSink(voice_recv.AudioSink):
             self._ready.clear()
         # Clean up stale temp WAV files from this guild
         try:
-            temp_dir = Path("temp")
+            temp_dir = Path(__file__).resolve().parent / "temp"
             if temp_dir.exists():
                 prefix = f"vc-{self.guild_id}-"
                 now = time.time()

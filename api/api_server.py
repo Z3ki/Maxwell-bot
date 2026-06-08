@@ -57,6 +57,7 @@ _load_env_file(ENV_FILE)
 import sys as _sys
 _sys.path.insert(0, str(APP_ROOT))
 from control_defaults import DEAD_CONTROL_KEYS, DEFAULT_CONTROL, KNOWN_TOOLS, parse_bool as _parse_bool  # noqa: E402
+from utils import _atomic_json_write_sync, _atomic_text_write_sync  # noqa: E402 - fd-safe atomic writes
 
 DATA_DIR = Path(os.getenv("DATA_DIR", APP_ROOT / "data"))
 CORS_ORIGIN = os.getenv("MAXWELL_CORS_ORIGIN", os.getenv("MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com")).rstrip("/")
@@ -115,17 +116,45 @@ def _needs_auth(request) -> bool:
 _auth_failures: dict[str, list[float]] = defaultdict(list)
 _AUTH_RATE_WINDOW = 300  # 5 minutes
 _AUTH_RATE_MAX = 10  # max failures per window
+_AUTH_CLEANUP_INTERVAL = 600  # cleanup every 10 minutes
+_last_auth_cleanup = 0.0
+
+
+def _get_client_ip(request) -> str:
+    """Extract client IP, respecting X-Forwarded-For behind reverse proxies."""
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return getattr(request, 'remote', None) or "unknown"
+
+
+def _cleanup_auth_failures():
+    """Prune stale entries from _auth_failures to prevent unbounded growth."""
+    global _last_auth_cleanup
+    now = time.time()
+    if now - _last_auth_cleanup < _AUTH_CLEANUP_INTERVAL:
+        return
+    _last_auth_cleanup = now
+    stale_ips = [
+        ip for ip, times in _auth_failures.items()
+        if all(now - t >= _AUTH_RATE_WINDOW for t in times)
+    ]
+    for ip in stale_ips:
+        del _auth_failures[ip]
+
 
 def _check_rate_limit(request) -> bool:
     """Return True if request is rate-limited (should be rejected)."""
-    ip = getattr(request, 'remote', None) or "unknown"
+    ip = _get_client_ip(request)
     now = time.time()
-    # Prune old entries
+    # Prune old entries for this IP
     _auth_failures[ip] = [t for t in _auth_failures[ip] if now - t < _AUTH_RATE_WINDOW]
+    # Periodic cleanup of all stale IPs
+    _cleanup_auth_failures()
     return len(_auth_failures[ip]) >= _AUTH_RATE_MAX
 
 def _record_auth_failure(request):
-    ip = getattr(request, 'remote', None) or "unknown"
+    ip = _get_client_ip(request)
     _auth_failures[ip].append(time.time())
 
 
@@ -426,7 +455,12 @@ def _sanitize_context_entries(data):
         expires_at = str(raw.get("expires_at") or "")
         if expires_at:
             try:
-                if time.mktime(time.strptime(expires_at[:19], "%Y-%m-%dT%H:%M:%S")) <= now:
+                # Parse ISO timestamp with proper timezone handling
+                from datetime import datetime as _dt, timezone as _tz
+                _exp_dt = _dt.fromisoformat(expires_at[:19].replace("Z", "+00:00"))
+                if _exp_dt.tzinfo is None:
+                    _exp_dt = _exp_dt.replace(tzinfo=_tz.utc)
+                if _exp_dt.timestamp() <= now:
                     continue
             except Exception:
                 pass
@@ -474,41 +508,13 @@ async def _save_context_entries(entries):
 
 
 async def atomic_json_write(path: Path, data):
-    """Atomic write: temp file + fsync + rename."""
-
-    def _sync_write():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False, default=str)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, path)
-        finally:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-
-    await asyncio.to_thread(_sync_write)
+    """Atomic write: temp file + fsync + rename. Uses shared fd-safe implementation."""
+    await asyncio.to_thread(_atomic_json_write_sync, path, data)
 
 
 async def atomic_text_write(path: Path, text: str):
-    """Atomic write: temp file + fsync + rename."""
-
-    def _sync_write():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(text)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, path)
-        finally:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-
-    await asyncio.to_thread(_sync_write)
+    """Atomic write: temp file + fsync + rename. Uses shared fd-safe implementation."""
+    await asyncio.to_thread(_atomic_text_write_sync, path, text)
 
 
 # ---------- Data (all authenticated) ----------
