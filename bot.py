@@ -1659,13 +1659,14 @@ class MaxwellBot(commands.Bot):
             base_url = str(control.get("autonomy_base_url", "") or "").strip()
             api_key = str(control.get("autonomy_api_key", "") or "").strip()
             model = str(control.get("autonomy_model", "") or "").strip()
+            disable_reasoning = bool(control.get("autonomy_disable_reasoning", True))
             # No separate autonomy endpoint configured -> use main provider. This
             # also covers the both-empty case; if only a model differs (no
             # base_url) we reuse the main provider instance and pass model= per
             # request at call time.
             if not base_url:
                 return self.ai_provider
-            sig = f"{base_url}|{api_key}|{model}"
+            sig = f"{base_url}|{api_key}|{model}|dr={int(disable_reasoning)}"
             cached = self.autonomy_provider if sig == self._autonomy_provider_sig else None
             if cached is not None and getattr(cached, "available", False):
                 return cached
@@ -1691,7 +1692,7 @@ class MaxwellBot(commands.Bot):
                     max_tokens=autonomy_max_tokens,
                     temperature=self.config.OLLAMA_TEMPERATURE,
                     api_key=api_key,
-                    disable_reasoning=True,
+                    disable_reasoning=disable_reasoning,
                     retry_attempts=self.config.OLLAMA_RETRY_ATTEMPTS,
                 )
             else:

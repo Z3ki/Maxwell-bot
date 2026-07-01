@@ -94,6 +94,7 @@ DEFAULT_CONTROL = {
     "autonomy_base_url": "",      # "" = use main provider's base_url
     "autonomy_api_key": "",       # "" = use main provider's key
     "autonomy_model": "",         # "" = use main provider's model
+    "autonomy_disable_reasoning": True,  # False for endpoints that reject the reasoning param (e.g. NVIDIA)
     "autonomy_min_post_gap_seconds": 1800,  # min quiet gap between unprompted autonomy posts per channel
 }
 

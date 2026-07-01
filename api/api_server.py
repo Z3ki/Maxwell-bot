@@ -1059,6 +1059,7 @@ async def autonomy_status(request):
         "interval_seconds": control.get("autonomy_interval_seconds", 300),
         "model": control.get("autonomy_model", ""),
         "base_url": control.get("autonomy_base_url", ""),
+        "disable_reasoning": control.get("autonomy_disable_reasoning", True),
         "min_post_gap_seconds": control.get("autonomy_min_post_gap_seconds", 1800),
         "last_tick": state.get("last_tick"),
         "last_tick_duration": state.get("last_tick_duration"),
