@@ -1312,13 +1312,18 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
         # call the LLM
         try:
             messages = [{"role": "system", "content": system_prompt}]
+            # Cap the timeout like the REM path (bot.py _run_rem_once_guarded)
+            # so a misconfigured ai_timeout_seconds can't hang a tick for hours.
             timeout = max(
                 30,
-                int(
-                    (getattr(self.bot, "_control", None) or {}).get(
-                        "ai_timeout_seconds", 180
-                    )
-                    or 180
+                min(
+                    int(
+                        (getattr(self.bot, "_control", None) or {}).get(
+                            "ai_timeout_seconds", 180
+                        )
+                        or 180
+                    ),
+                    600,
                 ),
             )
             # Provider-unavailable soft skip: if the autonomy provider isn't
@@ -1339,11 +1344,13 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
             try:
                 # Pass the configured autonomy model as override so even the main
                 # provider runs a different model if autonomy_model is set.
-                autonomy_model = str(
-                    (getattr(self.bot, "_control", None) or {}).get(
-                        "autonomy_model", ""
-                    )
-                    or ""
+                control = getattr(self.bot, "_control", None) or {}
+                autonomy_model = str(control.get("autonomy_model", "") or "")
+                # Honor autonomy_disable_reasoning per-call so it takes effect even
+                # when reusing the main provider (no autonomy_base_url). The
+                # provider lets a per-call False override the endpoint default.
+                autonomy_disable_reasoning = bool(
+                    control.get("autonomy_disable_reasoning", True)
                 )
                 raw_response = await ai_provider.generate_response(
                     messages,
@@ -1353,12 +1360,18 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
                     # we don't blow past an autonomy model's output limit (e.g.
                     # minimax-m3 caps at 131072) and waste quota/tokens.
                     max_tokens=8192,
+                    disable_reasoning=autonomy_disable_reasoning,
                 )
             finally:
                 await self.bot._release_ai_slot()
         except Exception as e:
+            # Re-raise so tick() reports an error and _loop engages exponential
+            # backoff. The provider already retried internally (retry_attempts);
+            # if it still fails, hammering every interval with backoff=1 is worse
+            # than backing off. The provider-unavailable soft skip above returns
+            # normally and does NOT reach here.
             logger.error(f"Autonomy LLM call failed: {e}")
-            return [{"kind": "do_nothing", "reason": f"LLM call failed: {e}"}]
+            raise
 
         # parse JSON from response
         logger.info(
@@ -1797,7 +1810,7 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
 
     async def _exec_post_channel(self, action: dict, result: dict):
         channel_id = action["target_channel_id"]
-        content = action["content"][:2000]
+        content = action["content"][:MAX_CONTENT_CHARS]
         reply_to_message_id = action.get("reply_to_message_id")
         result["target"] = f"channel:{channel_id}"
         result["channel_id"] = channel_id

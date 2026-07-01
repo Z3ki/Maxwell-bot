@@ -122,10 +122,14 @@ def _message_content(message: dict) -> str:
     return str(message.get("content") or "")
 
 
-async def _provider_message(provider, messages: list[dict], tools: list[dict], model: str, timeout: int) -> dict:
+async def _provider_message(
+    provider, messages: list[dict], tools: list[dict], model: str, timeout: int, max_tokens: int | None = None
+) -> dict:
     if hasattr(provider, "generate_chat_completion"):
-        return await provider.generate_chat_completion(messages, tools=tools, model=model, timeout=timeout)
-    content = await provider.generate_response(messages, timeout=timeout)
+        return await provider.generate_chat_completion(
+            messages, tools=tools, model=model, timeout=timeout, max_tokens=max_tokens
+        )
+    content = await provider.generate_response(messages, timeout=timeout, max_tokens=max_tokens)
     return {"role": "assistant", "content": content}
 
 
@@ -140,6 +144,7 @@ async def run_rem_once(
     run_history: int = 50,
     prompt_body: str | None = None,
     timeout: int = 60,
+    max_tokens: int | None = None,
 ) -> dict:
     store = RemStore(data_dir, run_history=run_history)
     state = await store.load_state()
@@ -161,7 +166,7 @@ async def run_rem_once(
     success = False
     try:
         await store.patch_state({"running": True, "running_since": started})
-        response = await _provider_message(provider, messages, [], model, timeout)
+        response = await _provider_message(provider, messages, [], model, timeout, max_tokens)
         audit = _message_content(response).strip() or "DONE"
         finished = utcnow_iso()
         # Use 'started' as watermark so events recorded during the run are not lost

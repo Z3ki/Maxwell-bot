@@ -148,7 +148,13 @@ class OllamaProvider:
         }
         # Always include max_tokens from config or override
         data["max_tokens"] = max_tokens if max_tokens is not None else self.max_tokens
-        if endpoint.disable_reasoning or disable_reasoning:
+        # Per-call disable_reasoning overrides the endpoint default; a caller
+        # that passes disable_reasoning=False can keep reasoning on a shared
+        # provider whose endpoint.disable_reasoning is True.
+        use_disable_reasoning = (
+            disable_reasoning if disable_reasoning is not None else endpoint.disable_reasoning
+        )
+        if use_disable_reasoning:
             data["reasoning"] = {"exclude": True}
         if tools:
             data["tools"] = tools

@@ -315,6 +315,8 @@ def test_exec_post_channel_records_autonomy_message_as_self_memory(tmp_path):
         "author_is_bot": True,
         "content": "that was me",
         "message_id": "777",
+        "autonomy": True,
+        "autonomy_reason": "",
     }
 
 

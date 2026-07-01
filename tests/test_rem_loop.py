@@ -29,7 +29,7 @@ class FakeProvider:
         self.messages = list(messages)
         self.calls = 0
 
-    async def generate_chat_completion(self, messages, tools=None, model=None, timeout=60):
+    async def generate_chat_completion(self, messages, tools=None, model=None, timeout=60, max_tokens=None):
         self.calls += 1
         return self.messages.pop(0)
 

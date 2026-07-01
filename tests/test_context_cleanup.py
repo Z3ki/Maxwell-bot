@@ -151,3 +151,13 @@ def test_status_shape(tmp_path):
     assert {"enabled", "interval_seconds", "running", "last_run", "last_audit",
             "ops_applied_total", "passes_total", "log"} <= set(status)
     assert status["passes_total"] == 1
+
+
+def test_parse_plan_non_list_ops_returns_no_ops_keeps_audit(tmp_path):
+    # Regression: a non-list `ops` (null/object/string) previously caused
+    # _parse_plan to swap its return values, treating the audit text as an op
+    # (AttributeError swallowed by apply()) and writing "[]" as the audit.
+    engine = ContextCleanupEngine(FakeBot(str(tmp_path), FakeMemory(), FakeProvider("")))
+    ops, audit = engine._parse_plan('{"audit": "no work needed", "ops": null}', _entries())
+    assert ops == []
+    assert audit == "no work needed"

@@ -438,22 +438,32 @@ class ContextCleanupEngine:
 
         try:
             provider = await self.bot._get_autonomy_provider()
-            if not callable(getattr(provider, "generate_response", None)) and not callable(
-                getattr(provider, "generate_chat_completion", None)
-            ):
+            # We only ever call generate_response; drop the misleading
+            # generate_chat_completion check (it was never dispatched to). If the
+            # resolved provider lacks generate_response, fall back to the main
+            # ai_provider, which has both methods.
+            if provider is None or not callable(getattr(provider, "generate_response", None)):
                 provider = getattr(self.bot, "ai_provider", None)
             if provider is None:
                 return [], "DONE - no provider available"
+            # Provider-unavailable soft skip: don't burn an AI slot or count this
+            # as a failure — _get_autonomy_provider re-probes init next tick.
+            if getattr(provider, "available", None) is False:
+                logger.info("ContextCleanup: provider not available, soft skip")
+                return [], "DONE - provider not available"
             model = str(
                 (getattr(self.bot, "_control", None) or {}).get("autonomy_model", "") or ""
             ) or None
             timeout = max(
                 30,
-                int(
-                    (getattr(self.bot, "_control", None) or {}).get(
-                        "ai_timeout_seconds", 120
-                    )
-                    or 120
+                min(
+                    int(
+                        (getattr(self.bot, "_control", None) or {}).get(
+                            "ai_timeout_seconds", 120
+                        )
+                        or 120
+                    ),
+                    600,
                 ),
             )
             await self.bot._acquire_ai_slot(timeout=timeout)
@@ -534,7 +544,7 @@ class ContextCleanupEngine:
         audit = str(parsed.get("audit", ""))[:2000]
         raw_ops = parsed.get("ops", [])
         if not isinstance(raw_ops, list):
-            return [audit or "DONE"], []
+            return [], audit or "DONE"
 
         known_ids = {str(e.get("id", "")) for e in entries if e.get("id")}
         valid: list[dict] = []

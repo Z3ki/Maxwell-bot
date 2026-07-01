@@ -1657,7 +1657,10 @@ class MaxwellBot(commands.Bot):
         Init is awaited on a fresh build (so the first tick doesn't race the
         /models probe) and re-probed whenever the cached provider is unavailable
         (so a transient init failure self-heals on a later tick instead of
-        soft-skipping forever). Cache hits stay instant — the await only runs
+        soft-skipping forever). If the dedicated provider can't initialize, the
+        main ai_provider is returned for that tick so autonomy keeps running on a
+        healthy endpoint; the cached provider is retained so a later tick
+        re-probes and self-heals. Cache hits stay instant — the await only runs
         when construction or a re-probe is needed.
         """
         try:
@@ -1671,6 +1674,17 @@ class MaxwellBot(commands.Bot):
             # base_url) we reuse the main provider instance and pass model= per
             # request at call time.
             if not base_url:
+                # base_url cleared since last tick: close the cached dedicated
+                # provider (it owns an aiohttp ClientSession) so config churn
+                # doesn't leak sessions, then fall through to the main provider.
+                old = self.autonomy_provider
+                if old is not None and hasattr(old, "close"):
+                    try:
+                        asyncio.ensure_future(old.close())
+                    except Exception as e:
+                        logger.warning(f"Failed to schedule old autonomy provider close: {e}")
+                self.autonomy_provider = None
+                self._autonomy_provider_sig = ""
                 return self.ai_provider
             sig = f"{base_url}|{api_key}|{model}|dr={int(disable_reasoning)}"
             cached = self.autonomy_provider if sig == self._autonomy_provider_sig else None
@@ -1699,6 +1713,13 @@ class MaxwellBot(commands.Bot):
                     temperature=self.config.OLLAMA_TEMPERATURE,
                     api_key=api_key,
                     disable_reasoning=disable_reasoning,
+                    # Inherit the main provider's fallback endpoint so a dedicated
+                    # autonomy endpoint doesn't lose fallback resilience. No-op
+                    # when OLLAMA_FALLBACK_* is unset (empty -> no fallback).
+                    fallback_base_url=self.config.OLLAMA_FALLBACK_BASE_URL,
+                    fallback_model=self.config.OLLAMA_FALLBACK_MODEL,
+                    fallback_api_key=self.config.OLLAMA_FALLBACK_API_KEY,
+                    fallback_disable_reasoning=self.config.OLLAMA_FALLBACK_DISABLE_REASONING,
                     retry_attempts=self.config.OLLAMA_RETRY_ATTEMPTS,
                 )
             else:
@@ -1711,6 +1732,16 @@ class MaxwellBot(commands.Bot):
                 logger.warning(f"Autonomy provider initialize() failed: {e}")
             self.autonomy_provider = provider
             self._autonomy_provider_sig = sig
+            # If the dedicated provider couldn't initialize (primary + fallback
+            # both down), fall back to the main ai_provider for this tick so
+            # autonomy keeps running instead of soft-skipping forever. The cached
+            # (unavailable) provider is retained so a later tick re-probes
+            # initialize() and self-heals.
+            if not getattr(provider, "available", False):
+                logger.warning(
+                    "Autonomy provider unavailable, falling back to main ai_provider for this tick"
+                )
+                return self.ai_provider
             return provider
         except Exception as e:
             logger.warning(f"_get_autonomy_provider failed, falling back to main: {e}")
@@ -3379,6 +3410,10 @@ class MaxwellBot(commands.Bot):
                     run_history=self.config.REM_RUN_HISTORY,
                     prompt_body=self.rem_prompt_body,
                     timeout=timeout,
+                    # REM produces a short audit, not free-form prose; cap
+                    # max_tokens like autonomy so we don't blow past the model's
+                    # output limit (default OLLAMA_MAX_TOKENS=200000 risks a 400).
+                    max_tokens=8192,
                 )
             finally:
                 await self._release_ai_slot()
