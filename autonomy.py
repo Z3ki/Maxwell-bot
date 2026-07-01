@@ -1282,6 +1282,7 @@ DECISION RULES:
 - Act ONLY if one is true: (1) someone mentioned/replied to/asked you (check mentions, reply_to, addressed_to), (2) a goal needs a concrete step right now, (3) you have a genuinely natural, in-character addition to a live conversation.
 - When a goal applies, let it guide WHICH action to take — e.g. a goal about following up on someone's project → post_channel or send_dm when that person is around.
 - Don't: post unprompted jokes to seem active, restate visible context, reopen concluded conversations, DM without a concrete reason, or say "just checking in". Talk like a person in the channel — never reference being a "background loop" or "check-in".
+- Don't pile on: if you (Maxwell) already replied in a channel recently (check CHANNEL ACTIVITY and YOUR RECENT ACTIONS for your own messages there), don't post again unless there's a genuinely new reason — you'd look like you're talking to yourself. If you're mid-reply in normal chat, the autonomy tick isn't the place to add a second message; let the conversation breathe.
 - Voice: short, casual, lowercase-natural — exactly like Maxwell in normal chat.
 
 DATA RULES:
@@ -1622,14 +1623,11 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
             kind = action.get("kind", "do_nothing")
             result = {"kind": kind, "result": "success", "error": None}
 
-            # Don't let autonomy post into a channel the bot is actively replying
-            # in, or just replied in. This prevents two real bugs:
-            #  1. Race: autonomy posts while the bot is mid-reply -> duplicate/odd
-            #     message lands before the real reply finishes.
-            #  2. Re-engagement: autonomy sees the bot's own (possibly old) reply
-            #     in context and posts again ~minutes later, re-opening a thread
-            #     the bot already answered.
-            # Applies to post_channel and message-sending run_tool alike.
+            # Soft guard: skip autonomy post if the bot replied in-channel
+            # within the configured window (0 = off, never block). The
+            # "bot is already replying" race is handled by the prompt telling
+            # Maxwell not to pile on when he already answered — no hardcoded
+            # skip. Applies to post_channel and message-sending run_tool.
             post_cid = None
             if kind == "post_channel":
                 post_cid = str(action.get("target_channel_id") or "") or None
@@ -1643,19 +1641,6 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
                     or None
                 )
             if post_cid:
-                replying = getattr(self.bot, "_replying_channels", set())
-                if post_cid in replying:
-                    logger.info(
-                        f"Autonomy skip post to {post_cid}: bot is already replying there"
-                    )
-                    result = {
-                        "kind": kind,
-                        "result": "skipped",
-                        "error": None,
-                        "content_summary": "bot already replying in channel",
-                    }
-                    results.append(result)
-                    continue
                 last_reply = getattr(self.bot, "_last_bot_reply", {}).get(post_cid, 0.0)
                 # Configurable: how recently the bot must have replied in-channel
                 # before autonomy is blocked from posting there. 0 disables the
