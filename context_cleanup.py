@@ -1,0 +1,674 @@
+"""ContextCleanupEngine — Maxwell's shared-context janitor.
+
+Runs alongside REM and autonomy. Periodically loads the full shared-context
+store, asks the LLM (the SAME provider/model autonomy and REM use) to review it
+for duplicates, contradictions, stale/garbage entries, and produces a batch of
+cleanup operations (delete, edit, merge, add) that are applied through the
+existing MemoryManager API.
+
+Why this exists: the context-watcher agent fires on every flagged message and
+loves to produce near-duplicate facts, half-sentences, and entries that
+contradict newer ones. The on-add dedup in memory.py only catches >80% text
+overlap in the same scope; semantic dupes and weird cross-scope cruft pile up
+until a human has to scrub them by hand from the dashboard. This agent does the
+scrub on a schedule instead.
+
+Design notes:
+- Uses MemoryManager.list_shared_context / remove_shared_context /
+  update_shared_context / add_shared_context. It never writes the file
+  directly — every mutation goes through the locked memory API so it stays
+  consistent with the on-add sanitization (re-dedup, eviction, mtime tracking).
+- Shares the autonomy/REM provider + model. If the autonomy provider isn't
+  configured it transparently falls back to the main bot provider via
+  bot._get_autonomy_provider().
+- No approval queue. Like autonomy/REM, it just runs. The audit log + last
+  actions are surfaced in the dashboard so a human can see what it did and
+  undo deletions if needed.
+- One cleanup pass = one LLM call over the current snapshot. If the store is
+  huge it caps the reviewed slice so we don't blow the context window.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import logging
+import re
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, cast
+
+from control_defaults import DEFAULT_CONTROL  # noqa: E402
+from utils import _atomic_json_write_sync  # noqa: E402
+
+logger = logging.getLogger(__name__)
+
+# Cap the snapshot sent to the LLM. The store can hold 1000 entries; sending all
+# of them would overflow most context windows and cost a fortune. 200 is plenty
+# to find obvious dupes and weird stuff — on-add dedup already catches exact
+# matches, so this pass mostly hunts semantic dupes and garbage.
+MAX_REVIEW_ENTRIES = 200
+# Hard cap on operations the LLM may request in one pass. Stops a hallucinating
+# model from nuking the whole store in a single tick.
+MAX_OPS_PER_PASS = 60
+MAX_CONTENT_CHARS = 1200
+LOG_RING_SIZE = 50
+MAX_ACTIONS_PER_PASS = MAX_OPS_PER_PASS
+
+VALID_OP_KINDS = frozenset({"delete", "edit", "merge", "add"})
+VALID_VISIBILITIES = frozenset({"shared", "private", "admin_only", "public_hint"})
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _load_json_safe(path: Path, default):
+    try:
+        if not path.exists():
+            return default() if callable(default) else default
+        raw = path.read_text(encoding="utf-8").strip()
+        if not raw:
+            return default() if callable(default) else default
+        data = json.loads(raw)
+        return data
+    except (json.JSONDecodeError, OSError, ValueError) as e:
+        logger.warning(f"Corrupt/unreadable {path.name}, recreating defaults: {e}")
+        return default() if callable(default) else default
+
+
+def _truncate(text: str, budget: int) -> str:
+    budget = max(0, int(budget or 0))
+    if len(text) <= budget:
+        return text
+    suffix = "\n... [truncated]"
+    if budget <= len(suffix):
+        return text[:budget]
+    return text[: budget - len(suffix)] + suffix
+
+
+def _strip_id(value: Any) -> str:
+    return re.sub(r"[^A-Za-z0-9_\-]", "", str(value or ""))[:64]
+
+
+def _coerce_scope(value: Any, fallback: str = "global") -> str:
+    scope = str(value or "").strip().lower()[:80]
+    return scope or fallback
+
+
+def _coerce_visibility(value: Any, fallback: str = "shared") -> str:
+    vis = str(value or "").strip().lower()
+    return vis if vis in VALID_VISIBILITIES else fallback
+
+
+def _coerce_importance(value: Any, fallback: int = 5) -> int:
+    try:
+        return max(1, min(int(value), 10))
+    except (TypeError, ValueError):
+        return fallback
+
+
+class ContextCleanupStore:
+    """JSON-backed state + audit log for the cleanup agent (atomic writes)."""
+
+    def __init__(self, data_dir: str):
+        self.data_dir = Path(data_dir)
+        self.state_file = self.data_dir / "context_cleanup_state.json"
+        self.log_file = self.data_dir / "context_cleanup_log.json"
+        self.control_file = self.data_dir / "context_cleanup_control.json"
+        self._lock = asyncio.Lock()
+
+    async def load_state(self) -> dict:
+        async with self._lock:
+            data = await asyncio.to_thread(_load_json_safe, self.state_file, dict)
+            return data if isinstance(data, dict) else {}
+
+    async def save_state(self, state: dict):
+        async with self._lock:
+            await asyncio.to_thread(_atomic_json_write_sync, self.state_file, state)
+
+    async def patch_state(self, updates: dict) -> dict:
+        async with self._lock:
+            state = await asyncio.to_thread(_load_json_safe, self.state_file, dict)
+            if not isinstance(state, dict):
+                state = {}
+            state.update(updates)
+            await asyncio.to_thread(_atomic_json_write_sync, self.state_file, state)
+            return state
+
+    async def update_state(self, fn) -> dict:
+        async with self._lock:
+            state = await asyncio.to_thread(_load_json_safe, self.state_file, dict)
+            if not isinstance(state, dict):
+                state = {}
+            fn(state)
+            await asyncio.to_thread(_atomic_json_write_sync, self.state_file, state)
+            return state
+
+    async def load_control(self) -> dict:
+        async with self._lock:
+            control = await asyncio.to_thread(_load_json_safe, self.control_file, dict)
+            return control if isinstance(control, dict) else {}
+
+    async def save_control(self, control: dict):
+        async with self._lock:
+            await asyncio.to_thread(
+                _atomic_json_write_sync, self.control_file, dict(control or {})
+            )
+
+    async def load_log(self) -> list[dict]:
+        async with self._lock:
+            data = await asyncio.to_thread(_load_json_safe, self.log_file, dict)
+            entries = data.get("entries", []) if isinstance(data, dict) else []
+            return entries if isinstance(entries, list) else []
+
+    async def append_log_entry(self, entry: dict):
+        async with self._lock:
+            data = await asyncio.to_thread(_load_json_safe, self.log_file, dict)
+            entries = data.get("entries", []) if isinstance(data, dict) else []
+            if not isinstance(entries, list):
+                entries = []
+            entries.append(entry)
+            entries = entries[-LOG_RING_SIZE:]
+            await asyncio.to_thread(
+                _atomic_json_write_sync, self.log_file, {"entries": entries}
+            )
+
+    async def clear_log(self):
+        async with self._lock:
+            await asyncio.to_thread(
+                _atomic_json_write_sync, self.log_file, {"entries": []}
+            )
+
+    async def record_error(self, error: str):
+        await self.patch_state({"last_error": str(error)[:2000]})
+
+
+def _entry_digest(entry: dict) -> str:
+    """Compact one-line representation for the LLM snapshot."""
+    eid = str(entry.get("id", "?"))
+    scope = entry.get("scope", "global")
+    vis = entry.get("visibility", "shared")
+    imp = entry.get("importance", 5)
+    content = str(entry.get("content", "")).replace("\n", " ")[:200]
+    return f"[{eid}] scope={scope} vis={vis} i{imp}: {content}"
+
+
+class ContextCleanupEngine:
+    """Background loop that periodically reviews and cleans shared context."""
+
+    def __init__(self, bot: Any):
+        self.bot = bot
+        self.store = ContextCleanupStore(getattr(bot.config, "DATA_DIR", "data"))
+        self.enabled = self._default_enabled()
+        self.interval_seconds = self._default_interval()
+        self._running_flag = False
+        self._task: asyncio.Task | None = None
+        self._lock = asyncio.Lock()
+        self._last_audit = ""
+
+    def _default_enabled(self) -> bool:
+        return bool(
+            (getattr(self.bot, "_control", None) or {}).get(
+                "context_cleanup_enabled", DEFAULT_CONTROL.get("context_cleanup_enabled", False)
+            )
+        )
+
+    def _default_interval(self) -> int:
+        try:
+            return max(
+                300,
+                int(
+                    (getattr(self.bot, "_control", None) or {}).get(
+                        "context_cleanup_interval_seconds",
+                        DEFAULT_CONTROL.get("context_cleanup_interval_seconds", 1800),
+                    )
+                    or 1800
+                ),
+            )
+        except (TypeError, ValueError):
+            return 1800
+
+    # -- lifecycle --
+
+    async def start(self):
+        """Start the background loop. Safe to call multiple times."""
+        await self.load_control()
+        if self._task is not None and not self._task.done():
+            return
+        self._task = asyncio.create_task(self._loop())
+        logger.info("ContextCleanupEngine started")
+
+    async def stop(self):
+        self._task and await self._cancel_task(self._task)
+        self._task = None
+        logger.info("ContextCleanupEngine stopped")
+
+    @staticmethod
+    async def _cancel_task(task: asyncio.Task):
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    async def load_control(self):
+        try:
+            control = await self.store.load_control()
+            self.enabled = bool(control.get("enabled", self._default_enabled()))
+            self.interval_seconds = max(
+                300, int(control.get("interval_seconds", self._default_interval()) or 1800)
+            )
+        except Exception as e:
+            logger.warning(f"ContextCleanup load_control failed: {e}")
+
+    async def save_control(self):
+        await self.store.save_control(
+            {"enabled": self.enabled, "interval_seconds": self.interval_seconds}
+        )
+
+    # -- main loop --
+
+    async def _loop(self):
+        MAX_INTERVAL = 86400
+        consecutive_failures = 0
+        while True:
+            try:
+                await self.load_control()
+                if self.enabled:
+                    result = await self.run_once()
+                    if result.get("error"):
+                        consecutive_failures += 1
+                    elif not result.get("skipped"):
+                        consecutive_failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                consecutive_failures += 1
+                logger.error(f"ContextCleanup loop error: {e}", exc_info=True)
+                try:
+                    await self.store.record_error(str(e))
+                except Exception:
+                    pass
+            interval = max(300, min(self.interval_seconds, MAX_INTERVAL))
+            backoff = min(2**consecutive_failures, 6) if consecutive_failures > 0 else 1
+            await asyncio.sleep(max(60, interval * backoff))
+
+    # -- single pass --
+
+    async def run_once(self) -> dict:
+        """One cleanup pass. Skipped if already running."""
+        if self._lock.locked():
+            logger.debug("ContextCleanup pass skipped — previous still running")
+            return {"skipped": True}
+        async with self._lock:
+            self._running_flag = True
+            await self.store.patch_state(
+                {"running": True, "running_since": _utcnow_iso()}
+            )
+            success = False
+            started = _utcnow_iso()
+            start = time.time()
+            try:
+                memory = cast(Any, getattr(self.bot, "memory", None))
+                if memory is None or not hasattr(memory, "list_shared_context"):
+                    raise RuntimeError("memory manager unavailable")
+                entries = await memory.list_shared_context(limit=MAX_REVIEW_ENTRIES)
+                if not entries:
+                    audit = "DONE - empty shared context store"
+                    await self._finish_pass(
+                        started, time.time() - start, audit, 0, 0, None
+                    )
+                    return {"skipped": False, "ops": 0, "audit": audit}
+
+                plan, audit = await self.plan(entries)
+                applied, skipped = await self.apply(plan)
+                duration = time.time() - start
+                await self._finish_pass(
+                    started, duration, audit, applied, skipped, None
+                )
+                success = True
+                return {
+                    "skipped": False,
+                    "ops": applied,
+                    "skipped_ops": skipped,
+                    "audit": audit,
+                    "duration": duration,
+                }
+            except Exception as e:
+                logger.error(f"ContextCleanup pass failed: {e}")
+                duration = time.time() - start
+                await self._finish_pass(
+                    started, duration, f"ERROR: {e}", 0, 0, str(e)
+                )
+                return {"skipped": False, "error": str(e), "duration": duration}
+            finally:
+                self._running_flag = False
+                if not success:
+                    try:
+                        await self.store.patch_state(
+                            {"running": False, "running_since": ""}
+                        )
+                    except Exception:
+                        pass
+
+    async def _finish_pass(
+        self,
+        started_iso: str,
+        duration: float,
+        audit: str,
+        applied: int,
+        skipped: int,
+        error: str | None,
+    ):
+        self._last_audit = str(audit)[:4000]
+
+        def _update(s):
+            s["last_run"] = started_iso
+            s["last_duration"] = round(duration, 2)
+            s["last_audit"] = str(audit)[:4000]
+            s["ops_applied_total"] = int(s.get("ops_applied_total", 0)) + applied
+            s["ops_skipped_total"] = int(s.get("ops_skipped_total", 0)) + skipped
+            s["passes_total"] = int(s.get("passes_total", 0)) + 1
+            s["last_error"] = error
+
+        await self.store.update_state(_update)
+        await self.store.append_log_entry(
+            {
+                "id": f"pass_{uuid.uuid4().hex[:8]}",
+                "timestamp": _utcnow_iso(),
+                "duration": round(duration, 2),
+                "ops_applied": applied,
+                "ops_skipped": skipped,
+                "audit": str(audit)[:2000],
+                "error": error,
+            }
+        )
+        try:
+            await self.store.patch_state({"running": False, "running_since": ""})
+        except Exception:
+            pass
+
+    # -- planning --
+
+    async def plan(self, entries: list[dict]) -> tuple[list[dict], str]:
+        """Ask the LLM for a batch of cleanup ops over the current snapshot."""
+        snapshot = "\n".join(_entry_digest(e) for e in entries[:MAX_REVIEW_ENTRIES])
+        snapshot = _truncate(snapshot, 16000)
+
+        system_prompt = (
+            "You are Maxwell's shared-context janitor. You review a list of stored facts "
+            "and produce cleanup operations: delete duplicates/garbage, edit messy entries, "
+            "merge near-duplicates into one clean entry, or add a missing consolidated fact.\n\n"
+            "RULES:\n"
+            "- Only DELETE an entry if it is an exact/near duplicate of another, obviously "
+            "garbage (truncated, nonsensical, leaked prompt text, raw timestamps), or "
+            "superseded by a newer entry with the same scope.\n"
+            "- EDIT to clean up phrasing, fix scope/visibility/importance, or remove junk "
+            "appended to an otherwise useful fact. Never change the meaning.\n"
+            "- MERGE two or more near-duplicate entries into one: provide keep_id + the new "
+            "content; the others are deleted automatically. Use sparingly.\n"
+            "- ADD only if a genuinely new consolidated fact is missing. Do not re-add "
+            "something you're also deleting.\n"
+            "- Preserve identity, preference, and operational facts. Never delete secrets "
+            "handling — just leave them.\n"
+            f"- At most {MAX_OPS_PER_PASS} operations. Prefer edits over deletes when unsure.\n\n"
+            "Return ONLY strict JSON:\n"
+            "{\n"
+            '  "audit": "short summary of what you cleaned and why",\n'
+            '  "ops": [\n'
+            '    {"kind":"delete","id":"<entry id>","reason":"..."},\n'
+            '    {"kind":"edit","id":"<entry id>","content":"...","importance":1-10,'\
+            '"scope":"global|user:<id>|guild:<id>|channel:<id>|dm:<id>","visibility":'\
+            '"shared|private|admin_only|public_hint","reason":"..."},\n'
+            '    {"kind":"merge","keep_id":"<id>","delete_ids":["<id>","<id>"],'\
+            '"content":"...","importance":1-10,"reason":"..."},\n'
+            '    {"kind":"add","content":"...","scope":"...","importance":1-10,'\
+            '"visibility":"...","reason":"..."}\n'
+            "  ]\n"
+            "}\n"
+            "Valid kinds: delete, edit, merge, add. Do not invent others."
+        )
+
+        user_prompt = (
+            f"Current shared-context snapshot ({len(entries)} entries, max {MAX_REVIEW_ENTRIES}):\n"
+            f"{snapshot}\n\nReturn the cleanup plan JSON."
+        )
+
+        try:
+            provider = await self.bot._get_autonomy_provider()
+            if not callable(getattr(provider, "generate_response", None)) and not callable(
+                getattr(provider, "generate_chat_completion", None)
+            ):
+                provider = getattr(self.bot, "ai_provider", None)
+            if provider is None:
+                return [], "DONE - no provider available"
+            model = str(
+                (getattr(self.bot, "_control", None) or {}).get("autonomy_model", "") or ""
+            ) or None
+            timeout = max(
+                30,
+                int(
+                    (getattr(self.bot, "_control", None) or {}).get(
+                        "ai_timeout_seconds", 120
+                    )
+                    or 120
+                ),
+            )
+            await self.bot._acquire_ai_slot(timeout=timeout)
+            try:
+                raw = await provider.generate_response(
+                    [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    timeout=timeout,
+                    model=model,
+                    max_tokens=4096,
+                )
+            finally:
+                await self.bot._release_ai_slot()
+        except Exception as e:
+            logger.error(f"ContextCleanup LLM call failed: {e}")
+            return [], f"ERROR - LLM call failed: {e}"
+
+        ops, audit = self._parse_plan(raw, entries)
+        return ops, audit
+
+    def _parse_plan(self, raw: str, entries: list[dict]) -> tuple[list[dict], str]:
+        """Extract and validate the cleanup plan from LLM output."""
+        if not raw:
+            return [], "DONE - empty LLM response"
+        text = str(raw).strip()
+
+        json_str: str | None = None
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                json_str = text
+        except (json.JSONDecodeError, ValueError):
+            pass
+        if json_str is None:
+            m = re.search(r"```(?:json)?\s*\n?(\{[^`]*)\s*```", text, re.DOTALL)
+            if m:
+                json_str = m.group(1)
+        if json_str is None:
+            candidates = []
+            i = 0
+            while i < len(text):
+                if text[i] == "{":
+                    depth = 0
+                    for j in range(i, len(text)):
+                        if text[j] == "{":
+                            depth += 1
+                        elif text[j] == "}":
+                            depth -= 1
+                            if depth == 0:
+                                candidates.append(text[i : j + 1])
+                                i = j
+                                break
+                i += 1
+            for c in candidates:
+                try:
+                    obj = json.loads(c)
+                    if isinstance(obj, dict) and "ops" in obj:
+                        json_str = c
+                        break
+                except json.JSONDecodeError:
+                    pass
+            if json_str is None and candidates:
+                json_str = candidates[0]
+        if json_str is None:
+            logger.warning(f"ContextCleanup no JSON. Raw: {text[:500]}")
+            return [], "DONE - no JSON in LLM response"
+
+        try:
+            parsed = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            logger.warning(f"ContextCleanup JSON parse failed: {e}. Raw: {json_str[:500]}")
+            return [], "DONE - invalid JSON from planner"
+        if not isinstance(parsed, dict):
+            return [], "DONE - planner returned non-object"
+
+        audit = str(parsed.get("audit", ""))[:2000]
+        raw_ops = parsed.get("ops", [])
+        if not isinstance(raw_ops, list):
+            return [audit or "DONE"], []
+
+        known_ids = {str(e.get("id", "")) for e in entries if e.get("id")}
+        valid: list[dict] = []
+        for op in raw_ops[:MAX_OPS_PER_PASS]:
+            if not isinstance(op, dict):
+                continue
+            kind = str(op.get("kind", "")).strip().lower()
+            if kind not in VALID_OP_KINDS:
+                continue
+            reason = str(op.get("reason", ""))[:300]
+            if kind == "delete":
+                eid = _strip_id(op.get("id"))
+                if eid and eid in known_ids:
+                    valid.append({"kind": "delete", "id": eid, "reason": reason})
+            elif kind == "edit":
+                eid = _strip_id(op.get("id"))
+                if not eid or eid not in known_ids:
+                    continue
+                updates: dict[str, Any] = {"reason": reason}
+                if op.get("content"):
+                    content = str(op.get("content")).strip()[:MAX_CONTENT_CHARS]
+                    if content:
+                        updates["content"] = content
+                if op.get("importance") is not None:
+                    updates["importance"] = _coerce_importance(op.get("importance"))
+                if op.get("scope"):
+                    updates["scope"] = _coerce_scope(op.get("scope"))
+                if op.get("visibility"):
+                    updates["visibility"] = _coerce_visibility(op.get("visibility"))
+                if len(updates) > 1:
+                    valid.append({"kind": "edit", "id": eid, "updates": updates})
+            elif kind == "merge":
+                keep_id = _strip_id(op.get("keep_id"))
+                delete_ids_raw = op.get("delete_ids", [])
+                if not isinstance(delete_ids_raw, list):
+                    delete_ids_raw = []
+                delete_ids = [
+                    d for d in (_strip_id(x) for x in delete_ids_raw) if d
+                ]
+                delete_ids = [d for d in delete_ids if d in known_ids and d != keep_id]
+                content = str(op.get("content", "")).strip()[:MAX_CONTENT_CHARS]
+                if not keep_id or keep_id not in known_ids or not delete_ids or not content:
+                    continue
+                valid.append(
+                    {
+                        "kind": "merge",
+                        "keep_id": keep_id,
+                        "delete_ids": delete_ids,
+                        "content": content,
+                        "importance": _coerce_importance(op.get("importance"), 5),
+                        "reason": reason,
+                    }
+                )
+            elif kind == "add":
+                content = str(op.get("content", "")).strip()[:MAX_CONTENT_CHARS]
+                if not content:
+                    continue
+                valid.append(
+                    {
+                        "kind": "add",
+                        "content": content,
+                        "scope": _coerce_scope(op.get("scope"), "global"),
+                        "visibility": _coerce_visibility(op.get("visibility"), "shared"),
+                        "importance": _coerce_importance(op.get("importance"), 5),
+                        "reason": reason,
+                    }
+                )
+        return valid, audit or "DONE"
+
+    # -- applying --
+
+    async def apply(self, plan: list[dict]) -> tuple[int, int]:
+        """Apply cleanup ops through the memory manager. Returns (applied, skipped)."""
+        memory = cast(Any, getattr(self.bot, "memory", None))
+        if memory is None:
+            return 0, len(plan)
+        applied = 0
+        skipped = 0
+        for op in plan[:MAX_OPS_PER_PASS]:
+            kind = op.get("kind")
+            try:
+                if kind == "delete":
+                    ok = await memory.remove_shared_context(op["id"])
+                elif kind == "edit":
+                    ok = await memory.update_shared_context(op["id"], op["updates"])
+                elif kind == "merge":
+                    ok = await memory.update_shared_context(
+                        op["keep_id"],
+                        {
+                            "content": op["content"],
+                            "importance": op["importance"],
+                        },
+                    )
+                    if ok:
+                        for did in op["delete_ids"]:
+                            with contextlib.suppress(Exception):
+                                await memory.remove_shared_context(did)
+                elif kind == "add":
+                    new_id = await memory.add_shared_context(
+                        {
+                            "scope": op["scope"],
+                            "visibility": op["visibility"],
+                            "importance": op["importance"],
+                            "content": op["content"],
+                            "tags": ["cleanup"],
+                        }
+                    )
+                    ok = bool(new_id)
+                else:
+                    ok = False
+                if ok:
+                    applied += 1
+                else:
+                    skipped += 1
+            except Exception as e:
+                logger.warning(f"ContextCleanup op {kind} failed: {e}")
+                skipped += 1
+        return applied, skipped
+
+    # -- status for API --
+
+    async def status(self) -> dict:
+        state = await self.store.load_state()
+        log = await self.store.load_log()
+        return {
+            "enabled": self.enabled,
+            "interval_seconds": self.interval_seconds,
+            "running": self._running_flag or bool(state.get("running")),
+            "last_run": state.get("last_run", ""),
+            "last_duration": state.get("last_duration"),
+            "last_audit": str(state.get("last_audit") or self._last_audit or "")[:4000],
+            "last_error": state.get("last_error"),
+            "ops_applied_total": state.get("ops_applied_total", 0),
+            "ops_skipped_total": state.get("ops_skipped_total", 0),
+            "passes_total": state.get("passes_total", 0),
+            "log": log[-20:],
+        }

@@ -96,6 +96,8 @@ DEFAULT_CONTROL = {
     "autonomy_disable_reasoning": True,  # False for endpoints that reject the reasoning param (e.g. NVIDIA)
     "autonomy_min_post_gap_seconds": 0,  # deprecated — no longer enforced, kept for compat
     "autonomy_recent_reply_block_seconds": 0,  # skip autonomy post if bot replied in-channel within this window (0=off)
+    "context_cleanup_enabled": False,   # background context janitor (dedupe/merge/remove weird shared-context facts)
+    "context_cleanup_interval_seconds": 1800,  # how often the janitor runs (>=300s)
 }
 
 DEAD_CONTROL_KEYS = frozenset({

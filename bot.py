@@ -189,6 +189,7 @@ from memory import MemoryManager, RemEventLog  # noqa: E402
 from providers import MIME_MAP, OllamaProvider, ProviderUsageExhaustedError  # noqa: E402
 from rem import RemStore, load_rem_defaults, run_rem_once  # noqa: E402
 from autonomy import AutonomyEngine  # noqa: E402
+from context_cleanup import ContextCleanupEngine  # noqa: E402
 
 
 class _MaxLevelFilter(logging.Filter):
@@ -1628,6 +1629,7 @@ class MaxwellBot(commands.Bot):
         self._setup_memory()
         self._setup_tools()
         self.autonomy_engine = AutonomyEngine(self)
+        self.context_cleanup_engine = ContextCleanupEngine(self)
 
     def _setup_ai(self):
         self.ai_provider = OllamaProvider(
@@ -1837,6 +1839,7 @@ class MaxwellBot(commands.Bot):
             asyncio.create_task(self._rem_scheduler_loop()),
         ]
         await self.autonomy_engine.start()
+        await self.context_cleanup_engine.start()
         if self.config.TELEGRAM_TOKEN:
             if self.config.TELEGRAM_WEBHOOK_URL:
                 self._tasks.append(asyncio.create_task(self._telegram_webhook_loop()))
@@ -3922,12 +3925,27 @@ class MaxwellBot(commands.Bot):
             )
             await self._acquire_ai_slot(timeout=20)
             try:
-                raw = await self.ai_provider.generate_response(
+                # Context watcher shares the autonomy/REM brain — same provider,
+                # base_url, api key, and model as autonomy and REM. Falls back to
+                # the main provider if the autonomy provider isn't configured or
+                # init failed. Never raises out of provider resolution.
+                context_provider = await self._get_autonomy_provider()
+                if not callable(
+                    getattr(context_provider, "generate_response", None)
+                ) and not callable(
+                    getattr(context_provider, "generate_chat_completion", None)
+                ):
+                    context_provider = self.ai_provider
+                context_model = str(
+                    (self._control or {}).get("autonomy_model", "") or ""
+                ) or None
+                raw = await context_provider.generate_response(
                     [
                         {"role": "system", "content": prompt},
                         {"role": "user", "content": user},
                     ],
                     timeout=20,
+                    model=context_model,
                 )
             finally:
                 await self._release_ai_slot()
@@ -4099,6 +4117,25 @@ class MaxwellBot(commands.Bot):
                             )
                             cmd["result"] = (
                                 f"autonomy interval set to {control['autonomy_interval_seconds']}s"
+                            )
+                        elif typ == "context_cleanup_run":
+                            result = await self.context_cleanup_engine.run_once()
+                            cmd["result"] = f"context cleanup: {result}"
+                        elif typ == "context_cleanup_enable":
+                            self.context_cleanup_engine.enabled = True
+                            await self.context_cleanup_engine.save_control()
+                            cmd["result"] = "context cleanup enabled"
+                        elif typ == "context_cleanup_disable":
+                            self.context_cleanup_engine.enabled = False
+                            await self.context_cleanup_engine.save_control()
+                            cmd["result"] = "context cleanup disabled"
+                        elif typ == "context_cleanup_interval":
+                            new_interval = int(cmd.get("interval_seconds", 1800))
+                            self.context_cleanup_engine.interval_seconds = max(300, new_interval)
+                            await self.context_cleanup_engine.save_control()
+                            cmd["result"] = (
+                                f"context cleanup interval set to "
+                                f"{self.context_cleanup_engine.interval_seconds}s"
                             )
                         else:
                             cmd["result"] = "unknown command"

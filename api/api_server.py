@@ -1275,6 +1275,136 @@ async def autonomy_log_clear(request):
     return _json_response({"ok": True})
 
 
+# ---------- Context cleanup agent ----------
+def _context_cleanup_state_path():
+    return DATA_DIR / "context_cleanup_state.json"
+
+
+def _context_cleanup_control_path():
+    return DATA_DIR / "context_cleanup_control.json"
+
+
+def _context_cleanup_log_path():
+    return DATA_DIR / "context_cleanup_log.json"
+
+
+def _load_context_cleanup_control():
+    control = _safe_object(_load(_context_cleanup_control_path()))
+    bot_control = _safe_object(_load(_control_path()))
+    # Bot control is the source of truth for the enabled flag default; the
+    # dedicated control file overrides per-deployment.
+    enabled = _parse_bool(
+        control.get("enabled"),
+        _parse_bool(bot_control.get("context_cleanup_enabled"), DEFAULT_CONTROL.get("context_cleanup_enabled", False)),
+    )
+    try:
+        interval = max(300, int(control.get("interval_seconds") or bot_control.get(
+            "context_cleanup_interval_seconds", DEFAULT_CONTROL.get("context_cleanup_interval_seconds", 1800)
+        ) or 1800))
+    except (TypeError, ValueError):
+        interval = 1800
+    return {"enabled": enabled, "interval_seconds": interval}
+
+
+def _load_context_cleanup_status():
+    control = _load_context_cleanup_control()
+    state = _safe_object(_load(_context_cleanup_state_path()))
+    log = _safe_list(_load(_context_cleanup_log_path()))
+    entries = log if isinstance(log, list) else []
+    return {
+        "enabled": control["enabled"],
+        "interval_seconds": control["interval_seconds"],
+        "running": bool(state.get("running")),
+        "last_run": state.get("last_run", ""),
+        "last_duration": state.get("last_duration"),
+        "last_audit": str(state.get("last_audit") or "")[:4000],
+        "last_error": state.get("last_error"),
+        "ops_applied_total": state.get("ops_applied_total", 0),
+        "ops_skipped_total": state.get("ops_skipped_total", 0),
+        "passes_total": state.get("passes_total", 0),
+        "log": entries[-20:],
+    }
+
+
+async def context_cleanup_status(request):
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
+    return _json_response(_load_context_cleanup_status())
+
+
+async def context_cleanup_run(request):
+    cmd_id, err = await _queue_command("context_cleanup_run")
+    if err:
+        return _json_response({"error": err}, 409)
+    return _json_response({"ok": True, "started": True, "id": cmd_id})
+
+
+async def _set_context_cleanup_enabled(enabled: bool, cmd_type: str):
+    async with _file_lock:
+        try:
+            control = _load_context_cleanup_control()
+            cmds = _load_commands_for_write()
+        except ValueError as exc:
+            return "", str(exc)
+        control["enabled"] = enabled
+        await atomic_json_write(_context_cleanup_control_path(), control)
+        cmd_id = str(_uuid.uuid4())[:8]
+        cmds.append({
+            "id": cmd_id,
+            "type": cmd_type,
+            "status": "pending",
+            "result": "",
+            "created_at": time.time(),
+        })
+        if len(cmds) > MAX_COMMANDS:
+            cmds = cmds[-MAX_COMMANDS:]
+        await atomic_json_write(_commands_path(), cmds)
+        return cmd_id, ""
+
+
+async def context_cleanup_enable(request):
+    cmd_id, err = await _set_context_cleanup_enabled(True, "context_cleanup_enable")
+    if err:
+        return _json_response({"error": err}, 409)
+    return _json_response({"ok": True, "enabled": True, "id": cmd_id})
+
+
+async def context_cleanup_disable(request):
+    cmd_id, err = await _set_context_cleanup_enabled(False, "context_cleanup_disable")
+    if err:
+        return _json_response({"error": err}, 409)
+    return _json_response({"ok": True, "enabled": False, "id": cmd_id})
+
+
+async def context_cleanup_interval(request):
+    try:
+        body = await request.json()
+    except Exception:
+        return _json_response({"error": "invalid json"}, 400)
+    try:
+        new_interval = max(300, int(body.get("interval_seconds", 1800)))
+    except (TypeError, ValueError):
+        return _json_response({"error": "interval_seconds must be >= 300"}, 400)
+    cmd_id, err = await _queue_command(
+        "context_cleanup_interval", {"interval_seconds": new_interval}
+    )
+    if err:
+        return _json_response({"error": err}, 409)
+    # Persist immediately so the dashboard reflects it before the bot picks up the command
+    async with _file_lock:
+        control = _load_context_cleanup_control()
+        control["interval_seconds"] = new_interval
+        await atomic_json_write(_context_cleanup_control_path(), control)
+    return _json_response({"ok": True, "interval_seconds": new_interval, "id": cmd_id})
+
+
+async def context_cleanup_log_clear(request):
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
+    await atomic_json_write(_context_cleanup_log_path(), {"entries": []})
+    return _json_response({"ok": True})
+
+
 # ---------- Command queue ----------
 def _commands_path():
     return DATA_DIR / "bot_commands.json"
@@ -1331,7 +1461,7 @@ async def commands_post(request):
         command["channel_id"] = str(body.get("channel_id", "")).strip()
     elif cmd_type == "reload_controls":
         pass
-    elif cmd_type in {"rem_run", "rem_enable", "rem_disable", "autonomy_run", "autonomy_enable", "autonomy_disable", "autonomy_interval"}:
+    elif cmd_type in {"rem_run", "rem_enable", "rem_disable", "autonomy_run", "autonomy_enable", "autonomy_disable", "autonomy_interval", "context_cleanup_run", "context_cleanup_enable", "context_cleanup_disable", "context_cleanup_interval"}:
         pass
     else:
         return _json_response({"error": f"unknown command type: {cmd_type}"}, 400)
@@ -1756,6 +1886,12 @@ app.router.add_put("/api/autonomy/interval", autonomy_interval)
 app.router.add_post("/api/autonomy/goals", autonomy_goal_add)
 app.router.add_delete("/api/autonomy/goals/{goal_id}", autonomy_goal_delete)
 app.router.add_delete("/api/autonomy/log", autonomy_log_clear)
+app.router.add_get("/api/context_cleanup/status", context_cleanup_status)
+app.router.add_post("/api/context_cleanup/run", context_cleanup_run)
+app.router.add_post("/api/context_cleanup/enable", context_cleanup_enable)
+app.router.add_post("/api/context_cleanup/disable", context_cleanup_disable)
+app.router.add_put("/api/context_cleanup/interval", context_cleanup_interval)
+app.router.add_delete("/api/context_cleanup/log", context_cleanup_log_clear)
 app.router.add_get("/api/commands", commands_get)
 app.router.add_post("/api/commands", commands_post)
 app.router.add_delete("/api/commands", commands_del)
