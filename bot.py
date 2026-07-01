@@ -1632,13 +1632,19 @@ class MaxwellBot(commands.Bot):
             retry_attempts=self.config.OLLAMA_RETRY_ATTEMPTS,
         )
 
-    def _get_autonomy_provider(self):
+    async def _get_autonomy_provider(self):
         """Return a provider for the autonomy loop.
 
         If autonomy_base_url / autonomy_model are configured, build (and cache) a
         separate OllamaProvider. Otherwise — or on any construction/init failure —
         fall back to the main ai_provider. NEVER raise: the autonomy tick must not
         crash because of provider construction.
+
+        Init is awaited on a fresh build (so the first tick doesn't race the
+        /models probe) and re-probed whenever the cached provider is unavailable
+        (so a transient init failure self-heals on a later tick instead of
+        soft-skipping forever). Cache hits stay instant — the await only runs
+        when construction or a re-probe is needed.
         """
         try:
             control = self._control or {}
@@ -1652,33 +1658,40 @@ class MaxwellBot(commands.Bot):
             if not base_url:
                 return self.ai_provider
             sig = f"{base_url}|{api_key}|{model}"
-            if sig == self._autonomy_provider_sig and self.autonomy_provider is not None:
-                return self.autonomy_provider
+            cached = self.autonomy_provider if sig == self._autonomy_provider_sig else None
+            if cached is not None and getattr(cached, "available", False):
+                return cached
+            # Autonomy only generates short JSON plans — don't inherit the main
+            # bot's large max_tokens, which can exceed the autonomy model's
+            # output cap (e.g. minimax-m3 caps at 131072). Cap conservatively.
+            autonomy_max_tokens = min(
+                int(self.config.OLLAMA_MAX_TOKENS or 200000), 8192
+            )
             # Signature changed: close the previously cached provider (it owns an
             # aiohttp ClientSession) before replacing it, so config churn doesn't
             # leak sessions. close() is async; schedule it fire-and-forget.
-            old = self.autonomy_provider
-            if old is not None and hasattr(old, "close"):
-                try:
-                    asyncio.ensure_future(old.close())
-                except Exception as e:
-                    logger.warning(f"Failed to schedule old autonomy provider close: {e}")
-            provider = OllamaProvider(
-                base_url=base_url,
-                model=model or self.config.OLLAMA_MODEL,
-                max_tokens=self.config.OLLAMA_MAX_TOKENS,
-                temperature=self.config.OLLAMA_TEMPERATURE,
-                api_key=api_key,
-                disable_reasoning=True,
-                retry_attempts=self.config.OLLAMA_RETRY_ATTEMPTS,
-            )
-            # Fire-and-forget init; guard with try/except so it never raises.
+            if cached is None:
+                old = self.autonomy_provider
+                if old is not None and hasattr(old, "close"):
+                    try:
+                        asyncio.ensure_future(old.close())
+                    except Exception as e:
+                        logger.warning(f"Failed to schedule old autonomy provider close: {e}")
+                provider = OllamaProvider(
+                    base_url=base_url,
+                    model=model or self.config.OLLAMA_MODEL,
+                    max_tokens=autonomy_max_tokens,
+                    temperature=self.config.OLLAMA_TEMPERATURE,
+                    api_key=api_key,
+                    disable_reasoning=True,
+                    retry_attempts=self.config.OLLAMA_RETRY_ATTEMPTS,
+                )
+            else:
+                provider = cached
+            # Await init so the first tick after a build (or after a transient
+            # failure) doesn't race the /models probe. Guarded so it never raises.
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.ensure_future(provider.initialize())
-                else:
-                    loop.run_until_complete(provider.initialize())
+                await provider.initialize()
             except Exception as e:
                 logger.warning(f"Autonomy provider initialize() failed: {e}")
             self.autonomy_provider = provider

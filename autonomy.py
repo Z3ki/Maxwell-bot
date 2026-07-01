@@ -1365,10 +1365,15 @@ Do NOT invent other action kinds — they will be rejected."""
                     or 180
                 ),
             )
-            # Provider-unavailable soft skip: if the autonomy provider was built
-            # but isn't ready yet (init fire-and-forget failed/unfinished), don't
-            # burn an AI slot or count this as a tick failure — just do_nothing.
-            ai_provider = cast(Any, getattr(self.bot, "_get_autonomy_provider", lambda: None)())
+            # Provider-unavailable soft skip: if the autonomy provider isn't
+            # ready (init failed / endpoint down), don't burn an AI slot or count
+            # this as a tick failure — just do_nothing. _get_autonomy_provider
+            # awaits init, so a transient failure self-heals on the next tick.
+            ai_provider = cast(Any, getattr(self.bot, "_get_autonomy_provider", None))
+            if callable(ai_provider):
+                ai_provider = await ai_provider()
+            else:
+                ai_provider = cast(Any, getattr(self.bot, "ai_provider", None))
             if not callable(getattr(ai_provider, "generate_response", None)):
                 ai_provider = cast(Any, getattr(self.bot, "ai_provider", None))
             if ai_provider is not None and getattr(ai_provider, "available", None) is False:
@@ -1385,7 +1390,13 @@ Do NOT invent other action kinds — they will be rejected."""
                     or ""
                 )
                 raw_response = await ai_provider.generate_response(
-                    messages, timeout=timeout, model=autonomy_model or None
+                    messages,
+                    timeout=timeout,
+                    model=autonomy_model or None,
+                    # Autonomy only generates a short JSON plan; cap max_tokens so
+                    # we don't blow past an autonomy model's output limit (e.g.
+                    # minimax-m3 caps at 131072) and waste quota/tokens.
+                    max_tokens=8192,
                 )
             finally:
                 await self.bot._release_ai_slot()
