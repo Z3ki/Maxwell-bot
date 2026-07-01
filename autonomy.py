@@ -1667,6 +1667,55 @@ Do NOT invent other action kinds — they will be rejected."""
             kind = action.get("kind", "do_nothing")
             result = {"kind": kind, "result": "success", "error": None}
 
+            # Don't let autonomy post into a channel the bot is actively replying
+            # in, or just replied in. This prevents two real bugs:
+            #  1. Race: autonomy posts while the bot is mid-reply -> duplicate/odd
+            #     message lands before the real reply finishes.
+            #  2. Re-engagement: autonomy sees the bot's own (possibly old) reply
+            #     in context and posts again ~minutes later, re-opening a thread
+            #     the bot already answered.
+            # Applies to post_channel and message-sending run_tool alike.
+            post_cid = None
+            if kind == "post_channel":
+                post_cid = str(action.get("target_channel_id") or "") or None
+            elif kind == "run_tool" and str(action.get("tool_name", "")) in AUTONOMY_POST_TOOLS:
+                ta = action.get("tool_args") or {}
+                post_cid = (
+                    str(action.get("target_channel_id")
+                        or ta.get("target_channel_id")
+                        or ta.get("channel_id")
+                        or "")
+                    or None
+                )
+            if post_cid:
+                replying = getattr(self.bot, "_replying_channels", set())
+                if post_cid in replying:
+                    logger.info(
+                        f"Autonomy skip post to {post_cid}: bot is already replying there"
+                    )
+                    result = {
+                        "kind": kind,
+                        "result": "skipped",
+                        "error": None,
+                        "content_summary": "bot already replying in channel",
+                    }
+                    results.append(result)
+                    continue
+                last_reply = getattr(self.bot, "_last_bot_reply", {}).get(post_cid, 0.0)
+                if last_reply and time.time() - last_reply < 600:
+                    logger.info(
+                        f"Autonomy skip post to {post_cid}: bot replied there "
+                        f"{int(time.time() - last_reply)}s ago"
+                    )
+                    result = {
+                        "kind": kind,
+                        "result": "skipped",
+                        "error": None,
+                        "content_summary": "bot recently replied in channel",
+                    }
+                    results.append(result)
+                    continue
+
             # Rate-limit unprompted posts: an action that posts to a channel
             # WITHOUT replying to a user message is "unprompted". Enforce a
             # minimum quiet gap per channel so proactive chatter feels like

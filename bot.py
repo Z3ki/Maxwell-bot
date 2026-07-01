@@ -1572,6 +1572,14 @@ class MaxwellBot(commands.Bot):
         self._rem_running = False
         self.tools = {}
         self._channel_locks: dict[str, asyncio.Lock] = {}
+        # Channels the bot is currently generating a reply for (in-flight).
+        # Autonomy reads this to avoid posting into a channel mid-reply, which
+        # would race the real reply and produce a duplicate/odd message.
+        self._replying_channels: set[str] = set()
+        # Channels the bot most recently replied in -> timestamp. Autonomy reads
+        # this to avoid re-engaging a conversation the bot already answered (the
+        # "bot sees its own 15-min-old reply and posts again" loop).
+        self._last_bot_reply: dict[str, float] = {}
         self._ai_concurrency = 3
         self._ai_active = 0
         self._ai_cond = asyncio.Condition()
@@ -4897,6 +4905,9 @@ class MaxwellBot(commands.Bot):
     async def _handle_message(self, message, content: str | None = None):
         content = content or message.content
         channel_id = str(message.channel.id)
+        # Mark this channel as in-flight (bot is generating a reply) so autonomy
+        # can skip posting into it and avoid racing the real reply.
+        self._replying_channels.add(channel_id)
         await self._record_rem_event(message, "user", content)
         current_task = asyncio.current_task()
         if current_task:
@@ -5057,6 +5068,17 @@ class MaxwellBot(commands.Bot):
             if self._active_requests.get(channel_id) is current_task:
                 self._active_requests.pop(channel_id, None)
             self._tick_media_context(channel_id)
+            # Channel is no longer in-flight; record that the bot just replied
+            # here so autonomy can avoid re-engaging a conversation it already
+            # answered (the "bot sees its own old reply and posts again" loop).
+            self._replying_channels.discard(channel_id)
+            self._last_bot_reply[channel_id] = time.time()
+            # Keep the reply map bounded.
+            if len(self._last_bot_reply) > 64:
+                cutoff = time.time() - 3600
+                self._last_bot_reply = {
+                    c: t for c, t in self._last_bot_reply.items() if t > cutoff
+                }
 
     async def _ensure_reasoning_trace(
         self, message, tool_results: list[str], response: str, outcome: str
