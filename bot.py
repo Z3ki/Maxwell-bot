@@ -3355,12 +3355,22 @@ class MaxwellBot(commands.Bot):
             )
             await self._acquire_ai_slot(timeout=timeout)
             try:
+                # REM uses the same provider/model as autonomy so the two
+                # background brains share one endpoint/model config.
+                rem_provider = await self._get_autonomy_provider()
+                if not callable(getattr(rem_provider, "generate_response", None)) and not callable(
+                    getattr(rem_provider, "generate_chat_completion", None)
+                ):
+                    rem_provider = self.ai_provider
+                rem_model = str(
+                    (self._control or {}).get("autonomy_model", "") or ""
+                ) or self.config.OLLAMA_REM_MODEL
                 run = await run_rem_once(
                     memory_manager=self.memory,
                     rem_log=self.rem_log,
-                    provider=self.ai_provider,
+                    provider=rem_provider,
                     data_dir=self.config.DATA_DIR,
-                    model=self.config.OLLAMA_REM_MODEL,
+                    model=rem_model,
                     max_turns=self.rem_max_turns,
                     run_history=self.config.REM_RUN_HISTORY,
                     prompt_body=self.rem_prompt_body,
