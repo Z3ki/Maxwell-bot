@@ -1606,6 +1606,8 @@ class MaxwellBot(commands.Bot):
         self._trace_lock = asyncio.Lock()
         self._tasks: list[Any] = []
         self.autonomy_engine: Any = None  # initialized after tools
+        self.autonomy_provider: Any = None
+        self._autonomy_provider_sig: str = ""
         self._tool_breaker = ToolCircuitBreaker(failure_threshold=5, recovery_seconds=30)
         self._token_tracker = TokenBudgetTracker(
             daily_budget=int(os.environ.get("MAXWELL_DAILY_TOKEN_BUDGET", "500000"))
@@ -1629,6 +1631,62 @@ class MaxwellBot(commands.Bot):
             fallback_disable_reasoning=self.config.OLLAMA_FALLBACK_DISABLE_REASONING,
             retry_attempts=self.config.OLLAMA_RETRY_ATTEMPTS,
         )
+
+    def _get_autonomy_provider(self):
+        """Return a provider for the autonomy loop.
+
+        If autonomy_base_url / autonomy_model are configured, build (and cache) a
+        separate OllamaProvider. Otherwise — or on any construction/init failure —
+        fall back to the main ai_provider. NEVER raise: the autonomy tick must not
+        crash because of provider construction.
+        """
+        try:
+            control = self._control or {}
+            base_url = str(control.get("autonomy_base_url", "") or "").strip()
+            api_key = str(control.get("autonomy_api_key", "") or "").strip()
+            model = str(control.get("autonomy_model", "") or "").strip()
+            # No separate autonomy endpoint configured -> use main provider. This
+            # also covers the both-empty case; if only a model differs (no
+            # base_url) we reuse the main provider instance and pass model= per
+            # request at call time.
+            if not base_url:
+                return self.ai_provider
+            sig = f"{base_url}|{api_key}|{model}"
+            if sig == self._autonomy_provider_sig and self.autonomy_provider is not None:
+                return self.autonomy_provider
+            # Signature changed: close the previously cached provider (it owns an
+            # aiohttp ClientSession) before replacing it, so config churn doesn't
+            # leak sessions. close() is async; schedule it fire-and-forget.
+            old = self.autonomy_provider
+            if old is not None and hasattr(old, "close"):
+                try:
+                    asyncio.ensure_future(old.close())
+                except Exception as e:
+                    logger.warning(f"Failed to schedule old autonomy provider close: {e}")
+            provider = OllamaProvider(
+                base_url=base_url,
+                model=model or self.config.OLLAMA_MODEL,
+                max_tokens=self.config.OLLAMA_MAX_TOKENS,
+                temperature=self.config.OLLAMA_TEMPERATURE,
+                api_key=api_key,
+                disable_reasoning=True,
+                retry_attempts=self.config.OLLAMA_RETRY_ATTEMPTS,
+            )
+            # Fire-and-forget init; guard with try/except so it never raises.
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(provider.initialize())
+                else:
+                    loop.run_until_complete(provider.initialize())
+            except Exception as e:
+                logger.warning(f"Autonomy provider initialize() failed: {e}")
+            self.autonomy_provider = provider
+            self._autonomy_provider_sig = sig
+            return provider
+        except Exception as e:
+            logger.warning(f"_get_autonomy_provider failed, falling back to main: {e}")
+            return self.ai_provider
 
     def _setup_memory(self):
         self.memory = MemoryManager(
@@ -1919,6 +1977,9 @@ class MaxwellBot(commands.Bot):
 
         if self.user and message.author.id == self.user.id:
             if message.content and self._control.get("store_memory", True):
+                # Dedup contract: memory.add_to_channel_memory dedups by message_id,
+                # so an autonomy-force-recorded post (same message_id) only merges
+                # metadata here — its autonomy tag/reason are preserved.
                 await self.memory.add_to_channel_memory(
                     channel_id,
                     {
@@ -5534,7 +5595,18 @@ class MaxwellBot(commands.Bot):
                     if mention_bits:
                         relation_bits.append("mentions=" + ",".join(mention_bits))
                     relation = f" [{'; '.join(relation_bits)}]" if relation_bits else ""
-                    line = f"{prefix}{author_label}{relation}: {str(msg.get('content', ''))[:4000]}"
+                    # If this was an autonomous (unprompted) message the bot itself
+                    # posted, tag it so a replying user's context makes clear the
+                    # bot said it unprompted and why — the model then responds
+                    # in-character instead of being confused by its own prior post.
+                    autonomy_tag = ""
+                    if msg.get("autonomy"):
+                        reason = str(msg.get("autonomy_reason") or "").strip()
+                        autonomy_tag = " [your earlier autonomous message"
+                        if reason:
+                            autonomy_tag += f"; reason: {reason[:200]}"
+                        autonomy_tag += "]"
+                    line = f"{prefix}{author_label}{relation}{autonomy_tag}: {str(msg.get('content', ''))[:4000]}"
                 if used + len(line) > budget:
                     break
                 lines.append(line)
@@ -6320,6 +6392,14 @@ async def main():
             await bot.ai_provider.close()
         except Exception as e:
             logger.error(f"Failed to close AI provider: {e}")
+        # Close the separately-built autonomy provider too (it owns its own
+        # aiohttp session). Guarded so a missing/never-built provider is fine.
+        try:
+            ap = getattr(bot, "autonomy_provider", None)
+            if ap is not None and hasattr(ap, "close") and ap is not bot.ai_provider:
+                await ap.close()
+        except Exception as e:
+            logger.error(f"Failed to close autonomy provider: {e}")
         try:
             await close_shared_session()
         except Exception as e:

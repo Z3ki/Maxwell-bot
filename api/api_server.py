@@ -56,7 +56,7 @@ _load_env_file(ENV_FILE)
 # Add parent dir to path so we can import shared modules
 import sys as _sys
 _sys.path.insert(0, str(APP_ROOT))
-from control_defaults import DEAD_CONTROL_KEYS, DEFAULT_CONTROL, KNOWN_TOOLS, parse_bool as _parse_bool  # noqa: E402
+from control_defaults import DEAD_CONTROL_KEYS, DEFAULT_CONTROL, KNOWN_TOOLS, clamp_autonomy_min_post_gap, parse_bool as _parse_bool  # noqa: E402
 from utils import _atomic_json_write_sync, _atomic_text_write_sync  # noqa: E402 - fd-safe atomic writes
 
 DATA_DIR = Path(os.getenv("DATA_DIR", APP_ROOT / "data"))
@@ -373,6 +373,10 @@ def _sanitize_control(control):
     out["ai_timeout_seconds"] = max(10, min(out["ai_timeout_seconds"], 600))
     out["ai_concurrency"] = max(1, min(out["ai_concurrency"], 10))
     out["autonomy_interval_seconds"] = max(30, int(out.get("autonomy_interval_seconds", 300) or 300))
+    out["autonomy_min_post_gap_seconds"] = clamp_autonomy_min_post_gap(out.get("autonomy_min_post_gap_seconds", 1800))
+    out["autonomy_base_url"] = str(out.get("autonomy_base_url", "") or "")[:512]
+    out["autonomy_api_key"] = str(out.get("autonomy_api_key", "") or "")[:512]
+    out["autonomy_model"] = str(out.get("autonomy_model", "") or "")[:200]
     out["memory_history_messages"] = max(0, min(out["memory_history_messages"], 100))
     out["memory_context_budget"] = max(1000, min(out["memory_context_budget"], 100000))
     out["tool_history_messages"] = max(0, min(int(out.get("tool_history_messages", 3) or 3), 20))
@@ -1053,6 +1057,9 @@ async def autonomy_status(request):
     return _json_response({
         "enabled": control.get("autonomy_enabled", False),
         "interval_seconds": control.get("autonomy_interval_seconds", 300),
+        "model": control.get("autonomy_model", ""),
+        "base_url": control.get("autonomy_base_url", ""),
+        "min_post_gap_seconds": control.get("autonomy_min_post_gap_seconds", 1800),
         "last_tick": state.get("last_tick"),
         "last_tick_duration": state.get("last_tick_duration"),
         "actions_executed_total": state.get("actions_executed_total", 0),

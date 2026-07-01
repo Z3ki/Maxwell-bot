@@ -36,7 +36,11 @@ from typing import Any, cast
 
 import discord
 
-from control_defaults import DEFAULT_CONTROL  # noqa: E402
+from control_defaults import (
+    DEFAULT_CONTROL,
+    AUTONOMY_MIN_POST_GAP_MAX,
+    clamp_autonomy_min_post_gap,
+)  # noqa: E402
 from utils import (  # noqa: E402
     _atomic_json_write_sync,
     _coerce_utc_datetime as _coerce_utc_dt_shared,
@@ -175,6 +179,13 @@ AUTONOMY_VALID_KINDS = frozenset(
 MAX_ACTIONS_PER_TICK = 3  # reduced from 5 — prevents spam bursts
 MAX_CONTENT_CHARS = 1900
 LOG_RING_SIZE = 200
+
+# Tools that post a visible message to a channel. autonomy's run_tool path
+# builds a SyntheticMessage against the target channel, so these must be
+# treated like post_channel for the unprompted-post rate-limit.
+AUTONOMY_POST_TOOLS = frozenset({
+    "send_message", "send_file", "send_meme", "send_media", "tts",
+})
 
 # Per-section context budgets (sum ~8800, bumped for enriched channel map)
 CTX_BUDGET_GOALS = 800
@@ -500,6 +511,9 @@ class AutonomyEngine:
         self._posted_messages: list[dict] = []
         # Validation failures from last tick (fed back into context)
         self._last_validation_failures: list[str] = []
+        # In-memory rate-limit state for unprompted posts, keyed by channel_id.
+        # Runtime throttle, not config — intentionally not persisted.
+        self._last_unprompted_post: dict[str, float] = {}
 
     def _auto_channel_candidates(self) -> list[str]:
         """Stable target list for autonomous posts/tools."""
@@ -1252,9 +1266,9 @@ class AutonomyEngine:
         if hasattr(self.bot, "_get_personality"):
             base_personality = self.bot._get_personality()
 
-        system_prompt = f"""You are Maxwell, doing a periodic check-in on your own. You're reviewing what's happening in your Discord server and deciding if there's something worth doing.
+        system_prompt = f"""You are Maxwell, doing a quick background check-in on your Discord server. You are NOT obligated to speak every tick. Silence is normal and correct.
 
-YOUR PERSONALITY AND STYLE (this is who you are — your posts must match this voice):
+YOUR PERSONALITY AND STYLE (this is who you are — when you DO post, it must match this voice):
 {base_personality}
 
 Here is everything you currently know:
@@ -1266,7 +1280,21 @@ You have access to these tools:
 Your goals:
 {goals_text}
 
-IMPORTANT RULES:
+HOW TO DECIDE:
+- Default to do_nothing. Most ticks should be do_nothing. You are not a chatterbox and you are not "keeping the channel alive" — you are an occasional presence who chimes in only when it actually fits.
+- Only act when ONE of these is true:
+  1. Someone mentioned you, replied to you, or directly asked you a question (you can tell from mentions, reply_to, and addressed_to).
+  2. A goal explicitly requires an action right now.
+  3. You have a GENUINELY natural, in-character thing to add that fits the live, ongoing conversation — not a random thought, not a non-sequitur, not a tangent only you care about.
+- Do NOT:
+  - Post unprompted jokes or commentary just to be active.
+  - Restate or summarize what's already visible in the context above.
+  - Re-open a conversation that has naturally concluded.
+  - DM someone out of the blue without a clear, concrete reason tied to an active conversation or goal.
+  - Say "just checking in" or announce that this is a background tick — talk like a person who happens to be in the channel, not a scheduled bot.
+- VOICE: when you do post, sound exactly like Maxwell in normal chat — short, casual, lowercase when natural. Do not reference being a "background loop", "check-in", or that you were "reviewing the server". You are just Maxwell, in the channel.
+
+FACTS ABOUT THE DATA:
 - The channel activity and recent conversations above are REAL data. Don't try to fetch more — it's already here.
 - CHANNEL ACTIVITY and RECENT CONVERSATIONS lines are structured: channel=#name(ID), msg=ID, speaker=Name(user_id), reply_to=..., mentions=[...], addressed_to=..., content="...".
 - Discord is multi-user. Each unique user_id is a separate person/account even if display names are similar or changed. Never attribute one user's message to another.
@@ -1275,15 +1303,11 @@ IMPORTANT RULES:
 - If a conversation is happening in a channel, use that channel's ID to respond — don't pick a random channel.
 - Use reply_to, mentions, addressed_to, names, and IDs to tell who is talking to whom.
 - If joining an active multi-person conversation, address the right person by name unless a plain channel message is obviously enough.
-- If conversations are happening and you have something interesting/funny/useful to say, say it.
-- If someone mentioned you or talked about you, respond.
-- If a conversation naturally concluded, don't re-open it unless you have a genuinely good reason.
-- If nothing needs doing, that's FINE. Output do_nothing with a reason.
 - You may use any listed tool when it helps. Dashboard-disabled tools are not listed.
 - For tools that need a real message target (react, edit_message, delete_message, forward_message), pass "target_message_id" and "target_channel_id" from CHANNEL ACTIVITY when possible.
 - ALWAYS use "post_channel" with an explicit "target_channel_id" — the numeric ID, not a channel name.
 - Don't repeat things you already posted recently (check YOUR RECENT ACTIONS). Use the bracketed timestamps there; they are recalculated for this tick.
-- You can use up to {MAX_ACTIONS_PER_TICK} actions per tick.
+- Prefer 0-1 actions. You can use up to {MAX_ACTIONS_PER_TICK} actions per tick, but only when there's a clear reason for each one.
 
 Return ONLY valid JSON in this exact format:
 {{
@@ -1341,11 +1365,27 @@ Do NOT invent other action kinds — they will be rejected."""
                     or 180
                 ),
             )
+            # Provider-unavailable soft skip: if the autonomy provider was built
+            # but isn't ready yet (init fire-and-forget failed/unfinished), don't
+            # burn an AI slot or count this as a tick failure — just do_nothing.
+            ai_provider = cast(Any, getattr(self.bot, "_get_autonomy_provider", lambda: None)())
+            if not callable(getattr(ai_provider, "generate_response", None)):
+                ai_provider = cast(Any, getattr(self.bot, "ai_provider", None))
+            if ai_provider is not None and getattr(ai_provider, "available", None) is False:
+                logger.info("Autonomy planner: provider not available, soft skip")
+                return [{"kind": "do_nothing", "reason": "provider not available"}]
             await self.bot._acquire_ai_slot(timeout=timeout)
             try:
-                ai_provider = cast(Any, getattr(self.bot, "ai_provider", None))
+                # Pass the configured autonomy model as override so even the main
+                # provider runs a different model if autonomy_model is set.
+                autonomy_model = str(
+                    (getattr(self.bot, "_control", None) or {}).get(
+                        "autonomy_model", ""
+                    )
+                    or ""
+                )
                 raw_response = await ai_provider.generate_response(
-                    messages, timeout=timeout
+                    messages, timeout=timeout, model=autonomy_model or None
                 )
             finally:
                 await self.bot._release_ai_slot()
@@ -1615,6 +1655,64 @@ Do NOT invent other action kinds — they will be rejected."""
 
             kind = action.get("kind", "do_nothing")
             result = {"kind": kind, "result": "success", "error": None}
+
+            # Rate-limit unprompted posts: an action that posts to a channel
+            # WITHOUT replying to a user message is "unprompted". Enforce a
+            # minimum quiet gap per channel so proactive chatter feels like
+            # "occasionally chimes in" instead of every-tick spam. Replies
+            # (reply_to_message_id set) are always allowed.
+            #
+            # Covers both `post_channel` and `run_tool` invocations of
+            # message-sending tools (AUTONOMY_POST_TOOLS), since the latter
+            # also post to the target channel via a SyntheticMessage and would
+            # otherwise bypass the gap. The stamp is only recorded AFTER a
+            # successful send, so a failed post (permission/not-found/API
+            # error) does NOT consume the gap — the next valid attempt is not
+            # falsely blocked.
+            unprompted_cid = None
+            if kind == "post_channel" and not action.get("reply_to_message_id"):
+                unprompted_cid = str(action.get("target_channel_id") or "") or None
+            elif kind == "run_tool" and str(action.get("tool_name", "")) in AUTONOMY_POST_TOOLS:
+                tool_args = action.get("tool_args") or {}
+                if not tool_args.get("reply_to_message_id") and not tool_args.get("reply"):
+                    unprompted_cid = (
+                        str(action.get("target_channel_id")
+                            or tool_args.get("target_channel_id")
+                            or tool_args.get("channel_id")
+                            or "")
+                        or None
+                    )
+
+            if unprompted_cid:
+                gap = clamp_autonomy_min_post_gap(
+                    (getattr(self.bot, "_control", None) or {}).get(
+                        "autonomy_min_post_gap_seconds", 1800
+                    )
+                )
+                # Prune stale entries (older than the max gap) so the dict can't
+                # grow unbounded across long-running processes / arbitrary cids.
+                prune_before = time.time() - AUTONOMY_MIN_POST_GAP_MAX
+                if len(self._last_unprompted_post) > 64:
+                    self._last_unprompted_post = {
+                        c: t for c, t in self._last_unprompted_post.items()
+                        if t > prune_before
+                    }
+                last = self._last_unprompted_post.get(unprompted_cid, 0.0)
+                now_ts = time.time()
+                if now_ts - last < gap:
+                    logger.info(
+                        f"Autonomy rate-limited unprompted post to {unprompted_cid} "
+                        f"(gap {int(now_ts - last)}s < {gap}s); downgraded to do_nothing"
+                    )
+                    result = {
+                        "kind": kind,
+                        "result": "skipped",
+                        "error": None,
+                        "content_summary": "rate-limited unprompted post",
+                    }
+                    results.append(result)
+                    continue
+
             try:
                 if kind == "send_dm":
                     await asyncio.wait_for(
@@ -1652,6 +1750,11 @@ Do NOT invent other action kinds — they will be rejected."""
                 result["result"] = "error"
                 result["error"] = str(e)[:1000]
                 logger.error(f"Autonomy action {kind} failed: {e}")
+            # Only stamp the unprompted-post rate-limit AFTER a successful send,
+            # so a failed post (permission/not-found/API error) does NOT consume
+            # the gap and falsely block the next valid attempt.
+            if unprompted_cid and result.get("result") == "success":
+                self._last_unprompted_post[unprompted_cid] = time.time()
             results.append(result)
 
             # record in REM event log (skip do_nothing)
@@ -1733,7 +1836,9 @@ Do NOT invent other action kinds — they will be rejected."""
                         "ts": time.time(),
                     }
                 )
-                await self._remember_visible_self_message(dm_channel, msg, content)
+                await self._remember_visible_self_message(
+                    dm_channel, msg, content, reason=action.get("reason", "")
+                )
         except discord.Forbidden:
             result["result"] = "error"
             result["error"] = "user has DMs disabled or blocked the bot"
@@ -1813,7 +1918,7 @@ Do NOT invent other action kinds — they will be rejected."""
                     }
                 )
                 await self._remember_visible_self_message(
-                    channel, msg, content, reply=memory_reply
+                    channel, msg, content, reply=memory_reply, reason=action.get("reason", "")
                 )
         except discord.Forbidden:
             result["result"] = "error"
@@ -1823,10 +1928,18 @@ Do NOT invent other action kinds — they will be rejected."""
             result["error"] = f"Discord API error: {e}"
 
     async def _remember_visible_self_message(
-        self, channel: Any, sent_message: Any, content: str, *, reply: Any = None
+        self,
+        channel: Any,
+        sent_message: Any,
+        content: str,
+        *,
+        reply: Any = None,
+        reason: str = "",
     ):
-        if not bool(getattr(self.bot, "_control", {}).get("store_memory", True)):
-            return
+        # Always record autonomy's own posts into channel memory (not gated on
+        # store_memory) so the normal reply path keeps context after an
+        # autonomous post. Dedup by message_id in memory.add_to_channel_memory
+        # keeps the later on_message self-echo from duplicating the entry.
         memory = cast(Any, getattr(self.bot, "memory", None))
         if memory is None or not hasattr(memory, "add_to_channel_memory"):
             return
@@ -1849,6 +1962,8 @@ Do NOT invent other action kinds — they will be rejected."""
             "timestamp": (
                 getattr(sent_message, "created_at", None) or datetime.now(timezone.utc)
             ).isoformat(),
+            "autonomy": True,
+            "autonomy_reason": str(reason)[:500],
         }
         if reply is not None and hasattr(reply, "author"):
             item.update(
