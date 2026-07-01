@@ -270,11 +270,8 @@ class ImageGeneratorTool(Tool):
 
     def get_description(self):
         return (
-            "Generate an AI image FAST (~5s). Use this as the DEFAULT — quick, decent quality. "
-            "Only switch to hd_image when someone specifically asks for 'high quality', 'HD', 'HQ', or 'better quality'. "
-            "Params: prompt (required). "
-            "The image is posted to chat so you can SEE it. If it looks bad, call image_generator again with an improved prompt. "
-            "Returns a Discord CDN URL. Use that URL in HTML <img> tags for sites."
+            "Generate an AI image (~5s) — the DEFAULT image tool. "
+            "Params: prompt (required). Posts the image to chat with a CDN URL you can reuse in sites."
         )
 
     async def execute(
@@ -410,9 +407,8 @@ class HDImageGeneratorTool(Tool):
 
     def get_description(self):
         return (
-            "Generate an HD AI image (~40s). Use ONLY when the user explicitly asks for 'high quality', 'HD', 'HQ', 'better quality', or similar. "
-            "Otherwise default to image_generator (fast/normal). Params: prompt (required), size (optional, e.g. '1024x1024'). "
-            "Returns a Discord CDN URL for the image. Use that URL directly in HTML <img> tags for sites."
+            "Generate an HD AI image (~40s). Use ONLY when the user explicitly asks for high quality/HD/HQ. "
+            "Params: prompt (required), size (optional, e.g. '1024x1024'). Returns a Discord CDN URL for sites."
         )
 
     async def execute(

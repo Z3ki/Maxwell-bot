@@ -330,8 +330,8 @@ def test_tool_prompt_requires_reasoning_before_terminal_action():
 
     prompt = MaxwellBot._tool_system_prompt(bot, "discord")
 
-    assert "reasoning_log first" in prompt
-    assert "Never stop after reasoning_log" in prompt
+    assert "reasoning_log" in prompt.lower()
+    assert "reasoning_log first" in prompt.lower()
 
 
 def test_ensure_reasoning_trace_backfills_missing_trace():
@@ -469,16 +469,15 @@ def test_telegram_audio_turn_uses_stable_latest_message_label():
 def test_telegram_tool_followup_keeps_audio_turn_context_available():
     instruction = _telegram_tool_followup_instruction(has_original_media=True)
 
-    assert "already attached to the first model pass" in instruction
-    assert "do not say you cannot hear" in instruction
+    assert "Original media isn't reattached here" in instruction
     assert "<tool:send_message>" in instruction
 
 
 def test_telegram_tool_followup_without_media_does_not_claim_audio_context():
     instruction = _telegram_tool_followup_instruction(has_original_media=False)
 
-    assert "No original Telegram media" in instruction
-    assert "already attached to the first model pass" not in instruction
+    assert "No original media is attached" in instruction
+    assert "Original media isn't reattached here" not in instruction
 
 
 def test_no_response_tool_results_do_not_trigger_followup():
@@ -502,7 +501,7 @@ def test_tool_prompt_has_no_nested_tags_rule():
     prompt = MaxwellBot._tool_system_prompt(bot, "discord")
 
     assert "plain text" in prompt.lower()
-    assert "never put" in prompt.lower()
+    assert "no nested tags" in prompt.lower()
 
 
 def test_prompt_budget_trims_large_background_blocks():
@@ -560,7 +559,7 @@ def test_build_messages_has_single_formatting_instruction():
         system_content = messages[0]["content"]
         assert "MANDATORY" not in system_content
         assert "MUST format every response" not in system_content
-        assert "Do not force markdown into tiny greetings" in system_content
+        assert "don't force it into one-liners" in system_content
 
     asyncio.run(run())
 

@@ -14,10 +14,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_REM_PROMPT_BODY = (
     "Run Maxwell REM memory assimilation. Review the short-term visible slice injected by the scheduler. "
-    "Search existing memories before adding or editing. Consolidate durable facts, preferences, decisions, "
-    "identities, and unresolved work. Do not let useful context vanish like tears in rain. Delete or supersede "
-    "memory bloat when it is clearly obsolete. Do not call tools in REM mode. "
-    "Answer DONE with a short audit list when complete."
+    "Search existing memories before adding/editing. Consolidate durable facts, preferences, decisions, identities, and unresolved work. "
+    "Delete/supersede obsolete bloat. Do not call tools in REM mode. Answer DONE with a short audit list."
 )
 
 
@@ -28,22 +26,19 @@ def utcnow_iso() -> str:
 def rem_system_prompt(turns_remaining: int, prompt_body: str | None = None) -> str:
     body = (prompt_body or DEFAULT_REM_PROMPT_BODY).strip()
     return (
-        "You are Maxwell REM, a periodic memory assimilation process. "
-        "You are not answering live chat. You are organizing the last slice of visible life into durable memory.\n\n"
-        "Keep memory useful, specific, "
-        "deduplicated, and inspectable; do not compress away decisions, preferences, unresolved tasks, or identity facts. "
-        "Do not let useful context vanish like tears in rain.\n\n"
+        "You are Maxwell REM, a periodic memory assimilation process — not answering live chat. "
+        "Organize the last slice of visible life into durable memory. Keep it useful, specific, deduplicated, inspectable; "
+        "don't compress away decisions, preferences, unresolved tasks, or identity facts.\n\n"
         f"{body}\n\n"
-        f"You have {turns_remaining} REM tool turn(s) left after this call. "
-        "Do not call tools in REM mode. Always answer DONE with a short audit list."
+        f"You have {turns_remaining} REM turn(s) left. Do not call tools. Answer DONE with a short audit list."
     )
 
 
 def short_term_slice_prompt(events: list[dict]) -> str:
     return (
-        "Short-term visible memory slice follows. This is the last interval of visible inputs and outputs, "
-        "with model reasoning intentionally excluded. Preserve what matters; discard noise.\n\n"
-        + json.dumps(events, ensure_ascii=False, indent=2, sort_keys=True)
+        "Short-term visible memory slice (last interval of inputs/outputs, reasoning excluded). "
+        "Preserve what matters; discard noise:\n"
+        + json.dumps(events, ensure_ascii=False, sort_keys=True)
     )
 
 
@@ -160,7 +155,7 @@ async def run_rem_once(
     messages = [
         {"role": "system", "content": rem_system_prompt(max_turns, prompt_body=prompt_body)},
         {"role": "system", "content": short_term_slice_prompt(events)},
-        {"role": "system", "content": "Current long-term memory snapshot:\n" + json.dumps(memory_manager.get_long_term_memory()[:200], ensure_ascii=False, indent=2)},
+        {"role": "system", "content": "Current long-term memory snapshot:\n" + json.dumps(memory_manager.get_long_term_memory()[:200], ensure_ascii=False)},
     ]
     audit = ""
     success = False
