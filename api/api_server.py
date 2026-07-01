@@ -8,6 +8,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import shutil
@@ -18,6 +19,9 @@ from collections import defaultdict
 from pathlib import Path
 
 from aiohttp import web
+
+logger = logging.getLogger("maxwell_api")
+logging.basicConfig(level=logging.INFO)
 
 APP_ROOT = Path(os.getenv("MAXWELL_APP_ROOT", Path(__file__).resolve().parents[1]))
 ENV_FILE = Path(os.getenv("MAXWELL_ENV_FILE", APP_ROOT / ".env"))
@@ -66,6 +70,17 @@ API_PORT = _int_env_safe("MAXWELL_API_PORT", 8765)
 BASE_SITE_DIR = Path(os.getenv("MAXWELL_SITE_DIR", APP_ROOT / "public" / "bot")).resolve()
 ADMIN_USER = os.getenv("MAXWELL_ADMIN_USER", "").strip()
 ADMIN_PASSWORD = os.getenv("MAXWELL_ADMIN_PASSWORD", "").strip()
+DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "").strip()
+DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "").strip()
+DISCORD_REDIRECT_URI = os.getenv(
+    "DISCORD_REDIRECT_URI",
+    "https://maxwell.z3ki.dev/api/auth/discord/callback",
+).strip()
+DISCORD_ALLOWED_USER_IDS = {
+    uid.strip()
+    for uid in os.getenv("DISCORD_ALLOWED_USER_IDS", "").split(",")
+    if uid.strip()
+}
 REM_ENABLED_DEFAULT = _parse_bool(os.getenv("REM_ENABLED"), False)
 REM_INTERVAL_DEFAULT = _int_env_safe("REM_INTERVAL_SECONDS", 600)
 REM_RUN_HISTORY_DEFAULT = _int_env_safe("REM_RUN_HISTORY", 50)
@@ -92,6 +107,18 @@ _file_lock = asyncio.Lock()
 # DEFAULT_CONTROL, KNOWN_TOOLS, _parse_bool imported from control_defaults.py above
 MAX_COMMANDS = 200
 MAX_AUTONOMY_GOALS = 50
+
+
+# Discord OAuth bearer tokens issued by the /api/auth/discord flow. Kept in
+# process memory; users re-authenticate after a restart.
+_DISCORD_TOKENS: dict[str, dict] = {}
+_DISCORD_TOKEN_TTL = 7 * 24 * 3600
+
+
+def _discord_token_authed(request) -> bool:
+    token = request.headers.get("X-Discord-Token", "")
+    info = _DISCORD_TOKENS.get(token)
+    return bool(info and info.get("expires", 0) >= time.time())
 
 
 def _json_response(data, status=200):
@@ -173,6 +200,8 @@ def _basic_credentials(request):
 
 
 def _has_admin_auth(request) -> bool:
+    if _discord_token_authed(request):
+        return True
     _load_admin_creds()
     if not ADMIN_USER or not ADMIN_PASSWORD:
         return False
@@ -186,6 +215,9 @@ def _has_admin_auth(request) -> bool:
 async def _auth_middleware_unless_login(app, handler):
     """Middleware that requires auth for all requests, except OPTIONS and /api/login."""
     async def middleware(request):
+        # Discord OAuth routes bypass Basic auth (they're the login flow).
+        if request.path.startswith("/api/auth/discord"):
+            return await handler(request)
         if request.method == "POST" and request.path == "/api/login":
             # Rate limit login attempts
             if _check_rate_limit(request):
@@ -194,14 +226,17 @@ async def _auth_middleware_unless_login(app, handler):
         if _needs_auth(request):
             _load_admin_creds()
             if not ADMIN_USER or not ADMIN_PASSWORD:
-                return _json_response({"error": "admin auth not configured"}, 503)
-            username, password = _basic_credentials(request)
-            if not (
-                hmac.compare_digest(username or "", ADMIN_USER)
-                and hmac.compare_digest(password or "", ADMIN_PASSWORD)
-            ):
-                _record_auth_failure(request)
-                return _json_response({"error": "unauthorized"}, 401)
+                # No Basic creds configured; allow Discord-token auth alone.
+                if not _discord_token_authed(request):
+                    return _json_response({"error": "admin auth not configured"}, 503)
+            else:
+                username, password = _basic_credentials(request)
+                if not (
+                    hmac.compare_digest(username or "", ADMIN_USER)
+                    and hmac.compare_digest(password or "", ADMIN_PASSWORD)
+                ) and not _discord_token_authed(request):
+                    _record_auth_failure(request)
+                    return _json_response({"error": "unauthorized"}, 401)
         # Add security headers to all responses
         resp = await handler(request)
         if isinstance(resp, web.Response):
@@ -1523,6 +1558,125 @@ async def login_post(request):
     return _json_response({"ok": True, "message": "credentials valid"})
 
 
+# ---------- Discord OAuth login ----------
+# The frontend hits /api/auth/discord/state to get a one-time state token and
+# the authorize URL, then Discord redirects to /api/auth/discord/callback which
+# exchanges the code and issues a bearer token the dashboard stores and sends
+# as `X-Discord-Token` for subsequent API calls.
+_DISCORD_STATES: dict[str, float] = {}
+
+
+def _discord_redirect_base(request) -> str:
+    return f"{request.scheme}://{request.host}"
+
+
+async def discord_auth_state(request):
+    import secrets as _secrets
+    state = _secrets.token_urlsafe(24)
+    _DISCORD_STATES[state] = time.time()
+    redirect = os.getenv("DISCORD_REDIRECT_URI") or f"{_discord_redirect_base(request)}/api/auth/discord/callback"
+    client_id = DISCORD_CLIENT_ID
+    return _json_response({
+        "client_id": client_id,
+        "redirect_uri": redirect,
+        "state": state,
+        "authorize_url": (
+            "https://discord.com/api/oauth2/authorize"
+            f"?client_id={client_id}"
+            "&response_type=code"
+            f"&redirect_uri={redirect}"
+            "&scope=identify"
+            f"&state={state}"
+        ) if client_id else "",
+        "enabled": bool(client_id and DISCORD_CLIENT_SECRET),
+    })
+
+
+async def discord_auth_callback(request):
+    code = request.query.get("code")
+    state = request.query.get("state")
+    if not code or not state:
+        return _json_response({"error": "missing code/state"}, 400)
+    issued = _DISCORD_STATES.pop(state, None)
+    if not issued or time.time() - issued > 600:
+        return _json_response({"error": "invalid or expired state"}, 400)
+    if not DISCORD_CLIENT_ID or not DISCORD_CLIENT_SECRET:
+        return _json_response({"error": "discord oauth not configured"}, 503)
+    redirect = os.getenv("DISCORD_REDIRECT_URI") or f"{_discord_redirect_base(request)}/api/auth/discord/callback"
+    import aiohttp as _aiohttp
+    async with _aiohttp.ClientSession() as sess:
+        token_resp = await sess.post(
+            "https://discord.com/api/oauth2/token",
+            data={
+                "client_id": DISCORD_CLIENT_ID,
+                "client_secret": DISCORD_CLIENT_SECRET,
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect,
+                "scope": "identify",
+            },
+            headers={"Accept": "application/json"},
+        )
+        if token_resp.status != 200:
+            body = await token_resp.text()
+            logger.warning("discord token exchange failed: %s", body[:300])
+            return _json_response({"error": "discord token exchange failed"}, 502)
+        token_json = await token_resp.json()
+        access_token = token_json.get("access_token")
+        if not access_token:
+            return _json_response({"error": "no access token from discord"}, 502)
+        me_resp = await sess.get(
+            "https://discord.com/api/users/@me",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        if me_resp.status != 200:
+            return _json_response({"error": "failed to fetch discord user"}, 502)
+        me = await me_resp.json()
+    user_id = str(me.get("id", ""))
+    username = str(me.get("username", "")) + "#" + str(me.get("discriminator", "0"))
+    avatar = me.get("avatar")
+    avatar_url = (
+        f"https://cdn.discordapp.com/avatars/{user_id}/{avatar}.png"
+        if avatar else ""
+    )
+    if DISCORD_ALLOWED_USER_IDS and user_id not in DISCORD_ALLOWED_USER_IDS:
+        logger.warning("discord oauth denied for user %s (%s)", user_id, username)
+        return _json_response({"error": "discord account not authorized"}, 403)
+    import secrets as _secrets
+    bearer = _secrets.token_urlsafe(48)
+    _DISCORD_TOKENS[bearer] = {
+        "user_id": user_id,
+        "username": username,
+        "avatar_url": avatar_url,
+        "expires": time.time() + _DISCORD_TOKEN_TTL,
+    }
+    base = _discord_redirect_base(request)
+    # Redirect back to the admin page with the token in the hash fragment so
+    # the SPA can pick it up without it hitting server logs as a query param.
+    raise web.HTTPFound(f"{base}/admin/#discord_token={bearer}")
+
+
+async def discord_auth_verify(request):
+    token = request.headers.get("X-Discord-Token", "") or (request.query.get("token") or "")
+    info = _DISCORD_TOKENS.get(token)
+    if not info or info.get("expires", 0) < time.time():
+        return _json_response({"ok": False}, 401)
+    return _json_response({
+        "ok": True,
+        "user_id": info["user_id"],
+        "username": info["username"],
+        "avatar_url": info.get("avatar_url", ""),
+    })
+
+
+async def discord_auth_logout(request):
+    token = request.headers.get("X-Discord-Token", "") or (request.query.get("token") or "")
+    _DISCORD_TOKENS.pop(token, None)
+    return _json_response({"ok": True})
+
+
+
+
 # ---------- System Stats ----------
 async def system_stats(request):
     if not _has_admin_auth(request):
@@ -1607,6 +1761,10 @@ app.router.add_post("/api/commands", commands_post)
 app.router.add_delete("/api/commands", commands_del)
 app.router.add_get("/api/discord/state", discord_state)
 app.router.add_post("/api/login", login_post)
+app.router.add_get("/api/auth/discord/state", discord_auth_state)
+app.router.add_get("/api/auth/discord/callback", discord_auth_callback)
+app.router.add_get("/api/auth/discord/verify", discord_auth_verify)
+app.router.add_post("/api/auth/discord/logout", discord_auth_logout)
 app.router.add_get("/api/pm2", pm2_status)
 app.router.add_get("/api/pm2/logs", pm2_logs)
 app.router.add_post("/api/pm2/restart", pm2_restart)
