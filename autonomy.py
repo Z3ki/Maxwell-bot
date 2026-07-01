@@ -38,8 +38,6 @@ import discord
 
 from control_defaults import (
     DEFAULT_CONTROL,
-    AUTONOMY_MIN_POST_GAP_MAX,
-    clamp_autonomy_min_post_gap,
 )  # noqa: E402
 from utils import (  # noqa: E402
     _atomic_json_write_sync,
@@ -512,9 +510,6 @@ class AutonomyEngine:
         self._posted_messages: list[dict] = []
         # Validation failures from last tick (fed back into context)
         self._last_validation_failures: list[str] = []
-        # In-memory rate-limit state for unprompted posts, keyed by channel_id.
-        # Runtime throttle, not config — intentionally not persisted.
-        self._last_unprompted_post: dict[str, float] = {}
 
     def _auto_channel_candidates(self) -> list[str]:
         """Stable target list for autonomous posts/tools."""
@@ -1685,63 +1680,6 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
                     results.append(result)
                     continue
 
-            # Rate-limit unprompted posts: an action that posts to a channel
-            # WITHOUT replying to a user message is "unprompted". Enforce a
-            # minimum quiet gap per channel so proactive chatter feels like
-            # "occasionally chimes in" instead of every-tick spam. Replies
-            # (reply_to_message_id set) are always allowed.
-            #
-            # Covers both `post_channel` and `run_tool` invocations of
-            # message-sending tools (AUTONOMY_POST_TOOLS), since the latter
-            # also post to the target channel via a SyntheticMessage and would
-            # otherwise bypass the gap. The stamp is only recorded AFTER a
-            # successful send, so a failed post (permission/not-found/API
-            # error) does NOT consume the gap — the next valid attempt is not
-            # falsely blocked.
-            unprompted_cid = None
-            if kind == "post_channel" and not action.get("reply_to_message_id"):
-                unprompted_cid = str(action.get("target_channel_id") or "") or None
-            elif kind == "run_tool" and str(action.get("tool_name", "")) in AUTONOMY_POST_TOOLS:
-                tool_args = action.get("tool_args") or {}
-                if not tool_args.get("reply_to_message_id") and not tool_args.get("reply"):
-                    unprompted_cid = (
-                        str(action.get("target_channel_id")
-                            or tool_args.get("target_channel_id")
-                            or tool_args.get("channel_id")
-                            or "")
-                        or None
-                    )
-
-            if unprompted_cid:
-                gap = clamp_autonomy_min_post_gap(
-                    (getattr(self.bot, "_control", None) or {}).get(
-                        "autonomy_min_post_gap_seconds", 1800
-                    )
-                )
-                # Prune stale entries (older than the max gap) so the dict can't
-                # grow unbounded across long-running processes / arbitrary cids.
-                prune_before = time.time() - AUTONOMY_MIN_POST_GAP_MAX
-                if len(self._last_unprompted_post) > 64:
-                    self._last_unprompted_post = {
-                        c: t for c, t in self._last_unprompted_post.items()
-                        if t > prune_before
-                    }
-                last = self._last_unprompted_post.get(unprompted_cid, 0.0)
-                now_ts = time.time()
-                if now_ts - last < gap:
-                    logger.info(
-                        f"Autonomy rate-limited unprompted post to {unprompted_cid} "
-                        f"(gap {int(now_ts - last)}s < {gap}s); downgraded to do_nothing"
-                    )
-                    result = {
-                        "kind": kind,
-                        "result": "skipped",
-                        "error": None,
-                        "content_summary": "rate-limited unprompted post",
-                    }
-                    results.append(result)
-                    continue
-
             try:
                 if kind == "send_dm":
                     await asyncio.wait_for(
@@ -1779,11 +1717,6 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
                 result["result"] = "error"
                 result["error"] = str(e)[:1000]
                 logger.error(f"Autonomy action {kind} failed: {e}")
-            # Only stamp the unprompted-post rate-limit AFTER a successful send,
-            # so a failed post (permission/not-found/API error) does NOT consume
-            # the gap and falsely block the next valid attempt.
-            if unprompted_cid and result.get("result") == "success":
-                self._last_unprompted_post[unprompted_cid] = time.time()
             results.append(result)
 
             # record in REM event log (skip do_nothing)

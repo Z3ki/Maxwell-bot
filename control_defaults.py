@@ -94,25 +94,9 @@ DEFAULT_CONTROL = {
     "autonomy_api_key": "",       # "" = use main provider's key
     "autonomy_model": "",         # "" = use main provider's model
     "autonomy_disable_reasoning": True,  # False for endpoints that reject the reasoning param (e.g. NVIDIA)
-    "autonomy_min_post_gap_seconds": 1800,  # min quiet gap between unprompted autonomy posts per channel
+    "autonomy_min_post_gap_seconds": 0,  # deprecated — no longer enforced, kept for compat
     "autonomy_recent_reply_block_seconds": 0,  # skip autonomy post if bot replied in-channel within this window (0=off)
 }
-
-# Shared clamp bounds for autonomy_min_post_gap_seconds.
-# Used by both api_server._sanitize_control (on save) and autonomy runtime
-# (defensive fallback) so the two can't drift.
-AUTONOMY_MIN_POST_GAP_MIN = 60
-AUTONOMY_MIN_POST_GAP_MAX = 86400
-AUTONOMY_MIN_POST_GAP_DEFAULT = 1800
-
-
-def clamp_autonomy_min_post_gap(value, default=AUTONOMY_MIN_POST_GAP_DEFAULT):
-    """Clamp autonomy_min_post_gap_seconds to [60, 86400]; fall back on bad input."""
-    try:
-        v = int(value)
-    except (TypeError, ValueError):
-        return default
-    return max(AUTONOMY_MIN_POST_GAP_MIN, min(v, AUTONOMY_MIN_POST_GAP_MAX))
 
 DEAD_CONTROL_KEYS = frozenset({
     "auto_mode_enabled",
