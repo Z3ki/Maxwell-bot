@@ -415,6 +415,7 @@ class AutonomyStore:
             )
 
     MAX_GOALS = 50  # cap to prevent unbounded growth
+    MAX_GOAL_DESC_CHARS = 2000
 
     async def add_goal(self, description: str) -> dict:
         async with self._lock:
@@ -433,7 +434,7 @@ class AutonomyStore:
                 }
             goal = {
                 "id": f"goal_{uuid.uuid4().hex[:8]}",
-                "description": str(description)[:500],
+                "description": str(description)[: self.MAX_GOAL_DESC_CHARS],
                 "active": True,
                 "created_at": _utcnow_iso(),
                 "last_acted_on": None,
@@ -1248,7 +1249,8 @@ class AutonomyEngine:
             active_goals = [g for g in goals if g.get("active")]
             goals_text = (
                 "\n".join(
-                    f"- [{g['id']}] {g.get('description', '')}" for g in active_goals
+                    f"- [{g['id']}] (last acted: {g.get('last_acted_on') or 'never'}) {g.get('description', '')}"
+                    for g in active_goals
                 )
                 if active_goals
                 else "(no active goals)"
@@ -1277,12 +1279,13 @@ CURRENT CONTEXT:
 TOOLS:
 {tool_descriptions}
 
-GOALS:
+GOALS (these are your ongoing objectives — pursue them when the situation fits, and update last_acted_on by re-creating the goal after acting):
 {goals_text}
 
 DECISION RULES:
 - Default to do_nothing. Most ticks = do_nothing. You're an occasional presence, not a chatterbox.
-- Act ONLY if one is true: (1) someone mentioned/replied to/asked you (check mentions, reply_to, addressed_to), (2) a goal requires action now, (3) you have a genuinely natural, in-character addition to a live conversation.
+- Act ONLY if one is true: (1) someone mentioned/replied to/asked you (check mentions, reply_to, addressed_to), (2) a goal needs a concrete step right now, (3) you have a genuinely natural, in-character addition to a live conversation.
+- When a goal applies, let it guide WHICH action to take — e.g. a goal about following up on someone's project → post_channel or send_dm when that person is around.
 - Don't: post unprompted jokes to seem active, restate visible context, reopen concluded conversations, DM without a concrete reason, or say "just checking in". Talk like a person in the channel — never reference being a "background loop" or "check-in".
 - Voice: short, casual, lowercase-natural — exactly like Maxwell in normal chat.
 
@@ -1659,16 +1662,25 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
                     results.append(result)
                     continue
                 last_reply = getattr(self.bot, "_last_bot_reply", {}).get(post_cid, 0.0)
-                if last_reply and time.time() - last_reply < 600:
+                # Configurable: how recently the bot must have replied in-channel
+                # before autonomy is blocked from posting there. 0 disables the
+                # block entirely (let the LLM decide). Defaults to 600s for safety.
+                block_window = int(
+                    (getattr(self.bot, "_control", None) or {}).get(
+                        "autonomy_recent_reply_block_seconds", 0
+                    )
+                    or 0
+                )
+                if block_window > 0 and last_reply and time.time() - last_reply < block_window:
                     logger.info(
                         f"Autonomy skip post to {post_cid}: bot replied there "
-                        f"{int(time.time() - last_reply)}s ago"
+                        f"{int(time.time() - last_reply)}s ago (block_window={block_window}s)"
                     )
                     result = {
                         "kind": kind,
                         "result": "skipped",
                         "error": None,
-                        "content_summary": "bot recently replied in channel",
+                        "content_summary": f"bot recently replied in channel ({block_window}s window)",
                     }
                     results.append(result)
                     continue

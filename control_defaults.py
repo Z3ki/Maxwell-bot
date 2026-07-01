@@ -95,6 +95,7 @@ DEFAULT_CONTROL = {
     "autonomy_model": "",         # "" = use main provider's model
     "autonomy_disable_reasoning": True,  # False for endpoints that reject the reasoning param (e.g. NVIDIA)
     "autonomy_min_post_gap_seconds": 1800,  # min quiet gap between unprompted autonomy posts per channel
+    "autonomy_recent_reply_block_seconds": 0,  # skip autonomy post if bot replied in-channel within this window (0=off)
 }
 
 # Shared clamp bounds for autonomy_min_post_gap_seconds.

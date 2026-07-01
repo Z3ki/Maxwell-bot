@@ -409,6 +409,7 @@ def _sanitize_control(control):
     out["ai_concurrency"] = max(1, min(out["ai_concurrency"], 10))
     out["autonomy_interval_seconds"] = max(30, int(out.get("autonomy_interval_seconds", 300) or 300))
     out["autonomy_min_post_gap_seconds"] = clamp_autonomy_min_post_gap(out.get("autonomy_min_post_gap_seconds", 1800))
+    out["autonomy_recent_reply_block_seconds"] = max(0, min(int(out.get("autonomy_recent_reply_block_seconds", 0) or 0), 86400))
     out["autonomy_base_url"] = str(out.get("autonomy_base_url", "") or "")[:512]
     out["autonomy_api_key"] = str(out.get("autonomy_api_key", "") or "")[:512]
     out["autonomy_model"] = str(out.get("autonomy_model", "") or "")[:200]
@@ -1096,6 +1097,7 @@ async def autonomy_status(request):
         "base_url": control.get("autonomy_base_url", ""),
         "disable_reasoning": control.get("autonomy_disable_reasoning", True),
         "min_post_gap_seconds": control.get("autonomy_min_post_gap_seconds", 1800),
+        "recent_reply_block_seconds": control.get("autonomy_recent_reply_block_seconds", 0),
         "last_tick": state.get("last_tick"),
         "last_tick_duration": state.get("last_tick_duration"),
         "actions_executed_total": state.get("actions_executed_total", 0),
@@ -1221,7 +1223,7 @@ async def autonomy_goal_add(request):
         body = await request.json()
     except Exception:
         return _json_response({"error": "invalid json"}, 400)
-    description = str(body.get("description", "")).strip()[:500]
+    description = str(body.get("description", "")).strip()[:2000]
     if not description:
         return _json_response({"error": "description required"}, 400)
     goal = {
