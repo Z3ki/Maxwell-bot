@@ -2559,6 +2559,34 @@ class YouTubeTool(Tool):
                 sent.append(f"{self._format_ts(ts)} read failed: {e}")
         return sent
 
+    async def _thumbnail_image(self, url: str) -> str:
+        video_id = self._video_id(url)
+        if not video_id:
+            return ""
+        session = await _get_shared_session()
+        for name in ("maxresdefault.jpg", "sddefault.jpg", "hqdefault.jpg", "0.jpg"):
+            thumb_url = f"https://i.ytimg.com/vi/{video_id}/{name}"
+            try:
+                async with session.get(
+                    thumb_url, timeout=aiohttp.ClientTimeout(total=15)
+                ) as resp:
+                    if resp.status != 200:
+                        continue
+                    content_type = resp.headers.get("Content-Type", "")
+                    if not content_type.startswith("image/"):
+                        continue
+                    raw = await _read_response_limited(resp, 2 * 1024 * 1024)
+                    if not raw.startswith(b"\xff\xd8\xff") and not raw.startswith(b"\x89PNG"):
+                        continue
+                    encoded = base64.b64encode(raw).decode("ascii")
+                    return (
+                        "thumbnail attached for visual inspection\n"
+                        f"__IMAGE_B64__{encoded}__END_IMAGE_B64__"
+                    )
+            except Exception:
+                continue
+        return ""
+
     async def execute(
         self,
         message: Message,
@@ -2585,6 +2613,10 @@ class YouTubeTool(Tool):
             transcript = await self._download_transcript(url, lang, tmp)
             info = await info_task
             frame_results = await self._extract_frames(url, requested_ts, tmp)
+            if not frame_results and not transcript:
+                thumbnail = await self._thumbnail_image(url)
+                if thumbnail:
+                    frame_results = [thumbnail]
 
         title = str(info.get("title") or "YouTube video")
         uploader = str(info.get("uploader") or info.get("channel") or "unknown")
@@ -2599,6 +2631,8 @@ class YouTubeTool(Tool):
             parts.append("Transcript: unavailable (no captions found or yt-dlp could not fetch them).")
         if requested_ts:
             parts.append("Frames: " + ("; ".join(frame_results) if frame_results else "requested but unavailable"))
+        elif frame_results:
+            parts.append("Visual context: " + "; ".join(frame_results))
         return "\n\n".join(parts)
 
 
