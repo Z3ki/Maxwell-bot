@@ -39,7 +39,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-YouTube transcript and frame extraction uses `yt-dlp` plus `ffmpeg`. `yt-dlp` is included in `requirements.txt`; install `ffmpeg` with your system package manager if it is not already available.
+YouTube transcript and frame extraction uses `yt-dlp` plus `ffmpeg`. `yt-dlp` is included in `requirements.txt`; install `ffmpeg` with your system package manager if it is not already available. For videos that trigger YouTube bot checks, export Netscape-format cookies to `data/youtube_cookies.txt` or set `YOUTUBE_COOKIES_FILE=/path/to/cookies.txt`. Never commit that file.
 
 Edit `.env` with your values, then run:
 

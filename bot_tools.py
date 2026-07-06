@@ -2284,6 +2284,28 @@ class YouTubeTool(Tool):
             "max_transcript_chars (optional, default 12000, max 20000), lang (optional, default en)."
         )
 
+    def _cookies_file(self) -> str | None:
+        raw_path = os.environ.get("YOUTUBE_COOKIES_FILE", "").strip()
+        if raw_path:
+            path = Path(raw_path).expanduser()
+        else:
+            data_dir = Path(getattr(getattr(self.bot, "config", None), "DATA_DIR", os.environ.get("DATA_DIR", "data")))
+            path = data_dir / "youtube_cookies.txt"
+        try:
+            if path.exists() and path.is_file() and path.stat().st_size > 0:
+                return str(path)
+        except OSError:
+            return None
+        return None
+
+    def _yt_dlp_args(self, *args: str) -> list[str]:
+        cmd = ["yt-dlp"]
+        cookies = self._cookies_file()
+        if cookies:
+            cmd.extend(["--cookies", cookies])
+        cmd.extend(args)
+        return cmd
+
     @classmethod
     def _is_youtube_url(cls, url: str) -> bool:
         try:
@@ -2407,19 +2429,19 @@ class YouTubeTool(Tool):
         if not shutil.which("yt-dlp"):
             return ""
         out_tpl = str(tmp / "subs.%(ext)s")
-        args = [
-            "yt-dlp",
+        args = self._yt_dlp_args(
             "--skip-download",
+            "--ignore-no-formats-error",
             "--write-subs",
             "--write-auto-subs",
             "--sub-langs",
-            f"{lang}.*,{lang},en.*",
+            f"{lang}-orig,{lang}.*,{lang},en-orig,en.*",
             "--sub-format",
             "vtt",
             "-o",
             out_tpl,
             url,
-        ]
+        )
         _code, _stdout, _stderr = await self._run_cmd(args, timeout=60)
         candidates = sorted(tmp.glob("subs*.vtt"), key=lambda p: p.stat().st_size, reverse=True)
         if not candidates:
@@ -2497,7 +2519,7 @@ class YouTubeTool(Tool):
         if not shutil.which("yt-dlp"):
             return fallback
         code, stdout, _stderr = await self._run_cmd(
-            ["yt-dlp", "--dump-json", "--no-playlist", url], timeout=45
+            self._yt_dlp_args("--dump-json", "--no-playlist", url), timeout=45
         )
         if code != 0 or not stdout.strip():
             return fallback
@@ -2513,14 +2535,13 @@ class YouTubeTool(Tool):
         if not timestamps or not shutil.which("ffmpeg") or not shutil.which("yt-dlp"):
             return []
         code, stream_url, stderr = await self._run_cmd(
-            [
-                "yt-dlp",
+            self._yt_dlp_args(
                 "-g",
                 "--no-playlist",
                 "-f",
                 "bestvideo[height<=720]/best[height<=720]/best",
                 url,
-            ],
+            ),
             timeout=45,
         )
         if code != 0 or not stream_url.strip():
@@ -2613,10 +2634,10 @@ class YouTubeTool(Tool):
             transcript = await self._download_transcript(url, lang, tmp)
             info = await info_task
             frame_results = await self._extract_frames(url, requested_ts, tmp)
-            if not frame_results and not transcript:
+            if not any("__IMAGE_B64__" in item for item in frame_results):
                 thumbnail = await self._thumbnail_image(url)
                 if thumbnail:
-                    frame_results = [thumbnail]
+                    frame_results.append(thumbnail)
 
         title = str(info.get("title") or "YouTube video")
         uploader = str(info.get("uploader") or info.get("channel") or "unknown")
