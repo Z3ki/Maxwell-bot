@@ -4790,13 +4790,16 @@ class MaxwellBot(commands.Bot):
             text = self._embed_text(embed)
             if text:
                 text_blocks.append(f"Embed {idx}:\n{text}")
+            # Skip ALL media for YouTube embeds; the youtube tool fetches
+            # thumbnail/frames/transcript itself, and feeding the raw
+            # embed thumbnail here lets the model "see" it without ever
+            # calling the tool.
+            embed_url = getattr(embed, "url", None) or ""
+            if _YouTubeTool._is_youtube_url(embed_url):
+                continue
             for label, url in self._embed_media_urls(embed):
                 if media_count >= 5:
                     break
-                # Skip YouTube embed media; the youtube tool fetches
-                # thumbnail/frames/transcript itself, and feeding the raw
-                # embed thumbnail here lets the model "see" it without
-                # ever calling the tool.
                 if _YouTubeTool._is_youtube_url(url):
                     continue
                 ext = Path(urlparse(url).path).suffix.lower()
