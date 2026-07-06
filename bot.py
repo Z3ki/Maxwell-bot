@@ -2159,6 +2159,22 @@ class MaxwellBot(commands.Bot):
                     await self._record_rem_event(message, "user", memory_content)
             self._maybe_schedule_context_extraction(message)
 
+            # Cache media context for EVERY message in an allowed channel,
+            # not just pinged ones. Without this, an image posted without a
+            # ping never enters visual memory, so a later ping about "this"
+            # or "the image above" has nothing to attach. This is the fix for
+            # "the bot can't see sent media in channels if it's not pinged".
+            if self._control.get("process_images", True) and (
+                message.attachments or getattr(message, "embeds", None)
+            ):
+                try:
+                    _imgs, bg_media = await self._extract_media(message)
+                    bg_media.extend(await self._extract_embeds(message))
+                    if bg_media:
+                        self._cache_media_context(channel_id, bg_media)
+                except Exception as e:
+                    logger.warning(f"Background media cache failed: {e}")
+
             if message.author.bot and not self._control.get("reply_to_bots", True):
                 return
 

@@ -943,6 +943,20 @@ class AutonomyEngine:
         else:
             sections.append("=== CHANNEL ACTIVITY ===\n(no accessible channels)")
 
+        # Auto-invoke the youtube tool for YouTube links seen in recent
+        # channel activity, so the planner has transcript/frames context —
+        # same capability as the normal reply path. Mirrors bot.py's
+        # pre_tool_results injection.
+        yt_context = await self._gather_youtube_context(ch_lines)
+        if yt_context:
+            sections.append(
+                _truncate(
+                    "=== YOUTUBE CONTEXT (auto-fetched for links above) ===\n"
+                    + yt_context,
+                    CTX_BUDGET_CHANNEL_ACTIVITY,
+                )
+            )
+
         # 5. The same short-term channel memory normal Maxwell sees.
         # This is the glue that stops autonomy from acting like some weird second
         # intern who skimmed the logs but missed the actual relationship history.
@@ -1212,7 +1226,60 @@ class AutonomyEngine:
         full = "\n\n".join(sections)
         return full
 
-    async def _check_post_engagement(self) -> str:
+    async def _gather_youtube_context(self, ch_lines: list[str]) -> str:
+        """Auto-invoke the youtube tool for YouTube links in recent channel
+        activity, mirroring the normal reply path. Returns transcript/frame
+        text the planner can use directly."""
+        control = getattr(self.bot, "_control", None) or {}
+        if not control.get("tools_enabled", True):
+            return ""
+        if "youtube" in set(control.get("disabled_tools", []) or []):
+            return ""
+        yt_tool = self.bot.tools.get("youtube")
+        if yt_tool is None:
+            return ""
+        yt_re = re.compile(
+            r"https?://(?:www\.)?(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/[^\s<>\"']+",
+            re.IGNORECASE,
+        )
+        urls: list[str] = []
+        for line in ch_lines:
+            for m in yt_re.finditer(line):
+                url = m.group(0).rstrip(".,)]")
+                if url not in urls:
+                    urls.append(url)
+        if not urls:
+            return ""
+        blocks: list[str] = []
+        for url in urls[:3]:
+            try:
+                # SyntheticMessage lets the youtube tool resolve a channel if
+                # it needs one (it generally doesn't for transcript fetch).
+                syn = SyntheticMessage(
+                    channel=None,
+                    author=SimpleNamespace(
+                        id="autonomy",
+                        display_name=getattr(self.bot.user, "display_name", "Maxwell"),
+                        name=getattr(self.bot.user, "name", "Maxwell"),
+                        bot=True,
+                    ),
+                    guild=None,
+                    content=url,
+                )
+                result = await yt_tool.execute(syn, url=url)
+                if result:
+                    # Strip frame image blobs — autonomy is text-only planning.
+                    result = re.sub(
+                        r"__IMAGE_B64__.*?__END_IMAGE_B64__",
+                        "[frame available]",
+                        result,
+                        flags=re.DOTALL,
+                    )
+                    blocks.append(f"URL {url}:\n{result[:1500]}")
+            except Exception as e:
+                logger.warning(f"Autonomy youtube auto-invoke failed for {url}: {e}")
+        return "\n\n".join(blocks)
+
         """Check if recent autonomous posts got reactions or replies."""
         if not self._posted_messages:
             return ""
