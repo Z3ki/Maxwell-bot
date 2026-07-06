@@ -2538,10 +2538,12 @@ class YouTubeTool(Tool):
             return []
         code, stream_url, stderr = await self._run_cmd(
             self._yt_dlp_args(
+                "--extractor-args",
+                "youtube:player_client=web_embedded",
                 "-g",
                 "--no-playlist",
                 "-f",
-                "bestvideo[height<=720]/best[height<=720]/best",
+                "best[height<=720]/best",
                 url,
             ),
             timeout=45,

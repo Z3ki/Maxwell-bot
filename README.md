@@ -142,7 +142,7 @@ Live VC replies require `discord-ext-voice-recv`, `PyNaCl`, `ffmpeg`, and an aud
 
 ## Web and YouTube Tools
 
-When tools are enabled, Maxwell can use `web_search` for recent/searchable info, `fetch_url` to read a specific web page, and `youtube` for YouTube videos. The YouTube tool returns title/channel/duration, transcript or auto-captions when available, using YouTube timedtext first and `yt-dlp` as fallback. Cookie-backed caption fetching uses `yt-dlp --ignore-no-formats-error --write-subs --write-auto-subs`, which can fetch captions even when playable formats are blocked. Requested timestamp frames are attached back to the model for visual inspection before Maxwell answers. Timestamps can be written like `0:10` or `1:23,2:45`.
+When tools are enabled, Maxwell can use `web_search` for recent/searchable info, `fetch_url` to read a specific web page, and `youtube` for YouTube videos. The YouTube tool returns title/channel/duration, transcript or auto-captions when available, using YouTube timedtext first and `yt-dlp` as fallback. Cookie-backed caption fetching uses `yt-dlp --ignore-no-formats-error --write-subs --write-auto-subs`, which can fetch captions even when playable formats are blocked. Requested timestamp frames use yt-dlp's `web_embedded` YouTube client to avoid raw Googlevideo 403s, then attach back to the model for visual inspection before Maxwell answers. Timestamps can be written like `0:10` or `1:23,2:45`.
 
 ## Memory and REM
 
