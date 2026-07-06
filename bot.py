@@ -4785,6 +4785,7 @@ class MaxwellBot(commands.Bot):
         text_blocks = []
         message_id = getattr(message, "id", None)
         media_count = 0
+        from bot_tools import YouTubeTool as _YouTubeTool
         for idx, embed in enumerate(embeds[:5], 1):
             text = self._embed_text(embed)
             if text:
@@ -4792,6 +4793,12 @@ class MaxwellBot(commands.Bot):
             for label, url in self._embed_media_urls(embed):
                 if media_count >= 5:
                     break
+                # Skip YouTube embed media; the youtube tool fetches
+                # thumbnail/frames/transcript itself, and feeding the raw
+                # embed thumbnail here lets the model "see" it without
+                # ever calling the tool.
+                if _YouTubeTool._is_youtube_url(url):
+                    continue
                 ext = Path(urlparse(url).path).suffix.lower()
                 filename = f"embed-{idx}-{label}{ext or ''}"
                 item = await self._download_embed_media(
@@ -5036,9 +5043,64 @@ class MaxwellBot(commands.Bot):
         active_media = current_images + cached_media + self._current_binary_media(media)
         media_summary = self._format_media_summary(media, active_media)
         self._cache_media_context(channel_id, media)
+        # Auto-invoke the youtube tool for YouTube links so the model
+        # gets transcript/frames even when it wouldn't emit a tool call
+        # on its own. This runs before the model sees the message, and
+        # the result is appended as tool context the model can use.
+        pre_tool_results: list[str] = []
+        pre_tool_images: list[str] = []
+        if (
+            self._control.get("tools_enabled", True)
+            and "youtube" in self.tools
+            and "youtube" not in set(self._control.get("disabled_tools", []) or [])
+        ):
+            from bot_tools import YouTubeTool as _YouTubeTool
+            yt_urls = re.findall(
+                r"https?://(?:www\.)?(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/[^\s<>\"']+",
+                content or "",
+                re.IGNORECASE,
+            )
+            for yt_url in yt_urls[:3]:
+                try:
+                    yt_result = await self.tools["youtube"].execute(
+                        message, url=yt_url
+                    )
+                    if yt_result:
+                        pre_tool_results.append(f"Tool youtube (auto): {yt_result}")
+                        _IMG_RE = re.compile(
+                            r"__IMAGE_B64__([A-Za-z0-9+/=\s]+)__END_IMAGE_B64__"
+                        )
+                        for m in _IMG_RE.finditer(yt_result):
+                            pre_tool_images.append(m.group(1).strip())
+                except Exception as e:
+                    logger.warning(f"Auto youtube tool failed for {yt_url}: {e}")
         messages = await self._build_messages(
             message, content, has_media=bool(active_media), media_summary=media_summary
         )
+        if pre_tool_results:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": "YouTube tool was auto-invoked for the link(s) above. "
+                    "Use this data (transcript, timestamps, frames) to answer; "
+                    "do not just describe a thumbnail.\n\n"
+                    + "\n\n".join(pre_tool_results),
+                }
+            )
+            if pre_tool_images:
+                active_media = [
+                    {
+                        "b64": img,
+                        "mime_type": "image/jpeg",
+                        "filename": "youtube-frame.jpg",
+                        "is_image": True,
+                        "is_text": False,
+                        "text": "",
+                        "message_id": None,
+                        "source": "youtube_tool",
+                    }
+                    for img in pre_tool_images
+                ] + active_media
         try:
             await self._acquire_ai_slot(timeout=ai_timeout)
             try:
