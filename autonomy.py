@@ -1077,9 +1077,12 @@ class AutonomyEngine:
             )
 
         # 6. Engagement tracking (did anyone react to or reply to your posts?)
-        engagement = await self._check_post_engagement()
-        if engagement:
-            sections.append(f"=== ENGAGEMENT WITH YOUR POSTS ===\n{engagement}")
+        try:
+            engagement = await self._check_post_engagement()
+            if engagement:
+                sections.append(f"=== ENGAGEMENT WITH YOUR POSTS ===\n{engagement}")
+        except Exception as e:
+            sections.append(f"=== ENGAGEMENT WITH YOUR POSTS ===\n(error: {e})")
 
         # 7. DM history
         dm_blocks = []
@@ -1280,6 +1283,7 @@ class AutonomyEngine:
                 logger.warning(f"Autonomy youtube auto-invoke failed for {url}: {e}")
         return "\n\n".join(blocks)
 
+    async def _check_post_engagement(self) -> str:
         """Check if recent autonomous posts got reactions or replies."""
         if not self._posted_messages:
             return ""
