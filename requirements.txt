@@ -7,5 +7,6 @@ python-dotenv>=1.0.0
 aiofiles>=24.1.0
 ddgs>=9.0.0
 yt-dlp>=2025.12.8
+yt-dlp-ejs>=0.8.0
 discord-ext-voice-recv==0.5.2a179
 gTTS>=2.5.0

@@ -39,7 +39,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-YouTube transcript and frame extraction uses `yt-dlp` plus `ffmpeg`. `yt-dlp` is included in `requirements.txt`; install `ffmpeg` with your system package manager if it is not already available. For videos that trigger YouTube bot checks, export Netscape-format cookies to `data/youtube_cookies.txt` or set `YOUTUBE_COOKIES_FILE=/path/to/cookies.txt`. Never commit that file.
+YouTube transcript and frame extraction uses `yt-dlp`, `yt-dlp-ejs`, a JavaScript runtime, and `ffmpeg`. The Python packages are included in `requirements.txt`; install `node` or `deno`, and install `ffmpeg` with your system package manager if they are not already available. Maxwell explicitly uses Node for yt-dlp's YouTube JS challenge handling when `node` is on `PATH`. For videos that trigger YouTube bot checks, export Netscape-format cookies to `data/youtube_cookies.txt` or set `YOUTUBE_COOKIES_FILE=/path/to/cookies.txt`. Never commit that file.
 
 Edit `.env` with your values, then run:
 
@@ -142,7 +142,7 @@ Live VC replies require `discord-ext-voice-recv`, `PyNaCl`, `ffmpeg`, and an aud
 
 ## Web and YouTube Tools
 
-When tools are enabled, Maxwell can use `web_search` for recent/searchable info, `fetch_url` to read a specific web page, and `youtube` for YouTube videos. The YouTube tool returns title/channel/duration, transcript or auto-captions when available, using YouTube timedtext first and `yt-dlp` as fallback. Requested timestamp frames are attached back to the model for visual inspection before Maxwell answers. Timestamps can be written like `0:10` or `1:23,2:45`.
+When tools are enabled, Maxwell can use `web_search` for recent/searchable info, `fetch_url` to read a specific web page, and `youtube` for YouTube videos. The YouTube tool returns title/channel/duration, transcript or auto-captions when available, using YouTube timedtext first and `yt-dlp` as fallback. Cookie-backed caption fetching uses `yt-dlp --ignore-no-formats-error --write-subs --write-auto-subs`, which can fetch captions even when playable formats are blocked. Requested timestamp frames are attached back to the model for visual inspection before Maxwell answers. Timestamps can be written like `0:10` or `1:23,2:45`.
 
 ## Memory and REM
 

@@ -2299,7 +2299,9 @@ class YouTubeTool(Tool):
         return None
 
     def _yt_dlp_args(self, *args: str) -> list[str]:
-        cmd = ["yt-dlp"]
+        cmd = ["yt-dlp", "--no-update"]
+        if shutil.which("node"):
+            cmd.extend(["--js-runtimes", "node"])
         cookies = self._cookies_file()
         if cookies:
             cmd.extend(["--cookies", cookies])
