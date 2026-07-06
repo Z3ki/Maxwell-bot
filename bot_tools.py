@@ -2408,11 +2408,21 @@ class YouTubeTool(Tool):
     def _strip_vtt(raw: str) -> str:
         lines = []
         seen = set()
+        current_ts = ""
         for line in raw.splitlines():
             text = line.strip()
             if not text or text == "WEBVTT" or text.startswith(("Kind:", "Language:")):
                 continue
-            if "-->" in text or re.fullmatch(r"\d+", text):
+            if "-->" in text:
+                m = re.match(r"(\d+):(\d{2})(?::(\d{2}))?\.\d{3}", text)
+                if m:
+                    h, mn, sc = m.group(1), m.group(2), m.group(3)
+                    if sc:
+                        current_ts = f"{int(h)}:{int(mn):02d}:{int(sc):02d}"
+                    else:
+                        current_ts = f"{int(h)}:{int(mn):02d}"
+                continue
+            if re.fullmatch(r"\d+", text):
                 continue
             text = re.sub(r"<[^>]+>", "", text)
             text = re.sub(r"&amp;", "&", text)
@@ -2421,7 +2431,7 @@ class YouTubeTool(Tool):
             text = re.sub(r"\s+", " ", text).strip()
             if text and text not in seen:
                 seen.add(text)
-                lines.append(text)
+                lines.append(f"[{current_ts}] {text}" if current_ts else text)
         return "\n".join(lines)
 
     async def _download_transcript(self, url: str, lang: str, tmp: Path) -> str:
@@ -2487,7 +2497,11 @@ class YouTubeTool(Tool):
                             line = "".join(str(seg.get("utf8", "")) for seg in segs if isinstance(seg, dict))
                             line = re.sub(r"\s+", " ", line).strip()
                             if line:
-                                lines.append(line)
+                                start = event.get("start")
+                                if isinstance(start, (int, float)) and start >= 0:
+                                    lines.append(f"[{YouTubeTool._format_ts(float(start))}] {line}")
+                                else:
+                                    lines.append(line)
                         if lines:
                             return "\n".join(lines)
                     except Exception:
