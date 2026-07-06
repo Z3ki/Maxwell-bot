@@ -161,6 +161,34 @@ def _format_memory_context_line(msg: dict, *, bot_user: Any = None, now=None) ->
     return f"{prefix}{label}{relation}: {str(msg.get('content', ''))[:600]}"
 
 
+def _conversation_label(bot: Any, channel_id: str) -> str:
+    """Human-readable channel/DM label for autonomy context."""
+    cid = re.sub(r"[^0-9]", "", str(channel_id or ""))
+    if not cid:
+        return str(channel_id or "unknown")
+    channel = None
+    with contextlib.suppress(Exception):
+        channel = bot.get_channel(int(cid))
+    if channel is None:
+        for private in list(getattr(bot, "private_channels", []) or []):
+            if str(getattr(private, "id", "")) == cid:
+                channel = private
+                break
+    if isinstance(channel, discord.DMChannel):
+        recipient = getattr(channel, "recipient", None)
+        if recipient is not None:
+            return f"DM with {_user_ref(recipient, getattr(bot, 'user', None))} channel={cid}"
+        return f"DM channel={cid}"
+    if channel is not None:
+        name = getattr(channel, "name", None) or cid
+        guild = getattr(channel, "guild", None)
+        guild_name = getattr(guild, "name", None)
+        if guild_name:
+            return f"#{name}({cid}) in {guild_name}"
+        return f"#{name}({cid})"
+    return f"channel={cid}"
+
+
 # _render_discord_context_text imported from utils.py
 
 
@@ -707,6 +735,38 @@ class AutonomyEngine:
         sections.append(
             f"=== CURRENT TIME ===\n{now.strftime('%A, %Y-%m-%d %H:%M')} ({tz_name})"
         )
+
+        # Normal on_message replies and autonomy ticks run independently. Tell the
+        # planner about live/recent normal replies so it does not treat the same
+        # conversation as unattended and send a second autonomous message.
+        try:
+            reply_lines = []
+            active_replying = sorted(
+                str(cid) for cid in (getattr(self.bot, "_replying_channels", None) or set())
+            )
+            for cid in active_replying[:12]:
+                reply_lines.append(
+                    f"currently replying normally in {_conversation_label(self.bot, cid)}"
+                )
+            last_replies = getattr(self.bot, "_last_bot_reply", None) or {}
+            if last_replies:
+                now_ts = time.time()
+                for cid, ts in sorted(
+                    last_replies.items(), key=lambda item: item[1], reverse=True
+                )[:12]:
+                    age = int(max(0, now_ts - float(ts or 0)))
+                    if age <= 3600:
+                        reply_lines.append(
+                            f"normal reply already sent {age}s ago in {_conversation_label(self.bot, str(cid))}"
+                        )
+            if reply_lines:
+                sections.append(
+                    "=== NORMAL REPLY STATUS ===\n"
+                    + "\n".join(reply_lines)
+                    + "\nInterpret this as Maxwell already handling or having just handled those conversations. Usually choose do_nothing there unless a clearly new human message arrives after that reply."
+                )
+        except Exception as e:
+            sections.append(f"=== NORMAL REPLY STATUS ===\n(error: {e})")
 
         # 2. Active goals (most decision-relevant — what should I work on?)
         try:
@@ -1280,6 +1340,8 @@ GOALS (these are your ongoing objectives — pursue them when the situation fits
 DECISION RULES:
 - Default to do_nothing. Most ticks = do_nothing. You're an occasional presence, not a chatterbox.
 - Act ONLY if one is true: (1) someone mentioned/replied to/asked you (check mentions, reply_to, addressed_to), (2) a goal needs a concrete step right now, (3) you have a genuinely natural, in-character addition to a live conversation.
+- If NORMAL REPLY STATUS says Maxwell is currently replying normally in a conversation, treat that conversation as already being handled. Do not also post/DM into it from autonomy; choose do_nothing unless a separate, clearly new situation elsewhere needs action.
+- If NORMAL REPLY STATUS says a normal reply was already sent recently, do not send an autonomous follow-up just because the conversation appears in DM HISTORY or CHANNEL ACTIVITY. Only act if a newer human message after that reply creates a fresh reason.
 - When a goal applies, let it guide WHICH action to take — e.g. a goal about following up on someone's project → post_channel or send_dm when that person is around.
 - Don't: post unprompted jokes to seem active, restate visible context, reopen concluded conversations, DM without a concrete reason, or say "just checking in". Talk like a person in the channel — never reference being a "background loop" or "check-in".
 - Don't pile on: if you (Maxwell) already replied in a channel recently (check CHANNEL ACTIVITY and YOUR RECENT ACTIONS for your own messages there), don't post again unless there's a genuinely new reason — you'd look like you're talking to yourself. If you're mid-reply in normal chat, the autonomy tick isn't the place to add a second message; let the conversation breathe.
