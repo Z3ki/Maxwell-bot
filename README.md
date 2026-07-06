@@ -8,7 +8,7 @@ Maxwell is a Discord self-bot backed by any OpenAI-compatible API. It reads text
 
 - Multimodal input: images, audio, video, text files, and Discord embeds are forwarded to the model with normalized video, extracted frames, and extracted audio.
 - Visual memory: recent images persist across messages per channel (configurable depth).
-- Tool system: image generation (Pollinations, NVIDIA NIM, GPT-compatible), web search, URL fetch, arbitrary file sending, meme/media sending, shell execution, polls, invites, site generation, avatar/presence/nickname changes, message editing/forwarding/deletion, and more.
+- Tool system: image generation (Pollinations, NVIDIA NIM, GPT-compatible), web search, URL fetch, YouTube transcript/frame extraction, arbitrary file sending, meme/media sending, shell execution, polls, invites, site generation, avatar/presence/nickname changes, message editing/forwarding/deletion, and more.
 - Autonomy: periodic self-directed checks where Maxwell reviews context/goals and decides whether to act without running a decider on every few messages.
 - Per-server custom prompts, long-term memory, and scoped cross-context facts across DMs, servers, groups, and channels.
 - Opt-in REM "dreaming" pass that periodically consolidates recent visible traffic into long-term memory.
@@ -38,6 +38,8 @@ python3 -m venv .venv
 pip install -r requirements.txt
 cp .env.example .env
 ```
+
+YouTube transcript and frame extraction uses `yt-dlp` plus `ffmpeg`. `yt-dlp` is included in `requirements.txt`; install `ffmpeg` with your system package manager if it is not already available.
 
 Edit `.env` with your values, then run:
 
@@ -137,6 +139,10 @@ All commands use the `,` prefix. Admin commands require the user to be in the ad
 | `,vc say <text>` | No | Speak text in VC with TTS |
 
 Live VC replies require `discord-ext-voice-recv`, `PyNaCl`, `ffmpeg`, and an audio-capable OpenAI-compatible provider.
+
+## Web and YouTube Tools
+
+When tools are enabled, Maxwell can use `web_search` for recent/searchable info, `fetch_url` to read a specific web page, and `youtube` for YouTube videos. The YouTube tool returns title/channel/duration, transcript or auto-captions when available, and attaches requested timestamp frames back to the model for visual inspection before Maxwell answers. Timestamps can be written like `0:10` or `1:23,2:45`.
 
 ## Memory and REM
 

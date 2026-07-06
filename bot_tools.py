@@ -2269,6 +2269,237 @@ class FetchUrlTool(Tool):
         return text
 
 
+class YouTubeTool(Tool):
+    """Fetch YouTube transcripts and optional timestamp frames."""
+
+    MAX_TRANSCRIPT_CHARS = 20000
+    MAX_FRAMES = 6
+    YOUTUBE_HOST_RE = re.compile(r"(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com)$", re.I)
+
+    def get_description(self):
+        return (
+            "Fetch a YouTube video's transcript/captions and optionally extract still frames at timestamps. "
+            "Extracted frames are attached to the model for inspection, not posted to chat. "
+            "Use this for YouTube links instead of fetch_url. Params: url (required), timestamps (optional comma-separated seconds or mm:ss/hh:mm:ss), "
+            "max_transcript_chars (optional, default 12000, max 20000), lang (optional, default en)."
+        )
+
+    @classmethod
+    def _is_youtube_url(cls, url: str) -> bool:
+        try:
+            parsed = urlparse(url)
+            return parsed.scheme in {"http", "https"} and bool(
+                parsed.hostname and cls.YOUTUBE_HOST_RE.search(parsed.hostname)
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _parse_timestamp(value: str) -> float | None:
+        text = str(value or "").strip().lower()
+        if not text:
+            return None
+        text = text.removeprefix("t=")
+        if re.fullmatch(r"\d+(?:\.\d+)?s?", text):
+            return float(text.rstrip("s"))
+        parts = text.split(":")
+        if not 1 <= len(parts) <= 3:
+            return None
+        try:
+            nums = [float(p) for p in parts]
+        except ValueError:
+            return None
+        seconds = 0.0
+        for n in nums:
+            seconds = seconds * 60 + n
+        return seconds
+
+    @classmethod
+    def _parse_timestamps(cls, raw: str | None) -> list[float]:
+        if not raw:
+            return []
+        out = []
+        for part in re.split(r"[,\n]+", str(raw)):
+            ts = cls._parse_timestamp(part)
+            if ts is not None and ts >= 0:
+                out.append(ts)
+            if len(out) >= cls.MAX_FRAMES:
+                break
+        return out
+
+    @staticmethod
+    def _format_ts(seconds: float) -> str:
+        total = max(0, int(seconds))
+        h, rem = divmod(total, 3600)
+        m, s = divmod(rem, 60)
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+    async def _run_cmd(self, args: list[str], timeout: int = 60) -> tuple[int, str, str]:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return 124, "", f"timed out after {timeout}s"
+        return (
+            proc.returncode or 0,
+            stdout.decode("utf-8", "replace"),
+            stderr.decode("utf-8", "replace"),
+        )
+
+    @staticmethod
+    def _strip_vtt(raw: str) -> str:
+        lines = []
+        seen = set()
+        for line in raw.splitlines():
+            text = line.strip()
+            if not text or text == "WEBVTT" or text.startswith(("Kind:", "Language:")):
+                continue
+            if "-->" in text or re.fullmatch(r"\d+", text):
+                continue
+            text = re.sub(r"<[^>]+>", "", text)
+            text = re.sub(r"&amp;", "&", text)
+            text = re.sub(r"&lt;", "<", text)
+            text = re.sub(r"&gt;", ">", text)
+            text = re.sub(r"\s+", " ", text).strip()
+            if text and text not in seen:
+                seen.add(text)
+                lines.append(text)
+        return "\n".join(lines)
+
+    async def _download_transcript(self, url: str, lang: str, tmp: Path) -> str:
+        if not shutil.which("yt-dlp"):
+            return ""
+        out_tpl = str(tmp / "subs.%(ext)s")
+        args = [
+            "yt-dlp",
+            "--skip-download",
+            "--write-subs",
+            "--write-auto-subs",
+            "--sub-langs",
+            f"{lang}.*,{lang},en.*",
+            "--sub-format",
+            "vtt",
+            "-o",
+            out_tpl,
+            url,
+        ]
+        _code, _stdout, _stderr = await self._run_cmd(args, timeout=60)
+        candidates = sorted(tmp.glob("subs*.vtt"), key=lambda p: p.stat().st_size, reverse=True)
+        if not candidates:
+            return ""
+        return self._strip_vtt(candidates[0].read_text(encoding="utf-8", errors="replace"))
+
+    async def _video_info(self, url: str) -> dict:
+        if not shutil.which("yt-dlp"):
+            return {}
+        code, stdout, _stderr = await self._run_cmd(
+            ["yt-dlp", "--dump-json", "--no-playlist", url], timeout=45
+        )
+        if code != 0 or not stdout.strip():
+            return {}
+        try:
+            return json.loads(stdout)
+        except json.JSONDecodeError:
+            return {}
+
+    async def _extract_frames(self, url: str, timestamps: list[float], tmp: Path) -> list[str]:
+        if not timestamps or not shutil.which("ffmpeg") or not shutil.which("yt-dlp"):
+            return []
+        code, stream_url, stderr = await self._run_cmd(
+            [
+                "yt-dlp",
+                "-g",
+                "--no-playlist",
+                "-f",
+                "bestvideo[height<=720]/best[height<=720]/best",
+                url,
+            ],
+            timeout=45,
+        )
+        if code != 0 or not stream_url.strip():
+            return [f"frame extraction unavailable: {stderr.strip()[:180] or 'no stream url'}"]
+        video_url = stream_url.strip().splitlines()[0]
+        sent = []
+        for i, ts in enumerate(timestamps[: self.MAX_FRAMES], 1):
+            frame_path = tmp / f"youtube_frame_{i}_{int(ts)}s.jpg"
+            args = [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                str(ts),
+                "-i",
+                video_url,
+                "-frames:v",
+                "1",
+                "-q:v",
+                "3",
+                "-y",
+                str(frame_path),
+            ]
+            code, _stdout, stderr = await self._run_cmd(args, timeout=40)
+            if code != 0 or not frame_path.exists():
+                sent.append(f"{self._format_ts(ts)} frame failed: {stderr.strip()[:120]}")
+                continue
+            try:
+                encoded = base64.b64encode(frame_path.read_bytes()).decode("ascii")
+                sent.append(
+                    f"frame at {self._format_ts(ts)} attached for visual inspection\n"
+                    f"__IMAGE_B64__{encoded}__END_IMAGE_B64__"
+                )
+            except Exception as e:
+                sent.append(f"{self._format_ts(ts)} read failed: {e}")
+        return sent
+
+    async def execute(
+        self,
+        message: Message,
+        url: str | None = None,
+        timestamps: str | None = None,
+        max_transcript_chars: str = "12000",
+        lang: str = "en",
+        **kwargs,
+    ) -> str:
+        if not url:
+            return "Error: url is required"
+        if not self._is_youtube_url(url):
+            return "Error: expected a YouTube URL"
+        try:
+            max_chars = max(1000, min(int(max_transcript_chars), self.MAX_TRANSCRIPT_CHARS))
+        except (TypeError, ValueError):
+            max_chars = 12000
+        lang = re.sub(r"[^A-Za-z0-9_.-]", "", str(lang or "en"))[:20] or "en"
+        requested_ts = self._parse_timestamps(timestamps)
+        with tempfile.TemporaryDirectory(prefix="maxwell_yt_") as tmpdir:
+            tmp = Path(tmpdir)
+            info_task = asyncio.create_task(self._video_info(url))
+            transcript = await self._download_transcript(url, lang, tmp)
+            info = await info_task
+            frame_results = await self._extract_frames(url, requested_ts, tmp)
+
+        title = str(info.get("title") or "YouTube video")
+        uploader = str(info.get("uploader") or info.get("channel") or "unknown")
+        duration = info.get("duration")
+        duration_text = self._format_ts(float(duration)) if isinstance(duration, (int, float)) else "unknown"
+        parts = [f"Title: {title}", f"Channel: {uploader}", f"Duration: {duration_text}"]
+        if transcript:
+            if len(transcript) > max_chars:
+                transcript = transcript[:max_chars] + "\n... (transcript truncated)"
+            parts.append("Transcript:\n" + transcript)
+        else:
+            parts.append("Transcript: unavailable (no captions found or yt-dlp could not fetch them).")
+        if requested_ts:
+            parts.append("Frames: " + ("; ".join(frame_results) if frame_results else "requested but unavailable"))
+        return "\n\n".join(parts)
+
+
 class SendMemeTool(Tool):
     """Send a random meme from Reddit"""
 

@@ -176,6 +176,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     TypingTool,
     TtsTool,
     WebSearchTool,
+    YouTubeTool,
     LeaveVcTool,
     OWNER_IDS,
     close_shared_session,
@@ -696,6 +697,7 @@ DEFAULT_TOOL_PARAMS = {
     "reasoning_log": "thoughts",
     "tts": "text",
     "fetch_url": "url",
+    "youtube": "url",
     "shell": "command",
     "set_nickname": "nickname",
     "set_activity": "name",
@@ -764,10 +766,12 @@ TOOL_PARAM_TAGS = {
     "subreddit",
     "text",
     "thoughts",
+    "timestamps",
     "title",
     "tool_plan",
     "type",
     "url",
+    "max_transcript_chars",
 }
 
 
@@ -1441,6 +1445,7 @@ TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "no_response",
     "shell",
     "fetch_url",
+    "youtube",
     "send_file",
     "send_meme",
     "send_media",
@@ -1788,6 +1793,7 @@ class MaxwellBot(commands.Bot):
         self.tools["no_response"] = NoResponseTool(self)
         self.tools["shell"] = ShellTool(self)
         self.tools["fetch_url"] = FetchUrlTool(self)
+        self.tools["youtube"] = YouTubeTool(self)
         self.tools["send_file"] = SendFileTool(self)
         self.tools["send_message"] = SendMessageTool(self)
         self.tools["reasoning_log"] = ReasoningLogTool(self)

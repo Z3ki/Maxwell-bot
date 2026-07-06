@@ -114,6 +114,6 @@ KNOWN_TOOLS = [
     "forward_message", "typing", "tts", "list_servers", "list_admin_servers",
     "create_category", "create_channel", "edit_channel", "delete_channel",
     "change_avatar", "create_site", "list_sites", "web_search", "no_response",
-    "shell", "fetch_url", "send_file", "send_message", "reasoning_log",
+    "shell", "fetch_url", "youtube", "send_file", "send_message", "reasoning_log",
     "send_meme", "send_media", "leave_vc",
 ]
