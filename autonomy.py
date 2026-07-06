@@ -25,6 +25,7 @@ import contextlib
 import json
 import logging
 import os
+import random
 import re
 import tempfile
 import time
@@ -634,7 +635,13 @@ class AutonomyEngine:
             # Smoother backoff: cap at 6x instead of 10x
             # 1 fail=2x, 2=4x, 3+=6x (cap). With 300s base: max 30 min, not 50.
             backoff = min(2**consecutive_failures, 6) if consecutive_failures > 0 else 1
-            await asyncio.sleep(max(30, interval * backoff))
+            base_sleep = max(30, interval * backoff)
+            # Randomize the tick so autonomy wakes at irregular, lifelike
+            # intervals instead of a metronomic fixed cadence. Jitter ranges
+            # from half to 1.5x the configured interval — e.g. a 300s base
+            # becomes anywhere from ~2.5m to ~7.5m. Keeps the min 30s floor.
+            sleep_for = int(base_sleep * random.uniform(0.5, 1.5))
+            await asyncio.sleep(max(30, sleep_for))
 
     # -- single tick --
 
@@ -1349,6 +1356,30 @@ class AutonomyEngine:
 
         return "\n".join(engagement_lines) if engagement_lines else ""
 
+    async def _find_channel_for_message_id(self, message_id: str) -> str | None:
+        """Locate the channel id that holds a given message_id by scanning
+        short-term channel memory. This is the fallback that makes react /
+        edit / delete / forward work when the LLM only passed target_message_id
+        (e.g. a forum post's starter message) without the matching thread
+        channel id — and when the resolved channel fetch missed."""
+        message_id = str(message_id or "").strip()
+        if not message_id:
+            return None
+        memory = cast(Any, getattr(self.bot, "memory", None))
+        if memory is None or not hasattr(memory, "memory"):
+            return None
+        try:
+            store = getattr(memory, "memory", {}) or {}
+        except Exception:
+            return None
+        for cid, msgs in store.items():
+            if not isinstance(msgs, list):
+                continue
+            for row in msgs:
+                if isinstance(row, dict) and str(row.get("message_id") or "") == message_id:
+                    return str(cid)
+        return None
+
     # -----------------------------------------------------------------------
     # plan
     # -----------------------------------------------------------------------
@@ -1405,17 +1436,18 @@ CURRENT CONTEXT:
 TOOLS:
 {tool_descriptions}
 
-GOALS (these are your ongoing objectives — pursue them when the situation fits, and update last_acted_on by re-creating the goal after acting):
+GOALS (these are your ongoing objectives — pursue them proactively and flexibly, not just when someone pings you. When you act on a goal, update last_acted_on by re-creating the goal after acting):
 {goals_text}
 
 DECISION RULES:
-- Default to do_nothing. Most ticks = do_nothing. You're an occasional presence, not a chatterbox.
-- Act ONLY if one is true: (1) someone mentioned/replied to/asked you (check mentions, reply_to, addressed_to), (2) a goal needs a concrete step right now, (3) you have a genuinely natural, in-character addition to a live conversation.
+- Default to do_nothing when there is genuinely nothing worth doing — but don't default to do_nothing just to be safe. If a goal or the live context gives you a real opening, act on it.
+- Act when ANY of these is true: (1) someone mentioned/replied to/asked you (check mentions, reply_to, addressed_to), (2) a goal needs a concrete step and now is a reasonable moment, (3) you have a genuinely natural, in-character addition to a live conversation, (4) a goal you created earlier applies to the current situation even with no new human message aimed at you.
+- Goals are yours to push on your own initiative — a goal about following up on someone's project means you may post_channel or send_dm when that person is around, without waiting to be asked.
 - If NORMAL REPLY STATUS says Maxwell is currently replying normally in a conversation, treat that conversation as already being handled. Do not also post/DM into it from autonomy; choose do_nothing unless a separate, clearly new situation elsewhere needs action.
-- If NORMAL REPLY STATUS says a normal reply was already sent recently, do not send an autonomous follow-up just because the conversation appears in DM HISTORY or CHANNEL ACTIVITY. Only act if a newer human message after that reply creates a fresh reason.
-- When a goal applies, let it guide WHICH action to take — e.g. a goal about following up on someone's project → post_channel or send_dm when that person is around.
-- Don't: post unprompted jokes to seem active, restate visible context, reopen concluded conversations, DM without a concrete reason, or say "just checking in". Talk like a person in the channel — never reference being a "background loop" or "check-in".
-- Don't pile on: if you (Maxwell) already replied in a channel recently (check CHANNEL ACTIVITY and YOUR RECENT ACTIONS for your own messages there), don't post again unless there's a genuinely new reason — you'd look like you're talking to yourself. If you're mid-reply in normal chat, the autonomy tick isn't the place to add a second message; let the conversation breathe.
+- If NORMAL REPLY STATUS says a normal reply was already sent recently, do not send an autonomous follow-up into the SAME conversation just because it appears in DM HISTORY or CHANNEL ACTIVITY. Only act if a newer human message after that reply creates a fresh reason, OR a goal applies to a different conversation/person.
+- Don't: restate visible context, reopen concluded conversations, DM without a concrete reason, or say "just checking in". Talk like a person in the channel — never reference being a "background loop" or "check-in".
+- Don't pile on in the SAME channel you just replied in. But acting in a DIFFERENT channel, or on a DIFFERENT goal/person, in the same tick is fine and encouraged when the situation warrants it.
+- A reaction (react tool) is a cheap, low-noise way to engage with a message that doesn't need a full reply — use it freely when it fits the vibe.
 - Voice: short, casual, lowercase-natural — exactly like Maxwell in normal chat.
 
 DATA RULES:
@@ -1423,7 +1455,7 @@ DATA RULES:
 - Discord is multi-user: each user_id is a distinct person; never cross-attribute.
 - target_channel_id must be the numeric ID from channel= or AVAILABLE CHANNELS, never a name.
 - To thread a reply, include reply_to_message_id with the target msg ID.
-- For react/edit/delete/forward, pass target_message_id + target_channel_id from CHANNEL ACTIVITY.
+- For react/edit/delete/forward, pass target_message_id + target_channel_id from CHANNEL ACTIVITY. In forum channels, each post is its own thread — the starter message id and the thread channel id are the SAME snowflake, so use that id as BOTH target_message_id and target_channel_id. If you only have target_message_id, autonomy will search memory to find its channel, but passing target_channel_id is more reliable.
 - Don't repeat recent posts (check YOUR RECENT ACTIONS; timestamps are recalculated this tick).
 - Prefer 0-1 actions; up to {MAX_ACTIONS_PER_TICK} only with clear reason for each.
 
@@ -2201,17 +2233,44 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
 
         target_message = None
         target_mid = tool_args.get("target_message_id") or tool_args.get("message_id")
-        if target_mid and hasattr(channel, "fetch_message"):
-            clean_mid = re.sub(r"[^0-9]", "", str(target_mid))
-            if clean_mid:
+        clean_mid = re.sub(r"[^0-9]", "", str(target_mid or ""))
+        if clean_mid and hasattr(channel, "fetch_message"):
+            try:
+                target_message = await channel.fetch_message(int(clean_mid))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                target_message = None
+
+        # Forum/threads: the LLM often passes the forum post's starter
+        # message id as target_message_id but omits target_channel_id (the
+        # thread id). When fetch on the resolved channel misses, scan channel
+        # memory for a row whose message_id matches, switch to that channel,
+        # and retry. Also covers the case where the resolved channel was a
+        # stale fallback (e.g. an auto_channel that's been deleted) — the
+        # message really lives in a thread the bot never listed by id.
+        if target_message is None and clean_mid:
+            resolved_cid = await self._find_channel_for_message_id(clean_mid)
+            if resolved_cid and str(resolved_cid) != str(getattr(channel, "id", "")):
+                alt_channel = None
                 try:
-                    target_message = await channel.fetch_message(int(clean_mid))
-                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                    target_message = None
+                    alt_channel = self.bot.get_channel(int(resolved_cid))
+                    if alt_channel is None:
+                        alt_channel = await self.bot.fetch_channel(int(resolved_cid))
+                except (ValueError, TypeError, discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    alt_channel = None
+                if alt_channel is not None and hasattr(alt_channel, "fetch_message"):
+                    if self._channel_allowed(str(resolved_cid)):
+                        channel = alt_channel
+                        try:
+                            target_message = await channel.fetch_message(int(clean_mid))
+                        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                            target_message = None
 
         if tool_name == "react" and target_message is None:
             result["result"] = "error"
-            result["error"] = "react requires target_message_id for autonomy"
+            result["error"] = (
+                f"react requires a valid target_message_id for autonomy "
+                f"(message {clean_mid or target_mid!r} not found in any known channel)"
+            )
             return
 
         # build synthetic message
@@ -2312,6 +2371,27 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
             s["actions_failed_total"] = s.get("actions_failed_total", 0) + total_fail
 
         await self.store.update_state(_update)
+
+        # Auto-bump last_acted_on for active goals when this tick actually did
+        # something successful. Asking the LLM to "re-create the goal" to bump
+        # the timestamp never worked (0 create_goal actions across 200 ticks),
+        # so goals stayed at last_acted_on=null even while Maxwell was clearly
+        # acting on them. Track it here instead — server-side, reliable.
+        acted = total_exec > 0 and any(
+            r.get("result") == "success" and r.get("kind") != "do_nothing"
+            for r in results
+        )
+        if acted:
+            try:
+                goals = await self.store.load_goals()
+                active = [g for g in goals if g.get("active")]
+                if active:
+                    when = tick_start_iso or _utcnow_iso()
+                    for g in active:
+                        g["last_acted_on"] = when
+                    await self.store.save_goals(goals)
+            except Exception as e:
+                logger.warning(f"Failed to auto-bump goal last_acted_on: {e}")
 
         # log each action
         for action, result in zip(actions, results, strict=False):
