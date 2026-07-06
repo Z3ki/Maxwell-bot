@@ -9,6 +9,7 @@ import logging
 import re
 import os
 import shutil
+import signal
 import sys
 import tempfile
 import time
@@ -6568,6 +6569,25 @@ class MaxwellBot(commands.Bot):
 
 async def main():
     bot = MaxwellBot()
+    _shutdown_called = False
+
+    def _request_shutdown(sig):
+        nonlocal _shutdown_called
+        if _shutdown_called:
+            logger.warning(f"Received signal {sig}; shutdown already in progress")
+            return
+        _shutdown_called = True
+        logger.info(f"Received signal {sig}, initiating graceful shutdown...")
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(bot.close())
+        except RuntimeError:
+            pass
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, _request_shutdown, sig)
+
     try:
         if not bot.config.DISCORD_TOKEN:
             raise RuntimeError("DISCORD_TOKEN is not configured")
@@ -6575,11 +6595,19 @@ async def main():
     except KeyboardInterrupt:
         pass
     finally:
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.remove_signal_handler(sig)
         logger.info("Shutting down Maxwell...")
         try:
             await bot.autonomy_engine.stop()
         except Exception as e:
             logger.error(f"Failed to stop autonomy engine: {e}")
+        try:
+            cc = getattr(bot, "context_cleanup_engine", None)
+            if cc is not None and hasattr(cc, "stop"):
+                await cc.stop()
+        except Exception as e:
+            logger.error(f"Failed to stop context cleanup engine: {e}")
         for task in getattr(bot, "_tasks", []):
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

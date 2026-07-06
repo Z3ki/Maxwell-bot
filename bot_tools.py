@@ -199,6 +199,50 @@ def _clean_channel_name(value: str | None) -> str:
     return text[:100]
 
 
+def _is_path_allowed(path: str, allowed_base: str) -> bool:
+    """Return True if `path` resolves to a regular file under `allowed_base`.
+
+    Blocks path traversal, absolute escapes, and symlinks that point outside
+    the allowed directory. Used to stop LLM-driven file reads.
+    """
+    if not path or not isinstance(path, str):
+        return False
+    try:
+        base = Path(allowed_base).resolve()
+        target = Path(path).resolve()
+        if not target.is_file():
+            return False
+        # is_relative_to rejects .. escapes and symlinks outside base
+        return target.is_relative_to(base)
+    except (OSError, ValueError):
+        return False
+
+
+def _safe_attachment_filename(name: str | None, default: str = "attachment") -> str:
+    """Return a safe Discord attachment filename.
+
+    Strips path components, control characters, and leading dots, then limits
+    length. Keeps the original extension when possible.
+    """
+    raw = str(name or default).strip()
+    # Take only the final path segment and strip any query/fragment junk
+    raw = Path(raw).name
+    # Remove control chars and anything that isn't a safe filename character
+    raw = re.sub(r"[^A-Za-z0-9._-]", "_", raw)
+    # Collapse repeated separators
+    raw = re.sub(r"[._-]{2,}", "_", raw)
+    # Avoid hidden files and names that are only dots/separators
+    raw = raw.lstrip(".")
+    if not raw or raw in {"", ".", ".."}:
+        raw = default
+    # Limit total length; reserve space for any suffix the caller may add
+    max_len = 80
+    if len(raw) > max_len:
+        stem, ext = os.path.splitext(raw)
+        raw = stem[: max_len - len(ext)] + ext
+    return raw
+
+
 # _atomic_json_write_sync imported from utils.py (fd-safe, single source of truth)
 
 
@@ -1567,9 +1611,9 @@ class CreateSiteTool(Tool):
                     if isinstance(entry, str):
                         entry = {"path": entry}
                     src_path = entry.get("path", "")
-                    if not src_path or not os.path.isfile(src_path):
+                    if not src_path or not _is_path_allowed(src_path, self.base_dir):
                         missing_images.append(src_path or "(empty path)")
-                        logger.warning(f"Site image not found: {src_path}")
+                        logger.warning(f"Site image blocked or not found: {src_path}")
                         continue
                     filename = entry.get("filename") or os.path.basename(src_path)
                     # Sanitize filename — only allow safe chars
@@ -1872,7 +1916,7 @@ class SendFileTool(Tool):
         if content is None:
             return "Error: content is required"
 
-        safe_name = Path(str(filename).strip()).name
+        safe_name = _safe_attachment_filename(filename, default="file")
         if not safe_name or safe_name in {".", ".."}:
             return "Error: invalid filename"
 
@@ -1903,6 +1947,26 @@ class SendFileTool(Tool):
         return f"__FILE_SENT__ Sent file: {safe_name} ({len(blob)} bytes)"
 
 
+# Dangerous shell patterns that try to escape the Docker sandbox or access the host.
+# These are blocked before the command reaches the container as defense in depth.
+_SHELL_BLOCKED_PATTERNS = [
+    r"--privileged\b",
+    r"--pid=host\b",
+    r"--net(?:work)?=?host\b",
+    r"--network\b",
+    r"--device\b",
+    r"--cap-add\b",
+    r"--mount\b",
+    r"--volume\b",
+    r"\b-v\s+\S+:\S+",  # docker -v host:container bind mount
+    r"-u\s+root\b",
+    r"--user\s+root\b",
+    r"/var/run/docker\.sock",
+    r"docker\.sock",
+    r"docker\s+(?:run|exec)\b",
+]
+
+
 class ShellTool(Tool):
     """Execute shell commands in the dedicated Docker sandbox."""
 
@@ -1911,6 +1975,7 @@ class ShellTool(Tool):
     DOCKERFILE_DIR = os.path.join(os.path.dirname(__file__), "docker")
     MAX_OUTPUT = 8000
     TIMEOUT = 60
+    MAX_COMMAND_LENGTH = 4000
 
     def get_description(self):
         return (
@@ -2002,9 +2067,27 @@ class ShellTool(Tool):
             return ""
         return raw
 
+    def _validate_command(self, command: str) -> str | None:
+        """Return an error reason if the command looks dangerous, otherwise None."""
+        if not command:
+            return "empty command"
+        if len(command) > self.MAX_COMMAND_LENGTH:
+            return f"command too long (max {self.MAX_COMMAND_LENGTH} chars)"
+        if "\n" in command or "\r" in command:
+            return "newlines are not allowed in shell commands"
+        if any(ord(c) < 32 for c in command):
+            return "control characters are not allowed in shell commands"
+        for pattern in _SHELL_BLOCKED_PATTERNS:
+            if re.search(pattern, command, re.IGNORECASE):
+                return f"blocked dangerous shell pattern"
+        return None
+
     async def _run_shell_command(self, command: str):
         await self._ensure_container()
         sanitized = self._normalize_command(command)
+        validation_error = self._validate_command(sanitized)
+        if validation_error:
+            raise RuntimeError(validation_error)
         if not sanitized:
             raise RuntimeError("empty command")
         proc = await asyncio.create_subprocess_exec(
@@ -2780,7 +2863,9 @@ class SendMediaTool(Tool):
         except Exception as e:
             return f"Error downloading: {e}"
 
-        filename = url.rsplit("/", 1)[-1].split("?")[0] or "media"
+        filename = _safe_attachment_filename(
+            url.rsplit("/", 1)[-1].split("?")[0], default="media"
+        )
         ext = os.path.splitext(filename)[1].lower()
         if ext not in (
             ".png",
@@ -2793,7 +2878,10 @@ class SendMediaTool(Tool):
             ".weba",
             ".mp3",
         ):
-            filename += ".png"
+            # Unknown extension: don't disguise it as a PNG; use a generic safe suffix.
+            # Discord still transports the raw bytes, so this is only a naming hint.
+            logger.warning(f"SendMediaTool normalizing unknown extension {ext!r} to .bin")
+            filename = os.path.splitext(filename)[0] + ".bin"
 
         file = File(BytesIO(media_bytes), filename=filename)
         try:
