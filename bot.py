@@ -867,7 +867,7 @@ ARTIFACT_BLOCK_RE = re.compile(
 PIPE_MARKER_RE = re.compile(
     r"<\|/?(?:tool:[A-Za-z_]\w*|tool_call_begin|tool_call_end|end)\|?>", re.IGNORECASE
 )
-LEAKED_TOOL_CLOSE_RE = re.compile(r"</\s*(?:tool_call|function)\s*>", re.IGNORECASE)
+LEAKED_TOOL_CALL_RE = re.compile(r"</?\s*(?:tool_call|function)\s*>", re.IGNORECASE)
 
 
 def _strip_leading_reasoning_json(text: str) -> str:
@@ -891,7 +891,7 @@ def strip_model_artifact_leaks(text: str, strip_pipe_markers: bool = True) -> st
     cleaned = ARTIFACT_BLOCK_RE.sub("", cleaned)
     if strip_pipe_markers:
         cleaned = PIPE_MARKER_RE.sub("", cleaned)
-    cleaned = LEAKED_TOOL_CLOSE_RE.sub("", cleaned)
+    cleaned = LEAKED_TOOL_CALL_RE.sub("", cleaned)
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
@@ -1001,6 +1001,19 @@ def _parse_tool_body_params(name: str, body: str) -> dict:
         if key not in TOOL_PARAM_TAGS:
             continue
         val = match.group(2).strip()
+        if key not in {"content", "code", "body", "command"}:
+            val = html.unescape(val)
+        params[key] = val
+        consumed.append(match.span())
+    named_param_re = re.compile(
+        r"<param\s+name\s*=\s*(?:\"([A-Za-z_]\w*)\"|'([A-Za-z_]\w*)'|([A-Za-z_]\w*))\s*>\s*(.*?)</\s*param\s*>",
+        re.DOTALL | re.IGNORECASE,
+    )
+    for match in named_param_re.finditer(body or ""):
+        key = next(group for group in match.groups()[:3] if group)
+        if key not in TOOL_PARAM_TAGS:
+            continue
+        val = match.group(4).strip()
         if key not in {"content", "code", "body", "command"}:
             val = html.unescape(val)
         params[key] = val
@@ -1421,6 +1434,7 @@ FOLLOWUP_TOOL_NAMES = {
     "list_sites",
     "web_search",
     "fetch_url",
+    "youtube",
     "shell",
     "list_admin_servers",
     "create_category",

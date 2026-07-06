@@ -26,7 +26,7 @@ import random
 from datetime import datetime, timezone, timedelta
 from discord import Message, File, Activity, Status
 from io import BytesIO
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from tools import Tool
 from ddgs import DDGS as _DDGS
 from utils import _atomic_json_write_sync  # single source of truth, fd-safe
@@ -2294,6 +2294,34 @@ class YouTubeTool(Tool):
         except Exception:
             return False
 
+    @classmethod
+    def _extract_youtube_url(cls, raw: str) -> str:
+        text = str(raw or "").strip()
+        if "<" in text and ">" in text:
+            text = re.sub(r"</?param\b[^>]*>", "", text, flags=re.IGNORECASE).strip()
+            text = re.sub(r"</?(?:url|tool:youtube|youtube)\b[^>]*>", "", text, flags=re.IGNORECASE).strip()
+        match = re.search(
+            r"https?://(?:www\.)?(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/[^\s<>\"']+",
+            text,
+            re.IGNORECASE,
+        )
+        return match.group(0).rstrip(".,)]") if match else text
+
+    @staticmethod
+    def _video_id(url: str) -> str:
+        try:
+            parsed = urlparse(url)
+            host = (parsed.hostname or "").lower()
+            if host.endswith("youtu.be"):
+                return parsed.path.strip("/").split("/", 1)[0]
+            query_id = parse_qs(parsed.query).get("v", [""])[0]
+            if query_id:
+                return query_id
+            match = re.search(r"/(?:embed|shorts|live)/([A-Za-z0-9_-]{6,})", parsed.path)
+            return match.group(1) if match else ""
+        except Exception:
+            return ""
+
     @staticmethod
     def _parse_timestamp(value: str) -> float | None:
         text = str(value or "").strip().lower()
@@ -2373,6 +2401,9 @@ class YouTubeTool(Tool):
         return "\n".join(lines)
 
     async def _download_transcript(self, url: str, lang: str, tmp: Path) -> str:
+        direct = await self._download_timedtext(url, lang)
+        if direct:
+            return direct
         if not shutil.which("yt-dlp"):
             return ""
         out_tpl = str(tmp / "subs.%(ext)s")
@@ -2395,18 +2426,88 @@ class YouTubeTool(Tool):
             return ""
         return self._strip_vtt(candidates[0].read_text(encoding="utf-8", errors="replace"))
 
+    async def _download_timedtext(self, url: str, lang: str) -> str:
+        video_id = self._video_id(url)
+        if not video_id:
+            return ""
+        session = await _get_shared_session()
+        langs = [lang, "en"] if lang != "en" else ["en"]
+        for lang_code in langs:
+            for params in (
+                {"v": video_id, "lang": lang_code, "fmt": "json3"},
+                {"v": video_id, "lang": lang_code, "fmt": "srv3"},
+            ):
+                try:
+                    async with session.get(
+                        "https://www.youtube.com/api/timedtext",
+                        params=params,
+                        timeout=aiohttp.ClientTimeout(total=15),
+                    ) as resp:
+                        if resp.status != 200:
+                            continue
+                        raw = await _read_response_limited(resp, 2 * 1024 * 1024)
+                except Exception:
+                    continue
+                text = raw.decode("utf-8", "replace").strip()
+                if not text:
+                    continue
+                if params.get("fmt") == "json3":
+                    try:
+                        data = json.loads(text)
+                        events = data.get("events", []) if isinstance(data, dict) else []
+                        lines = []
+                        for event in events:
+                            segs = event.get("segs") if isinstance(event, dict) else None
+                            if not isinstance(segs, list):
+                                continue
+                            line = "".join(str(seg.get("utf8", "")) for seg in segs if isinstance(seg, dict))
+                            line = re.sub(r"\s+", " ", line).strip()
+                            if line:
+                                lines.append(line)
+                        if lines:
+                            return "\n".join(lines)
+                    except Exception:
+                        pass
+                else:
+                    text = re.sub(r"<[^>]+>", " ", text)
+                    text = re.sub(r"\s+", " ", text).strip()
+                    if text:
+                        return text
+        return ""
+
     async def _video_info(self, url: str) -> dict:
+        fallback: dict = {}
+        try:
+            session = await _get_shared_session()
+            async with session.get(
+                "https://www.youtube.com/oembed",
+                params={"url": url, "format": "json"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status == 200:
+                    raw = await _read_response_limited(resp, 256 * 1024)
+                    data = json.loads(raw.decode("utf-8", "replace"))
+                    if isinstance(data, dict):
+                        fallback = {
+                            "title": data.get("title"),
+                            "uploader": data.get("author_name"),
+                        }
+        except Exception:
+            fallback = {}
         if not shutil.which("yt-dlp"):
-            return {}
+            return fallback
         code, stdout, _stderr = await self._run_cmd(
             ["yt-dlp", "--dump-json", "--no-playlist", url], timeout=45
         )
         if code != 0 or not stdout.strip():
-            return {}
+            return fallback
         try:
-            return json.loads(stdout)
+            info = json.loads(stdout)
+            if isinstance(info, dict):
+                return {**fallback, **info}
+            return fallback
         except json.JSONDecodeError:
-            return {}
+            return fallback
 
     async def _extract_frames(self, url: str, timestamps: list[float], tmp: Path) -> list[str]:
         if not timestamps or not shutil.which("ffmpeg") or not shutil.which("yt-dlp"):
@@ -2469,6 +2570,7 @@ class YouTubeTool(Tool):
     ) -> str:
         if not url:
             return "Error: url is required"
+        url = self._extract_youtube_url(url)
         if not self._is_youtube_url(url):
             return "Error: expected a YouTube URL"
         try:
