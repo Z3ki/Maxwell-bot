@@ -1664,6 +1664,9 @@ class MaxwellBot(commands.Bot):
         self._vc_text_channels: dict[int, discord.abc.Messageable] = {}
         self._vc_voice_channels: dict[int, Any] = {}
         self._vc_reply_locks: dict[int, asyncio.Lock] = {}
+        self._vc_active_tasks: dict[int, asyncio.Task] = {}
+        self._vc_gen_counter: dict[int, int] = {}
+        self._vc_ai_semaphore = asyncio.Semaphore(2)
         self._vc_playback_until: dict[int, float] = {}
         self._trace_lock = asyncio.Lock()
         self._tasks: list[Any] = []
@@ -2855,6 +2858,9 @@ class MaxwellBot(commands.Bot):
     async def _handle_vc_utterance(self, guild, text_channel, user, wav_path, duration):
         t_total = time.perf_counter()
         t_stage = t_total
+        key = None
+        current = None
+        my_gen = 0
         try:
             if not self.user or user.id == self.user.id:
                 return
@@ -2862,6 +2868,17 @@ class MaxwellBot(commands.Bot):
                 self._control.get("ignore_users", []) or []
             ):
                 return
+            key = self._vc_context_key(guild, None, text_channel)
+            # Cancel any still-running VC reply for this channel so the newest
+            # utterance wins instead of stacking stale generations that queue
+            # behind playback and replay long after the moment passed.
+            prev = self._vc_active_tasks.get(key)
+            if prev is not None and not prev.done():
+                prev.cancel()
+            current = asyncio.current_task()
+            self._vc_active_tasks[key] = current
+            my_gen = self._vc_gen_counter.get(key, 0) + 1
+            self._vc_gen_counter[key] = my_gen
             with open(wav_path, "rb") as f:
                 wav_bytes = f.read()
             media = {
@@ -2955,15 +2972,16 @@ class MaxwellBot(commands.Bot):
                 24, min(int(self._control.get("vc_ai_max_tokens", 90) or 90), 2000)
             )
             t_ai = time.perf_counter()
-            resp = await self.ai_provider.generate_response(
-                messages,
-                media=[media],
-                timeout=vc_timeout,
-                max_tokens=vc_max_tokens,
-                temperature=0.6,
-                disable_reasoning=True,
-                fast_fallback=True,
-            )
+            async with self._vc_ai_semaphore:
+                resp = await self.ai_provider.generate_response(
+                    messages,
+                    media=[media],
+                    timeout=vc_timeout,
+                    max_tokens=vc_max_tokens,
+                    temperature=0.6,
+                    disable_reasoning=True,
+                    fast_fallback=True,
+                )
             t_ai_done = time.perf_counter()
             resp = strip_tool_payload_leaks((resp or "").strip())
             if not resp or resp == "__NO_RESPONSE__":
@@ -2980,6 +2998,11 @@ class MaxwellBot(commands.Bot):
             )
             if len(resp) > max_chars:
                 resp = resp[:max_chars].rsplit(" ", 1)[0].rstrip(".,;: ") + "..."
+            # Bail if a newer utterance superseded this one while generating,
+            # so we don't replay a stale answer after the conversation moved on.
+            if self._vc_gen_counter.get(key, my_gen) != my_gen:
+                logger.info("VC reply superseded by newer utterance, skipping playback")
+                return
             mode = str(self._control.get("vc_reply_mode", "voice")).lower()
             logger.info(
                 "VC timing response user=%s mode=%s chars=%s ai_ms=%.1f preplay_total_ms=%.1f",
@@ -3039,6 +3062,9 @@ class MaxwellBot(commands.Bot):
                 logger.error(f"VC utterance handling failed: {e}\n{traceback.format_exc()}")
         finally:
             Path(wav_path).unlink(missing_ok=True)
+            if key is not None and current is not None:
+                if self._vc_active_tasks.get(key) is current:
+                    self._vc_active_tasks.pop(key, None)
 
     async def _play_vc_response(self, guild, text_channel, response: str):
         t_total = time.perf_counter()
@@ -3065,7 +3091,7 @@ class MaxwellBot(commands.Bot):
                     self._control.get("vc_tts_engine", "local")
                 ).lower() in {"local", "espeak", "espeak-ng"}
                 await _synthesize_tts_wav(
-                    response[:400], wav_path, prefer_local=prefer_local_tts
+                    response, wav_path, prefer_local=prefer_local_tts
                 )
                 t_tts_done = time.perf_counter()
                 if sink:
@@ -3096,6 +3122,16 @@ class MaxwellBot(commands.Bot):
                     )
                     if sink:
                         sink.set_ignore_until(loop.time() + 0.5)
+                except asyncio.CancelledError:
+                    # Cancelled by a newer utterance (or bot shutdown). Stop
+                    # playback immediately so the old audio doesn't bleed
+                    # into the next reply; don't fall through to text fallback.
+                    try:
+                        if vc and vc.is_connected() and vc.is_playing():
+                            vc.stop()
+                    except Exception:
+                        pass
+                    raise
                 except Exception:
                     logger.exception(
                         "VC playback failed after %.1fms",
