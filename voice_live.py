@@ -173,12 +173,44 @@ class LiveSpeechSink(voice_recv.AudioSink):
         out_dir = Path(__file__).resolve().parent / "temp"
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / name
+        # Downmix to mono. Discord delivers stereo 48kHz PCM, but audio-input
+        # LLMs (OpenRouter mimo/gemini/etc.) expect mono and often return empty
+        # on stereo WAVs. Averaging the two channels preserves the signal.
+        mono = self._downmix_to_mono(pcm)
         with wave.open(str(path), "wb") as w:
-            w.setnchannels(self.channels)
+            w.setnchannels(1)
             w.setsampwidth(self.sample_width)
             w.setframerate(self.sample_rate)
-            w.writeframes(pcm)
+            w.writeframes(mono)
         return str(path)
+
+    def _downmix_to_mono(self, pcm: bytes) -> bytes:
+        if self.channels == 1:
+            return pcm
+        import array
+        try:
+            samples = array.array("h", pcm)
+        except ValueError:
+            n = len(pcm) - (len(pcm) % 2)
+            samples = array.array("h", pcm[:n]) if n else array.array("h")
+        ch = self.channels
+        if len(samples) < ch:
+            return b""
+        # Fast path for stereo (Discord's default): slice L/R and average.
+        # zip + generator runs in C, so a 3s utterance (~144k frames) is sub-ms.
+        if ch == 2:
+            left = samples[0::2]
+            right = samples[1::2]
+            mono = array.array("h", ((l + r) // 2 for l, r in zip(left, right)))
+            return mono.tobytes()
+        # General case (rare): average each frame's channels.
+        mono = array.array("h", bytes(2 * (len(samples) // ch)))
+        for i in range(0, len(samples) - ch + 1, ch):
+            s = 0
+            for c in range(ch):
+                s += samples[i + c]
+            mono[i // ch] = s // ch
+        return mono.tobytes()
 
     def cleanup(self):
         self._running = False
