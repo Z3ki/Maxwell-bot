@@ -79,7 +79,7 @@ DEFAULT_CONTROL = {
     "vc_memory_history_messages": 2,
     "vc_cross_context_enabled": False,
     "vc_max_response_chars": 260,
-    "vc_tts_engine": "riva",
+    "vc_tts_engine": "local",
     "vc_reply_mode": "voice",
     "vc_response_mode": "addressed",
     "vc_wake_words": ["maxwell"],
