@@ -2949,10 +2949,10 @@ class MaxwellBot(commands.Bot):
                 len(facts),
             )
             vc_timeout = max(
-                8, min(int(self._control.get("vc_ai_timeout_seconds", 25) or 25), 90)
+                8, min(int(self._control.get("vc_ai_timeout_seconds", 25) or 25), 120)
             )
             vc_max_tokens = max(
-                24, min(int(self._control.get("vc_ai_max_tokens", 90) or 90), 240)
+                24, min(int(self._control.get("vc_ai_max_tokens", 90) or 90), 2000)
             )
             t_ai = time.perf_counter()
             resp = await self.ai_provider.generate_response(
@@ -2976,7 +2976,7 @@ class MaxwellBot(commands.Bot):
                 return
             max_chars = max(
                 80,
-                min(int(self._control.get("vc_max_response_chars", 260) or 260), 600),
+                min(int(self._control.get("vc_max_response_chars", 260) or 260), 4000),
             )
             if len(resp) > max_chars:
                 resp = resp[:max_chars].rsplit(" ", 1)[0].rstrip(".,;: ") + "..."
