@@ -62,45 +62,74 @@ def _patch_voice_recv_decoder():
             except Exception:
                 user_id = None
         if packet and user_id is not None:
+            dave_failed = False
             try:
                 vc = self.sink.voice_client
                 session = getattr(
                     getattr(vc, "_connection", None), "dave_session", None
                 )
                 if session is not None and getattr(session, "ready", False):
+                    # Proactively enable passthrough (sticky, no expiry) the first
+                    # time we see a ready DAVE session. Peers whose clients haven't
+                    # engaged E2E send unencrypted frames that davey otherwise drops
+                    # with UnencryptedWhenPassthroughDisabled; passthrough lets them
+                    # through while still decrypting genuinely encrypted frames.
+                    enabled = getattr(self, "_maxwell_passthrough_sessions", None)
+                    if enabled is None:
+                        enabled = set()
+                        self._maxwell_passthrough_sessions = enabled
+                    if id(session) not in enabled and hasattr(session, "set_passthrough_mode"):
+                        try:
+                            session.set_passthrough_mode(True)
+                            enabled.add(id(session))
+                        except Exception:
+                            logging.getLogger(__name__).debug(
+                                "Failed to enable DAVE passthrough proactively", exc_info=True
+                            )
                     packet.decrypted_data = session.decrypt(
                         int(user_id), davey.MediaType.audio, packet.decrypted_data
                     )
             except Exception as exc:
                 if "UnencryptedWhenPassthroughDisabled" in str(exc):
+                    # Reactive fallback: force passthrough on and retry the decrypt
+                    # so this packet is recovered instead of dropped as corrupted.
                     try:
-                        # session was assigned above in the try block; grab it from the closure
                         vc = self.sink.voice_client
                         _session = getattr(
                             getattr(vc, "_connection", None), "dave_session", None
                         )
-                        if _session is not None and hasattr(_session, "can_passthrough"):
-                            _session.can_passthrough(int(user_id))
-                        if _session is not None and hasattr(
-                            _session, "set_passthrough_mode"
-                        ):
-                            _session.set_passthrough_mode(True, 10)
+                        if _session is not None and hasattr(_session, "set_passthrough_mode"):
+                            _session.set_passthrough_mode(True)
+                        if _session is not None and getattr(_session, "ready", False):
+                            packet.decrypted_data = _session.decrypt(
+                                int(user_id), davey.MediaType.audio, packet.decrypted_data
+                            )
                     except Exception:
                         logging.getLogger(__name__).debug(
-                            "Failed to enable DAVE passthrough", exc_info=True
+                            "DAVE passthrough retry failed", exc_info=True
                         )
-                log_key = "_maxwell_dave_decrypt_errors"
-                count = getattr(self, log_key, 0) + 1
-                setattr(self, log_key, count)
-                if count <= 3 or count % 100 == 0:
-                    logging.getLogger(__name__).warning(
-                        "DAVE decrypt failed ssrc=%s user=%s seq=%s count=%s: %s",
-                        getattr(packet, "ssrc", "?"),
-                        user_id,
-                        getattr(packet, "sequence", "?"),
-                        count,
-                        exc,
-                    )
+                        dave_failed = True
+                elif "NoValidCryptorFound" in str(exc):
+                    # Session isn't synced for this user yet (DAVE key rotation in
+                    # flight). Passthrough can't help — these are transient while
+                    # the session settles. Drop quietly; the OpusError path below
+                    # already rate-limits the "corrupted packet" log.
+                    dave_failed = True
+                else:
+                    dave_failed = True
+                if dave_failed:
+                    log_key = "_maxwell_dave_decrypt_errors"
+                    count = getattr(self, log_key, 0) + 1
+                    setattr(self, log_key, count)
+                    if count <= 3 or count % 100 == 0:
+                        logging.getLogger(__name__).warning(
+                            "DAVE decrypt failed ssrc=%s user=%s seq=%s count=%s: %s",
+                            getattr(packet, "ssrc", "?"),
+                            user_id,
+                            getattr(packet, "sequence", "?"),
+                            count,
+                            exc,
+                        )
         try:
             return original_decode_packet(self, packet)
         except discord.opus.OpusError as exc:
@@ -3001,7 +3030,13 @@ class MaxwellBot(commands.Bot):
                     },
                 )
         except Exception as e:
-            logger.error(f"VC utterance handling failed: {e}\n{traceback.format_exc()}")
+            msg = str(e)
+            # Provider empty/error on VC is usually "not addressed to me" or a
+            # transient blank from the audio model — expected, not a crash.
+            if "empty response" in msg.lower() or "provider call failed" in msg.lower():
+                logger.info("VC utterance skipped (provider returned nothing): %s", msg[:160])
+            else:
+                logger.error(f"VC utterance handling failed: {e}\n{traceback.format_exc()}")
         finally:
             Path(wav_path).unlink(missing_ok=True)
 

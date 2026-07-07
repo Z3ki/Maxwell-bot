@@ -287,9 +287,18 @@ class OllamaProvider:
         session = await self._get_session()
         last_error = None
         last_usage_error = None
+        has_media = bool(payload_media)
+        # Endpoints that rejected this call's media (e.g. "No endpoints found that
+        # support input audio"). We steer retries away from them so an audio
+        # request never dies on a text-only fallback model.
+        audio_broken: set[str] = set()
         max_attempts = min(self.retry_attempts, 2) if fast_fallback and len(self._endpoints) > 1 else self.retry_attempts
         for attempt in range(1, max_attempts + 1):
             endpoint = self._attempt_endpoint(attempt, fast_fallback=fast_fallback)
+            if endpoint.name in audio_broken:
+                usable = [e for e in self._endpoints if e.name not in audio_broken]
+                if usable:
+                    endpoint = usable[0]
             data = self._request_payload(endpoint, chat_messages, tools=tools, model=model, max_tokens=max_tokens, temperature=temperature, disable_reasoning=disable_reasoning)
             request_start = time.perf_counter()
             media_parts = sum(1 for msg in chat_messages for part in (msg.get("content") if isinstance(msg.get("content"), list) else []) if isinstance(part, dict) and part.get("type") != "text")
@@ -337,6 +346,28 @@ class OllamaProvider:
                     if resp.status != 200:
                         error_text = await resp.text()
                         logger.warning("Provider timing status endpoint=%s status=%s headers_ms=%.1f body_chars=%s", endpoint.name, resp.status, headers_ms, len(error_text))
+                        # Fallback model can't handle audio input (OpenRouter 404:
+                        # "No endpoints found that support input audio"). Don't die
+                        # here — mark the endpoint broken and retry an audio-capable
+                        # one (typically the primary) instead.
+                        if (
+                            has_media
+                            and resp.status == 404
+                            and "support input audio" in error_text.lower()
+                        ):
+                            audio_broken.add(endpoint.name)
+                            usable = [e for e in self._endpoints if e.name not in audio_broken]
+                            if not usable:
+                                raise RuntimeError(
+                                    f"Provider {endpoint.name} audio-unsupported and no alternatives: {error_text[:200]}"
+                                )
+                            if attempt >= max_attempts:
+                                max_attempts = attempt + len(usable)
+                            logger.warning(
+                                "Provider endpoint %s cannot handle audio media; retrying with %s",
+                                endpoint.name, usable[0].name,
+                            )
+                            continue
                         # Auto-clamp max_tokens on context overflow (OpenRouter returns 400)
                         if resp.status == 400 and "maximum context length" in error_text.lower() and max_tokens is None:
                             import re as _re
