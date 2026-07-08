@@ -5854,9 +5854,10 @@ class MaxwellBot(commands.Bot):
         custom_prompt = self.memory.get_server_prompt(server_id)
         if custom_prompt:
             system_parts.append(custom_prompt)
-        system_parts.append(
-            f"Style: {self._get_personality() if hasattr(self, '_get_personality') else self._control.get('base_personality', DEFAULT_CONTROL['base_personality'])}\nLimit: {int(self._control.get('max_response_chars', 1000) or 1000)} chars."
-        )
+        else:
+            system_parts.append(
+                f"Style: {self._get_personality() if hasattr(self, '_get_personality') else self._control.get('base_personality', DEFAULT_CONTROL['base_personality'])}\nLimit: {int(self._control.get('max_response_chars', 1000) or 1000)} chars."
+            )
         drugged_remaining = (
             self._drugged_until.get(channel_id, 0) - asyncio.get_running_loop().time()
         )
