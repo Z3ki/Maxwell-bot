@@ -420,18 +420,6 @@ class ImageGeneratorTool(Tool):
                     logger.info(
                         f"NVIDIA image generated successfully, size: {len(image_bytes)} bytes"
                     )
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                logger.warning(
-                    f"NVIDIA image connection error (attempt {attempt + 1}/{max_retries}): {e}"
-                )
-                if "Server disconnected" in str(e) or "Connection" in str(e):
-                    session = await _recreate_shared_session()
-                last_error = f"Error generating image: connection failed. Try again later."
-                if attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 10
-                    await asyncio.sleep(wait_time)
-                    continue
-                break
                     # Send to Discord so the model can SEE it in chat
                     file = File(BytesIO(image_bytes), filename="generated_image.png")
                     sent_msg = None
@@ -460,6 +448,18 @@ class ImageGeneratorTool(Tool):
                     result += "\nLook at the image you just posted. If it looks good, mention the URL or use it for the site. "
                     result += "If it looks bad, call image_generator again with an improved prompt."
                     return result
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                logger.warning(
+                    f"NVIDIA image connection error (attempt {attempt + 1}/{max_retries}): {e}"
+                )
+                if "Server disconnected" in str(e) or "Connection" in str(e):
+                    session = await _recreate_shared_session()
+                last_error = f"Error generating image: connection failed. Try again later."
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 10
+                    await asyncio.sleep(wait_time)
+                    continue
+                break
             except asyncio.TimeoutError:
                 logger.warning(
                     f"NVIDIA image timeout, attempt {attempt + 1}/{max_retries}"
