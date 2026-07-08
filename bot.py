@@ -900,6 +900,11 @@ PIPE_MARKER_RE = re.compile(
     r"<\|/?(?:tool:[A-Za-z_]\w*|tool_call_begin|tool_call_end|end)\|?>", re.IGNORECASE
 )
 LEAKED_TOOL_CALL_RE = re.compile(r"</?\s*(?:tool_call|function)\s*>", re.IGNORECASE)
+# Some models (or fine-tunes) wrap final replies in <message>...</message>
+# that should never be shown to users.
+LEAKED_MESSAGE_TAG_RE = re.compile(
+    r"</?\s*message\s*>", re.IGNORECASE
+)
 
 
 def _strip_leading_reasoning_json(text: str) -> str:
@@ -924,6 +929,7 @@ def strip_model_artifact_leaks(text: str, strip_pipe_markers: bool = True) -> st
     if strip_pipe_markers:
         cleaned = PIPE_MARKER_RE.sub("", cleaned)
     cleaned = LEAKED_TOOL_CALL_RE.sub("", cleaned)
+    cleaned = LEAKED_MESSAGE_TAG_RE.sub("", cleaned)
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
