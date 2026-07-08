@@ -203,6 +203,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     SetActivityTool,
     SetNicknameTool,
     ShellTool,
+    SubAgentTool,
     TypingTool,
     TtsTool,
     WebSearchTool,
@@ -214,6 +215,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     _is_safe_url,
     _read_response_limited,
 )
+from utils import _atomic_json_write_sync  # fd-safe, single source of truth  # noqa: E402
 from control_defaults import DEAD_CONTROL_KEYS, DEFAULT_CONTROL, parse_bool  # noqa: E402
 from config import Config  # noqa: E402
 from memory import MemoryManager, RemEventLog  # noqa: E402
@@ -1526,8 +1528,6 @@ def _tool_results_need_followup(tool_results: list[str]) -> bool:
     return False
 
 
-from utils import _atomic_json_write_sync  # fd-safe, single source of truth
-
 
 class ToolCircuitBreaker:
     """Track tool failures and temporarily disable failing tools."""
@@ -1861,6 +1861,7 @@ class MaxwellBot(commands.Bot):
         self.tools["send_meme"] = SendMemeTool(self)
         self.tools["send_media"] = SendMediaTool(self)
         self.tools["leave_vc"] = LeaveVcTool(self)
+        self.tools["sub_agent"] = SubAgentTool(self)
 
     def _build_activities(self):
         activities = []
@@ -5273,7 +5274,6 @@ class MaxwellBot(commands.Bot):
             and "youtube" in self.tools
             and "youtube" not in set(self._control.get("disabled_tools", []) or [])
         ):
-            from bot_tools import YouTubeTool as _YouTubeTool
             yt_urls = re.findall(
                 r"https?://(?:www\.)?(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/[^\s<>\"']+",
                 content or "",
@@ -5446,10 +5446,19 @@ class MaxwellBot(commands.Bot):
                 except discord.Forbidden:
                     pass
         except Exception as e:
+            is_timeout = (
+                isinstance(e, asyncio.TimeoutError)
+                or (isinstance(e, RuntimeError) and "timed out" in str(e).lower())
+            )
             logger.error(f"Error handling message: {e}\n{traceback.format_exc()}")
             if self._control.get("error_replies", True):
                 try:
-                    await message.channel.send("something went wrong... try again")
+                    if is_timeout:
+                        await message.channel.send(
+                            "timed out waiting for a response (10 min). try again or break the task into smaller pieces."
+                        )
+                    else:
+                        await message.channel.send("something went wrong... try again")
                     normal_reply_sent = True
                 except discord.Forbidden:
                     pass

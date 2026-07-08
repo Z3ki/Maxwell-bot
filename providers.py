@@ -242,7 +242,7 @@ class OllamaProvider:
         return initialized
 
     async def generate_response(
-        self, messages: list[dict], images: list[str] = None, media: list[dict] = None, timeout: int = 60, **kwargs
+        self, messages: list[dict], images: list[str] = None, media: list[dict] = None, timeout: int = 600, **kwargs
     ) -> str:
         """Generate response. images is legacy b64 list, media is list of {b64, mime_type}."""
         message = await self.generate_chat_completion(messages, images=images, media=media, timeout=timeout, **kwargs)
@@ -263,7 +263,7 @@ class OllamaProvider:
         media: list[dict] = None,
         tools: list[dict] = None,
         model: str = None,
-        timeout: int = 60,
+        timeout: int = 600,
         max_tokens: int = None,
         temperature: float = None,
         disable_reasoning: bool = None,

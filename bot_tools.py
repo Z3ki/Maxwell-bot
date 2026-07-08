@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any, cast
 import socket
 import tempfile
+import html
+import wave
 
 import asyncio
 import base64
@@ -30,6 +32,7 @@ from urllib.parse import parse_qs, urlparse
 from tools import Tool
 from ddgs import DDGS as _DDGS
 from utils import _atomic_json_write_sync  # single source of truth, fd-safe
+from subagent_runner import run_subagent_task
 
 logger = logging.getLogger(__name__)
 
@@ -809,10 +812,8 @@ class SetActivityTool(Tool):
         )
 
     def _parse_elapsed(self, elapsed: str) -> int:
-        import re as _re
-
         total_ms = 0
-        for match in _re.finditer(r"(\d+)\s*(h|m|s|d)", elapsed.lower()):
+        for match in re.finditer(r"(\d+)\s*(h|m|s|d)", elapsed.lower()):
             val = int(match.group(1))
             unit = match.group(2)
             if unit == "d":
@@ -908,14 +909,12 @@ class CreatePollTool(Tool):
             if len(option_list) > 10:
                 return "Error: Maximum 10 options allowed"
 
-            import datetime
-
             hours = int(duration_hours)
             if hours < 1 or hours > 168:
                 return "Error: duration_hours must be between 1 and 168"
             poll = discord.Poll(
                 question=question,
-                duration=datetime.timedelta(hours=hours),
+                duration=timedelta(hours=hours),
             )
             for opt in option_list:
                 poll.add_answer(text=opt)
@@ -1537,6 +1536,9 @@ class CreateSiteTool(Tool):
             "Params: name (short slug, lowercase/numbers/hyphens), title (headline), "
             "body (FULL HTML document — write complete <!DOCTYPE html> pages with all styles/JS inline. "
             "Written as-is to file, no template wrapping), encoding (optional: text or base64; use base64 for exact full HTML). "
+            "Inline <script> and <style> are allowed and will run. External CDN libraries (e.g. https:// cdnjs, jsdelivr, "
+            "Google Fonts, unpkg) work too. This is the right tool for coding full websites, apps, games, calculators, "
+            "demos, portfolios, and anything interactive — write the complete working HTML/JS/CSS in body. "
             "Only generate images with image_generator if the site NEEDS images (visual showcase, portfolio, etc). "
             "Plain text/CSS sites do NOT need images. If you do generate images, use the returned Discord CDN URL in <img> tags."
         )
@@ -1630,21 +1632,56 @@ class CreateSiteTool(Tool):
                         logger.warning(f"Failed to copy image {src_path}: {e}")
 
             index_path = os.path.join(site_dir, "index.html")
-            # Inject CSP meta tag to mitigate XSS from arbitrary HTML
-            csp_meta = (
-                '<meta http-equiv="Content-Security-Policy" '
-                "content=\"default-src 'self'; script-src 'self'; "
-                "style-src 'unsafe-inline'; img-src * data:; connect-src 'self'\">"
-            )
+            # Inject a permissive CSP meta tag. The whole point of create_site is
+            # letting the model write complete, functional HTML pages with inline
+            # <script> and <style>, external CDN libraries (fonts, frameworks),
+            # and arbitrary images. The old CSP blocked script-src to 'self' only,
+            # which silently broke every JS-bearing page the tool was built to
+            # produce. Per the README security model, generated sites are arbitrary
+            # HTML served on a SEPARATE origin from admin pages, so XSS risk to
+            # admin credentials is already mitigated at the hosting layer.
+            # 'unsafe-inline' covers both script and style; data: URIs cover inline
+            # SVG/embedded assets; https: allows CDNs without listing each host.
             if "<head" in body.lower():
-                body = re.sub(
-                    r"(<head[^>]*>)",
-                    r"\1\n" + csp_meta,
-                    body,
-                    count=1,
-                    flags=re.IGNORECASE,
+                head_match = re.search(
+                    r"<head[^>]*>", body, re.IGNORECASE
                 )
+                if head_match and re.search(
+                    r"http-equiv\s*=\s*[\"']?Content-Security-Policy",
+                    body,
+                    re.IGNORECASE,
+                ):
+                    csp_meta = ""  # page already declares its own CSP; don't double-inject
+                else:
+                    csp_meta = (
+                        '<meta http-equiv="Content-Security-Policy" '
+                        "content=\"default-src https: data: blob:; "
+                        "img-src https: data: blob:; "
+                        "style-src 'unsafe-inline' https:; "
+                        "script-src 'unsafe-inline' 'unsafe-eval' https:; "
+                        "font-src https: data:; "
+                        "connect-src https:; "
+                        "media-src https: data: blob:;\">"
+                    )
+                if csp_meta:
+                    body = re.sub(
+                        r"(<head[^>]*>)",
+                        r"\1\n" + csp_meta,
+                        body,
+                        count=1,
+                        flags=re.IGNORECASE,
+                    )
             elif "<html" in body.lower():
+                csp_meta = (
+                    '<meta http-equiv="Content-Security-Policy" '
+                    "content=\"default-src https: data: blob:; "
+                    "img-src https: data: blob:; "
+                    "style-src 'unsafe-inline' https:; "
+                    "script-src 'unsafe-inline' 'unsafe-eval' https:; "
+                    "font-src https: data:; "
+                    "connect-src https:; "
+                    "media-src https: data: blob:;\">"
+                )
                 body = re.sub(
                     r"(<html[^>]*>)",
                     r"\1\n<head>" + csp_meta + "</head>",
@@ -1653,6 +1690,16 @@ class CreateSiteTool(Tool):
                     flags=re.IGNORECASE,
                 )
             else:
+                csp_meta = (
+                    '<meta http-equiv="Content-Security-Policy" '
+                    "content=\"default-src https: data: blob:; "
+                    "img-src https: data: blob:; "
+                    "style-src 'unsafe-inline' https:; "
+                    "script-src 'unsafe-inline' 'unsafe-eval' https:; "
+                    "font-src https: data:; "
+                    "connect-src https:; "
+                    "media-src https: data: blob:;\">"
+                )
                 body = "<head>" + csp_meta + "</head>\n" + body
             async with aiofiles.open(index_path, "w", encoding="utf-8") as f:
                 await f.write(body)
@@ -1889,16 +1936,20 @@ class NoResponseTool(Tool):
 
 
 class SendFileTool(Tool):
-    """Create and send an arbitrary file attachment"""
+    """Create and send an arbitrary file attachment, or send an existing file from disk."""
 
     MAX_SIZE = 25 * 1024 * 1024
 
     def get_description(self):
         return (
-            "Create a file with any filename/extension and send it as an attachment. "
+            "Create a file with any filename/extension and send it as an attachment, "
+            "or send a file already on disk. "
             "Use this for .txt, .py, .json, .html, binary files, etc. "
             "For code/HTML/JSON or exact file bytes, prefer encoding=base64 so markup/backticks are preserved exactly. "
-            "Params: filename (required), content (required), encoding (optional: text or base64; default text)."
+            "Params: filename (required when using content), content (required when creating inline), "
+            "path (optional: absolute path to an existing file on disk to send), "
+            "encoding (optional: text or base64; default text). "
+            "When path is given, the file is read from a safe directory (data, sites, subagents, shell workdir) and sent directly."
         )
 
     async def execute(
@@ -1907,10 +1958,36 @@ class SendFileTool(Tool):
         filename: str | None = None,
         content: str | None = None,
         encoding: str = "text",
+        path: str | None = None,
         **kwargs,
     ) -> str:
         if self.bot and not self.bot._is_admin(message.author.id):
             return "Error: send_file is admin-only"
+
+        # Path mode: send a file that already exists on disk.
+        if path:
+            allowed_bases = self._allowed_send_file_bases()
+            found_base = None
+            for base in allowed_bases:
+                if _is_path_allowed(path, base):
+                    found_base = base
+                    break
+            if not found_base:
+                return (
+                    f"Error: path '{path}' is not in an allowed directory. "
+                    f"Allowed: {', '.join(allowed_bases)}"
+                )
+            try:
+                target = Path(path).resolve()
+                blob = await asyncio.to_thread(target.read_bytes)
+            except FileNotFoundError:
+                return f"Error: file not found at '{path}'"
+            except Exception as e:
+                return f"Error reading file from disk: {e}"
+            safe_name = filename or _safe_attachment_filename(target.name, default="file")
+            return await self._send_blob(message, blob, safe_name)
+
+        # Inline-content mode (original behavior).
         if not filename or not str(filename).strip():
             return "Error: filename is required"
         if content is None:
@@ -1931,6 +2008,23 @@ class SendFileTool(Tool):
         except Exception as e:
             return f"Error: could not decode file content: {e}"
 
+        return await self._send_blob(message, blob, safe_name)
+
+    def _allowed_send_file_bases(self) -> list[str]:
+        bases = [os.path.abspath("data")]
+        site_dir = getattr(getattr(self, "bot", None), "config", None)
+        if site_dir:
+            site_path = getattr(site_dir, "MAXWELL_SITE_DIR", "")
+            if site_path:
+                bases.append(os.path.abspath(site_path))
+        subagent_base = os.environ.get("OPENCODE_SUBAGENT_BASE_DIR", "subagents")
+        bases.append(os.path.abspath(subagent_base))
+        # Legacy shell tool shared host directory, if configured.
+        shell_host = os.path.join(os.path.dirname(__file__), "shelldocker")
+        bases.append(os.path.abspath(shell_host))
+        return bases
+
+    async def _send_blob(self, message: Message, blob: bytes, safe_name: str) -> str:
         if len(blob) > self.MAX_SIZE:
             return f"Error: file is too large (max {self.MAX_SIZE // 1024 // 1024} MB)"
 
@@ -2079,7 +2173,7 @@ class ShellTool(Tool):
             return "control characters are not allowed in shell commands"
         for pattern in _SHELL_BLOCKED_PATTERNS:
             if re.search(pattern, command, re.IGNORECASE):
-                return f"blocked dangerous shell pattern"
+                return "blocked dangerous shell pattern"
         return None
 
     async def _run_shell_command(self, command: str):
@@ -2297,10 +2391,8 @@ class FetchUrlTool(Tool):
         try:
             if "json" in content_type or url.endswith(".json"):
                 text = raw.decode(errors="replace")
-                import json as _json
-
                 try:
-                    text = _json.dumps(_json.loads(text), indent=2, ensure_ascii=False)
+                    text = json.dumps(json.loads(text), indent=2, ensure_ascii=False)
                 except Exception:
                     pass
             elif (
@@ -2332,12 +2424,11 @@ class FetchUrlTool(Tool):
                     flags=re.IGNORECASE,
                 )
                 text = re.sub(r"<[^>]+>", "", text)
-                text = re.sub(r"&nbsp;", " ", text)
-                text = re.sub(r"&amp;", "&", text)
-                text = re.sub(r"&lt;", "<", text)
-                text = re.sub(r"&gt;", ">", text)
-                text = re.sub(r"&quot;", '"', text)
-                text = re.sub(r"&#\d+;", "", text)
+                # Decode ALL HTML entities (named + numeric) in one pass instead
+                # of hand-picking a few common ones. The old code dropped numeric
+                # entities like &#8217; (right single quote) entirely and missed
+                # anything beyond the handful it special-cased.
+                text = html.unescape(text)
                 text = re.sub(r"\n{3,}", "\n\n", text)
                 text = re.sub(r"[ \t]+", " ", text)
             else:
@@ -2921,10 +3012,6 @@ class TtsTool(Tool):
         language_key = _tts_language_key(language, lang, **kwargs)
         lang_is_spanish = language_key == "spanish"
 
-        import wave
-        import os
-        import discord
-
         # Determine API Key and Setup File
         bot_config = getattr(getattr(self, "bot", None), "config", None)
         nvidia_api_key = os.environ.get("NVIDIA_API_KEY", "") or getattr(
@@ -3198,3 +3285,65 @@ class LeaveVcTool(Tool):
             return "Successfully disconnected from the voice channel."
         except Exception as e:
             return f"Error leaving voice channel: {e}"
+
+
+class SubAgentTool(Tool):
+    """Spawn a background OpenCode sub-agent to handle long tasks."""
+
+    def get_description(self):
+        return (
+            "Launch an OpenCode sub-agent to work on a long or complex task in the background. "
+            "The main bot can keep chatting while the sub-agent runs. "
+            "Params: task (required, full prompt for the sub-agent), slug (optional short name), "
+            "timeout_minutes (optional, default 30, max 120), files (optional JSON array of file paths to attach). "
+            "The sub-agent works in its own directory under the Maxwell project. "
+            "It uses Ollama Cloud with the minimax-m3:cloud model by default. "
+            "I'll post the result to the channel when the sub-agent finishes."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        task: str | None = None,
+        slug: str | None = None,
+        timeout_minutes: str = "30",
+        files: str | None = None,
+        **kwargs,
+    ) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: sub_agent is admin-only"
+        if not task or not str(task).strip():
+            return "Error: task prompt is required"
+
+        try:
+            minutes = max(1, min(int(timeout_minutes), 120))
+        except (TypeError, ValueError):
+            minutes = 30
+
+        extra_files: list[str] = []
+        if files:
+            try:
+                parsed = json.loads(files)
+                if isinstance(parsed, list):
+                    extra_files = [str(f).strip() for f in parsed if str(f).strip()]
+                elif isinstance(parsed, str):
+                    extra_files = [parsed.strip()] if parsed.strip() else []
+            except json.JSONDecodeError:
+                extra_files = [f.strip() for f in str(files).split(",") if f.strip()]
+
+        try:
+            model = os.environ.get(
+                "OPENCODE_SUBAGENT_MODEL", "ollama-cloud/minimax-m3:cloud"
+            )
+            return await run_subagent_task(
+                self.bot,
+                message,
+                task,
+                slug=slug or "task",
+                model=model,
+                timeout_minutes=minutes,
+                extra_files=extra_files,
+            )
+        except Exception as e:
+            logger.exception("Failed to start sub-agent")
+            return f"Error starting sub-agent: {e}"

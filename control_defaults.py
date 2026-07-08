@@ -43,7 +43,7 @@ DEFAULT_CONTROL = {
     "per_user_cooldown_seconds": 1.5,
     "process_images": True,
     "max_image_size_mb": 10,
-    "ai_timeout_seconds": 180,
+    "ai_timeout_seconds": 600,
     "ai_concurrency": 2,
     "memory_history_messages": 40,
     "memory_context_budget": 50000,
@@ -113,5 +113,5 @@ KNOWN_TOOLS = [
     "create_category", "create_channel", "edit_channel", "delete_channel",
     "change_avatar", "create_site", "list_sites", "web_search", "no_response",
     "shell", "fetch_url", "youtube", "send_file", "send_message", "reasoning_log",
-    "send_meme", "send_media", "leave_vc",
+    "send_meme", "send_media", "leave_vc", "sub_agent",
 ]
