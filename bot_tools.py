@@ -454,7 +454,7 @@ class ImageGeneratorTool(Tool):
                 )
                 if "Server disconnected" in str(e) or "Connection" in str(e):
                     session = await _recreate_shared_session()
-                last_error = f"Error generating image: connection failed. Try again later."
+                last_error = "Error generating image: connection failed. Try again later."
                 if attempt < max_retries - 1:
                     wait_time = (attempt + 1) * 10
                     await asyncio.sleep(wait_time)

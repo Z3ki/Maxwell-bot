@@ -316,7 +316,6 @@ class ContextCleanupEngine:
             await self.store.patch_state(
                 {"running": True, "running_since": _utcnow_iso()}
             )
-            success = False
             started = _utcnow_iso()
             start = time.time()
             try:
@@ -337,7 +336,6 @@ class ContextCleanupEngine:
                 await self._finish_pass(
                     started, duration, audit, applied, skipped, None
                 )
-                success = True
                 return {
                     "skipped": False,
                     "ops": applied,
