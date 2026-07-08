@@ -1642,6 +1642,7 @@ class MaxwellBot(commands.Bot):
         self._current_game = None
         self._cooldowns: dict[str, float] = {}
         self._active_requests: dict[str, asyncio.Task] = {}
+        self._active_request_user: dict[str, str] = {}
         self._stop_until: dict[str, float] = {}
         self._drugged_until: dict[str, float] = {}
         self._sites: dict[str, dict] = {}
@@ -1875,6 +1876,25 @@ class MaxwellBot(commands.Bot):
         if channel_id not in self._channel_locks:
             self._channel_locks[channel_id] = asyncio.Lock()
         return self._channel_locks[channel_id]
+
+    def _message_addresses_self(self, message) -> bool:
+        """True if this message is directed at Maxwell (DM, mention, or reply to him).
+
+        Used for the same-user interrupt check, which runs before the channel
+        lock is acquired. Callers should ensure message.reference is already
+        resolved (fetch happens earlier in on_message) for the reply case.
+        """
+        if self.user is None:
+            return False
+        if isinstance(message.channel, discord.DMChannel):
+            return True
+        if self.user in (message.mentions or []):
+            return True
+        ref = getattr(message, "reference", None)
+        resolved = getattr(ref, "resolved", None) if ref else None
+        if resolved is not None and hasattr(resolved, "author"):
+            return getattr(resolved.author, "id", None) == self.user.id
+        return False
 
     async def _acquire_ai_slot(self, timeout: float):
         loop = asyncio.get_running_loop()
@@ -2111,19 +2131,45 @@ class MaxwellBot(commands.Bot):
         if not has_content and not has_attachment and not has_embed:
             return
 
-        async with self._get_channel_lock(channel_id):
-            if (
-                message.reference
-                and not message.reference.resolved
-                and message.reference.message_id
-            ):
-                try:
-                    message.reference.resolved = await message.channel.fetch_message(
-                        message.reference.message_id
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to fetch referenced message: {e}")
+        # Resolve the referenced message before acquiring the channel lock so
+        # the same-user interrupt below can tell whether this is a reply to
+        # Maxwell, and so the lock isn't held during the fetch.
+        if (
+            message.reference
+            and not message.reference.resolved
+            and message.reference.message_id
+        ):
+            try:
+                message.reference.resolved = await message.channel.fetch_message(
+                    message.reference.message_id
+                )
+            except Exception as e:
+                logger.warning(f"Failed to fetch referenced message: {e}")
 
+        # Same-user interrupt: if this user already has an in-flight request in
+        # this channel and is now addressing Maxwell again, cancel the stale
+        # request so the new message takes over immediately instead of queuing
+        # behind a slow (up to ai_timeout_seconds) response. Without this the
+        # channel lock serializes the new message behind the old one, so a
+        # re-ping while Maxwell is mid-generation just waits silently.
+        if not message.author.bot and self.user is not None:
+            active = self._active_requests.get(channel_id)
+            active_user = self._active_request_user.get(channel_id)
+            if (
+                active is not None
+                and active is not asyncio.current_task()
+                and not active.done()
+                and active_user == str(message.author.id)
+                and self._message_addresses_self(message)
+            ):
+                logger.info(
+                    f"Same-user interrupt: cancelling in-flight request for "
+                    f"{message.author.display_name} ({message.author.id}) in "
+                    f"{channel_id}"
+                )
+                active.cancel()
+
+        async with self._get_channel_lock(channel_id):
             if self._control.get("store_memory", True):
                 memory_content = message.content or ""
                 if message.attachments:
@@ -2429,6 +2475,7 @@ class MaxwellBot(commands.Bot):
                 await self.memory.clear_channel_memory(channel_id)
                 self._media_context.pop(channel_id, None)
                 self._active_requests.pop(channel_id, None)
+                self._active_request_user.pop(channel_id, None)
                 self._stop_until.pop(channel_id, None)
                 self._drugged_until.pop(channel_id, None)
                 self._reaction_seen.clear()
@@ -5112,6 +5159,7 @@ class MaxwellBot(commands.Bot):
         current_task = asyncio.current_task()
         if current_task:
             self._active_requests[channel_id] = current_task
+            self._active_request_user[channel_id] = str(message.author.id)
         ai_timeout = max(
             10, min(int(self._control.get("ai_timeout_seconds", 180) or 180), 600)
         )
@@ -5328,6 +5376,7 @@ class MaxwellBot(commands.Bot):
         finally:
             if self._active_requests.get(channel_id) is current_task:
                 self._active_requests.pop(channel_id, None)
+                self._active_request_user.pop(channel_id, None)
             self._tick_media_context(channel_id)
             # Channel is no longer in-flight; record that the bot just replied
             # here so autonomy can avoid re-engaging a conversation it already
