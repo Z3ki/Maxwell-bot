@@ -1634,7 +1634,7 @@ class MaxwellBot(commands.Bot):
         # this to avoid re-engaging a conversation the bot already answered (the
         # "bot sees its own 15-min-old reply and posts again" loop).
         self._last_bot_reply: dict[str, float] = {}
-        self._ai_concurrency = 3
+        self._ai_concurrency = 2
         self._ai_active = 0
         self._ai_cond = asyncio.Condition()
         self._last_avatar_change: float = 0
@@ -3811,7 +3811,7 @@ class MaxwellBot(commands.Bot):
                 if isinstance(default, bool):
                     control[key] = parse_bool(control.get(key), default)
             control["ai_concurrency"] = max(
-                1, min(int(control.get("ai_concurrency", 3) or 3), 10)
+                1, min(int(control.get("ai_concurrency", 2) or 2), 10)
             )
             control["max_response_chars"] = max(
                 80, min(int(control.get("max_response_chars", 500) or 500), 4000)

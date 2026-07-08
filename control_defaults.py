@@ -44,7 +44,7 @@ DEFAULT_CONTROL = {
     "process_images": True,
     "max_image_size_mb": 10,
     "ai_timeout_seconds": 180,
-    "ai_concurrency": 3,
+    "ai_concurrency": 2,
     "memory_history_messages": 40,
     "memory_context_budget": 50000,
     "tool_history_messages": 10,

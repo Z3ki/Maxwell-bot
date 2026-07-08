@@ -3,10 +3,18 @@
 import asyncio
 import aiohttp
 import logging
+import os
 import time
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+# When an endpoint returns a 429 (rate-limited / usage-exhausted), we temporarily
+# steer traffic away from it for this long instead of retrying it in the same
+# request. This avoids hammering a shared upstream pool (e.g. OpenRouter's
+# pooled free keys) that is already rate-limiting us, which only makes the
+# limit worse. Override via OLLAMA_ENDPOINT_COOLDOWN_SECONDS.
+DEFAULT_ENDPOINT_COOLDOWN_SECONDS = 60.0
 
 USAGE_EXHAUSTED_MESSAGE = "The api is down cuz yall drained the usage and im not rich so wait like 2 hours"
 
@@ -111,6 +119,17 @@ class OllamaProvider:
         self._session = None
         self.available = False
         self._last_usage: dict = {}
+        # Per-endpoint rate-limit cooldown: name -> monotonic expiry. While an
+        # endpoint is cooling, _attempt_endpoint steers to an alternative (if
+        # any) so a rate-limited upstream isn't retried immediately.
+        self._endpoint_cooldown: dict[str, float] = {}
+        try:
+            self._cooldown_seconds = float(
+                os.getenv("OLLAMA_ENDPOINT_COOLDOWN_SECONDS", str(DEFAULT_ENDPOINT_COOLDOWN_SECONDS))
+                or DEFAULT_ENDPOINT_COOLDOWN_SECONDS
+            )
+        except (TypeError, ValueError):
+            self._cooldown_seconds = DEFAULT_ENDPOINT_COOLDOWN_SECONDS
 
     def _headers(self, endpoint: ProviderEndpoint = None) -> dict[str, str]:
         api_key = self.api_key if endpoint is None else endpoint.api_key
@@ -122,10 +141,35 @@ class OllamaProvider:
         if len(self._endpoints) < 2:
             return self._endpoints[0]
         if fast_fallback:
-            return self._endpoints[0] if attempt == 1 else self._endpoints[1]
-        # Attempt 1 and 2: primary (main)
-        # Attempt 3 and beyond: fallback (second provider)
-        return self._endpoints[0] if attempt <= 2 else self._endpoints[1]
+            natural = self._endpoints[0] if attempt == 1 else self._endpoints[1]
+        else:
+            # Attempt 1 and 2: primary (main)
+            # Attempt 3 and beyond: fallback (second provider)
+            natural = self._endpoints[0] if attempt <= 2 else self._endpoints[1]
+        # If the chosen endpoint is rate-limit cooling and a healthy alternative
+        # exists, skip straight to it. This turns a 429 on a shared upstream into
+        # an immediate fallback instead of a doomed same-endpoint retry.
+        if self._is_endpoint_cooling(natural.name):
+            for ep in self._endpoints:
+                if not self._is_endpoint_cooling(ep.name):
+                    return ep
+        return natural
+
+    def _is_endpoint_cooling(self, name: str) -> bool:
+        expiry = self._endpoint_cooldown.get(name)
+        if expiry is None:
+            return False
+        if time.monotonic() >= expiry:
+            self._endpoint_cooldown.pop(name, None)
+            return False
+        return True
+
+    def _cool_endpoint(self, name: str) -> None:
+        self._endpoint_cooldown[name] = time.monotonic() + self._cooldown_seconds
+        logger.warning(
+            "Provider endpoint %s rate-limited; cooling for %.0fs (using alternative if available)",
+            name, self._cooldown_seconds,
+        )
 
     def _should_wait_before_retry(self, current: ProviderEndpoint, next_endpoint: ProviderEndpoint) -> bool:
         return current.name == next_endpoint.name
@@ -331,6 +375,7 @@ class OllamaProvider:
                     if resp.status == 429:
                         error_text = await resp.text()
                         logger.warning("Provider timing status endpoint=%s status=%s headers_ms=%.1f body_chars=%s", endpoint.name, resp.status, headers_ms, len(error_text))
+                        self._cool_endpoint(endpoint.name)
                         if _is_usage_exhausted_error(resp.status, error_text):
                             last_usage_error = ProviderUsageExhaustedError(
                                 f"Provider {endpoint.name} usage exhausted: {error_text[:200]}"
@@ -410,6 +455,8 @@ class OllamaProvider:
                         "completion_tokens": usage.get("completion_tokens", 0),
                         "total_tokens": usage.get("total_tokens", 0),
                     }
+                    # Healthy response: this endpoint is no longer rate-limited.
+                    self._endpoint_cooldown.pop(endpoint.name, None)
                     logger.info(
                         "Provider timing done endpoint=%s status=%s headers_ms=%.1f total_ms=%.1f content_chars=%s tool_calls=%s tokens=%s",
                         endpoint.name,

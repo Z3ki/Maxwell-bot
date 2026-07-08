@@ -24,10 +24,8 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
 import random
 import re
-import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
@@ -45,9 +43,6 @@ from utils import (  # noqa: E402
     _coerce_utc_datetime as _coerce_utc_dt_shared,
     _discord_display_name as _discord_display_name_shared,
     _discord_id as _discord_id_shared,
-    USER_MENTION_RE,
-    CHANNEL_MENTION_RE,
-    ROLE_MENTION_RE,
     render_discord_context_text as _render_discord_context_text,
 )
 
@@ -281,8 +276,15 @@ def _truncate_keep_tail(text: str, budget: int) -> str:
     return prefix + text[-max(0, budget - len(prefix)) :]
 
 
-# _coerce_utc_datetime imported from utils.py
+# _coerce_utc_datetime, _discord_display_name, _discord_id imported from utils.py.
+# The utils imports are aliased to *_shared to avoid clashing with bot.py's
+# local copies; rebind them to the bare names the helper functions below use.
+# Without these, _user_ref() raises NameError, which the channel-activity loop
+# silently swallows via `except Exception: continue` — so autonomy sees NO live
+# channel activity. Keep these aliases in sync with the utils import block.
 _coerce_utc_datetime = _coerce_utc_dt_shared  # local alias for backward compat
+_discord_display_name = _discord_display_name_shared
+_discord_id = _discord_id_shared
 
 
 def _relative_time(dt, *, now: datetime | None = None) -> str:
@@ -1801,11 +1803,9 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
             kind = action.get("kind", "do_nothing")
             result = {"kind": kind, "result": "success", "error": None}
 
-            # Soft guard: skip autonomy post if the bot replied in-channel
-            # within the configured window (0 = off, never block). The
-            # "bot is already replying" race is handled by the prompt telling
-            # Maxwell not to pile on when he already answered — no hardcoded
-            # skip. Applies to post_channel and message-sending run_tool.
+            # Determine the target channel for any post-style action so we can
+            # gate it against live main-bot activity. Applies to post_channel
+            # and message-sending run_tool (AUTONOMY_POST_TOOLS).
             post_cid = None
             if kind == "post_channel":
                 post_cid = str(action.get("target_channel_id") or "") or None
@@ -1819,10 +1819,29 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
                     or None
                 )
             if post_cid:
+                # HARD GATE: never post into a channel the main bot is currently
+                # mid-reply in. _replying_channels is held for the whole
+                # _handle_message lifetime (generation + tool-call loop), so
+                # without this autonomy posts over a reply that's still being
+                # built and the bot visibly talks over itself. Not configurable —
+                # this is a correctness fix, not a taste preference.
+                if post_cid in (getattr(self.bot, "_replying_channels", None) or set()):
+                    logger.info(
+                        f"Autonomy skip post to {post_cid}: main bot currently replying there"
+                    )
+                    result = {
+                        "kind": kind,
+                        "result": "skipped",
+                        "error": None,
+                        "content_summary": "main bot currently replying in channel",
+                    }
+                    results.append(result)
+                    continue
+                # Soft guard: skip autonomy post if the bot replied in-channel
+                # within the configured window (0 = off, never block). Catches
+                # the case where the main reply already finished but is so
+                # recent that piling on would still look like spam.
                 last_reply = getattr(self.bot, "_last_bot_reply", {}).get(post_cid, 0.0)
-                # Configurable: how recently the bot must have replied in-channel
-                # before autonomy is blocked from posting there. 0 disables the
-                # block entirely (let the LLM decide). Defaults to 600s for safety.
                 block_window = int(
                     (getattr(self.bot, "_control", None) or {}).get(
                         "autonomy_recent_reply_block_seconds", 0

@@ -160,6 +160,50 @@ def test_generate_chat_completion_retries_primary_before_fallback():
     assert session.payloads[1]["model"] == "primary-model"
 
 
+def test_429_rate_limit_skips_to_fallback_without_doomed_retry():
+    provider = OllamaProvider(
+        "http://primary.test/v1",
+        "primary-model",
+        10,
+        0.5,
+        fallback_base_url="http://fallback.test/v1",
+        fallback_model="fallback-model",
+        fallback_api_key="fallback-key",
+    )
+    provider.available = True
+    # No backoff sleep on the single fallback step.
+    provider._cooldown_seconds = 60
+    session = FakeSequenceSession([
+        FakeErrorResponse(429, '{"error":{"code":429,"message":"xiaomi/mimo-v2.5 is temporarily rate-limited upstream. Please retry shortly, or add your own key to accumulate your rate limits"}}'),
+        FakeResponse(),
+    ])
+    provider._session = session
+
+    async def run():
+        message = await provider.generate_chat_completion([{"role": "user", "content": "hi"}])
+        assert message["content"] == "ok"
+
+    asyncio.run(run())
+    # Only ONE primary call (the 429) then immediate fallback — no second doomed
+    # primary retry, no 2s wait.
+    assert session.urls == [
+        "http://primary.test/v1/chat/completions",
+        "http://fallback.test/v1/chat/completions",
+    ]
+    assert session.payloads[0]["model"] == "primary-model"
+    assert session.payloads[1]["model"] == "fallback-model"
+    # Primary is now cooling: a follow-up call must skip straight to fallback.
+    session2 = FakeSequenceSession([FakeResponse()])
+    provider._session = session2
+
+    async def run2():
+        message = await provider.generate_chat_completion([{"role": "user", "content": "hi"}])
+        assert message["content"] == "ok"
+
+    asyncio.run(run2())
+    assert session2.urls == ["http://fallback.test/v1/chat/completions"]
+
+
 def test_generate_response_rejects_native_tool_calls():
     provider = OllamaProvider("http://example.test", "base-model", 10, 0.5)
     provider.available = True
