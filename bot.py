@@ -5876,8 +5876,8 @@ class MaxwellBot(commands.Bot):
                         "Long-term memory:\n"
                         + "\n".join(e["content"] for e in ltm[:8])
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to load long-term memory: {e}")
         if self._control.get("cross_context_enabled", True):
             try:
                 facts = await self.memory.get_relevant_shared_context(
@@ -6152,10 +6152,15 @@ class MaxwellBot(commands.Bot):
                 return web.Response(status=200)
 
             # Fire and forget: process the message in the background
-            asyncio.create_task(
+            task = asyncio.create_task(
                 self._process_telegram_message(
                     message, chat_id, text, user_name, user_id, session, url_base,
                 )
+            )
+            task.add_done_callback(
+                lambda t: logger.error(
+                    f"Telegram webhook task failed: {t.exception()}\n{traceback.format_exc()}"
+                ) if t.exception() else None
             )
             return web.Response(status=200)
 
@@ -6757,7 +6762,7 @@ class MaxwellBot(commands.Bot):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Telegram polling loop exception: {e}")
+                logger.error(f"Telegram polling loop exception: {e}\n{traceback.format_exc()}")
                 if self._control.get("error_replies", True):
                     try:
                         failed_chat_id = chat_id

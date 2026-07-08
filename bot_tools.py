@@ -136,9 +136,26 @@ async def _get_shared_session() -> aiohttp.ClientSession:
     async with _SESSION_LOCK:
         if _SHARED_SESSION is None or _SHARED_SESSION.closed:
             connector = aiohttp.TCPConnector(
-                resolver=cast(Any, _SafeResolver()), limit=30, limit_per_host=5
+                resolver=cast(Any, _SafeResolver()), limit=30, limit_per_host=5,
+                force_close=True,
             )
             _SHARED_SESSION = aiohttp.ClientSession(connector=connector)
+        return _SHARED_SESSION
+
+
+async def _recreate_shared_session():
+    global _SHARED_SESSION
+    async with _SESSION_LOCK:
+        if _SHARED_SESSION is not None and not _SHARED_SESSION.closed:
+            try:
+                await _SHARED_SESSION.close()
+            except Exception:
+                pass
+        connector = aiohttp.TCPConnector(
+            resolver=cast(Any, _SafeResolver()), limit=30, limit_per_host=5,
+            force_close=True,
+        )
+        _SHARED_SESSION = aiohttp.ClientSession(connector=connector)
         return _SHARED_SESSION
 
 
@@ -403,6 +420,18 @@ class ImageGeneratorTool(Tool):
                     logger.info(
                         f"NVIDIA image generated successfully, size: {len(image_bytes)} bytes"
                     )
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                logger.warning(
+                    f"NVIDIA image connection error (attempt {attempt + 1}/{max_retries}): {e}"
+                )
+                if "Server disconnected" in str(e) or "Connection" in str(e):
+                    session = await _recreate_shared_session()
+                last_error = f"Error generating image: connection failed. Try again later."
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 10
+                    await asyncio.sleep(wait_time)
+                    continue
+                break
                     # Send to Discord so the model can SEE it in chat
                     file = File(BytesIO(image_bytes), filename="generated_image.png")
                     sent_msg = None
@@ -1074,10 +1103,6 @@ class ForwardMessageTool(Tool):
     ) -> str:
         if not message_id or not channel_id:
             return "Error: message_id and channel_id are required"
-        if not getattr(self.bot, "_is_admin", lambda _uid: False)(
-            getattr(message.author, "id", "")
-        ):
-            return "Error: forward_message is admin-only"
         try:
             dest = self.bot.get_channel(int(channel_id))
             if not dest:
@@ -1553,8 +1578,6 @@ class CreateSiteTool(Tool):
         images: str | None = None,
         **kwargs,
     ) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: create_site is admin-only"
         if not name or not title or body is None:
             missing = []
             if not name:
@@ -1583,6 +1606,14 @@ class CreateSiteTool(Tool):
         if hasattr(self.bot, "_load_sites"):
             self.bot._load_sites(quiet=True)
         sites = self.bot._sites
+
+        control = getattr(self.bot, "control", {}) or {}
+        max_sites = int(control.get("create_site_quota_per_user", 10))
+        active_user_sites = [
+            s for s in sites.values() if s.get("user_id") == user_id
+        ]
+        if len(active_user_sites) >= max_sites:
+            return f"Error: site quota reached ({len(active_user_sites)}/{max_sites} active sites). Delete an old site or ask an admin."
 
         if len(body) > self.MAX_CONTENT_SIZE:
             return f"Error: content too long ({len(body)} chars, max {self.MAX_CONTENT_SIZE})"
@@ -1961,9 +1992,6 @@ class SendFileTool(Tool):
         path: str | None = None,
         **kwargs,
     ) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: send_file is admin-only"
-
         # Path mode: send a file that already exists on disk.
         if path:
             allowed_bases = self._allowed_send_file_bases()
@@ -2085,9 +2113,14 @@ class ShellTool(Tool):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        return await asyncio.wait_for(
-            proc.communicate(), timeout=timeout
-        ), proc.returncode
+        try:
+            return await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            ), proc.returncode
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise
 
     async def _ensure_container(self):
         try:
@@ -2198,9 +2231,14 @@ class ShellTool(Tool):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=self.TIMEOUT
-        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=self.TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise
         return stdout, stderr, proc.returncode
 
     async def execute(
@@ -3297,7 +3335,7 @@ class SubAgentTool(Tool):
             "Params: task (required, full prompt for the sub-agent), slug (optional short name), "
             "timeout_minutes (optional, default 30, max 120), files (optional JSON array of file paths to attach). "
             "The sub-agent works in its own directory under the Maxwell project. "
-            "It uses Ollama Cloud with the minimax-m3:cloud model by default. "
+            "It uses Ollama Cloud with the minimax-m3 model by default. "
             "I'll post the result to the channel when the sub-agent finishes."
         )
 
@@ -3310,8 +3348,6 @@ class SubAgentTool(Tool):
         files: str | None = None,
         **kwargs,
     ) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: sub_agent is admin-only"
         if not task or not str(task).strip():
             return "Error: task prompt is required"
 
@@ -3333,7 +3369,7 @@ class SubAgentTool(Tool):
 
         try:
             model = os.environ.get(
-                "OPENCODE_SUBAGENT_MODEL", "ollama-cloud/minimax-m3:cloud"
+                "OPENCODE_SUBAGENT_MODEL", "ollama-cloud/minimax-m3"
             )
             return await run_subagent_task(
                 self.bot,

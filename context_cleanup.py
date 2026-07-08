@@ -77,6 +77,10 @@ def _load_json_safe(path: Path, default):
         return data
     except (json.JSONDecodeError, OSError, ValueError) as e:
         logger.warning(f"Corrupt/unreadable {path.name}, recreating defaults: {e}")
+        try:
+            path.write_text("{}", encoding="utf-8")
+        except Exception:
+            pass
         return default() if callable(default) else default
 
 
@@ -213,7 +217,7 @@ class ContextCleanupEngine:
     def _default_enabled(self) -> bool:
         return bool(
             (getattr(self.bot, "_control", None) or {}).get(
-                "context_cleanup_enabled", DEFAULT_CONTROL.get("context_cleanup_enabled", False)
+                "context_cleanup_enabled", DEFAULT_CONTROL.get("context_cleanup_enabled", True)
             )
         )
 
@@ -291,7 +295,7 @@ class ContextCleanupEngine:
                     await self.store.record_error(str(e))
                 except Exception:
                     pass
-            interval = max(300, min(self.interval_seconds, MAX_INTERVAL))
+            interval = max(60, min(self.interval_seconds, MAX_INTERVAL))
             backoff = min(2**consecutive_failures, 6) if consecutive_failures > 0 else 1
             await asyncio.sleep(max(60, interval * backoff))
 
@@ -302,7 +306,12 @@ class ContextCleanupEngine:
         if self._lock.locked():
             logger.debug("ContextCleanup pass skipped — previous still running")
             return {"skipped": True}
-        async with self._lock:
+        try:
+            await asyncio.wait_for(self._lock.acquire(), timeout=600)
+        except asyncio.TimeoutError:
+            logger.error("ContextCleanup lock timed out — previous pass hung for >10m, forcing release")
+            return {"skipped": False, "error": "lock timeout"}
+        try:
             self._running_flag = True
             await self.store.patch_state(
                 {"running": True, "running_since": _utcnow_iso()}
@@ -345,13 +354,8 @@ class ContextCleanupEngine:
                 return {"skipped": False, "error": str(e), "duration": duration}
             finally:
                 self._running_flag = False
-                if not success:
-                    try:
-                        await self.store.patch_state(
-                            {"running": False, "running_since": ""}
-                        )
-                    except Exception:
-                        pass
+        finally:
+            self._lock.release()
 
     async def _finish_pass(
         self,

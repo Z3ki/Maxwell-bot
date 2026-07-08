@@ -247,6 +247,10 @@ def _load_json_safe(path: Path, default):
         return data
     except (json.JSONDecodeError, OSError, ValueError) as e:
         logger.warning(f"Corrupt/unreadable {path.name}, recreating defaults: {e}")
+        try:
+            path.write_text("{}", encoding="utf-8")
+        except Exception:
+            pass
         return default if not callable(default) else default()
 
 
@@ -652,7 +656,12 @@ class AutonomyEngine:
         if self._lock.locked():
             logger.debug("Autonomy tick skipped — previous still running")
             return {"skipped": True}
-        async with self._lock:
+        try:
+            await asyncio.wait_for(self._lock.acquire(), timeout=600)
+        except asyncio.TimeoutError:
+            logger.error("Autonomy tick lock timed out — previous tick hung for >10m, forcing release")
+            return {"skipped": False, "error": "lock timeout"}
+        try:
             # BUG FIX: capture tick START time as watermark. Events recorded during
             # plan/execute have timestamps between start and end. Using end-of-tick
             # as watermark (old behavior) drops those events from the next tick.
@@ -678,6 +687,8 @@ class AutonomyEngine:
                     }
                 )
                 return {"skipped": False, "error": str(e), "duration": duration}
+        finally:
+            self._lock.release()
 
     async def _resolve_reference(
         self, message: Any, cache: dict[tuple[str, str], Any]

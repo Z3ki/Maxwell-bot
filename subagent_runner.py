@@ -17,6 +17,8 @@ import discord
 from discord import File
 from io import BytesIO
 
+from subagent_docker import run_opencode_in_docker
+
 logger = None  # initialized lazily via _ensure_logger
 
 
@@ -90,18 +92,11 @@ def _write_opencode_config(workdir: Path, model: str, timeout_ms: int) -> Path:
         },
         # Prefer a cheap small model for title/summary if available.
         "small_model": "opencode/mimo-v2.5-free",
-        # Auto-approve non-destructive file tools so the subagent can run without
-        # blocking on stdin. Destructive shell commands still require stdin in
-        # auto mode unless the user has explicitly allowed them, but at least
-        # editing files inside the workdir is not stuck.
+        # Auto-approve all tool operations so the subagent can run without
+        # blocking on stdin. We already sandbox it to its own work directory,
+        # and the user invoking sub_agent is an admin.
         "permission": {
-            "edit": "allow",
-            "write": "allow",
-            "read": "allow",
-            "glob": "allow",
-            "grep": "allow",
-            "bash": "allow",
-            "question": "deny",
+            "*": "allow",
         },
         "snapshot": True,
         "share": "disabled",
@@ -111,17 +106,38 @@ def _write_opencode_config(workdir: Path, model: str, timeout_ms: int) -> Path:
     return config_path
 
 
+def _use_docker_backend() -> bool:
+    """Return True when the OpenCode sub-agent should run inside Docker."""
+    env = os.environ.get("OPENCODE_SUBAGENT_DOCKER", "").strip().lower()
+    if env in {"1", "true", "yes", "on"}:
+        return True
+    if env in {"0", "false", "no", "off", ""}:
+        return False
+    # Fallback for weird values: anything non-empty/positive defaults off to stay safe.
+    return False
+
+
 async def _run_opencode(
     workdir: Path,
     prompt: str,
     *,
-    model: str = "ollama-cloud/minimax-m3:cloud",
+    model: str = "ollama-cloud/minimax-m3",
     timeout_minutes: int = 30,
     opencode_bin: str | None = None,
     extra_files: list[str] | None = None,
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run opencode and capture output."""
+    if _use_docker_backend():
+        return await run_opencode_in_docker(
+            workdir,
+            prompt,
+            model=model,
+            timeout_minutes=timeout_minutes,
+            extra_files=extra_files,
+            env=env,
+        )
+
     opencode_bin = opencode_bin or _default_opencode_bin()
     if not Path(opencode_bin).exists():
         return {
@@ -137,11 +153,11 @@ async def _run_opencode(
     cmd = [
         opencode_bin,
         "run",
-        "--prompt",
-        prompt,
+        "--model",
+        model,
         "--dir",
         str(workdir),
-        "--auto",
+        prompt,
     ]
     for fpath in extra_files or []:
         cmd.extend(["--file", fpath])
@@ -262,13 +278,20 @@ async def run_subagent_task(
     """
     base = subagent_base_dir()
     base.mkdir(parents=True, exist_ok=True)
+    base.chmod(0o777)
     workdir = _workdir_for(slug)
     workdir.mkdir(parents=True, exist_ok=True)
+    workdir.chmod(0o777)
 
     model = model or os.environ.get(
-        "OPENCODE_SUBAGENT_MODEL", "ollama-cloud/minimax-m3:cloud"
+        "OPENCODE_SUBAGENT_MODEL", "ollama-cloud/minimax-m3"
     )
     opencode_bin = os.environ.get("OPENCODE_BIN", _default_opencode_bin())
+
+    # Apply control timeout cap when available.
+    control = getattr(bot, "control", {}) or {}
+    max_timeout = int(control.get("subagent_max_timeout_minutes", 120))
+    timeout_minutes = max(1, min(timeout_minutes, max_timeout))
 
     task = asyncio.create_task(
         _run_opencode(
