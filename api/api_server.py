@@ -1361,7 +1361,7 @@ def _load_intel_status():
     state = _safe_object(_load(_intel_state_path()))
     log = _safe_list(_load(_intel_log_path()))
     entries = log if isinstance(log, list) else []
-    bot_control = _load_bot_control()
+    bot_control = _safe_object(_load(_control_path()))
     enabled = _parse_bool(
         control.get("enabled"),
         _parse_bool(bot_control.get("intel_enabled"), DEFAULT_CONTROL.get("intel_enabled", True)),
