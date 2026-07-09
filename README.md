@@ -178,7 +178,7 @@ Autonomy (and normal chat) now benefits from the **Intel engine** (`intel.py`): 
 
 `,intel now` forces a pass. It is enabled by default with a 1-hour interval.
 
-It **receives** directly from news outlet feeds (RSS) instead of searching: defaults are OpenAI (`openai.com/news/rss.xml`), Hugging Face blog, MarkTechPost, TLDR AI, arXiv cs.AI/cs.LG. Customize via `intel_feed_urls` in control or `data/intel_control.json` (`{"feed_urls": [...]}`). Run `,intel feeds` to list active sources.
+It **receives** directly from general AI/tech outlet feeds (RSS) instead of searching: defaults include Hugging Face, MarkTechPost (strong on model releases), TLDR AI, arXiv (cs.AI/cs.LG), Simon Willison, VentureBeat AI, TechCrunch, The Verge AI. This covers broad model releases across companies + general tech news. Customize via `intel_feed_urls` in control or `data/intel_control.json` (`{"feed_urls": [...]}`). Run `,intel feeds` to list active sources.
 
 ## Dashboard / API
 

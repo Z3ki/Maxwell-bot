@@ -96,8 +96,10 @@ def _discord_id(obj: Any) -> str:
     return str(getattr(obj, "id", "unknown"))
 
 
-def render_discord_context_text(message: Any, content: str | None = None) -> str:
-    """Make Discord tokens readable for prompts/logged context without mutating the real message."""
+def render_discord_context_text(message: Any, content: str | None = None, known_users: dict | None = None) -> str:
+    """Make Discord tokens readable for prompts/logged context without mutating the real message.
+    known_users: optional {user_id: display_name} from conversation history to resolve pings.
+    """
     text = str(
         content if content is not None else (getattr(message, "content", "") or "")
     )
@@ -122,6 +124,9 @@ def render_discord_context_text(message: Any, content: str | None = None) -> str
         user = users.get(user_id)
         if user is None and guild is not None:
             user = guild.get_member(int(user_id))
+        if user is None and known_users and user_id in known_users:
+            name = known_users[user_id]
+            return f"@{name}({user_id})"
         if user is None:
             return f"@unknown-user({user_id})"
         return f"@{_discord_display_name(user)}({user_id})"

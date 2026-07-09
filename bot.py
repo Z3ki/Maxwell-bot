@@ -215,7 +215,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     _is_safe_url,
     _read_response_limited,
 )
-from utils import _atomic_json_write_sync  # fd-safe, single source of truth  # noqa: E402
+from utils import _atomic_json_write_sync, render_discord_context_text  # fd-safe, single source of truth  # noqa: E402
 from control_defaults import DEAD_CONTROL_KEYS, DEFAULT_CONTROL, parse_bool  # noqa: E402
 from config import Config  # noqa: E402
 from memory import MemoryManager, RemEventLog  # noqa: E402
@@ -637,58 +637,7 @@ def _discord_id(obj: Any) -> str:
     return str(getattr(obj, "id", "unknown"))
 
 
-def render_discord_context_text(message: Any, content: str | None = None) -> str:
-    """Make Discord tokens readable for prompts/logged context without mutating the real message."""
-    text = str(
-        content if content is not None else (getattr(message, "content", "") or "")
-    )
-    if not text:
-        return text
 
-    guild = getattr(message, "guild", None)
-    users = {
-        _discord_id(user): user for user in list(getattr(message, "mentions", []) or [])
-    }
-    channels = {
-        _discord_id(ch): ch
-        for ch in list(getattr(message, "channel_mentions", []) or [])
-    }
-    roles = {
-        _discord_id(role): role
-        for role in list(getattr(message, "role_mentions", []) or [])
-    }
-
-    def replace_user(match: re.Match) -> str:
-        user_id = match.group(1)
-        user = users.get(user_id)
-        if user is None and guild is not None:
-            user = guild.get_member(int(user_id))
-        if user is None:
-            return f"@unknown-user({user_id})"
-        return f"@{_discord_display_name(user)}({user_id})"
-
-    def replace_channel(match: re.Match) -> str:
-        channel_id = match.group(1)
-        channel = channels.get(channel_id)
-        if channel is None and guild is not None:
-            channel = guild.get_channel(int(channel_id))
-        if channel is None:
-            return f"#unknown-channel({channel_id})"
-        return f"#{getattr(channel, 'name', channel_id)}({channel_id})"
-
-    def replace_role(match: re.Match) -> str:
-        role_id = match.group(1)
-        role = roles.get(role_id)
-        if role is None and guild is not None:
-            role = guild.get_role(int(role_id))
-        if role is None:
-            return f"@unknown-role({role_id})"
-        return f"@{getattr(role, 'name', role_id)}({role_id})"
-
-    text = USER_MENTION_RE.sub(replace_user, text)
-    text = CHANNEL_MENTION_RE.sub(replace_channel, text)
-    text = ROLE_MENTION_RE.sub(replace_role, text)
-    return text
 
 
 def extract_json_object(text: str, start: int = 0) -> tuple[str, int] | None:
@@ -1656,6 +1605,10 @@ class MaxwellBot(commands.Bot):
         self._ai_concurrency = 2
         self._ai_active = 0
         self._ai_cond = asyncio.Condition()
+        # Cache of recent users seen in each channel's conversation, so we can
+        # resolve mentions/IDs for pinging even if not in current message.mentions
+        # or guild cache (common for self-bots in larger servers).
+        self._recent_users: dict[str, dict[str, str]] = {}  # channel_id -> {user_id: name}
         self._last_avatar_change: float = 0
         self._custom_status = None
         self._current_game = None
@@ -1704,6 +1657,21 @@ class MaxwellBot(commands.Bot):
         self.autonomy_engine = AutonomyEngine(self)
         self.context_cleanup_engine = ContextCleanupEngine(self)
         self.intel_engine = IntelEngine(self)
+
+    def _update_recent_users(self, channel_id: str, user: Any):
+        """Track users seen in this channel's conversation so render can resolve
+        mentions for pinging (guild.get_member often misses them in self-bots).
+        """
+        if not user:
+            return
+        cid = str(channel_id)
+        uid = str(getattr(user, "id", ""))
+        if not uid:
+            return
+        name = getattr(user, "display_name", None) or getattr(user, "name", uid)
+        if cid not in self._recent_users:
+            self._recent_users[cid] = {}
+        self._recent_users[cid][uid] = name
 
     def _setup_ai(self):
         self.ai_provider = OllamaProvider(
@@ -2136,6 +2104,11 @@ class MaxwellBot(commands.Bot):
             cutoff = now - 60
             self._cooldowns = {k: v for k, v in self._cooldowns.items() if v > cutoff}
 
+        # Update user cache for this conversation early
+        self._update_recent_users(channel_id, message.author)
+        for u in getattr(message, "mentions", []) or []:
+            self._update_recent_users(channel_id, u)
+
         if self.user and message.author.id == self.user.id:
             if message.content and self._control.get("store_memory", True):
                 # Dedup contract: memory.add_to_channel_memory dedups by message_id,
@@ -2148,12 +2121,14 @@ class MaxwellBot(commands.Bot):
                         "author_id": str(self.user.id),
                         "author_is_bot": True,
                         "content": render_discord_context_text(
-                            message, message.content
+                            message, message.content,
+                            known_users=self._recent_users.get(channel_id, {}),
                         ),
                         "message_id": str(message.id),
                         "timestamp": _message_created_at_iso(message),
                     },
                 )
+                self._update_recent_users(channel_id, self.user)
             return
 
         if not has_content and not has_attachment and not has_embed:
@@ -2230,11 +2205,15 @@ class MaxwellBot(commands.Bot):
                     "author_id": str(message.author.id),
                     "author_is_bot": bool(message.author.bot),
                     "content": render_discord_context_text(
-                        message, memory_content or "[media attached]"
+                        message, memory_content or "[media attached]",
+                        known_users=self._recent_users.get(channel_id, {}),
                     ),
                     "message_id": str(message.id),
                     "timestamp": _message_created_at_iso(message),
                 }
+                self._update_recent_users(channel_id, message.author)
+                for u in getattr(message, "mentions", []) or []:
+                    self._update_recent_users(channel_id, u)
                 mention_rows = [
                     {
                         "id": str(user.id),
@@ -3370,7 +3349,8 @@ class MaxwellBot(commands.Bot):
         ref = cast(Any, message.reference.resolved)
         if not ref or not hasattr(ref, "author"):
             return ""
-        ref_content = render_discord_context_text(ref, ref.content or "")
+        ch_id = str(getattr(message, 'channel_id', getattr(getattr(message, 'channel', None), 'id', '') or ''))
+        ref_content = render_discord_context_text(ref, ref.content or "", known_users=self._recent_users.get(ch_id, {}))
         if ref.attachments:
             ref_content = (ref_content + " [media attached]").strip()
         if not ref_content:
@@ -3851,83 +3831,100 @@ class MaxwellBot(commands.Bot):
 
     async def _handle_intel_command(self, message, args: str | None):
         arg = (args or "").strip().lower()
-        if not arg:
-            st = await self.intel_engine.status()
-            feeds = getattr(self.intel_engine, "_get_feed_urls", lambda: [])()
-            feed_count = len(feeds) if feeds else 0
-            await message.channel.send(
-                "Intel (tech/AI news gatherer) status\n"
-                f"enabled: {st['enabled']} running: {st['running']}\n"
-                f"interval: {st['interval_seconds']}s  feeds: {feed_count}\n"
-                f"last run: {st.get('last_run') or 'never'} facts added total: {st.get('facts_added_total', 0)}\n"
-                f"audit: {(st.get('last_audit') or '-')[:300]}"
-            )
-            return
-        if arg in {"now", "tick", "run"}:
-            await message.channel.send("Running intel gather now...")
-            res = await self.intel_engine.trigger_now()
-            if res.get("skipped"):
-                await message.channel.send("Intel pass skipped (already running).")
-            else:
+        try:
+            if not arg:
+                st = await self.intel_engine.status()
+                feeds = getattr(self.intel_engine, "_get_feed_urls", lambda: [])()
+                feed_count = len(feeds) if feeds else 0
                 await message.channel.send(
-                    f"Intel done. {res.get('audit', '')} (added: {res.get('facts_added', 0)})"
-                )
-            return
-        if arg == "on":
-            self.intel_engine.enabled = True
-            await self.intel_engine.save_control()
-            await message.channel.send("Intel gatherer enabled.")
-            return
-        if arg == "off":
-            self.intel_engine.enabled = False
-            await self.intel_engine.save_control()
-            await message.channel.send("Intel gatherer disabled.")
-            return
-        if arg.startswith("interval"):
-            parts = arg.split()
-            if len(parts) < 2:
-                await message.channel.send(
-                    f"Current intel interval: {self.intel_engine.interval_seconds}s. Usage: `,intel interval <seconds>`"
+                    "Intel (tech/AI news gatherer) status\n"
+                    f"enabled: {st['enabled']} running: {st['running']}\n"
+                    f"interval: {st['interval_seconds']}s  feeds: {feed_count}\n"
+                    f"last run: {st.get('last_run') or 'never'} facts added total: {st.get('facts_added_total', 0)}\n"
+                    f"audit: {(st.get('last_audit') or '-')[:300]}"
                 )
                 return
+            if arg in {"now", "tick", "run"}:
+                await message.channel.send("Running intel gather now...")
+                res = await self.intel_engine.trigger_now()
+                if res.get("skipped"):
+                    await message.channel.send("Intel pass skipped (already running).")
+                elif res.get("error"):
+                    await message.channel.send(f"Intel error: {res['error']}")
+                else:
+                    await message.channel.send(
+                        f"Intel done. {res.get('audit', '')} (added: {res.get('facts_added', 0)})"
+                    )
+                return
+        except Exception as e:
+            logger.error(f"Intel command failed: {e}", exc_info=True)
             try:
-                new_int = max(300, int(parts[1]))
-            except ValueError:
-                await message.channel.send("Invalid number.")
-                return
-            self.intel_engine.interval_seconds = new_int
-            await self.intel_engine.save_control()
-            await message.channel.send(f"Intel interval set to {new_int}s.")
+                await message.channel.send(f"Intel command error: {e}")
+            except:
+                pass
             return
-        if arg == "log":
-            log = (await self.intel_engine.store.load_log())[-10:]
-            if not log:
-                await message.channel.send("No intel runs logged yet.")
+        try:
+            if arg == "on":
+                self.intel_engine.enabled = True
+                await self.intel_engine.save_control()
+                await message.channel.send("Intel gatherer enabled.")
                 return
-            lines = [
-                f"{e.get('timestamp', '?')[:19]} added={e.get('facts_added', 0)} {str(e.get('audit', ''))[:120]}"
-                for e in log
-            ]
-            for chunk in self._split_response("\n".join(lines), limit=1900):
-                await message.channel.send(chunk)
-            return
-        if arg in {"feeds", "sources", "outlets"}:
-            feeds = self.intel_engine._get_feed_urls() if hasattr(self.intel_engine, "_get_feed_urls") else []
-            if not feeds:
-                await message.channel.send("No feeds configured.")
+            if arg == "off":
+                self.intel_engine.enabled = False
+                await self.intel_engine.save_control()
+                await message.channel.send("Intel gatherer disabled.")
                 return
-            lines = [f"- {f}" for f in feeds[:15]]
-            await message.channel.send("Current Intel news feeds/outlets:\n" + "\n".join(lines))
-            return
-        await message.channel.send(
-            "Usage: `,intel`, `,intel now`, `,intel on`, `,intel off`, `,intel interval <sec>`, `,intel log`, `,intel feeds`"
-        )
+            if arg.startswith("interval"):
+                parts = arg.split()
+                if len(parts) < 2:
+                    await message.channel.send(
+                        f"Current intel interval: {self.intel_engine.interval_seconds}s. Usage: `,intel interval <seconds>`"
+                    )
+                    return
+                try:
+                    new_int = max(300, int(parts[1]))
+                except ValueError:
+                    await message.channel.send("Invalid number.")
+                    return
+                self.intel_engine.interval_seconds = new_int
+                await self.intel_engine.save_control()
+                await message.channel.send(f"Intel interval set to {new_int}s.")
+                return
+            if arg == "log":
+                log = (await self.intel_engine.store.load_log())[-10:]
+                if not log:
+                    await message.channel.send("No intel runs logged yet.")
+                    return
+                lines = [
+                    f"{e.get('timestamp', '?')[:19]} added={e.get('facts_added', 0)} {str(e.get('audit', ''))[:120]}"
+                    for e in log
+                ]
+                for chunk in self._split_response("\n".join(lines), limit=1900):
+                    await message.channel.send(chunk)
+                return
+            if arg in {"feeds", "sources", "outlets"}:
+                feeds = self.intel_engine._get_feed_urls() if hasattr(self.intel_engine, "_get_feed_urls") else []
+                if not feeds:
+                    await message.channel.send("No feeds configured.")
+                    return
+                lines = [f"- {f}" for f in feeds[:15]]
+                await message.channel.send("Current Intel news feeds/outlets:\n" + "\n".join(lines))
+                return
+            await message.channel.send(
+                "Usage: `,intel`, `,intel now`, `,intel on`, `,intel off`, `,intel interval <sec>`, `,intel log`, `,intel feeds`"
+            )
+        except Exception as e:
+            logger.error(f"Intel command failed: {e}", exc_info=True)
+            try:
+                await message.channel.send(f"Intel command error: {e}")
+            except:
+                pass
 
-    @staticmethod
-    def _visible_event_content(message, content: str | None = None) -> str:
+    def _visible_event_content(self, message, content: str | None = None) -> str:
         text = render_discord_context_text(
             message,
             content if content is not None else (getattr(message, "content", "") or ""),
+            known_users=self._recent_users.get(str(getattr(getattr(message, "channel", None), "id", "") or ""), {}),
         )
         text = re.sub(
             r"<think\b[^>]*>.*?</think>", "", str(text), flags=re.IGNORECASE | re.DOTALL
@@ -6069,6 +6066,30 @@ class MaxwellBot(commands.Bot):
         media_summary: str = "",
     ) -> list[dict]:
         channel_id = str(message.channel.id)
+
+        # Collect recent users from conversation for pinging support
+        conv_users = {}
+        try:
+            caid = str(message.author.id)
+            cname = getattr(message.author, "display_name", str(caid))
+            conv_users[caid] = cname
+            for u in getattr(message, "mentions", []) or []:
+                uid = str(u.id)
+                conv_users[uid] = getattr(u, "display_name", str(uid))
+            mem = await self.memory.get_channel_memory(channel_id) if hasattr(self, "memory") else []
+            for m in (mem or [])[-50:]:
+                aid = str(m.get("author_id") or "")
+                an = str(m.get("author") or "")
+                if aid:
+                    conv_users[aid] = an
+                for ment in m.get("mentions") or []:
+                    mid = str(ment.get("id") or "")
+                    mn = str(ment.get("name") or "")
+                    if mid:
+                        conv_users[mid] = mn
+        except Exception:
+            pass
+
         system_parts = [
             "You are Maxwell — a real person in this chat, not a service or assistant. You have your own opinions, humor, and bluntness; you answer like a friend who happens to know a lot, never like a helpdesk. You never hedge, disclaim, soften, moralize, or say 'I can't'/'I shouldn't' — you just say what you'd actually say, on any topic, the way you'd actually say it. "
             "Reply ONLY to the latest message. "
@@ -6156,6 +6177,13 @@ class MaxwellBot(commands.Bot):
                         )
             except Exception as e:
                 logger.warning(f"Failed to build shared context: {e}")
+
+        if conv_users:
+            ul = [f"- {n} (ID {uid})" for uid, n in list(conv_users.items())[:30]]
+            system_parts.append(
+                "Users in/mentioned in this conversation (to ping a user, output EXACTLY the raw token <@USER_ID> with nothing else around it, no backticks, no code blocks, no markdown):\n"
+                + "\n".join(ul)
+            )
         if message.guild and self._control.get("emoji_context_enabled", True):
             emojis = self._guild_emojis.get(str(message.guild.id), {})
             if emojis:
@@ -6281,7 +6309,7 @@ class MaxwellBot(commands.Bot):
                         + "\n".join(reversed(lines)),
                     }
                 )
-        latest_text = render_discord_context_text(message, user_message)
+        latest_text = render_discord_context_text(message, user_message, known_users=self._recent_users.get(channel_id, {}))
         author_id = str(getattr(message.author, "id", "unknown"))
         author_label = f"{message.author.display_name}({author_id})"
         if message.author.bot:

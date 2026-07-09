@@ -59,8 +59,13 @@ def _user_ref(obj: Any, bot_user: Any = None) -> str:
     return f"{_discord_display_name(obj)}({uid})"
 
 
-def _visible_message_content(message: Any, content: str | None = None) -> str:
-    text = _render_discord_context_text(message, content)
+def _visible_message_content(
+    message: Any,
+    content: str | None = None,
+    *,
+    known_users: dict | None = None,
+) -> str:
+    text = _render_discord_context_text(message, content, known_users=known_users)
     parts = [text] if text else []
     for attachment in list(getattr(message, "attachments", []) or [])[:5]:
         content_type = getattr(attachment, "content_type", "") or ""
@@ -953,7 +958,9 @@ class AutonomyEngine:
                     continue
                 messages = [m async for m in ch.history(limit=12)]
                 for m in reversed(messages):
-                    content = _visible_message_content(m, m.content or "")[:260]
+                    _cid = str(getattr(ch, "id", "") or "")
+                    _ku = (getattr(self.bot, "_recent_users", {}) or {}).get(_cid, {})
+                    content = _visible_message_content(m, m.content or "", known_users=_ku)[:260]
                     if not content:
                         continue
                     age = _context_time(getattr(m, "created_at", None))
@@ -1135,7 +1142,9 @@ class AutonomyEngine:
                 lines = [f"DM with {recipient_ref} channel={channel.id}"]
                 messages = [m async for m in channel.history(limit=20)]
                 for m in reversed(messages):
-                    content = _visible_message_content(m, m.content or "")[:260]
+                    _cid = str(getattr(channel, "id", "") or "")
+                    _ku = (getattr(self.bot, "_recent_users", {}) or {}).get(_cid, {})
+                    content = _visible_message_content(m, m.content or "", known_users=_ku)[:260]
                     if not content:
                         continue
                     age = _context_time(getattr(m, "created_at", None))
@@ -1362,7 +1371,10 @@ class AutonomyEngine:
                                     reply.author, "display_name", None
                                 ) or getattr(reply.author, "name", "?")
                                 content = _render_discord_context_text(
-                                    reply, reply.content or ""
+                                    reply, reply.content or "",
+                                    known_users=(getattr(self.bot, "_recent_users", {}) or {}).get(
+                                        str(getattr(getattr(reply, "channel", None), "id", "") or ""), {}
+                                    ),
                                 )[:160]
                                 reply_snippets.append(
                                     f"{author}({reply.author.id}): {content or '[media/reaction-only]'}"
@@ -2154,7 +2166,12 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
             "author": author_name,
             "author_id": str(getattr(bot_user, "id", "")),
             "author_is_bot": True,
-            "content": _render_discord_context_text(sent_message, content),
+            "content": _render_discord_context_text(
+                sent_message, content,
+                known_users=(getattr(self.bot, "_recent_users", {}) or {}).get(
+                    str(getattr(getattr(sent_message, "channel", None), "id", "") or ""), {}
+                ),
+            ),
             "message_id": str(getattr(sent_message, "id", "")),
             "timestamp": (
                 getattr(sent_message, "created_at", None) or datetime.now(timezone.utc)

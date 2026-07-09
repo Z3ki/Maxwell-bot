@@ -1,8 +1,9 @@
 """IntelEngine — Maxwell's background tech/AI/news knowledge gatherer.
 
 Runs automatically on a schedule (default every hour). It **receives** news
-directly from outlet feeds / APIs (RSS from OpenAI, Hugging Face, MarkTechPost,
-TLDR AI, arXiv etc.) instead of actively searching the web.
+directly from general AI/tech outlet feeds / APIs (RSS from Hugging Face, MarkTechPost,
+TLDR AI, arXiv, Simon Willison, VentureBeat, TechCrunch, The Verge, etc.)
+instead of actively searching the web. Focuses on broad model releases and tech news.
 
 Then uses the *exact same* provider + model as autonomy/REM/context_cleanup
 (via bot._get_autonomy_provider()) to curate clean, dated facts.
@@ -47,16 +48,21 @@ logger = logging.getLogger(__name__)
 LOG_RING_SIZE = 50
 MAX_FACTS_PER_RUN = 8
 
-# Curated high-signal AI/tech news outlets. These are "receive from the source"
-# instead of web search. User can override via control "intel_feed_urls".
+# Curated high-signal general AI/tech news outlets (not company-specific).
+# Focus on broad coverage of model releases, papers, benchmarks, and tech news.
+# These are "receive from the source" instead of web search.
+# User can override via control "intel_feed_urls" or intel_control.json.
 DEFAULT_AI_FEEDS: list[str] = [
-    "https://openai.com/news/rss.xml",           # Official OpenAI releases & research
-    "https://huggingface.co/blog/feed.xml",      # HF blog: models, tools, papers
-    "https://www.marktechpost.com/feed/",        # Fast paper summaries + launches (excellent signal)
-    "https://tldr.tech/api/rss/ai",              # Daily curated AI digest
-    "https://arxiv.org/rss/cs.AI",               # arXiv AI papers (cs.AI)
-    "https://arxiv.org/rss/cs.LG",               # Machine Learning papers
-    # Add more stable ones here or override in bot control / intel_control.json
+    "https://huggingface.co/blog/feed.xml",      # HF: models, tools, papers, releases
+    "https://www.marktechpost.com/feed/",        # Excellent for new model releases, papers, benchmarks
+    "https://tldr.tech/api/rss/ai",              # Daily curated AI digest covering many model launches
+    "https://arxiv.org/rss/cs.AI",               # arXiv AI research papers
+    "https://arxiv.org/rss/cs.LG",               # Machine learning papers
+    "https://simonwillison.net/atom/everything/", # Broad practical AI coverage, models, tools, analysis
+    "https://venturebeat.com/category/ai/feed/",  # Enterprise AI, new models, tech developments
+    "https://techcrunch.com/feed/",               # General tech + AI model releases and news
+    "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml", # Consumer tech/AI news and releases
+    # Add/override more via bot control for full customization.
 ]
 
 def _utcnow_iso() -> str:
@@ -516,18 +522,23 @@ class IntelEngine:
             return None
 
     async def _collect_from_feeds(self) -> list[dict]:
-        """Receive items directly from the configured news outlet feeds."""
+        """Receive items directly from the configured news outlet feeds.
+        Fetches are done in parallel for speed so commands don't feel frozen.
+        """
         feed_urls = self._get_feed_urls()
         if not feed_urls:
             return []
 
+        # Parallel fetches (much faster than sequential)
+        tasks = [self._fetch_and_parse_one(url) for url in feed_urls[:12]]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
         all_items: list[dict] = []
-        for url in feed_urls[:12]:  # safety cap
-            xml = await self._fetch_xml(url)
-            if not xml:
-                continue
-            parsed = self._parse_feed(xml, url)
-            all_items.extend(parsed)
+        for res in results:
+            if isinstance(res, list):
+                all_items.extend(res)
+            elif isinstance(res, Exception):
+                logger.debug(f"Intel feed task error: {res}")
 
         # Dedup by link or title
         seen = set()
@@ -538,23 +549,28 @@ class IntelEngine:
                 seen.add(key)
                 unique.append(it)
 
-        # Keep only reasonably recent items (last ~3 days) to avoid old noise
+        # Keep recent items (last ~7 days) + any without dates, to gather general intel without skipping too much
         now = datetime.now(timezone.utc)
         recent = []
         for it in unique:
             dt = self._parse_published(it.get("published", ""))
             if dt is None:
-                # No date? keep a few, the LLM will filter junk
                 recent.append(it)
                 continue
             age = (now - dt).total_seconds()
             if age < 0:
                 age = 0
-            if age <= 3 * 24 * 3600:  # 3 days
+            if age <= 7 * 24 * 3600:  # 7 days for more general coverage
                 recent.append(it)
 
         # Limit volume per run so the curator LLM stays focused
-        return recent[:60]
+        return recent[:100]
+
+    async def _fetch_and_parse_one(self, url: str) -> list[dict]:
+        xml = await self._fetch_xml(url)
+        if not xml:
+            return []
+        return self._parse_feed(xml, url)
 
     # Legacy search methods kept as optional fallback (disabled by default)
     async def _perform_searches(self) -> list[dict]:
@@ -579,11 +595,14 @@ class IntelEngine:
             return []
 
         # Build compact context for the model — "received" feed style
+        # Limit input to keep total intel memory under control
         now_str = datetime.now().astimezone().strftime("%Y-%m-%d %A")
         ctx_parts = [f"Current date context: {now_str}"]
-        ctx_parts.append("The following items were received directly from AI/tech news outlet feeds (OpenAI, HF, arXiv, MarkTechPost, TLDR, etc.).")
+        ctx_parts.append("The following items were received directly from general AI/tech news outlet feeds (HF, MarkTechPost, TLDR, arXiv, Simon Willison, VentureBeat, TechCrunch, The Verge, etc.).")
 
-        for it in items[:35]:
+        total_ctx_words = 0
+        max_ctx_words = 1500  # leave room for prompt + output <2k
+        for it in items:
             src = it.get("source", "feed")
             title = it.get("title", "").strip()
             summ = (it.get("summary") or "")[:450].replace("\n", " ")
@@ -593,14 +612,18 @@ class IntelEngine:
                 line += f" — {summ}"
             if link:
                 line += f" ({link})"
+            w = len(line.split())
+            if total_ctx_words + w > max_ctx_words:
+                break
             ctx_parts.append(line)
+            total_ctx_words += w
 
         context_blob = "\n\n".join(ctx_parts)
         context_blob = _truncate(context_blob, 16000)
 
         system_prompt = (
             "You are Maxwell's background intel curator (not a chat responder).\n"
-            "Your job: turn items **received directly from news outlet feeds** (OpenAI, Hugging Face, arXiv, MarkTechPost, TLDR AI, etc.) "
+            "Your job: turn items **received directly from general news outlet feeds** (Hugging Face, MarkTechPost, TLDR AI, arXiv, Simon Willison, VentureBeat, TechCrunch, The Verge, etc.) "
             "into a short list of *new, specific, high-value* facts about AI models, LLM releases, capabilities, benchmarks, papers, org announcements, or major tech news.\n\n"
             "STRICT RULES:\n"
             "- Only output facts that look genuinely recent/new based on the received items.\n"
@@ -608,7 +631,8 @@ class IntelEngine:
             "- Keep each fact to one memorable sentence (max ~220 chars).\n"
             "- Do NOT invent details or repeat old knowledge.\n"
             "- Prefer unique signals (new model drops, papers, releases) over generic hype.\n"
-            "- At most 8 facts total. Fewer is better if nothing solid.\n\n"
+            "- At most 8 facts total. Fewer is better if nothing solid.\n"
+            "- Total combined facts text must stay under 2000 words.\n\n"
             "Return ONLY this JSON (no other text):\n"
             '{\n  "facts": ["fact one here", "fact two here"]\n}\n'
         )
@@ -637,8 +661,8 @@ class IntelEngine:
                     seen.add(title.lower())
                     # Heuristically make good memory facts for AI models/news
                     fact = title
-                    if "gpt" in title.lower() or "model" in title.lower() or "live" in title.lower() or "release" in title.lower() or "introducing" in title.lower():
-                        fact = f"OpenAI / {src}: {title}"
+                    if any(k in title.lower() for k in ["gpt", "model", "live", "release", "introducing", "llm", "claude", "gemini", "llama"]):
+                        fact = f"AI release from {src}: {title}"
                         if summary and len(summary) > 20:
                             fact += f". {summary}"
                     else:
@@ -648,7 +672,17 @@ class IntelEngine:
                     facts.append(fact[:280])
                     if len(facts) >= MAX_FACTS_PER_RUN:
                         break
-                return facts
+
+                # Enforce total Intel memory under ~2000 words max
+                total_words = 0
+                capped = []
+                for f in facts:
+                    w = len(f.split())
+                    if total_words + w > 2000:
+                        break
+                    capped.append(f)
+                    total_words += w
+                return capped
             if getattr(provider, "available", None) is False:
                 logger.info("Intel: provider not available, soft skip curation")
                 return []
@@ -678,7 +712,18 @@ class IntelEngine:
             logger.error(f"Intel LLM curation call failed: {e}")
             return []
 
-        return self._parse_facts(raw)
+        facts = self._parse_facts(raw)
+
+        # Enforce total Intel memory/facts under ~2000 words max
+        total_words = 0
+        capped = []
+        for f in facts:
+            w = len(f.split())
+            if total_words + w > 2000:
+                break
+            capped.append(f)
+            total_words += w
+        return capped
 
     def _parse_facts(self, raw: str) -> list[str]:
         if not raw:
