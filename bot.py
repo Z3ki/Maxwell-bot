@@ -1604,7 +1604,13 @@ class MaxwellBot(commands.Bot):
         self._last_bot_reply: dict[str, float] = {}
         self._ai_concurrency = 2
         self._ai_active = 0
+        self._ai_user_waiter_count = 0  # user-priority calls waiting for a slot
         self._ai_cond = asyncio.Condition()
+        # Per-call priority tracking. "user" calls (Discord/Telegram/VC replies)
+        # outrank "background" calls (autonomy, intel, context_cleanup, REM) so a
+        # slow upstream can't make the user wait behind a 60s background tick.
+        # Active calls: asyncio.Task -> "user" | "background"
+        self._ai_call_kind: dict[asyncio.Task, str] = {}
         # Cache of recent users seen in each channel's conversation, so we can
         # resolve mentions/IDs for pinging even if not in current message.mentions
         # or guild cache (common for self-bots in larger servers).
@@ -1896,22 +1902,47 @@ class MaxwellBot(commands.Bot):
             return getattr(resolved.author, "id", None) == self.user.id
         return False
 
-    async def _acquire_ai_slot(self, timeout: float):
+    async def _acquire_ai_slot(self, timeout: float, *, priority: str = "background"):
+        """Acquire one of `ai_concurrency` LLM slots.
+
+        priority="user" outranks "background". When a user call is queued, a
+        background call is told (via the condition) to back off so the user
+        reply doesn't sit behind a 60s background tick. Within the same
+        priority, FIFO.
+        """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
+        task = asyncio.current_task()
         async with self._ai_cond:
-            while self._ai_active >= self._ai_concurrency:
+            while True:
+                # A user is always allowed through; a background call must wait
+                # if any user is currently queued.
+                if self._ai_active < self._ai_concurrency and not (
+                    priority == "background" and self._ai_user_waiter_count > 0
+                ):
+                    self._ai_active += 1
+                    if task is not None:
+                        self._ai_call_kind[task] = priority
+                    return
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     raise asyncio.TimeoutError()
-                await asyncio.wait_for(self._ai_cond.wait(), timeout=remaining)
-            self._ai_active += 1
+                if priority == "user":
+                    self._ai_user_waiter_count += 1
+                try:
+                    await asyncio.wait_for(self._ai_cond.wait(), timeout=remaining)
+                finally:
+                    if priority == "user":
+                        self._ai_user_waiter_count = max(0, self._ai_user_waiter_count - 1)
 
     async def _release_ai_slot(self):
         async with self._ai_cond:
             if self._ai_active > 0:
                 self._ai_active -= 1
-            self._ai_cond.notify()
+            task = asyncio.current_task()
+            if task is not None:
+                self._ai_call_kind.pop(task, None)
+            self._ai_cond.notify_all()
 
     def _notify_ai_waiters(self):
         async def notify():
@@ -3073,7 +3104,7 @@ class MaxwellBot(commands.Bot):
             t_ai = time.perf_counter()
             # Use the global AI slot (instead of only private VC semaphore) so noisy VC
             # does not starve text replies, autonomy, REM etc. Keep a local bound too.
-            await self._acquire_ai_slot(timeout=vc_timeout)
+            await self._acquire_ai_slot(timeout=vc_timeout, priority="user")
             try:
                 async with self._vc_ai_semaphore:
                     resp = await self.ai_provider.generate_response(
@@ -5512,7 +5543,7 @@ class MaxwellBot(commands.Bot):
                     for img in pre_tool_images
                 ] + active_media
         try:
-            await self._acquire_ai_slot(timeout=ai_timeout)
+            await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
             try:
                 if self._control.get("typing_indicator", True) and not getattr(
                     message, "suppress_typing", False
@@ -5566,7 +5597,7 @@ class MaxwellBot(commands.Bot):
                         + "\n=== END ===\nUse these results to continue. Tool images are attached. Don't text-reply if the user asked for an image — send_media or re-run image_generator instead.",
                     }
                 )
-                await self._acquire_ai_slot(timeout=ai_timeout)
+                await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
                 try:
                     # Attach images from tools so the model can SEE them
                     followup_images = all_tool_images if all_tool_images else []
@@ -6578,7 +6609,7 @@ class MaxwellBot(commands.Bot):
             user_parts.append("Media available to inspect in the multimodal payload.")
         messages.append({"role": "user", "content": "\n".join(user_parts)})
 
-        await self._acquire_ai_slot(timeout=ai_timeout)
+        await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
         try:
             async with session.post(f"{url_base}/sendChatAction", json={"chat_id": chat_id, "action": "typing"}):
                 pass
@@ -6619,7 +6650,7 @@ class MaxwellBot(commands.Bot):
                         "if not, finish with <tool:no_response />."
                     ),
                 })
-                await self._acquire_ai_slot(timeout=ai_timeout)
+                await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
                 try:
                     async with session.post(f"{url_base}/sendChatAction", json={"chat_id": chat_id, "action": "typing"}):
                         pass
@@ -6874,7 +6905,7 @@ class MaxwellBot(commands.Bot):
                     messages.append({"role": "user", "content": "\n".join(user_parts)})
 
                     # Request LLM
-                    await self._acquire_ai_slot(timeout=30)
+                    await self._acquire_ai_slot(timeout=30, priority="user")
                     try:
                         async with session.post(
                             f"{url_base}/sendChatAction",
@@ -6946,7 +6977,7 @@ class MaxwellBot(commands.Bot):
                                     + _telegram_tool_followup_instruction(bool(tg_media)),
                                 }
                             )
-                            await self._acquire_ai_slot(timeout=30)
+                            await self._acquire_ai_slot(timeout=30, priority="user")
                             try:
                                 async with session.post(
                                     f"{url_base}/sendChatAction",
