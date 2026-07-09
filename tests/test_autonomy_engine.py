@@ -4,6 +4,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 from autonomy import (
+    AutonomyContextIndex,
     AutonomyEngine,
     AutonomyStore,
     _truncate,
@@ -51,9 +52,43 @@ def test_parse_plan_requires_explicit_channel_id(tmp_path):
     )
     actions, failures = engine._parse_plan(raw)
 
-    assert "post_channel: missing explicit numeric target_channel_id" in failures
+    assert any("post_channel: missing target_channel" in f for f in failures)
     assert actions == [
         {"kind": "do_nothing", "reason": "all actions failed validation"}
+    ]
+
+
+def test_parse_plan_resolves_channel_and_message_indices(tmp_path):
+    engine = _engine(tmp_path, auto_channels={"100"}, tools={"react": DummyTool()})
+    idx = AutonomyContextIndex()
+    idx.add_channel("100")
+    idx.add_message("555", "100")
+    engine._context_index = idx
+
+    raw = json.dumps(
+        {
+            "thought": "reply using numbered refs",
+            "actions": [
+                {
+                    "kind": "post_channel",
+                    "target_channel_id": "1",
+                    "reply_to_message_id": "1",
+                    "content": "yeah exactly",
+                }
+            ],
+        }
+    )
+    actions, failures = engine._parse_plan(raw)
+
+    assert failures == []
+    assert actions == [
+        {
+            "kind": "post_channel",
+            "target_channel_id": "100",
+            "reply_to_message_id": "555",
+            "content": "yeah exactly",
+            "reason": "",
+        }
     ]
 
 
@@ -368,6 +403,76 @@ def test_truncate_handles_tiny_budgets():
     assert _truncate("abcdef", 0) == ""
     assert _truncate("abcdef", 3) == "abc"
     assert _truncate("abcdef", 99) == "abcdef"
+
+
+def test_gather_context_uses_numbered_channels_and_messages(tmp_path):
+    class Store:
+        async def load_goals(self):
+            return []
+
+        async def load_state(self):
+            return {}
+
+        async def load_log(self):
+            return []
+
+    class RemLog:
+        async def drain_slice(self, since):
+            return []
+
+    class HistoryMessage:
+        id = 555
+        content = "hello there"
+        created_at = datetime.now()
+        author = SimpleNamespace(
+            id=7,
+            display_name="Alice",
+            name="alice",
+            bot=False,
+        )
+        mentions = []
+        reference = None
+        attachments = []
+        embeds = []
+
+    class Channel:
+        id = 100
+        name = "general"
+        topic = ""
+
+        async def history(self, limit=12):
+            for msg in [HistoryMessage()]:
+                yield msg
+
+    channel = Channel()
+    bot = SimpleNamespace(
+        config=SimpleNamespace(DATA_DIR=str(tmp_path)),
+        _auto_channels={"100"},
+        _control={"bot_enabled": True},
+        tools={},
+        user=SimpleNamespace(id=42, display_name="Maxwell", name="Maxwell"),
+        guilds=[
+            SimpleNamespace(
+                text_channels=[channel],
+                me=SimpleNamespace(),
+            )
+        ],
+        private_channels=[],
+        rem_log=RemLog(),
+        memory=None,
+        get_channel=lambda channel_id: channel if channel_id == 100 else None,
+        fetch_channel=None,
+    )
+    channel.permissions_for = lambda _me: SimpleNamespace(send_messages=True)
+    engine = AutonomyEngine(bot)
+    engine.store = Store()
+
+    context = asyncio.run(engine.gather_context())
+
+    assert "channel=1(#general)" in context
+    assert "msg=1" in context
+    assert "  1: #general" in context
+    assert "100" not in context.split("=== AVAILABLE CHANNELS")[1].split("===")[0]
 
 
 def test_gather_context_includes_normal_channel_memory(tmp_path):

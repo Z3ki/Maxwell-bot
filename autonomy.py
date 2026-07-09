@@ -190,6 +190,79 @@ def _conversation_label(bot: Any, channel_id: str) -> str:
     return f"channel={cid}"
 
 
+class AutonomyContextIndex:
+    """Maps small integers shown to the planner to real Discord IDs for one tick.
+
+    The LLM sees channel=1, msg=3 instead of 18-digit snowflakes, which it
+    routinely garbles. Resolution happens in _parse_plan before execution.
+    """
+
+    def __init__(self):
+        self.channel_by_idx: dict[int, str] = {}
+        self.channel_idx_by_id: dict[str, int] = {}
+        self.message_by_idx: dict[int, str] = {}
+        self.message_channel_by_idx: dict[int, str] = {}
+        self._next_channel = 1
+        self._next_message = 1
+
+    def add_channel(self, channel_id: str) -> int:
+        cid = re.sub(r"[^0-9]", "", str(channel_id or ""))
+        if not cid:
+            return 0
+        existing = self.channel_idx_by_id.get(cid)
+        if existing is not None:
+            return existing
+        idx = self._next_channel
+        self._next_channel += 1
+        self.channel_by_idx[idx] = cid
+        self.channel_idx_by_id[cid] = idx
+        return idx
+
+    def add_message(self, message_id: str, channel_id: str) -> int:
+        mid = re.sub(r"[^0-9]", "", str(message_id or ""))
+        cid = re.sub(r"[^0-9]", "", str(channel_id or ""))
+        if not mid:
+            return 0
+        idx = self._next_message
+        self._next_message += 1
+        self.message_by_idx[idx] = mid
+        if cid:
+            self.message_channel_by_idx[idx] = cid
+        return idx
+
+    @staticmethod
+    def _digits(raw: str) -> str:
+        return re.sub(r"[^0-9]", "", str(raw or "").strip())
+
+    def resolve_channel(self, raw: str) -> str | None:
+        digits = self._digits(raw)
+        if not digits:
+            return None
+        if len(digits) >= 15:
+            return digits
+        try:
+            num = int(digits)
+        except ValueError:
+            return None
+        if num in self.channel_by_idx:
+            return self.channel_by_idx[num]
+        return digits
+
+    def resolve_message(self, raw: str) -> tuple[str | None, str | None]:
+        digits = self._digits(raw)
+        if not digits:
+            return None, None
+        if len(digits) >= 15:
+            return digits, None
+        try:
+            num = int(digits)
+        except ValueError:
+            return None, None
+        if num in self.message_by_idx:
+            return self.message_by_idx[num], self.message_channel_by_idx.get(num)
+        return digits, None
+
+
 # _render_discord_context_text imported from utils.py
 
 
@@ -562,6 +635,69 @@ class AutonomyEngine:
         self._posted_messages: list[dict] = []
         # Validation failures from last tick (fed back into context)
         self._last_validation_failures: list[str] = []
+        # Channel/message index built during gather_context for this tick
+        self._context_index: AutonomyContextIndex | None = None
+
+    def _resolve_planner_channel(self, raw: str) -> str | None:
+        idx = getattr(self, "_context_index", None)
+        if idx is not None:
+            resolved = idx.resolve_channel(raw)
+            if resolved:
+                return resolved
+        digits = re.sub(r"[^0-9]", "", str(raw or ""))
+        return digits or None
+
+    def _resolve_planner_message(self, raw: str) -> tuple[str | None, str | None]:
+        idx = getattr(self, "_context_index", None)
+        if idx is not None:
+            return idx.resolve_message(raw)
+        digits = re.sub(r"[^0-9]", "", str(raw or ""))
+        return (digits or None), None
+
+    async def _collect_available_channels(
+        self, ctx_index: AutonomyContextIndex
+    ) -> list[str]:
+        """Build numbered AVAILABLE CHANNELS lines and populate ctx_index."""
+        now_ts = time.time()
+        ch_map_lines = []
+        for guild in self.bot.guilds:
+            for ch in guild.text_channels:
+                try:
+                    if guild.me is None:
+                        continue
+                    perms = ch.permissions_for(guild.me)
+                    if not perms.send_messages or not self._channel_allowed(str(ch.id)):
+                        continue
+                    idx = ctx_index.add_channel(str(ch.id))
+                    tags = []
+                    if str(ch.id) in (self.bot._auto_channels or set()):
+                        tags.append("auto")
+                    topic = getattr(ch, "topic", None) or ""
+                    topic_snippet = topic[:80].replace("\n", " ") if topic else ""
+                    last_msg_ago = ""
+                    try:
+                        last_msg = [m async for m in ch.history(limit=1)]
+                        if last_msg:
+                            age_s = int(now_ts - last_msg[0].created_at.timestamp())
+                            if age_s < 60:
+                                last_msg_ago = "just now"
+                            elif age_s < 3600:
+                                last_msg_ago = f"{age_s // 60}m ago"
+                            elif age_s < 86400:
+                                last_msg_ago = f"{age_s // 3600}h ago"
+                            else:
+                                last_msg_ago = f"{age_s // 86400}d ago"
+                    except Exception:
+                        pass
+                    tag_str = f" [{', '.join(tags)}]" if tags else ""
+                    topic_str = f' — "{topic_snippet}"' if topic_snippet else ""
+                    recency_str = f" (last msg: {last_msg_ago})" if last_msg_ago else ""
+                    ch_map_lines.append(
+                        f"  {idx}: #{ch.name}{tag_str}{recency_str}{topic_str}"
+                    )
+                except Exception:
+                    continue
+        return ch_map_lines
 
     def _auto_channel_candidates(self) -> list[str]:
         """Stable target list for autonomous posts/tools."""
@@ -769,6 +905,9 @@ class AutonomyEngine:
         global truncation that ate channel activity first."""
 
         sections = []
+        ctx_index = AutonomyContextIndex()
+        self._context_index = ctx_index
+        available_channel_lines = await self._collect_available_channels(ctx_index)
         # Use system local time so the LLM doesn't see UTC and think it's
         # night when it's 5pm. No hardcoding offsets — let the OS decide.
         now = datetime.now().astimezone()
@@ -849,11 +988,14 @@ class AutonomyEngine:
                             when = _context_time(ev_dt) if ev_dt else "?"
                     cid = str(ev.get("channel_id") or "?")
                     ch_name = cid
+                    ch_idx = 0
                     with contextlib.suppress(Exception):
                         ch_obj = self.bot.get_channel(int(cid)) if cid != "?" else None
                         ch_name = (
                             getattr(ch_obj, "name", cid) if ch_obj is not None else cid
                         )
+                        if cid != "?":
+                            ch_idx = ctx_index.add_channel(cid)
                     uid = str(ev.get("user_id") or "?")
                     uname = str(ev.get("user_name") or "?")
                     role = str(ev.get("role") or "?")
@@ -864,8 +1006,10 @@ class AutonomyEngine:
                     )
 
                     tags = []
-                    if ev.get("message_id"):
-                        tags.append(f"msg={ev.get('message_id')}")
+                    if ev.get("message_id") and cid != "?":
+                        msg_idx = ctx_index.add_message(str(ev.get("message_id")), cid)
+                        if msg_idx:
+                            tags.append(f"msg={msg_idx}")
 
                     addressed = []
                     if ev.get("reply_to_author_id"):
@@ -905,8 +1049,13 @@ class AutonomyEngine:
                         else "addressed_to=channel"
                     )
                     tag_text = " ".join(tags)
+                    ch_label = (
+                        f"channel={ch_idx}(#{ch_name})"
+                        if ch_idx
+                        else f"channel=#{ch_name}"
+                    )
                     ev_lines.append(
-                        f'time={when} channel=#{ch_name}({cid}) speaker={uname}({uid}, {speaker_kind}) {tag_text} content="{content}"'
+                        f'time={when} {ch_label} speaker={uname}({uid}, {speaker_kind}) {tag_text} content="{content}"'
                     )
                 sections.append(
                     _truncate(
@@ -969,10 +1118,12 @@ class AutonomyEngine:
                         m, bot_user=self.bot.user, reply=reply
                     )
                     tag_text = " ".join(tags)
-                    msg_id = str(getattr(m, "id", "?"))
+                    msg_id = str(getattr(m, "id", ""))
+                    ch_idx = ctx_index.add_channel(_cid)
+                    msg_idx = ctx_index.add_message(msg_id, _cid) if msg_id else 0
                     author = _user_ref(getattr(m, "author", None), self.bot.user)
                     ch_lines.append(
-                        f'time={age} channel=#{getattr(ch, "name", cid)}({cid}) msg={msg_id} speaker={author} {tag_text} content="{content}"'
+                        f'time={age} channel={ch_idx}(#{getattr(ch, "name", cid)}) msg={msg_idx} speaker={author} {tag_text} content="{content}"'
                     )
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 continue
@@ -1029,6 +1180,7 @@ class AutonomyEngine:
                     if not rows:
                         continue
                     ch_name = cid
+                    ch_idx = ctx_index.add_channel(cid)
                     with contextlib.suppress(Exception):
                         ch_obj = self.bot.get_channel(int(cid))
                         ch_name = getattr(ch_obj, "name", cid) if ch_obj else cid
@@ -1079,7 +1231,7 @@ class AutonomyEngine:
                         channel_lines.append(line)
                         used += len(line)
                     if channel_lines:
-                        mem_lines.append(f"# {ch_name}({cid})")
+                        mem_lines.append(f"# channel {ch_idx} (#{ch_name})")
                         mem_lines.extend(reversed(channel_lines))
             if mem_lines:
                 sections.append(
@@ -1157,8 +1309,11 @@ class AutonomyEngine:
                         if author_is_self
                         else f"from={_user_ref(m.author, self.bot.user)} to=you/Maxwell({getattr(self.bot.user, 'id', '?')})"
                     )
+                    msg_idx = ctx_index.add_message(
+                        str(getattr(m, "id", "")), _cid
+                    )
                     lines.append(
-                        f'time={age} msg={getattr(m, "id", "?")} {direction} content="{content}"'
+                        f'time={age} msg={msg_idx} {direction} content="{content}"'
                     )
                 if len(lines) > 1:
                     dm_blocks.append("\n".join(lines))
@@ -1193,56 +1348,15 @@ class AutonomyEngine:
         except Exception as e:
             sections.append(f"=== LONG-TERM MEMORY ===\n(error: {e})")
 
-        # 9. Available channels map — enriched with activity and topic
-        # so the LLM can pick the right channel without cross-referencing CHANNEL ACTIVITY.
-        now_ts = time.time()
-        ch_map_lines = []
-        for guild in self.bot.guilds:
-            for ch in guild.text_channels:
-                try:
-                    if guild.me is None:
-                        continue
-                    perms = ch.permissions_for(guild.me)
-                    if not perms.send_messages or not self._channel_allowed(str(ch.id)):
-                        continue
-                    cid = str(ch.id)
-                    # build status tags
-                    tags = []
-                    if cid in (self.bot._auto_channels or set()):
-                        tags.append("auto")
-                    topic = getattr(ch, "topic", None) or ""
-                    topic_snippet = topic[:80].replace("\n", " ") if topic else ""
-                    # grab last message time for recency
-                    last_msg_ago = ""
-                    try:
-                        last_msg = [m async for m in ch.history(limit=1)]
-                        if last_msg:
-                            age_s = int(now_ts - last_msg[0].created_at.timestamp())
-                            if age_s < 60:
-                                last_msg_ago = "just now"
-                            elif age_s < 3600:
-                                last_msg_ago = f"{age_s // 60}m ago"
-                            elif age_s < 86400:
-                                last_msg_ago = f"{age_s // 3600}h ago"
-                            else:
-                                last_msg_ago = f"{age_s // 86400}d ago"
-                    except Exception:
-                        pass
-                    tag_str = f" [{', '.join(tags)}]" if tags else ""
-                    topic_str = f' — "{topic_snippet}"' if topic_snippet else ""
-                    recency_str = f" (last msg: {last_msg_ago})" if last_msg_ago else ""
-                    ch_map_lines.append(
-                        f"  {cid}: #{ch.name}{tag_str}{recency_str}{topic_str}"
-                    )
-                except Exception:
-                    continue
-        if ch_map_lines:
+        # 9. Available channels map — numbered 1..N so the planner picks by index,
+        # not by 18-digit snowflakes it routinely garbles.
+        if available_channel_lines:
             # Intentionally limit to reduce "everything is a channel post" bias.
             # Autonomy should also do research, memory updates, goals, DMs, reacts etc.
             sections.append(
                 _truncate(
-                    "=== AVAILABLE CHANNELS (only post when you have a real reason; prefer research/update_memory for knowledge goals) ===\n"
-                    + "\n".join(ch_map_lines[:18]),
+                    "=== AVAILABLE CHANNELS (use the number as target_channel_id; only post when you have a real reason; prefer research/update_memory for knowledge goals) ===\n"
+                    + "\n".join(available_channel_lines[:18]),
                     CTX_BUDGET_CHANNELS_MAP,
                 )
             )
@@ -1499,11 +1613,11 @@ DECISION RULES:
 - Voice: short, casual, lowercase-natural — exactly like Maxwell in normal chat.
 
 DATA RULES:
-- Channel activity / recent conversations are REAL, structured lines: channel=#name(ID), msg=ID, speaker=Name(user_id), reply_to=, mentions=[], addressed_to=, content="...". Don't fetch more.
+- Channel activity / recent conversations are REAL, structured lines: channel=N(#name), msg=M, speaker=Name(user_id), reply_to=, mentions=[], addressed_to=, content="...". N and M are small integers (1, 2, 3...), NOT Discord snowflakes. Don't fetch more.
 - Discord is multi-user: each user_id is a distinct person; never cross-attribute.
-- target_channel_id must be the numeric ID from channel= or AVAILABLE CHANNELS, never a name.
-- To thread a reply, include reply_to_message_id with the target msg ID.
-- For react/edit/delete/forward, pass target_message_id + target_channel_id from CHANNEL ACTIVITY. In forum channels, each post is its own thread — the starter message id and the thread channel id are the SAME snowflake, so use that id as BOTH target_message_id and target_channel_id. If you only have target_message_id, autonomy will search memory to find its channel, but passing target_channel_id is more reliable.
+- target_channel_id must be the channel NUMBER from AVAILABLE CHANNELS or channel=N in activity lines — e.g. "3" for channel 3, never a channel name.
+- To thread a reply, set reply_to_message_id to the msg=M number from CHANNEL ACTIVITY.
+- For react/edit/delete/forward, pass target_message_id (the msg=M number) and target_channel_id (the channel=N number) from CHANNEL ACTIVITY. If you only pass target_message_id, autonomy will infer the channel from that message index.
 - Don't repeat recent posts (check YOUR RECENT ACTIONS; timestamps are recalculated this tick).
 - Prefer 0-1 actions; up to {MAX_ACTIONS_PER_TICK} only with clear reason for each.
 
@@ -1511,9 +1625,9 @@ Return ONLY valid JSON:
 {{
   "thought": "your read on the situation",
   "actions": [
-    {{"kind": "post_channel", "target_channel_id": "ID", "reply_to_message_id": "ID", "content": "...", "reason": "..."}},
+    {{"kind": "post_channel", "target_channel_id": "3", "reply_to_message_id": "12", "content": "...", "reason": "..."}},
     {{"kind": "send_dm", "target_user_id": "ID", "content": "...", "reason": "..."}},
-    {{"kind": "run_tool", "tool_name": "react", "tool_args": {{"emoji": "...", "target_message_id": "ID"}}, "target_channel_id": "ID", "reason": "..."}},
+    {{"kind": "run_tool", "tool_name": "react", "tool_args": {{"emoji": "...", "target_message_id": "12"}}, "target_channel_id": "3", "reason": "..."}},
     {{"kind": "update_memory", "content": "...", "reason": "..."}},
     {{"kind": "create_goal", "description": "...", "reason": "..."}},
     {{"kind": "do_nothing", "reason": "..."}}
@@ -1726,18 +1840,23 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
 
             elif kind == "post_channel":
                 cid_raw = str(action.get("target_channel_id", ""))
-                cid = re.sub(r"[^0-9]", "", cid_raw)
+                cid = self._resolve_planner_channel(cid_raw)
                 content = str(action.get("content", "")).strip()
                 if not content:
                     validation_failures.append("post_channel: empty content")
                     continue
                 if not cid:
                     validation_failures.append(
-                        "post_channel: missing explicit numeric target_channel_id"
+                        "post_channel: missing target_channel (use channel number from AVAILABLE CHANNELS)"
                     )
                     continue
                 reply_to_raw = str(action.get("reply_to_message_id", ""))
-                reply_to = re.sub(r"[^0-9]", "", reply_to_raw)
+                reply_to, reply_ch = self._resolve_planner_message(reply_to_raw)
+                if reply_to_raw.strip() and not reply_to:
+                    validation_failures.append(
+                        "post_channel: invalid reply_to_message_id (use msg number from CHANNEL ACTIVITY)"
+                    )
+                    continue
                 parsed_action = {
                     "kind": "post_channel",
                     "target_channel_id": cid,
@@ -1767,6 +1886,26 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
                 if not isinstance(tool_args, dict):
                     tool_args = {}
                 safe_args = {str(k): v for k, v in tool_args.items()}
+                inferred_ch = None
+                msg_resolve_failed = False
+                for msg_key in ("target_message_id", "message_id"):
+                    if msg_key not in safe_args:
+                        continue
+                    resolved_mid, resolved_ch = self._resolve_planner_message(
+                        str(safe_args[msg_key])
+                    )
+                    if str(safe_args[msg_key]).strip() and not resolved_mid:
+                        validation_failures.append(
+                            f"run_tool: invalid {msg_key} (use msg number from CHANNEL ACTIVITY)"
+                        )
+                        msg_resolve_failed = True
+                        break
+                    if resolved_mid:
+                        safe_args[msg_key] = resolved_mid
+                    if resolved_ch:
+                        inferred_ch = resolved_ch
+                if msg_resolve_failed:
+                    continue
                 parsed_action = {
                     "kind": "run_tool",
                     "tool_name": tool_name,
@@ -1774,14 +1913,16 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
                     "reason": str(action.get("reason", ""))[:500],
                 }
                 target_cid_raw = str(action.get("target_channel_id", ""))
-                target_cid = re.sub(r"[^0-9]", "", target_cid_raw)
+                target_cid = self._resolve_planner_channel(target_cid_raw)
                 if target_cid_raw.strip() and not target_cid:
                     validation_failures.append(
-                        "run_tool: target_channel_id must be numeric"
+                        "run_tool: invalid target_channel_id (use channel number from AVAILABLE CHANNELS)"
                     )
                     continue
                 if target_cid:
                     parsed_action["target_channel_id"] = target_cid
+                elif inferred_ch:
+                    parsed_action["target_channel_id"] = inferred_ch
                 valid.append(parsed_action)
 
             elif kind == "update_memory":
@@ -2242,8 +2383,8 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
             if not clean_cid:
                 logger.warning(
                     f"Autonomy run_tool '{tool_name}': target_channel_id '{target_cid}' "
-                    f"has no digits — LLM probably passed a channel name. "
-                    f"Available channels are listed by ID in context."
+                    f"could not be resolved — LLM probably passed a channel name. "
+                    f"Available channels are listed by number in context."
                 )
                 if explicit_target:
                     result["result"] = "error"
