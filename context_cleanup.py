@@ -202,13 +202,21 @@ def _entry_digest(entry: dict) -> str:
 
 
 class ContextCleanupEngine:
-    """Background loop that periodically reviews and cleans shared context."""
+    """Background loop that periodically reviews and cleans shared context.
+
+    Runs two passes per tick: shared_context (scoped facts) and long_term_memory
+    (the flat LTM list that Intel/news writes to hourly). The LTM pass exists
+    because Intel appends 7-8 dated facts every hour and nothing else
+    maintained that list — without an LTM pass, the only cap is MAX_LTM_LINES
+    and it just rolls over the oldest entries.
+    """
 
     def __init__(self, bot: Any):
         self.bot = bot
         self.store = ContextCleanupStore(getattr(bot.config, "DATA_DIR", "data"))
         self.enabled = self._default_enabled()
         self.interval_seconds = self._default_interval()
+        self.ltm_enabled = self._default_ltm_enabled()
         self._running_flag = False
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
@@ -235,6 +243,14 @@ class ContextCleanupEngine:
             )
         except (TypeError, ValueError):
             return 1800
+
+    def _default_ltm_enabled(self) -> bool:
+        return bool(
+            (getattr(self.bot, "_control", None) or {}).get(
+                "context_cleanup_ltm_enabled",
+                DEFAULT_CONTROL.get("context_cleanup_ltm_enabled", True),
+            )
+        )
 
     # -- lifecycle --
 
@@ -264,12 +280,19 @@ class ContextCleanupEngine:
             self.interval_seconds = max(
                 300, int(control.get("interval_seconds", self._default_interval()) or 1800)
             )
+            self.ltm_enabled = bool(
+                control.get("ltm_enabled", self._default_ltm_enabled())
+            )
         except Exception as e:
             logger.warning(f"ContextCleanup load_control failed: {e}")
 
     async def save_control(self):
         await self.store.save_control(
-            {"enabled": self.enabled, "interval_seconds": self.interval_seconds}
+            {
+                "enabled": self.enabled,
+                "interval_seconds": self.interval_seconds,
+                "ltm_enabled": self.ltm_enabled,
+            }
         )
 
     # -- main loop --
@@ -302,7 +325,12 @@ class ContextCleanupEngine:
     # -- single pass --
 
     async def run_once(self) -> dict:
-        """One cleanup pass. Skipped if already running."""
+        """One cleanup pass over shared_context AND long_term_memory.
+
+        Skipped if a previous pass is still running. Both sub-passes share
+        the same lock and the same audit/log entry; their per-store
+        counters are reported in the result.
+        """
         if self._lock.locked():
             logger.debug("ContextCleanup pass skipped — previous still running")
             return {"skipped": True}
@@ -322,27 +350,64 @@ class ContextCleanupEngine:
             start = time.time()
             try:
                 memory = cast(Any, getattr(self.bot, "memory", None))
-                if memory is None or not hasattr(memory, "list_shared_context"):
+                if memory is None:
                     raise RuntimeError("memory manager unavailable")
-                entries = await memory.list_shared_context(limit=MAX_REVIEW_ENTRIES)
-                if not entries:
-                    audit = "DONE - empty shared context store"
-                    await self._finish_pass(
-                        started, time.time() - start, audit, 0, 0, None
-                    )
-                    return {"skipped": False, "ops": 0, "audit": audit}
 
-                plan, audit = await self.plan(entries)
-                applied, skipped = await self.apply(plan)
+                sc_audit = ""
+                sc_applied = 0
+                sc_skipped = 0
+                ltm_audit = ""
+                ltm_applied = 0
+                ltm_skipped = 0
+                ltm_skipped_disabled = False
+
+                # --- shared_context pass ---
+                if hasattr(memory, "list_shared_context"):
+                    entries = await memory.list_shared_context(limit=MAX_REVIEW_ENTRIES)
+                    if not entries:
+                        sc_audit = "shared_context: empty"
+                    else:
+                        sc_plan, sc_audit = await self.plan(entries)
+                        sc_applied, sc_skipped = await self.apply(sc_plan)
+
+                # --- long_term_memory pass ---
+                if self.ltm_enabled and hasattr(memory, "get_long_term_memory"):
+                    ltm_entries = await asyncio.to_thread(memory.get_long_term_memory)
+                    if not ltm_entries:
+                        ltm_audit = "ltm: empty"
+                    else:
+                        ltm_plan, ltm_audit = await self.plan_ltm(ltm_entries)
+                        ltm_applied, ltm_skipped = await self.apply_ltm(ltm_plan)
+                elif not self.ltm_enabled:
+                    ltm_audit = "ltm: skipped (disabled)"
+                    ltm_skipped_disabled = True
+
                 duration = time.time() - start
+                combined_audit = (
+                    f"shared_context: {sc_audit} | ltm: {ltm_audit}"
+                ).strip(" |")
+                total_applied = sc_applied + ltm_applied
+                total_skipped = sc_skipped + ltm_skipped
                 await self._finish_pass(
-                    started, duration, audit, applied, skipped, None
+                    started,
+                    duration,
+                    combined_audit,
+                    total_applied,
+                    total_skipped,
+                    None,
+                    sc_applied=sc_applied,
+                    sc_skipped=sc_skipped,
+                    ltm_applied=ltm_applied,
+                    ltm_skipped=ltm_skipped,
+                    ltm_disabled=ltm_skipped_disabled,
                 )
                 return {
                     "skipped": False,
-                    "ops": applied,
-                    "skipped_ops": skipped,
-                    "audit": audit,
+                    "ops": total_applied,
+                    "skipped_ops": total_skipped,
+                    "sc_ops": sc_applied,
+                    "ltm_ops": ltm_applied,
+                    "audit": combined_audit,
                     "duration": duration,
                 }
             except Exception as e:
@@ -366,6 +431,11 @@ class ContextCleanupEngine:
         applied: int,
         skipped: int,
         error: str | None,
+        sc_applied: int = 0,
+        sc_skipped: int = 0,
+        ltm_applied: int = 0,
+        ltm_skipped: int = 0,
+        ltm_disabled: bool = False,
     ):
         self._last_audit = str(audit)[:4000]
 
@@ -375,6 +445,9 @@ class ContextCleanupEngine:
             s["last_audit"] = str(audit)[:4000]
             s["ops_applied_total"] = int(s.get("ops_applied_total", 0)) + applied
             s["ops_skipped_total"] = int(s.get("ops_skipped_total", 0)) + skipped
+            s["sc_ops_applied_total"] = int(s.get("sc_ops_applied_total", 0)) + sc_applied
+            s["ltm_ops_applied_total"] = int(s.get("ltm_ops_applied_total", 0)) + ltm_applied
+            s["ltm_disabled"] = bool(ltm_disabled)
             s["passes_total"] = int(s.get("passes_total", 0)) + 1
             s["last_error"] = error
 
@@ -386,6 +459,9 @@ class ContextCleanupEngine:
                 "duration": round(duration, 2),
                 "ops_applied": applied,
                 "ops_skipped": skipped,
+                "sc_ops": sc_applied,
+                "ltm_ops": ltm_applied,
+                "ltm_disabled": bool(ltm_disabled),
                 "audit": str(audit)[:2000],
                 "error": error,
             }
@@ -669,6 +745,239 @@ class ContextCleanupEngine:
                 skipped += 1
         return applied, skipped
 
+    # -- LTM pass (long_term_memory) --
+
+    def _ltm_digest(self, entry: dict) -> str:
+        eid = str(entry.get("id", "?"))
+        content = str(entry.get("content", "")).replace("\n", " ")[:200]
+        return f"[{eid}] {content}"
+
+    async def plan_ltm(self, entries: list[dict]) -> tuple[list[dict], str]:
+        """Ask the LLM to clean the long_term_memory store.
+
+        LTM is a flat list of dated facts (Intel/news mostly). Cleanup is
+        delete/edit/merge; "add" is intentionally not allowed here because
+        nothing else writes to LTM except Intel and the bot itself, and
+        cleanup shouldn't grow the list.
+        """
+        if not entries:
+            return [], "ltm: empty"
+        # Cap snapshot size. LTM can be 1000+; send the freshest slice that
+        # fits the budget — Intel's recent facts are at the tail.
+        budget = 14000
+        tail = entries[-MAX_REVIEW_ENTRIES:]
+        snapshot = "\n".join(self._ltm_digest(e) for e in tail)
+        snapshot = _truncate(snapshot, budget)
+        system_prompt = (
+            "You are Maxwell's long-term-memory janitor. You review a list of "
+            "stored facts (mostly news/intel entries the bot accumulated) and "
+            "produce cleanup operations: delete duplicates/garbage, edit messy "
+            "entries, or merge near-duplicates into one clean entry.\n\n"
+            "RULES:\n"
+            "- Only DELETE an entry if it is an exact/near duplicate of another, "
+            "obviously garbage (truncated, leaked prompt text, raw timestamps), "
+            "or superseded by a newer entry on the same topic.\n"
+            "- EDIT to clean phrasing, fix typos, normalize dates, or strip "
+            "leading '[2026-01-01]' style prefixes that are not useful. Never "
+            "change the meaning.\n"
+            "- MERGE two or more near-duplicate entries into one: keep the "
+            "newest/widest-scoped one, provide a single clean merged content, "
+            "and list the others in delete_ids.\n"
+            f"- At most {MAX_OPS_PER_PASS} operations. Prefer edits over deletes.\n\n"
+            "Return ONLY strict JSON:\n"
+            "{\n"
+            '  "audit": "short summary of what you cleaned and why",\n'
+            '  "ops": [\n'
+            '    {"kind":"delete","id":"<entry id>","reason":"..."},\n'
+            '    {"kind":"edit","id":"<entry id>","content":"...","reason":"..."},\n'
+            '    {"kind":"merge","keep_id":"<id>","delete_ids":["<id>","<id>"],'
+            '"content":"...","reason":"..."}\n'
+            "  ]\n"
+            "}\n"
+            "Valid kinds: delete, edit, merge. Do not add entries — Intel "
+            "and the bot itself manage additions; cleanup only removes/merges."
+        )
+        user_prompt = (
+            f"Long-term-memory snapshot ({len(entries)} entries total, showing "
+            f"newest {len(tail)}):\n{snapshot}\n\nReturn the cleanup plan JSON."
+        )
+        try:
+            provider = await self.bot._get_autonomy_provider()
+            if provider is None or not callable(getattr(provider, "generate_response", None)):
+                provider = getattr(self.bot, "ai_provider", None)
+            if provider is None:
+                return [], "ltm: no provider available"
+            if getattr(provider, "available", None) is False:
+                logger.info("ContextCleanup: provider not available for LTM, soft skip")
+                return [], "ltm: provider not available"
+            model = str(
+                (getattr(self.bot, "_control", None) or {}).get("autonomy_model", "") or ""
+            ) or None
+            timeout = max(
+                30,
+                min(
+                    int(
+                        (getattr(self.bot, "_control", None) or {}).get(
+                            "ai_timeout_seconds", 120
+                        )
+                        or 120
+                    ),
+                    600,
+                ),
+            )
+            await self.bot._acquire_ai_slot(timeout=timeout)
+            try:
+                raw = await provider.generate_response(
+                    [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    timeout=timeout,
+                    model=model,
+                    max_tokens=4096,
+                )
+            finally:
+                await self.bot._release_ai_slot()
+        except Exception as e:
+            logger.error(f"ContextCleanup LTM LLM call failed: {e}")
+            return [], f"ltm ERROR: {e}"
+
+        ops, audit = self._parse_ltm_plan(raw, entries)
+        return ops, audit
+
+    def _parse_ltm_plan(self, raw: str, entries: list[dict]) -> tuple[list[dict], str]:
+        if not raw:
+            return [], "ltm: empty LLM response"
+        text = str(raw).strip()
+        json_str: str | None = None
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                json_str = text
+        except (json.JSONDecodeError, ValueError):
+            pass
+        if json_str is None:
+            m = re.search(r"```(?:json)?\s*\n?(\{[^`]*)\s*```", text, re.DOTALL)
+            if m:
+                json_str = m.group(1)
+        if json_str is None:
+            candidates = []
+            i = 0
+            while i < len(text):
+                if text[i] == "{":
+                    depth = 0
+                    for j in range(i, len(text)):
+                        if text[j] == "{":
+                            depth += 1
+                        elif text[j] == "}":
+                            depth -= 1
+                            if depth == 0:
+                                candidates.append(text[i : j + 1])
+                                i = j
+                                break
+                i += 1
+            for c in candidates:
+                try:
+                    obj = json.loads(c)
+                    if isinstance(obj, dict) and "ops" in obj:
+                        json_str = c
+                        break
+                except json.JSONDecodeError:
+                    pass
+            if json_str is None and candidates:
+                json_str = candidates[0]
+        if json_str is None:
+            logger.warning(f"ContextCleanup LTM no JSON. Raw: {text[:500]}")
+            return [], "ltm: no JSON in LLM response"
+        try:
+            parsed = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            logger.warning(f"ContextCleanup LTM JSON parse failed: {e}. Raw: {json_str[:500]}")
+            return [], "ltm: invalid JSON from planner"
+        if not isinstance(parsed, dict):
+            return [], "ltm: planner returned non-object"
+
+        audit = str(parsed.get("audit", ""))[:2000]
+        raw_ops = parsed.get("ops", [])
+        if not isinstance(raw_ops, list):
+            return [], audit or "ltm: DONE"
+
+        known_ids = {str(e.get("id", "")) for e in entries if e.get("id") is not None}
+        valid: list[dict] = []
+        for op in raw_ops[:MAX_OPS_PER_PASS]:
+            if not isinstance(op, dict):
+                continue
+            kind = str(op.get("kind", "")).strip().lower()
+            reason = str(op.get("reason", ""))[:300]
+            if kind == "delete":
+                eid = str(op.get("id", "")).strip()
+                if eid and eid in known_ids:
+                    valid.append({"kind": "delete", "id": eid, "reason": reason})
+            elif kind == "edit":
+                eid = str(op.get("id", "")).strip()
+                if not eid or eid not in known_ids:
+                    continue
+                content = str(op.get("content", "")).strip()[:MAX_CONTENT_CHARS]
+                if not content:
+                    continue
+                valid.append(
+                    {"kind": "edit", "id": eid, "content": content, "reason": reason}
+                )
+            elif kind == "merge":
+                keep_id = str(op.get("keep_id", "")).strip()
+                delete_ids_raw = op.get("delete_ids", [])
+                if not isinstance(delete_ids_raw, list):
+                    delete_ids_raw = []
+                delete_ids = [
+                    d for d in (str(x).strip() for x in delete_ids_raw) if d
+                ]
+                delete_ids = [d for d in delete_ids if d in known_ids and d != keep_id]
+                content = str(op.get("content", "")).strip()[:MAX_CONTENT_CHARS]
+                if not keep_id or keep_id not in known_ids or not delete_ids or not content:
+                    continue
+                valid.append(
+                    {
+                        "kind": "merge",
+                        "keep_id": keep_id,
+                        "delete_ids": delete_ids,
+                        "content": content,
+                        "reason": reason,
+                    }
+                )
+        return valid, audit or "ltm: DONE"
+
+    async def apply_ltm(self, plan: list[dict]) -> tuple[int, int]:
+        memory = cast(Any, getattr(self.bot, "memory", None))
+        if memory is None:
+            return 0, len(plan)
+        applied = 0
+        skipped = 0
+        for op in plan[:MAX_OPS_PER_PASS]:
+            kind = op.get("kind")
+            try:
+                if kind == "delete":
+                    ok = await memory.remove_long_term_memory(op["id"])
+                elif kind == "edit":
+                    ok = await memory.edit_long_term_memory(op["id"], op["content"])
+                elif kind == "merge":
+                    ok = await memory.edit_long_term_memory(
+                        op["keep_id"], op["content"]
+                    )
+                    if ok:
+                        for did in op["delete_ids"]:
+                            with contextlib.suppress(Exception):
+                                await memory.remove_long_term_memory(did)
+                else:
+                    ok = False
+                if ok:
+                    applied += 1
+                else:
+                    skipped += 1
+            except Exception as e:
+                logger.warning(f"ContextCleanup LTM op {kind} failed: {e}")
+                skipped += 1
+        return applied, skipped
+
     # -- status for API --
 
     async def status(self) -> dict:
@@ -676,6 +985,7 @@ class ContextCleanupEngine:
         log = await self.store.load_log()
         return {
             "enabled": self.enabled,
+            "ltm_enabled": self.ltm_enabled,
             "interval_seconds": self.interval_seconds,
             "running": self._running_flag or bool(state.get("running")),
             "last_run": state.get("last_run", ""),
@@ -684,6 +994,9 @@ class ContextCleanupEngine:
             "last_error": state.get("last_error"),
             "ops_applied_total": state.get("ops_applied_total", 0),
             "ops_skipped_total": state.get("ops_skipped_total", 0),
+            "sc_ops_applied_total": state.get("sc_ops_applied_total", 0),
+            "ltm_ops_applied_total": state.get("ltm_ops_applied_total", 0),
+            "ltm_disabled": bool(state.get("ltm_disabled", False)),
             "passes_total": state.get("passes_total", 0),
             "log": log[-20:],
         }
