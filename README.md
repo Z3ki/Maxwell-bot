@@ -163,6 +163,17 @@ Autonomy is separate from the removed `,auto` auto-reply mode. It wakes on `auto
 
 Channel post cooldowns were removed. The engine can post to the same channel on consecutive ticks if the planner decides to. Keep the interval sane if you do not want spam; the code is no longer pretending a hardcoded 30-minute cooldown is wisdom.
 
+## Development & Releases
+
+This is a **rolling release** project.
+
+- `main` is always the current release.
+- `git push origin main` + `pm2 restart maxwell-bot maxwell-api` is the deployment.
+- No semantic version numbers, no release tags, no version branches.
+- Features (like the hourly Intel knowledge roller) land continuously.
+
+If you're running via PM2 (recommended), a push to main followed by a restart gives you the latest rolling update immediately.
+
 Autonomy (and normal chat) now benefits from the **Intel engine** (`intel.py`): a background sub-process that wakes ~hourly, uses web_search + fetch to pull the latest AI model releases, LLM news, benchmarks, etc., then uses the *exact same model/provider* configured for autonomy/REM to curate facts and writes them into long_term_memory. This is how the main bot stays aware of "the new AI model that just dropped" instead of saying it doesn't know.
 
 `,intel now` forces a pass. It is enabled by default with a 1-hour interval.
