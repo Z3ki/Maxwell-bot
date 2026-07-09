@@ -223,6 +223,7 @@ from providers import MIME_MAP, OllamaProvider, ProviderUsageExhaustedError  # n
 from rem import RemStore, load_rem_defaults, run_rem_once  # noqa: E402
 from autonomy import AutonomyEngine  # noqa: E402
 from context_cleanup import ContextCleanupEngine  # noqa: E402
+from intel import IntelEngine  # noqa: E402
 
 
 class _MaxLevelFilter(logging.Filter):
@@ -1702,6 +1703,7 @@ class MaxwellBot(commands.Bot):
         self._setup_tools()
         self.autonomy_engine = AutonomyEngine(self)
         self.context_cleanup_engine = ContextCleanupEngine(self)
+        self.intel_engine = IntelEngine(self)
 
     def _setup_ai(self):
         self.ai_provider = OllamaProvider(
@@ -1969,6 +1971,7 @@ class MaxwellBot(commands.Bot):
         ]
         await self.autonomy_engine.start()
         await self.context_cleanup_engine.start()
+        await self.intel_engine.start()
         if self.config.TELEGRAM_TOKEN:
             if self.config.TELEGRAM_WEBHOOK_URL:
                 self._tasks.append(asyncio.create_task(self._telegram_webhook_loop()))
@@ -2514,6 +2517,8 @@ class MaxwellBot(commands.Bot):
                 await self._handle_rem_command(message, args)
             elif cmd == "autonomy":
                 await self._handle_autonomy_command(message, args)
+            elif cmd == "intel":
+                await self._handle_intel_command(message, args)
             elif cmd == "drug":
                 now = asyncio.get_running_loop().time()
                 arg = (args or "").strip().lower()
@@ -3844,6 +3849,80 @@ class MaxwellBot(commands.Bot):
             "`,autonomy log`, `,autonomy interval <seconds>`"
         )
 
+    async def _handle_intel_command(self, message, args: str | None):
+        arg = (args or "").strip().lower()
+        if not arg:
+            st = await self.intel_engine.status()
+            feeds = getattr(self.intel_engine, "_get_feed_urls", lambda: [])()
+            feed_count = len(feeds) if feeds else 0
+            await message.channel.send(
+                "Intel (tech/AI news gatherer) status\n"
+                f"enabled: {st['enabled']} running: {st['running']}\n"
+                f"interval: {st['interval_seconds']}s  feeds: {feed_count}\n"
+                f"last run: {st.get('last_run') or 'never'} facts added total: {st.get('facts_added_total', 0)}\n"
+                f"audit: {(st.get('last_audit') or '-')[:300]}"
+            )
+            return
+        if arg in {"now", "tick", "run"}:
+            await message.channel.send("Running intel gather now...")
+            res = await self.intel_engine.trigger_now()
+            if res.get("skipped"):
+                await message.channel.send("Intel pass skipped (already running).")
+            else:
+                await message.channel.send(
+                    f"Intel done. {res.get('audit', '')} (added: {res.get('facts_added', 0)})"
+                )
+            return
+        if arg == "on":
+            self.intel_engine.enabled = True
+            await self.intel_engine.save_control()
+            await message.channel.send("Intel gatherer enabled.")
+            return
+        if arg == "off":
+            self.intel_engine.enabled = False
+            await self.intel_engine.save_control()
+            await message.channel.send("Intel gatherer disabled.")
+            return
+        if arg.startswith("interval"):
+            parts = arg.split()
+            if len(parts) < 2:
+                await message.channel.send(
+                    f"Current intel interval: {self.intel_engine.interval_seconds}s. Usage: `,intel interval <seconds>`"
+                )
+                return
+            try:
+                new_int = max(300, int(parts[1]))
+            except ValueError:
+                await message.channel.send("Invalid number.")
+                return
+            self.intel_engine.interval_seconds = new_int
+            await self.intel_engine.save_control()
+            await message.channel.send(f"Intel interval set to {new_int}s.")
+            return
+        if arg == "log":
+            log = (await self.intel_engine.store.load_log())[-10:]
+            if not log:
+                await message.channel.send("No intel runs logged yet.")
+                return
+            lines = [
+                f"{e.get('timestamp', '?')[:19]} added={e.get('facts_added', 0)} {str(e.get('audit', ''))[:120]}"
+                for e in log
+            ]
+            for chunk in self._split_response("\n".join(lines), limit=1900):
+                await message.channel.send(chunk)
+            return
+        if arg in {"feeds", "sources", "outlets"}:
+            feeds = self.intel_engine._get_feed_urls() if hasattr(self.intel_engine, "_get_feed_urls") else []
+            if not feeds:
+                await message.channel.send("No feeds configured.")
+                return
+            lines = [f"- {f}" for f in feeds[:15]]
+            await message.channel.send("Current Intel news feeds/outlets:\n" + "\n".join(lines))
+            return
+        await message.channel.send(
+            "Usage: `,intel`, `,intel now`, `,intel on`, `,intel off`, `,intel interval <sec>`, `,intel log`, `,intel feeds`"
+        )
+
     @staticmethod
     def _visible_event_content(message, content: str | None = None) -> str:
         text = render_discord_context_text(
@@ -4424,6 +4503,9 @@ class MaxwellBot(commands.Bot):
                         elif typ == "context_cleanup_run":
                             result = await self.context_cleanup_engine.run_once()
                             cmd["result"] = f"context cleanup: {result}"
+                        elif typ == "intel_run":
+                            result = await self.intel_engine.trigger_now()
+                            cmd["result"] = f"intel gather: {result}"
                         elif typ == "context_cleanup_enable":
                             self.context_cleanup_engine.enabled = True
                             await self.context_cleanup_engine.save_control()
@@ -4440,6 +4522,19 @@ class MaxwellBot(commands.Bot):
                                 f"context cleanup interval set to "
                                 f"{self.context_cleanup_engine.interval_seconds}s"
                             )
+                        elif typ == "intel_enable":
+                            self.intel_engine.enabled = True
+                            await self.intel_engine.save_control()
+                            cmd["result"] = "intel enabled"
+                        elif typ == "intel_disable":
+                            self.intel_engine.enabled = False
+                            await self.intel_engine.save_control()
+                            cmd["result"] = "intel disabled"
+                        elif typ == "intel_interval":
+                            new_interval = max(300, int(cmd.get("interval_seconds", 3600) or 3600))
+                            self.intel_engine.interval_seconds = new_interval
+                            await self.intel_engine.save_control()
+                            cmd["result"] = f"intel interval set to {new_interval}s"
                         else:
                             cmd["result"] = "unknown command"
                     except Exception as e:
@@ -5344,19 +5439,61 @@ class MaxwellBot(commands.Bot):
                             pre_tool_images.append(m.group(1).strip())
                 except Exception as e:
                     logger.warning(f"Auto youtube tool failed for {yt_url}: {e}")
+
+        # Auto web_search for queries about new/recent AI models, releases, current events.
+        # This is code logic (not a prompt rule) to ensure the bot looks up the most
+        # available up-to-date info from search + Intel-fed memory when the topic
+        # indicates it might be "lost" or guessing otherwise. Only when tools enabled.
+        if (
+            content
+            and self._control.get("tools_enabled", True)
+            and "web_search" in self.tools
+            and "web_search" not in set(self._control.get("disabled_tools", []) or [])
+            and MaxwellBot._needs_up_to_date_info(content)
+        ):
+            try:
+                q = MaxwellBot._extract_search_query(content)
+                search_res = await self.tools["web_search"].execute(
+                    message, query=q, max_results="5"
+                )
+                if search_res and not str(search_res).lower().startswith("error"):
+                    pre_tool_results.append(
+                        f"Web search (auto for up-to-date info on this topic): {search_res}"
+                    )
+            except Exception as e:
+                logger.warning(f"Auto web_search for current info failed: {e}")
         messages = await self._build_messages(
             message, content, has_media=bool(active_media), media_summary=media_summary
         )
         if pre_tool_results:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": "YouTube tool was auto-invoked for the link(s) above. "
+            # General pre-tool results (YouTube + auto current-info searches etc.)
+            yt_only = [r for r in pre_tool_results if "youtube" in r.lower()]
+            search_only = [r for r in pre_tool_results if "web search" in r.lower() and "youtube" not in r.lower()]
+            other = [r for r in pre_tool_results if r not in yt_only and r not in search_only]
+
+            injection_parts = []
+            if yt_only:
+                injection_parts.append(
+                    "YouTube tool was auto-invoked for the link(s) above. "
                     "Use this data (transcript, timestamps, frames) to answer; "
-                    "do not just describe a thumbnail.\n\n"
-                    + "\n\n".join(pre_tool_results),
-                }
-            )
+                    "do not just describe a thumbnail.\n\n" + "\n\n".join(yt_only)
+                )
+            if search_only:
+                injection_parts.append(
+                    "Fresh web search results were automatically retrieved for recent/current events or new models in your question. "
+                    "Use the most up-to-date information from these results (and long-term memory if relevant) rather than guessing or using old knowledge.\n\n"
+                    + "\n\n".join(search_only)
+                )
+            if other:
+                injection_parts.append("\n\n".join(other))
+
+            if injection_parts:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": "\n\n".join(injection_parts),
+                    }
+                )
             if pre_tool_images:
                 active_media = [
                     {
@@ -5800,6 +5937,52 @@ class MaxwellBot(commands.Bot):
             if t not in stop
         }
 
+    @staticmethod
+    def _needs_up_to_date_info(text: str) -> bool:
+        """Code-driven detection for when the bot should proactively look up current info
+        instead of guessing or relying only on memory. Triggered for recent events,
+        new model questions, etc. This ensures it uses the most available up-to-date
+        sources (web_search, feeds via memory) when the topic is fresh or uncertain.
+        Not a prompt instruction — pure runtime logic.
+        """
+        if not text:
+            return False
+        t = text.lower()
+        # Strong signals for needing live/recent lookup
+        strong = [
+            "new model", "latest model", "just released", "newly released",
+            "released today", "this week", "frontier", "new llm", "new ai model",
+            "gpt-5", "claude 4", "gemini 2", "llama 4", "new grok", "model drop",
+            "announced", "launch", "update on", "what's new", "current version of",
+        ]
+        if any(s in t for s in strong):
+            return True
+        # AI/LLM topic + recency words
+        ai_keywords = ["gpt", "claude", "gemini", "llama", "grok", "mistral", "qwen",
+                       "deepseek", "model", "llm", "hugging face", "openai", "anthropic",
+                       "xai", "meta ai", "benchmark", "paper", "release"]
+        recency = ["latest", "new", "recent", "today", "now", "just", "2026", "july"]
+        has_ai = any(k in t for k in ai_keywords)
+        has_recency = any(r in t for r in recency)
+        if has_ai and has_recency:
+            return True
+        # Direct "search for" or "look up" intent on facts
+        if ("search" in t or "look up" in t or "find out" in t) and ("about" in t or "the new" in t):
+            return True
+        return False
+
+    @staticmethod
+    def _extract_search_query(text: str) -> str:
+        """Turn user question into a good search query for up-to-date info."""
+        t = (text or "").strip()
+        # Keep it focused
+        if len(t) > 120:
+            t = t[:120]
+        # Add recency bias without overdoing
+        if not any(w in t.lower() for w in ["2026", "july", "latest", "new"]):
+            t += " 2026"
+        return t
+
     @classmethod
     def _shared_fact_relevant(cls, latest: str, fact: dict) -> bool:
         scope = str(fact.get("scope") or "")
@@ -5924,9 +6107,12 @@ class MaxwellBot(commands.Bot):
             try:
                 ltm = self.memory.get_long_term_memory()
                 if ltm:
+                    # Prefer recent entries (Intel facts are appended at the end with dates).
+                    # This helps surface the most up-to-date info from feeds when relevant.
+                    recent_ltm = ltm[-12:] if len(ltm) > 12 else ltm
                     system_parts.append(
-                        "Long-term memory:\n"
-                        + "\n".join(e["content"] for e in ltm[:8])
+                        "Long-term memory (most recent first for current events):\n"
+                        + "\n".join(e["content"] for e in reversed(recent_ltm))
                     )
             except Exception as e:
                 logger.warning(f"Failed to load long-term memory: {e}")
@@ -6874,6 +7060,12 @@ async def main():
                 await cc.stop()
         except Exception as e:
             logger.error(f"Failed to stop context cleanup engine: {e}")
+        try:
+            ie = getattr(bot, "intel_engine", None)
+            if ie is not None and hasattr(ie, "stop"):
+                await ie.stop()
+        except Exception as e:
+            logger.error(f"Failed to stop intel engine: {e}")
         for task in getattr(bot, "_tasks", []):
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

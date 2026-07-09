@@ -97,6 +97,8 @@ DEFAULT_CONTROL = {
     "autonomy_recent_reply_block_seconds": 0,  # skip autonomy post if bot replied in-channel within this window (0=off)
     "context_cleanup_enabled": True,   # background context janitor (dedupe/merge/remove weird shared-context facts)
     "context_cleanup_interval_seconds": 1800,  # how often the janitor runs (>=300s)
+    "intel_enabled": True,   # background tech/AI news & model releases gatherer (hourly by default)
+    "intel_interval_seconds": 3600,  # how often the intel/news gatherer runs (min 300s)
 }
 
 DEAD_CONTROL_KEYS = frozenset({

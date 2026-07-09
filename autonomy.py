@@ -1167,15 +1167,17 @@ class AutonomyEngine:
         else:
             sections.append("=== DM HISTORY ===\n(no accessible DMs)")
 
-        # 8. Long-term memory
+        # 8. Long-term memory (includes fresh facts from the hourly Intel/news gatherer)
         try:
             memory = cast(Any, getattr(self.bot, "memory", None))
             ltm = memory.get_long_term_memory() if memory else []
             if ltm:
-                ltm_text = "\n".join(str(m) for m in ltm[:30])
+                # Recent last (Intel appends new dated facts at the end)
+                recent = ltm[-40:] if len(ltm) > 40 else ltm
+                ltm_text = "\n".join(str(m) for m in reversed(recent))
                 sections.append(
                     _truncate(
-                        f"=== LONG-TERM MEMORY ===\n{ltm_text}",
+                        f"=== LONG-TERM MEMORY (includes recent AI/tech intel facts; newest first) ===\n{ltm_text}",
                         CTX_BUDGET_LTM,
                     )
                 )
@@ -1226,10 +1228,12 @@ class AutonomyEngine:
                 except Exception:
                     continue
         if ch_map_lines:
+            # Intentionally limit to reduce "everything is a channel post" bias.
+            # Autonomy should also do research, memory updates, goals, DMs, reacts etc.
             sections.append(
                 _truncate(
-                    "=== AVAILABLE CHANNELS (use the numeric ID on the left for post_channel target_channel_id) ===\n"
-                    + "\n".join(ch_map_lines[:30]),
+                    "=== AVAILABLE CHANNELS (only post when you have a real reason; prefer research/update_memory for knowledge goals) ===\n"
+                    + "\n".join(ch_map_lines[:18]),
                     CTX_BUDGET_CHANNELS_MAP,
                 )
             )
@@ -1474,6 +1478,7 @@ DECISION RULES:
 - Default to do_nothing when there is genuinely nothing worth doing — but don't default to do_nothing just to be safe. If a goal or the live context gives you a real opening, act on it.
 - Act when ANY of these is true: (1) someone mentioned/replied to/asked you (check mentions, reply_to, addressed_to), (2) a goal needs a concrete step and now is a reasonable moment, (3) you have a genuinely natural, in-character addition to a live conversation, (4) a goal you created earlier applies to the current situation even with no new human message aimed at you.
 - Goals are yours to push on your own initiative — a goal about following up on someone's project means you may post_channel or send_dm when that person is around, without waiting to be asked.
+- **Knowledge & autonomy improvement**: The bot now has a background Intel gatherer that regularly pulls fresh AI model / tech news into LONG-TERM MEMORY. When you see interesting new info in CHANNEL ACTIVITY or want to stay current, use run_tool with web_search / fetch_url then update_memory (or create_goal for deeper tracking). This is high-value autonomous work — don't just post to channels.
 - If NORMAL REPLY STATUS says Maxwell is currently replying normally in a conversation, treat that conversation as already being handled. Do not also post/DM into it from autonomy; choose do_nothing unless a separate, clearly new situation elsewhere needs action.
 - If NORMAL REPLY STATUS says a normal reply was already sent recently, do not send an autonomous follow-up into the SAME conversation just because it appears in DM HISTORY or CHANNEL ACTIVITY. Only act if a newer human message after that reply creates a fresh reason, OR a goal applies to a different conversation/person.
 - Don't: restate visible context, reopen concluded conversations, DM without a concrete reason, or say "just checking in". Talk like a person in the channel — never reference being a "background loop" or "check-in".

@@ -116,6 +116,11 @@ All commands use the `,` prefix. Admin commands require the user to be in the ad
 | `,autonomy on` / `,autonomy off` | Yes | Enable or disable autonomy |
 | `,autonomy log` | Yes | Show recent autonomy actions |
 | `,autonomy interval <seconds>` | Yes | Set autonomy check interval |
+| `,intel` | Yes | Show status of the background tech/AI news & model intel gatherer |
+| `,intel now` | Yes | Force an immediate news/intel gathering pass into long-term memory |
+| `,intel on` / `,intel off` | Yes | Enable/disable the hourly intel gatherer |
+| `,intel interval <seconds>` | Yes | Set intel gather interval (default 3600) |
+| `,intel log` | Yes | Show recent intel run audits |
 | `,drug [minutes]` | No | Temporary "fried" personality override |
 | `,drug off` | No | Turn off drug mode |
 | `,blacklist [user]` | Yes | Add/view/clear blacklisted users |
@@ -157,6 +162,12 @@ REM is opt-in with `REM_ENABLED=false` by default. Configure `REM_INTERVAL_SECON
 Autonomy is separate from the removed `,auto` auto-reply mode. It wakes on `autonomy_interval_seconds`, gathers recent conversations, DMs, goals, memory, and available channels, then asks the LLM for a JSON action plan. Supported actions are channel posts, DMs, tool calls, memory updates, goal creation, or doing nothing.
 
 Channel post cooldowns were removed. The engine can post to the same channel on consecutive ticks if the planner decides to. Keep the interval sane if you do not want spam; the code is no longer pretending a hardcoded 30-minute cooldown is wisdom.
+
+Autonomy (and normal chat) now benefits from the **Intel engine** (`intel.py`): a background sub-process that wakes ~hourly, uses web_search + fetch to pull the latest AI model releases, LLM news, benchmarks, etc., then uses the *exact same model/provider* configured for autonomy/REM to curate facts and writes them into long_term_memory. This is how the main bot stays aware of "the new AI model that just dropped" instead of saying it doesn't know.
+
+`,intel now` forces a pass. It is enabled by default with a 1-hour interval.
+
+It **receives** directly from news outlet feeds (RSS) instead of searching: defaults are OpenAI (`openai.com/news/rss.xml`), Hugging Face blog, MarkTechPost, TLDR AI, arXiv cs.AI/cs.LG. Customize via `intel_feed_urls` in control or `data/intel_control.json` (`{"feed_urls": [...]}`). Run `,intel feeds` to list active sources.
 
 ## Dashboard / API
 
