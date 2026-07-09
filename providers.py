@@ -440,11 +440,28 @@ class OllamaProvider:
                     json_ms = (time.perf_counter() - request_start) * 1000
                     choices = result.get("choices", [])
                     if not choices:
+                        # Log details to debug providers that return 200 OK with empty choices
+                        # (common with some models/endpoints on safety, overload, or format quirks).
+                        result_keys = list(result.keys()) if isinstance(result, dict) else type(result).__name__
+                        result_preview = str(result)[:600] if result else ""
+                        logger.warning(
+                            "Provider %s returned 200 with no choices. keys=%s preview=%s",
+                            endpoint.name, result_keys, result_preview
+                        )
+                        if isinstance(result, dict) and "error" in result:
+                            logger.warning("Provider %s also included error in body: %s", endpoint.name, str(result["error"])[:300])
                         raise RuntimeError("No response from provider")
 
                     message = choices[0].get("message", {})
                     content = message.get("content", "")
                     if not content and not message.get("tool_calls"):
+                        # Some providers return choices with a message but blank content (e.g. refusals, reasoning-only, or bugs).
+                        logger.warning(
+                            "Provider %s returned 200 with empty content (tool_calls=%s) message_keys=%s",
+                            endpoint.name,
+                            bool(message.get("tool_calls")),
+                            list(message.keys()) if isinstance(message, dict) else type(message).__name__,
+                        )
                         if await self._retry_after_attempt(attempt, endpoint, f"Provider {endpoint.name} returned empty response", max_attempts=max_attempts, fast_fallback=fast_fallback):
                             continue
                         raise RuntimeError("Empty response from provider")

@@ -5480,7 +5480,7 @@ class MaxwellBot(commands.Bot):
                             "timed out waiting for a response (10 min). try again or break the task into smaller pieces."
                         )
                     else:
-                        await message.channel.send("something went wrong... try again")
+                        await message.channel.send("Sorry, please try again.")
                     normal_reply_sent = True
                 except discord.Forbidden:
                     pass
@@ -6798,7 +6798,7 @@ class MaxwellBot(commands.Bot):
                             tg_reply = TelegramMessageAdapter(
                                 session, url_base, failed_chat_id, failed_message_id
                             )
-                            await tg_reply.reply("something went wrong... try again")
+                            await tg_reply.reply("Sorry, please try again.")
                     except Exception:
                         pass
                 await asyncio.sleep(5)
