@@ -306,8 +306,10 @@ class ContextCleanupEngine:
         if self._lock.locked():
             logger.debug("ContextCleanup pass skipped — previous still running")
             return {"skipped": True}
+        acquired = False
         try:
             await asyncio.wait_for(self._lock.acquire(), timeout=600)
+            acquired = True
         except asyncio.TimeoutError:
             logger.error("ContextCleanup lock timed out — previous pass hung for >10m, forcing release")
             return {"skipped": False, "error": "lock timeout"}
@@ -353,7 +355,8 @@ class ContextCleanupEngine:
             finally:
                 self._running_flag = False
         finally:
-            self._lock.release()
+            if acquired:
+                self._lock.release()
 
     async def _finish_pass(
         self,

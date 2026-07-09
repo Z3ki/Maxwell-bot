@@ -1,12 +1,9 @@
 """Memory management for Maxwell Bot"""
 
 import asyncio
-import contextlib
 import json
 import logging
-import os
 import re
-import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path

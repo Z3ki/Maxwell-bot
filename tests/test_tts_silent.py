@@ -559,7 +559,9 @@ def test_build_messages_has_single_formatting_instruction():
         system_content = messages[0]["content"]
         assert "MANDATORY" not in system_content
         assert "MUST format every response" not in system_content
-        assert "don't force it into one-liners" in system_content
+        # Current style instruction uses "Limit: N chars." (the formatting bound).
+        # The old "don't force it into one-liners" phrase was removed during prompt refactor.
+        assert "Limit:" in system_content or "chars." in system_content
 
     asyncio.run(run())
 

@@ -1,7 +1,4 @@
-import os
 from pathlib import Path
-
-import pytest
 
 from bot_tools import _is_path_allowed, _safe_attachment_filename, ShellTool
 

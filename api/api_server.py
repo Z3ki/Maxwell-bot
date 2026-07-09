@@ -12,7 +12,6 @@ import logging
 import os
 import re
 import shutil
-import tempfile
 import time
 import uuid as _uuid
 from collections import defaultdict

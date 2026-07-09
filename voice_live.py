@@ -201,7 +201,7 @@ class LiveSpeechSink(voice_recv.AudioSink):
         if ch == 2:
             left = samples[0::2]
             right = samples[1::2]
-            mono = array.array("h", ((l + r) // 2 for l, r in zip(left, right)))
+            mono = array.array("h", ((ls + rs) // 2 for ls, rs in zip(left, right)))
             return mono.tobytes()
         # General case (rare): average each frame's channels.
         mono = array.array("h", bytes(2 * (len(samples) // ch)))

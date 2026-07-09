@@ -4245,9 +4245,25 @@ class MaxwellBot(commands.Bot):
             try:
                 if not path.exists():
                     continue
-                commands_data = await asyncio.to_thread(
-                    lambda: json.loads(path.read_text(encoding="utf-8"))
-                )
+                try:
+                    raw = await asyncio.to_thread(path.read_text, encoding="utf-8")
+                    commands_data = json.loads(raw)
+                except Exception as read_err:
+                    # Corrupt command queue: back it up (don't lose potential data) and reset so
+                    # dashboard commands can flow again. Matches the "refuse to clobber corrupt"
+                    # spirit but for the consumer side we must recover to keep the system alive.
+                    try:
+                        backup = path.with_suffix(path.suffix + ".corrupt-" + str(int(time.time())))
+                        path.rename(backup)
+                        logger.error(f"Corrupt bot_commands.json backed up to {backup}: {read_err}")
+                    except Exception:
+                        logger.error(f"Corrupt bot_commands.json and failed to backup: {read_err}")
+                    commands_data = []
+                    # Recreate a clean empty queue file so future dashboard commands work immediately.
+                    try:
+                        await asyncio.to_thread(_atomic_json_write_sync, path, [])
+                    except Exception as werr:
+                        logger.error(f"Failed to reset clean bot_commands.json after corrupt: {werr}")
                 if not isinstance(commands_data, list):
                     continue
                 changed = False

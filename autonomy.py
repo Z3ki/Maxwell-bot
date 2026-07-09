@@ -656,8 +656,10 @@ class AutonomyEngine:
         if self._lock.locked():
             logger.debug("Autonomy tick skipped — previous still running")
             return {"skipped": True}
+        acquired = False
         try:
             await asyncio.wait_for(self._lock.acquire(), timeout=600)
+            acquired = True
         except asyncio.TimeoutError:
             logger.error("Autonomy tick lock timed out — previous tick hung for >10m, forcing release")
             return {"skipped": False, "error": "lock timeout"}
@@ -688,7 +690,8 @@ class AutonomyEngine:
                 )
                 return {"skipped": False, "error": str(e), "duration": duration}
         finally:
-            self._lock.release()
+            if acquired:
+                self._lock.release()
 
     async def _resolve_reference(
         self, message: Any, cache: dict[tuple[str, str], Any]
