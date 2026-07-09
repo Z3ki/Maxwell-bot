@@ -1707,10 +1707,16 @@ class MaxwellBot(commands.Bot):
         """
         try:
             control = self._control or {}
-            base_url = str(control.get("autonomy_base_url", "") or "").strip()
-            api_key = str(control.get("autonomy_api_key", "") or "").strip()
-            model = str(control.get("autonomy_model", "") or "").strip()
-            disable_reasoning = bool(control.get("autonomy_disable_reasoning", True))
+            # Dashboard control wins; env (self.config.AUTONOMY_*) is the default
+            # so a fresh install without a control.json override still routes
+            # autonomy at the configured dedicated provider (e.g. NVIDIA NIM).
+            base_url = str(control.get("autonomy_base_url", "") or "").strip() or self.config.AUTONOMY_BASE_URL
+            api_key = str(control.get("autonomy_api_key", "") or "").strip() or self.config.AUTONOMY_API_KEY
+            model = str(control.get("autonomy_model", "") or "").strip() or self.config.AUTONOMY_MODEL
+            if "autonomy_disable_reasoning" in control:
+                disable_reasoning = bool(control.get("autonomy_disable_reasoning", True))
+            else:
+                disable_reasoning = bool(self.config.AUTONOMY_DISABLE_REASONING)
             # No separate autonomy endpoint configured -> use main provider. This
             # also covers the both-empty case; if only a model differs (no
             # base_url) we reuse the main provider instance and pass model= per
