@@ -814,6 +814,8 @@ class ChangePresenceTool(Tool):
         return "Set your online availability/status dot. Params: status (online/idle/dnd/invisible). Use set_activity for the visible custom status text."
 
     async def execute(self, message: Message, status: str = "online", **kwargs) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: change_presence is admin-only"
         valid = ["online", "idle", "dnd", "invisible"]
         if status not in valid:
             return f"Error: status must be one of {', '.join(valid)}"
@@ -868,6 +870,8 @@ class SetActivityTool(Tool):
         elapsed: str | None = None,
         **kwargs,
     ) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: set_activity is admin-only"
         activity_type = (type or "custom").lower()
 
         if not text:
@@ -1069,6 +1073,8 @@ class SetNicknameTool(Tool):
     async def execute(
         self, message: Message, nickname: str | None = None, **kwargs
     ) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: set_nickname is admin-only"
         if not nickname:
             return "Error: nickname is required"
         if not message.guild:
@@ -1101,6 +1107,8 @@ class ForwardMessageTool(Tool):
         channel_id: str | None = None,
         **kwargs,
     ) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: forward_message is admin-only"
         if not message_id or not channel_id:
             return "Error: message_id and channel_id are required"
         try:
@@ -1158,6 +1166,8 @@ class ListServersTool(Tool):
         return "List your servers and group chats. No params."
 
     async def execute(self, message: Message, **kwargs) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: list_servers is admin-only"
         lines = []
         if self.bot.guilds:
             lines.append(f"Servers ({len(self.bot.guilds)}):")
@@ -1191,6 +1201,8 @@ class ListAdminServersTool(Tool):
         )
 
     async def execute(self, message: Message, **kwargs) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: list_admin_servers is admin-only"
         rows = []
         for guild in getattr(self.bot, "guilds", []) or []:
             caps, reason = _admin_caps(guild)
@@ -1503,6 +1515,8 @@ class ChangeAvatarTool(Tool):
         return "Change your profile picture. 30-min cooldown. Params: url (required, direct image URL jpg/png/gif/webp)."
 
     async def execute(self, message: Message, url: str | None = None, **kwargs) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: change_avatar is admin-only"
         if not url:
             return "Error: url is required"
 
@@ -1578,6 +1592,8 @@ class CreateSiteTool(Tool):
         images: str | None = None,
         **kwargs,
     ) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: create_site is admin-only"
         if not name or not title or body is None:
             missing = []
             if not name:
@@ -1992,6 +2008,8 @@ class SendFileTool(Tool):
         path: str | None = None,
         **kwargs,
     ) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: send_file is admin-only"
         # Path mode: send a file that already exists on disk.
         if path:
             allowed_bases = self._allowed_send_file_bases()
@@ -2235,11 +2253,25 @@ class ShellTool(Tool):
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(), timeout=self.TIMEOUT
             )
+            return stdout, stderr, proc.returncode
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
             raise
-        return stdout, stderr, proc.returncode
+        except asyncio.CancelledError:
+            # Outer autonomy wait_for or other cancel can hit here; always kill child.
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            raise
+        finally:
+            # Belt-and-suspenders: ensure no zombie if communicate didn't finish.
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
 
     async def execute(
         self,
@@ -3348,6 +3380,8 @@ class SubAgentTool(Tool):
         files: str | None = None,
         **kwargs,
     ) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: sub_agent is admin-only"
         if not task or not str(task).strip():
             return "Error: task prompt is required"
 

@@ -1567,8 +1567,25 @@ async def pm2_logs(request):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
-        text = stdout.decode("utf-8", errors="replace")
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+            text = stdout.decode("utf-8", errors="replace")
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return _json_response({"error": "pm2 logs timed out"}, 500)
+        except asyncio.CancelledError:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            raise
+        finally:
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
         # Strip ANSI escape sequences for clean HTML display
         text = re.sub(r'\x1b\[[0-9;]*m', '', text)
         # Drop PM2 headers and log file labels
@@ -1601,9 +1618,26 @@ async def pm2_restart(request):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-        text = (stdout + stderr).decode("utf-8", errors="replace")
-        return _json_response({"ok": True, "output": text})
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+            text = (stdout + stderr).decode("utf-8", errors="replace")
+            return _json_response({"ok": True, "output": text})
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return _json_response({"ok": False, "error": "pm2 restart timed out"})
+        except asyncio.CancelledError:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            raise
+        finally:
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
     except Exception:
         return _json_response({"error": "internal error"}, 500)
 

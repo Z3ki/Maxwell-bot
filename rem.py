@@ -163,7 +163,6 @@ async def run_rem_once(
         {"role": "system", "content": "Current long-term memory snapshot:\n" + json.dumps(memory_manager.get_long_term_memory()[:200], ensure_ascii=False)},
     ]
     audit = ""
-    success = False
     try:
         await store.patch_state({"running": True, "running_since": started})
         response = await _provider_message(provider, messages, [], model, timeout, max_tokens)
@@ -173,15 +172,12 @@ async def run_rem_once(
         run = {"ts": finished, "turns_used": 0, "audit": audit[:4000], "tool_counts": {}, "events": len(events)}
         await store.patch_state({"last_rem_run_ts": started, "last_audit": audit[:4000], "running": False, "running_since": ""})
         await store.append_run(run)
-        success = True
         return run
     finally:
-        # BUG FIX: CancelledError is BaseException since Python 3.9, not Exception.
-        # If PM2 sends SIGTERM while REM runs, the old except Exception didn't catch
-        # CancelledError, leaving running: True stuck in rem_state.json forever.
-        # The API then refuses new runs. Use finally to always clear the flag.
-        if not success:
-            try:
-                await store.patch_state({"running": False, "running_since": ""})
-            except Exception:
-                pass
+        # Always clear the running flag in finally (covers CancelledError, exceptions,
+        # and any partial success path). Prevents stuck "running: true" that blocks
+        # the API from allowing new REM runs.
+        try:
+            await store.patch_state({"running": False, "running_since": ""})
+        except Exception:
+            pass

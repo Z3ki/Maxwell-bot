@@ -220,11 +220,23 @@ CTX_BUDGET_LTM = 800
 CTX_BUDGET_SHARED = 600
 CTX_BUDGET_CHANNELS_MAP = 1600  # bumped from 800 — enriched with topic/recency
 
-# Autonomy can use every registered tool unless dashboard controls disable it.
-# Yeah, this used to be a graveyard of "this is annoying in synthetic messages"
-# exceptions. The requirement is all tools, so the synthetic message shim now has
-# to eat the pain instead of hiding tools from Maxwell.
-AUTONOMY_DISABLED_TOOLS = frozenset()
+# Hard safety: these tools are NEVER available to autonomy even if dashboard
+# enables them. Prevents autonomy/LLM from server-admin, shell, site creation,
+# or other high-risk actions. (Dashboard disabled_tools still apply too.)
+AUTONOMY_DISABLED_TOOLS = frozenset({
+    "shell",
+    "create_site",
+    "sub_agent",
+    "list_admin_servers",
+    "create_category",
+    "create_channel",
+    "edit_channel",
+    "delete_channel",
+    "change_avatar",
+    "set_nickname",
+    "forward_message",
+    "create_invite",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -577,7 +589,10 @@ class AutonomyEngine:
         CRITICAL: without this, autonomy bypasses tools_enabled/disabled_tools.
         The LLM was calling shell/kilo/create_channel through autonomy even when
         the admin disabled them in the dashboard. Don't remove this gate.
+        Hard safety denials from AUTONOMY_DISABLED_TOOLS are enforced first.
         """
+        if name in AUTONOMY_DISABLED_TOOLS:
+            return False
         control = getattr(self.bot, "_control", None) or {}
         if not control.get("tools_enabled", True):
             return False
@@ -1806,6 +1821,12 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
         """Execute each action. One failure doesn't kill the rest."""
         results = []
         ACTION_TIMEOUT = 30  # seconds per action
+
+        # Prevent multiple posts to the *same* channel within a single autonomy tick/plan.
+        # This was a bypass of cooldowns noted in reviews: validation happened before any
+        # side effects, so the LLM could return several post_channel for one cid and all would run.
+        planned_post_channels: set[str] = set()
+
         for action in actions:
             # bail if bot disconnected mid-tick
             if self.bot.is_closed():
@@ -1851,6 +1872,19 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
                     }
                     results.append(result)
                     continue
+
+                # Same-tick dedup: don't allow the plan to post twice to one channel in one go.
+                if post_cid in planned_post_channels:
+                    logger.info(f"Autonomy skip duplicate post to {post_cid} in same tick/plan")
+                    result = {
+                        "kind": kind,
+                        "result": "skipped",
+                        "error": None,
+                        "content_summary": "duplicate post_channel for same channel in this tick",
+                    }
+                    results.append(result)
+                    continue
+                planned_post_channels.add(post_cid)
                 # Soft guard: skip autonomy post if the bot replied in-channel
                 # within the configured window (0 = off, never block). Catches
                 # the case where the main reply already finished but is so

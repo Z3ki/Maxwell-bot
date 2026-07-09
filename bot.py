@@ -1752,7 +1752,9 @@ class MaxwellBot(commands.Bot):
                 old = self.autonomy_provider
                 if old is not None and hasattr(old, "close"):
                     try:
-                        asyncio.ensure_future(old.close())
+                        # Track the close task so shutdown can await/cancel it (prevents session leaks on churn).
+                        task = asyncio.create_task(old.close())
+                        self._tasks.append(task)
                     except Exception as e:
                         logger.warning(f"Failed to schedule old autonomy provider close: {e}")
                 self.autonomy_provider = None
@@ -1775,7 +1777,9 @@ class MaxwellBot(commands.Bot):
                 old = self.autonomy_provider
                 if old is not None and hasattr(old, "close"):
                     try:
-                        asyncio.ensure_future(old.close())
+                        # Track the close task so shutdown can await/cancel it (prevents session leaks on churn).
+                        task = asyncio.create_task(old.close())
+                        self._tasks.append(task)
                     except Exception as e:
                         logger.warning(f"Failed to schedule old autonomy provider close: {e}")
                 provider = OllamaProvider(
@@ -3077,16 +3081,22 @@ class MaxwellBot(commands.Bot):
                 24, min(int(self._control.get("vc_ai_max_tokens", 90) or 90), 2000)
             )
             t_ai = time.perf_counter()
-            async with self._vc_ai_semaphore:
-                resp = await self.ai_provider.generate_response(
-                    messages,
-                    media=[media],
-                    timeout=vc_timeout,
-                    max_tokens=vc_max_tokens,
-                    temperature=0.6,
-                    disable_reasoning=True,
-                    fast_fallback=True,
-                )
+            # Use the global AI slot (instead of only private VC semaphore) so noisy VC
+            # does not starve text replies, autonomy, REM etc. Keep a local bound too.
+            await self._acquire_ai_slot(timeout=vc_timeout)
+            try:
+                async with self._vc_ai_semaphore:
+                    resp = await self.ai_provider.generate_response(
+                        messages,
+                        media=[media],
+                        timeout=vc_timeout,
+                        max_tokens=vc_max_tokens,
+                        temperature=0.6,
+                        disable_reasoning=True,
+                        fast_fallback=True,
+                    )
+            finally:
+                await self._release_ai_slot()
             t_ai_done = time.perf_counter()
             resp = strip_tool_payload_leaks((resp or "").strip())
             if not resp or resp == "__NO_RESPONSE__":
@@ -4436,6 +4446,25 @@ class MaxwellBot(commands.Bot):
                         cmd["result"] = f"error: {e}"
                     cmd["status"] = "done"
                 if changed:
+                    # Race mitigation: re-load fresh list (API may have appended during our long work)
+                    # and overlay our "done" results so we don't clobber new pending commands.
+                    try:
+                        fresh_raw = await asyncio.to_thread(path.read_text, encoding="utf-8")
+                        fresh = json.loads(fresh_raw) if fresh_raw.strip() else []
+                        if isinstance(fresh, list):
+                            for fc in fresh:
+                                if fc.get("status") == "pending":
+                                    for our in commands_data:
+                                        if (our.get("status") == "done" and
+                                            our.get("type") == fc.get("type") and
+                                            our.get("content") == fc.get("content") and
+                                            (our.get("channel_id") == fc.get("channel_id") or
+                                             our.get("user_id") == fc.get("user_id"))):
+                                            fc["status"] = "done"
+                                            fc["result"] = our.get("result")
+                            commands_data = fresh
+                    except Exception:
+                        pass
                     await asyncio.to_thread(_atomic_json_write_sync, path, commands_data)
             except Exception as e:
                 logger.error(f"Command queue error: {e}")
@@ -6854,6 +6883,31 @@ async def main():
         if getattr(bot, "_context_tasks", None):
             await asyncio.gather(*list(bot._context_tasks), return_exceptions=True)
             bot._context_tasks.clear()
+
+        # Additional tracked tasks from reviews (subagents, VC utterances, active requests)
+        # to prevent leaks on shutdown / PM2 restart.
+        for task_dict in (
+            getattr(bot, "_vc_active_tasks", {}) or {},
+            getattr(bot, "_subagent_tasks", {}) or {},
+            getattr(bot, "_active_requests", {}) or {},
+        ):
+            for t in list(task_dict.values()):
+                if isinstance(t, asyncio.Task) and not t.done():
+                    t.cancel()
+            try:
+                await asyncio.gather(*[t for t in task_dict.values() if isinstance(t, asyncio.Task)], return_exceptions=True)
+            except Exception:
+                pass
+            task_dict.clear()
+
+        # Cleanup VC sinks
+        for sink in list(getattr(bot, "_vc_sinks", {}).values() or []):
+            try:
+                if hasattr(sink, "cleanup"):
+                    await sink.cleanup()
+            except Exception:
+                pass
+        getattr(bot, "_vc_sinks", {}).clear()
         try:
             await bot.memory.flush()
         except Exception as e:
