@@ -6701,14 +6701,28 @@ class MaxwellBot(commands.Bot):
             chat_id = None
             message = None
             try:
-                # getUpdates call
+                # getUpdates call. Pass an explicit ClientTimeout longer than the
+                # 25s long-poll so aiohttp's internal read timer doesn't fire
+                # mid-poll and surface a TimeoutError that used to kill the loop
+                # (and the process). See pm2 restart count climbing.
                 url = f"{url_base}/getUpdates?offset={offset}&timeout={timeout}"
-                async with session.get(url) as resp:
-                    if resp.status != 200:
-                        logger.warning(f"Telegram polling error: {resp.status}")
-                        await asyncio.sleep(5)
-                        continue
-                    data = await resp.json()
+                try:
+                    async with session.get(
+                        url,
+                        timeout=aiohttp.ClientTimeout(
+                            total=timeout + 30, connect=10, sock_read=timeout + 30
+                        ),
+                    ) as resp:
+                        if resp.status != 200:
+                            logger.warning(f"Telegram polling error: {resp.status}")
+                            await asyncio.sleep(5)
+                            continue
+                        data = await resp.json()
+                except asyncio.TimeoutError:
+                    # Network legitimately stuck; just retry the long-poll.
+                    logger.warning("Telegram long-poll timed out; retrying")
+                    await asyncio.sleep(1)
+                    continue
 
                 if not data.get("ok"):
                     logger.warning(f"Telegram getUpdates returned error: {data}")
