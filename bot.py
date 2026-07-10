@@ -6,8 +6,8 @@ import contextlib
 import html
 import json
 import logging
-import re
 import os
+import re
 import shutil
 import signal
 import sys
@@ -17,7 +17,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal, overload, cast
+from typing import Any, Literal, cast, overload
 from urllib.parse import urlparse
 
 import aiohttp
@@ -26,6 +26,7 @@ from discord.ext import commands
 
 try:
     from discord.ext import voice_recv
+
     from voice_live import LiveSpeechSink
 except (ImportError, ModuleNotFoundError) as e:
     voice_recv = None
@@ -39,8 +40,8 @@ def _patch_voice_recv_decoder():
     if voice_recv is None:
         return
     try:
-        from discord.ext.voice_recv import opus as voice_recv_opus
         import davey
+        from discord.ext.voice_recv import opus as voice_recv_opus
     except Exception:
         logger = logging.getLogger(__name__)
         logger.exception("Failed to import voice receive opus decoder for patching")
@@ -171,7 +172,9 @@ def _patch_voice_recv_decoder():
 
 _patch_voice_recv_decoder()
 
+from autonomy import AutonomyEngine  # noqa: E402
 from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before these imports
+    OWNER_IDS,
     ChangeAvatarTool,
     ChangePresenceTool,
     CreateCategoryTool,
@@ -187,6 +190,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     ForwardMessageTool,
     HDImageGeneratorTool,
     ImageGeneratorTool,
+    LeaveVcTool,
     ListAdminServersTool,
     ListServersTool,
     ListSitesTool,
@@ -194,36 +198,44 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     MemoryTool,
     NoResponseTool,
     ReactTool,
+    ReasoningLogTool,
     SearchMessagesTool,
     SendFileTool,
-    SendMessageTool,
-    ReasoningLogTool,
     SendMediaTool,
     SendMemeTool,
+    SendMessageTool,
     SetActivityTool,
     SetNicknameTool,
     ShellTool,
     SubAgentTool,
-    TypingTool,
     TtsTool,
+    TypingTool,
     WebSearchTool,
     YouTubeTool,
-    LeaveVcTool,
-    OWNER_IDS,
-    close_shared_session,
     _get_shared_session,
     _is_safe_url,
     _read_response_limited,
+    close_shared_session,
 )
-from utils import _atomic_json_write_sync, render_discord_context_text  # fd-safe, single source of truth  # noqa: E402
-from control_defaults import DEAD_CONTROL_KEYS, DEFAULT_CONTROL, parse_bool  # noqa: E402
 from config import Config  # noqa: E402
-from memory import MemoryManager, RemEventLog  # noqa: E402
-from providers import MIME_MAP, OllamaProvider, ProviderUsageExhaustedError  # noqa: E402
-from rem import RemStore, load_rem_defaults, run_rem_once  # noqa: E402
-from autonomy import AutonomyEngine  # noqa: E402
 from context_cleanup import ContextCleanupEngine  # noqa: E402
+from control_defaults import (  # noqa: E402
+    DEAD_CONTROL_KEYS,
+    DEFAULT_CONTROL,
+    parse_bool,
+)
 from intel import IntelEngine  # noqa: E402
+from memory import MemoryManager, RemEventLog  # noqa: E402
+from providers import (  # noqa: E402
+    MIME_MAP,
+    OllamaProvider,
+    ProviderUsageExhaustedError,
+)
+from rem import RemStore, load_rem_defaults, run_rem_once  # noqa: E402
+from utils import (  # fd-safe, single source of truth  # noqa: E402
+    _atomic_json_write_sync,
+    render_discord_context_text,
+)
 
 
 class _MaxLevelFilter(logging.Filter):
@@ -389,10 +401,8 @@ async def _synthesize_local_tts_wav(text: str, output_path: str) -> str | None:
         logger.warning("Local espeak ffmpeg conversion timed out")
         return None
     finally:
-        try:
+        with contextlib.suppress(Exception):
             Path(raw_path).unlink(missing_ok=True)
-        except Exception:
-            pass
     if convert.returncode != 0 or not os.path.exists(output_path):
         logger.warning(
             "Local espeak conversion failed: %s", stderr.decode("utf-8", "ignore")[:300]
@@ -930,8 +940,7 @@ def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = 
                 (match.start(), match.end(), name, match.group(2), "", True)
             )
     if pipe_matches:
-        for item in sorted(pipe_matches, key=lambda x: (x[0], x[1])):
-            yield item
+        yield from sorted(pipe_matches, key=lambda x: (x[0], x[1]))
         return
     pos = 0
     while pos < len(text):
@@ -1314,10 +1323,8 @@ class TelegramMessageAdapter:
                 )
 
             if hasattr(file_obj, "seek"):
-                try:
+                with contextlib.suppress(Exception):
                     file_obj.seek(0)
-                except Exception:
-                    pass
             blob = file_obj.read()
             if not isinstance(blob, (bytes, bytearray)):
                 raise RuntimeError("Telegram adapter expected bytes-like file payload")
@@ -1477,7 +1484,7 @@ def _tool_results_need_followup(tool_results: list[str]) -> bool:
     for result in tool_results:
         # Check for error prefixes, not just the substring "Error" anywhere
         # (prevents false positives like "Error handling in Python" search results)
-        if result.startswith("Error:") or result.startswith("Error ") or "\nError:" in result:
+        if result.startswith(("Error:", "Error ")) or "\nError:" in result:
             return True
         if any(result.startswith(f"Tool {name}:") for name in FOLLOWUP_TOOL_NAMES):
             return True
@@ -1949,10 +1956,8 @@ class MaxwellBot(commands.Bot):
             async with self._ai_cond:
                 self._ai_cond.notify_all()
 
-        try:
+        with contextlib.suppress(RuntimeError):
             asyncio.get_running_loop().create_task(notify())
-        except RuntimeError:
-            pass
 
     async def setup_hook(self):
         await self.ai_provider.initialize()
@@ -2101,11 +2106,10 @@ class MaxwellBot(commands.Bot):
         # Previously, blacklisted users could still run ,stop, ,drug, etc.
         # because the blacklist check was after the command prefix check.
         # Admins bypass so they can manage the blacklist.
-        if str(message.author.id) in self._blacklist or str(message.author.id) in set(
+        if (str(message.author.id) in self._blacklist or str(message.author.id) in set(
             self._control.get("ignore_users", []) or []
-        ):
-            if not self._is_admin(message.author.id):
-                return
+        )) and not self._is_admin(message.author.id):
+            return
 
         if (
             message.content
@@ -2976,10 +2980,8 @@ class MaxwellBot(commands.Bot):
         self._vc_text_channels.pop(key, None)
         self._vc_voice_channels.pop(key, None)
         if vc and hasattr(vc, "stop_listening"):
-            try:
+            with contextlib.suppress(Exception):
                 vc.stop_listening()
-            except Exception:
-                pass
             if hasattr(vc, "_maxwell_sink"):
                 vc._maxwell_sink = None
         if sink:
@@ -3198,9 +3200,8 @@ class MaxwellBot(commands.Bot):
                 logger.error(f"VC utterance handling failed: {e}\n{traceback.format_exc()}")
         finally:
             Path(wav_path).unlink(missing_ok=True)
-            if key is not None and current is not None:
-                if self._vc_active_tasks.get(key) is current:
-                    self._vc_active_tasks.pop(key, None)
+            if key is not None and current is not None and self._vc_active_tasks.get(key) is current:
+                self._vc_active_tasks.pop(key, None)
 
     async def _play_vc_response(self, guild, text_channel, response: str):
         t_total = time.perf_counter()
@@ -3442,7 +3443,7 @@ class MaxwellBot(commands.Bot):
             if mtime == self._sites_mtime:
                 return
             if path.exists():
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     data = json.load(f)
                 self._sites = (
                     {k: v for k, v in data.items() if isinstance(v, dict)}
@@ -3463,7 +3464,7 @@ class MaxwellBot(commands.Bot):
         try:
             path = Path(self.config.DATA_DIR) / "auto_channels.json"
             if path.exists():
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, list):
                     self._auto_channels = {str(x) for x in data}
@@ -3486,7 +3487,7 @@ class MaxwellBot(commands.Bot):
         try:
             path = Path(self.config.DATA_DIR) / "jailbreak_servers.json"
             if path.exists():
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, list):
                     self._jailbreak_servers = {str(x) for x in data}
@@ -3514,7 +3515,7 @@ class MaxwellBot(commands.Bot):
         try:
             path = Path(self.config.DATA_DIR) / "blacklist.json"
             if path.exists():
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, list):
                     self._blacklist = {str(x) for x in data}
@@ -3528,8 +3529,8 @@ class MaxwellBot(commands.Bot):
         try:
             path = Path(self.config.DATA_DIR) / "shell_whitelist.json"
             if path.exists():
-                with open(path, "r", encoding="utf-8") as f:
-                    self._shell_whitelist = set(str(x) for x in json.load(f))
+                with open(path, encoding="utf-8") as f:
+                    self._shell_whitelist = {str(x) for x in json.load(f)}
             if not quiet:
                 logger.info(
                     f"Loaded {len(self._shell_whitelist)} whitelisted shell users"
@@ -3560,7 +3561,7 @@ class MaxwellBot(commands.Bot):
         try:
             path = Path(self.config.DATA_DIR) / "admins.json"
             if path.exists():
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, list):
                     admins.update(str(x) for x in data)
@@ -3701,12 +3702,10 @@ class MaxwellBot(commands.Bot):
             # BUG FIX: CancelledError is BaseException since Python 3.9.
             # PM2 SIGTERM during REM left running:True stuck in rem_state.json.
             if not success:
-                try:
+                with contextlib.suppress(Exception):
                     await self.rem_store.patch_state(
                         {"running": False, "running_since": ""}
                     )
-                except Exception:
-                    pass
 
     async def _rem_scheduler_loop(self):
         while True:
@@ -3755,10 +3754,8 @@ class MaxwellBot(commands.Bot):
             parts = arg.split()
             limit = 5
             if len(parts) > 1:
-                try:
+                with contextlib.suppress(ValueError):
                     limit = max(1, min(int(parts[1]), 20))
-                except ValueError:
-                    pass
             runs = (await self.rem_store.load_runs())[-limit:]
             if not runs:
                 await message.channel.send("No REM runs yet.")
@@ -3871,7 +3868,7 @@ class MaxwellBot(commands.Bot):
         try:
             if not arg:
                 st = await self.intel_engine.status()
-                feeds = getattr(self.intel_engine, "_get_feed_urls", lambda: [])()
+                feeds = getattr(self.intel_engine, "_get_feed_urls", list)()
                 feed_count = len(feeds) if feeds else 0
                 await message.channel.send(
                     "Intel (tech/AI news gatherer) status\n"
@@ -3895,10 +3892,8 @@ class MaxwellBot(commands.Bot):
                 return
         except Exception as e:
             logger.error(f"Intel command failed: {e}", exc_info=True)
-            try:
+            with contextlib.suppress(BaseException):
                 await message.channel.send(f"Intel command error: {e}")
-            except:
-                pass
             return
         try:
             if arg == "on":
@@ -3952,10 +3947,8 @@ class MaxwellBot(commands.Bot):
             )
         except Exception as e:
             logger.error(f"Intel command failed: {e}", exc_info=True)
-            try:
+            with contextlib.suppress(BaseException):
                 await message.channel.send(f"Intel command error: {e}")
-            except:
-                pass
 
     def _visible_event_content(self, message, content: str | None = None) -> str:
         text = render_discord_context_text(
@@ -4055,7 +4048,7 @@ class MaxwellBot(commands.Bot):
                 return
             loaded = {}
             if path.exists():
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     loaded = json.load(f)
                 if not isinstance(loaded, dict):
                     loaded = {}
@@ -4654,10 +4647,9 @@ class MaxwellBot(commands.Bot):
                     expired.append(slug)
                     continue
                 path = (base / slug).resolve()
-                if path == base or base in path.parents:
-                    if path.exists():
-                        await asyncio.to_thread(shutil.rmtree, path)
-                        logger.info(f"Deleted expired site {slug}")
+                if (path == base or base in path.parents) and path.exists():
+                    await asyncio.to_thread(shutil.rmtree, path)
+                    logger.info(f"Deleted expired site {slug}")
             except Exception as e:
                 logger.error(f"Failed to delete site {slug}: {e}")
             expired.append(slug)
@@ -5574,7 +5566,7 @@ class MaxwellBot(commands.Bot):
             )
             all_tool_results = []
             all_tool_images = []
-            for iteration in range(max_iters):
+            for _iteration in range(max_iters):
                 response, tool_results, iter_images = await self._process_tool_calls(
                     message, response, include_images=True
                 )
@@ -6001,9 +5993,7 @@ class MaxwellBot(commands.Bot):
         if has_ai and has_recency:
             return True
         # Direct "search for" or "look up" intent on facts
-        if ("search" in t or "look up" in t or "find out" in t) and ("about" in t or "the new" in t):
-            return True
-        return False
+        return bool(("search" in t or "look up" in t or "find out" in t) and ("about" in t or "the new" in t))
 
     @staticmethod
     def _extract_search_query(text: str) -> str:
@@ -7165,10 +7155,8 @@ async def main():
             for t in list(task_dict.values()):
                 if isinstance(t, asyncio.Task) and not t.done():
                     t.cancel()
-            try:
+            with contextlib.suppress(Exception):
                 await asyncio.gather(*[t for t in task_dict.values() if isinstance(t, asyncio.Task)], return_exceptions=True)
-            except Exception:
-                pass
             task_dict.clear()
 
         # Cleanup VC sinks
