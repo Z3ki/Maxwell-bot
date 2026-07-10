@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import contextlib
 from pathlib import Path
 from typing import Any, cast
 import socket
@@ -2070,7 +2071,7 @@ class SendFileTool(Tool):
                 bases.append(os.path.abspath(site_path))
         subagent_base = os.environ.get("OPENCODE_SUBAGENT_BASE_DIR", "subagents")
         bases.append(os.path.abspath(subagent_base))
-        # Legacy shell tool shared host directory, if configured.
+        # Shell tool working dir (volume mounted into container).
         shell_host = os.path.join(os.path.dirname(__file__), "shelldocker")
         bases.append(os.path.abspath(shell_host))
         return bases
@@ -2092,20 +2093,17 @@ class SendFileTool(Tool):
         return f"__FILE_SENT__ Sent file: {safe_name} ({len(blob)} bytes)"
 
 
-# Dangerous shell patterns that try to escape the Docker sandbox or access the host.
-# These are blocked before the command reaches the container as defense in depth.
+# Patterns blocked in shell commands (defense-in-depth even in full-access mode).
+# These mainly prevent accidental or malicious attempts to run nested privileged containers,
+# mount host paths from inside commands, or access the Docker socket.
+# Note: the outer shell sandbox itself now runs with full network + full host FS access (/host).
 _SHELL_BLOCKED_PATTERNS = [
     r"--privileged\b",
     r"--pid=host\b",
-    r"--net(?:work)?=?host\b",
-    r"--network\b",
     r"--device\b",
-    r"--cap-add\b",
     r"--mount\b",
     r"--volume\b",
-    r"\b-v\s+\S+:\S+",  # docker -v host:container bind mount
-    r"-u\s+root\b",
-    r"--user\s+root\b",
+    r"\b-v\s+\S+:\S+",  # trying to do extra docker -v from inside command
     r"/var/run/docker\.sock",
     r"docker\.sock",
     r"docker\s+(?:run|exec)\b",
@@ -2124,9 +2122,10 @@ class ShellTool(Tool):
 
     def get_description(self):
         return (
-            "Run a shell command in the isolated maxwell-shell Docker sandbox with bash -lc. Output sent directly to chat. "
-            "Params: command (required), files (optional: comma-separated file paths or JSON array to send as attachments after the command runs, "
-            "e.g. 'output.png' or '[\"report.pdf\", \"data.csv\"]'. Files are copied from the container's /home/maxwell directory and sent to chat)."
+            "Run a shell command with bash -lc in the maxwell-shell container. "
+            "FULL ACCESS MODE: host network (--network host), writable root filesystem (no --read-only), host root filesystem mounted at /host (full FS access from inside), running as root. "
+            "Use /host to reach the real host machine's files. Network tools (curl, ping, apt, pip, git, etc.) work without restriction. "
+            "Params: command (required), files (optional: comma-separated or JSON list of paths under /home/maxwell to send back as Discord attachments after run)."
         )
 
     async def _run_docker(self, *args: str, timeout: int = 30):
@@ -2146,6 +2145,12 @@ class ShellTool(Tool):
             raise
 
     async def _ensure_container(self):
+        # Always force-remove any existing container so we get the current flags
+        # (full network host + /host FS mount + no read-only). Old sandboxed
+        # containers from previous runs will be replaced on first shell use.
+        with contextlib.suppress(Exception):
+            await self._run_docker("rm", "-f", self.CONTAINER_NAME, timeout=10)
+
         try:
             (stdout, _stderr), code = await self._run_docker(
                 "inspect", "-f", "{{.State.Running}}", self.CONTAINER_NAME, timeout=10
@@ -2180,22 +2185,19 @@ class ShellTool(Tool):
             "--name",
             self.CONTAINER_NAME,
             "--memory",
-            "2g",
+            "4g",
             "--cpus",
-            "1.0",
+            "2.0",
             "--network",
-            "none",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges",
+            "host",
             "--pids-limit",
-            "128",
+            "1024",
             "--tmpfs",
-            "/tmp:rw,noexec,nosuid,size=64m",
+            "/tmp:rw,exec,nosuid,size=256m",
             "-v",
             f"{os.path.join(os.path.dirname(__file__), 'shelldocker')}:/home/maxwell:rw",
+            "-v",
+            "/:/host:rw",
             self.IMAGE_NAME,
             timeout=30,
         )
@@ -2246,7 +2248,7 @@ class ShellTool(Tool):
             "--workdir",
             "/home/maxwell",
             "--user",
-            "maxwell",
+            "root",
             self.CONTAINER_NAME,
             "bash",
             "-lc",
