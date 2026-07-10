@@ -163,6 +163,17 @@ Autonomy is separate from the removed `,auto` auto-reply mode. It wakes on `auto
 
 Channel post cooldowns were removed. The engine can post to the same channel on consecutive ticks if the planner decides to. Keep the interval sane if you do not want spam; the code is no longer pretending a hardcoded 30-minute cooldown is wisdom.
 
+## Pi as Brain (experimental-pi-port branch)
+
+Pi is now the core agent "brain" (via `pi --mode rpc` subprocess from Python bot). 
+- Restricted: `--no-builtin-tools --no-skills` etc. so Pi cannot list/edit arbitrary files — only controlled Maxwell tools via extensions (discord actions, create_site with Caddy parity, web, image, yt...).
+- Same providers from your .env (mimo-v2.5 as main model, etc.).
+- Extensions: `.pi/extensions/maxwell-tools/` and `maxwell-brain/` for parity.
+- Docker Pi-specific removed (legacy); main is direct Python + Pi RPC.
+- See `pi_bridge.py`, wiring in `bot.py` (enable with `MAXWELL_USE_PI_BRAIN=1`), AGENTS.md.
+
+Also see `.pi/extensions/`.
+
 ## Development & Releases
 
 This is a **rolling release** project.

@@ -98,6 +98,7 @@ def test_record_rem_event_user_and_assistant_metadata(tmp_path):
     bot.bot_name = "Maxwell"
     bot._auto_channels = {"1"}
     bot._recorded_rem_msg_ids = set()
+    bot._recent_users = {}
     bot._connection = type("Conn", (), {"user": type("User", (), {"id": 99})()})()
     msg = FakeMessage("hello <think>secret</think>")
     msg.mentions = [FakeMention()]

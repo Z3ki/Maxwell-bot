@@ -17,12 +17,18 @@ import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal, cast, overload
+from typing import Any, Literal, Optional, cast, overload
 from urllib.parse import urlparse
 
 import aiohttp
 import discord
 from discord.ext import commands
+
+# Pi brain bridge - optional via MAXWELL_USE_PI_BRAIN=1
+try:
+    from pi_bridge import PiRPCBridge
+except Exception:
+    PiRPCBridge = None  # type: ignore
 
 try:
     from discord.ext import voice_recv
@@ -1594,6 +1600,7 @@ class MaxwellBot(commands.Bot):
         self.memory: Any = None
         self.rem_log: Any = None
         self.rem_store: Any = None
+        self.pi_bridge: Optional["PiRPCBridge"] = None  # Pi as brain (optional)
         self.rem_enabled = self.config.REM_ENABLED
         self.rem_interval_seconds = self.config.REM_INTERVAL_SECONDS
         self.rem_max_turns = self.config.REM_MAX_TURNS
@@ -1670,6 +1677,7 @@ class MaxwellBot(commands.Bot):
         self.autonomy_engine = AutonomyEngine(self)
         self.context_cleanup_engine = ContextCleanupEngine(self)
         self.intel_engine = IntelEngine(self)
+        self._setup_pi_bridge()  # start wiring Pi as brain if MAXWELL_USE_PI_BRAIN=1
 
     def _update_recent_users(self, channel_id: str, user: Any):
         """Track users seen in this channel's conversation so render can resolve
@@ -1700,6 +1708,56 @@ class MaxwellBot(commands.Bot):
             fallback_disable_reasoning=self.config.OLLAMA_FALLBACK_DISABLE_REASONING,
             retry_attempts=self.config.OLLAMA_RETRY_ATTEMPTS,
         )
+
+    def _setup_pi_bridge(self):
+        """Start wiring Pi as the brain (thin adapter).
+
+        Enabled with MAXWELL_USE_PI_BRAIN=1 (or true/yes).
+        Uses same env as PM2 (OLLAMA_MODEL=xiaomi/mimo-v2.5 etc from your .env).
+        Loads maxwell extensions so Pi has tools + site creator parity.
+        """
+        if os.getenv("MAXWELL_USE_PI_BRAIN", "0").lower() not in ("1", "true", "yes"):
+            return
+        if PiRPCBridge is None:
+            logger.warning("PiRPCBridge not available - cannot enable Pi brain")
+            return
+        try:
+            self.pi_bridge = PiRPCBridge(
+                on_text_delta=self._on_pi_text_delta,
+                on_tool_result=self._on_pi_tool_result,
+                on_agent_event=self._on_pi_agent_event,
+            )
+            logger.info("Pi brain bridge initialized (will use your OLLAMA_MODEL + providers)")
+        except Exception as e:
+            logger.exception(f"Failed to init Pi brain bridge: {e}")
+            self.pi_bridge = None
+
+    def _on_pi_text_delta(self, delta: str, meta: dict):
+        """Callback for streaming text from Pi (the brain)."""
+        # For now, accumulate per channel if we have active context.
+        # Full streaming send will be wired in _handle_message.
+        logger.debug(f"Pi delta: {delta[:80]!r}")
+
+    def _on_pi_tool_result(self, event_type: str, data: dict):
+        """Callback when Pi executes a tool (via its extensions)."""
+        logger.debug(f"Pi tool {event_type}: {str(data)[:100]}")
+
+    def _on_pi_agent_event(self, event):
+        """General Pi events."""
+        logger.debug(f"Pi event: {getattr(event, 'type', event)}")
+
+    async def _pi_background_prompt(self, prompt: str, timeout: float = 60) -> str:
+        """For autonomy, REM, intel: route to Pi brain for reasoning.
+        Uses follow_up to not disrupt user conversations.
+        """
+        if self.pi_bridge:
+            try:
+                if not getattr(self.pi_bridge, "proc", None):
+                    await self.pi_bridge.start()
+                return await self.pi_bridge.send_background_prompt(prompt, timeout=timeout)
+            except Exception as e:
+                logger.warning(f"Pi background prompt failed: {e}")
+        return ""
 
     async def _get_autonomy_provider(self):
         """Return a provider for the autonomy loop.
@@ -3662,35 +3720,43 @@ class MaxwellBot(commands.Bot):
             timeout = max(
                 10, min(int(self._control.get("ai_timeout_seconds", 180) or 180), 600)
             )
-            await self._acquire_ai_slot(timeout=timeout)
-            try:
-                # REM uses the same provider/model as autonomy so the two
-                # background brains share one endpoint/model config.
-                rem_provider = await self._get_autonomy_provider()
-                if not callable(getattr(rem_provider, "generate_response", None)) and not callable(
-                    getattr(rem_provider, "generate_chat_completion", None)
-                ):
-                    rem_provider = self.ai_provider
-                rem_model = str(
-                    (self._control or {}).get("autonomy_model", "") or ""
-                ) or self.config.OLLAMA_REM_MODEL
-                run = await run_rem_once(
-                    memory_manager=self.memory,
-                    rem_log=self.rem_log,
-                    provider=rem_provider,
-                    data_dir=self.config.DATA_DIR,
-                    model=rem_model,
-                    max_turns=self.rem_max_turns,
-                    run_history=self.config.REM_RUN_HISTORY,
-                    prompt_body=self.rem_prompt_body,
-                    timeout=timeout,
-                    # REM produces a short audit, not free-form prose; cap
-                    # max_tokens like autonomy so we don't blow past the model's
-                    # output limit (default OLLAMA_MAX_TOKENS=200000 risks a 400).
-                    max_tokens=8192,
-                )
-            finally:
-                await self._release_ai_slot()
+            if self.pi_bridge:
+                # Wire Pi brain for REM (bypass provider + slot for background)
+                events_str = "REM events since last run (use for consolidation into memory)."
+                pi_prompt = f"{self.rem_prompt_body}\n\n{events_str}\n\nRespond with the audit and any memory edits."
+                audit = await self._pi_background_prompt(pi_prompt, timeout=timeout)
+                run = {"ts": started, "turns_used": 1, "audit": audit or "Pi REM done", "tool_counts": {}, "events": 0}
+                await store.append_run(run)
+            else:
+                await self._acquire_ai_slot(timeout=timeout)
+                try:
+                    # REM uses the same provider/model as autonomy so the two
+                    # background brains share one endpoint/model config.
+                    rem_provider = await self._get_autonomy_provider()
+                    if not callable(getattr(rem_provider, "generate_response", None)) and not callable(
+                        getattr(rem_provider, "generate_chat_completion", None)
+                    ):
+                        rem_provider = self.ai_provider
+                    rem_model = str(
+                        (self._control or {}).get("autonomy_model", "") or ""
+                    ) or self.config.OLLAMA_REM_MODEL
+                    run = await run_rem_once(
+                        memory_manager=self.memory,
+                        rem_log=self.rem_log,
+                        provider=rem_provider,
+                        data_dir=self.config.DATA_DIR,
+                        model=rem_model,
+                        max_turns=self.rem_max_turns,
+                        run_history=self.config.REM_RUN_HISTORY,
+                        prompt_body=self.rem_prompt_body,
+                        timeout=timeout,
+                        # REM produces a short audit, not free-form prose; cap
+                        # max_tokens like autonomy so we don't blow past the model's
+                        # output limit (default OLLAMA_MAX_TOKENS=200000 risks a 400).
+                        max_tokens=8192,
+                    )
+                finally:
+                    await self._release_ai_slot()
             logger.info(f"REM pass complete: {run.get('audit', '')[:160]}")
             success = True
             return True, "ok", run
@@ -5534,33 +5600,132 @@ class MaxwellBot(commands.Bot):
                     }
                     for img in pre_tool_images
                 ] + active_media
+
+            # Improved media for Pi: include more b64 images + any cached visuals
+            pi_images = []
+            for m in active_media:
+                if m.get("is_image") and m.get("b64"):
+                    pi_images.append({
+                        "type": "image",
+                        "data": m["b64"],
+                        "mimeType": m.get("mime_type", "image/jpeg"),
+                    })
+
         try:
-            await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
-            try:
-                if self._control.get("typing_indicator", True) and not getattr(
-                    message, "suppress_typing", False
-                ):
+            response = None
+            used_pi = False
+            if self.pi_bridge:
+                # Pi is the brain - use the bridge (auto uses your OLLAMA_MODEL=xiaomi/mimo-v2.5 etc)
+                # Bypass more old logic: let Pi handle reasoning + tools via extensions
+                used_pi = True
+                try:
+                    if not getattr(self.pi_bridge, "proc", None):
+                        await self.pi_bridge.start()
+                    # Build prompt text for Pi (include pre-tool context + media summary)
+                    prompt = (content or "look at this")
+                    if pre_tool_results:
+                        prompt += "\n\n" + "\n".join(pre_tool_results)
+                    if media_summary:
+                        prompt += f"\n\n[Media context: {media_summary}]"
+                    await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
                     try:
-                        async with message.channel.typing():
+                        if self._control.get("typing_indicator", True) and not getattr(
+                            message, "suppress_typing", False
+                        ):
+                            async with message.channel.typing():
+                                response = await self.pi_bridge.prompt_and_collect(
+                                    prompt, images=pi_images or None, timeout=ai_timeout
+                                )
+                        else:
+                            response = await self.pi_bridge.prompt_and_collect(
+                                prompt, images=pi_images or None, timeout=ai_timeout
+                            )
+                    finally:
+                        await self._release_ai_slot()
+                except Exception as e:
+                    logger.warning(f"Pi brain path failed, falling back to old provider: {e}")
+                    self.pi_bridge = None  # disable on error for this run
+                    used_pi = False
+
+            if not response:
+                # Original path (fallback or Pi not enabled)
+                await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
+                try:
+                    if self._control.get("typing_indicator", True) and not getattr(
+                        message, "suppress_typing", False
+                    ):
+                        try:
+                            async with message.channel.typing():
+                                response = await self.ai_provider.generate_response(
+                                    messages, media=active_media, timeout=ai_timeout
+                                )
+                        except discord.Forbidden:
                             response = await self.ai_provider.generate_response(
                                 messages, media=active_media, timeout=ai_timeout
                             )
-                    except discord.Forbidden:
+                    else:
                         response = await self.ai_provider.generate_response(
                             messages, media=active_media, timeout=ai_timeout
                         )
-                else:
-                    response = await self.ai_provider.generate_response(
-                        messages, media=active_media, timeout=ai_timeout
-                    )
-            finally:
-                await self._release_ai_slot()
-            # Track token usage from provider
-            usage = getattr(self.ai_provider, '_last_usage', None) or {}
-            if usage:
-                self._token_tracker.record(usage)
+                finally:
+                    await self._release_ai_slot()
+                # Track token usage from provider
+                usage = getattr(self.ai_provider, '_last_usage', None) or {}
+                if usage:
+                    self._token_tracker.record(usage)
             if not response or not response.strip():
                 return
+
+            # Bypass old tool loop when Pi brain was used (Pi + extensions handle tool decisions)
+            if used_pi:
+                # Still process markers from Pi (e.g. from discord_* or maxwell tools returning ACTION:)
+                if any("__NO_RESPONSE__" in response for _ in [response]) or "__NO_RESPONSE__" in (response or ""):
+                    await self._ensure_reasoning_trace(message, [], response, "no_response")
+                    return
+                if "__MESSAGE_SENT__" in (response or ""):
+                    await self._ensure_reasoning_trace(message, [], response, "send_message")
+                    normal_reply_sent = True
+                    return
+                # Clean Pi response of any leaked markers
+                response = re.sub(r"\[(\w+)\]\s*\n?\s*\{.*?\}\s*\n?\s*\[/\1\]", "", response, flags=re.DOTALL)
+                response = re.sub(r"\[/?(?:TOOL_CALL:)?[\w-]+.*?\]", "", response)
+                response = TOOL_TRACE_LINE_RE.sub("", response)
+                response = (response or "").replace("__NO_RESPONSE__", "").replace("__MESSAGE_SENT__", "").strip()
+
+                # Improved tool handling for Pi: execute ACTION: markers returned by
+                # discord_* / maxwell tools in the extensions (e.g. from Pi deciding to send)
+                if response and response.startswith("ACTION:"):
+                    try:
+                        action, payload = response.split(":", 1)
+                        params = json.loads(payload) if payload.strip().startswith("{") else {}
+                        if "discord_send_message" in response:
+                            await message.channel.send(params.get("content", response))
+                            normal_reply_sent = True
+                        elif "discord_react" in response:
+                            # simple react if possible
+                            pass
+                        await self._record_rem_event(message, "assistant", str(params))
+                        return
+                    except Exception:
+                        pass
+
+                if response:
+                    # send it
+                    await self._ensure_reasoning_trace(message, [], response, "reply")
+                    response = _auto_format_discord(response)
+                    response = self._render_custom_emojis(response, message.guild)
+                    chunks = self._split_response(response, limit=1900)
+                    for i, chunk in enumerate(chunks):
+                        if i == 0:
+                            await message.reply(chunk)
+                        else:
+                            await message.channel.send(chunk)
+                        if len(chunks) > 1:
+                            await asyncio.sleep(0.3)
+                    await self._record_rem_event(message, "assistant", response)
+                    normal_reply_sent = True
+                return  # bypass old max_iters tool loop and followup
+
             max_iters = max(
                 0, min(int(self._control.get("max_tool_iterations", 10) or 0), 25)
             )

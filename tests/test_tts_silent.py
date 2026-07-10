@@ -46,6 +46,7 @@ def test_process_tool_calls_preserves_no_response_marker_for_tts():
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False},
         tools={"tts": tts},
+        _recent_users={},
     )
     message = SimpleNamespace()
 
@@ -173,6 +174,7 @@ def test_process_tool_calls_handles_reasoning_json_tts_without_leaking_system_re
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False},
         tools={"tts": tts},
+        _recent_users={},
     )
     message = SimpleNamespace()
     response = '''{
@@ -199,6 +201,7 @@ def test_process_tool_calls_handles_pipe_tts_format():
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False},
         tools={"tts": tts},
+        _recent_users={},
     )
     message = SimpleNamespace()
 
@@ -401,6 +404,7 @@ def test_build_messages_caps_tool_history_outside_recent_count():
         bot_name="Maxwell",
         memory=memory,
         user=SimpleNamespace(display_name="Maxwell"),
+        _recent_users={},
     )
     message = SimpleNamespace(
         author=SimpleNamespace(bot=False, display_name="alice", id=456),
@@ -544,6 +548,7 @@ def test_build_messages_has_single_formatting_instruction():
         bot_name="Maxwell",
         memory=memory,
         user=SimpleNamespace(display_name="Maxwell"),
+        _recent_users={},
     )
     message = SimpleNamespace(
         author=SimpleNamespace(bot=False, display_name="alice", id=456),

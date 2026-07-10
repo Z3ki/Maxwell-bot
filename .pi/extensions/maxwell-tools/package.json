@@ -1,0 +1,12 @@
+{
+  "name": "maxwell-tools",
+  "version": "0.1.0",
+  "description": "Pi extension porting Maxwell bot tools (web_search, fetch, image_gen, youtube, create_site/website creator, etc) for use in Pi sessions on this project. Uses same providers from .env.",
+  "type": "module",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "dependencies": {
+    "typebox": "^0.33.0"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "maxwell-brain",
+  "version": "0.1.0",
+  "description": "Pi extension making Pi the actual brain for Maxwell Discord self-bot. Custom tools for Discord actions + site creator (Caddy parity), web, etc. Loaded by pi_bridge.py or directly in Pi sessions.",
+  "type": "module",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "dependencies": {
+    "typebox": "^0.33.0"
+  }
+}

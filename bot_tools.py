@@ -1689,6 +1689,10 @@ class CreateSiteTool(Tool):
             # admin credentials is already mitigated at the hosting layer.
             # 'unsafe-inline' covers both script and style; data: URIs cover inline
             # SVG/embedded assets; https: allows CDNs without listing each host.
+            #
+            # Pi port note (experimental-pi-port): maxwell_create_site in .pi/extensions/maxwell-tools/index.ts
+            # does the *exact* same injection + write to MAXWELL_SITE_DIR so sites work identically
+            # from inside the Debian Pi Docker (volumes + host Caddy unchanged).
             if "<head" in body.lower():
                 head_match = re.search(
                     r"<head[^>]*>", body, re.IGNORECASE

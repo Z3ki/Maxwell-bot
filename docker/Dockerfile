@@ -1,5 +1,9 @@
 FROM ubuntu:26.04
 
+# Legacy shell sandbox Dockerfile (used by ShellTool with --network none etc).
+# Legacy/general Dockerfile. Pi brain is integrated directly (Python bot + restricted `pi --mode rpc` subprocess).
+# Pi-specific docker (pi-debian, entrypoint) removed.
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \

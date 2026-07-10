@@ -1679,16 +1679,21 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
                 autonomy_disable_reasoning = bool(
                     control.get("autonomy_disable_reasoning", True)
                 )
-                raw_response = await ai_provider.generate_response(
-                    messages,
-                    timeout=timeout,
-                    model=autonomy_model or None,
-                    # Autonomy only generates a short JSON plan; cap max_tokens so
-                    # we don't blow past an autonomy model's output limit (e.g.
-                    # minimax-m3 caps at 131072) and waste quota/tokens.
-                    max_tokens=8192,
-                    disable_reasoning=autonomy_disable_reasoning,
-                )
+                # Wire Pi brain for autonomy if enabled (bypass direct provider)
+                if getattr(self.bot, "pi_bridge", None):
+                    pi_prompt = "\n\n".join(m.get("content", "") for m in messages if m.get("content"))
+                    raw_response = await self.bot._pi_background_prompt(pi_prompt, timeout=timeout)
+                else:
+                    raw_response = await ai_provider.generate_response(
+                        messages,
+                        timeout=timeout,
+                        model=autonomy_model or None,
+                        # Autonomy only generates a short JSON plan; cap max_tokens so
+                        # we don't blow past an autonomy model's output limit (e.g.
+                        # minimax-m3 caps at 131072) and waste quota/tokens.
+                        max_tokens=8192,
+                        disable_reasoning=autonomy_disable_reasoning,
+                    )
             finally:
                 await self.bot._release_ai_slot()
         except Exception as e:
