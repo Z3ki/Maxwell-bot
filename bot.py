@@ -234,6 +234,7 @@ from providers import (  # noqa: E402
 from rem import RemStore, load_rem_defaults, run_rem_once  # noqa: E402
 from utils import (  # fd-safe, single source of truth  # noqa: E402
     _atomic_json_write_sync,
+    FileLock,
     render_discord_context_text,
 )
 
@@ -813,11 +814,19 @@ def _parse_xml_open_tag(raw_tag: str) -> tuple[str | None, str, bool]:
         re.DOTALL | re.IGNORECASE,
     )
     if tool_alias_match:
-        return tool_alias_match.group(1), tool_alias_match.group(2) or "", self_closing
+        name = tool_alias_match.group(1)
+        if name and name.lower().startswith("tool_"):
+            name = name[5:]
+        return name, tool_alias_match.group(2) or "", self_closing
     match = re.match(r"(?:tool:)?([A-Za-z_]\w*)(?:\s+(.*))?$", inner, re.DOTALL)
     if not match:
         return None, "", False
-    return match.group(1), match.group(2) or "", self_closing
+    name = match.group(1)
+    attrs = match.group(2) or ""
+    # Normalize common model mistakes like <tool_send_message> or tool_send_foo into send_message
+    if name and name.lower().startswith("tool_"):
+        name = name[5:]
+    return name, attrs, self_closing
 
 
 def _parse_xml_attrs(attrs_str: str) -> dict:
@@ -834,8 +843,12 @@ def _parse_xml_attrs(attrs_str: str) -> dict:
 
 
 def _find_tool_close(text: str, name: str, start: int) -> re.Match | None:
+    # Accept closes with or without tool: / tool_ prefix, since models mix <tool_xxx> and </tool_xxx>
+    n = re.escape(name)
+    tn = re.escape("tool_" + name)
+    tcn = re.escape("tool:" + name)
     close_re = re.compile(
-        rf"</\s*(?:(?:tool:)?{re.escape(name)}|function|tool|tool_call)\s*>",
+        rf"</\s*(?:tool[:_])?(?:{n}|{tn}|{tcn}|function|tool|tool_call)\s*>",
         re.IGNORECASE,
     )
     return close_re.search(text, start)
@@ -852,18 +865,30 @@ PIPE_TOOL_CALL_RE = re.compile(
     r"<\|tool_call_begin\|>\s*([A-Za-z_]\w*)\|>(.*?)(?:<\|tool_call_end\|>|<\|end\|>|$)",
     re.IGNORECASE | re.DOTALL,
 )
+# Catch common model-specific pipe-delimited tool tokens like <|tool_send_message|>content<|/tool_send_message|>
+GENERIC_PIPE_TOOL_RE = re.compile(
+    r"<\|tool[:_]([A-Za-z_]\w*)\|>(.*?)(?=<\|[^|]*\|>|<\|/tool[:_]\1\s*\|>|<\|end[^|]*\|>|$)",
+    re.IGNORECASE | re.DOTALL,
+)
 ARTIFACT_BLOCK_RE = re.compile(
     r"<(?:system-reminder|environment_details)\b[^>]*>.*?(?:</(?:system-reminder|environment_details)>|$)",
     re.IGNORECASE | re.DOTALL,
 )
 PIPE_MARKER_RE = re.compile(
-    r"<\|/?(?:tool:[A-Za-z_]\w*|tool_call_begin|tool_call_end|end)\|?>", re.IGNORECASE
+    r"<\|/?(?:tool[:_][A-Za-z_]\w*|tool_call_begin|tool_call_end|end|tool_response|begin_of_text|end_of_text|start_header_id|end_header_id)\|?>",
+    re.IGNORECASE,
 )
 LEAKED_TOOL_CALL_RE = re.compile(r"</?\s*(?:tool_call|function)\s*>", re.IGNORECASE)
 # Some models (or fine-tunes) wrap final replies in <message>...</message>
 # that should never be shown to users.
 LEAKED_MESSAGE_TAG_RE = re.compile(
     r"</?\s*message\s*>", re.IGNORECASE
+)
+# Aggressive remover for pipe-style special tokens (these are not full XML blocks with bodies).
+# Full XML tool blocks (even malformed <tool_send_xxx>) are handled via _iter range removal in strip_tool_payload_leaks.
+TOKEN_ARTIFACT_RE = re.compile(
+    r"<\|/?[^|]*tool[^|]*\|?>",
+    re.IGNORECASE,
 )
 
 
@@ -888,8 +913,11 @@ def strip_model_artifact_leaks(text: str, strip_pipe_markers: bool = True) -> st
     cleaned = ARTIFACT_BLOCK_RE.sub("", cleaned)
     if strip_pipe_markers:
         cleaned = PIPE_MARKER_RE.sub("", cleaned)
+        cleaned = TOKEN_ARTIFACT_RE.sub("", cleaned)
     cleaned = LEAKED_TOOL_CALL_RE.sub("", cleaned)
     cleaned = LEAKED_MESSAGE_TAG_RE.sub("", cleaned)
+    # Always strip these garbage tokens; they are never valid visible output.
+    cleaned = re.sub(r"<\|?end_of_text\|?>|<\|?tool_response\|?>|<unk>", "", cleaned, flags=re.IGNORECASE)
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
@@ -920,6 +948,8 @@ def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = 
         if _in_ranges(match.start(), code_ranges):
             continue
         name = match.group(1)
+        if name and name.lower().startswith("tool_"):
+            name = name[5:]
         if available_tools is None or name in available_tools:
             pipe_matches.append(
                 (
@@ -935,9 +965,21 @@ def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = 
         if _in_ranges(match.start(), code_ranges):
             continue
         name = match.group(1)
+        if name and name.lower().startswith("tool_"):
+            name = name[5:]
         if available_tools is None or name in available_tools:
             pipe_matches.append(
                 (match.start(), match.end(), name, match.group(2), "", True)
+            )
+    for match in GENERIC_PIPE_TOOL_RE.finditer(text):
+        if _in_ranges(match.start(), code_ranges):
+            continue
+        name = match.group(1)
+        if name and name.lower().startswith("tool_"):
+            name = name[5:]
+        if available_tools is None or name in available_tools:
+            pipe_matches.append(
+                (match.start(), match.end(), name, "", match.group(2), False)
             )
     if pipe_matches:
         yield from sorted(pipe_matches, key=lambda x: (x[0], x[1]))
@@ -1086,7 +1128,10 @@ def collect_tool_calls(
 
 
 def strip_tool_payload_leaks(text: str) -> str:
-    cleaned = strip_model_artifact_leaks(text)
+    # First remove any full tool invocation blocks (XML or pipe) including their payloads.
+    # This must happen before token stripping so that <|tool_foo|>body  removes body too.
+    cleaned = str(text or "")
+    original = cleaned
     ranges = [
         (start, end)
         for start, end, *_rest in _iter_top_level_tool_tags(
@@ -1095,7 +1140,21 @@ def strip_tool_payload_leaks(text: str) -> str:
     ]
     for start, end in reversed(ranges):
         cleaned = cleaned[:start] + cleaned[end:]
-    return strip_model_artifact_leaks(cleaned)
+    # Now clean remaining artifacts/markers on the leftovers.
+    cleaned = strip_model_artifact_leaks(cleaned)
+    # Final safety for any stray tokens left.
+    cleaned = TOKEN_ARTIFACT_RE.sub("", cleaned)
+    cleaned = PIPE_MARKER_RE.sub("", cleaned)
+    cleaned = re.sub(r"<\|?[^<>\|\s]{0,30}tool[^<>\|\s]{0,30}\|?>", "", cleaned, flags=re.IGNORECASE)
+    # Extra defensive: strip common leaked reasoning blocks that escape other passes
+    # (some models leak <think> or raw JSON decision objects into visible text).
+    cleaned = re.sub(r"<think\b[^>]*>.*?</think>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"^\s*\{[\s\S]*?(?:\"thoughts\"|\"intent\"|\"decision\"|\"tool_plan\")[\s\S]*?\}\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    if len(cleaned) < len(original) * 0.95 and logger.isEnabledFor(logging.DEBUG):
+        # Significant sanitization happened; helps debug persistent leak issues without always logging.
+        logger.debug("strip_tool_payload_leaks removed %d chars of artifacts", len(original) - len(cleaned))
+    return cleaned
 
 
 def _auto_format_discord(text: str) -> str:
@@ -3657,7 +3716,6 @@ class MaxwellBot(commands.Bot):
         await self.rem_store.patch_state(
             {"running": True, "running_since": datetime.now(timezone.utc).isoformat()}
         )
-        success = False
         try:
             timeout = max(
                 10, min(int(self._control.get("ai_timeout_seconds", 180) or 180), 600)
@@ -3692,20 +3750,19 @@ class MaxwellBot(commands.Bot):
             finally:
                 await self._release_ai_slot()
             logger.info(f"REM pass complete: {run.get('audit', '')[:160]}")
-            success = True
             return True, "ok", run
         except Exception as e:
             logger.warning(f"REM pass failed: {e}")
             return False, str(e), None
         finally:
             self._rem_running = False
-            # BUG FIX: CancelledError is BaseException since Python 3.9.
-            # PM2 SIGTERM during REM left running:True stuck in rem_state.json.
-            if not success:
-                with contextlib.suppress(Exception):
-                    await self.rem_store.patch_state(
-                        {"running": False, "running_since": ""}
-                    )
+            # Always clear persistent running flag on exit (success, error, or cancel).
+            # Previous logic only cleared on !success path, leaving "running": true after
+            # normal completion (dashboard + ,rem saw stuck REM). Also covers CancelledError.
+            with contextlib.suppress(Exception):
+                await self.rem_store.patch_state(
+                    {"running": False, "running_since": ""}
+                )
 
     async def _rem_scheduler_loop(self):
         while True:
@@ -4570,13 +4627,20 @@ class MaxwellBot(commands.Bot):
                 if changed:
                     # Race mitigation: re-load fresh list (API may have appended during our long work)
                     # and overlay our "done" results so we don't clobber new pending commands.
-                    try:
-                        fresh_raw = await asyncio.to_thread(path.read_text, encoding="utf-8")
-                        fresh = json.loads(fresh_raw) if fresh_raw.strip() else []
+                    # Additionally hold a cross-process FileLock around the read+merge+write
+                    # to reduce (but not eliminate) window where concurrent appends are lost.
+                    snapshot = list(commands_data)  # the ones we just marked done
+
+                    def _merge_and_write():
+                        try:
+                            fresh_raw = path.read_text(encoding="utf-8")
+                            fresh = json.loads(fresh_raw) if fresh_raw.strip() else []
+                        except Exception:
+                            fresh = []
                         if isinstance(fresh, list):
                             for fc in fresh:
                                 if fc.get("status") == "pending":
-                                    for our in commands_data:
+                                    for our in snapshot:
                                         if (our.get("status") == "done" and
                                             our.get("type") == fc.get("type") and
                                             our.get("content") == fc.get("content") and
@@ -4584,10 +4648,21 @@ class MaxwellBot(commands.Bot):
                                              our.get("user_id") == fc.get("user_id"))):
                                             fc["status"] = "done"
                                             fc["result"] = our.get("result")
-                            commands_data = fresh
+                            to_write = fresh
+                        else:
+                            to_write = snapshot
+                        _atomic_json_write_sync(path, to_write)
+                        return to_write
+
+                    try:
+                        with FileLock(path, timeout=10.0):
+                            await asyncio.to_thread(_merge_and_write)
                     except Exception:
-                        pass
-                    await asyncio.to_thread(_atomic_json_write_sync, path, commands_data)
+                        # Fallback to previous best-effort without blocking too long
+                        try:
+                            await asyncio.to_thread(_atomic_json_write_sync, path, snapshot)
+                        except Exception:
+                            pass
             except Exception as e:
                 logger.error(f"Command queue error: {e}")
 

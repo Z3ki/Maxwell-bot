@@ -190,3 +190,35 @@ def test_strip_tool_payload_leaks_removes_reasoning_json_and_system_reminder():
 <system-reminder>secret context</system-reminder>'''
 
     assert strip_tool_payload_leaks(text) == ""
+
+
+def test_collect_tool_calls_accepts_leaking_tool_token_format():
+    # Models sometimes emit <|tool_send_message|>text<|/tool_send_message|> or without close
+    calls = collect_tool_calls("<|tool_send_message|>hello world<|/tool_send_message|>", TOOLS)
+    assert [(name, params) for _start, _end, name, params in calls] == [
+        ("send_message", {"content": "hello world"})
+    ]
+
+    calls2 = collect_tool_calls("<|tool_send_message|>just an emoji 🔥", TOOLS)
+    assert [(name, params) for _start, _end, name, params in calls2] == [
+        ("send_message", {"content": "just an emoji 🔥"})
+    ]
+
+
+def test_collect_tool_calls_accepts_tool_underscore_prefix():
+    calls = collect_tool_calls("<tool_send_message>hi there</tool_send_message>", TOOLS)
+    assert [(name, params) for _start, _end, name, params in calls] == [
+        ("send_message", {"content": "hi there"})
+    ]
+
+
+def test_strip_tool_payload_leaks_catches_leaking_variants():
+    # Pure tool token blocks (even malformed) get fully stripped like other payloads.
+    assert strip_tool_payload_leaks("<|tool_send_message|>foo bar") == ""
+    # Stray tokens in middle get removed (bodies after lone tokens may remain if not part of a full match)
+    assert "before" in strip_tool_payload_leaks("before <|tool_response|> <|end_of_text|> after")
+    assert "after" in strip_tool_payload_leaks("before <|tool_response|> <|end_of_text|> after")
+    assert strip_tool_payload_leaks("<|/tool:send_message|>text") == "text"
+    # XML malformed gets removed as full block (incl body) via range logic now that normalize+close work
+    assert strip_tool_payload_leaks("<tool_send_message>leaked</tool_send_message> visible").strip() == "visible"
+    assert strip_tool_payload_leaks("normal <div>ok</div>") == "normal <div>ok</div>"

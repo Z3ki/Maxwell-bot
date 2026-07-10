@@ -157,3 +157,71 @@ def render_discord_context_text(message: Any, content: str | None = None, known_
 
 # Alias for autonomy.py compatibility
 _render_discord_context_text = render_discord_context_text
+
+
+# --- Cross-process file locking (Linux fcntl; best-effort elsewhere) ---
+# Used to reduce lost-update races on shared JSONs between bot and api processes
+# (bot_commands.json, autonomy state, rem state, etc.). Not a full DB, but
+# makes the existing read-modify-write pattern much safer.
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore
+
+
+class FileLock:
+    """Simple exclusive file lock context manager using fcntl.flock when available.
+
+    On non-Linux or without fcntl it becomes a no-op (still better than nothing
+    for single-process, and documents intent).
+    Usage:
+        with FileLock(path):
+            data = json.loads(path.read_text() or '[]')
+            ... mutate ...
+            _atomic_json_write_sync(path, data)
+    """
+
+    def __init__(self, path: Path | str, timeout: float = 30.0):
+        self.path = Path(path)
+        self.timeout = timeout
+        self._fd = None
+        self._locked = False
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
+        if fcntl is not None:
+            import time as _time
+            deadline = _time.time() + self.timeout
+            while True:
+                try:
+                    fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    self._locked = True
+                    break
+                except BlockingIOError:
+                    if _time.time() > deadline:
+                        # Fall through without hard lock; still proceed (best effort).
+                        logger.warning(f"FileLock timeout on {self.path}; proceeding without exclusive lock")
+                        break
+                    _time.sleep(0.05)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._fd is not None:
+            if fcntl is not None and self._locked:
+                with contextlib.suppress(Exception):
+                    fcntl.flock(self._fd, fcntl.LOCK_UN)
+            with contextlib.suppress(Exception):
+                os.close(self._fd)
+        self._fd = None
+        self._locked = False
+        return False
+
+
+def _with_file_lock(path: Path | str, func, timeout: float = 30.0):
+    """Helper to run func() while holding an exclusive lock on path.
+
+    func receives no args and should do the read-modify-(atomic)write.
+    """
+    with FileLock(path, timeout=timeout):
+        return func()

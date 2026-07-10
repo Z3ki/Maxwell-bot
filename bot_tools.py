@@ -1748,8 +1748,13 @@ class CreateSiteTool(Tool):
                     "media-src https: data: blob:;\">"
                 )
                 body = "<head>" + csp_meta + "</head>\n" + body
-            async with aiofiles.open(index_path, "w", encoding="utf-8") as f:
+            # Atomic write for the public HTML to avoid truncated/orphan sites on
+            # crash, OOM, or concurrent overwrite (reliability fix per persistence review).
+            tmp_path = index_path + ".tmp"
+            async with aiofiles.open(tmp_path, "w", encoding="utf-8") as f:
                 await f.write(body)
+                await f.flush()
+            os.replace(tmp_path, index_path)
 
             sites[slug] = {
                 "user_id": user_id,

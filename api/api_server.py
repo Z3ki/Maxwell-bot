@@ -60,7 +60,7 @@ _load_env_file(ENV_FILE)
 import sys as _sys
 _sys.path.insert(0, str(APP_ROOT))
 from control_defaults import DEAD_CONTROL_KEYS, DEFAULT_CONTROL, KNOWN_TOOLS, parse_bool as _parse_bool  # noqa: E402
-from utils import _atomic_json_write_sync, _atomic_text_write_sync  # noqa: E402 - fd-safe atomic writes
+from utils import _atomic_json_write_sync, _atomic_text_write_sync, FileLock  # noqa: E402 - fd-safe atomic writes
 
 DATA_DIR = Path(os.getenv("DATA_DIR", APP_ROOT / "data"))
 CORS_ORIGIN = os.getenv("MAXWELL_CORS_ORIGIN", os.getenv("MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com")).rstrip("/")
@@ -996,11 +996,13 @@ async def _queue_rem_command(cmd_type: str):
 
 async def _queue_command(cmd_type: str, extra: dict | None = None):
     """Generic command queue helper (same pattern as _queue_rem_command)."""
-    async with _file_lock:
+    # Use cross-process FileLock in addition to in-process _file_lock for
+    # better protection against bot reader/writer races on bot_commands.json.
+    def _do_append():
         try:
             cmds = _load_commands_for_write()
-        except ValueError as exc:
-            return "", str(exc)
+        except ValueError:
+            raise
         cmd_id = str(_uuid.uuid4())[:8]
         entry = {
             "id": cmd_id,
@@ -1014,8 +1016,33 @@ async def _queue_command(cmd_type: str, extra: dict | None = None):
         cmds.append(entry)
         if len(cmds) > MAX_COMMANDS:
             cmds = cmds[-MAX_COMMANDS:]
-        await atomic_json_write(_commands_path(), cmds)
-    return cmd_id, ""
+        # Note: atomic_json_write inside lock; keep the write short.
+        # The outer async with _file_lock is kept for API-internal serialization.
+        atomic_json_write(_commands_path(), cmds)
+        return cmd_id
+
+    async with _file_lock:
+        try:
+            with FileLock(_commands_path(), timeout=5.0):
+                cmd_id = await asyncio.to_thread(_do_append)
+            return cmd_id, ""
+        except ValueError as exc:
+            return "", str(exc)
+        except Exception:
+            # Best effort fallback
+            try:
+                cmds = _load_commands_for_write()
+                cmd_id = str(_uuid.uuid4())[:8]
+                entry = {"id": cmd_id, "type": cmd_type, "status": "pending", "result": "", "created_at": time.time()}
+                if extra:
+                    entry.update(extra)
+                cmds.append(entry)
+                if len(cmds) > MAX_COMMANDS:
+                    cmds = cmds[-MAX_COMMANDS:]
+                await atomic_json_write(_commands_path(), cmds)
+                return cmd_id, ""
+            except Exception as e:
+                return "", str(e)
 
 
 async def rem_run(request):

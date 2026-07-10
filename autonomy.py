@@ -2532,10 +2532,15 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
             exec_kwargs["message_id"] = exec_kwargs["target_message_id"]
         try:
             tool_result = await tool.execute(syn_msg, **exec_kwargs)
-            result["result"] = "success"
-            result["content_summary"] = (
-                str(tool_result)[:300] if tool_result else result["content_summary"]
-            )
+            text = str(tool_result) if tool_result is not None else ""
+            # Many tools (especially permission/admin guards) return "Error: ..." strings
+            # instead of raising. Treat those as failures for accurate autonomy auditing.
+            if text.lower().startswith("error"):
+                result["result"] = "error"
+                result["error"] = text[:1000]
+            else:
+                result["result"] = "success"
+                result["content_summary"] = text[:300] if text else result["content_summary"]
         except Exception as e:
             result["result"] = "error"
             result["error"] = str(e)[:1000]
