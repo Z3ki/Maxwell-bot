@@ -696,16 +696,21 @@ class IntelEngine:
 
             await self.bot._acquire_ai_slot(timeout=timeout)
             try:
-                raw = await provider.generate_response(
-                    [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    timeout=timeout,
-                    model=model,
-                    max_tokens=2048,
-                    disable_reasoning=bool(control.get("autonomy_disable_reasoning", True)),
-                )
+                if getattr(self.bot, "pi_bridge", None):
+                    # Route intel curation through Pi brain when enabled (Pi as main)
+                    pi_prompt = f"System: {system_prompt}\n\nTask: {user_prompt}\n\nReturn the curation output as specified."
+                    raw = await self.bot._pi_background_prompt(pi_prompt, timeout=timeout) or ""
+                else:
+                    raw = await provider.generate_response(
+                        [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        timeout=timeout,
+                        model=model,
+                        max_tokens=2048,
+                        disable_reasoning=bool(control.get("autonomy_disable_reasoning", True)),
+                    )
             finally:
                 await self.bot._release_ai_slot()
         except Exception as e:

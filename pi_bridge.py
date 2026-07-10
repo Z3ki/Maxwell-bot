@@ -33,15 +33,18 @@ import logging
 import os
 import subprocess
 import sys
+import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 # === JUST READ THE FUCKING ENV ===
 # Load Maxwell's .env at import time so the bridge + spawned `pi --mode rpc`
 # process get the real provider keys (NVIDIA, OpenRouter via fallback, etc).
 try:
     from dotenv import load_dotenv
+
     env_path = os.getenv("MAXWELL_ENV_FILE") or str(Path(__file__).parent / ".env")
     load_dotenv(env_path, override=False)
 except Exception:
@@ -53,6 +56,7 @@ logger = logging.getLogger(__name__)
 # Default Pi command. Can override via PI_CMD or env.
 # Use --no-session for ephemeral Discord turns, or --session-dir for persistent Pi memory.
 DEFAULT_PI_CMD = ["pi", "--mode", "rpc", "--no-session"]
+
 
 def _get_maxwell_pi_model_args():
     """Map Maxwell's OLLAMA_MODEL (from .env / PM2 env) to Pi --model args.
@@ -86,6 +90,7 @@ def _get_maxwell_pi_model_args():
     # Fallback: let Pi try the name (it does fuzzy/provider matching)
     return ["--model", model]
 
+
 # Environment for Pi (inherits + extras). Pi reads NVIDIA_API_KEY etc directly.
 PI_ENV_OVERRIDES: dict[str, str] = {
     # Example: force a specific model if desired (Pi also accepts --model on cmdline)
@@ -96,6 +101,7 @@ PI_ENV_OVERRIDES: dict[str, str] = {
 @dataclass
 class PiEvent:
     """Parsed event from Pi stdout (JSONL)."""
+
     raw: dict[str, Any]
     type: str = field(init=False)
 
@@ -123,18 +129,18 @@ class PiRPCBridge:
 
     def __init__(
         self,
-        pi_cmd: Optional[list[str]] = None,
-        cwd: Optional[str] = None,
-        extra_env: Optional[dict[str, str]] = None,
-        on_text_delta: Optional[Callable[[str, dict], None]] = None,
-        on_tool_result: Optional[Callable[[str, Any], None]] = None,
-        on_agent_event: Optional[Callable[[PiEvent], None]] = None,
+        pi_cmd: list[str] | None = None,
+        cwd: str | None = None,
+        extra_env: dict[str, str] | None = None,
+        on_text_delta: Callable[[str, dict], None] | None = None,
+        on_tool_result: Callable[[str, Any], None] | None = None,
+        on_agent_event: Callable[[PiEvent], None] | None = None,
     ):
         self.pi_cmd = pi_cmd or DEFAULT_PI_CMD[:]
         self.cwd = cwd or str(Path(__file__).parent.resolve())
         self.extra_env = {**PI_ENV_OVERRIDES, **(extra_env or {})}
-        self.proc: Optional[subprocess.Popen] = None
-        self._reader_task: Optional[asyncio.Task] = None
+        self.proc: subprocess.Popen | None = None
+        self._reader_task: asyncio.Task | None = None
         self._stdin_lock = asyncio.Lock()
         self._running = False
 
@@ -152,14 +158,48 @@ class PiRPCBridge:
             logger.warning("Pi RPC already running")
             return
 
+        # Cleanup any dead previous process / tasks (prevents broken pipes on restart)
+        if self.proc:
+            try:
+                if self.proc.stdin:
+                    self.proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                if self.proc.stdout:
+                    self.proc.stdout.close()
+            except Exception:
+                pass
+            try:
+                if self.proc.stderr:
+                    self.proc.stderr.close()
+            except Exception:
+                pass
+            self.proc = None
+
+        if self._reader_task:
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except asyncio.CancelledError:
+                pass
+            self._reader_task = None
+
+        self._pending_responses.clear()
+        self._running = False
+
         env = os.environ.copy()
         env.update(self.extra_env)
 
         # Make sure the exact same keys from your PM2 maxwell-bot .env are visible to Pi
         # (NVIDIA, the openrouter key behind OLLAMA_FALLBACK_*, etc.)
-        if not any(k in env for k in ("NVIDIA_API_KEY", "OLLAMA_FALLBACK_API_KEY", "OPENROUTER_API_KEY")):
+        if not any(
+            k in env
+            for k in ("NVIDIA_API_KEY", "OLLAMA_FALLBACK_API_KEY", "OPENROUTER_API_KEY")
+        ):
             try:
                 from dotenv import load_dotenv as _ld
+
                 _ld(str(Path(__file__).parent / ".env"), override=False)
                 env = os.environ.copy()
                 env.update(self.extra_env)
@@ -170,6 +210,7 @@ class PiRPCBridge:
         if not env.get("NVIDIA_API_KEY") and not env.get("OLLAMA_FALLBACK_API_KEY"):
             try:
                 from dotenv import load_dotenv as _load_dotenv
+
                 _load_dotenv(str(Path(__file__).parent / ".env"), override=False)
                 env = os.environ.copy()
                 env.update(self.extra_env)
@@ -184,6 +225,9 @@ class PiRPCBridge:
         # Only our controlled Maxwell extensions provide the tools (discord actions,
         # create_site to specific dir, web, image, yt, etc.).
         cmd.extend(["--no-builtin-tools", "--no-skills", "--no-prompt-templates"])
+        # Explicitly disable thinking/reasoning to match your PM2 env
+        # (OLLAMA_DISABLE_REASONING=true, etc.) and avoid <thinking> blocks or extra reasoning.
+        cmd.extend(["--thinking", "off"])
         # Always load Maxwell extensions for brain use (site creator exact Caddy parity,
         # web/image/yt, discord actions via ACTION: markers that Python executes).
         # Explicit paths.
@@ -195,7 +239,9 @@ class PiRPCBridge:
             if os.path.exists(ext_path):
                 cmd.extend(["--extension", ext_path])
         logger.info(f"Starting Pi RPC bridge: {' '.join(cmd)} (cwd={self.cwd})")
-        logger.info("Using Maxwell OLLAMA_MODEL / providers from .env (mimo-v2.5 etc.) for Pi brain")
+        logger.info(
+            "Using Maxwell OLLAMA_MODEL / providers from .env (mimo-v2.5 etc.) for Pi brain"
+        )
 
         try:
             self.proc = subprocess.Popen(
@@ -209,7 +255,9 @@ class PiRPCBridge:
                 env=env,
             )
         except FileNotFoundError as e:
-            logger.error(f"Pi binary not found. Ensure 'pi' in PATH or install. Error: {e}")
+            logger.error(
+                f"Pi binary not found. Ensure 'pi' in PATH or install. Error: {e}"
+            )
             raise
 
         self._running = True
@@ -228,17 +276,24 @@ class PiRPCBridge:
         self._running = False
         if self.proc:
             try:
-                # Send abort if possible
-                await self._send_command({"type": "abort"}, wait_response=False)
+                # Send abort if possible (non-blocking best effort)
+                if self.proc.stdin and self.proc.poll() is None:
+                    try:
+                        abort_cmd = {"type": "abort", "id": str(uuid.uuid4())}
+                        self.proc.stdin.write(json.dumps(abort_cmd) + "\n")
+                        self.proc.stdin.flush()
+                    except Exception:
+                        pass
             except Exception:
                 pass
             try:
-                self.proc.stdin.close()
+                if self.proc.stdin:
+                    self.proc.stdin.close()
             except Exception:
                 pass
             try:
                 self.proc.terminate()
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.3)
                 if self.proc.poll() is None:
                     self.proc.kill()
             except Exception as e:
@@ -253,56 +308,88 @@ class PiRPCBridge:
                 pass
             self._reader_task = None
 
+        self._pending_responses.clear()
         logger.info("Pi RPC bridge stopped.")
 
     async def send_prompt(
         self,
         message: str,
-        images: Optional[list[dict]] = None,  # list of {"type":"image", "data": b64, "mimeType": "image/png"}
-        streaming_behavior: Optional[str] = None,  # "steer" or "followUp" if already running
-        request_id: Optional[str] = None,
+        images: list[dict]
+        | None = None,  # list of {"type":"image", "data": b64, "mimeType": "image/png"}
+        streaming_behavior: str
+        | None = None,  # "steer" or "followUp" if already running
+        request_id: str | None = None,
     ) -> bool:
         """Send a user prompt (and optional images) to Pi.
 
         Returns True if accepted (per docs response.success).
         Images follow RPC ImageContent format.
         """
+        if not request_id:
+            request_id = str(uuid.uuid4())
         cmd: dict[str, Any] = {
             "type": "prompt",
             "message": message,
+            "id": request_id,
         }
         if images:
             cmd["images"] = images
         if streaming_behavior:
             cmd["streamingBehavior"] = streaming_behavior
-        if request_id:
-            cmd["id"] = request_id
 
         resp = await self._send_command(cmd)
-        success = bool(resp.get("success", False)) if resp else False
-        if not success:
-            logger.warning(f"Prompt rejected or failed: {resp}")
-        return success
+        # Treat missing/None resp as success for fire-and-forget cases where Pi still streams deltas;
+        # only warn on explicit failure response.
+        if resp is not None:
+            success = bool(resp.get("success", False))
+            if not success:
+                logger.warning(f"Prompt rejected or failed: {resp}")
+            return success
+        return True  # write succeeded, rely on streaming events for content
 
-    async def steer(self, message: str, images: Optional[list[dict]] = None) -> bool:
-        cmd: dict[str, Any] = {"type": "steer", "message": message}
+    async def steer(
+        self,
+        message: str,
+        images: list[dict] | None = None,
+        request_id: str | None = None,
+    ) -> bool:
+        if not request_id:
+            request_id = str(uuid.uuid4())
+        cmd: dict[str, Any] = {"type": "steer", "message": message, "id": request_id}
         if images:
             cmd["images"] = images
         resp = await self._send_command(cmd)
-        return bool(resp.get("success", False)) if resp else False
+        if resp is not None:
+            return bool(resp.get("success", False))
+        return True
 
-    async def follow_up(self, message: str, images: Optional[list[dict]] = None) -> bool:
-        cmd: dict[str, Any] = {"type": "follow_up", "message": message}
+    async def follow_up(
+        self,
+        message: str,
+        images: list[dict] | None = None,
+        request_id: str | None = None,
+    ) -> bool:
+        if not request_id:
+            request_id = str(uuid.uuid4())
+        cmd: dict[str, Any] = {
+            "type": "follow_up",
+            "message": message,
+            "id": request_id,
+        }
         if images:
             cmd["images"] = images
         resp = await self._send_command(cmd)
-        return bool(resp.get("success", False)) if resp else False
+        if resp is not None:
+            return bool(resp.get("success", False))
+        return True
 
     async def get_state(self) -> dict[str, Any]:
         resp = await self._send_command({"type": "get_state"})
         return resp.get("data", {}) if resp else {}
 
-    async def prompt_and_collect(self, message: str, images: Optional[list[dict]] = None, timeout: float = 120) -> str:
+    async def prompt_and_collect(
+        self, message: str, images: list[dict] | None = None, timeout: float = 120
+    ) -> str:
         """Send prompt and collect full assistant text response (convenience for wiring).
         Also streams deltas via the on_text_delta callback (used for live send in bot).
         """
@@ -319,8 +406,28 @@ class PiRPCBridge:
 
         self.on_text_delta = _collector
         try:
-            await self.send_prompt(message, images=images)
-            # wait for completion (rough heuristic)
+            rid = str(uuid.uuid4())
+            accepted = await self.send_prompt(message, images=images, request_id=rid)
+            if not accepted:
+                # Agent is already processing — retry as followUp to queue properly
+                # instead of collecting stray deltas from the in-flight previous turn
+                logger.info(
+                    "Pi bridge: prompt rejected (agent busy), retrying as followUp"
+                )
+                # Discard any stray deltas from the in-flight previous turn
+                collected.clear()
+                accepted = await self.send_prompt(
+                    message,
+                    images=images,
+                    request_id=rid,
+                    streaming_behavior="followUp",
+                )
+                if not accepted:
+                    logger.warning(
+                        "Pi bridge: followUp also rejected, returning empty response"
+                    )
+                    return ""
+            # wait for completion (rough heuristic based on deltas + bounded time)
             waited = 0.0
             last_len = 0
             while waited < timeout:
@@ -353,7 +460,10 @@ class PiRPCBridge:
         self.on_text_delta = _collector
         try:
             # Use follow_up for background to not interrupt
-            await self.follow_up(message)
+            rid = str(uuid.uuid4())
+            accepted = await self.follow_up(message, request_id=rid)
+            if not accepted:
+                logger.warning("Pi bridge did not accept background prompt")
             waited = 0.0
             last_len = 0
             while waited < timeout:
@@ -372,8 +482,23 @@ class PiRPCBridge:
 
     # --- Internal ---
 
-    async def _send_command(self, cmd: dict[str, Any], wait_response: bool = True) -> Optional[dict]:
-        if not self.proc or self.proc.stdin is None or not self._running:
+    async def _send_command(
+        self, cmd: dict[str, Any], wait_response: bool = True
+    ) -> dict | None:
+        # Auto-recover if proc died (common after PM2 restart or crash)
+        if (
+            not self.proc
+            or self.proc.poll() is not None
+            or self.proc.stdin is None
+            or not self._running
+        ):
+            try:
+                await self.start()
+            except Exception as start_e:
+                logger.error(f"Pi bridge auto-start failed in _send_command: {start_e}")
+                raise RuntimeError("Pi RPC bridge not available") from None
+
+        if not self.proc or self.proc.stdin is None:
             raise RuntimeError("Pi RPC bridge not started")
 
         req_id = cmd.get("id")
@@ -386,6 +511,19 @@ class PiRPCBridge:
             try:
                 self.proc.stdin.write(line)
                 self.proc.stdin.flush()
+            except BrokenPipeError as e:
+                logger.error(f"Failed writing to Pi stdin (broken pipe): {e}")
+                # Mark dead so next call will restart
+                self._running = False
+                if self.proc:
+                    try:
+                        self.proc.terminate()
+                    except Exception:
+                        pass
+                self.proc = None
+                if req_id and req_id in self._pending_responses:
+                    self._pending_responses.pop(req_id, None)
+                raise
             except Exception as e:
                 logger.error(f"Failed writing to Pi stdin: {e}")
                 if req_id and req_id in self._pending_responses:
@@ -394,7 +532,9 @@ class PiRPCBridge:
 
         if wait_response and req_id:
             try:
-                return await asyncio.wait_for(self._pending_responses[req_id], timeout=30)
+                return await asyncio.wait_for(
+                    self._pending_responses[req_id], timeout=30
+                )
             except asyncio.TimeoutError:
                 self._pending_responses.pop(req_id, None)
                 logger.warning(f"Timeout waiting response for id={req_id}")
@@ -431,7 +571,9 @@ class PiRPCBridge:
                     try:
                         event = json.loads(line)
                     except json.JSONDecodeError as e:
-                        logger.debug(f"Non-JSON from Pi (ignored): {line[:200]}... err={e}")
+                        logger.debug(
+                            f"Non-JSON from Pi (ignored): {line[:200]}... err={e}"
+                        )
                         continue
 
                     await self._dispatch_event(event)
@@ -498,8 +640,9 @@ class PiRPCBridge:
         if not self.proc or self.proc.stderr is None:
             return
         try:
+            loop = asyncio.get_running_loop()
             while self._running and self.proc.poll() is None:
-                line = self.proc.stderr.readline()
+                line = await loop.run_in_executor(None, self.proc.stderr.readline)
                 if line:
                     logger.debug(f"[pi stderr] {line.rstrip()}")
                 else:
@@ -508,7 +651,9 @@ class PiRPCBridge:
             pass
 
     # Convenience: build a simple Maxwell-style context string + forward images
-    def build_discord_context(self, channel_history: list[dict], current_user_msg: str, **meta) -> str:
+    def build_discord_context(
+        self, channel_history: list[dict], current_user_msg: str, **meta
+    ) -> str:
         """Helper to serialize some history + facts for the prompt sent to Pi.
         In full impl, richer context (memory, recent users, system personality) here.
         Pi's own session + AGENTS.md will carry personality.

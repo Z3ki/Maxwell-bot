@@ -549,15 +549,20 @@ class ContextCleanupEngine:
             )
             await self.bot._acquire_ai_slot(timeout=timeout)
             try:
-                raw = await provider.generate_response(
-                    [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    timeout=timeout,
-                    model=model,
-                    max_tokens=4096,
-                )
+                if getattr(self.bot, "pi_bridge", None):
+                    # Prefer Pi as main brain even for context cleanup summaries (LTM/shared)
+                    pi_prompt = f"System: {system_prompt}\n\nUser task: {user_prompt}\n\nReturn only the required JSON or structured output."
+                    raw = await self.bot._pi_background_prompt(pi_prompt, timeout=timeout) or ""
+                else:
+                    raw = await provider.generate_response(
+                        [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        timeout=timeout,
+                        model=model,
+                        max_tokens=4096,
+                    )
             finally:
                 await self.bot._release_ai_slot()
         except Exception as e:
@@ -827,15 +832,20 @@ class ContextCleanupEngine:
             )
             await self.bot._acquire_ai_slot(timeout=timeout)
             try:
-                raw = await provider.generate_response(
-                    [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    timeout=timeout,
-                    model=model,
-                    max_tokens=4096,
-                )
+                if getattr(self.bot, "pi_bridge", None):
+                    # Prefer Pi as main brain even for context cleanup summaries (LTM/shared)
+                    pi_prompt = f"System: {system_prompt}\n\nUser task: {user_prompt}\n\nReturn only the required JSON or structured output."
+                    raw = await self.bot._pi_background_prompt(pi_prompt, timeout=timeout) or ""
+                else:
+                    raw = await provider.generate_response(
+                        [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        timeout=timeout,
+                        model=model,
+                        max_tokens=4096,
+                    )
             finally:
                 await self.bot._release_ai_slot()
         except Exception as e:

@@ -25,5 +25,6 @@ build/
 *.egg-info/
 
 subagents/
+.pi-subagents/
 progress.md
 core.*

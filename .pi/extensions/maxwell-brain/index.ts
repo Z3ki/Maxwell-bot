@@ -96,6 +96,97 @@ export default function maxwellBrain(pi: ExtensionAPI) {
     },
   });
 
+  // Additional Discord actions for full parity with old bot_tools
+  pi.registerTool({
+    name: "discord_edit_message",
+    label: "Edit Discord Message",
+    description: "Edit a previous message. Returns ACTION for bridge.",
+    parameters: Type.Object({
+      message_id: Type.String(),
+      content: Type.String(),
+      channel_id: Type.Optional(Type.String()),
+    }),
+    async execute(_id, params) {
+      return {
+        content: [{ type: "text", text: `ACTION:discord_edit_message:${JSON.stringify(params)}` }],
+        details: { action: "discord_edit_message", params },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "discord_delete_message",
+    label: "Delete Discord Message",
+    description: "Delete a message. Returns ACTION for bridge (with admin gate in Python).",
+    parameters: Type.Object({
+      message_id: Type.String(),
+      channel_id: Type.Optional(Type.String()),
+    }),
+    async execute(_id, params) {
+      return {
+        content: [{ type: "text", text: `ACTION:discord_delete_message:${JSON.stringify(params)}` }],
+        details: { action: "discord_delete_message", params },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "discord_create_poll",
+    label: "Create Poll",
+    description: "Create a poll in channel. Bridge executes.",
+    parameters: Type.Object({
+      question: Type.String(),
+      options: Type.Array(Type.String()),
+      channel_id: Type.Optional(Type.String()),
+      duration_minutes: Type.Optional(Type.Integer()),
+    }),
+    async execute(_id, params) {
+      return {
+        content: [{ type: "text", text: `ACTION:discord_create_poll:${JSON.stringify(params)}` }],
+        details: { action: "discord_create_poll", params },
+      };
+    },
+  });
+
+  // Memory tools - Pi brain can directly manage long term + shared context via bridge
+  pi.registerTool({
+    name: "maxwell_memory_add",
+    label: "Add to Long Term Memory",
+    description: "Persist a durable fact/preference/identity into long-term memory. Bridge applies via MemoryManager.",
+    parameters: Type.Object({
+      content: Type.String({ description: "The fact or memory to store" }),
+      category: Type.Optional(Type.String()),
+    }),
+    async execute(_id, params) {
+      return {
+        content: [{ type: "text", text: `ACTION:memory_add:${JSON.stringify(params)}` }],
+        details: { action: "memory_add", params },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "maxwell_memory_search",
+    label: "Search Memory",
+    description: "Search long-term memory and shared context. Returns results for Pi to use in reasoning.",
+    parameters: Type.Object({
+      query: Type.String(),
+      limit: Type.Optional(Type.Integer({ default: 5 })),
+    }),
+    async execute(_id, params) {
+      return {
+        content: [{ type: "text", text: `ACTION:memory_search:${JSON.stringify(params)}` }],
+        details: { action: "memory_search", params },
+      };
+    },
+  });
+
+  // More parity tools (stubs that return ACTION: so Python bridge + old tool code executes with gates)
+  pi.registerTool({ name: "discord_send_file", label: "Send File", description: "Send file/media. ACTION for bridge.", parameters: Type.Object({ path: Type.String(), filename: Type.Optional(Type.String()) }), async execute(_id, p) { return { content: [{type:"text", text: `ACTION:discord_send_file:${JSON.stringify(p)}`}] }; } });
+  pi.registerTool({ name: "discord_youtube", label: "YouTube Analyze", description: "Analyze YT (title/transcript/frames). ACTION or use maxwell_youtube.", parameters: Type.Object({ url: Type.String(), timestamps: Type.Optional(Type.String()) }), async execute(_id, p) { return { content: [{type:"text", text: `ACTION:discord_youtube:${JSON.stringify(p)}`}] }; } });
+  pi.registerTool({ name: "discord_shell", label: "Shell (sandbox)", description: "Run restricted shell. Use with care; bridge gates.", parameters: Type.Object({ command: Type.String() }), async execute(_id, p) { return { content: [{type:"text", text: `ACTION:discord_shell:${JSON.stringify(p)}`}] }; } });
+  pi.registerTool({ name: "maxwell_create_poll", label: "Create Poll (alias)", description: "Alias to discord_create_poll.", parameters: Type.Object({ question: Type.String(), options: Type.Array(Type.String()) }), async execute(_id, p) { return { content: [{type:"text", text: `ACTION:discord_create_poll:${JSON.stringify(p)}`}] }; } });
+
   // Shell / fetch / etc can be re-registered here with maxwell names or use built-in bash + custom.
   // For shell, prefer the existing sandbox approach from Python (ShellTool).
 
