@@ -3,6 +3,7 @@
 
 All API and data routes require Basic username/password auth by default.
 """
+
 import asyncio
 import base64
 import hashlib
@@ -36,7 +37,7 @@ def _load_env_file(path: Path):
         if not line or line.startswith("#") or "=" not in line:
             continue
         if line.startswith("export "):
-            line = line[len("export "):].strip()
+            line = line[len("export ") :].strip()
         key, value = line.split("=", 1)
         key = key.strip()
         value = value.strip().strip('"').strip("'")
@@ -51,22 +52,52 @@ def _int_env_safe(name: str, default: int) -> int:
         return default
 
 
+def _safe_int(val, default: int) -> int:
+    """Safely convert a value to int, returning default on failure."""
+    try:
+        return int(val) if val is not None else default
+    except (TypeError, ValueError):
+        return default
 
+
+def _safe_float(val, default: float) -> float:
+    """Safely convert a value to float, returning default on failure."""
+    try:
+        return float(val) if val is not None else default
+    except (TypeError, ValueError):
+        return default
 
 
 _load_env_file(ENV_FILE)
 
 # Add parent dir to path so we can import shared modules
-import sys as _sys
+import sys as _sys  # noqa: E402
+
 _sys.path.insert(0, str(APP_ROOT))
-from control_defaults import DEAD_CONTROL_KEYS, DEFAULT_CONTROL, KNOWN_TOOLS, parse_bool as _parse_bool  # noqa: E402
-from utils import _atomic_json_write_sync, _atomic_text_write_sync, FileLock  # noqa: E402 - fd-safe atomic writes
+from control_defaults import (  # noqa: E402
+    DEAD_CONTROL_KEYS,
+    DEFAULT_CONTROL,
+    KNOWN_TOOLS,
+)
+from control_defaults import (  # noqa: E402
+    parse_bool as _parse_bool,
+)
+from utils import (  # noqa: E402 - fd-safe atomic writes
+    FileLock,
+    _atomic_json_write_sync,
+    _atomic_text_write_sync,
+)
 
 DATA_DIR = Path(os.getenv("DATA_DIR", APP_ROOT / "data"))
-CORS_ORIGIN = os.getenv("MAXWELL_CORS_ORIGIN", os.getenv("MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com")).rstrip("/")
+CORS_ORIGIN = os.getenv(
+    "MAXWELL_CORS_ORIGIN",
+    os.getenv("MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com"),
+).rstrip("/")
 API_HOST = os.getenv("MAXWELL_API_HOST", "127.0.0.1")
 API_PORT = _int_env_safe("MAXWELL_API_PORT", 8765)
-BASE_SITE_DIR = Path(os.getenv("MAXWELL_SITE_DIR", APP_ROOT / "public" / "bot")).resolve()
+BASE_SITE_DIR = Path(
+    os.getenv("MAXWELL_SITE_DIR", APP_ROOT / "public" / "bot")
+).resolve()
 ADMIN_USER = os.getenv("MAXWELL_ADMIN_USER", "").strip()
 ADMIN_PASSWORD = os.getenv("MAXWELL_ADMIN_PASSWORD", "").strip()
 DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "").strip()
@@ -131,11 +162,10 @@ def _json_response(data, status=200):
         },
     )
 
+
 def _needs_auth(request) -> bool:
     """All requests need auth except OPTIONS preflight and /api/login."""
-    if request.method == "OPTIONS":
-        return False
-    return True
+    return request.method != "OPTIONS"
 
 
 # --- Rate limiting for login/auth ---
@@ -151,7 +181,7 @@ def _get_client_ip(request) -> str:
     forwarded = request.headers.get("X-Forwarded-For", "")
     if forwarded:
         return forwarded.split(",")[0].strip()
-    return getattr(request, 'remote', None) or "unknown"
+    return getattr(request, "remote", None) or "unknown"
 
 
 def _cleanup_auth_failures():
@@ -162,7 +192,8 @@ def _cleanup_auth_failures():
         return
     _last_auth_cleanup = now
     stale_ips = [
-        ip for ip, times in _auth_failures.items()
+        ip
+        for ip, times in _auth_failures.items()
         if all(now - t >= _AUTH_RATE_WINDOW for t in times)
     ]
     for ip in stale_ips:
@@ -178,6 +209,7 @@ def _check_rate_limit(request) -> bool:
     # Periodic cleanup of all stale IPs
     _cleanup_auth_failures()
     return len(_auth_failures[ip]) >= _AUTH_RATE_MAX
+
 
 def _record_auth_failure(request):
     ip = _get_client_ip(request)
@@ -211,41 +243,45 @@ def _has_admin_auth(request) -> bool:
     )
 
 
-async def _auth_middleware_unless_login(app, handler):
+@web.middleware
+async def _auth_middleware_unless_login(request, handler):
     """Middleware that requires auth for all requests, except OPTIONS and /api/login."""
-    async def middleware(request):
-        # Discord OAuth routes bypass Basic auth (they're the login flow).
-        if request.path.startswith("/api/auth/discord"):
-            return await handler(request)
-        if request.method == "POST" and request.path == "/api/login":
-            # Rate limit login attempts
-            if _check_rate_limit(request):
-                return _json_response({"error": "too many attempts, try again later"}, 429)
-            return await handler(request)
-        if _needs_auth(request):
-            _load_admin_creds()
-            if not ADMIN_USER or not ADMIN_PASSWORD:
-                # No Basic creds configured; allow Discord-token auth alone.
-                if not _discord_token_authed(request):
-                    return _json_response({"error": "admin auth not configured"}, 503)
-            else:
-                username, password = _basic_credentials(request)
-                if not (
-                    hmac.compare_digest(username or "", ADMIN_USER)
-                    and hmac.compare_digest(password or "", ADMIN_PASSWORD)
-                ) and not _discord_token_authed(request):
-                    _record_auth_failure(request)
-                    return _json_response({"error": "unauthorized"}, 401)
-        # Add security headers to all responses
-        resp = await handler(request)
-        if isinstance(resp, web.Response):
-            resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-            resp.headers.setdefault("X-Frame-Options", "DENY")
-            resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-            resp.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-            resp.headers.setdefault("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'")
-        return resp
-    return middleware
+    # Discord OAuth routes bypass Basic auth (they're the login flow).
+    if request.path.startswith("/api/auth/discord"):
+        return await handler(request)
+    if request.method == "POST" and request.path == "/api/login":
+        # Rate limit login attempts
+        if _check_rate_limit(request):
+            return _json_response({"error": "too many attempts, try again later"}, 429)
+        return await handler(request)
+    if _needs_auth(request):
+        _load_admin_creds()
+        if not ADMIN_USER or not ADMIN_PASSWORD:
+            # No Basic creds configured; allow Discord-token auth alone.
+            if not _discord_token_authed(request):
+                return _json_response({"error": "admin auth not configured"}, 503)
+        else:
+            username, password = _basic_credentials(request)
+            if not (
+                hmac.compare_digest(username or "", ADMIN_USER)
+                and hmac.compare_digest(password or "", ADMIN_PASSWORD)
+            ) and not _discord_token_authed(request):
+                _record_auth_failure(request)
+                return _json_response({"error": "unauthorized"}, 401)
+    # Add security headers to all responses
+    resp = await handler(request)
+    if isinstance(resp, web.Response):
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        resp.headers.setdefault("X-Frame-Options", "DENY")
+        resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        resp.headers.setdefault(
+            "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
+        )
+        resp.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'",
+        )
+    return resp
 
 
 def _load(path):
@@ -317,7 +353,9 @@ def _sanitize_rem_control(control):
     interval = REM_INTERVAL_DEFAULT
     try:
         if control.get("interval_seconds") is not None:
-            interval = max(10, int(control.get("interval_seconds")))
+            interval = max(
+                10, _safe_int(control.get("interval_seconds"), REM_INTERVAL_DEFAULT)
+            )
     except (TypeError, ValueError):
         pass
     max_turns = 3
@@ -328,7 +366,7 @@ def _sanitize_rem_control(control):
         pass
     try:
         if control.get("max_turns") is not None:
-            max_turns = max(0, min(int(control.get("max_turns")), 10))
+            max_turns = max(0, min(_safe_int(control.get("max_turns"), 3), 10))
     except (TypeError, ValueError):
         pass
     return {
@@ -362,7 +400,9 @@ def _load_rem_status():
         "interval_s": control["interval_seconds"],
         "last_run": state.get("last_rem_run_ts") or last.get("ts") or "",
         "events_buffered": len(events),
-        "last_audit_preview": str(state.get("last_audit") or last.get("audit") or "")[:500],
+        "last_audit_preview": str(state.get("last_audit") or last.get("audit") or "")[
+            :500
+        ],
         "running": bool(state.get("running")),
     }
 
@@ -378,7 +418,11 @@ def _sanitize_control(control):
     control = _safe_object(control)
     # Preserve newer bot-side settings this API build doesn't understand yet.
     # Dashboard saves should not casually delete config just because the UI lags.
-    out = {k: v for k, v in control.items() if k not in DEFAULT_CONTROL and k not in DEAD_CONTROL_KEYS}
+    out = {
+        k: v
+        for k, v in control.items()
+        if k not in DEFAULT_CONTROL and k not in DEAD_CONTROL_KEYS
+    }
     out.update(DEFAULT_CONTROL)
     for key, default in DEFAULT_CONTROL.items():
         value = control.get(key, default)
@@ -397,40 +441,83 @@ def _sanitize_control(control):
         elif isinstance(default, list):
             if isinstance(value, list):
                 items = [str(x).strip()[:64] for x in value if str(x).strip()]
-                out[key] = [x for x in items if x in KNOWN_TOOLS] if key == "disabled_tools" else items[:500]
+                out[key] = (
+                    [x for x in items if x in KNOWN_TOOLS]
+                    if key == "disabled_tools"
+                    else items[:500]
+                )
             else:
                 out[key] = []
+            # autonomy_blocked_* lists and other ID lists are preserved as string ID arrays (no tool filter)
         else:
             out[key] = value
-    out["per_user_cooldown_seconds"] = max(0, min(out["per_user_cooldown_seconds"], 3600))
+    out["per_user_cooldown_seconds"] = max(
+        0, min(out["per_user_cooldown_seconds"], 3600)
+    )
     out["max_image_size_mb"] = max(1, min(out["max_image_size_mb"], 25))
     out["ai_timeout_seconds"] = max(10, min(out["ai_timeout_seconds"], 600))
     out["ai_concurrency"] = max(1, min(out["ai_concurrency"], 10))
-    out["autonomy_interval_seconds"] = max(30, int(out.get("autonomy_interval_seconds", 300) or 300))
-    out["autonomy_recent_reply_block_seconds"] = max(0, min(int(out.get("autonomy_recent_reply_block_seconds", 0) or 0), 86400))
+    out["autonomy_interval_seconds"] = max(
+        30, _safe_int(out.get("autonomy_interval_seconds") or 300, 300)
+    )
+    out["autonomy_recent_reply_block_seconds"] = max(
+        0, min(_safe_int(out.get("autonomy_recent_reply_block_seconds") or 0, 0), 86400)
+    )
     out["autonomy_base_url"] = str(out.get("autonomy_base_url", "") or "")[:512]
     out["autonomy_api_key"] = str(out.get("autonomy_api_key", "") or "")[:512]
     out["autonomy_model"] = str(out.get("autonomy_model", "") or "")[:200]
     out["memory_history_messages"] = max(0, min(out["memory_history_messages"], 100))
     out["memory_context_budget"] = max(1000, min(out["memory_context_budget"], 100000))
-    out["tool_history_messages"] = max(0, min(int(out.get("tool_history_messages", 3) or 3), 20))
-    out["prompt_context_budget"] = max(10000, min(int(out.get("prompt_context_budget", 60000) or 60000), 200000))
-    out["cross_context_max_items"] = max(1, min(int(out.get("cross_context_max_items", 10)), 50))
-    out["cross_context_budget"] = max(1000, min(int(out.get("cross_context_budget", 5000)), 20000))
-    out["cross_context_min_importance"] = max(1, min(int(out.get("cross_context_min_importance", 5)), 10))
+    out["tool_history_messages"] = max(
+        0, min(_safe_int(out.get("tool_history_messages") or 3, 3), 20)
+    )
+    out["prompt_context_budget"] = max(
+        10000, min(_safe_int(out.get("prompt_context_budget") or 60000, 60000), 200000)
+    )
+    out["cross_context_max_items"] = max(
+        1, min(_safe_int(out.get("cross_context_max_items"), 10), 50)
+    )
+    out["cross_context_budget"] = max(
+        1000, min(_safe_int(out.get("cross_context_budget"), 5000), 20000)
+    )
+    out["cross_context_min_importance"] = max(
+        1, min(_safe_int(out.get("cross_context_min_importance"), 5), 10)
+    )
     out["max_tool_iterations"] = max(0, min(out["max_tool_iterations"], 25))
     out["max_response_chars"] = max(80, min(out["max_response_chars"], 4000))
-    out["vc_rms_threshold"] = max(100, min(int(out.get("vc_rms_threshold", 1200) or 1200), 10000))
-    out["vc_pause_seconds"] = max(0.1, min(float(out.get("vc_pause_seconds", 0.8) or 0.8), 5.0))
-    out["vc_min_seconds"] = max(0.1, min(float(out.get("vc_min_seconds", 0.55) or 0.55), 10.0))
-    out["vc_max_seconds"] = max(1.0, min(float(out.get("vc_max_seconds", 18) or 18), 120.0))
-    out["vc_preroll_seconds"] = max(0.0, min(float(out.get("vc_preroll_seconds", 0.25) or 0.25), 3.0))
-    out["vc_ai_timeout_seconds"] = max(5, min(int(out.get("vc_ai_timeout_seconds", 25) or 25), 180))
-    out["vc_ai_max_tokens"] = max(16, min(int(out.get("vc_ai_max_tokens", 90) or 90), 1000))
-    out["vc_memory_history_messages"] = max(0, min(int(out.get("vc_memory_history_messages", 2) or 2), 20))
-    out["vc_max_response_chars"] = max(40, min(int(out.get("vc_max_response_chars", 260) or 260), 2000))
-    out["vc_wake_words"] = [str(x).strip()[:32] for x in out.get("vc_wake_words", []) if str(x).strip()][:20]
-    out["base_personality"] = str(out.get("base_personality", DEFAULT_CONTROL["base_personality"]))[:12000]
+    out["vc_rms_threshold"] = max(
+        100, min(_safe_int(out.get("vc_rms_threshold") or 1200, 1200), 10000)
+    )
+    out["vc_pause_seconds"] = max(
+        0.1, min(_safe_float(out.get("vc_pause_seconds") or 0.8, 0.8), 5.0)
+    )
+    out["vc_min_seconds"] = max(
+        0.1, min(_safe_float(out.get("vc_min_seconds") or 0.55, 0.55), 10.0)
+    )
+    out["vc_max_seconds"] = max(
+        1.0, min(_safe_float(out.get("vc_max_seconds") or 18, 18.0), 120.0)
+    )
+    out["vc_preroll_seconds"] = max(
+        0.0, min(_safe_float(out.get("vc_preroll_seconds") or 0.25, 0.25), 3.0)
+    )
+    out["vc_ai_timeout_seconds"] = max(
+        5, min(_safe_int(out.get("vc_ai_timeout_seconds") or 25, 25), 180)
+    )
+    out["vc_ai_max_tokens"] = max(
+        16, min(_safe_int(out.get("vc_ai_max_tokens") or 90, 90), 1000)
+    )
+    out["vc_memory_history_messages"] = max(
+        0, min(_safe_int(out.get("vc_memory_history_messages") or 2, 2), 20)
+    )
+    out["vc_max_response_chars"] = max(
+        40, min(_safe_int(out.get("vc_max_response_chars") or 260, 260), 2000)
+    )
+    out["vc_wake_words"] = [
+        str(x).strip()[:32] for x in out.get("vc_wake_words", []) if str(x).strip()
+    ][:20]
+    out["base_personality"] = str(
+        out.get("base_personality", DEFAULT_CONTROL["base_personality"])
+    )[:12000]
     for dead_key in DEAD_CONTROL_KEYS:
         out.pop(dead_key, None)
     return out
@@ -450,7 +537,9 @@ def _memory_lines():
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         lines = []
-    return [_normalize_memory_line(line) for line in lines if line.strip()][:MAX_LTM_LINES]
+    return [_normalize_memory_line(line) for line in lines if line.strip()][
+        :MAX_LTM_LINES
+    ]
 
 
 def _memory_json():
@@ -469,13 +558,17 @@ def _context_entry_id(raw: dict) -> str:
     existing = str(raw.get("id") or "").strip()
     if existing:
         return existing[:32]
-    stable = json.dumps({
-        "scope": raw.get("scope") or "global",
-        "content": _normalize_context_content(raw.get("content", "")),
-        "created_at": raw.get("created_at") or "",
-        "source_user_id": raw.get("source_user_id") or "",
-        "source_channel_id": raw.get("source_channel_id") or "",
-    }, sort_keys=True, ensure_ascii=False)
+    stable = json.dumps(
+        {
+            "scope": raw.get("scope") or "global",
+            "content": _normalize_context_content(raw.get("content", "")),
+            "created_at": raw.get("created_at") or "",
+            "source_user_id": raw.get("source_user_id") or "",
+            "source_channel_id": raw.get("source_channel_id") or "",
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
     return hashlib.sha1(stable.encode("utf-8")).hexdigest()[:8]
 
 
@@ -494,7 +587,9 @@ def _sanitize_context_entries(data):
         if expires_at:
             try:
                 # Parse ISO timestamp with proper timezone handling
-                from datetime import datetime as _dt, timezone as _tz
+                from datetime import datetime as _dt
+                from datetime import timezone as _tz
+
                 _exp_dt = _dt.fromisoformat(expires_at[:19].replace("Z", "+00:00"))
                 if _exp_dt.tzinfo is None:
                     _exp_dt = _exp_dt.replace(tzinfo=_tz.utc)
@@ -514,22 +609,28 @@ def _sanitize_context_entries(data):
             tags = [tags]
         if not isinstance(tags, list):
             tags = []
-        out.append({
-            "id": _context_entry_id(raw),
-            "scope": str(raw.get("scope") or "global")[:80],
-            "visibility": visibility,
-            "importance": max(1, min(importance, 10)),
-            "content": content,
-            "source_user_id": str(raw.get("source_user_id") or "")[:64],
-            "source_channel_id": str(raw.get("source_channel_id") or "")[:64],
-            "source_guild_id": str(raw.get("source_guild_id") or "")[:64],
-            "source_kind": str(raw.get("source_kind") or "unknown")[:32],
-            "tags": [str(t).strip()[:32] for t in tags if str(t).strip()][:12],
-            "created_at": str(raw.get("created_at") or "")[:64],
-            "last_seen_at": str(raw.get("last_seen_at") or raw.get("created_at") or "")[:64],
-            "expires_at": expires_at[:64],
-        })
-    out.sort(key=lambda e: (e.get("last_seen_at", ""), e.get("created_at", "")), reverse=True)
+        out.append(
+            {
+                "id": _context_entry_id(raw),
+                "scope": str(raw.get("scope") or "global")[:80],
+                "visibility": visibility,
+                "importance": max(1, min(importance, 10)),
+                "content": content,
+                "source_user_id": str(raw.get("source_user_id") or "")[:64],
+                "source_channel_id": str(raw.get("source_channel_id") or "")[:64],
+                "source_guild_id": str(raw.get("source_guild_id") or "")[:64],
+                "source_kind": str(raw.get("source_kind") or "unknown")[:32],
+                "tags": [str(t).strip()[:32] for t in tags if str(t).strip()][:12],
+                "created_at": str(raw.get("created_at") or "")[:64],
+                "last_seen_at": str(
+                    raw.get("last_seen_at") or raw.get("created_at") or ""
+                )[:64],
+                "expires_at": expires_at[:64],
+            }
+        )
+    out.sort(
+        key=lambda e: (e.get("last_seen_at", ""), e.get("created_at", "")), reverse=True
+    )
     return out[:1000]
 
 
@@ -562,9 +663,14 @@ async def data_file(request):
         return _json_response({"error": "bad file"}, 403)
     # All data files require auth
     ALLOWED_FILES = {
-        "sites.json", "prompts.json", "memory.json",
-        "long_term_memory.json", "blacklist.json", "auto_channels.json",
-        "intel_state.json", "intel_log.json",
+        "sites.json",
+        "prompts.json",
+        "memory.json",
+        "long_term_memory.json",
+        "blacklist.json",
+        "auto_channels.json",
+        "intel_state.json",
+        "intel_log.json",
         "bot_control.json",
     }
     if file not in ALLOWED_FILES:
@@ -651,7 +757,18 @@ async def context_get(request):
     entries = _load_context_entries()
     query = str(request.query.get("q", "")).strip().lower()
     if query:
-        entries = [e for e in entries if query in (e.get("content", "") + " " + e.get("scope", "") + " " + " ".join(e.get("tags", []))).lower()]
+        entries = [
+            e
+            for e in entries
+            if query
+            in (
+                e.get("content", "")
+                + " "
+                + e.get("scope", "")
+                + " "
+                + " ".join(e.get("tags", []))
+            ).lower()
+        ]
     return _json_response(entries[:500])
 
 
@@ -716,8 +833,14 @@ async def context_put(request):
             if str(entry.get("id")) == context_id:
                 for key in allowed:
                     if key in body:
-                        entry[key] = _normalize_context_content(body[key]) if key == "content" else body[key]
-                entry["last_seen_at"] = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+                        entry[key] = (
+                            _normalize_context_content(body[key])
+                            if key == "content"
+                            else body[key]
+                        )
+                entry["last_seen_at"] = time.strftime(
+                    "%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()
+                )
                 await _save_context_entries(entries)
                 return _json_response({"ok": True, "entry": entry})
     return _json_response({"error": "not found"}, 404)
@@ -952,6 +1075,7 @@ async def llm_traces(request):
         pass
     return _json_response(traces[-limit:])
 
+
 async def rem_status(request):
     if not _has_admin_auth(request):
         return _json_response({"error": "unauthorized"}, 401)
@@ -971,7 +1095,14 @@ async def rem_runs(request):
     except (TypeError, ValueError):
         offset = 0
     ordered = list(reversed(runs))
-    return _json_response({"items": ordered[offset:offset + limit], "total": len(runs), "offset": offset, "limit": limit})
+    return _json_response(
+        {
+            "items": ordered[offset : offset + limit],
+            "total": len(runs),
+            "offset": offset,
+            "limit": limit,
+        }
+    )
 
 
 async def _queue_rem_command(cmd_type: str):
@@ -981,13 +1112,15 @@ async def _queue_rem_command(cmd_type: str):
         except ValueError as exc:
             return "", str(exc)
         cmd_id = str(_uuid.uuid4())[:8]
-        cmds.append({
-            "id": cmd_id,
-            "type": cmd_type,
-            "status": "pending",
-            "result": "",
-            "created_at": time.time(),
-        })
+        cmds.append(
+            {
+                "id": cmd_id,
+                "type": cmd_type,
+                "status": "pending",
+                "result": "",
+                "created_at": time.time(),
+            }
+        )
         if len(cmds) > MAX_COMMANDS:
             cmds = cmds[-MAX_COMMANDS:]
         await atomic_json_write(_commands_path(), cmds)
@@ -996,6 +1129,7 @@ async def _queue_rem_command(cmd_type: str):
 
 async def _queue_command(cmd_type: str, extra: dict | None = None):
     """Generic command queue helper (same pattern as _queue_rem_command)."""
+
     # Use cross-process FileLock in addition to in-process _file_lock for
     # better protection against bot reader/writer races on bot_commands.json.
     def _do_append():
@@ -1018,7 +1152,7 @@ async def _queue_command(cmd_type: str, extra: dict | None = None):
             cmds = cmds[-MAX_COMMANDS:]
         # Note: atomic_json_write inside lock; keep the write short.
         # The outer async with _file_lock is kept for API-internal serialization.
-        atomic_json_write(_commands_path(), cmds)
+        _atomic_json_write_sync(_commands_path(), cmds)
         return cmd_id
 
     async with _file_lock:
@@ -1033,7 +1167,13 @@ async def _queue_command(cmd_type: str, extra: dict | None = None):
             try:
                 cmds = _load_commands_for_write()
                 cmd_id = str(_uuid.uuid4())[:8]
-                entry = {"id": cmd_id, "type": cmd_type, "status": "pending", "result": "", "created_at": time.time()}
+                entry = {
+                    "id": cmd_id,
+                    "type": cmd_type,
+                    "status": "pending",
+                    "result": "",
+                    "created_at": time.time(),
+                }
                 if extra:
                     entry.update(extra)
                 cmds.append(entry)
@@ -1048,7 +1188,9 @@ async def _queue_command(cmd_type: str, extra: dict | None = None):
 async def rem_run(request):
     status = _load_rem_status()
     if status.get("running"):
-        return _json_response({"ok": True, "started": False, "reason": "already running"})
+        return _json_response(
+            {"ok": True, "started": False, "reason": "already running"}
+        )
     cmd_id, err = await _queue_rem_command("rem_run")
     if err:
         return _json_response({"error": err}, 409)
@@ -1064,13 +1206,15 @@ async def _set_rem_enabled(enabled: bool, cmd_type: str):
             return "", str(exc)
         control["enabled"] = enabled
         cmd_id = str(_uuid.uuid4())[:8]
-        cmds.append({
-            "id": cmd_id,
-            "type": cmd_type,
-            "status": "pending",
-            "result": "",
-            "created_at": time.time(),
-        })
+        cmds.append(
+            {
+                "id": cmd_id,
+                "type": cmd_type,
+                "status": "pending",
+                "result": "",
+                "created_at": time.time(),
+            }
+        )
         if len(cmds) > MAX_COMMANDS:
             cmds = cmds[-MAX_COMMANDS:]
         await _save_rem_control(control)
@@ -1116,20 +1260,24 @@ async def autonomy_status(request):
         return _json_response({"error": "unauthorized"}, 401)
     control = _load_control()
     state = _load_autonomy_state()
-    return _json_response({
-        "enabled": control.get("autonomy_enabled", False),
-        "interval_seconds": control.get("autonomy_interval_seconds", 300),
-        "model": control.get("autonomy_model", ""),
-        "base_url": control.get("autonomy_base_url", ""),
-        "disable_reasoning": control.get("autonomy_disable_reasoning", True),
-        "recent_reply_block_seconds": control.get("autonomy_recent_reply_block_seconds", 0),
-        "last_tick": state.get("last_tick"),
-        "last_tick_duration": state.get("last_tick_duration"),
-        "actions_executed_total": state.get("actions_executed_total", 0),
-        "actions_failed_total": state.get("actions_failed_total", 0),
-        "last_error": state.get("last_error"),
-        "last_thought": state.get("last_thought"),
-    })
+    return _json_response(
+        {
+            "enabled": control.get("autonomy_enabled", False),
+            "interval_seconds": control.get("autonomy_interval_seconds", 300),
+            "model": control.get("autonomy_model", ""),
+            "base_url": control.get("autonomy_base_url", ""),
+            "disable_reasoning": control.get("autonomy_disable_reasoning", True),
+            "recent_reply_block_seconds": control.get(
+                "autonomy_recent_reply_block_seconds", 0
+            ),
+            "last_tick": state.get("last_tick"),
+            "last_tick_duration": state.get("last_tick_duration"),
+            "actions_executed_total": state.get("actions_executed_total", 0),
+            "actions_failed_total": state.get("actions_failed_total", 0),
+            "last_error": state.get("last_error"),
+            "last_thought": state.get("last_thought"),
+        }
+    )
 
 
 async def autonomy_log(request):
@@ -1172,13 +1320,15 @@ async def _set_autonomy_enabled(enabled: bool):
             return "", str(exc)
         cmd_type = "autonomy_enable" if enabled else "autonomy_disable"
         cmd_id = str(_uuid.uuid4())[:8]
-        cmds.append({
-            "id": cmd_id,
-            "type": cmd_type,
-            "status": "pending",
-            "result": "",
-            "created_at": time.time(),
-        })
+        cmds.append(
+            {
+                "id": cmd_id,
+                "type": cmd_type,
+                "status": "pending",
+                "result": "",
+                "created_at": time.time(),
+            }
+        )
         if len(cmds) > MAX_COMMANDS:
             cmds = cmds[-MAX_COMMANDS:]
         await atomic_json_write(_control_path(), control)
@@ -1226,14 +1376,16 @@ async def autonomy_interval(request):
         except ValueError as exc:
             return _json_response({"error": str(exc)}, 409)
         cmd_id = str(_uuid.uuid4())[:8]
-        cmds.append({
-            "id": cmd_id,
-            "type": "autonomy_interval",
-            "status": "pending",
-            "interval_seconds": new_interval,
-            "result": "",
-            "created_at": time.time(),
-        })
+        cmds.append(
+            {
+                "id": cmd_id,
+                "type": "autonomy_interval",
+                "status": "pending",
+                "interval_seconds": new_interval,
+                "result": "",
+                "created_at": time.time(),
+            }
+        )
         if len(cmds) > MAX_COMMANDS:
             cmds = cmds[-MAX_COMMANDS:]
         await atomic_json_write(_control_path(), control)
@@ -1265,11 +1417,17 @@ async def autonomy_goal_add(request):
             return _json_response({"error": str(exc)}, 409)
         goals = data.get("goals", [])
         if not isinstance(goals, list):
-            return _json_response({"error": "refusing to overwrite malformed autonomy_goals.json"}, 409)
+            return _json_response(
+                {"error": "refusing to overwrite malformed autonomy_goals.json"}, 409
+            )
         if len(goals) >= MAX_AUTONOMY_GOALS:
-            return _json_response({"error": f"goal limit reached ({MAX_AUTONOMY_GOALS})"}, 409)
+            return _json_response(
+                {"error": f"goal limit reached ({MAX_AUTONOMY_GOALS})"}, 409
+            )
         goals.append(goal)
-        await atomic_json_write(_autonomy_goals_path(), {"goals": goals[-MAX_AUTONOMY_GOALS:]})
+        await atomic_json_write(
+            _autonomy_goals_path(), {"goals": goals[-MAX_AUTONOMY_GOALS:]}
+        )
     return _json_response({"ok": True, "goal": goal})
 
 
@@ -1286,7 +1444,9 @@ async def autonomy_goal_delete(request):
             return _json_response({"error": str(exc)}, 409)
         goals = data.get("goals", [])
         if not isinstance(goals, list):
-            return _json_response({"error": "refusing to overwrite malformed autonomy_goals.json"}, 409)
+            return _json_response(
+                {"error": "refusing to overwrite malformed autonomy_goals.json"}, 409
+            )
         before = len(goals)
         goals = [g for g in goals if g.get("id") != goal_id]
         if len(goals) == before:
@@ -1326,12 +1486,23 @@ def _load_context_cleanup_control():
     # dedicated control file overrides per-deployment.
     enabled = _parse_bool(
         control.get("enabled"),
-        _parse_bool(bot_control.get("context_cleanup_enabled"), DEFAULT_CONTROL.get("context_cleanup_enabled", False)),
+        _parse_bool(
+            bot_control.get("context_cleanup_enabled"),
+            DEFAULT_CONTROL.get("context_cleanup_enabled", False),
+        ),
     )
     try:
-        interval = max(300, int(control.get("interval_seconds") or bot_control.get(
-            "context_cleanup_interval_seconds", DEFAULT_CONTROL.get("context_cleanup_interval_seconds", 1800)
-        ) or 1800))
+        interval = max(
+            300,
+            int(
+                control.get("interval_seconds")
+                or bot_control.get(
+                    "context_cleanup_interval_seconds",
+                    DEFAULT_CONTROL.get("context_cleanup_interval_seconds", 1800),
+                )
+                or 1800
+            ),
+        )
     except (TypeError, ValueError):
         interval = 1800
     return {"enabled": enabled, "interval_seconds": interval}
@@ -1391,12 +1562,22 @@ def _load_intel_status():
     bot_control = _safe_object(_load(_control_path()))
     enabled = _parse_bool(
         control.get("enabled"),
-        _parse_bool(bot_control.get("intel_enabled"), DEFAULT_CONTROL.get("intel_enabled", True)),
+        _parse_bool(
+            bot_control.get("intel_enabled"), DEFAULT_CONTROL.get("intel_enabled", True)
+        ),
     )
     try:
-        interval = max(300, int(control.get("interval_seconds") or bot_control.get(
-            "intel_interval_seconds", DEFAULT_CONTROL.get("intel_interval_seconds", 3600)
-        ) or 3600))
+        interval = max(
+            300,
+            int(
+                control.get("interval_seconds")
+                or bot_control.get(
+                    "intel_interval_seconds",
+                    DEFAULT_CONTROL.get("intel_interval_seconds", 3600),
+                )
+                or 3600
+            ),
+        )
     except (TypeError, ValueError):
         interval = 3600
     return {
@@ -1443,13 +1624,15 @@ async def _set_context_cleanup_enabled(enabled: bool, cmd_type: str):
         control["enabled"] = enabled
         await atomic_json_write(_context_cleanup_control_path(), control)
         cmd_id = str(_uuid.uuid4())[:8]
-        cmds.append({
-            "id": cmd_id,
-            "type": cmd_type,
-            "status": "pending",
-            "result": "",
-            "created_at": time.time(),
-        })
+        cmds.append(
+            {
+                "id": cmd_id,
+                "type": cmd_type,
+                "status": "pending",
+                "result": "",
+                "created_at": time.time(),
+            }
+        )
         if len(cmds) > MAX_COMMANDS:
             cmds = cmds[-MAX_COMMANDS:]
         await atomic_json_write(_commands_path(), cmds)
@@ -1507,13 +1690,15 @@ async def _set_intel_enabled(enabled: bool, cmd_type: str):
             await atomic_json_write(_intel_control_path(), control)
             cmd_id = str(_uuid.uuid4())[:8]
             cmds = _load_commands_for_write()
-            cmds.append({
-                "id": cmd_id,
-                "type": cmd_type,
-                "status": "pending",
-                "result": "",
-                "created_at": time.time(),
-            })
+            cmds.append(
+                {
+                    "id": cmd_id,
+                    "type": cmd_type,
+                    "status": "pending",
+                    "result": "",
+                    "created_at": time.time(),
+                }
+            )
             if len(cmds) > MAX_COMMANDS:
                 cmds = cmds[-MAX_COMMANDS:]
             await atomic_json_write(_commands_path(), cmds)
@@ -1551,7 +1736,9 @@ async def intel_interval(request):
         new_interval = max(300, int(body.get("interval_seconds", 3600)))
     except (TypeError, ValueError):
         return _json_response({"error": "interval_seconds must be >= 300"}, 400)
-    cmd_id, err = await _queue_command("intel_interval", {"interval_seconds": new_interval})
+    cmd_id, err = await _queue_command(
+        "intel_interval", {"interval_seconds": new_interval}
+    )
     if err:
         return _json_response({"error": err}, 409)
     # Persist immediately
@@ -1620,12 +1807,24 @@ async def commands_post(request):
     elif cmd_type == "shell":
         # Shell commands via web API are disabled for security.
         # Use the bot's Discord shell tool or SSH directly instead.
-        return _json_response({"error": "shell commands are not allowed via the web API"}, 403)
+        return _json_response(
+            {"error": "shell commands are not allowed via the web API"}, 403
+        )
     elif cmd_type == "clear_memory":
         command["channel_id"] = str(body.get("channel_id", "")).strip()
-    elif cmd_type == "reload_controls":
-        pass
-    elif cmd_type in {"rem_run", "rem_enable", "rem_disable", "autonomy_run", "autonomy_enable", "autonomy_disable", "autonomy_interval", "context_cleanup_run", "context_cleanup_enable", "context_cleanup_disable", "context_cleanup_interval"}:
+    elif cmd_type == "reload_controls" or cmd_type in {
+        "rem_run",
+        "rem_enable",
+        "rem_disable",
+        "autonomy_run",
+        "autonomy_enable",
+        "autonomy_disable",
+        "autonomy_interval",
+        "context_cleanup_run",
+        "context_cleanup_enable",
+        "context_cleanup_disable",
+        "context_cleanup_interval",
+    }:
         pass
     else:
         return _json_response({"error": f"unknown command type: {cmd_type}"}, 400)
@@ -1671,6 +1870,7 @@ async def discord_state(request):
 _pm2_cache = None
 _pm2_cache_time = 0.0
 
+
 async def _pm2_json():
     global _pm2_cache, _pm2_cache_time
     now = time.time()
@@ -1678,7 +1878,8 @@ async def _pm2_json():
         return _pm2_cache
     try:
         proc = await asyncio.create_subprocess_exec(
-            "pm2", "jlist",
+            "pm2",
+            "jlist",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -1703,15 +1904,17 @@ async def pm2_status(request):
             continue
         env = proc.get("pm2_env", {})
         mon = proc.get("monit", {})
-        out.append({
-            "name": name,
-            "pid": proc.get("pid"),
-            "status": env.get("status"),
-            "uptime": env.get("pm_uptime"),
-            "restart_time": env.get("restart_time"),
-            "cpu": mon.get("cpu"),
-            "memory": mon.get("memory"),
-        })
+        out.append(
+            {
+                "name": name,
+                "pid": proc.get("pid"),
+                "status": env.get("status"),
+                "uptime": env.get("pm_uptime"),
+                "restart_time": env.get("restart_time"),
+                "cpu": mon.get("cpu"),
+                "memory": mon.get("memory"),
+            }
+        )
     return _json_response(out)
 
 
@@ -1728,22 +1931,27 @@ async def pm2_logs(request):
         return _json_response({"error": "bad process"}, 400)
     try:
         proc = await asyncio.create_subprocess_exec(
-            "pm2", "logs", process, "--lines", str(lines_int), "--nostream",
+            "pm2",
+            "logs",
+            process,
+            "--lines",
+            str(lines_int),
+            "--nostream",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
             text = stdout.decode("utf-8", errors="replace")
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                if proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
+                raise
             proc.kill()
             await proc.wait()
             return _json_response({"error": "pm2 logs timed out"}, 500)
-        except asyncio.CancelledError:
-            if proc.returncode is None:
-                proc.kill()
-                await proc.wait()
-            raise
         finally:
             if proc.returncode is None:
                 try:
@@ -1752,16 +1960,16 @@ async def pm2_logs(request):
                 except Exception:
                     pass
         # Strip ANSI escape sequences for clean HTML display
-        text = re.sub(r'\x1b\[[0-9;]*m', '', text)
+        text = re.sub(r"\x1b\[[0-9;]*m", "", text)
         # Drop PM2 headers and log file labels
         lines_raw = text.splitlines()
         clean = []
         for ln in lines_raw:
-            if ln.startswith('[TAILING]'):
+            if ln.startswith("[TAILING]"):
                 continue
-            if ' last ' in ln and ' lines:' in ln:
+            if " last " in ln and " lines:" in ln:
                 continue
-            if ln.startswith('/root/.pm2/logs/'):
+            if ln.startswith("/root/.pm2/logs/"):
                 continue
             clean.append(ln)
         text = "\n".join(clean)
@@ -1777,7 +1985,11 @@ async def pm2_restart(request):
     if target not in {"maxwell-bot", "maxwell-api", "all"}:
         return _json_response({"error": "bad target"}, 400)
     try:
-        cmd = ["pm2", "restart", target] if target != "all" else ["pm2", "restart", "maxwell-bot", "maxwell-api"]
+        cmd = (
+            ["pm2", "restart", target]
+            if target != "all"
+            else ["pm2", "restart", "maxwell-bot", "maxwell-api"]
+        )
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -1787,15 +1999,15 @@ async def pm2_restart(request):
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
             text = (stdout + stderr).decode("utf-8", errors="replace")
             return _json_response({"ok": True, "output": text})
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                if proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
+                raise
             proc.kill()
             await proc.wait()
             return _json_response({"ok": False, "error": "pm2 restart timed out"})
-        except asyncio.CancelledError:
-            if proc.returncode is None:
-                proc.kill()
-                await proc.wait()
-            raise
         finally:
             if proc.returncode is None:
                 try:
@@ -1813,11 +2025,15 @@ async def channel_list(request):
     mem = _safe_object(_load(DATA_DIR / "memory.json"))
     out = []
     for cid, msgs in mem.items():
-        out.append({
-            "id": str(cid),
-            "messages": len(msgs) if isinstance(msgs, list) else 0,
-            "last": msgs[-1].get("timestamp", "") if isinstance(msgs, list) and msgs else "",
-        })
+        out.append(
+            {
+                "id": str(cid),
+                "messages": len(msgs) if isinstance(msgs, list) else 0,
+                "last": msgs[-1].get("timestamp", "")
+                if isinstance(msgs, list) and msgs
+                else "",
+            }
+        )
     out.sort(key=lambda x: x["messages"], reverse=True)
     return _json_response(out)
 
@@ -1841,30 +2057,52 @@ async def bot_status(request):
     pm2 = await _pm2_json()
     bot_proc = next((p for p in pm2 if p.get("name") == "maxwell-bot"), None)
     api_proc = next((p for p in pm2 if p.get("name") == "maxwell-api"), None)
-    return _json_response({
-        "online": bool(bot_proc and bot_proc.get("pm2_env", {}).get("status") == "online"),
-        "control": {k: control.get(k) for k in [
-            "bot_enabled", "reply_dms", "reply_groups", "reply_mentions",
-            "tools_enabled", "store_memory", "cross_context_enabled",
-            "cross_context_extract_enabled"
-        ]},
-        "stats": {
-            "channels": len(mem),
-            "messages": sum(len(v) for v in mem.values() if isinstance(v, list)),
-            "context": len(_load_context_entries()),
-        },
-        "pm2": {
-            "bot": {
-                "status": bot_proc.get("pm2_env", {}).get("status") if bot_proc else "unknown",
-                "uptime": bot_proc.get("pm2_env", {}).get("pm_uptime") if bot_proc else None,
-                "restart_time": bot_proc.get("pm2_env", {}).get("restart_time") if bot_proc else None,
+    return _json_response(
+        {
+            "online": bool(
+                bot_proc and bot_proc.get("pm2_env", {}).get("status") == "online"
+            ),
+            "control": {
+                k: control.get(k)
+                for k in [
+                    "bot_enabled",
+                    "reply_dms",
+                    "reply_groups",
+                    "reply_mentions",
+                    "tools_enabled",
+                    "store_memory",
+                    "cross_context_enabled",
+                    "cross_context_extract_enabled",
+                ]
             },
-            "api": {
-                "status": api_proc.get("pm2_env", {}).get("status") if api_proc else "unknown",
-                "uptime": api_proc.get("pm2_env", {}).get("pm_uptime") if api_proc else None,
+            "stats": {
+                "channels": len(mem),
+                "messages": sum(len(v) for v in mem.values() if isinstance(v, list)),
+                "context": len(_load_context_entries()),
             },
-        },
-    })
+            "pm2": {
+                "bot": {
+                    "status": bot_proc.get("pm2_env", {}).get("status")
+                    if bot_proc
+                    else "unknown",
+                    "uptime": bot_proc.get("pm2_env", {}).get("pm_uptime")
+                    if bot_proc
+                    else None,
+                    "restart_time": bot_proc.get("pm2_env", {}).get("restart_time")
+                    if bot_proc
+                    else None,
+                },
+                "api": {
+                    "status": api_proc.get("pm2_env", {}).get("status")
+                    if api_proc
+                    else "unknown",
+                    "uptime": api_proc.get("pm2_env", {}).get("pm_uptime")
+                    if api_proc
+                    else None,
+                },
+            },
+        }
+    )
 
 
 # ---------- Login ----------
@@ -1880,7 +2118,10 @@ async def login_post(request):
         return _json_response({"error": "user and pass required"}, 400)
     if not ADMIN_USER or not ADMIN_PASSWORD:
         return _json_response({"error": "admin auth not configured"}, 503)
-    if not (hmac.compare_digest(user, ADMIN_USER) and hmac.compare_digest(pwd, ADMIN_PASSWORD)):
+    if not (
+        hmac.compare_digest(user, ADMIN_USER)
+        and hmac.compare_digest(pwd, ADMIN_PASSWORD)
+    ):
         _record_auth_failure(request)
         return _json_response({"error": "unauthorized"}, 401)
     return _json_response({"ok": True, "message": "credentials valid"})
@@ -1900,24 +2141,32 @@ def _discord_redirect_base(request) -> str:
 
 async def discord_auth_state(request):
     import secrets as _secrets
+
     state = _secrets.token_urlsafe(24)
     _DISCORD_STATES[state] = time.time()
-    redirect = os.getenv("DISCORD_REDIRECT_URI") or f"{_discord_redirect_base(request)}/api/auth/discord/callback"
+    redirect = (
+        os.getenv("DISCORD_REDIRECT_URI")
+        or f"{_discord_redirect_base(request)}/api/auth/discord/callback"
+    )
     client_id = DISCORD_CLIENT_ID
-    return _json_response({
-        "client_id": client_id,
-        "redirect_uri": redirect,
-        "state": state,
-        "authorize_url": (
-            "https://discord.com/api/oauth2/authorize"
-            f"?client_id={client_id}"
-            "&response_type=code"
-            f"&redirect_uri={redirect}"
-            "&scope=identify"
-            f"&state={state}"
-        ) if client_id else "",
-        "enabled": bool(client_id and DISCORD_CLIENT_SECRET),
-    })
+    return _json_response(
+        {
+            "client_id": client_id,
+            "redirect_uri": redirect,
+            "state": state,
+            "authorize_url": (
+                "https://discord.com/api/oauth2/authorize"
+                f"?client_id={client_id}"
+                "&response_type=code"
+                f"&redirect_uri={redirect}"
+                "&scope=identify"
+                f"&state={state}"
+            )
+            if client_id
+            else "",
+            "enabled": bool(client_id and DISCORD_CLIENT_SECRET),
+        }
+    )
 
 
 async def discord_auth_callback(request):
@@ -1930,8 +2179,12 @@ async def discord_auth_callback(request):
         return _json_response({"error": "invalid or expired state"}, 400)
     if not DISCORD_CLIENT_ID or not DISCORD_CLIENT_SECRET:
         return _json_response({"error": "discord oauth not configured"}, 503)
-    redirect = os.getenv("DISCORD_REDIRECT_URI") or f"{_discord_redirect_base(request)}/api/auth/discord/callback"
+    redirect = (
+        os.getenv("DISCORD_REDIRECT_URI")
+        or f"{_discord_redirect_base(request)}/api/auth/discord/callback"
+    )
     import aiohttp as _aiohttp
+
     async with _aiohttp.ClientSession() as sess:
         token_resp = await sess.post(
             "https://discord.com/api/oauth2/token",
@@ -1964,13 +2217,13 @@ async def discord_auth_callback(request):
     username = str(me.get("username", "")) + "#" + str(me.get("discriminator", "0"))
     avatar = me.get("avatar")
     avatar_url = (
-        f"https://cdn.discordapp.com/avatars/{user_id}/{avatar}.png"
-        if avatar else ""
+        f"https://cdn.discordapp.com/avatars/{user_id}/{avatar}.png" if avatar else ""
     )
     if DISCORD_ALLOWED_USER_IDS and user_id not in DISCORD_ALLOWED_USER_IDS:
         logger.warning("discord oauth denied for user %s (%s)", user_id, username)
         return _json_response({"error": "discord account not authorized"}, 403)
     import secrets as _secrets
+
     bearer = _secrets.token_urlsafe(48)
     _DISCORD_TOKENS[bearer] = {
         "user_id": user_id,
@@ -1985,24 +2238,28 @@ async def discord_auth_callback(request):
 
 
 async def discord_auth_verify(request):
-    token = request.headers.get("X-Discord-Token", "") or (request.query.get("token") or "")
+    token = request.headers.get("X-Discord-Token", "") or (
+        request.query.get("token") or ""
+    )
     info = _DISCORD_TOKENS.get(token)
     if not info or info.get("expires", 0) < time.time():
         return _json_response({"ok": False}, 401)
-    return _json_response({
-        "ok": True,
-        "user_id": info["user_id"],
-        "username": info["username"],
-        "avatar_url": info.get("avatar_url", ""),
-    })
+    return _json_response(
+        {
+            "ok": True,
+            "user_id": info["user_id"],
+            "username": info["username"],
+            "avatar_url": info.get("avatar_url", ""),
+        }
+    )
 
 
 async def discord_auth_logout(request):
-    token = request.headers.get("X-Discord-Token", "") or (request.query.get("token") or "")
+    token = request.headers.get("X-Discord-Token", "") or (
+        request.query.get("token") or ""
+    )
     _DISCORD_TOKENS.pop(token, None)
     return _json_response({"ok": True})
-
-
 
 
 # ---------- System Stats ----------
@@ -2038,22 +2295,44 @@ async def system_stats(request):
         uptime_seconds = float(uptime_text.split()[0])
     except Exception:
         pass
-    return _json_response({
-        "load": loadavg,
-        "memory": {"total_mb": mem_total, "used_mb": mem_used},
-        "disk": {"total_bytes": disk_total, "used_bytes": disk_used},
-        "uptime_seconds": round(uptime_seconds),
-    })
+    return _json_response(
+        {
+            "load": loadavg,
+            "memory": {"total_mb": mem_total, "used_mb": mem_used},
+            "disk": {"total_bytes": disk_total, "used_bytes": disk_used},
+            "uptime_seconds": round(uptime_seconds),
+        }
+    )
 
 
 # ---------- App ----------
-app = web.Application(middlewares=[_auth_middleware_unless_login], client_max_size=256 * 1024)
+async def _options_handler(request):
+    """Shared CORS preflight handler for all OPTIONS routes."""
+    return web.Response(
+        status=204,
+        headers={
+            "Access-Control-Allow-Origin": CORS_ORIGIN,
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        },
+    )
+
+
+app = web.Application(
+    middlewares=[_auth_middleware_unless_login], client_max_size=256 * 1024
+)
 app.router.add_get("/data/{file}", data_file)
-app.router.add_options("/data/{file}", lambda r: web.Response(status=204, headers={"Access-Control-Allow-Origin": CORS_ORIGIN, "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS", "Access-Control-Allow-Headers": "Content-Type, Authorization"}))
+app.router.add_options(
+    "/data/{file}",
+    _options_handler,
+)
 app.router.add_post("/api/memory", memory_add)
 app.router.add_put("/api/memory", memory_update)
 app.router.add_delete("/api/memory", memory_delete)
-app.router.add_options("/api/memory", lambda r: web.Response(status=204, headers={"Access-Control-Allow-Origin": CORS_ORIGIN, "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS", "Access-Control-Allow-Headers": "Content-Type, Authorization"}))
+app.router.add_options(
+    "/api/memory",
+    _options_handler,
+)
 app.router.add_get("/api/context", context_get)
 app.router.add_post("/api/context", context_post)
 app.router.add_put("/api/context", context_put)
@@ -2112,7 +2391,10 @@ app.router.add_get("/api/channels", channel_list)
 app.router.add_get("/api/chat/history", chat_history)
 app.router.add_get("/api/status", bot_status)
 app.router.add_get("/api/system", system_stats)
-app.router.add_options("/api/{path:.*}", lambda r: web.Response(status=204, headers={"Access-Control-Allow-Origin": CORS_ORIGIN, "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS", "Access-Control-Allow-Headers": "Content-Type, Authorization"}))
+app.router.add_options(
+    "/api/{path:.*}",
+    _options_handler,
+)
 
 if __name__ == "__main__":
     web.run_app(app, host=API_HOST, port=API_PORT, access_log=None)

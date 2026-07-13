@@ -48,6 +48,15 @@ from utils import (  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_int(val, default=0):
+    """Parse int safely, returning default on failure."""
+    try:
+        return int(val) if val is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
 # Regex constants, _discord_display_name, _discord_id, _coerce_utc_datetime,
 # and _render_discord_context_text are now imported from utils.py
 
@@ -148,12 +157,14 @@ def _format_memory_context_line(msg: dict, *, bot_user: Any = None, now=None) ->
         if msg.get("reply_to_self"):
             reply_label = "you/Maxwell"
         relation_bits.append(
-            f"reply_to={reply_label}({reply_id})" if reply_id else f"reply_to={reply_label}"
+            f"reply_to={reply_label}({reply_id})"
+            if reply_id
+            else f"reply_to={reply_label}"
         )
     mentions = msg.get("mentions") if isinstance(msg.get("mentions"), list) else []
     mention_bits = [
         f"@{item.get('name', 'unknown')}({item.get('id', 'unknown')})"
-        for item in mentions[:10]
+        for item in (mentions or [])[:10]
         if isinstance(item, dict)
     ]
     if mention_bits:
@@ -169,7 +180,7 @@ def _conversation_label(bot: Any, channel_id: str) -> str:
         return str(channel_id or "unknown")
     channel = None
     with contextlib.suppress(Exception):
-        channel = bot.get_channel(int(cid))
+        channel = bot.get_channel(_safe_int(cid))
     if channel is None:
         for private in list(getattr(bot, "private_channels", []) or []):
             if str(getattr(private, "id", "")) == cid:
@@ -283,9 +294,15 @@ LOG_RING_SIZE = 200
 # Tools that post a visible message to a channel. autonomy's run_tool path
 # builds a SyntheticMessage against the target channel, so these must be
 # treated like post_channel for the unprompted-post rate-limit.
-AUTONOMY_POST_TOOLS = frozenset({
-    "send_message", "send_file", "send_meme", "send_media", "tts",
-})
+AUTONOMY_POST_TOOLS = frozenset(
+    {
+        "send_message",
+        "send_file",
+        "send_meme",
+        "send_media",
+        "tts",
+    }
+)
 
 # Per-section context budgets (sum ~8800, bumped for enriched channel map)
 CTX_BUDGET_GOALS = 800
@@ -301,20 +318,22 @@ CTX_BUDGET_CHANNELS_MAP = 1600  # bumped from 800 — enriched with topic/recenc
 # Hard safety: these tools are NEVER available to autonomy even if dashboard
 # enables them. Prevents autonomy/LLM from server-admin, shell, site creation,
 # or other high-risk actions. (Dashboard disabled_tools still apply too.)
-AUTONOMY_DISABLED_TOOLS = frozenset({
-    "shell",
-    "create_site",
-    "sub_agent",
-    "list_admin_servers",
-    "create_category",
-    "create_channel",
-    "edit_channel",
-    "delete_channel",
-    "change_avatar",
-    "set_nickname",
-    "forward_message",
-    "create_invite",
-})
+AUTONOMY_DISABLED_TOOLS = frozenset(
+    {
+        "shell",
+        "create_site",
+        "sub_agent",
+        "list_admin_servers",
+        "create_category",
+        "create_channel",
+        "edit_channel",
+        "delete_channel",
+        "change_avatar",
+        "set_nickname",
+        "forward_message",
+        "create_invite",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -337,10 +356,8 @@ def _load_json_safe(path: Path, default):
         return data
     except (json.JSONDecodeError, OSError, ValueError) as e:
         logger.warning(f"Corrupt/unreadable {path.name}, recreating defaults: {e}")
-        try:
+        with contextlib.suppress(Exception):
             path.write_text("{}", encoding="utf-8")
-        except Exception:
-            pass
         return default if not callable(default) else default()
 
 
@@ -350,7 +367,7 @@ def _utcnow_iso() -> str:
 
 def _truncate(text: str, budget: int) -> str:
     """Truncate text to budget, adding ellipsis if cut."""
-    budget = max(0, int(budget or 0))
+    budget = max(0, _safe_int(budget, 0))
     if len(text) <= budget:
         return text
     suffix = "\n... [truncated]"
@@ -361,7 +378,7 @@ def _truncate(text: str, budget: int) -> str:
 
 def _truncate_keep_tail(text: str, budget: int) -> str:
     """Keep newest lines when context gets too fat. Front truncation betrayed us."""
-    budget = max(0, int(budget or 0))
+    budget = max(0, _safe_int(budget, 0))
     if len(text) <= budget:
         return text
     prefix = "[older context truncated] ...\n"
@@ -466,7 +483,7 @@ class SyntheticMessage:
             self._target_message, "add_reaction"
         ):
             return await self._target_message.add_reaction(emoji)
-        raise discord.NotFound(response=None, message="target message not found")
+        raise discord.NotFound(response=None, message="target message not found")  # type: ignore
 
     async def remove_reaction(self, emoji, member):
         pass  # same
@@ -661,6 +678,8 @@ class AutonomyEngine:
         now_ts = time.time()
         ch_map_lines = []
         for guild in self.bot.guilds:
+            if not self._guild_allowed(str(guild.id)):
+                continue
             for ch in guild.text_channels:
                 try:
                     if guild.me is None:
@@ -714,6 +733,10 @@ class AutonomyEngine:
         CRITICAL: must stay in sync with bot.py on_message channel guards.
         Autonomy was posting to blocked/missing-allowed channels because
         nobody remembered this check exists. Don't remove it.
+
+        Also respects dedicated autonomy_blocked_channels and autonomy_blocked_servers
+        (guild blacklists) so you can keep normal replies but silence autonomy in noisy
+        or unwanted servers/channels.
         """
         control = getattr(self.bot, "_control", None) or {}
         cid = str(channel_id)
@@ -721,8 +744,31 @@ class AutonomyEngine:
             return False
         if cid in set(control.get("blocked_channels", []) or []):
             return False
+        if cid in set(control.get("autonomy_blocked_channels", []) or []):
+            return False
         allowed = set(control.get("allowed_channels", []) or [])
-        return not allowed or cid in allowed
+        if allowed and cid not in allowed:
+            return False
+        # Also gate by server/guild blacklist (resolve via cache if possible)
+        try:
+            ch = self.bot.get_channel(int(cid))
+            if ch is not None:
+                g = getattr(ch, "guild", None)
+                if g and str(g.id) in set(control.get("autonomy_blocked_servers", []) or []):
+                    return False
+        except Exception:
+            pass
+        return True
+
+    def _guild_allowed(self, guild_id: str | None) -> bool:
+        """Check if autonomy should act inside a given guild/server."""
+        if not guild_id:
+            return True
+        control = getattr(self.bot, "_control", None) or {}
+        gid = str(guild_id)
+        if gid in set(control.get("autonomy_blocked_servers", []) or []):
+            return False
+        return True
 
     def _autonomy_tool_allowed(self, name: str) -> bool:
         """Check if autonomy can use a tool, respecting dashboard controls.
@@ -773,7 +819,7 @@ class AutonomyEngine:
                         consecutive_failures += 1
                     elif not tick_result.get("skipped"):
                         consecutive_failures = 0
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as _exc:
                 raise
             except Exception as e:
                 consecutive_failures += 1
@@ -802,7 +848,7 @@ class AutonomyEngine:
             # intervals instead of a metronomic fixed cadence. Jitter ranges
             # from half to 1.5x the configured interval — e.g. a 300s base
             # becomes anywhere from ~2.5m to ~7.5m. Keeps the min 30s floor.
-            sleep_for = int(base_sleep * random.uniform(0.5, 1.5))
+            sleep_for = _safe_int(base_sleep * random.uniform(0.5, 1.5), 300)
             await asyncio.sleep(max(30, sleep_for))
 
     # -- single tick --
@@ -816,8 +862,10 @@ class AutonomyEngine:
         try:
             await asyncio.wait_for(self._lock.acquire(), timeout=600)
             acquired = True
-        except asyncio.TimeoutError:
-            logger.error("Autonomy tick lock timed out — previous tick hung for >10m, forcing release")
+        except asyncio.TimeoutError as _exc:
+            logger.error(
+                "Autonomy tick lock timed out — previous tick hung for >10m, forcing release"
+            )
             return {"skipped": False, "error": "lock timeout"}
         try:
             # BUG FIX: capture tick START time as watermark. Events recorded during
@@ -924,7 +972,8 @@ class AutonomyEngine:
         try:
             reply_lines = []
             active_replying = sorted(
-                str(cid) for cid in (getattr(self.bot, "_replying_channels", None) or set())
+                str(cid)
+                for cid in (getattr(self.bot, "_replying_channels", None) or set())
             )
             for cid in active_replying[:12]:
                 reply_lines.append(
@@ -1109,7 +1158,9 @@ class AutonomyEngine:
                 for m in reversed(messages):
                     _cid = str(getattr(ch, "id", "") or "")
                     _ku = (getattr(self.bot, "_recent_users", {}) or {}).get(_cid, {})
-                    content = _visible_message_content(m, m.content or "", known_users=_ku)[:260]
+                    content = _visible_message_content(
+                        m, m.content or "", known_users=_ku
+                    )[:260]
                     if not content:
                         continue
                     age = _context_time(getattr(m, "created_at", None))
@@ -1211,9 +1262,13 @@ class AutonomyEngine:
                     recent_rows = rows[-history_count:]
                     recent_ids = {id(row) for row in recent_rows}
                     tool_rows = (
-                        [row for row in rows if isinstance(row, dict) and row.get("is_tool") and id(row) not in recent_ids][
-                            -tool_limit:
-                        ]
+                        [
+                            row
+                            for row in rows
+                            if isinstance(row, dict)
+                            and row.get("is_tool")
+                            and id(row) not in recent_ids
+                        ][-tool_limit:]
                         if tool_limit
                         else []
                     )
@@ -1296,7 +1351,9 @@ class AutonomyEngine:
                 for m in reversed(messages):
                     _cid = str(getattr(channel, "id", "") or "")
                     _ku = (getattr(self.bot, "_recent_users", {}) or {}).get(_cid, {})
-                    content = _visible_message_content(m, m.content or "", known_users=_ku)[:260]
+                    content = _visible_message_content(
+                        m, m.content or "", known_users=_ku
+                    )[:260]
                     if not content:
                         continue
                     age = _context_time(getattr(m, "created_at", None))
@@ -1309,9 +1366,7 @@ class AutonomyEngine:
                         if author_is_self
                         else f"from={_user_ref(m.author, self.bot.user)} to=you/Maxwell({getattr(self.bot.user, 'id', '?')})"
                     )
-                    msg_idx = ctx_index.add_message(
-                        str(getattr(m, "id", "")), _cid
-                    )
+                    msg_idx = ctx_index.add_message(str(getattr(m, "id", "")), _cid)
                     lines.append(
                         f'time={age} msg={msg_idx} {direction} content="{content}"'
                     )
@@ -1485,9 +1540,20 @@ class AutonomyEngine:
                                     reply.author, "display_name", None
                                 ) or getattr(reply.author, "name", "?")
                                 content = _render_discord_context_text(
-                                    reply, reply.content or "",
-                                    known_users=(getattr(self.bot, "_recent_users", {}) or {}).get(
-                                        str(getattr(getattr(reply, "channel", None), "id", "") or ""), {}
+                                    reply,
+                                    reply.content or "",
+                                    known_users=(
+                                        getattr(self.bot, "_recent_users", {}) or {}
+                                    ).get(
+                                        str(
+                                            getattr(
+                                                getattr(reply, "channel", None),
+                                                "id",
+                                                "",
+                                            )
+                                            or ""
+                                        ),
+                                        {},
                                     ),
                                 )[:160]
                                 reply_snippets.append(
@@ -1537,7 +1603,10 @@ class AutonomyEngine:
             if not isinstance(msgs, list):
                 continue
             for row in msgs:
-                if isinstance(row, dict) and str(row.get("message_id") or "") == message_id:
+                if (
+                    isinstance(row, dict)
+                    and str(row.get("message_id") or "") == message_id
+                ):
                     return str(cid)
         return None
 
@@ -1659,12 +1728,15 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
             # awaits init, so a transient failure self-heals on the next tick.
             ai_provider = cast(Any, getattr(self.bot, "_get_autonomy_provider", None))
             if callable(ai_provider):
-                ai_provider = await ai_provider()
+                ai_provider = await ai_provider()  # type: ignore
             else:
                 ai_provider = cast(Any, getattr(self.bot, "ai_provider", None))
             if not callable(getattr(ai_provider, "generate_response", None)):
                 ai_provider = cast(Any, getattr(self.bot, "ai_provider", None))
-            if ai_provider is not None and getattr(ai_provider, "available", None) is False:
+            if (
+                ai_provider is not None
+                and getattr(ai_provider, "available", None) == False  # noqa: E712
+            ):
                 logger.info("Autonomy planner: provider not available, soft skip")
                 return [{"kind": "do_nothing", "reason": "provider not available"}]
             await self.bot._acquire_ai_slot(timeout=timeout)
@@ -1679,6 +1751,7 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
                 autonomy_disable_reasoning = bool(
                     control.get("autonomy_disable_reasoning", True)
                 )
+                assert ai_provider is not None  # narrowed by callable check above
                 raw_response = await ai_provider.generate_response(
                     messages,
                     timeout=timeout,
@@ -1759,7 +1832,7 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
                     if isinstance(obj, dict) and "actions" in obj:
                         json_str = c
                         break
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as _exc:
                     pass
             if json_str is None and candidates:
                 json_str = candidates[0]
@@ -2002,13 +2075,18 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
             post_cid = None
             if kind == "post_channel":
                 post_cid = str(action.get("target_channel_id") or "") or None
-            elif kind == "run_tool" and str(action.get("tool_name", "")) in AUTONOMY_POST_TOOLS:
+            elif (
+                kind == "run_tool"
+                and str(action.get("tool_name", "")) in AUTONOMY_POST_TOOLS
+            ):
                 ta = action.get("tool_args") or {}
                 post_cid = (
-                    str(action.get("target_channel_id")
+                    str(
+                        action.get("target_channel_id")
                         or ta.get("target_channel_id")
                         or ta.get("channel_id")
-                        or "")
+                        or ""
+                    )
                     or None
                 )
             if post_cid:
@@ -2033,7 +2111,9 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
 
                 # Same-tick dedup: don't allow the plan to post twice to one channel in one go.
                 if post_cid in planned_post_channels:
-                    logger.info(f"Autonomy skip duplicate post to {post_cid} in same tick/plan")
+                    logger.info(
+                        f"Autonomy skip duplicate post to {post_cid} in same tick/plan"
+                    )
                     result = {
                         "kind": kind,
                         "result": "skipped",
@@ -2048,16 +2128,20 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
                 # the case where the main reply already finished but is so
                 # recent that piling on would still look like spam.
                 last_reply = getattr(self.bot, "_last_bot_reply", {}).get(post_cid, 0.0)
-                block_window = int(
+                block_window = _safe_int(
                     (getattr(self.bot, "_control", None) or {}).get(
                         "autonomy_recent_reply_block_seconds", 0
-                    )
-                    or 0
+                    ),
+                    0,
                 )
-                if block_window > 0 and last_reply and time.time() - last_reply < block_window:
+                if (
+                    block_window > 0
+                    and last_reply
+                    and time.time() - last_reply < block_window
+                ):
                     logger.info(
                         f"Autonomy skip post to {post_cid}: bot replied there "
-                        f"{int(time.time() - last_reply)}s ago (block_window={block_window}s)"
+                        f"{_safe_int(time.time() - last_reply, 0)}s ago (block_window={block_window}s)"
                     )
                     result = {
                         "kind": kind,
@@ -2095,7 +2179,7 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
                 else:
                     result["result"] = "skipped"
                     result["error"] = f"unknown kind: {kind}"
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as _exc:
                 result["result"] = "error"
                 result["error"] = f"action timed out after {ACTION_TIMEOUT}s"
                 logger.warning(
@@ -2143,10 +2227,10 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
         result["target"] = f"user:{user_id}"
         result["content_summary"] = content[:200]
 
-        user = self.bot.get_user(int(user_id))
+        user = self.bot.get_user(_safe_int(user_id))
         if user is None:
             try:
-                user = await self.bot.fetch_user(int(user_id))
+                user = await self.bot.fetch_user(_safe_int(user_id))
             except (discord.NotFound, discord.HTTPException, ValueError) as e:
                 result["result"] = "error"
                 result["error"] = f"user not found or API error: {e}"
@@ -2189,7 +2273,7 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
                 await self._remember_visible_self_message(
                     dm_channel, msg, content, reason=action.get("reason", "")
                 )
-        except discord.Forbidden:
+        except discord.Forbidden as _exc:
             result["result"] = "error"
             result["error"] = "user has DMs disabled or blocked the bot"
             return
@@ -2213,10 +2297,10 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
             result["error"] = "channel not allowed for autonomy"
             return
 
-        channel = cast(Any, self.bot.get_channel(int(channel_id)))
+        channel = cast(Any, self.bot.get_channel(_safe_int(channel_id)))
         if channel is None:
             try:
-                channel = cast(Any, await self.bot.fetch_channel(int(channel_id)))
+                channel = cast(Any, await self.bot.fetch_channel(_safe_int(channel_id)))
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 channel = None
         if channel is None:
@@ -2268,9 +2352,13 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
                     }
                 )
                 await self._remember_visible_self_message(
-                    channel, msg, content, reply=memory_reply, reason=action.get("reason", "")
+                    channel,
+                    msg,
+                    content,
+                    reply=memory_reply,
+                    reason=action.get("reason", ""),
                 )
-        except discord.Forbidden:
+        except discord.Forbidden as _exc:
             result["result"] = "error"
             result["error"] = "bot lacks permission to send in this channel"
         except discord.HTTPException as e:
@@ -2308,9 +2396,13 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
             "author_id": str(getattr(bot_user, "id", "")),
             "author_is_bot": True,
             "content": _render_discord_context_text(
-                sent_message, content,
+                sent_message,
+                content,
                 known_users=(getattr(self.bot, "_recent_users", {}) or {}).get(
-                    str(getattr(getattr(sent_message, "channel", None), "id", "") or ""), {}
+                    str(
+                        getattr(getattr(sent_message, "channel", None), "id", "") or ""
+                    ),
+                    {},
                 ),
             ),
             "message_id": str(getattr(sent_message, "id", "")),
@@ -2403,7 +2495,7 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
                     logger.warning(
                         f"Autonomy run_tool '{tool_name}': bad channel_id '{target_cid}'"
                     )
-                except discord.NotFound:
+                except discord.NotFound as _exc:
                     logger.warning(
                         f"Autonomy run_tool '{tool_name}': channel {clean_cid} not found (deleted?)"
                     )
@@ -2485,15 +2577,28 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
                     alt_channel = self.bot.get_channel(int(resolved_cid))
                     if alt_channel is None:
                         alt_channel = await self.bot.fetch_channel(int(resolved_cid))
-                except (ValueError, TypeError, discord.NotFound, discord.Forbidden, discord.HTTPException):
+                except (
+                    ValueError,
+                    TypeError,
+                    discord.NotFound,
+                    discord.Forbidden,
+                    discord.HTTPException,
+                ):
                     alt_channel = None
-                if alt_channel is not None and hasattr(alt_channel, "fetch_message"):
-                    if self._channel_allowed(str(resolved_cid)):
-                        channel = alt_channel
-                        try:
-                            target_message = await channel.fetch_message(int(clean_mid))
-                        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                            target_message = None
+                if (
+                    alt_channel is not None
+                    and hasattr(alt_channel, "fetch_message")
+                    and self._channel_allowed(str(resolved_cid))
+                ):
+                    channel = alt_channel
+                    try:
+                        target_message = await channel.fetch_message(int(clean_mid))
+                    except (
+                        discord.NotFound,
+                        discord.Forbidden,
+                        discord.HTTPException,
+                    ):
+                        target_message = None
 
         if tool_name == "react" and target_message is None:
             result["result"] = "error"
@@ -2510,7 +2615,8 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
             display_name=getattr(bot_user, "display_name", None)
             or getattr(bot_user, "name", None)
             or getattr(self.bot, "bot_name", "Maxwell"),
-            name=getattr(bot_user, "name", None) or getattr(self.bot, "bot_name", "Maxwell"),
+            name=getattr(bot_user, "name", None)
+            or getattr(self.bot, "bot_name", "Maxwell"),
             bot=True,
         )
         guild = channel.guild if hasattr(channel, "guild") else None
@@ -2524,9 +2630,7 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
 
         # extract tool kwargs (exclude meta fields that aren't real tool params)
         exec_kwargs = {
-            k: v
-            for k, v in tool_args.items()
-            if k not in {"target_channel_id"}
+            k: v for k, v in tool_args.items() if k not in {"target_channel_id"}
         }
         if "target_message_id" in exec_kwargs and "message_id" not in exec_kwargs:
             exec_kwargs["message_id"] = exec_kwargs["target_message_id"]
@@ -2540,7 +2644,9 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
                 result["error"] = text[:1000]
             else:
                 result["result"] = "success"
-                result["content_summary"] = text[:300] if text else result["content_summary"]
+                result["content_summary"] = (
+                    text[:300] if text else result["content_summary"]
+                )
         except Exception as e:
             result["result"] = "error"
             result["error"] = str(e)[:1000]

@@ -100,6 +100,11 @@ DEFAULT_CONTROL = {
     "context_cleanup_ltm_enabled": True,  # also clean long_term_memory (where Intel dumps hourly)
     "intel_enabled": True,   # background tech/AI news & model releases gatherer (hourly by default)
     "intel_interval_seconds": 3600,  # how often the intel/news gatherer runs (min 300s)
+    # Autonomy-specific blacklists (separate from general blocked_channels/allowed_channels).
+    # These prevent autonomy from posting/DMing or acting in listed channels or servers (guilds),
+    # while normal bot replies (mentions etc) can still work if not otherwise blocked.
+    "autonomy_blocked_channels": [],
+    "autonomy_blocked_servers": [],
 }
 
 DEAD_CONTROL_KEYS = frozenset({

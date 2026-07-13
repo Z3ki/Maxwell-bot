@@ -111,11 +111,13 @@ All commands use the `,` prefix. Admin commands require the user to be in the ad
 | `,prompt [text]` | Yes | View or set a custom server prompt |
 | `,clearprompt` | Yes | Clear the custom server prompt |
 | `,clearmem` | Yes | Clear channel memory and all cached state |
-| `,autonomy` | Yes | Show autonomy status |
+| `,autonomy` | Yes | Show autonomy status + current channel/server blacklists |
 | `,autonomy tick` | Yes | Trigger one autonomy check immediately |
 | `,autonomy on` / `,autonomy off` | Yes | Enable or disable autonomy |
 | `,autonomy log` | Yes | Show recent autonomy actions |
 | `,autonomy interval <seconds>` | Yes | Set autonomy check interval |
+| `,autonomy blacklist channel|server <id>` | Yes | Add to autonomy blacklist (channels or servers/guilds) |
+| `,autonomy unblacklist channel|server <id>` | Yes | Remove from autonomy blacklist |
 | `,intel` | Yes | Show status of the background tech/AI news & model intel gatherer |
 | `,intel now` | Yes | Force an immediate news/intel gathering pass into long-term memory |
 | `,intel on` / `,intel off` | Yes | Enable/disable the hourly intel gatherer |
@@ -162,6 +164,18 @@ REM is opt-in with `REM_ENABLED=false` by default. Configure `REM_INTERVAL_SECON
 Autonomy is separate from the removed `,auto` auto-reply mode. It wakes on `autonomy_interval_seconds`, gathers recent conversations, DMs, goals, memory, and available channels, then asks the LLM for a JSON action plan. Supported actions are channel posts, DMs, tool calls, memory updates, goal creation, or doing nothing.
 
 Channel post cooldowns were removed. The engine can post to the same channel on consecutive ticks if the planner decides to. Keep the interval sane if you do not want spam; the code is no longer pretending a hardcoded 30-minute cooldown is wisdom.
+
+Autonomy respects two dedicated blacklists (in addition to the general `blocked_channels`/`allowed_channels`):
+
+- `autonomy_blocked_channels`: list of channel IDs autonomy will never post to or run tools against.
+- `autonomy_blocked_servers`: list of guild/server IDs autonomy will ignore entirely.
+
+These are independent of normal bot replies, so you can keep the bot responsive on mention while preventing autonomous actions in busy or low-value servers/channels. Manage via dashboard **Controls** tab (new Autonomy Blacklists card), raw `bot_control.json`, or chat commands:
+
+`,autonomy` — show status + current blacklists  
+`,autonomy blacklist channel 123456789012345678`  
+`,autonomy blacklist server 123456789012345678`  
+`,autonomy unblacklist channel ...` (or server)
 
 ## Development & Releases
 
