@@ -6403,7 +6403,6 @@ class MaxwellBot(commands.Bot):
             "- Output either visible text or tool tags, never both unless the visible text is inside send_message.\n"
             "- A tool turn must end with exactly one terminal action: send_message or no_response. reasoning_log alone is not an answer.\n"
             "- Order: reasoning_log first, helper tools next, send_message/no_response last.\n"
-            '- Use create_site (with encoding="base64" for large/complex HTML) for ANY request to "code and host", "make a website/3d scene/game and host it", "single file html and host". Do not output raw code in chat for hosted things — use the tool to give a real URL.\n'
             '- Use send_file encoding="base64" for file/code/HTML/JSON content. Tool params ignore response char limits.\n'
             "- reasoning_log fields are plain text only: no nested tags, JSON, or <thoughts>.\n"
             "- Status: set_activity for your visible status/activity, change_presence for the online/idle/dnd dot."

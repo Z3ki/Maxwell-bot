@@ -1573,20 +1573,14 @@ class CreateSiteTool(Tool):
     def get_description(self):
         return (
             f"Create a temporary website at {self.base_url}/<name>. Auto-deletes after 24h. "
-            "CRITICAL: When the user says 'code me a ... and host', 'make a 3d scene / website / movie recreation / game and host', 'single file html and host', "
-            "'build an interactive demo and put it online', or asks for a website/app/3D/animation/game/calculator to be hosted — YOU MUST use this tool. "
-            "NEVER just paste code in chat; always host it properly so they get a real URL. "
             "Params: name (short slug, lowercase/numbers/hyphens), title (headline), "
             "body (FULL HTML document — write complete <!DOCTYPE html> pages with all styles/JS inline. "
-            "Written as-is to file, no template wrapping. For 3D scenes use Three.js via CDN like https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js or latest unpkg/jsdelivr. "
-            "Make it fully self-contained, working, rotatable, animated, with controls. Use WebGL/Three.js/Canvas for 3D. Add nice UI, lighting, camera controls. ), "
-            "encoding (optional: text or base64; **strongly prefer base64 for any large or complex HTML/JS especially 3D scenes, long code, to avoid XML parse issues**). "
+            "Written as-is to file, no template wrapping), encoding (optional: text or base64; use base64 for exact full HTML). "
             "Inline <script> and <style> are allowed and will run. External CDN libraries (e.g. https:// cdnjs, jsdelivr, "
-            "Google Fonts, unpkg, three.js) work perfectly. This is THE tool for full websites, apps, games, 3D scenes, movie recreations, calculators, "
+            "Google Fonts, unpkg) work too. This is the right tool for coding full websites, apps, games, calculators, "
             "demos, portfolios, and anything interactive — write the complete working HTML/JS/CSS in body. "
             "Only generate images with image_generator if the site NEEDS images (visual showcase, portfolio, etc). "
-            "Plain text/CSS sites do NOT need images. If you do generate images, use the returned Discord CDN URL in <img> tags. "
-            "For any 'host' request involving code or HTML, call create_site immediately with a high-quality complete implementation."
+            "Plain text/CSS sites do NOT need images. If you do generate images, use the returned Discord CDN URL in <img> tags."
         )
 
     async def execute(
