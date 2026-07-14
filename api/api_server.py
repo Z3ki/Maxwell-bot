@@ -455,7 +455,10 @@ def _sanitize_control(control):
         0, min(out["per_user_cooldown_seconds"], 3600)
     )
     out["max_image_size_mb"] = max(1, min(out["max_image_size_mb"], 25))
-    out["ai_timeout_seconds"] = max(10, min(out["ai_timeout_seconds"], 600))
+    out["ai_timeout_seconds"] = max(10, min(out["ai_timeout_seconds"], 7200))
+    out["tool_iteration_timeout_seconds"] = max(
+        60, min(_safe_int(out.get("tool_iteration_timeout_seconds") or 3600, 3600), 14400)
+    )
     out["ai_concurrency"] = max(1, min(out["ai_concurrency"], 10))
     out["autonomy_interval_seconds"] = max(
         30, _safe_int(out.get("autonomy_interval_seconds") or 300, 300)
@@ -467,12 +470,12 @@ def _sanitize_control(control):
     out["autonomy_api_key"] = str(out.get("autonomy_api_key", "") or "")[:512]
     out["autonomy_model"] = str(out.get("autonomy_model", "") or "")[:200]
     out["memory_history_messages"] = max(0, min(out["memory_history_messages"], 100))
-    out["memory_context_budget"] = max(1000, min(out["memory_context_budget"], 100000))
+    out["memory_context_budget"] = max(1000, min(out["memory_context_budget"], 500000))
     out["tool_history_messages"] = max(
         0, min(_safe_int(out.get("tool_history_messages") or 3, 3), 20)
     )
     out["prompt_context_budget"] = max(
-        10000, min(_safe_int(out.get("prompt_context_budget") or 60000, 60000), 200000)
+        10000, min(_safe_int(out.get("prompt_context_budget") or 200000, 200000), 500000)
     )
     out["cross_context_max_items"] = max(
         1, min(_safe_int(out.get("cross_context_max_items"), 10), 50)
@@ -483,8 +486,8 @@ def _sanitize_control(control):
     out["cross_context_min_importance"] = max(
         1, min(_safe_int(out.get("cross_context_min_importance"), 5), 10)
     )
-    out["max_tool_iterations"] = max(0, min(out["max_tool_iterations"], 25))
-    out["max_response_chars"] = max(80, min(out["max_response_chars"], 4000))
+    out["max_tool_iterations"] = max(0, min(out["max_tool_iterations"], 100))
+    out["max_response_chars"] = max(80, min(out["max_response_chars"], 8000))
     out["vc_rms_threshold"] = max(
         100, min(_safe_int(out.get("vc_rms_threshold") or 1200, 1200), 10000)
     )

@@ -3867,8 +3867,8 @@ class MaxwellBot(commands.Bot):
             timeout = max(
                 10,
                 min(
-                    _safe_int(self._control.get("ai_timeout_seconds", 180) or 180, 180),
-                    600,
+                    _safe_int(self._control.get("ai_timeout_seconds", 3600) or 3600, 3600),
+                    7200,
                 ),
             )
             await self._acquire_ai_slot(timeout=timeout)
@@ -4343,7 +4343,7 @@ class MaxwellBot(commands.Bot):
             control["max_response_chars"] = max(
                 80,
                 min(
-                    _safe_int(control.get("max_response_chars", 500) or 500, 500), 4000
+                    _safe_int(control.get("max_response_chars", 4000) or 4000, 4000), 8000
                 ),
             )
             control["tool_history_messages"] = max(
@@ -4353,9 +4353,9 @@ class MaxwellBot(commands.Bot):
                 10000,
                 min(
                     _safe_int(
-                        control.get("prompt_context_budget", 80000) or 80000, 80000
+                        control.get("prompt_context_budget", 200000) or 200000, 200000
                     ),
-                    200000,
+                    500000,
                 ),
             )
             control["autonomy_interval_seconds"] = max(
@@ -5756,9 +5756,10 @@ class MaxwellBot(commands.Bot):
         ai_timeout = max(
             10,
             min(
-                _safe_int(self._control.get("ai_timeout_seconds", 180) or 180, 180), 600
+                _safe_int(self._control.get("ai_timeout_seconds", 3600) or 3600, 3600), 7200
             ),
         )
+        max_out_tokens = getattr(self.config, "OLLAMA_MAX_TOKENS", 200000) or 200000
         try:
             _images, media = await self._extract_media(message)
             media.extend(await self._extract_embeds(message))
@@ -5917,11 +5918,11 @@ class MaxwellBot(commands.Bot):
                     try:
                         async with message.channel.typing():
                             response = await self.ai_provider.generate_response(
-                                messages, media=active_media, timeout=ai_timeout
+                                messages, media=active_media, timeout=ai_timeout, max_tokens=max_out_tokens
                             )
                     except discord.Forbidden as _exc:
                         response = await self.ai_provider.generate_response(
-                            messages, media=active_media, timeout=ai_timeout
+                            messages, media=active_media, timeout=ai_timeout, max_tokens=max_out_tokens
                         )
                 else:
                     response = await self.ai_provider.generate_response(
@@ -5947,11 +5948,11 @@ class MaxwellBot(commands.Bot):
             max_iters = max(
                 0,
                 min(
-                    _safe_int(self._control.get("max_tool_iterations", 10) or 0, 0), 25
+                    _safe_int(self._control.get("max_tool_iterations", 30) or 0, 0), 100
                 ),
             )
             tool_deadline = time.monotonic() + float(
-                self._control.get("tool_iteration_timeout_seconds", 120) or 120
+                self._control.get("tool_iteration_timeout_seconds", 3600) or 3600
             )
             all_tool_results = []
             all_tool_images = []
@@ -5971,8 +5972,22 @@ class MaxwellBot(commands.Bot):
                 # Reuse the already-built messages (system + memory + user)
                 # and append the assistant turn + tool results, instead of
                 # rebuilding the whole system prompt each iteration.
+                # Elide huge parameter bodies (e.g. full HTML for create_site) so
+                # that massive single-file sites/demos don't explode the context
+                # on the followup turn and cause timeouts or token overflows.
+                history_response = response
+                if "create_site" in (response or "") or "body" in (response or ""):
+                    try:
+                        history_response = re.sub(
+                            r'(<parameter[^>]*\bname=["\']?body["\']?[^>]*>)(.*?)(</\s*parameter\s*>)',
+                            r'\1[large HTML/asset body elided to protect context budget; site creation succeeded from the original full body]\3',
+                            history_response,
+                            flags=re.DOTALL | re.IGNORECASE,
+                        )
+                    except Exception:
+                        pass
                 result_messages = [dict(m) for m in messages]
-                result_messages.append({"role": "assistant", "content": response})
+                result_messages.append({"role": "assistant", "content": history_response})
                 result_messages.append(
                     {
                         "role": "user",
@@ -5990,6 +6005,7 @@ class MaxwellBot(commands.Bot):
                         images=followup_images,
                         media=[],
                         timeout=ai_timeout,
+                        max_tokens=max_out_tokens,
                     )
                     if followup and followup.strip():
                         response = followup
@@ -6150,8 +6166,14 @@ class MaxwellBot(commands.Bot):
             if channel_id is None or not hasattr(self, "memory"):
                 return
             try:
+                # For memory, never store massive bodies (create_site HTML, send_file content, etc.)
+                # to avoid bloating channel memory / long term storage with  MBs of generated code.
+                mem_params = dict(params or {})
+                for heavy_key in ("body", "content", "code", "html", "data"):
+                    if heavy_key in mem_params and isinstance(mem_params[heavy_key], str) and len(mem_params[heavy_key]) > 2000:
+                        mem_params[heavy_key] = f"[large {heavy_key} omitted, {len(mem_params[heavy_key])} chars]"
                 params_text = json.dumps(
-                    params or {}, ensure_ascii=False, sort_keys=True
+                    mem_params, ensure_ascii=False, sort_keys=True
                 )
             except TypeError:
                 params_text = str(params or {})
@@ -6162,7 +6184,7 @@ class MaxwellBot(commands.Bot):
                     "content": f"Called {name} with {params_text} -> {result}",
                     "is_tool": True,
                     "tool_name": name,
-                    "tool_params": params or {},
+                    "tool_params": mem_params,
                     "tool_result": result,
                 },
             )
@@ -6381,6 +6403,7 @@ class MaxwellBot(commands.Bot):
             "- Output either visible text or tool tags, never both unless the visible text is inside send_message.\n"
             "- A tool turn must end with exactly one terminal action: send_message or no_response. reasoning_log alone is not an answer.\n"
             "- Order: reasoning_log first, helper tools next, send_message/no_response last.\n"
+            '- Use create_site (with encoding="base64" for large/complex HTML) for ANY request to "code and host", "make a website/3d scene/game and host it", "single file html and host". Do not output raw code in chat for hosted things — use the tool to give a real URL.\n'
             '- Use send_file encoding="base64" for file/code/HTML/JSON content. Tool params ignore response char limits.\n'
             "- reasoning_log fields are plain text only: no nested tags, JSON, or <thoughts>.\n"
             "- Status: set_activity for your visible status/activity, change_presence for the online/idle/dnd dot."
@@ -7133,7 +7156,7 @@ class MaxwellBot(commands.Bot):
         ai_timeout = max(
             10,
             min(
-                _safe_int(self._control.get("ai_timeout_seconds", 180) or 180, 180), 600
+                _safe_int(self._control.get("ai_timeout_seconds", 3600) or 3600, 3600), 7200
             ),
         )
         system_parts = [
@@ -7237,7 +7260,7 @@ class MaxwellBot(commands.Bot):
             max_iters = max(
                 0,
                 min(
-                    _safe_int(self._control.get("max_tool_iterations", 10) or 0, 0), 25
+                    _safe_int(self._control.get("max_tool_iterations", 30) or 0, 0), 100
                 ),
             )
             for _iteration in range(max_iters):
@@ -7258,7 +7281,19 @@ class MaxwellBot(commands.Bot):
                             "\nMedia available to inspect in the multimodal payload.",
                             "",
                         )
-                result_messages.append({"role": "assistant", "content": response_text})
+                # elide large bodies for TG too
+                history_response_text = response_text
+                if "create_site" in (response_text or ""):
+                    try:
+                        history_response_text = re.sub(
+                            r'(<parameter[^>]*\bname=["\']?body["\']?[^>]*>)(.*?)(</\s*parameter\s*>)',
+                            r'\1[large body elided]\3',
+                            history_response_text,
+                            flags=re.DOTALL | re.IGNORECASE,
+                        )
+                    except Exception:
+                        pass
+                result_messages.append({"role": "assistant", "content": history_response_text})
                 result_messages.append(
                     {
                         "role": "user",
@@ -7616,9 +7651,9 @@ class MaxwellBot(commands.Bot):
                             0,
                             min(
                                 _safe_int(
-                                    self._control.get("max_tool_iterations", 10) or 0, 0
+                                    self._control.get("max_tool_iterations", 25) or 0, 0
                                 ),
-                                25,
+                                50,
                             ),
                         )
                         for _iteration in range(max_iters):
@@ -7642,8 +7677,15 @@ class MaxwellBot(commands.Bot):
                                         "\nMedia available to inspect in the multimodal payload.",
                                         "",
                                     )
+                            # elide large bodies (e.g. create_site HTML) 
+                            hrt = response_text
+                            if "create_site" in (response_text or ""):
+                                try:
+                                    hrt = re.sub(r'(<parameter[^>]*\bname=["\']?body["\']?[^>]*>)(.*?)(</\s*parameter\s*>)', r'\1[elided]\3', hrt, flags=re.DOTALL|re.IGNORECASE)
+                                except Exception:
+                                    pass
                             result_messages.append(
-                                {"role": "assistant", "content": response_text}
+                                {"role": "assistant", "content": hrt}
                             )
                             result_messages.append(
                                 {
