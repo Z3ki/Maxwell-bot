@@ -61,6 +61,10 @@ class Config:
     OLLAMA_FALLBACK_DISABLE_REASONING = _bool_env("OLLAMA_FALLBACK_DISABLE_REASONING", True)
     OLLAMA_RETRY_ATTEMPTS = _int_env("OLLAMA_RETRY_ATTEMPTS", 3, min_value=1, max_value=10)
 
+    # Toggle for "omni" (audio+vision capable) model input. When false, audio
+    # attachments/tracks are not sent to the LLM (text+image still work).
+    ENABLE_AUDIO_INPUT = _bool_env("ENABLE_AUDIO_INPUT", True)
+
     AUTONOMY_BASE_URL = os.getenv("AUTONOMY_BASE_URL", "").strip()
     AUTONOMY_API_KEY = os.getenv("AUTONOMY_API_KEY", os.getenv("OPENAI_COMPAT_API_KEY", "")).strip()
     AUTONOMY_MODEL = os.getenv("AUTONOMY_MODEL", "").strip()

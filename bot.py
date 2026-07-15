@@ -1793,6 +1793,7 @@ class MaxwellBot(commands.Bot):
             fallback_api_key=self.config.OLLAMA_FALLBACK_API_KEY,
             fallback_disable_reasoning=self.config.OLLAMA_FALLBACK_DISABLE_REASONING,
             retry_attempts=self.config.OLLAMA_RETRY_ATTEMPTS,
+            enable_audio_input=self.config.ENABLE_AUDIO_INPUT,
         )
 
     async def _get_autonomy_provider(self):
@@ -1897,6 +1898,7 @@ class MaxwellBot(commands.Bot):
                     fallback_api_key=self.config.OLLAMA_FALLBACK_API_KEY,
                     fallback_disable_reasoning=self.config.OLLAMA_FALLBACK_DISABLE_REASONING,
                     retry_attempts=self.config.OLLAMA_RETRY_ATTEMPTS,
+                    enable_audio_input=self.config.ENABLE_AUDIO_INPUT,
                 )
             else:
                 provider = cached
@@ -3252,10 +3254,12 @@ class MaxwellBot(commands.Bot):
                         "content": f"{msg.get('author', 'user')}: {msg.get('content', '')[:220]}",
                     }
                 )
+            use_audio = bool(self._control.get("process_audio", getattr(self.config, "ENABLE_AUDIO_INPUT", True)))
+            vc_note = "Audio is attached." if use_audio else "Voice activity detected (audio input disabled)."
             messages.append(
                 {
                     "role": "user",
-                    "content": f"Latest VC utterance from {user.display_name}. Audio is attached. Reply quickly and naturally.",
+                    "content": f"Latest VC utterance from {user.display_name}. {vc_note} Reply quickly and naturally.",
                 }
             )
             t_prompt = time.perf_counter()
@@ -3290,9 +3294,11 @@ class MaxwellBot(commands.Bot):
             await self._acquire_ai_slot(timeout=vc_timeout, priority="user")
             try:
                 async with self._vc_ai_semaphore:
+                    use_audio = bool(self._control.get("process_audio", getattr(self.config, "ENABLE_AUDIO_INPUT", True)))
+                    vc_media = [media] if use_audio else []
                     resp = await self.ai_provider.generate_response(
                         messages,
-                        media=[media],
+                        media=vc_media,
                         timeout=vc_timeout,
                         max_tokens=vc_max_tokens,
                         temperature=0.6,
@@ -5031,7 +5037,11 @@ class MaxwellBot(commands.Bot):
         return fixed
 
     async def _extract_media(self, message) -> tuple[list[str], list[dict]]:
-        if not self._control.get("process_images", True):
+        proc_img = bool(self._control.get("process_images", True))
+        proc_aud = bool(self._control.get("process_audio", True))
+        # If neither images nor audio processing, skip all binary media collection.
+        # (process_audio controls "omni" audio input to models.)
+        if not proc_img and not proc_aud:
             return [], []
         images = []
         media = []
@@ -5083,6 +5093,10 @@ class MaxwellBot(commands.Bot):
                     )
                 )
                 filename = attachment.filename
+                # Respect process_audio (the "omni audio model" toggle) — skip pure audio attachments
+                # if disabled. Video may still yield image frames even if audio track skipped later.
+                if mime.startswith("audio/") and not proc_aud:
+                    continue
                 if mime == "image/gif" or ext == ".gif":
                     normalized = await self._normalize_gif(
                         blob, attachment.filename, max_size
@@ -5269,60 +5283,63 @@ class MaxwellBot(commands.Bot):
                         f"Video frame extraction failed for {filename}: {stderr.decode(errors='replace')[-300:]}"
                     )
 
-                # Extract audio track
-                audio_path = tmp_path / "audio.wav"
-                audio_cmd = [
-                    "ffmpeg",
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-y",
-                    "-i",
-                    str(video_path),
-                    "-vn",
-                    "-ac",
-                    "1",
-                    "-ar",
-                    "16000",
-                    str(audio_path),
-                ]
-                proc = await asyncio.create_subprocess_exec(
-                    *audio_cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                try:
-                    _stdout, stderr = await asyncio.wait_for(
-                        proc.communicate(), timeout=30
+                # Extract audio track only if process_audio (omni audio input) is enabled.
+                # This prevents sending audio to non-omni or when user disabled audio models.
+                proc_aud = bool((getattr(self, "_control", None) or {}).get("process_audio", True))
+                if proc_aud:
+                    audio_path = tmp_path / "audio.wav"
+                    audio_cmd = [
+                        "ffmpeg",
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-y",
+                        "-i",
+                        str(video_path),
+                        "-vn",
+                        "-ac",
+                        "1",
+                        "-ar",
+                        "16000",
+                        str(audio_path),
+                    ]
+                    proc = await asyncio.create_subprocess_exec(
+                        *audio_cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
                     )
-                except asyncio.TimeoutError as _exc:
-                    proc.kill()
-                    await proc.wait()
-                    logger.info(f"Video audio extraction timed out for {filename}")
-                    stderr = b"timeout"
-                if (
-                    proc.returncode == 0
-                    and audio_path.exists()
-                    and audio_path.stat().st_size > 44
-                ):
-                    audio_blob = audio_path.read_bytes()
-                    if len(audio_blob) <= max_size:
-                        results.append(
-                            {
-                                "b64": base64.b64encode(audio_blob).decode("utf-8"),
-                                "mime_type": "audio/wav",
-                                "filename": f"{filename}-audio.wav",
-                                "is_image": False,
-                                "is_text": False,
-                                "text": "",
-                                "message_id": message_id,
-                                "source": "video_audio",
-                            }
+                    try:
+                        _stdout, stderr = await asyncio.wait_for(
+                            proc.communicate(), timeout=30
                         )
-                elif proc.returncode != 0:
-                    logger.info(
-                        f"No extractable audio track for {filename}: {stderr.decode(errors='replace')[-200:]}"
-                    )
+                    except asyncio.TimeoutError as _exc:
+                        proc.kill()
+                        await proc.wait()
+                        logger.info(f"Video audio extraction timed out for {filename}")
+                        stderr = b"timeout"
+                    if (
+                        proc.returncode == 0
+                        and audio_path.exists()
+                        and audio_path.stat().st_size > 44
+                    ):
+                        audio_blob = audio_path.read_bytes()
+                        if len(audio_blob) <= max_size:
+                            results.append(
+                                {
+                                    "b64": base64.b64encode(audio_blob).decode("utf-8"),
+                                    "mime_type": "audio/wav",
+                                    "filename": f"{filename}-audio.wav",
+                                    "is_image": False,
+                                    "is_text": False,
+                                    "text": "",
+                                    "message_id": message_id,
+                                    "source": "video_audio",
+                                }
+                            )
+                    elif proc.returncode != 0:
+                        logger.info(
+                            f"No extractable audio track for {filename}: {stderr.decode(errors='replace')[-200:]}"
+                        )
         except Exception as e:
             logger.warning(f"Failed to derive frames/audio from video {filename}: {e}")
         if results:
@@ -7069,6 +7086,12 @@ class MaxwellBot(commands.Bot):
         audio = message.get("audio")
         tg_media = []
 
+        proc_aud = bool(self._control.get("process_audio", self.config.ENABLE_AUDIO_INPUT))
+        if (voice or audio) and not proc_aud:
+            # Audio input disabled (omni model toggle); ignore audio/voice from TG but keep text.
+            voice = None
+            audio = None
+
         if voice or audio:
             media_file = voice or audio
             file_id = media_file.get("file_id")
@@ -7447,6 +7470,11 @@ class MaxwellBot(commands.Bot):
                     voice = message.get("voice")
                     audio = message.get("audio")
                     tg_media = []
+
+                    proc_aud = bool(self._control.get("process_audio", self.config.ENABLE_AUDIO_INPUT))
+                    if (voice or audio) and not proc_aud:
+                        voice = None
+                        audio = None
 
                     if voice or audio:
                         media_file = voice or audio

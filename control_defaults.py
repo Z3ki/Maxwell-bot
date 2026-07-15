@@ -42,6 +42,7 @@ DEFAULT_CONTROL = {
     "reply_to_bots": False,
     "per_user_cooldown_seconds": 1.5,
     "process_images": True,
+    "process_audio": True,
     "max_image_size_mb": 10,
     "ai_timeout_seconds": 3600,
     "ai_concurrency": 2,

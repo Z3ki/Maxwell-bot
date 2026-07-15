@@ -98,6 +98,7 @@ class OllamaProvider:
         fallback_api_key: str = "",
         fallback_disable_reasoning: bool = True,
         retry_attempts: int = 3,
+        enable_audio_input: bool = True,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -105,6 +106,7 @@ class OllamaProvider:
         self.temperature = temperature
         self.api_key = api_key.strip()
         self.retry_attempts = max(1, retry_attempts)
+        self.enable_audio_input = bool(enable_audio_input)
         self._endpoints = [
             ProviderEndpoint(
                 "primary", self.base_url, self.model, self.api_key, disable_reasoning
@@ -316,7 +318,11 @@ class OllamaProvider:
         payload_media = []
         for m in all_media:
             mime = str(m.get("mime_type", ""))
-            if m.get("b64") and mime.startswith(("image/", "audio/", "video/")):
+            if not m.get("b64"):
+                continue
+            if mime.startswith(("image/", "video/")):
+                payload_media.append(m)
+            elif mime.startswith("audio/") and getattr(self, "enable_audio_input", True):
                 payload_media.append(m)
 
         if payload_media:
@@ -346,7 +352,7 @@ class OllamaProvider:
                     uri = f"data:{mime};base64,{b64}"
                     if mime.startswith("image/"):
                         parts.append({"type": "image_url", "image_url": {"url": uri}})
-                    elif mime.startswith("audio/"):
+                    elif mime.startswith("audio/") and getattr(self, "enable_audio_input", True):
                         audio_format = AUDIO_FORMATS.get(
                             mime.split(";", 1)[0].lower(), "wav"
                         )

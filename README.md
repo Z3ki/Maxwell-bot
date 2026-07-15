@@ -73,6 +73,7 @@ See `.env.example` for a full template. Key variables:
 | `OLLAMA_FALLBACK_MODEL` | No | Model name for the fallback provider. |
 | `OLLAMA_FALLBACK_DISABLE_REASONING` | No | Add OpenRouter-compatible reasoning exclusion on fallback calls (default: `true`). |
 | `OLLAMA_RETRY_ATTEMPTS` | No | Total provider attempts per request (default: `3`; with fallback: primary, fallback, primary). |
+| `ENABLE_AUDIO_INPUT` | No | Enable sending audio (voice clips, attachments, extracted video audio) to the LLM for "omni" audio models (default: `true`). Set `false` to make audio input optional/disabled. |
 | `NVIDIA_API_KEY` | No | NVIDIA NIM API key for HD image generation |
 | `GPT_IMAGE_URL` | No | GPT-compatible image generation endpoint |
 | `GPT_IMAGE_API_KEY` | No | API key for GPT image endpoint |
