@@ -6,6 +6,7 @@ Node/opencode runtime.
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -50,7 +51,7 @@ def _load_hermes_ollama_key() -> str | None:
                 if not line or line.startswith("#"):
                     continue
                 if line.startswith("OLLAMA_API_KEY="):
-                    return line[len("OLLAMA_API_KEY="):].strip().strip('"\'')
+                    return line[len("OLLAMA_API_KEY=") :].strip().strip("\"'")
     except Exception:
         _ensure_logger().debug("Failed to read /root/.hermes/.env", exc_info=True)
     return None
@@ -96,7 +97,7 @@ async def _run_docker(*args: str, timeout: int = 30) -> tuple[bytes, bytes, int]
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as _exc:
         proc.kill()
         await proc.wait()
         raise
@@ -223,7 +224,7 @@ async def run_opencode_in_docker(
                     shutil.copy2(src, dest)
                 except Exception:
                     _ensure_logger().warning("Could not copy extra file %s", fpath)
-            exec_cmd.extend(["--file", str(CONTAINER_HOME / src.name)])
+            exec_cmd.extend(["--file", str(Path(CONTAINER_HOME) / src.name)])
     exec_cmd.append(prompt)
 
     cmd.extend([IMAGE_NAME, *exec_cmd])
@@ -240,12 +241,10 @@ async def run_opencode_in_docker(
         stdout, stderr, exit_code = await _run_docker(
             *cmd, timeout=timeout_minutes * 60
         )
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as _exc:
         # Best-effort cleanup; don't block result on it.
-        try:
+        with contextlib.suppress(Exception):
             await _run_docker("rm", "-f", container_name, timeout=15)
-        except Exception:
-            pass
         return {
             "ok": False,
             "exit_code": 124,

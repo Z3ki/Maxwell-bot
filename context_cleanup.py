@@ -62,6 +62,14 @@ VALID_OP_KINDS = frozenset({"delete", "edit", "merge", "add"})
 VALID_VISIBILITIES = frozenset({"shared", "private", "admin_only", "public_hint"})
 
 
+def _safe_int(val, default=0):
+    """Parse int safely, returning default on failure."""
+    try:
+        return int(val) if val is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -77,15 +85,13 @@ def _load_json_safe(path: Path, default):
         return data
     except (json.JSONDecodeError, OSError, ValueError) as e:
         logger.warning(f"Corrupt/unreadable {path.name}, recreating defaults: {e}")
-        try:
+        with contextlib.suppress(Exception):
             path.write_text("{}", encoding="utf-8")
-        except Exception:
-            pass
         return default() if callable(default) else default
 
 
 def _truncate(text: str, budget: int) -> str:
-    budget = max(0, int(budget or 0))
+    budget = max(0, _safe_int(budget, 0))
     if len(text) <= budget:
         return text
     suffix = "\n... [truncated]"
@@ -225,7 +231,8 @@ class ContextCleanupEngine:
     def _default_enabled(self) -> bool:
         return bool(
             (getattr(self.bot, "_control", None) or {}).get(
-                "context_cleanup_enabled", DEFAULT_CONTROL.get("context_cleanup_enabled", True)
+                "context_cleanup_enabled",
+                DEFAULT_CONTROL.get("context_cleanup_enabled", True),
             )
         )
 
@@ -263,7 +270,8 @@ class ContextCleanupEngine:
         logger.info("ContextCleanupEngine started")
 
     async def stop(self):
-        self._task and await self._cancel_task(self._task)
+        if self._task:
+            await self._cancel_task(self._task)
         self._task = None
         logger.info("ContextCleanupEngine stopped")
 
@@ -278,7 +286,8 @@ class ContextCleanupEngine:
             control = await self.store.load_control()
             self.enabled = bool(control.get("enabled", self._default_enabled()))
             self.interval_seconds = max(
-                300, int(control.get("interval_seconds", self._default_interval()) or 1800)
+                300,
+                int(control.get("interval_seconds", self._default_interval()) or 1800),
             )
             self.ltm_enabled = bool(
                 control.get("ltm_enabled", self._default_ltm_enabled())
@@ -309,15 +318,13 @@ class ContextCleanupEngine:
                         consecutive_failures += 1
                     elif not result.get("skipped"):
                         consecutive_failures = 0
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as _exc:
                 raise
             except Exception as e:
                 consecutive_failures += 1
                 logger.error(f"ContextCleanup loop error: {e}", exc_info=True)
-                try:
+                with contextlib.suppress(Exception):
                     await self.store.record_error(str(e))
-                except Exception:
-                    pass
             interval = max(60, min(self.interval_seconds, MAX_INTERVAL))
             backoff = min(2**consecutive_failures, 6) if consecutive_failures > 0 else 1
             await asyncio.sleep(max(60, interval * backoff))
@@ -338,8 +345,10 @@ class ContextCleanupEngine:
         try:
             await asyncio.wait_for(self._lock.acquire(), timeout=600)
             acquired = True
-        except asyncio.TimeoutError:
-            logger.error("ContextCleanup lock timed out — previous pass hung for >10m, forcing release")
+        except asyncio.TimeoutError as _exc:
+            logger.error(
+                "ContextCleanup lock timed out — previous pass hung for >10m, forcing release"
+            )
             return {"skipped": False, "error": "lock timeout"}
         try:
             self._running_flag = True
@@ -413,9 +422,7 @@ class ContextCleanupEngine:
             except Exception as e:
                 logger.error(f"ContextCleanup pass failed: {e}")
                 duration = time.time() - start
-                await self._finish_pass(
-                    started, duration, f"ERROR: {e}", 0, 0, str(e)
-                )
+                await self._finish_pass(started, duration, f"ERROR: {e}", 0, 0, str(e))
                 return {"skipped": False, "error": str(e), "duration": duration}
             finally:
                 self._running_flag = False
@@ -443,12 +450,16 @@ class ContextCleanupEngine:
             s["last_run"] = started_iso
             s["last_duration"] = round(duration, 2)
             s["last_audit"] = str(audit)[:4000]
-            s["ops_applied_total"] = int(s.get("ops_applied_total", 0)) + applied
-            s["ops_skipped_total"] = int(s.get("ops_skipped_total", 0)) + skipped
-            s["sc_ops_applied_total"] = int(s.get("sc_ops_applied_total", 0)) + sc_applied
-            s["ltm_ops_applied_total"] = int(s.get("ltm_ops_applied_total", 0)) + ltm_applied
+            s["ops_applied_total"] = _safe_int(s.get("ops_applied_total", 0)) + applied
+            s["ops_skipped_total"] = _safe_int(s.get("ops_skipped_total", 0)) + skipped
+            s["sc_ops_applied_total"] = (
+                _safe_int(s.get("sc_ops_applied_total", 0)) + sc_applied
+            )
+            s["ltm_ops_applied_total"] = (
+                _safe_int(s.get("ltm_ops_applied_total", 0)) + ltm_applied
+            )
             s["ltm_disabled"] = bool(ltm_disabled)
-            s["passes_total"] = int(s.get("passes_total", 0)) + 1
+            s["passes_total"] = _safe_int(s.get("passes_total", 0)) + 1
             s["last_error"] = error
 
         await self.store.update_state(_update)
@@ -466,10 +477,8 @@ class ContextCleanupEngine:
                 "error": error,
             }
         )
-        try:
+        with contextlib.suppress(Exception):
             await self.store.patch_state({"running": False, "running_since": ""})
-        except Exception:
-            pass
 
     # -- planning --
 
@@ -500,12 +509,12 @@ class ContextCleanupEngine:
             '  "audit": "short summary of what you cleaned and why",\n'
             '  "ops": [\n'
             '    {"kind":"delete","id":"<entry id>","reason":"..."},\n'
-            '    {"kind":"edit","id":"<entry id>","content":"...","importance":1-10,'\
-            '"scope":"global|user:<id>|guild:<id>|channel:<id>|dm:<id>","visibility":'\
+            '    {"kind":"edit","id":"<entry id>","content":"...","importance":1-10,'
+            '"scope":"global|user:<id>|guild:<id>|channel:<id>|dm:<id>","visibility":'
             '"shared|private|admin_only|public_hint","reason":"..."},\n'
-            '    {"kind":"merge","keep_id":"<id>","delete_ids":["<id>","<id>"],'\
+            '    {"kind":"merge","keep_id":"<id>","delete_ids":["<id>","<id>"],'
             '"content":"...","importance":1-10,"reason":"..."},\n'
-            '    {"kind":"add","content":"...","scope":"...","importance":1-10,'\
+            '    {"kind":"add","content":"...","scope":"...","importance":1-10,'
             '"visibility":"...","reason":"..."}\n'
             "  ]\n"
             "}\n"
@@ -523,18 +532,26 @@ class ContextCleanupEngine:
             # generate_chat_completion check (it was never dispatched to). If the
             # resolved provider lacks generate_response, fall back to the main
             # ai_provider, which has both methods.
-            if provider is None or not callable(getattr(provider, "generate_response", None)):
+            if provider is None or not callable(
+                getattr(provider, "generate_response", None)
+            ):
                 provider = getattr(self.bot, "ai_provider", None)
             if provider is None:
                 return [], "DONE - no provider available"
             # Provider-unavailable soft skip: don't burn an AI slot or count this
             # as a failure — _get_autonomy_provider re-probes init next tick.
-            if getattr(provider, "available", None) is False:
+            if getattr(provider, "available", None) == False:  # noqa: E712
                 logger.info("ContextCleanup: provider not available, soft skip")
                 return [], "DONE - provider not available"
-            model = str(
-                (getattr(self.bot, "_control", None) or {}).get("autonomy_model", "") or ""
-            ) or None
+            model = (
+                str(
+                    (getattr(self.bot, "_control", None) or {}).get(
+                        "autonomy_model", ""
+                    )
+                    or ""
+                )
+                or None
+            )
             timeout = max(
                 30,
                 min(
@@ -606,7 +623,7 @@ class ContextCleanupEngine:
                     if isinstance(obj, dict) and "ops" in obj:
                         json_str = c
                         break
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as _exc:
                     pass
             if json_str is None and candidates:
                 json_str = candidates[0]
@@ -617,7 +634,9 @@ class ContextCleanupEngine:
         try:
             parsed = json.loads(json_str)
         except json.JSONDecodeError as e:
-            logger.warning(f"ContextCleanup JSON parse failed: {e}. Raw: {json_str[:500]}")
+            logger.warning(
+                f"ContextCleanup JSON parse failed: {e}. Raw: {json_str[:500]}"
+            )
             return [], "DONE - invalid JSON from planner"
         if not isinstance(parsed, dict):
             return [], "DONE - planner returned non-object"
@@ -662,12 +681,15 @@ class ContextCleanupEngine:
                 delete_ids_raw = op.get("delete_ids", [])
                 if not isinstance(delete_ids_raw, list):
                     delete_ids_raw = []
-                delete_ids = [
-                    d for d in (_strip_id(x) for x in delete_ids_raw) if d
-                ]
+                delete_ids = [d for d in (_strip_id(x) for x in delete_ids_raw) if d]
                 delete_ids = [d for d in delete_ids if d in known_ids and d != keep_id]
                 content = str(op.get("content", "")).strip()[:MAX_CONTENT_CHARS]
-                if not keep_id or keep_id not in known_ids or not delete_ids or not content:
+                if (
+                    not keep_id
+                    or keep_id not in known_ids
+                    or not delete_ids
+                    or not content
+                ):
                     continue
                 valid.append(
                     {
@@ -688,7 +710,9 @@ class ContextCleanupEngine:
                         "kind": "add",
                         "content": content,
                         "scope": _coerce_scope(op.get("scope"), "global"),
-                        "visibility": _coerce_visibility(op.get("visibility"), "shared"),
+                        "visibility": _coerce_visibility(
+                            op.get("visibility"), "shared"
+                        ),
                         "importance": _coerce_importance(op.get("importance"), 5),
                         "reason": reason,
                     }
@@ -803,16 +827,24 @@ class ContextCleanupEngine:
         )
         try:
             provider = await self.bot._get_autonomy_provider()
-            if provider is None or not callable(getattr(provider, "generate_response", None)):
+            if provider is None or not callable(
+                getattr(provider, "generate_response", None)
+            ):
                 provider = getattr(self.bot, "ai_provider", None)
             if provider is None:
                 return [], "ltm: no provider available"
-            if getattr(provider, "available", None) is False:
+            if getattr(provider, "available", None) == False:  # noqa: E712
                 logger.info("ContextCleanup: provider not available for LTM, soft skip")
                 return [], "ltm: provider not available"
-            model = str(
-                (getattr(self.bot, "_control", None) or {}).get("autonomy_model", "") or ""
-            ) or None
+            model = (
+                str(
+                    (getattr(self.bot, "_control", None) or {}).get(
+                        "autonomy_model", ""
+                    )
+                    or ""
+                )
+                or None
+            )
             timeout = max(
                 30,
                 min(
@@ -882,7 +914,7 @@ class ContextCleanupEngine:
                     if isinstance(obj, dict) and "ops" in obj:
                         json_str = c
                         break
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as _exc:
                     pass
             if json_str is None and candidates:
                 json_str = candidates[0]
@@ -892,7 +924,9 @@ class ContextCleanupEngine:
         try:
             parsed = json.loads(json_str)
         except json.JSONDecodeError as e:
-            logger.warning(f"ContextCleanup LTM JSON parse failed: {e}. Raw: {json_str[:500]}")
+            logger.warning(
+                f"ContextCleanup LTM JSON parse failed: {e}. Raw: {json_str[:500]}"
+            )
             return [], "ltm: invalid JSON from planner"
         if not isinstance(parsed, dict):
             return [], "ltm: planner returned non-object"
@@ -928,12 +962,15 @@ class ContextCleanupEngine:
                 delete_ids_raw = op.get("delete_ids", [])
                 if not isinstance(delete_ids_raw, list):
                     delete_ids_raw = []
-                delete_ids = [
-                    d for d in (str(x).strip() for x in delete_ids_raw) if d
-                ]
+                delete_ids = [d for d in (str(x).strip() for x in delete_ids_raw) if d]
                 delete_ids = [d for d in delete_ids if d in known_ids and d != keep_id]
                 content = str(op.get("content", "")).strip()[:MAX_CONTENT_CHARS]
-                if not keep_id or keep_id not in known_ids or not delete_ids or not content:
+                if (
+                    not keep_id
+                    or keep_id not in known_ids
+                    or not delete_ids
+                    or not content
+                ):
                     continue
                 valid.append(
                     {

@@ -3,7 +3,11 @@ import copy
 
 import pytest
 
-from providers import OllamaProvider, ProviderUsageExhaustedError, USAGE_EXHAUSTED_MESSAGE
+from providers import (
+    OllamaProvider,
+    ProviderUsageExhaustedError,
+    USAGE_EXHAUSTED_MESSAGE,
+)
 
 
 class FakeResponse:
@@ -22,9 +26,26 @@ class FakeResponse:
         return ""
 
 
+class FakeNoneJsonResponse(FakeResponse):
+    """Returns None from json() — simulates a malformed/empty 200 response."""
+
+    async def json(self):
+        return None
+
+
 class FakeToolCallResponse(FakeResponse):
     async def json(self):
-        return {"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": [{"id": "1"}]}}]}
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{"id": "1"}],
+                    }
+                }
+            ]
+        }
 
 
 class FakeErrorResponse(FakeResponse):
@@ -70,19 +91,35 @@ def test_generate_chat_completion_model_override():
         message = await provider.generate_chat_completion(
             [{"role": "user", "content": "hi"}],
             model="rem-model",
-            tools=[{"type": "function", "function": {"name": "ltm_list", "parameters": {"type": "object", "properties": {}}}}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ltm_list",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
         )
         assert message["content"] == "ok"
+
     asyncio.run(run())
     assert session.payloads[0]["model"] == "rem-model"
-    assert session.payloads[0]["max_tokens"] == 10  # configured max_tokens always included
+    assert (
+        session.payloads[0]["max_tokens"] == 10
+    )  # configured max_tokens always included
     assert session.payloads[0]["tools"][0]["function"]["name"] == "ltm_list"
 
 
 def test_generate_chat_completion_usage_exhausted_error():
     provider = OllamaProvider("http://example.test", "base-model", 10, 0.5)
     provider.available = True
-    session = FakeSession(FakeErrorResponse(429, '{"error":{"code":"model_cooldown","message":"All credentials are cooling down"}}'))
+    session = FakeSession(
+        FakeErrorResponse(
+            429,
+            '{"error":{"code":"model_cooldown","message":"All credentials are cooling down"}}',
+        )
+    )
     provider._session = session
 
     async def run():
@@ -105,15 +142,19 @@ def test_generate_chat_completion_falls_back_to_secondary_provider():
         fallback_api_key="fallback-key",
     )
     provider.available = True
-    session = FakeSequenceSession([
-        FakeErrorResponse(503, "down"),
-        FakeErrorResponse(503, "down"),
-        FakeResponse(),
-    ])
+    session = FakeSequenceSession(
+        [
+            FakeErrorResponse(503, "down"),
+            FakeErrorResponse(503, "down"),
+            FakeResponse(),
+        ]
+    )
     provider._session = session
 
     async def run():
-        message = await provider.generate_chat_completion([{"role": "user", "content": "hi"}])
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "hi"}]
+        )
         assert message["content"] == "ok"
 
     asyncio.run(run())
@@ -125,7 +166,9 @@ def test_generate_chat_completion_falls_back_to_secondary_provider():
     assert session.payloads[0]["model"] == "primary-model"
     assert session.payloads[1]["model"] == "primary-model"
     assert session.payloads[2]["model"] == "fallback-model"
-    assert session.payloads[0]["max_tokens"] == 10  # configured max_tokens always included
+    assert (
+        session.payloads[0]["max_tokens"] == 10
+    )  # configured max_tokens always included
     assert session.payloads[2]["max_tokens"] == 10
     assert session.payloads[2]["reasoning"] == {"exclude": True}
 
@@ -141,14 +184,18 @@ def test_generate_chat_completion_retries_primary_before_fallback():
         fallback_api_key="fallback-key",
     )
     provider.available = True
-    session = FakeSequenceSession([
-        FakeErrorResponse(503, "down"),
-        FakeResponse(),
-    ])
+    session = FakeSequenceSession(
+        [
+            FakeErrorResponse(503, "down"),
+            FakeResponse(),
+        ]
+    )
     provider._session = session
 
     async def run():
-        message = await provider.generate_chat_completion([{"role": "user", "content": "hi"}])
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "hi"}]
+        )
         assert message["content"] == "ok"
 
     asyncio.run(run())
@@ -173,14 +220,21 @@ def test_429_rate_limit_skips_to_fallback_without_doomed_retry():
     provider.available = True
     # No backoff sleep on the single fallback step.
     provider._cooldown_seconds = 60
-    session = FakeSequenceSession([
-        FakeErrorResponse(429, '{"error":{"code":429,"message":"xiaomi/mimo-v2.5 is temporarily rate-limited upstream. Please retry shortly, or add your own key to accumulate your rate limits"}}'),
-        FakeResponse(),
-    ])
+    session = FakeSequenceSession(
+        [
+            FakeErrorResponse(
+                429,
+                '{"error":{"code":429,"message":"xiaomi/mimo-v2.5 is temporarily rate-limited upstream. Please retry shortly, or add your own key to accumulate your rate limits"}}',
+            ),
+            FakeResponse(),
+        ]
+    )
     provider._session = session
 
     async def run():
-        message = await provider.generate_chat_completion([{"role": "user", "content": "hi"}])
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "hi"}]
+        )
         assert message["content"] == "ok"
 
     asyncio.run(run())
@@ -197,7 +251,9 @@ def test_429_rate_limit_skips_to_fallback_without_doomed_retry():
     provider._session = session2
 
     async def run2():
-        message = await provider.generate_chat_completion([{"role": "user", "content": "hi"}])
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "hi"}]
+        )
         assert message["content"] == "ok"
 
     asyncio.run(run2())
@@ -217,12 +273,19 @@ def test_generate_response_rejects_native_tool_calls():
 
 
 def test_context_overflow_clamp_survives_retry():
-    provider = OllamaProvider("http://example.test", "base-model", 12000, 0.5, retry_attempts=2)
+    provider = OllamaProvider(
+        "http://example.test", "base-model", 12000, 0.5, retry_attempts=2
+    )
     provider.available = True
-    session = FakeSequenceSession([
-        FakeErrorResponse(400, "maximum context length is 10000 tokens. you requested about 13000 tokens"),
-        FakeResponse(),
-    ])
+    session = FakeSequenceSession(
+        [
+            FakeErrorResponse(
+                400,
+                "maximum context length is 10000 tokens. you requested about 13000 tokens",
+            ),
+            FakeResponse(),
+        ]
+    )
     provider._session = session
 
     async def no_wait_retry(*args, **kwargs):
@@ -231,9 +294,101 @@ def test_context_overflow_clamp_survives_retry():
     provider._retry_after_attempt = no_wait_retry
 
     async def run():
-        message = await provider.generate_chat_completion([{"role": "user", "content": "hi"}])
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "hi"}]
+        )
         assert message["content"] == "ok"
 
     asyncio.run(run())
     assert session.payloads[0]["max_tokens"] == 12000
     assert session.payloads[1]["max_tokens"] == 8488
+
+
+def test_none_json_body_retries_and_falls_back():
+    """A 200 response with a None/missing JSON body should not crash with
+    AttributeError — it should retry/fallback like any other failed response."""
+    provider = OllamaProvider(
+        "http://primary.test/v1",
+        "primary-model",
+        10,
+        0.5,
+        fallback_base_url="http://fallback.test/v1",
+        fallback_model="fallback-model",
+        fallback_api_key="fallback-key",
+    )
+    provider.available = True
+    session = FakeSequenceSession(
+        [
+            FakeNoneJsonResponse(),  # primary attempt 1 — None body
+            FakeNoneJsonResponse(),  # primary attempt 2 — None body
+            FakeResponse(),  # fallback attempt 3 — success
+        ]
+    )
+    provider._session = session
+
+    async def run():
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "hi"}]
+        )
+        assert message["content"] == "ok"
+
+    asyncio.run(run())
+    assert session.urls == [
+        "http://primary.test/v1/chat/completions",
+        "http://primary.test/v1/chat/completions",
+        "http://fallback.test/v1/chat/completions",
+    ]
+
+
+def test_degraded_endpoint_skips_to_fallback_without_retry():
+    """A 400 'DEGRADED function cannot be invoked' should cool the endpoint and
+    fall back immediately — no wasted retries on the same degraded endpoint."""
+    provider = OllamaProvider(
+        "http://primary.test/v1",
+        "primary-model",
+        10,
+        0.5,
+        fallback_base_url="http://fallback.test/v1",
+        fallback_model="fallback-model",
+        fallback_api_key="fallback-key",
+    )
+    provider.available = True
+    provider._cooldown_seconds = 60
+    session = FakeSequenceSession(
+        [
+            FakeErrorResponse(
+                400,
+                '{"status":400,"title":"Bad Request","detail":"Function id \'abc\': DEGRADED function cannot be invoked"}',
+            ),
+            FakeResponse(),
+        ]
+    )
+    provider._session = session
+
+    async def run():
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "hi"}]
+        )
+        assert message["content"] == "ok"
+
+    asyncio.run(run())
+    # Only ONE primary call (the DEGRADED 400) then immediate fallback — no
+    # second doomed primary retry, no 2s wait.
+    assert session.urls == [
+        "http://primary.test/v1/chat/completions",
+        "http://fallback.test/v1/chat/completions",
+    ]
+    assert session.payloads[0]["model"] == "primary-model"
+    assert session.payloads[1]["model"] == "fallback-model"
+    # Primary is now cooling: a follow-up call must skip straight to fallback.
+    session2 = FakeSequenceSession([FakeResponse()])
+    provider._session = session2
+
+    async def run2():
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "hi"}]
+        )
+        assert message["content"] == "ok"
+
+    asyncio.run(run2())
+    assert session2.urls == ["http://fallback.test/v1/chat/completions"]

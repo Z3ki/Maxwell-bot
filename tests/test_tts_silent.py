@@ -44,7 +44,11 @@ def test_process_tool_calls_preserves_no_response_marker_for_tts():
     tts = FakeTool("__NO_RESPONSE__")
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False},
+        _control={
+            "tools_enabled": True,
+            "disabled_tools": [],
+            "typing_indicator": False,
+        },
         tools={"tts": tts},
     )
     message = SimpleNamespace()
@@ -73,7 +77,9 @@ def test_reaction_on_maxwell_message_invokes_handler():
     calls = []
     replies = []
     maxwell_user = SimpleNamespace(id=42, display_name="Maxwell", bot=True)
-    reacting_user = SimpleNamespace(id=99, display_name="alice", name="alice", bot=False)
+    reacting_user = SimpleNamespace(
+        id=99, display_name="alice", name="alice", bot=False
+    )
     channel = SimpleNamespace(id=123)
     original = SimpleNamespace(
         id=777,
@@ -130,7 +136,11 @@ def test_process_tool_calls_still_returns_other_tool_results():
     react = FakeTool("Reacted with <:catjam:123>")
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False},
+        _control={
+            "tools_enabled": True,
+            "disabled_tools": [],
+            "typing_indicator": False,
+        },
         tools={"react": react},
     )
     message = SimpleNamespace()
@@ -152,14 +162,20 @@ def test_process_tool_calls_handles_unclosed_send_message_without_leaking_enviro
     send_message = FakeTool("__MESSAGE_SENT__ Sent 6 chars")
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False},
+        _control={
+            "tools_enabled": True,
+            "disabled_tools": [],
+            "typing_indicator": False,
+        },
         tools={"send_message": send_message},
     )
     message = SimpleNamespace(guild=None)
-    response = '<tool:send_message>Hello!<|end|><environment_details>secret context</environment_details>'
+    response = "<tool:send_message>Hello!<|end|><environment_details>secret context</environment_details>"
 
     async def run():
-        cleaned, tool_results = await MaxwellBot._process_tool_calls(bot, message, response)
+        cleaned, tool_results = await MaxwellBot._process_tool_calls(
+            bot, message, response
+        )
         assert cleaned == ""
         assert tool_results == ["Tool send_message: __MESSAGE_SENT__ Sent 6 chars"]
         assert send_message.calls == [{"content": "Hello!"}]
@@ -171,21 +187,27 @@ def test_process_tool_calls_handles_reasoning_json_tts_without_leaking_system_re
     tts = FakeTool("__NO_RESPONSE__")
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False},
+        _control={
+            "tools_enabled": True,
+            "disabled_tools": [],
+            "typing_indicator": False,
+        },
         tools={"tts": tts},
     )
     message = SimpleNamespace()
-    response = '''{
+    response = """{
   "thoughts": "User asked for a TTS.",
   "intent": "Provide a text-to-speech response.",
   "decision": "Call the tts tool.",
   "tool_plan": "Use tts with text Hey there."
 }
 <tool:tts text="Hey there!" language="english" />
-<system-reminder>secret context</system-reminder>'''
+<system-reminder>secret context</system-reminder>"""
 
     async def run():
-        cleaned, tool_results = await MaxwellBot._process_tool_calls(bot, message, response)
+        cleaned, tool_results = await MaxwellBot._process_tool_calls(
+            bot, message, response
+        )
         assert cleaned == ""
         assert tool_results == ["Tool tts: __NO_RESPONSE__"]
         assert tts.calls == [{"text": "Hey there!", "language": "english"}]
@@ -197,7 +219,11 @@ def test_process_tool_calls_handles_pipe_tts_format():
     tts = FakeTool("__NO_RESPONSE__")
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False},
+        _control={
+            "tools_enabled": True,
+            "disabled_tools": [],
+            "typing_indicator": False,
+        },
         tools={"tts": tts},
     )
     message = SimpleNamespace()
@@ -220,7 +246,12 @@ def test_process_tool_calls_records_tool_history_in_memory():
     memory = FakeMemory()
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False, "store_memory": True},
+        _control={
+            "tools_enabled": True,
+            "disabled_tools": [],
+            "typing_indicator": False,
+            "store_memory": True,
+        },
         tools={"react": react},
         memory=memory,
     )
@@ -255,7 +286,11 @@ def test_process_tool_calls_strips_disabled_tool_call():
     react = FakeTool("Reacted with <:catjam:123>")
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={"tools_enabled": True, "disabled_tools": ["react"], "typing_indicator": False},
+        _control={
+            "tools_enabled": True,
+            "disabled_tools": ["react"],
+            "typing_indicator": False,
+        },
         tools={"react": react},
     )
     message = SimpleNamespace()
@@ -277,7 +312,11 @@ def test_process_tool_calls_strips_platform_incompatible_tool_call():
     react = FakeTool("Reacted")
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False},
+        _control={
+            "tools_enabled": True,
+            "disabled_tools": [],
+            "typing_indicator": False,
+        },
         tools={"react": react},
     )
     message = SimpleNamespace(tool_platform="telegram")
@@ -289,7 +328,9 @@ def test_process_tool_calls_strips_platform_incompatible_tool_call():
             '<tool:react emoji="catjam" />',
         )
         assert response == ""
-        assert tool_results == ["Tool react: Error - tool is not available on this platform"]
+        assert tool_results == [
+            "Tool react: Error - tool is not available on this platform"
+        ]
         assert react.calls == []
 
     asyncio.run(run())
@@ -325,7 +366,10 @@ def test_tool_prompt_requires_reasoning_before_terminal_action():
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={"tools_enabled": True, "disabled_tools": []},
-        tools={"reasoning_log": FakeTool("__REASONING_RECORDED__"), "send_message": FakeTool("sent")},
+        tools={
+            "reasoning_log": FakeTool("__REASONING_RECORDED__"),
+            "send_message": FakeTool("sent"),
+        },
     )
 
     prompt = MaxwellBot._tool_system_prompt(bot, "discord")
@@ -336,11 +380,20 @@ def test_tool_prompt_requires_reasoning_before_terminal_action():
 
 def test_ensure_reasoning_trace_backfills_missing_trace():
     reasoning = FakeTool("__REASONING_RECORDED__")
-    bot = SimpleNamespace(_tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0), tools={"reasoning_log": reasoning})
+    bot = SimpleNamespace(
+        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
+        tools={"reasoning_log": reasoning},
+    )
     message = SimpleNamespace()
 
     async def run():
-        await MaxwellBot._ensure_reasoning_trace(bot, message, ["Tool send_message: __MESSAGE_SENT__ Sent 2 chars"], "hi", "send_message")
+        await MaxwellBot._ensure_reasoning_trace(
+            bot,
+            message,
+            ["Tool send_message: __MESSAGE_SENT__ Sent 2 chars"],
+            "hi",
+            "send_message",
+        )
 
     asyncio.run(run())
 
@@ -360,11 +413,16 @@ def test_ensure_reasoning_trace_backfills_missing_trace():
 
 def test_ensure_reasoning_trace_skips_existing_trace():
     reasoning = FakeTool("__REASONING_RECORDED__")
-    bot = SimpleNamespace(_tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0), tools={"reasoning_log": reasoning})
+    bot = SimpleNamespace(
+        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
+        tools={"reasoning_log": reasoning},
+    )
     message = SimpleNamespace()
 
     async def run():
-        await MaxwellBot._ensure_reasoning_trace(bot, message, ["Tool reasoning_log: __REASONING_RECORDED__"], "hi", "reply")
+        await MaxwellBot._ensure_reasoning_trace(
+            bot, message, ["Tool reasoning_log: __REASONING_RECORDED__"], "hi", "reply"
+        )
 
     asyncio.run(run())
 
@@ -374,10 +432,26 @@ def test_ensure_reasoning_trace_skips_existing_trace():
 def test_build_messages_caps_tool_history_outside_recent_count():
     memory = FakeMemory(
         [
-            {"author": "Tool", "content": "Called search_messages with {} -> tool 1", "is_tool": True},
-            {"author": "Tool", "content": "Called search_messages with {} -> tool 2", "is_tool": True},
-            {"author": "Tool", "content": "Called search_messages with {} -> tool 3", "is_tool": True},
-            {"author": "Tool", "content": "Called search_messages with {} -> tool 4", "is_tool": True},
+            {
+                "author": "Tool",
+                "content": "Called search_messages with {} -> tool 1",
+                "is_tool": True,
+            },
+            {
+                "author": "Tool",
+                "content": "Called search_messages with {} -> tool 2",
+                "is_tool": True,
+            },
+            {
+                "author": "Tool",
+                "content": "Called search_messages with {} -> tool 3",
+                "is_tool": True,
+            },
+            {
+                "author": "Tool",
+                "content": "Called search_messages with {} -> tool 4",
+                "is_tool": True,
+            },
             {"author": "alice", "content": "old user message"},
             {"author": "alice", "content": "recent user message"},
         ]
@@ -397,6 +471,7 @@ def test_build_messages_caps_tool_history_outside_recent_count():
         },
         _drugged_until={},
         _guild_emojis={},
+        _recent_users={},
         _tool_system_prompt=lambda: "",
         bot_name="Maxwell",
         memory=memory,
@@ -429,7 +504,12 @@ def test_process_tool_calls_skips_duplicate_terminal_tools():
     second = FakeTool("__MESSAGE_SENT__ Sent 2 chars")
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={"tools_enabled": True, "disabled_tools": [], "typing_indicator": False, "store_memory": False},
+        _control={
+            "tools_enabled": True,
+            "disabled_tools": [],
+            "typing_indicator": False,
+            "store_memory": False,
+        },
         tools={"send_message": first, "no_response": second},
         _message_tool_platform=lambda _message: "discord",
         _compatible_tool_names=lambda _platform: {"send_message", "no_response"},
@@ -450,7 +530,9 @@ def test_process_tool_calls_skips_duplicate_terminal_tools():
 
 
 def test_shell_tool_results_trigger_followup():
-    assert _tool_results_need_followup(["Tool shell: __SHELL_SENT__\n$ date\nSat May 23"])
+    assert _tool_results_need_followup(
+        ["Tool shell: __SHELL_SENT__\n$ date\nSat May 23"]
+    )
 
 
 def test_telegram_html_renders_code_blocks():
@@ -462,8 +544,13 @@ def test_telegram_html_renders_code_blocks():
 
 
 def test_telegram_audio_turn_uses_stable_latest_message_label():
-    assert _telegram_latest_message_label("", has_media=True) == "[audio message attached]"
-    assert _telegram_latest_message_label("make an image", has_media=True) == "make an image"
+    assert (
+        _telegram_latest_message_label("", has_media=True) == "[audio message attached]"
+    )
+    assert (
+        _telegram_latest_message_label("make an image", has_media=True)
+        == "make an image"
+    )
 
 
 def test_telegram_tool_followup_keeps_audio_turn_context_available():
@@ -485,10 +572,12 @@ def test_no_response_tool_results_do_not_trigger_followup():
 
 
 def test_reasoning_log_with_send_message_does_not_trigger_followup():
-    assert not _tool_results_need_followup([
-        "Tool reasoning_log: __REASONING_RECORDED__",
-        "Tool send_message: __MESSAGE_SENT__ Sent 10 chars"
-    ])
+    assert not _tool_results_need_followup(
+        [
+            "Tool reasoning_log: __REASONING_RECORDED__",
+            "Tool send_message: __MESSAGE_SENT__ Sent 10 chars",
+        ]
+    )
 
 
 def test_tool_prompt_has_no_nested_tags_rule():
@@ -505,7 +594,10 @@ def test_tool_prompt_has_no_nested_tags_rule():
 
 
 def test_prompt_budget_trims_large_background_blocks():
-    bot = SimpleNamespace(_tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0), _control={"prompt_context_budget": 10000})
+    bot = SimpleNamespace(
+        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
+        _control={"prompt_context_budget": 10000},
+    )
     messages = [
         {"role": "system", "content": "core"},
         {"role": "system", "content": "x" * 50000},
@@ -519,9 +611,25 @@ def test_prompt_budget_trims_large_background_blocks():
 
 
 def test_shared_fact_relevance_filters_broad_vague_context():
-    assert MaxwellBot._shared_fact_relevant("lol", {"scope": "guild:1", "content": "project alpha uses postgres"}) is False
-    assert MaxwellBot._shared_fact_relevant("what database does project alpha use", {"scope": "guild:1", "content": "project alpha uses postgres"}) is True
-    assert MaxwellBot._shared_fact_relevant("lol", {"scope": "user:1", "content": "likes terse replies"}) is True
+    assert (
+        MaxwellBot._shared_fact_relevant(
+            "lol", {"scope": "guild:1", "content": "project alpha uses postgres"}
+        )
+        is False
+    )
+    assert (
+        MaxwellBot._shared_fact_relevant(
+            "what database does project alpha use",
+            {"scope": "guild:1", "content": "project alpha uses postgres"},
+        )
+        is True
+    )
+    assert (
+        MaxwellBot._shared_fact_relevant(
+            "lol", {"scope": "user:1", "content": "likes terse replies"}
+        )
+        is True
+    )
 
 
 def test_build_messages_has_single_formatting_instruction():
@@ -540,6 +648,7 @@ def test_build_messages_has_single_formatting_instruction():
         },
         _drugged_until={},
         _guild_emojis={},
+        _recent_users={},
         _tool_system_prompt=lambda: "",
         bot_name="Maxwell",
         memory=memory,
@@ -575,19 +684,34 @@ def test_cached_media_context_requires_latest_visual_reference():
 
 
 def test_cached_media_context_allowed_for_attachment_reply():
-    replied = SimpleNamespace(id=123, attachments=[SimpleNamespace(filename="old.png")], embeds=[])
+    replied = SimpleNamespace(
+        id=123, attachments=[SimpleNamespace(filename="old.png")], embeds=[]
+    )
     message = SimpleNamespace(reference=SimpleNamespace(resolved=replied))
 
     assert MaxwellBot._should_use_cached_media_context(message, "what is that")
 
 
 def test_cached_media_context_can_filter_by_reply_message_id():
-    bot = SimpleNamespace(_tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0), _media_context={
-        "c": [
-            {"b64": "old", "mime_type": "image/png", "filename": "old.png", "message_id": 1},
-            {"b64": "right", "mime_type": "image/png", "filename": "right.png", "message_id": 2},
-        ]
-    })
+    bot = SimpleNamespace(
+        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
+        _media_context={
+            "c": [
+                {
+                    "b64": "old",
+                    "mime_type": "image/png",
+                    "filename": "old.png",
+                    "message_id": 1,
+                },
+                {
+                    "b64": "right",
+                    "mime_type": "image/png",
+                    "filename": "right.png",
+                    "message_id": 2,
+                },
+            ]
+        },
+    )
 
     media = MaxwellBot._get_media_context(bot, "c", message_id=2)
 
@@ -596,7 +720,9 @@ def test_cached_media_context_can_filter_by_reply_message_id():
 
 def test_current_image_does_not_mix_cached_media_without_prior_reference():
     assert not MaxwellBot._should_mix_cached_with_current("look at this")
-    assert MaxwellBot._should_mix_cached_with_current("compare this with the previous image")
+    assert MaxwellBot._should_mix_cached_with_current(
+        "compare this with the previous image"
+    )
 
 
 def test_media_summary_does_not_tell_model_to_force_old_images():
