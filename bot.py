@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import contextlib
+import hmac
 import html
 import json
 import logging
@@ -855,15 +856,21 @@ def _parse_xml_attrs(attrs_str: str) -> dict:
 
 
 def _find_tool_close(text: str, name: str, start: int) -> re.Match | None:
-    # Accept closes with or without tool: / tool_ prefix, since models mix <tool_xxx> and </tool_xxx>
+    # Prefer named closes (</tool:name>, </name>, </tool_name>). Only fall back to
+    # bare </tool>/</function> when no named close exists — otherwise a bare tag
+    # inside a body (e.g. file content / HTML) closes early and steals later tools.
     n = re.escape(name)
     tn = re.escape("tool_" + name)
     tcn = re.escape("tool:" + name)
-    close_re = re.compile(
-        rf"</\s*(?:tool[:_])?(?:{n}|{tn}|{tcn}|function|tool|tool_call)\s*>",
+    named_re = re.compile(
+        rf"</\s*(?:tool[:_])?(?:{n}|{tn}|{tcn})\s*>",
         re.IGNORECASE,
     )
-    return close_re.search(text, start)
+    named = named_re.search(text, start)
+    if named:
+        return named
+    bare_re = re.compile(r"</\s*(?:function|tool|tool_call)\s*>", re.IGNORECASE)
+    return bare_re.search(text, start)
 
 
 UNTERMINATED_TOOL_STOP_RE = re.compile(
@@ -996,17 +1003,40 @@ def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = 
             pipe_matches.append(
                 (match.start(), match.end(), name, "", match.group(2), False)
             )
+    # De-dupe overlapping pipe matches (PIPE_TOOL_RE + GENERIC_PIPE_TOOL_RE can both
+    # match the same <|tool:name|>… span and cause double execution). Prefer the
+    # longer span, then first match order.
     if pipe_matches:
-        yield from sorted(pipe_matches, key=lambda x: (x[0], x[1]))
-        return
+        pipe_matches.sort(key=lambda x: (x[0], -(x[1] - x[0])))
+        deduped = []
+        occupied: list[tuple[int, int]] = []
+        for m in pipe_matches:
+            start, end = m[0], m[1]
+            if any(not (end <= os_ or start >= oe) for os_, oe in occupied):
+                continue
+            occupied.append((start, end))
+            deduped.append(m)
+        pipe_matches = sorted(deduped, key=lambda x: (x[0], x[1]))
+        # Continue to XML scan for non-overlapping regions; do not early-return
+        # so mixed pipe+XML batches still work.
+        for m in pipe_matches:
+            yield m
+        # Build occupied ranges so XML parser skips pipe-covered spans.
+        pipe_ranges = [(m[0], m[1]) for m in pipe_matches]
+    else:
+        pipe_ranges = []
     pos = 0
     while pos < len(text):
         start = text.find("<", pos)
         if start == -1:
             break
-        if _in_ranges(start, code_ranges):
+        if _in_ranges(start, code_ranges) or _in_ranges(start, pipe_ranges):
             containing = next(
-                (end for range_start, end in code_ranges if range_start <= start < end),
+                (
+                    end
+                    for range_start, end in (code_ranges + pipe_ranges)
+                    if range_start <= start < end
+                ),
                 start + 1,
             )
             pos = containing
@@ -1029,8 +1059,10 @@ def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = 
         if not close_match:
             stop_match = UNTERMINATED_TOOL_STOP_RE.search(text, tag_end + 1)
             body_end = stop_match.start() if stop_match else len(text)
-            yield start, len(text), name, attrs_str, text[tag_end + 1 : body_end], False
-            pos = len(text)
+            # Do not claim the entire rest of the response — only up to body_end —
+            # so later tools are still discoverable.
+            yield start, body_end, name, attrs_str, text[tag_end + 1 : body_end], False
+            pos = body_end
             continue
         yield (
             start,
@@ -1560,12 +1592,14 @@ JAILBREAK_PROMPT = (
 
 
 def _tool_results_need_followup(tool_results: list[str]) -> bool:
-    # If a terminal action was already taken, no follow-up is needed
-    if any(
-        any(marker in result for marker in ("__MESSAGE_SENT__", "__NO_RESPONSE__"))
-        for result in tool_results
-    ):
-        return False
+    # Terminal actions: send_message and explicit no_response only.
+    # TTS uses __TTS_SENT__ (and legacy __NO_RESPONSE__ from older code) and must
+    # NOT abort follow-up when other tools in the batch need a model turn.
+    for result in tool_results:
+        if "__MESSAGE_SENT__" in result:
+            return False
+        if result.startswith("Tool no_response:") and "__NO_RESPONSE__" in result:
+            return False
 
     for result in tool_results:
         # Check for error prefixes, not just the substring "Error" anywhere
@@ -2346,12 +2380,14 @@ class MaxwellBot(commands.Bot):
         _lock = self._get_channel_lock(channel_id)
         _lock_acquired = False
         try:
-            await asyncio.wait_for(_lock.acquire(), timeout=10.0)
+            # Fail closed: never process the same channel unlocked (double replies / races).
+            await asyncio.wait_for(_lock.acquire(), timeout=30.0)
             _lock_acquired = True
         except asyncio.TimeoutError as _exc:
-            logger.info(
-                f"Channel lock timeout for {channel_id}, proceeding without lock"
+            logger.warning(
+                f"Channel lock timeout for {channel_id}; dropping message to avoid double-processing"
             )
+            return
         try:
             if self._control.get("store_memory", True):
                 memory_content = message.content or ""
@@ -2635,6 +2671,7 @@ class MaxwellBot(commands.Bot):
             "vc",
             "autonomy",
             "jailbreak",
+            "intel",
         }
         if cmd in admin_commands and not self._is_admin(message.author.id):
             await message.channel.send("not authorized")
@@ -3114,17 +3151,32 @@ class MaxwellBot(commands.Bot):
 
                     async def restart():
                         await asyncio.sleep(1.5)
-                        if vc.is_connected() and not self._vc_is_listening(vc):
-                            try:
-                                await self._vc_start_listening(
-                                    guild,
-                                    text_channel,
-                                    voice_channel or getattr(vc, "channel", None),
-                                )
-                            except Exception:
-                                logger.exception("VC receive restart failed")
+                        # Bail if unlisten/leave already tore this sink down.
+                        if getattr(vc, "_maxwell_sink", None) is not None:
+                            return
+                        if key in getattr(self, "_vc_sinks", {}) and self._vc_sinks.get(key) is not None:
+                            return
+                        if not vc.is_connected() or self._vc_is_listening(vc):
+                            return
+                        try:
+                            await self._vc_start_listening(
+                                guild,
+                                text_channel,
+                                voice_channel or getattr(vc, "channel", None),
+                            )
+                        except Exception:
+                            logger.exception("VC receive restart failed")
 
-                    loop.create_task(restart())
+                    # Track restart task so unlisten/leave can cancel it.
+                    restart_task = loop.create_task(restart())
+                    tasks_map = getattr(self, "_vc_restart_tasks", None)
+                    if tasks_map is None:
+                        self._vc_restart_tasks = {}
+                        tasks_map = self._vc_restart_tasks
+                    old = tasks_map.get(key)
+                    if old and not old.done():
+                        old.cancel()
+                    tasks_map[key] = restart_task
 
             loop.call_soon_threadsafe(finish)
 
@@ -3140,6 +3192,16 @@ class MaxwellBot(commands.Bot):
         key = self._vc_context_key(guild, voice_channel, text_channel)
         if not key:
             return
+        # Cancel pending listen-restart and utterance work.
+        for task_map_name in ("_vc_restart_tasks", "_vc_active_tasks"):
+            task_map = getattr(self, task_map_name, None) or {}
+            pending = task_map.pop(key, None)
+            if pending is None:
+                continue
+            items = pending if isinstance(pending, (list, set, tuple)) else [pending]
+            for task in items:
+                if task and hasattr(task, "done") and not task.done():
+                    task.cancel()
         vc = self._vc_get_client(
             guild, voice_channel or self._vc_voice_channels.get(key)
         )
@@ -4524,13 +4586,26 @@ class MaxwellBot(commands.Bot):
         if visibility not in {"private", "shared", "admin_only", "public_hint"}:
             visibility = "shared"
 
-        allowed_scopes = {"global", f"user:{author_id}", f"channel:{channel_id}"}
-        if guild_id:
-            allowed_scopes.add(f"guild:{guild_id}")
-        if is_dm:
-            allowed_scopes.add(f"dm:{author_id}")
+        # Non-admins may only create user-scoped facts (never global/guild/channel shared).
+        if is_admin:
+            allowed_scopes = {"global", f"user:{author_id}", f"channel:{channel_id}"}
+            if guild_id:
+                allowed_scopes.add(f"guild:{guild_id}")
+            if is_dm:
+                allowed_scopes.add(f"dm:{author_id}")
+        else:
+            allowed_scopes = {f"user:{author_id}"}
+            if is_dm:
+                allowed_scopes.add(f"dm:{author_id}")
         if not scope:
             scope = "global" if is_admin and is_dm else f"user:{author_id}"
+        if not is_admin:
+            # Force private user facts for non-admins (prevents shared-context poison).
+            scope = f"user:{author_id}" if not is_dm else (
+                f"dm:{author_id}" if f"dm:{author_id}" in allowed_scopes else f"user:{author_id}"
+            )
+            if visibility not in {"private", "admin_only"}:
+                visibility = "private"
         if is_dm and not is_admin:
             scope = f"user:{author_id}"
             if visibility != "admin_only":
@@ -4899,22 +4974,18 @@ class MaxwellBot(commands.Bot):
                         except Exception:
                             fresh = []
                         if isinstance(fresh, list):
+                            # Match completed work by stable command id only.
+                            done_by_id = {
+                                str(our.get("id") or ""): our
+                                for our in snapshot
+                                if our.get("status") == "done" and our.get("id")
+                            }
                             for fc in fresh:
-                                if fc.get("status") == "pending":
-                                    for our in snapshot:
-                                        if (
-                                            our.get("status") == "done"
-                                            and our.get("type") == fc.get("type")
-                                            and our.get("content") == fc.get("content")
-                                            and (
-                                                our.get("channel_id")
-                                                == fc.get("channel_id")
-                                                or our.get("user_id")
-                                                == fc.get("user_id")
-                                            )
-                                        ):
-                                            fc["status"] = "done"
-                                            fc["result"] = our.get("result")
+                                cid = str(fc.get("id") or "")
+                                if cid and cid in done_by_id:
+                                    our = done_by_id[cid]
+                                    fc["status"] = "done"
+                                    fc["result"] = our.get("result")
                             to_write = fresh
                         else:
                             to_write = snapshot
@@ -4924,12 +4995,14 @@ class MaxwellBot(commands.Bot):
                     try:
                         with FileLock(path, timeout=10.0):
                             await asyncio.to_thread(_merge_and_write)
-                    except Exception:
-                        # Fallback to previous best-effort without blocking too long
-                        with contextlib.suppress(Exception):
-                            await asyncio.to_thread(
-                                _atomic_json_write_sync, path, snapshot
-                            )
+                    except Exception as lock_err:
+                        # Fail closed on lock timeout: keep pending so the next loop
+                        # retries instead of rewriting a stale snapshot that drops API
+                        # appends. Log and continue.
+                        logger.warning(
+                            "Command queue merge deferred (lock/write failed): %s",
+                            lock_err,
+                        )
             except Exception as e:
                 logger.error(f"Command queue error: {e}")
 
@@ -5296,6 +5369,8 @@ class MaxwellBot(commands.Bot):
                         "-y",
                         "-i",
                         str(video_path),
+                        "-t",
+                        "30",
                         "-vn",
                         "-ac",
                         "1",
@@ -5979,15 +6054,27 @@ class MaxwellBot(commands.Bot):
             )
             all_tool_results = []
             all_tool_images = []
+            # Accumulate multi-iteration history so intermediate tool results
+            # are not discarded on the next follow-up turn.
+            conversation_tail: list[dict] = []
             for _iteration in range(max_iters):
                 if time.monotonic() > tool_deadline:
                     logger.info("Tool iteration time budget exceeded, breaking")
+                    break
+                if self._token_tracker.exceeded:
+                    logger.warning(
+                        "Daily token budget exceeded (%s); stopping tool loop",
+                        self._token_tracker.summary(),
+                    )
                     break
                 response, tool_results, iter_images = await self._process_tool_calls(
                     message, response, include_images=True
                 )
                 all_tool_results.extend(tool_results)
+                # Cap image growth across iterations (keep newest frames).
                 all_tool_images.extend(iter_images)
+                if len(all_tool_images) > 12:
+                    all_tool_images = all_tool_images[-12:]
                 if not tool_results:
                     break
                 if not _tool_results_need_followup(tool_results):
@@ -6009,9 +6096,10 @@ class MaxwellBot(commands.Bot):
                         )
                     except Exception:
                         pass
-                result_messages = [dict(m) for m in messages]
-                result_messages.append({"role": "assistant", "content": history_response})
-                result_messages.append(
+                conversation_tail.append(
+                    {"role": "assistant", "content": history_response}
+                )
+                conversation_tail.append(
                     {
                         "role": "user",
                         "content": "=== TOOL RESULTS ===\n"
@@ -6019,6 +6107,10 @@ class MaxwellBot(commands.Bot):
                         + "\n=== END ===\nUse these results to continue. Tool images are attached. Don't text-reply if the user asked for an image — send_media or re-run image_generator instead.",
                     }
                 )
+                # Keep tail bounded (last 8 turns = 4 iterations of assistant+tools).
+                if len(conversation_tail) > 8:
+                    conversation_tail = conversation_tail[-8:]
+                result_messages = [dict(m) for m in messages] + list(conversation_tail)
                 await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
                 try:
                     # Attach images from tools so the model can SEE them
@@ -6030,13 +6122,20 @@ class MaxwellBot(commands.Bot):
                         timeout=ai_timeout,
                         max_tokens=max_out_tokens,
                     )
+                    usage = getattr(self.ai_provider, "_last_usage", None) or {}
+                    if usage:
+                        self._token_tracker.record(usage)
                     if followup and followup.strip():
                         response = followup
                     else:
                         break
                 finally:
                     await self._release_ai_slot()
-            if any("__NO_RESPONSE__" in tr for tr in all_tool_results):
+            # Terminal silence only for explicit no_response (not TTS).
+            if any(
+                tr.startswith("Tool no_response:") and "__NO_RESPONSE__" in tr
+                for tr in all_tool_results
+            ):
                 await self._ensure_reasoning_trace(
                     message, all_tool_results, response, "no_response"
                 )
@@ -6046,6 +6145,11 @@ class MaxwellBot(commands.Bot):
                     message, all_tool_results, response, "send_message"
                 )
                 normal_reply_sent = True
+                return
+            # TTS-only: no residual text reply required.
+            if any("__TTS_SENT__" in tr for tr in all_tool_results) and not (
+                response or ""
+            ).strip():
                 return
             response = re.sub(
                 r"\[(\w+)\]\s*\n?\s*\{.*?\}\s*\n?\s*\[/\1\]",
@@ -6057,6 +6161,7 @@ class MaxwellBot(commands.Bot):
             response = TOOL_TRACE_LINE_RE.sub("", response)
             response = (
                 response.replace("__NO_RESPONSE__", "")
+                .replace("__TTS_SENT__", "")
                 .replace("__SHELL_SENT__", "")
                 .replace("__MEME_SENT__", "")
                 .replace("__MEDIA_SENT__", "")
@@ -6263,7 +6368,13 @@ class MaxwellBot(commands.Bot):
                     result = await self.tools[name].execute(message, **params)
                     result_text = str(result) if result else "executed successfully"
                     results.append(f"Tool {name}: {result_text}")
-                    self._tool_breaker.record_success(name)
+                    # Soft tool failures return "Error: ..." strings — count them.
+                    if result_text.startswith("Error") or result_text.startswith(
+                        "Error:"
+                    ):
+                        self._tool_breaker.record_failure(name)
+                    else:
+                        self._tool_breaker.record_success(name)
                     await remember_tool_call(name, params, result_text)
                 except Exception as e:
                     logger.error(
@@ -6275,7 +6386,7 @@ class MaxwellBot(commands.Bot):
                     await remember_tool_call(name, params, result_text)
                 return results
 
-            # Run non-terminal tools concurrently
+            # Run non-terminal tools concurrently (shell serializes internally).
             if non_terminal:
                 gathered = await asyncio.gather(
                     *[execute_one(n, p) for _, _, n, p in non_terminal]
@@ -6321,7 +6432,12 @@ class MaxwellBot(commands.Bot):
                     result = await self.tools[name].execute(message, **params)
                     result_text = str(result) if result else "executed successfully"
                     tool_results.append(f"Tool {name}: {result_text}")
-                    self._tool_breaker.record_success(name)
+                    if result_text.startswith("Error") or result_text.startswith(
+                        "Error:"
+                    ):
+                        self._tool_breaker.record_failure(name)
+                    else:
+                        self._tool_breaker.record_success(name)
                     await remember_tool_call(name, params, result_text)
                 except Exception as e:
                     logger.error(
@@ -6331,7 +6447,6 @@ class MaxwellBot(commands.Bot):
                     result_text = f"Error - {e}"
                     tool_results.append(f"Tool {name}: {result_text}")
                     await remember_tool_call(name, params, result_text)
-
         if self._control.get("typing_indicator", True) and not getattr(
             message, "suppress_typing", False
         ):
@@ -6964,16 +7079,28 @@ class MaxwellBot(commands.Bot):
         token = self.config.TELEGRAM_TOKEN
         webhook_url = self.config.TELEGRAM_WEBHOOK_URL.rstrip("/")
         port = self.config.TELEGRAM_WEBHOOK_PORT
-        full_webhook_url = f"{webhook_url}/telegram/{token}"
+        # Do not put the bot token in the public path; use a dedicated secret.
+        import secrets as _secrets
+
+        webhook_path_secret = (
+            os.environ.get("TELEGRAM_WEBHOOK_PATH_SECRET", "").strip()
+            or _secrets.token_urlsafe(24)
+        )
+        secret_token = (
+            os.environ.get("TELEGRAM_WEBHOOK_SECRET", "").strip()
+            or _secrets.token_urlsafe(32)
+        )
+        full_webhook_url = f"{webhook_url}/telegram/{webhook_path_secret}"
         url_base = f"https://api.telegram.org/bot{token}"
         session = await _get_shared_session()
 
-        # Register webhook with Telegram
+        # Register webhook with Telegram (secret_token is verified on each update).
         try:
             async with session.post(
                 f"{url_base}/setWebhook",
                 json={
                     "url": full_webhook_url,
+                    "secret_token": secret_token,
                     "allowed_updates": ["message"],
                     "max_connections": 10,
                 },
@@ -6981,7 +7108,10 @@ class MaxwellBot(commands.Bot):
             ) as resp:
                 data = await resp.json()
                 if data.get("ok"):
-                    logger.info("Telegram webhook registered: %s", full_webhook_url)
+                    logger.info(
+                        "Telegram webhook registered at %s/telegram/<path_secret>",
+                        webhook_url,
+                    )
                 else:
                     logger.error("Telegram setWebhook failed: %s", data)
                     return
@@ -6993,6 +7123,13 @@ class MaxwellBot(commands.Bot):
 
         async def handle_update(request):
             """Handle incoming Telegram update via webhook POST."""
+            # Require Telegram's secret_token header (set at register time).
+            header_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+            if not header_secret or not hmac.compare_digest(
+                header_secret, secret_token
+            ):
+                logger.warning("Telegram webhook rejected: bad secret token")
+                return web.Response(status=403)
             try:
                 update = await request.json()
             except Exception:
@@ -7036,7 +7173,7 @@ class MaxwellBot(commands.Bot):
             return web.Response(status=200)
 
         app = web.Application()
-        app.router.add_post(f"/telegram/{token}", handle_update)
+        app.router.add_post(f"/telegram/{webhook_path_secret}", handle_update)
 
         runner = web.AppRunner(app)
         try:
@@ -7349,12 +7486,17 @@ class MaxwellBot(commands.Bot):
                         break
                 finally:
                     await self._release_ai_slot()
-            if any("__NO_RESPONSE__" in tr for tr in all_tool_results) or any(
-                "__MESSAGE_SENT__" in tr for tr in all_tool_results
+            if any(
+                (tr.startswith("Tool no_response:") and "__NO_RESPONSE__" in tr)
+                or "__MESSAGE_SENT__" in tr
+                for tr in all_tool_results
             ):
                 outcome = (
                     "no_response"
-                    if any("__NO_RESPONSE__" in tr for tr in all_tool_results)
+                    if any(
+                        tr.startswith("Tool no_response:") and "__NO_RESPONSE__" in tr
+                        for tr in all_tool_results
+                    )
                     else "send_message"
                 )
                 await self._ensure_reasoning_trace(
@@ -7748,12 +7890,19 @@ class MaxwellBot(commands.Bot):
                             finally:
                                 await self._release_ai_slot()
                         if any(
-                            "__NO_RESPONSE__" in tr for tr in all_tool_results
-                        ) or any("__MESSAGE_SENT__" in tr for tr in all_tool_results):
+                            (
+                                tr.startswith("Tool no_response:")
+                                and "__NO_RESPONSE__" in tr
+                            )
+                            or "__MESSAGE_SENT__" in tr
+                            for tr in all_tool_results
+                        ):
                             outcome = (
                                 "no_response"
                                 if any(
-                                    "__NO_RESPONSE__" in tr for tr in all_tool_results
+                                    tr.startswith("Tool no_response:")
+                                    and "__NO_RESPONSE__" in tr
+                                    for tr in all_tool_results
                                 )
                                 else "send_message"
                             )

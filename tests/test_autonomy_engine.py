@@ -453,6 +453,7 @@ def test_gather_context_uses_numbered_channels_and_messages(tmp_path):
         user=SimpleNamespace(id=42, display_name="Maxwell", name="Maxwell"),
         guilds=[
             SimpleNamespace(
+                id=1,
                 text_channels=[channel],
                 me=SimpleNamespace(),
             )

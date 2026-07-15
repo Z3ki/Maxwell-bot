@@ -177,11 +177,38 @@ _last_auth_cleanup = 0.0
 
 
 def _get_client_ip(request) -> str:
-    """Extract client IP, respecting X-Forwarded-For behind reverse proxies."""
-    forwarded = request.headers.get("X-Forwarded-For", "")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    """Extract client IP. Only trust X-Forwarded-For when MAXWELL_TRUST_PROXY=1."""
+    trust_proxy = os.getenv("MAXWELL_TRUST_PROXY", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if trust_proxy:
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
     return getattr(request, "remote", None) or "unknown"
+
+
+def _safe_compare(a: str, b: str) -> bool:
+    """Length-safe constant-time compare (avoid 500 length oracle)."""
+    if a is None or b is None:
+        return False
+    a = str(a)
+    b = str(b)
+    if len(a) != len(b):
+        # Still run compare_digest on equal-length padding to keep timing flatter.
+        dummy = a if len(a) >= len(b) else b
+        try:
+            hmac.compare_digest(dummy, dummy)
+        except Exception:
+            pass
+        return False
+    try:
+        return hmac.compare_digest(a, b)
+    except Exception:
+        return False
 
 
 def _cleanup_auth_failures():
@@ -238,8 +265,8 @@ def _has_admin_auth(request) -> bool:
         return False
     username, password = _basic_credentials(request)
     return bool(
-        hmac.compare_digest(username or "", ADMIN_USER)
-        and hmac.compare_digest(password or "", ADMIN_PASSWORD)
+        _safe_compare(username or "", ADMIN_USER)
+        and _safe_compare(password or "", ADMIN_PASSWORD)
     )
 
 
@@ -255,6 +282,9 @@ async def _auth_middleware_unless_login(request, handler):
             return _json_response({"error": "too many attempts, try again later"}, 429)
         return await handler(request)
     if _needs_auth(request):
+        # Rate-limit failed Basic auth on all protected routes, not only /api/login.
+        if _check_rate_limit(request):
+            return _json_response({"error": "too many attempts, try again later"}, 429)
         _load_admin_creds()
         if not ADMIN_USER or not ADMIN_PASSWORD:
             # No Basic creds configured; allow Discord-token auth alone.
@@ -263,8 +293,8 @@ async def _auth_middleware_unless_login(request, handler):
         else:
             username, password = _basic_credentials(request)
             if not (
-                hmac.compare_digest(username or "", ADMIN_USER)
-                and hmac.compare_digest(password or "", ADMIN_PASSWORD)
+                _safe_compare(username or "", ADMIN_USER)
+                and _safe_compare(password or "", ADMIN_PASSWORD)
             ) and not _discord_token_authed(request):
                 _record_auth_failure(request)
                 return _json_response({"error": "unauthorized"}, 401)
@@ -1109,25 +1139,8 @@ async def rem_runs(request):
 
 
 async def _queue_rem_command(cmd_type: str):
-    async with _file_lock:
-        try:
-            cmds = _load_commands_for_write()
-        except ValueError as exc:
-            return "", str(exc)
-        cmd_id = str(_uuid.uuid4())[:8]
-        cmds.append(
-            {
-                "id": cmd_id,
-                "type": cmd_type,
-                "status": "pending",
-                "result": "",
-                "created_at": time.time(),
-            }
-        )
-        if len(cmds) > MAX_COMMANDS:
-            cmds = cmds[-MAX_COMMANDS:]
-        await atomic_json_write(_commands_path(), cmds)
-    return cmd_id, ""
+    # Use the same cross-process FileLock path as _queue_command.
+    return await _queue_command(cmd_type)
 
 
 async def _queue_command(cmd_type: str, extra: dict | None = None):
@@ -2122,8 +2135,8 @@ async def login_post(request):
     if not ADMIN_USER or not ADMIN_PASSWORD:
         return _json_response({"error": "admin auth not configured"}, 503)
     if not (
-        hmac.compare_digest(user, ADMIN_USER)
-        and hmac.compare_digest(pwd, ADMIN_PASSWORD)
+        _safe_compare(user, ADMIN_USER)
+        and _safe_compare(pwd, ADMIN_PASSWORD)
     ):
         _record_auth_failure(request)
         return _json_response({"error": "unauthorized"}, 401)
@@ -2139,6 +2152,14 @@ _DISCORD_STATES: dict[str, float] = {}
 
 
 def _discord_redirect_base(request) -> str:
+    # Prefer fixed public base so Host-header open redirects cannot steal tokens.
+    fixed = (
+        os.getenv("MAXWELL_PUBLIC_BASE_URL")
+        or os.getenv("DISCORD_REDIRECT_BASE")
+        or ""
+    ).rstrip("/")
+    if fixed:
+        return fixed
     return f"{request.scheme}://{request.host}"
 
 
@@ -2222,7 +2243,15 @@ async def discord_auth_callback(request):
     avatar_url = (
         f"https://cdn.discordapp.com/avatars/{user_id}/{avatar}.png" if avatar else ""
     )
-    if DISCORD_ALLOWED_USER_IDS and user_id not in DISCORD_ALLOWED_USER_IDS:
+    # Fail closed: OAuth requires an explicit allowlist. Empty list = nobody.
+    if not DISCORD_ALLOWED_USER_IDS:
+        logger.error(
+            "discord oauth denied: DISCORD_ALLOWED_USER_IDS is empty (fail closed)"
+        )
+        return _json_response(
+            {"error": "discord oauth not configured (no allowed user ids)"}, 403
+        )
+    if user_id not in DISCORD_ALLOWED_USER_IDS:
         logger.warning("discord oauth denied for user %s (%s)", user_id, username)
         return _json_response({"error": "discord account not authorized"}, 403)
     import secrets as _secrets

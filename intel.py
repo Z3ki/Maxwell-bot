@@ -79,11 +79,9 @@ def _load_json_safe(path: Path, default):
         data = json.loads(raw)
         return data
     except (json.JSONDecodeError, OSError, ValueError) as e:
-        logger.warning(f"Corrupt/unreadable {path.name}, recreating defaults: {e}")
-        try:
-            path.write_text("{}", encoding="utf-8")
-        except Exception:
-            pass
+        # Fail closed: do NOT overwrite the on-disk file with {} on transient
+        # read errors — that wiped feed_urls / state in production.
+        logger.warning(f"Corrupt/unreadable {path.name}, using defaults (file left intact): {e}")
         return default() if callable(default) else default
 
 
@@ -252,9 +250,16 @@ class IntelEngine:
             logger.warning(f"Intel load_control failed: {e}")
 
     async def save_control(self):
-        await self.store.save_control(
-            {"enabled": self.enabled, "interval_seconds": self.interval_seconds}
-        )
+        # Preserve feed_urls / other custom keys when toggling enable/interval.
+        try:
+            existing = await self.store.load_control()
+            if not isinstance(existing, dict):
+                existing = {}
+        except Exception:
+            existing = {}
+        existing["enabled"] = self.enabled
+        existing["interval_seconds"] = self.interval_seconds
+        await self.store.save_control(existing)
 
     # -- loop --
 

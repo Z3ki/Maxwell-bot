@@ -58,19 +58,33 @@ class ProviderUsageExhaustedError(RuntimeError):
 
 
 def _is_usage_exhausted_error(status: int, error_text: str) -> bool:
+    """Detect true quota/credit exhaustion — not ordinary rate limits.
+
+    Transient 429 rate limits must still get normal retry/backoff. Only treat as
+    exhausted when the body clearly indicates cooldown, quota, or credits.
+    """
     text = (error_text or "").lower()
+    # Explicit exhaustion / cooldown markers (avoid bare "usage" / "rate limit").
     markers = (
         "model_cooldown",
         "cooling down",
-        "quota",
         "insufficient_quota",
         "insufficient credits",
         "credit balance",
-        "usage",
-        "rate limit",
-        "rate_limit",
+        "quota exceeded",
+        "out of credits",
+        "out of quota",
+        "billing hard limit",
+        "spend limit",
     )
-    return status == 429 and any(marker in text for marker in markers)
+    if status != 429:
+        return False
+    # Ordinary rate limiting is NOT exhausted.
+    if "rate limit" in text or "rate_limit" in text or "too many requests" in text:
+        # Unless also clearly quota-related
+        if not any(m in text for m in markers):
+            return False
+    return any(marker in text for marker in markers)
 
 
 @dataclass(frozen=True)

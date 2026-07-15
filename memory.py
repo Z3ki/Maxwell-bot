@@ -613,10 +613,15 @@ class MemoryManager:
                 scope = entry.get("scope", "global")
                 if visibility == "admin_only" and not is_admin:
                     continue
+                # Private facts are only visible to the source user (or admins).
+                # Channel-scoped private was leaking to every channel member.
                 if visibility == "private" and not (
                     is_admin
-                    or scope
-                    in {f"user:{user_id}", f"dm:{user_id}", f"channel:{channel_id}"}
+                    or scope in {f"user:{user_id}", f"dm:{user_id}"}
+                    or (
+                        str(entry.get("source_user_id") or "") == user_id
+                        and user_id
+                    )
                 ):
                     continue
                 if scope not in scopes:

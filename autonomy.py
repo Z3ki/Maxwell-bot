@@ -678,14 +678,20 @@ class AutonomyEngine:
         now_ts = time.time()
         ch_map_lines = []
         for guild in self.bot.guilds:
-            if not self._guild_allowed(str(guild.id)):
+            guild_id = getattr(guild, "id", None)
+            if guild_id is None:
                 continue
-            for ch in guild.text_channels:
+            if not self._guild_allowed(str(guild_id)):
+                continue
+            for ch in getattr(guild, "text_channels", None) or []:
                 try:
-                    if guild.me is None:
+                    if getattr(guild, "me", None) is None:
                         continue
                     perms = ch.permissions_for(guild.me)
-                    if not perms.send_messages or not self._channel_allowed(str(ch.id)):
+                    ch_id = getattr(ch, "id", None)
+                    if ch_id is None:
+                        continue
+                    if not perms.send_messages or not self._channel_allowed(str(ch_id)):
                         continue
                     idx = ctx_index.add_channel(str(ch.id))
                     tags = []
@@ -855,17 +861,20 @@ class AutonomyEngine:
 
     async def tick(self) -> dict:
         """One autonomy cycle. Skipped if previous tick still running."""
-        if self._lock.locked():
-            logger.debug("Autonomy tick skipped — previous still running")
-            return {"skipped": True}
         acquired = False
         try:
+            # Always wait with a timeout; do not pre-check locked() which made the
+            # 600s path unreachable and left autonomy permanently skipped.
             await asyncio.wait_for(self._lock.acquire(), timeout=600)
             acquired = True
         except asyncio.TimeoutError as _exc:
             logger.error(
                 "Autonomy tick lock timed out — previous tick hung for >10m, forcing release"
             )
+            # Force-release a stuck lock so future ticks can run.
+            if self._lock.locked():
+                with contextlib.suppress(RuntimeError, ValueError):
+                    self._lock.release()
             return {"skipped": False, "error": "lock timeout"}
         try:
             # BUG FIX: capture tick START time as watermark. Events recorded during

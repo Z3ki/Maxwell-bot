@@ -5,6 +5,7 @@ stdout/stderr, and notifies the channel when the task finishes.
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -107,14 +108,46 @@ def _write_opencode_config(workdir: Path, model: str, timeout_ms: int) -> Path:
 
 
 def _use_docker_backend() -> bool:
-    """Return True when the OpenCode sub-agent should run inside Docker."""
+    """Return True when the OpenCode sub-agent should run inside Docker.
+
+    Default is ON for isolation. Set OPENCODE_SUBAGENT_DOCKER=0 to force host.
+    Bot control flag ``subagent_docker`` is also honored when present on the bot.
+    """
     env = os.environ.get("OPENCODE_SUBAGENT_DOCKER", "").strip().lower()
+    if env in {"0", "false", "no", "off"}:
+        return False
     if env in {"1", "true", "yes", "on"}:
         return True
-    if env in {"0", "false", "no", "off", ""}:
-        return False
-    # Fallback for weird values: anything non-empty/positive defaults off to stay safe.
-    return False
+    # Default: prefer Docker isolation (safer than host RCE).
+    return True
+
+
+def _scrub_subagent_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """Build a minimal env for OpenCode — never pass full host secrets."""
+    allow = {
+        "PATH",
+        "HOME",
+        "USER",
+        "LANG",
+        "LC_ALL",
+        "TERM",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "OLLAMA_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENCODE_CONFIG",
+        "OPENCODE_CONFIG_DIR",
+        "OPENCODE_DISABLE_AUTOCOMPACT",
+        "OPENCODE_BIN",
+        "OPENCODE_SUBAGENT_MODEL",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+    }
+    src = base if base is not None else os.environ
+    out = {k: str(v) for k, v in src.items() if k in allow and v}
+    return out
 
 
 async def _run_opencode(
@@ -162,7 +195,8 @@ async def _run_opencode(
     for fpath in extra_files or []:
         cmd.extend(["--file", fpath])
 
-    run_env = dict(os.environ)
+    # Never inherit full host env (Discord tokens, admin passwords, etc.).
+    run_env = _scrub_subagent_env()
     run_env["OPENCODE_CONFIG"] = str(config_path)
     run_env["OPENCODE_CONFIG_DIR"] = str(workdir / ".opencode")
     run_env["OPENCODE_DISABLE_AUTOCOMPACT"] = "true"
@@ -172,7 +206,8 @@ async def _run_opencode(
         if hermes_key:
             run_env["OLLAMA_API_KEY"] = hermes_key
     if env:
-        run_env.update(env)
+        # Only merge allowlisted keys from caller overrides.
+        run_env.update(_scrub_subagent_env(env))
 
     _ensure_logger().info(
         "Starting OpenCode subagent in %s with model %s timeout %sms",
@@ -278,10 +313,13 @@ async def run_subagent_task(
     """
     base = subagent_base_dir()
     base.mkdir(parents=True, exist_ok=True)
-    base.chmod(0o777)
+    # Owner-writable only (avoid world-writable 0o777).
+    with contextlib.suppress(Exception):
+        base.chmod(0o755)
     workdir = _workdir_for(slug)
     workdir.mkdir(parents=True, exist_ok=True)
-    workdir.chmod(0o777)
+    with contextlib.suppress(Exception):
+        workdir.chmod(0o755)
 
     model = model or os.environ.get(
         "OPENCODE_SUBAGENT_MODEL", "ollama-cloud/minimax-m3"
@@ -289,9 +327,29 @@ async def run_subagent_task(
     opencode_bin = os.environ.get("OPENCODE_BIN", _default_opencode_bin())
 
     # Apply control timeout cap when available.
-    control = getattr(bot, "control", {}) or {}
+    control = getattr(bot, "control", None) or getattr(bot, "_control", {}) or {}
     max_timeout = int(control.get("subagent_max_timeout_minutes", 120))
     timeout_minutes = max(1, min(timeout_minutes, max_timeout))
+
+    # Honor dashboard/control flag to force docker/host when env is unset.
+    if "OPENCODE_SUBAGENT_DOCKER" not in os.environ:
+        if control.get("subagent_docker") is False:
+            os.environ["OPENCODE_SUBAGENT_DOCKER"] = "0"
+        elif control.get("subagent_docker") is True:
+            os.environ["OPENCODE_SUBAGENT_DOCKER"] = "1"
+
+    # Concurrency cap per process (control default 3).
+    max_concurrent = max(1, int(control.get("subagent_max_concurrent_per_user", 3) or 3))
+    tracker = getattr(bot, "_subagent_tasks", {})
+    live = sum(
+        1
+        for meta in tracker.values()
+        if isinstance(meta, dict)
+        and meta.get("task") is not None
+        and not meta["task"].done()
+    )
+    if live >= max_concurrent:
+        return f"Error: too many concurrent sub-agents ({live}/{max_concurrent})"
 
     task = asyncio.create_task(
         _run_opencode(
@@ -305,7 +363,6 @@ async def run_subagent_task(
     )
 
     task_id = os.urandom(8).hex()
-    tracker = getattr(bot, "_subagent_tasks", {})
     tracker[task_id] = {"task": task, "workdir": workdir, "prompt": prompt}
     bot._subagent_tasks = tracker
 
@@ -328,7 +385,14 @@ async def run_subagent_task(
                 _ensure_logger().error("Failed to notify channel about subagent: %s", e)
         tracker.pop(task_id, None)
 
-    task.add_done_callback(lambda t: asyncio.create_task(_on_complete(t)))
+    def _schedule_complete(t):
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_on_complete(t))
+        except RuntimeError:
+            pass
+
+    task.add_done_callback(_schedule_complete)
 
     return (
         f"__SUBAGENT_STARTED__ {task_id}\n"

@@ -89,7 +89,7 @@ def test_tts_spanish_falls_back_to_gtts_without_nvidia_key(monkeypatch, tmp_path
             text="hola mundo",
             language="spanish",
         )
-        assert result == "__NO_RESPONSE__"
+        assert result == "__TTS_SENT__"
 
     asyncio.run(run())
 

@@ -38,11 +38,35 @@ from subagent_runner import run_subagent_task
 logger = logging.getLogger(__name__)
 
 # Owner IDs come from env var only — no hardcoded defaults to leak in open-source.
+# Load dotenv first so bare `python bot.py` sees MAXWELL_OWNER_IDS from .env
+# (config.py also loads dotenv; this avoids import-order freezing empty OWNER_IDS).
+try:
+    from dotenv.main import load_dotenv as _load_dotenv_early
+    from pathlib import Path as _PathEarly
+
+    _load_dotenv_early(
+        _PathEarly(os.getenv("MAXWELL_ENV_FILE", _PathEarly(__file__).resolve().parent / ".env")),
+        override=False,
+    )
+except Exception:
+    pass
+
 OWNER_IDS = {
     item.strip()
     for item in os.environ.get("MAXWELL_OWNER_IDS", "").split(",")
     if item.strip()
 }
+
+
+def refresh_owner_ids() -> set[str]:
+    """Re-read MAXWELL_OWNER_IDS from the environment (e.g. after dotenv)."""
+    global OWNER_IDS
+    OWNER_IDS = {
+        item.strip()
+        for item in os.environ.get("MAXWELL_OWNER_IDS", "").split(",")
+        if item.strip()
+    }
+    return OWNER_IDS
 
 
 TTS_LANGUAGE_ALIASES = {
@@ -103,6 +127,9 @@ def _is_safe_ip(value: str) -> bool:
         ip = ipaddress.ip_address(value)
     except ValueError:
         return False
+    # Unwrap IPv4-mapped IPv6 (::ffff:127.0.0.1) so loopback/private checks apply.
+    if getattr(ip, "ipv4_mapped", None) is not None:
+        ip = ip.ipv4_mapped
     return not (
         ip.is_private
         or ip.is_loopback
@@ -161,8 +188,14 @@ async def _recreate_shared_session():
 
 
 async def close_shared_session():
-    if _SHARED_SESSION and not _SHARED_SESSION.closed:
-        await _SHARED_SESSION.close()
+    global _SHARED_SESSION
+    async with _SESSION_LOCK:
+        if _SHARED_SESSION is not None and not _SHARED_SESSION.closed:
+            try:
+                await _SHARED_SESSION.close()
+            except Exception:
+                pass
+        _SHARED_SESSION = None
 
 
 async def _read_response_limited(
@@ -620,6 +653,8 @@ class MemoryTool(Tool):
         memory_id: str | None = None,
         **kwargs,
     ) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: memory_edit is admin-only"
         if not action:
             return "Error: action is required (add/edit/remove)"
 
@@ -1593,7 +1628,7 @@ class CreateSiteTool(Tool):
         images: str | None = None,
         **kwargs,
     ) -> str:
-        # create_site is now available to everyone (non-admins too). Quota still applies per user.
+        # Available to everyone (non-admins too). Quota + ownership checks apply.
         if not name or not title or body is None:
             missing = []
             if not name:
@@ -1619,11 +1654,22 @@ class CreateSiteTool(Tool):
             return "Error: name must be at least 2 valid characters"
 
         user_id = str(message.author.id)
+        is_admin = bool(self.bot and self.bot._is_admin(message.author.id))
         if hasattr(self.bot, "_load_sites"):
             self.bot._load_sites(quiet=True)
         sites = self.bot._sites
 
-        control = getattr(self.bot, "control", {}) or {}
+        # Block slug takeover: only owner or admin may overwrite an existing site.
+        existing = sites.get(slug) if isinstance(sites, dict) else None
+        if isinstance(existing, dict):
+            owner = str(existing.get("user_id") or "")
+            if owner and owner != user_id and not is_admin:
+                return (
+                    f"Error: site slug '{slug}' is already owned by another user. "
+                    "Pick a different name."
+                )
+
+        control = getattr(self.bot, "control", {}) or getattr(self.bot, "_control", {}) or {}
         max_sites = int(control.get("create_site_quota_per_user", 10))
         active_user_sites = [
             s for s in sites.values() if s.get("user_id") == user_id
@@ -2035,7 +2081,10 @@ class SendFileTool(Tool):
                 return f"Error: file not found at '{path}'"
             except Exception as e:
                 return f"Error reading file from disk: {e}"
-            safe_name = filename or _safe_attachment_filename(target.name, default="file")
+            # Always sanitize the outbound attachment name (never trust filename=).
+            safe_name = _safe_attachment_filename(
+                filename or target.name, default="file"
+            )
             return await self._send_blob(message, blob, safe_name)
 
         # Inline-content mode (original behavior).
@@ -2062,7 +2111,15 @@ class SendFileTool(Tool):
         return await self._send_blob(message, blob, safe_name)
 
     def _allowed_send_file_bases(self) -> list[str]:
-        bases = [os.path.abspath("data")]
+        # Do NOT allow the full data/ tree (admins.json, cookies, traces, etc.).
+        # Only export-safe subtrees and workspace dirs the tools themselves create.
+        bases: list[str] = []
+        data_dir = os.path.abspath(
+            getattr(getattr(getattr(self, "bot", None), "config", None), "DATA_DIR", "data")
+            or "data"
+        )
+        for sub in ("exports", "public_files", "attachments"):
+            bases.append(os.path.join(data_dir, sub))
         site_dir = getattr(getattr(self, "bot", None), "config", None)
         if site_dir:
             site_path = getattr(site_dir, "MAXWELL_SITE_DIR", "")
@@ -2118,13 +2175,32 @@ class ShellTool(Tool):
     MAX_OUTPUT = 8000
     TIMEOUT = 60
     MAX_COMMAND_LENGTH = 4000
+    # Serialize container lifecycle + exec so parallel tool batches cannot
+    # race docker rm -f / recreate.
+    _lifecycle_lock = asyncio.Lock()
+
+    @staticmethod
+    def _full_host_access() -> bool:
+        """Opt-in host RCE mode. Default is isolated (no /host, no host net)."""
+        return os.environ.get("MAXWELL_SHELL_FULL_HOST", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
     def get_description(self):
+        if self._full_host_access():
+            return (
+                "Run a shell command with bash -lc in the maxwell-shell container. "
+                "FULL ACCESS MODE (MAXWELL_SHELL_FULL_HOST): host network, host root at /host, root user. "
+                "Params: command (required), files (optional paths under /home/maxwell to attach)."
+            )
         return (
             "Run a shell command with bash -lc in the maxwell-shell container. "
-            "FULL ACCESS MODE: host network (--network host), writable root filesystem (no --read-only), host root filesystem mounted at /host (full FS access from inside), running as root. "
-            "Use /host to reach the real host machine's files. Network tools (curl, ping, apt, pip, git, etc.) work without restriction. "
-            "Params: command (required), files (optional: comma-separated or JSON list of paths under /home/maxwell to send back as Discord attachments after run)."
+            "Isolated sandbox: no host filesystem mount, bridge network, memory/cpu/pids limits. "
+            "Working directory is /home/maxwell (project shelldocker volume only). "
+            "Params: command (required), files (optional paths under /home/maxwell to attach)."
         )
 
     async def _run_docker(self, *args: str, timeout: int = 30):
@@ -2144,27 +2220,34 @@ class ShellTool(Tool):
             raise
 
     async def _ensure_container(self):
-        # Always force-remove any existing container so we get the current flags
-        # (full network host + /host FS mount + no read-only). Old sandboxed
-        # containers from previous runs will be replaced on first shell use.
-        with contextlib.suppress(Exception):
-            await self._run_docker("rm", "-f", self.CONTAINER_NAME, timeout=10)
-
+        # Reuse a running container when present and access mode matches.
+        # Recreate when missing/stopped or when full-host mode flag changed.
+        desired_mode = "full" if self._full_host_access() else "isolated"
         try:
             (stdout, _stderr), code = await self._run_docker(
-                "inspect", "-f", "{{.State.Running}}", self.CONTAINER_NAME, timeout=10
+                "inspect",
+                "-f",
+                "{{.State.Running}} {{index .Config.Labels \"maxwell.shell.mode\"}}",
+                self.CONTAINER_NAME,
+                timeout=10,
             )
             if code == 0:
-                if stdout.decode(errors="replace").strip().lower() == "true":
+                parts = stdout.decode(errors="replace").strip().split(None, 1)
+                running = (parts[0] if parts else "").lower() == "true"
+                mode = parts[1] if len(parts) > 1 else ""
+                if running and mode == desired_mode:
                     return
+                # Wrong mode or stopped — recreate cleanly.
+                with contextlib.suppress(Exception):
+                    await self._run_docker("rm", "-f", self.CONTAINER_NAME, timeout=10)
                 (_stdout, stderr), start_code = await self._run_docker(
                     "start", self.CONTAINER_NAME, timeout=15
                 )
                 if start_code == 0:
                     return
-                raise RuntimeError(
-                    stderr.decode(errors="replace").strip() or "docker start failed"
-                )
+                # Stale container with wrong flags — remove and recreate below.
+                with contextlib.suppress(Exception):
+                    await self._run_docker("rm", "-f", self.CONTAINER_NAME, timeout=10)
         except FileNotFoundError:
             raise RuntimeError("docker is not installed or not on PATH")
         except asyncio.TimeoutError:
@@ -2178,28 +2261,63 @@ class ShellTool(Tool):
                 stderr.decode(errors="replace").strip() or "docker build failed"
             )
 
-        (_stdout, stderr), run_code = await self._run_docker(
+        shell_host = os.path.join(os.path.dirname(__file__), "shelldocker")
+        run_args = [
             "run",
             "-d",
             "--name",
             self.CONTAINER_NAME,
+            "--label",
+            f"maxwell.shell.mode={desired_mode}",
             "--memory",
             "4g",
             "--cpus",
             "2.0",
-            "--network",
-            "host",
             "--pids-limit",
             "1024",
             "--tmpfs",
             "/tmp:rw,exec,nosuid,size=256m",
             "-v",
-            f"{os.path.join(os.path.dirname(__file__), 'shelldocker')}:/home/maxwell:rw",
-            "-v",
-            "/:/host:rw",
-            self.IMAGE_NAME,
-            timeout=30,
-        )
+            f"{shell_host}:/home/maxwell:rw",
+        ]
+        if self._full_host_access():
+            # Explicit opt-in: host network + full host FS (documented RCE for admins).
+            run_args.extend(
+                [
+                    "--network",
+                    "host",
+                    "-v",
+                    "/:/host:rw",
+                ]
+            )
+        else:
+            # Default: isolated sandbox (no docker.sock, no host root, no host net).
+            run_args.extend(
+                [
+                    "--network",
+                    "bridge",
+                    "--security-opt",
+                    "no-new-privileges:true",
+                    "--cap-drop",
+                    "ALL",
+                    "--cap-add",
+                    "CHOWN",
+                    "--cap-add",
+                    "SETUID",
+                    "--cap-add",
+                    "SETGID",
+                    "--cap-add",
+                    "DAC_OVERRIDE",
+                    "--cap-add",
+                    "FOWNER",
+                    "--cap-add",
+                    "NET_RAW",
+                    "--cap-add",
+                    "NET_BIND_SERVICE",
+                ]
+            )
+        run_args.append(self.IMAGE_NAME)
+        (_stdout, stderr), run_code = await self._run_docker(*run_args, timeout=30)
         if run_code != 0:
             raise RuntimeError(
                 stderr.decode(errors="replace").strip() or "docker run failed"
@@ -2234,50 +2352,51 @@ class ShellTool(Tool):
         return None
 
     async def _run_shell_command(self, command: str):
-        await self._ensure_container()
         sanitized = self._normalize_command(command)
         validation_error = self._validate_command(sanitized)
         if validation_error:
             raise RuntimeError(validation_error)
         if not sanitized:
             raise RuntimeError("empty command")
-        proc = await asyncio.create_subprocess_exec(
-            "docker",
-            "exec",
-            "--workdir",
-            "/home/maxwell",
-            "--user",
-            "root",
-            self.CONTAINER_NAME,
-            "bash",
-            "-lc",
-            sanitized,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=self.TIMEOUT
+        async with self._lifecycle_lock:
+            await self._ensure_container()
+            proc = await asyncio.create_subprocess_exec(
+                "docker",
+                "exec",
+                "--workdir",
+                "/home/maxwell",
+                "--user",
+                "root",
+                self.CONTAINER_NAME,
+                "bash",
+                "-lc",
+                sanitized,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            return stdout, stderr, proc.returncode
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise
-        except asyncio.CancelledError:
-            # Outer autonomy wait_for or other cancel can hit here; always kill child.
-            if proc.returncode is None:
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=self.TIMEOUT
+                )
+                return stdout, stderr, proc.returncode
+            except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
-            raise
-        finally:
-            # Belt-and-suspenders: ensure no zombie if communicate didn't finish.
-            if proc.returncode is None:
-                try:
+                raise
+            except asyncio.CancelledError:
+                # Outer autonomy wait_for or other cancel can hit here; always kill child.
+                if proc.returncode is None:
                     proc.kill()
                     await proc.wait()
-                except Exception:
-                    pass
+                raise
+            finally:
+                # Belt-and-suspenders: ensure no zombie if communicate didn't finish.
+                if proc.returncode is None:
+                    try:
+                        proc.kill()
+                        await proc.wait()
+                    except Exception:
+                        pass
 
     async def execute(
         self,
@@ -3319,7 +3438,9 @@ class TtsTool(Tool):
                     await cast(Any, message).send_voice_file(send_path)
                 else:
                     await send_discord_voice_message(send_path)
-                return "__NO_RESPONSE__"
+                # Distinct from terminal no_response so TTS in a multi-tool batch
+                # does not abort follow-up / suppress other tool results.
+                return "__TTS_SENT__"
             except Exception as discord_err:
                 return f"Error sending TTS voice message to channel: {discord_err}"
             finally:
@@ -3343,6 +3464,8 @@ class LeaveVcTool(Tool):
         )
 
     async def execute(self, message: Message, **kwargs) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: leave_vc is admin-only"
         if not message.guild:
             return "Error: This tool can only be used within a server/guild."
         vc = None
@@ -3357,6 +3480,16 @@ class LeaveVcTool(Tool):
                 await self.bot._vc_stop_listening(
                     message.guild, vc.channel, message.channel
                 )
+            # Cancel any in-flight VC reply/utterance tasks for this guild.
+            key = None
+            if hasattr(self.bot, "_vc_context_key"):
+                key = self.bot._vc_context_key(message.guild, vc.channel, message.channel)
+            active = getattr(self.bot, "_vc_active_tasks", None) or {}
+            for task in list(active.get(key, []) if key else []):
+                if task and not task.done():
+                    task.cancel()
+            if key and isinstance(active, dict):
+                active.pop(key, None)
             await vc.disconnect(force=True)
             return "Successfully disconnected from the voice channel."
         except Exception as e:
@@ -3406,6 +3539,27 @@ class SubAgentTool(Tool):
                     extra_files = [parsed.strip()] if parsed.strip() else []
             except json.JSONDecodeError:
                 extra_files = [f.strip() for f in str(files).split(",") if f.strip()]
+
+        # Allowlist extra files to project-safe trees only (never .env / data secrets).
+        allowed_bases = [
+            os.path.abspath("subagents"),
+            os.path.abspath(os.environ.get("OPENCODE_SUBAGENT_BASE_DIR", "subagents")),
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "shelldocker")),
+        ]
+        site_dir = getattr(getattr(self.bot, "config", None), "MAXWELL_SITE_DIR", "")
+        if site_dir:
+            allowed_bases.append(os.path.abspath(site_dir))
+        safe_files: list[str] = []
+        for fpath in extra_files[:20]:
+            try:
+                resolved = str(Path(fpath).expanduser().resolve())
+            except Exception:
+                continue
+            if any(_is_path_allowed(resolved, base) for base in allowed_bases):
+                safe_files.append(resolved)
+            else:
+                logger.warning("sub_agent rejected extra file outside allowlist: %s", fpath)
+        extra_files = safe_files
 
         try:
             model = os.environ.get(

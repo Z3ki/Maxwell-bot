@@ -169,11 +169,20 @@ except ImportError:
     fcntl = None  # type: ignore
 
 
-class FileLock:
-    """Simple exclusive file lock context manager using fcntl.flock when available.
+class FileLockTimeout(TimeoutError):
+    """Raised when an exclusive FileLock cannot be acquired within timeout."""
 
-    On non-Linux or without fcntl it becomes a no-op (still better than nothing
-    for single-process, and documents intent).
+
+class FileLock:
+    """Exclusive file lock using a *sidecar* lock file + fcntl.flock.
+
+    The lock is held on ``{path}.lock``, never on the data file itself. That
+    matters because callers use atomic ``os.replace`` on the data path — locking
+    the data inode was broken (replace swaps the inode out from under flock).
+
+    On timeout this raises ``FileLockTimeout`` (fail closed) instead of
+    proceeding unlocked. Without fcntl it still serializes best-effort via the
+    sidecar fd but cannot enforce cross-process exclusion.
     Usage:
         with FileLock(path):
             data = json.loads(path.read_text() or '[]')
@@ -181,15 +190,17 @@ class FileLock:
             _atomic_json_write_sync(path, data)
     """
 
-    def __init__(self, path: Path | str, timeout: float = 30.0):
+    def __init__(self, path: Path | str, timeout: float = 30.0, *, fail_open: bool = False):
         self.path = Path(path)
+        self.lock_path = Path(str(self.path) + ".lock")
         self.timeout = timeout
+        self.fail_open = fail_open
         self._fd = None
         self._locked = False
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
+        self._fd = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o644)
         if fcntl is not None:
             import time as _time
             deadline = _time.time() + self.timeout
@@ -200,9 +211,17 @@ class FileLock:
                     break
                 except BlockingIOError:
                     if _time.time() > deadline:
-                        # Fall through without hard lock; still proceed (best effort).
-                        logger.warning(f"FileLock timeout on {self.path}; proceeding without exclusive lock")
-                        break
+                        if self.fail_open:
+                            logger.warning(
+                                f"FileLock timeout on {self.lock_path}; proceeding without exclusive lock"
+                            )
+                            break
+                        with contextlib.suppress(Exception):
+                            os.close(self._fd)
+                        self._fd = None
+                        raise FileLockTimeout(
+                            f"FileLock timeout after {self.timeout}s on {self.lock_path}"
+                        )
                     _time.sleep(0.05)
         return self
 

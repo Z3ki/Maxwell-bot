@@ -40,8 +40,8 @@ class FakeMemory:
         return None
 
 
-def test_process_tool_calls_preserves_no_response_marker_for_tts():
-    tts = FakeTool("__NO_RESPONSE__")
+def test_process_tool_calls_preserves_tts_sent_marker():
+    tts = FakeTool("__TTS_SENT__")
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={
@@ -60,10 +60,21 @@ def test_process_tool_calls_preserves_no_response_marker_for_tts():
             '<tool:tts text="say this" />',
         )
         assert response == ""
-        assert tool_results == ["Tool tts: __NO_RESPONSE__"]
+        assert tool_results == ["Tool tts: __TTS_SENT__"]
         assert tts.calls == [{"text": "say this"}]
 
     asyncio.run(run())
+
+
+def test_tts_results_do_not_block_tool_followup():
+    # TTS must not be treated as terminal no_response (allows multi-tool batches).
+    assert _tool_results_need_followup(
+        ["Tool tts: __TTS_SENT__", "Tool web_search: found 3 results"]
+    )
+    # TTS alone does not need followup (no FOLLOWUP_TOOL_NAMES hit).
+    assert not _tool_results_need_followup(["Tool tts: __TTS_SENT__"])
+    # web_search alone needs followup
+    assert _tool_results_need_followup(["Tool web_search: found 3 results"])
 
 
 def test_reaction_on_maxwell_message_invokes_handler():
@@ -184,7 +195,7 @@ def test_process_tool_calls_handles_unclosed_send_message_without_leaking_enviro
 
 
 def test_process_tool_calls_handles_reasoning_json_tts_without_leaking_system_reminder():
-    tts = FakeTool("__NO_RESPONSE__")
+    tts = FakeTool("__TTS_SENT__")
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={
@@ -209,14 +220,14 @@ def test_process_tool_calls_handles_reasoning_json_tts_without_leaking_system_re
             bot, message, response
         )
         assert cleaned == ""
-        assert tool_results == ["Tool tts: __NO_RESPONSE__"]
+        assert tool_results == ["Tool tts: __TTS_SENT__"]
         assert tts.calls == [{"text": "Hey there!", "language": "english"}]
 
     asyncio.run(run())
 
 
 def test_process_tool_calls_handles_pipe_tts_format():
-    tts = FakeTool("__NO_RESPONSE__")
+    tts = FakeTool("__TTS_SENT__")
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={
@@ -235,7 +246,7 @@ def test_process_tool_calls_handles_pipe_tts_format():
             "<|tool_call_begin|>tts|>text=Test tts language=spanish<|tool_call_end|>",
         )
         assert cleaned == ""
-        assert tool_results == ["Tool tts: __NO_RESPONSE__"]
+        assert tool_results == ["Tool tts: __TTS_SENT__"]
         assert tts.calls == [{"text": "Test tts", "language": "spanish"}]
 
     asyncio.run(run())
