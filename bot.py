@@ -5767,9 +5767,6 @@ class MaxwellBot(commands.Bot):
         except Exception as e:
             logger.warning(f"REM event recording failed: {e}")
         current_task = asyncio.current_task()
-        if current_task:
-            self._active_requests[channel_id] = current_task
-            self._active_request_user[channel_id] = str(message.author.id)
         ai_timeout = max(
             10,
             min(
@@ -5926,6 +5923,15 @@ class MaxwellBot(commands.Bot):
                     }
                     for img in pre_tool_images
                 ] + active_media
+
+        # Mark as in-flight only once we are about to do real LLM work (after
+        # expensive pre-work like memory building + tool pre-invocation). This
+        # makes the same-user interrupt target actual generations instead of
+        # blocking on prep work or causing spurious cancels.
+        if current_task:
+            self._active_requests[channel_id] = current_task
+            self._active_request_user[channel_id] = str(message.author.id)
+
         try:
             await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
             try:
