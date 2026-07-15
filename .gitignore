@@ -27,3 +27,108 @@ build/
 subagents/
 progress.md
 core.*
+
+# =============================================================================
+# Additional ignores for unnecessary / runtime / generated stuff
+# =============================================================================
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-*
+*.code-workspace
+*.iml
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Backup, temp and swap files
+*.bak
+*.tmp
+*.temp
+*~
+*.orig
+tmp/
+temp/
+.cache/
+
+# Python additional
+*.pyo
+*.pyd
+*.so
+.eggs/
+pip-wheel-metadata/
+
+# Node.js (for ecosystem.config.js and any tooling)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json.bak
+
+# PM2 and process manager runtime
+.pm2/
+pids/
+*.pid
+dump.pm2
+pm2-*.log
+
+# Logs (broader, in addition to *.log)
+logs/
+*.log.*
+
+# Test / coverage / debug artifacts (extra)
+.coverage.*
+htmlcov/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+test-results/
+junit.xml
+
+# Build / distribution (extra)
+*.egg
+*.egg-info/
+dist/
+build/
+wheels/
+sdist/
+*.whl
+
+# Local development / secrets overrides
+.env.local
+.env.*.local
+local.env
+secrets.*
+*.pem
+*.key
+
+# Ollama / model cache if copied locally (usually in ~/.ollama)
+ollama-models/
+*.gguf
+*.bin
+
+# Subagent / experimental output
+subagents/*/output/
+subagents/*/tmp/
+
+# Miscellaneous unnecessary
+*.sw?
+*~
+.#*
+#*#
+*.orig
+*.rej
