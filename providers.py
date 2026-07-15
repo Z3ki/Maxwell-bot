@@ -98,7 +98,7 @@ class OllamaProvider:
         fallback_api_key: str = "",
         fallback_disable_reasoning: bool = True,
         retry_attempts: int = 3,
-        enable_audio_input: bool = True,
+        enable_audio_input: bool = False,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -322,7 +322,7 @@ class OllamaProvider:
                 continue
             if mime.startswith(("image/", "video/")):
                 payload_media.append(m)
-            elif mime.startswith("audio/") and getattr(self, "enable_audio_input", True):
+            elif mime.startswith("audio/") and getattr(self, "enable_audio_input", False):
                 payload_media.append(m)
 
         if payload_media:
@@ -352,7 +352,7 @@ class OllamaProvider:
                     uri = f"data:{mime};base64,{b64}"
                     if mime.startswith("image/"):
                         parts.append({"type": "image_url", "image_url": {"url": uri}})
-                    elif mime.startswith("audio/") and getattr(self, "enable_audio_input", True):
+                    elif mime.startswith("audio/") and getattr(self, "enable_audio_input", False):
                         audio_format = AUDIO_FORMATS.get(
                             mime.split(";", 1)[0].lower(), "wav"
                         )

@@ -3254,7 +3254,7 @@ class MaxwellBot(commands.Bot):
                         "content": f"{msg.get('author', 'user')}: {msg.get('content', '')[:220]}",
                     }
                 )
-            use_audio = bool(self._control.get("process_audio", getattr(self.config, "ENABLE_AUDIO_INPUT", True)))
+            use_audio = bool(self._control.get("process_audio", getattr(self.config, "ENABLE_AUDIO_INPUT", False)))
             vc_note = "Audio is attached." if use_audio else "Voice activity detected (audio input disabled)."
             messages.append(
                 {
@@ -3294,7 +3294,7 @@ class MaxwellBot(commands.Bot):
             await self._acquire_ai_slot(timeout=vc_timeout, priority="user")
             try:
                 async with self._vc_ai_semaphore:
-                    use_audio = bool(self._control.get("process_audio", getattr(self.config, "ENABLE_AUDIO_INPUT", True)))
+                    use_audio = bool(self._control.get("process_audio", getattr(self.config, "ENABLE_AUDIO_INPUT", False)))
                     vc_media = [media] if use_audio else []
                     resp = await self.ai_provider.generate_response(
                         messages,
@@ -5038,9 +5038,9 @@ class MaxwellBot(commands.Bot):
 
     async def _extract_media(self, message) -> tuple[list[str], list[dict]]:
         proc_img = bool(self._control.get("process_images", True))
-        proc_aud = bool(self._control.get("process_audio", True))
+        proc_aud = bool(self._control.get("process_audio", False))
         # If neither images nor audio processing, skip all binary media collection.
-        # (process_audio controls "omni" audio input to models.)
+        # (process_audio / ENABLE_AUDIO_INPUT controls "omni" audio input to models; now defaults to off)
         if not proc_img and not proc_aud:
             return [], []
         images = []
@@ -5285,7 +5285,7 @@ class MaxwellBot(commands.Bot):
 
                 # Extract audio track only if process_audio (omni audio input) is enabled.
                 # This prevents sending audio to non-omni or when user disabled audio models.
-                proc_aud = bool((getattr(self, "_control", None) or {}).get("process_audio", True))
+                proc_aud = bool((getattr(self, "_control", None) or {}).get("process_audio", False))
                 if proc_aud:
                     audio_path = tmp_path / "audio.wav"
                     audio_cmd = [
