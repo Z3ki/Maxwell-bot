@@ -240,6 +240,11 @@ from providers import (  # noqa: E402
     ProviderUsageExhaustedError,
 )
 from rem import RemStore, load_rem_defaults, run_rem_once  # noqa: E402
+from tool_schemas import (  # noqa: E402
+    build_openai_tools,
+    elide_tool_calls_for_history,
+    normalize_native_tool_calls,
+)
 from utils import (  # fd-safe, single source of truth  # noqa: E402
     FileLock,
     _atomic_json_write_sync,
@@ -1041,7 +1046,11 @@ def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = 
             )
             pos = containing
             continue
-        if start > 0 and not (text[start - 1].isspace() or text[start - 1] == ">"):
+        # Skip tool-looking tags that sit inside quoted JSON / string literals
+        # (e.g. {"thoughts":"<tool:shell .../>"}). Still allow glued tags after
+        # letters/punctuation: "ship<tool:create_site ...>" — the old
+        # whitespace-only rule dropped those and leaked HTML into Discord.
+        if start > 0 and text[start - 1] in {'"', "'", "`", "\\"}:
             pos = start + 1
             continue
         tag_end = _find_xml_tag_end(text, start)
@@ -1075,19 +1084,128 @@ def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = 
         pos = close_match.end()
 
 
+# Params that hold freeform blobs. Nested same-named tags (e.g. HTML <body>
+# inside create_site's <body> param) must use balanced matching, and document-like
+# blobs should not be carved up by incidental <title>/<name> tags.
+_BLOB_TOOL_PARAMS = frozenset({"body", "content", "code", "command", "text", "thoughts"})
+# Short scalar param tags safe to extract from structured tool bodies.
+_SCALAR_TOOL_PARAMS = frozenset(TOOL_PARAM_TAGS) - _BLOB_TOOL_PARAMS
+
+
+def _looks_like_document_blob(text: str) -> bool:
+    """True when text is likely a full HTML/SVG/XML document, not structured params.
+
+    Intentionally strict: a tag-count heuristic falsely treats structured
+    tool bodies like ``<name>x</name><title>y</title><body>...`` as documents.
+    """
+    s = (text or "").lstrip()
+    if not s:
+        return False
+    lower = s[:200].lower()
+    return lower.startswith(
+        (
+            "<!doctype",
+            "<html",
+            "<svg",
+            "<?xml",
+            "<head",
+            "<body",
+            # bare fragments the model often dumps as create_site body
+            "<div",
+            "<main",
+            "<section",
+            "<style",
+            "<script",
+            "<meta",
+            "<link",
+        )
+    )
+
+
+def _find_balanced_xml_child(
+    text: str, key: str, start: int = 0
+) -> tuple[int, int, str] | None:
+    """Find first <key>...</key> with nesting depth, return (start, end, inner)."""
+    if not text or not key:
+        return None
+    open_re = re.compile(rf"<{re.escape(key)}(?:\s[^>]*)?>", re.IGNORECASE)
+    # Self-closing open: <key ... />
+    self_close_re = re.compile(
+        rf"<{re.escape(key)}(?:\s[^>]*)?/\s*>", re.IGNORECASE
+    )
+    close_re = re.compile(rf"</\s*{re.escape(key)}\s*>", re.IGNORECASE)
+    pos = start
+    while pos < len(text):
+        m = open_re.search(text, pos)
+        if not m:
+            return None
+        # Skip self-closing opens
+        sc = self_close_re.match(text, m.start())
+        if sc and sc.end() == m.end():
+            pos = m.end()
+            continue
+        depth = 1
+        cursor = m.end()
+        while depth > 0 and cursor < len(text):
+            next_open = open_re.search(text, cursor)
+            next_close = close_re.search(text, cursor)
+            if not next_close:
+                return None
+            if next_open and next_open.start() < next_close.start():
+                # Nested open of same tag (e.g. HTML <body> inside tool body)
+                sc2 = self_close_re.match(text, next_open.start())
+                if sc2 and sc2.end() == next_open.end():
+                    cursor = next_open.end()
+                    continue
+                depth += 1
+                cursor = next_open.end()
+            else:
+                depth -= 1
+                if depth == 0:
+                    inner = text[m.end() : next_close.start()]
+                    return m.start(), next_close.end(), inner
+                cursor = next_close.end()
+        pos = m.end()
+    return None
+
+
 def _parse_tool_body_params(name: str, body: str) -> dict:
-    params = {}
-    consumed = []
+    """Parse tool body into params.
+
+    Strategy:
+    1. Explicit ``<parameter=x>`` / ``<param name=x>`` forms.
+    2. Balanced **scalar** child tags only (name, title, filename, …).
+       Never harvest incidental HTML tags like ``<title>`` / ``<body>`` out of
+       a freeform document — that truncated create_site HTML in production.
+    3. Default blob param (body/content/code/…) comes from leftovers, or from a
+       single balanced wrapper tag around those leftovers.
+    """
+    params: dict = {}
+    consumed: list[tuple[int, int]] = []
+    raw = body or ""
+    default_param = DEFAULT_TOOL_PARAMS.get(name)
+
+    # Full document dumped as the tool body (typical create_site). Scalars like
+    # name/title come from XML attributes on the open tag — do not harvest
+    # incidental HTML <title>/<name> tags out of the document (that overwrote
+    # the real site title in production).
+    if (
+        default_param in _BLOB_TOOL_PARAMS
+        and _looks_like_document_blob(raw)
+    ):
+        params[default_param] = raw.strip()
+        return params
+
     parameter_re = re.compile(
         r"<?parameter\s*=\s*([A-Za-z_]\w*)\s*>\s*(.*?)</\s*parameter\s*>",
         re.DOTALL | re.IGNORECASE,
     )
-    for match in parameter_re.finditer(body or ""):
+    for match in parameter_re.finditer(raw):
         key = match.group(1)
         if key not in TOOL_PARAM_TAGS:
             continue
         val = match.group(2).strip()
-        if key not in {"content", "code", "body", "command"}:
+        if key not in _BLOB_TOOL_PARAMS:
             val = html.unescape(val)
         params[key] = val
         consumed.append(match.span())
@@ -1095,47 +1213,73 @@ def _parse_tool_body_params(name: str, body: str) -> dict:
         r"<param\s+name\s*=\s*(?:\"([A-Za-z_]\w*)\"|'([A-Za-z_]\w*)'|([A-Za-z_]\w*))\s*>\s*(.*?)</\s*param\s*>",
         re.DOTALL | re.IGNORECASE,
     )
-    for match in named_param_re.finditer(body or ""):
+    for match in named_param_re.finditer(raw):
         key = next(group for group in match.groups()[:3] if group)
         if key not in TOOL_PARAM_TAGS:
             continue
         val = match.group(4).strip()
-        if key not in {"content", "code", "body", "command"}:
+        if key not in _BLOB_TOOL_PARAMS:
             val = html.unescape(val)
         params[key] = val
         consumed.append(match.span())
-    child_re = re.compile(
-        r"<([A-Za-z_]\w*)(?:\s+[^>]*)?>(.*?)</\s*\1\s*>", re.DOTALL | re.IGNORECASE
-    )
-    for match in child_re.finditer(body or ""):
-        key = match.group(1)
-        if key not in TOOL_PARAM_TAGS:
-            continue
-        val = match.group(2).strip()
-        if key not in {"content", "code", "body", "command"}:
-            val = html.unescape(val)
-        params[key] = val
-        consumed.append(match.span())
-    if params:
-        leftovers = body
-        for start, end in reversed(consumed):
-            leftovers = leftovers[:start] + leftovers[end:]
-        if leftovers.strip():
-            default_param = DEFAULT_TOOL_PARAMS.get(name)
-            if default_param and default_param not in params:
-                val = body.strip()
-                if default_param not in {"content", "code", "body", "command"}:
-                    val = html.unescape(val)
-                params[default_param] = val
-        return params
 
-    cleaned_body = (body or "").strip()
-    default_param = DEFAULT_TOOL_PARAMS.get(name)
-    if cleaned_body and default_param:
-        val = cleaned_body
-        if default_param not in {"content", "code", "body", "command"}:
-            val = html.unescape(val)
-        params[default_param] = val
+    # Scalar children only (balanced). Skip blob keys here so HTML <body>/<title>
+    # inside a create_site document cannot steal tool params.
+    scan = 0
+    while scan < len(raw):
+        next_key = None
+        next_hit: tuple[int, int, str] | None = None
+        for key in _SCALAR_TOOL_PARAMS:
+            hit = _find_balanced_xml_child(raw, key, scan)
+            if not hit:
+                continue
+            if next_hit is None or hit[0] < next_hit[0]:
+                next_key = key
+                next_hit = hit
+        if not next_hit or next_key is None:
+            break
+        s, e, inner = next_hit
+        if any(not (e <= cs or s >= ce) for cs, ce in consumed):
+            scan = s + 1
+            continue
+        if next_key not in params:
+            params[next_key] = html.unescape(inner.strip())
+            consumed.append((s, e))
+        scan = e
+
+    leftovers = raw
+    for start, end in reversed(sorted(consumed)):
+        leftovers = leftovers[:start] + leftovers[end:]
+    lo = leftovers.strip()
+
+    def _assign_blob(text: str) -> None:
+        if not default_param or not text:
+            return
+        # If the whole leftover is a single balanced <default>...</default>, unwrap it.
+        # Nested same-named tags (HTML <body> inside tool body) are handled by
+        # balanced matching.
+        hit = _find_balanced_xml_child(text, default_param, 0)
+        if hit and hit[0] == 0 and hit[1] == len(text):
+            params[default_param] = hit[2].strip()
+        else:
+            val = text
+            if default_param not in _BLOB_TOOL_PARAMS:
+                val = html.unescape(val)
+            params[default_param] = val
+
+    if default_param and default_param not in params:
+        if lo:
+            _assign_blob(lo)
+        elif raw.strip():
+            # No scalar children and nothing consumed — whole body is the blob
+            # (or a single wrapper around it).
+            _assign_blob(raw.strip())
+    elif default_param and default_param in params and lo and _looks_like_document_blob(lo):
+        # Explicit parameter= form set a short body, but a document leftover exists
+        # (unusual); prefer the document.
+        if not _looks_like_document_blob(str(params.get(default_param, ""))):
+            params[default_param] = lo
+
     return params
 
 
@@ -6008,6 +6152,8 @@ class MaxwellBot(commands.Bot):
             self._active_request_user[channel_id] = str(message.author.id)
 
         try:
+            platform = MaxwellBot._message_tool_platform(self, message)
+            openai_tools = self._build_openai_tools(platform)
             await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
             try:
                 if self._control.get("typing_indicator", True) and not getattr(
@@ -6016,23 +6162,36 @@ class MaxwellBot(commands.Bot):
                     try:
                         async with message.channel.typing():
                             response = await self.ai_provider.generate_response(
-                                messages, media=active_media, timeout=ai_timeout, max_tokens=max_out_tokens
+                                messages,
+                                media=active_media,
+                                timeout=ai_timeout,
+                                max_tokens=max_out_tokens,
+                                tools=openai_tools or None,
                             )
                     except discord.Forbidden as _exc:
                         response = await self.ai_provider.generate_response(
-                            messages, media=active_media, timeout=ai_timeout, max_tokens=max_out_tokens
+                            messages,
+                            media=active_media,
+                            timeout=ai_timeout,
+                            max_tokens=max_out_tokens,
+                            tools=openai_tools or None,
                         )
                 else:
                     response = await self.ai_provider.generate_response(
-                        messages, media=active_media, timeout=ai_timeout
+                        messages,
+                        media=active_media,
+                        timeout=ai_timeout,
+                        max_tokens=max_out_tokens,
+                        tools=openai_tools or None,
                     )
             finally:
                 await self._release_ai_slot()
+            native_calls = self._consume_native_tool_calls()
             # Track token usage from provider
             usage = getattr(self.ai_provider, "_last_usage", None) or {}
             if usage:
                 self._token_tracker.record(usage)
-            if not response or not response.strip():
+            if (not response or not str(response).strip()) and not native_calls:
                 logger.warning(f"Empty response from provider for channel {channel_id}")
                 if self._control.get("error_replies", True):
                     try:
@@ -6043,6 +6202,7 @@ class MaxwellBot(commands.Bot):
                     except discord.Forbidden as _exc:
                         pass
                 return
+            response = response or ""
             max_iters = max(
                 0,
                 min(
@@ -6057,6 +6217,7 @@ class MaxwellBot(commands.Bot):
             # Accumulate multi-iteration history so intermediate tool results
             # are not discarded on the next follow-up turn.
             conversation_tail: list[dict] = []
+            pending_native = native_calls
             for _iteration in range(max_iters):
                 if time.monotonic() > tool_deadline:
                     logger.info("Tool iteration time budget exceeded, breaking")
@@ -6067,8 +6228,15 @@ class MaxwellBot(commands.Bot):
                         self._token_tracker.summary(),
                     )
                     break
-                response, tool_results, iter_images = await self._process_tool_calls(
-                    message, response, include_images=True
+                response, tool_results, iter_images = await self._dispatch_tool_calls(
+                    message,
+                    response,
+                    native_tool_calls=pending_native or None,
+                    include_images=True,
+                )
+                pending_native = None
+                native_followup = list(
+                    getattr(self, "_last_native_followup_messages", None) or []
                 )
                 all_tool_results.extend(tool_results)
                 # Cap image growth across iterations (keep newest frames).
@@ -6079,37 +6247,36 @@ class MaxwellBot(commands.Bot):
                     break
                 if not _tool_results_need_followup(tool_results):
                     break
-                # Reuse the already-built messages (system + memory + user)
-                # and append the assistant turn + tool results, instead of
-                # rebuilding the whole system prompt each iteration.
-                # Elide huge parameter bodies (e.g. full HTML for create_site) so
-                # that massive single-file sites/demos don't explode the context
-                # on the followup turn and cause timeouts or token overflows.
-                history_response = response
-                if "create_site" in (response or "") or "body" in (response or ""):
-                    try:
-                        history_response = re.sub(
-                            r'(<parameter[^>]*\bname=["\']?body["\']?[^>]*>)(.*?)(</\s*parameter\s*>)',
-                            r'\1[large HTML/asset body elided to protect context budget; site creation succeeded from the original full body]\3',
-                            history_response,
-                            flags=re.DOTALL | re.IGNORECASE,
-                        )
-                    except Exception:
-                        pass
-                conversation_tail.append(
-                    {"role": "assistant", "content": history_response}
-                )
-                conversation_tail.append(
-                    {
-                        "role": "user",
-                        "content": "=== TOOL RESULTS ===\n"
-                        + "\n".join(tool_results)
-                        + "\n=== END ===\nUse these results to continue. Tool images are attached. Don't text-reply if the user asked for an image — send_media or re-run image_generator instead.",
-                    }
-                )
-                # Keep tail bounded (last 8 turns = 4 iterations of assistant+tools).
-                if len(conversation_tail) > 8:
-                    conversation_tail = conversation_tail[-8:]
+                # Native path: append assistant tool_calls + role=tool messages.
+                # XML path: append freeform assistant text + synthetic user results.
+                if native_followup:
+                    conversation_tail.extend(native_followup)
+                else:
+                    history_response = response
+                    if "create_site" in (response or "") or "body" in (response or ""):
+                        try:
+                            history_response = re.sub(
+                                r'(<parameter[^>]*\bname=["\']?body["\']?[^>]*>)(.*?)(</\s*parameter\s*>)',
+                                r'\1[large HTML/asset body elided to protect context budget; site creation succeeded from the original full body]\3',
+                                history_response,
+                                flags=re.DOTALL | re.IGNORECASE,
+                            )
+                        except Exception:
+                            pass
+                    conversation_tail.append(
+                        {"role": "assistant", "content": history_response}
+                    )
+                    conversation_tail.append(
+                        {
+                            "role": "user",
+                            "content": "=== TOOL RESULTS ===\n"
+                            + "\n".join(tool_results)
+                            + "\n=== END ===\nUse these results to continue. Tool images are attached. Don't text-reply if the user asked for an image — send_media or re-run image_generator instead.",
+                        }
+                    )
+                # Keep tail bounded. Native tool turns are multi-message; cap by count.
+                if len(conversation_tail) > 24:
+                    conversation_tail = conversation_tail[-24:]
                 result_messages = [dict(m) for m in messages] + list(conversation_tail)
                 await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
                 try:
@@ -6121,12 +6288,14 @@ class MaxwellBot(commands.Bot):
                         media=[],
                         timeout=ai_timeout,
                         max_tokens=max_out_tokens,
+                        tools=openai_tools or None,
                     )
                     usage = getattr(self.ai_provider, "_last_usage", None) or {}
                     if usage:
                         self._token_tracker.record(usage)
-                    if followup and followup.strip():
-                        response = followup
+                    pending_native = self._consume_native_tool_calls()
+                    if (followup and str(followup).strip()) or pending_native:
+                        response = followup or ""
                     else:
                         break
                 finally:
@@ -6251,6 +6420,231 @@ class MaxwellBot(commands.Bot):
             )
         except Exception as e:
             logger.warning(f"Failed to force reasoning trace: {e}")
+
+    async def _execute_tool_by_name(
+        self, message, name: str, params: dict, *, disabled: set, compatible: set
+    ) -> str:
+        """Run a single tool and return the result text (including Tool name: prefix)."""
+        try:
+            if (
+                name == "send_message"
+                and getattr(message, "guild", None)
+                and isinstance(params.get("content"), str)
+            ):
+                params = dict(params)
+                params["content"] = self._render_custom_emojis(
+                    params.get("content", ""), message.guild
+                )
+            if name in disabled:
+                return f"Tool {name}: Error - tool is disabled"
+            if name not in compatible:
+                return f"Tool {name}: Error - tool is not available on this platform"
+            if name not in self.tools:
+                return f"Tool {name}: Error - unknown tool"
+            if self._tool_breaker.is_open(name):
+                return (
+                    f"Tool {name}: Error - tool temporarily disabled "
+                    "(too many recent failures)"
+                )
+            result = await self.tools[name].execute(message, **params)
+            result_text = str(result) if result else "executed successfully"
+            if result_text.startswith("Error") or result_text.startswith("Error:"):
+                self._tool_breaker.record_failure(name)
+            else:
+                self._tool_breaker.record_success(name)
+            return f"Tool {name}: {result_text}"
+        except Exception as e:
+            logger.error(
+                f"Tool execution error for {name}: {e}\n{traceback.format_exc()}"
+            )
+            self._tool_breaker.record_failure(name)
+            return f"Tool {name}: Error - {e}"
+
+    async def _remember_tool_call(self, message, name: str, params: dict, result: str):
+        if not self._control.get("store_memory", True):
+            return
+        channel = getattr(message, "channel", None)
+        channel_id = getattr(channel, "id", None)
+        if channel_id is None or not hasattr(self, "memory"):
+            return
+        mem_params: dict = dict(params or {})
+        try:
+            for heavy_key in ("body", "content", "code", "html", "data"):
+                if (
+                    heavy_key in mem_params
+                    and isinstance(mem_params[heavy_key], str)
+                    and len(mem_params[heavy_key]) > 2000
+                ):
+                    mem_params[heavy_key] = (
+                        f"[large {heavy_key} omitted, {len(mem_params[heavy_key])} chars]"
+                    )
+            params_text = json.dumps(mem_params, ensure_ascii=False, sort_keys=True)
+        except TypeError:
+            params_text = str(params or {})
+            mem_params = dict(params or {})
+        await self.memory.add_to_channel_memory(
+            str(channel_id),
+            {
+                "author": "Tool",
+                "content": f"Called {name} with {params_text} -> {result}",
+                "is_tool": True,
+                "tool_name": name,
+                "tool_params": mem_params,
+                "tool_result": result,
+            },
+        )
+
+    async def _process_native_tool_calls(
+        self,
+        message,
+        response: str,
+        raw_tool_calls: list,
+        include_images: bool = False,
+    ) -> tuple[str, list[str]] | tuple[str, list[str], list[str]]:
+        """Execute OpenAI-style native tool_calls from the provider."""
+        tool_results: list[str] = []
+        tool_images: list[str] = []
+        self._last_native_followup_messages = []
+        response = strip_model_artifact_leaks(response or "", strip_pipe_markers=False)
+        # Strip any accidental XML tags if the model dual-emitted
+        cleaned = strip_tool_payload_leaks(response)
+
+        if not self._control.get("tools_enabled", True):
+            return (cleaned, [], []) if include_images else (cleaned, [])
+
+        disabled = set(self._control.get("disabled_tools", []) or [])
+        compatible = MaxwellBot._compatible_tool_names(
+            self, MaxwellBot._message_tool_platform(self, message)
+        )
+        calls = normalize_native_tool_calls(raw_tool_calls)
+        if not calls:
+            return (cleaned, [], []) if include_images else (cleaned, [])
+
+        # Preserve raw tool_calls for the assistant message in the follow-up turn
+        raw_for_history = []
+        for c in calls:
+            raw = c.get("raw")
+            if isinstance(raw, dict):
+                raw_for_history.append(raw)
+            else:
+                raw_for_history.append(
+                    {
+                        "id": c["id"],
+                        "type": "function",
+                        "function": {
+                            "name": c["name"],
+                            "arguments": json.dumps(c.get("arguments") or {}),
+                        },
+                    }
+                )
+        history_tool_calls = elide_tool_calls_for_history(raw_for_history)
+
+        # Non-terminal first, terminal last (same as XML path)
+        non_terminal = [c for c in calls if c["name"] not in {"send_message", "no_response"}]
+        terminal = [c for c in calls if c["name"] in {"send_message", "no_response"}]
+
+        result_by_id: dict[str, str] = {}
+
+        async def run_one(call: dict) -> str:
+            name = call["name"]
+            params = dict(call.get("arguments") or {})
+            line = await MaxwellBot._execute_tool_by_name(
+                self, message, name, params, disabled=disabled, compatible=compatible
+            )
+            result_by_id[call["id"]] = line
+            await MaxwellBot._remember_tool_call(self, message, name, params, line)
+            return line
+
+        async def run_all():
+            nonlocal tool_results
+            if non_terminal:
+                gathered = await asyncio.gather(*[run_one(c) for c in non_terminal])
+                tool_results.extend(gathered)
+            terminal_seen = False
+            for call in terminal:
+                if terminal_seen:
+                    line = f"Tool {call['name']}: Skipped duplicate terminal tool call"
+                    result_by_id[call["id"]] = line
+                    tool_results.append(line)
+                    await MaxwellBot._remember_tool_call(
+                        self, message, call["name"], call.get("arguments") or {}, line
+                    )
+                    continue
+                terminal_seen = True
+                tool_results.append(await run_one(call))
+
+        if self._control.get("typing_indicator", True) and not getattr(
+            message, "suppress_typing", False
+        ):
+            try:
+                async with message.channel.typing():
+                    await run_all()
+            except discord.Forbidden:
+                await run_all()
+            except Exception:
+                await run_all()
+        else:
+            await run_all()
+
+        # Build OpenAI tool-role follow-up messages (assistant + tool results)
+        assistant_msg: dict[str, Any] = {
+            "role": "assistant",
+            "content": cleaned if cleaned else None,
+            "tool_calls": history_tool_calls,
+        }
+        followup_msgs: list[dict] = [assistant_msg]
+        for call in calls:
+            line = result_by_id.get(call["id"], f"Tool {call['name']}: (no result)")
+            # Strip Tool name: prefix for the model-facing tool content when long? Keep full for continuity.
+            followup_msgs.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "content": line,
+                }
+            )
+        self._last_native_followup_messages = followup_msgs
+
+        _IMG_RE = re.compile(r"__IMAGE_B64__([A-Za-z0-9+/=\s]+)__END_IMAGE_B64__")
+        for tr in tool_results:
+            for m in _IMG_RE.finditer(tr):
+                raw = m.group(1).replace("\n", "").replace(" ", "")
+                tool_images.append(raw)
+        tool_results = [_IMG_RE.sub("", tr).strip() for tr in tool_results]
+        return (
+            (cleaned, tool_results, tool_images)
+            if include_images
+            else (cleaned, tool_results)
+        )
+
+    async def _dispatch_tool_calls(
+        self,
+        message,
+        response: str,
+        *,
+        native_tool_calls: list | None = None,
+        include_images: bool = False,
+    ) -> tuple[str, list[str]] | tuple[str, list[str], list[str]]:
+        """Prefer native tool_calls; fall back to XML text tags."""
+        self._last_native_followup_messages = []
+        if native_tool_calls:
+            return await MaxwellBot._process_native_tool_calls(
+                self, message, response, native_tool_calls, include_images=include_images
+            )
+        return await MaxwellBot._process_tool_calls(
+            self, message, response, include_images=include_images
+        )
+
+    def _consume_native_tool_calls(self) -> list:
+        """Pop native tool_calls stashed on the provider after generate_response."""
+        provider = getattr(self, "ai_provider", None)
+        calls = list(getattr(provider, "_last_tool_calls", None) or [])
+        if provider is not None:
+            try:
+                provider._last_tool_calls = []
+            except Exception:
+                pass
+        return calls
 
     @overload
     async def _process_tool_calls(
@@ -6514,6 +6908,27 @@ class MaxwellBot(commands.Bot):
             return set(self.tools).intersection(TELEGRAM_COMPATIBLE_TOOL_NAMES)
         return set(self.tools)
 
+    def _native_tools_enabled(self) -> bool:
+        control = getattr(self, "_control", {}) or {}
+        return bool(control.get("native_tool_calls", True)) and bool(
+            control.get("tools_enabled", True)
+        )
+
+    @staticmethod
+    def _native_tools_enabled_for(control: dict) -> bool:
+        return bool(control.get("native_tool_calls", True)) and bool(
+            control.get("tools_enabled", True)
+        )
+
+    def _build_openai_tools(self, platform: str = "discord") -> list[dict]:
+        if not self.tools or not self._native_tools_enabled():
+            return []
+        disabled = set(self._control.get("disabled_tools", []) or [])
+        compatible = MaxwellBot._compatible_tool_names(self, platform)
+        return build_openai_tools(
+            self.tools, allowed_names=compatible, disabled_names=disabled
+        )
+
     def _tool_system_prompt(self, platform: str = "discord") -> str:
         if not self.tools or not self._control.get("tools_enabled", True):
             return ""
@@ -6526,6 +6941,23 @@ class MaxwellBot(commands.Bot):
         ]
         if not descriptions:
             return ""
+        if MaxwellBot._native_tools_enabled_for(self._control if hasattr(self, '_control') else {}):
+            return (
+                "TOOLS (optional; use only when they clearly help):\n"
+                + "\n".join(descriptions)
+                + "\n\nTOOL CALLING: Use the provider's native function/tool calling API for all tools. "
+                "Do NOT put tool markup in your visible text. Do not invent XML tags like <tool:name>.\n"
+                "RULES:\n"
+                "- Call tools via function calls; put user-facing chat text only in send_message content "
+                "(or leave content empty when you are only calling helper tools).\n"
+                "- A tool turn must end with exactly one terminal action: send_message or no_response. "
+                "reasoning_log alone is not an answer.\n"
+                "- Order: reasoning_log first, helper tools next, send_message/no_response last.\n"
+                "- For create_site, put the full HTML document in the body argument (not in chat).\n"
+                "- For send_file with large code/HTML, use encoding=base64 when needed.\n"
+                "- reasoning_log thoughts must be plain text only.\n"
+                "- Status: set_activity for your visible status/activity, change_presence for the online/idle/dnd dot."
+            )
         return (
             "TOOLS (optional; use only when they clearly help):\n"
             + "\n".join(descriptions)
@@ -7390,6 +7822,7 @@ class MaxwellBot(commands.Bot):
             user_parts.append("Media available to inspect in the multimodal payload.")
         messages.append({"role": "user", "content": "\n".join(user_parts)})
 
+        tg_openai_tools = self._build_openai_tools("telegram")
         await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
         try:
             async with session.post(
@@ -7399,7 +7832,10 @@ class MaxwellBot(commands.Bot):
                 pass
             try:
                 response_text = await self.ai_provider.generate_response(
-                    messages, media=tg_media, timeout=ai_timeout
+                    messages,
+                    media=tg_media,
+                    timeout=ai_timeout,
+                    tools=tg_openai_tools or None,
                 )
             except ProviderUsageExhaustedError as e:
                 logger.warning("Provider usage exhausted in Telegram: %s", e)
@@ -7407,10 +7843,11 @@ class MaxwellBot(commands.Bot):
         finally:
             await self._release_ai_slot()
 
-        if not response_text or not response_text.strip():
+        tg_native_calls = self._consume_native_tool_calls()
+        if (not response_text or not str(response_text).strip()) and not tg_native_calls:
             return
 
-        response_text = response_text.strip()
+        response_text = (response_text or "").strip()
 
         all_tool_results = []
         if self._control.get("tools_enabled", True):
@@ -7428,9 +7865,17 @@ class MaxwellBot(commands.Bot):
                     _safe_int(self._control.get("max_tool_iterations", 30) or 0, 0), 100
                 ),
             )
+            pending_native = tg_native_calls
+            conversation_tail: list[dict] = []
             for _iteration in range(max_iters):
-                response_text, tool_results = await self._process_tool_calls(
-                    tg_tool_message, response_text
+                response_text, tool_results = await self._dispatch_tool_calls(
+                    tg_tool_message,
+                    response_text,
+                    native_tool_calls=pending_native or None,
+                )
+                pending_native = None
+                native_followup = list(
+                    getattr(self, "_last_native_followup_messages", None) or []
                 )
                 all_tool_results.extend(tool_results)
                 if not tool_results:
@@ -7446,30 +7891,37 @@ class MaxwellBot(commands.Bot):
                             "\nMedia available to inspect in the multimodal payload.",
                             "",
                         )
-                # elide large bodies for TG too
-                history_response_text = response_text
-                if "create_site" in (response_text or ""):
-                    try:
-                        history_response_text = re.sub(
-                            r'(<parameter[^>]*\bname=["\']?body["\']?[^>]*>)(.*?)(</\s*parameter\s*>)',
-                            r'\1[large body elided]\3',
-                            history_response_text,
-                            flags=re.DOTALL | re.IGNORECASE,
-                        )
-                    except Exception:
-                        pass
-                result_messages.append({"role": "assistant", "content": history_response_text})
-                result_messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "=== TOOL RESULTS ===\n"
-                            + "\n".join(tool_results)
-                            + "\n=== END ===\nContinue. If a reply is needed, finish with <tool:send_message>text</tool:send_message>; "
-                            "if not, finish with <tool:no_response />."
-                        ),
-                    }
-                )
+                if native_followup:
+                    conversation_tail.extend(native_followup)
+                else:
+                    history_response_text = response_text
+                    if "create_site" in (response_text or ""):
+                        try:
+                            history_response_text = re.sub(
+                                r'(<parameter[^>]*\bname=["\']?body["\']?[^>]*>)(.*?)(</\s*parameter\s*>)',
+                                r'\1[large body elided]\3',
+                                history_response_text,
+                                flags=re.DOTALL | re.IGNORECASE,
+                            )
+                        except Exception:
+                            pass
+                    conversation_tail.append(
+                        {"role": "assistant", "content": history_response_text}
+                    )
+                    conversation_tail.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "=== TOOL RESULTS ===\n"
+                                + "\n".join(tool_results)
+                                + "\n=== END ===\nContinue. If a reply is needed, finish with send_message; "
+                                "if not, finish with no_response."
+                            ),
+                        }
+                    )
+                if len(conversation_tail) > 24:
+                    conversation_tail = conversation_tail[-24:]
+                result_messages = result_messages + list(conversation_tail)
                 await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
                 try:
                     async with session.post(
@@ -7478,10 +7930,14 @@ class MaxwellBot(commands.Bot):
                     ):
                         pass
                     followup = await self.ai_provider.generate_response(
-                        result_messages, media=[], timeout=ai_timeout
+                        result_messages,
+                        media=[],
+                        timeout=ai_timeout,
+                        tools=tg_openai_tools or None,
                     )
-                    if followup and followup.strip():
-                        response_text = followup.strip()
+                    pending_native = self._consume_native_tool_calls()
+                    if (followup and str(followup).strip()) or pending_native:
+                        response_text = (followup or "").strip()
                     else:
                         break
                 finally:
@@ -7788,6 +8244,7 @@ class MaxwellBot(commands.Bot):
                     messages.append({"role": "user", "content": "\n".join(user_parts)})
 
                     # Request LLM
+                    tg_openai_tools2 = self._build_openai_tools("telegram")
                     await self._acquire_ai_slot(timeout=30, priority="user")
                     try:
                         async with session.post(
@@ -7797,7 +8254,10 @@ class MaxwellBot(commands.Bot):
                             pass
                         try:
                             response_text = await self.ai_provider.generate_response(
-                                messages, media=tg_media, timeout=30
+                                messages,
+                                media=tg_media,
+                                timeout=30,
+                                tools=tg_openai_tools2 or None,
                             )
                         except ProviderUsageExhaustedError as e:
                             logger.warning(
@@ -7807,10 +8267,11 @@ class MaxwellBot(commands.Bot):
                     finally:
                         await self._release_ai_slot()
 
-                    if not response_text or not response_text.strip():
+                    tg_native2 = self._consume_native_tool_calls()
+                    if (not response_text or not str(response_text).strip()) and not tg_native2:
                         continue
 
-                    response_text = response_text.strip()
+                    response_text = (response_text or "").strip()
 
                     all_tool_results = []
                     if self._control.get("tools_enabled", True):
@@ -7831,12 +8292,21 @@ class MaxwellBot(commands.Bot):
                                 50,
                             ),
                         )
+                        pending_native = tg_native2
+                        conversation_tail: list[dict] = []
                         for _iteration in range(max_iters):
                             (
                                 response_text,
                                 tool_results,
-                            ) = await self._process_tool_calls(
-                                tg_tool_message, response_text
+                            ) = await self._dispatch_tool_calls(
+                                tg_tool_message,
+                                response_text,
+                                native_tool_calls=pending_native or None,
+                            )
+                            pending_native = None
+                            native_followup = list(
+                                getattr(self, "_last_native_followup_messages", None)
+                                or []
                             )
                             all_tool_results.extend(tool_results)
                             if not tool_results:
@@ -7852,27 +8322,37 @@ class MaxwellBot(commands.Bot):
                                         "\nMedia available to inspect in the multimodal payload.",
                                         "",
                                     )
-                            # elide large bodies (e.g. create_site HTML) 
-                            hrt = response_text
-                            if "create_site" in (response_text or ""):
-                                try:
-                                    hrt = re.sub(r'(<parameter[^>]*\bname=["\']?body["\']?[^>]*>)(.*?)(</\s*parameter\s*>)', r'\1[elided]\3', hrt, flags=re.DOTALL|re.IGNORECASE)
-                                except Exception:
-                                    pass
-                            result_messages.append(
-                                {"role": "assistant", "content": hrt}
-                            )
-                            result_messages.append(
-                                {
-                                    "role": "user",
-                                    "content": "=== TOOL RESULTS ===\n"
-                                    + "\n".join(tool_results)
-                                    + "\n=== END ===\n"
-                                    + _telegram_tool_followup_instruction(
-                                        bool(tg_media)
-                                    ),
-                                }
-                            )
+                            if native_followup:
+                                conversation_tail.extend(native_followup)
+                            else:
+                                hrt = response_text
+                                if "create_site" in (response_text or ""):
+                                    try:
+                                        hrt = re.sub(
+                                            r'(<parameter[^>]*\bname=["\']?body["\']?[^>]*>)(.*?)(</\s*parameter\s*>)',
+                                            r'\1[elided]\3',
+                                            hrt,
+                                            flags=re.DOTALL | re.IGNORECASE,
+                                        )
+                                    except Exception:
+                                        pass
+                                conversation_tail.append(
+                                    {"role": "assistant", "content": hrt}
+                                )
+                                conversation_tail.append(
+                                    {
+                                        "role": "user",
+                                        "content": "=== TOOL RESULTS ===\n"
+                                        + "\n".join(tool_results)
+                                        + "\n=== END ===\n"
+                                        + _telegram_tool_followup_instruction(
+                                            bool(tg_media)
+                                        ),
+                                    }
+                                )
+                            if len(conversation_tail) > 24:
+                                conversation_tail = conversation_tail[-24:]
+                            result_messages = result_messages + list(conversation_tail)
                             await self._acquire_ai_slot(timeout=30, priority="user")
                             try:
                                 async with session.post(
@@ -7881,10 +8361,14 @@ class MaxwellBot(commands.Bot):
                                 ):
                                     pass
                                 followup = await self.ai_provider.generate_response(
-                                    result_messages, media=[], timeout=30
+                                    result_messages,
+                                    media=[],
+                                    timeout=30,
+                                    tools=tg_openai_tools2 or None,
                                 )
-                                if followup and followup.strip():
-                                    response_text = followup.strip()
+                                pending_native = self._consume_native_tool_calls()
+                                if (followup and str(followup).strip()) or pending_native:
+                                    response_text = (followup or "").strip()
                                 else:
                                     break
                             finally:

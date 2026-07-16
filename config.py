@@ -52,7 +52,9 @@ class Config:
     OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", os.getenv("OPENAI_COMPAT_API_KEY", ""))
     OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:31b-cloud")
     OLLAMA_REM_MODEL = os.getenv("OLLAMA_REM_MODEL") or OLLAMA_MODEL
-    OLLAMA_MAX_TOKENS = _int_env("OLLAMA_MAX_TOKENS", 200000, min_value=1)
+    # max_tokens = max *output* tokens per completion (not context window).
+    # minimax-m3 allows huge context but caps output ~131072; 8192 is a sane default.
+    OLLAMA_MAX_TOKENS = _int_env("OLLAMA_MAX_TOKENS", 8192, min_value=1, max_value=131072)
     OLLAMA_TEMPERATURE = _float_env("OLLAMA_TEMPERATURE", 1.0, min_value=0.0)
     OLLAMA_DISABLE_REASONING = _bool_env("OLLAMA_DISABLE_REASONING", True)
     OLLAMA_FALLBACK_BASE_URL = os.getenv("OLLAMA_FALLBACK_BASE_URL", "").strip()

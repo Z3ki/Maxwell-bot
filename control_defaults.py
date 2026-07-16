@@ -53,6 +53,10 @@ DEFAULT_CONTROL = {
     "max_tool_iterations": 30,
     "tool_iteration_timeout_seconds": 3600,
     "max_response_chars": 4000,
+    # Prefer OpenAI-style native tool_calls when the provider supports them.
+    # XML text tags remain as a fallback when the model emits tags without
+    # native tool_calls (or the endpoint rejects tools=).
+    "native_tool_calls": True,
     "tools_enabled": False,
     "subagent_docker": True,
     "subagent_max_concurrent_per_user": 2,

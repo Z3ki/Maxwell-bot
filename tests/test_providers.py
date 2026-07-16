@@ -260,14 +260,17 @@ def test_429_rate_limit_skips_to_fallback_without_doomed_retry():
     assert session2.urls == ["http://fallback.test/v1/chat/completions"]
 
 
-def test_generate_response_rejects_native_tool_calls():
+def test_generate_response_returns_native_tool_calls():
+    """generate_response now supports native tool_calls instead of rejecting them."""
     provider = OllamaProvider("http://example.test", "base-model", 10, 0.5)
     provider.available = True
     provider._session = FakeSession(FakeToolCallResponse())
 
     async def run():
-        with pytest.raises(RuntimeError, match="Native provider tool_calls"):
-            await provider.generate_response([{"role": "user", "content": "hi"}])
+        content = await provider.generate_response([{"role": "user", "content": "hi"}])
+        # Content may be empty when the model only emits tool_calls
+        assert content == ""
+        assert provider._last_tool_calls == [{"id": "1"}]
 
     asyncio.run(run())
 

@@ -139,6 +139,8 @@ class OllamaProvider:
         self._session = None
         self.available = False
         self._last_usage: dict = {}
+        self._last_tool_calls: list = []
+        self._last_assistant_message: dict | None = None
         # Per-endpoint rate-limit cooldown: name -> monotonic expiry. While an
         # endpoint is cooling, _attempt_endpoint steers to an alternative (if
         # any) so a rate-limited upstream isn't retried immediately.
@@ -287,19 +289,55 @@ class OllamaProvider:
         timeout: int = 3600,
         **kwargs,
     ) -> str:
-        """Generate response. images is legacy b64 list, media is list of {b64, mime_type}."""
-        message = await self.generate_chat_completion(
-            messages, images=images, media=media, timeout=timeout, **kwargs
-        )
-        if message.get("tool_calls"):
-            # This bot intentionally uses XML-ish text tool tags. Native provider
-            # tool_calls need a totally different message loop; pretending they are
-            # text is how tool orchestration gets cursed.
-            raise RuntimeError(
-                "Native provider tool_calls are not supported in generate_response; use XML tool tags"
+        """Generate response. images is legacy b64 list, media is list of {b64, mime_type}.
+
+        When the model returns native OpenAI-style ``tool_calls``, content may be
+        empty. Those calls are stored on ``self._last_tool_calls`` (raw provider
+        format) and ``self._last_assistant_message`` for the orchestration loop.
+        Callers that pass ``tools=`` must check ``_last_tool_calls`` before treating
+        empty content as a failure.
+        """
+        tools = kwargs.get("tools")
+        try:
+            message = await self.generate_chat_completion(
+                messages, images=images, media=media, timeout=timeout, **kwargs
             )
-        content = message.get("content", "")
-        if not content:
+        except RuntimeError as e:
+            # Some endpoints reject tools/function calling with 400. Fall back to
+            # a plain completion so XML tool tags still work.
+            err = str(e).lower()
+            if tools and (
+                "tool" in err
+                or "function" in err
+                or "tools is not supported" in err
+                or "does not support" in err
+            ):
+                logger.warning(
+                    "Provider rejected native tools; retrying without tools: %s", e
+                )
+                kwargs = dict(kwargs)
+                kwargs.pop("tools", None)
+                message = await self.generate_chat_completion(
+                    messages, images=images, media=media, timeout=timeout, **kwargs
+                )
+            else:
+                raise
+
+        tool_calls = message.get("tool_calls") or []
+        self._last_tool_calls = tool_calls if isinstance(tool_calls, list) else []
+        self._last_assistant_message = message
+        content = message.get("content") or ""
+        # Multimodal / some providers return content as a list of parts
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    parts.append(str(part.get("text") or ""))
+                elif isinstance(part, str):
+                    parts.append(part)
+            content = "".join(parts)
+        content = content if isinstance(content, str) else str(content or "")
+        if not content and not self._last_tool_calls:
             raise RuntimeError("Empty response from provider")
         return content
 
@@ -598,6 +636,48 @@ class OllamaProvider:
                                         f"Context overflow, clamped max_tokens to {safe_output}",
                                         max_attempts=max_attempts,
                                         fast_fallback=fast_fallback,
+                                    ):
+                                        continue
+                        # max_tokens is *output* length, not context. Models like
+                        # minimax-m3 can have 1M context but only e.g. 131072 max output.
+                        if resp.status == 400 and (
+                            "maximum output tokens" in error_text.lower()
+                            or "exceeds model's maximum output" in error_text.lower()
+                        ):
+                            import re as _re
+
+                            out_match = _re.search(
+                                r"maximum output tokens\s*\(?\s*(\d+)\s*\)?",
+                                error_text,
+                                _re.IGNORECASE,
+                            )
+                            if not out_match:
+                                out_match = _re.search(
+                                    r"maximum output tokens \((\d+)\)",
+                                    error_text,
+                                    _re.IGNORECASE,
+                                )
+                            if out_match:
+                                out_cap = int(out_match.group(1))
+                                # Leave headroom under the hard cap.
+                                safe_output = max(1024, min(out_cap - 64, out_cap))
+                                current = int(data.get("max_tokens", self.max_tokens))
+                                if safe_output < current:
+                                    logger.warning(
+                                        "Clamping max_tokens from %s to %s (model max output %s)",
+                                        current,
+                                        safe_output,
+                                        out_cap,
+                                    )
+                                    max_tokens = safe_output
+                                    self.max_tokens = min(self.max_tokens, safe_output)
+                                    data["max_tokens"] = safe_output
+                                    if await self._retry_after_attempt(
+                                        attempt,
+                                        endpoint,
+                                        f"Output cap, clamped max_tokens to {safe_output}",
+                                        max_attempts=max_attempts,
+                                        fast_fallback=True,
                                     ):
                                         continue
                         raise RuntimeError(

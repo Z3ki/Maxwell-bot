@@ -350,7 +350,7 @@ def test_process_tool_calls_strips_platform_incompatible_tool_call():
 def test_tool_prompt_filters_discord_only_tools_for_telegram():
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={"tools_enabled": True, "disabled_tools": []},
+        _control={"tools_enabled": True, "disabled_tools": [], "native_tool_calls": False},
         tools={"send_file": FakeTool("sent"), "react": FakeTool("Reacted")},
     )
 
@@ -363,7 +363,7 @@ def test_tool_prompt_filters_discord_only_tools_for_telegram():
 def test_tool_prompt_keeps_discord_tools_for_discord():
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={"tools_enabled": True, "disabled_tools": []},
+        _control={"tools_enabled": True, "disabled_tools": [], "native_tool_calls": False},
         tools={"send_file": FakeTool("sent"), "react": FakeTool("Reacted")},
     )
 
@@ -376,7 +376,7 @@ def test_tool_prompt_keeps_discord_tools_for_discord():
 def test_tool_prompt_requires_reasoning_before_terminal_action():
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={"tools_enabled": True, "disabled_tools": []},
+        _control={"tools_enabled": True, "disabled_tools": [], "native_tool_calls": False},
         tools={
             "reasoning_log": FakeTool("__REASONING_RECORDED__"),
             "send_message": FakeTool("sent"),
@@ -594,7 +594,7 @@ def test_reasoning_log_with_send_message_does_not_trigger_followup():
 def test_tool_prompt_has_no_nested_tags_rule():
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={"tools_enabled": True, "disabled_tools": []},
+        _control={"tools_enabled": True, "disabled_tools": [], "native_tool_calls": False},
         tools={"reasoning_log": FakeTool("__REASONING_RECORDED__")},
     )
 
@@ -602,6 +602,20 @@ def test_tool_prompt_has_no_nested_tags_rule():
 
     assert "plain text" in prompt.lower()
     assert "no nested tags" in prompt.lower()
+
+
+def test_tool_prompt_native_mode_no_xml_instructions():
+    bot = SimpleNamespace(
+        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
+        _control={"tools_enabled": True, "disabled_tools": [], "native_tool_calls": True},
+        tools={"send_message": FakeTool("sent"), "react": FakeTool("Reacted")},
+    )
+
+    prompt = MaxwellBot._tool_system_prompt(bot, "discord")
+
+    assert "native function/tool calling" in prompt.lower()
+    assert "XML text tags only" not in prompt
+    assert "send_message:" in prompt
 
 
 def test_prompt_budget_trims_large_background_blocks():
