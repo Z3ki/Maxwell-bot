@@ -273,7 +273,7 @@ _stderr_handler.setLevel(logging.ERROR)
 logging.basicConfig(level=logging.INFO, handlers=[_stdout_handler, _stderr_handler])
 logger = logging.getLogger(__name__)
 
-MAX_VISUAL_MEMORY_IMAGES = 3
+MAX_VISUAL_MEMORY_IMAGES = 5
 # Keep visual carryover short. Long-lived image payloads make the model randomly
 # talk about old screenshots in unrelated replies. That bug is creepy as hell.
 MEDIA_CONTEXT_USES = 2
@@ -5817,17 +5817,36 @@ class MaxwellBot(commands.Bot):
             return
         cached = self._media_context.setdefault(channel_id, [])
         for item in image_media:
-            cached.append(
-                {
-                    "b64": item["b64"],
-                    "mime_type": item["mime_type"],
-                    "filename": item.get("filename", "attachment"),
-                    "message_id": item.get("message_id"),
-                    # Decremented after each handled message. Do not "clean this up"
-                    # back to a big number unless you enjoy haunted image context.
-                    "uses_left": MEDIA_CONTEXT_USES,
-                }
-            )
+            # Re-caching the same (message_id, filename) means a re-handled turn,
+            # not a new image. Bump uses_left on the existing entry instead of
+            # appending a duplicate, otherwise the cap fills with N copies of the
+            # newest image and they all expire in lockstep after a couple turns.
+            mid = str(item.get("message_id")) if item.get("message_id") is not None else None
+            fname = item.get("filename", "attachment")
+            replaced = False
+            if mid is not None:
+                for existing in cached:
+                    if (
+                        str(existing.get("message_id")) == mid
+                        and existing.get("filename") == fname
+                    ):
+                        existing["uses_left"] = MEDIA_CONTEXT_USES
+                        existing["b64"] = item["b64"]
+                        existing["mime_type"] = item["mime_type"]
+                        replaced = True
+                        break
+            if not replaced:
+                cached.append(
+                    {
+                        "b64": item["b64"],
+                        "mime_type": item["mime_type"],
+                        "filename": fname,
+                        "message_id": mid,
+                        # Decremented after each handled message. Do not "clean this up"
+                        # back to a big number unless you enjoy haunted image context.
+                        "uses_left": MEDIA_CONTEXT_USES,
+                    }
+                )
         # Enforce cap: keep only the most recent MAX_VISUAL_MEMORY_IMAGES
         if len(cached) > MAX_VISUAL_MEMORY_IMAGES:
             cached = cached[-MAX_VISUAL_MEMORY_IMAGES:]
@@ -6254,15 +6273,13 @@ class MaxwellBot(commands.Bot):
                 else:
                     history_response = response
                     if "create_site" in (response or "") or "body" in (response or ""):
-                        try:
+                        with contextlib.suppress(Exception):
                             history_response = re.sub(
                                 r'(<parameter[^>]*\bname=["\']?body["\']?[^>]*>)(.*?)(</\s*parameter\s*>)',
                                 r'\1[large HTML/asset body elided to protect context budget; site creation succeeded from the original full body]\3',
                                 history_response,
                                 flags=re.DOTALL | re.IGNORECASE,
                             )
-                        except Exception:
-                            pass
                     conversation_tail.append(
                         {"role": "assistant", "content": history_response}
                     )
@@ -6448,7 +6465,7 @@ class MaxwellBot(commands.Bot):
                 )
             result = await self.tools[name].execute(message, **params)
             result_text = str(result) if result else "executed successfully"
-            if result_text.startswith("Error") or result_text.startswith("Error:"):
+            if result_text.startswith(("Error", "Error:")):
                 self._tool_breaker.record_failure(name)
             else:
                 self._tool_breaker.record_success(name)
