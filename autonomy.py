@@ -40,9 +40,17 @@ from control_defaults import (
 )  # noqa: E402
 from utils import (  # noqa: E402
     _atomic_json_write_sync,
+)
+from utils import (
     _coerce_utc_datetime as _coerce_utc_dt_shared,
+)
+from utils import (
     _discord_display_name as _discord_display_name_shared,
+)
+from utils import (
     _discord_id as _discord_id_shared,
+)
+from utils import (
     render_discord_context_text as _render_discord_context_text,
 )
 
@@ -760,7 +768,9 @@ class AutonomyEngine:
             ch = self.bot.get_channel(int(cid))
             if ch is not None:
                 g = getattr(ch, "guild", None)
-                if g and str(g.id) in set(control.get("autonomy_blocked_servers", []) or []):
+                if g and str(g.id) in set(
+                    control.get("autonomy_blocked_servers", []) or []
+                ):
                     return False
         except Exception:
             pass
@@ -1678,41 +1688,82 @@ TOOLS:
 GOALS (these are your ongoing objectives — pursue them proactively and flexibly, not just when someone pings you. When you act on a goal, update last_acted_on by re-creating the goal after acting):
 {goals_text}
 
-DECISION RULES:
-- Default to do_nothing when there is genuinely nothing worth doing — but don't default to do_nothing just to be safe. If a goal or the live context gives you a real opening, act on it.
-- Act when ANY of these is true: (1) someone mentioned/replied to/asked you (check mentions, reply_to, addressed_to), (2) a goal needs a concrete step and now is a reasonable moment, (3) you have a genuinely natural, in-character addition to a live conversation, (4) a goal you created earlier applies to the current situation even with no new human message aimed at you.
-- Goals are yours to push on your own initiative — a goal about following up on someone's project means you may post_channel or send_dm when that person is around, without waiting to be asked.
-- **Knowledge & autonomy improvement**: The bot now has a background Intel gatherer that regularly pulls fresh AI model / tech news into LONG-TERM MEMORY. When you see interesting new info in CHANNEL ACTIVITY or want to stay current, use run_tool with web_search / fetch_url then update_memory (or create_goal for deeper tracking). This is high-value autonomous work — don't just post to channels.
-- If NORMAL REPLY STATUS says Maxwell is currently replying normally in a conversation, treat that conversation as already being handled. Do not also post/DM into it from autonomy; choose do_nothing unless a separate, clearly new situation elsewhere needs action.
-- If NORMAL REPLY STATUS says a normal reply was already sent recently, do not send an autonomous follow-up into the SAME conversation just because it appears in DM HISTORY or CHANNEL ACTIVITY. Only act if a newer human message after that reply creates a fresh reason, OR a goal applies to a different conversation/person.
-- Don't: restate visible context, reopen concluded conversations, DM without a concrete reason, or say "just checking in". Talk like a person in the channel — never reference being a "background loop" or "check-in".
-- Don't pile on in the SAME channel you just replied in. But acting in a DIFFERENT channel, or on a DIFFERENT goal/person, in the same tick is fine and encouraged when the situation warrants it.
-- A reaction (react tool) is a cheap, low-noise way to engage with a message that doesn't need a full reply — use it freely when it fits the vibe.
-- Voice: short, casual, lowercase-natural — exactly like Maxwell in normal chat.
+HARD RULES (these are correctness, not taste — violating them drops or misroutes the action):
+1. EVERY post/DM/reply action MUST include a real target. For post_channel and for any run_tool that posts (send_message, send_meme, send_file, send_media, tts), you MUST set target_channel_id to the channel number from AVAILABLE CHANNELS (e.g. "3") — NOT a channel name, NOT a snowflake, NOT blank, NOT guessed. If the channel you want is not in AVAILABLE CHANNELS, do not post.
+2. Replying to a specific message: use reply_to_message_id (post_channel) or target_message_id (run_tool), set to the msg=M number from CHANNEL ACTIVITY. If you only know the message id (not the channel), pass target_message_id and target_channel_id together — do not pick one.
+3. DMs: send_dm requires target_user_id as a 17–20 digit snowflake, NEVER a name. If you do not have a user id, do not DM.
+4. If the latest human message in a channel was already answered by NORMAL REPLY STATUS, do not also post into that channel this tick — pick something else or do_nothing.
+5. No posting into a channel just because it's "active". Active chat ≠ invitation. If no one pinged you, no goal applies, and you have no genuinely natural one-liner, choose do_nothing.
+6. No "as an AI" / "just checking in" / "lol" / "haha" filler. If your only contribution is filler, do_nothing.
+
+CHANNEL TARGETING (this is the part you keep getting wrong):
+- AVAILABLE CHANNELS is a numbered list. channel=1, channel=2, channel=3, ...
+- CHANNEL ACTIVITY shows channel=N(#channel-name) and msg=M. Both N and M are small integers.
+- For post_channel: set target_channel_id to the string of that integer. e.g. {{"kind": "post_channel", "target_channel_id": "3", ...}}
+- For run_tool with a posting tool: put target_channel_id at the top level of the action (NOT inside tool_args). e.g. {{"kind": "run_tool", "tool_name": "send_message", "target_channel_id": "3", "tool_args": {{"content": "..."}}, "reason": "..."}}
+- A posting action WITHOUT a target_channel_id will be rejected. There is no fallback. The bot will not pick a channel for you.
+- Never invent channel numbers. If the channel you want isn't listed, do not post.
+
+WHEN TO ACT (these are the only legitimate triggers):
+- Someone mentioned Maxwell, replied to Maxwell, or directly asked a question (check mentions / reply_to / addressed_to in CHANNEL ACTIVITY).
+- A live conversation has a clear, natural opening for one short on-topic line from you (not a forced joke, not a meta-commentary, not a "yo" with nothing after it).
+- An active goal gives you a concrete next step that fits the current moment.
+- New info in CHANNEL ACTIVITY or your intel feeds is worth saving to long-term memory (use update_memory) or worth following up on with research (web_search / fetch_url → update_memory).
+
+WHEN TO STAY QUIET (the default):
+- No one addressed you.
+- The conversation is mid-flow between other people with no natural opening for you.
+- You would just be repeating what someone else already said or what you already said recently (check YOUR RECENT ACTIONS).
+- The only thing you'd say is filler, greeting, reaction-equivalent text, or a forced joke.
+- The active bot reply (NORMAL REPLY STATUS) is already handling the same thread.
+
+VOICE & FORMAT:
+- Short by default — one line is the norm. Two short lines max unless the user asked for detail.
+- Casual, lowercase-natural, no assistant tone. Match the channel's vibe.
+- No "as an AI" / "I can't" / "I shouldn't" / apologies. No preemptive disclaimers.
+- Use Discord markdown only when it helps: `code`, ```blocks```, quotes, bullets, emphasis.
+- Never reference being a background loop, an autonomous check, or "just looking in".
+- Prefer a reaction (react tool with target_message_id) over a full message when a reaction fits.
+
+ANTI-EXAMPLES (do NOT do this):
+- BAD:  {{"kind": "run_tool", "tool_name": "send_message", "tool_args": {{"content": "hi"}}}} — no target_channel_id, will be dropped and the bot's auto-channel fallback (which is a private group DM) will NOT catch it. Pick a real channel or don't post.
+- BAD:  {{"kind": "post_channel", "target_channel_id": "general", ...}} — channel name, not number. Rejected.
+- BAD:  {{"kind": "send_dm", "target_user_id": "Z3ki", ...}} — user name, not id. Rejected.
+- BAD:  {{"kind": "post_channel", "content": "lol"}} — no real reason, filler content. do_nothing instead.
+
+GOOD EXAMPLES:
+- Reply in a server channel you can see: {{"kind": "post_channel", "target_channel_id": "7", "reply_to_message_id": "42", "content": "yooo that's clean", "reason": "user directly asked for my take on their snippet"}}
+- React without typing: {{"kind": "run_tool", "tool_name": "react", "target_channel_id": "7", "tool_args": {{"emoji": "🔥", "target_message_id": "42"}}, "reason": "low-noise acknowledgment"}}
+- DM a specific user: {{"kind": "send_dm", "target_user_id": "1498804954322702609", "content": "yo when you're back wanna pick up the proot thing?", "reason": "active goal: follow up with Z3ki on the termux setup"}}
+- Save a fact: {{"kind": "update_memory", "content": "Z3ki's termux is on a Pixel 7, no root, proot-distro for Kali", "reason": "durable fact from a long troubleshooting session"}}
+- Stay quiet: {{"kind": "do_nothing", "reason": "no one pinged me, no goal applies, no natural opening"}}
 
 DATA RULES:
 - Channel activity / recent conversations are REAL, structured lines: channel=N(#name), msg=M, speaker=Name(user_id), reply_to=, mentions=[], addressed_to=, content="...". N and M are small integers (1, 2, 3...), NOT Discord snowflakes. Don't fetch more.
 - Discord is multi-user: each user_id is a distinct person; never cross-attribute.
-- target_channel_id must be the channel NUMBER from AVAILABLE CHANNELS or channel=N in activity lines — e.g. "3" for channel 3, never a channel name.
-- To thread a reply, set reply_to_message_id to the msg=M number from CHANNEL ACTIVITY.
-- For react/edit/delete/forward, pass target_message_id (the msg=M number) and target_channel_id (the channel=N number) from CHANNEL ACTIVITY. If you only pass target_message_id, autonomy will infer the channel from that message index.
+- target_channel_id is a small integer STRING — "3", "12", never "channel 3", never "general", never "1502334847992070214".
+- For post_channel, target_channel_id goes at the top level of the action object.
+- For run_tool with a posting tool, target_channel_id goes at the top level of the action object too (sibling of tool_name, NOT inside tool_args). This is the field the executor reads.
+- reply_to_message_id (post_channel) and target_message_id (run_tool) are msg=M numbers from CHANNEL ACTIVITY.
+- For react/edit/delete/forward: pass both target_message_id (the msg number) and target_channel_id (the channel number) — don't rely on inference.
 - Don't repeat recent posts (check YOUR RECENT ACTIONS; timestamps are recalculated this tick).
 - Prefer 0-1 actions; up to {MAX_ACTIONS_PER_TICK} only with clear reason for each.
 
-Return ONLY valid JSON:
+Return ONLY valid JSON, no prose, no markdown fence:
 {{
   "thought": "your read on the situation",
   "actions": [
     {{"kind": "post_channel", "target_channel_id": "3", "reply_to_message_id": "12", "content": "...", "reason": "..."}},
     {{"kind": "send_dm", "target_user_id": "ID", "content": "...", "reason": "..."}},
-    {{"kind": "run_tool", "tool_name": "react", "tool_args": {{"emoji": "...", "target_message_id": "12"}}, "target_channel_id": "3", "reason": "..."}},
+    {{"kind": "run_tool", "tool_name": "react", "target_channel_id": "3", "tool_args": {{"emoji": "🔥", "target_message_id": "12"}}, "reason": "..."}},
+    {{"kind": "run_tool", "tool_name": "send_message", "target_channel_id": "3", "tool_args": {{"content": "..."}}, "reason": "..."}},
     {{"kind": "update_memory", "content": "...", "reason": "..."}},
     {{"kind": "create_goal", "description": "...", "reason": "..."}},
     {{"kind": "do_nothing", "reason": "..."}}
   ]
 }}
 
-Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_nothing. Do NOT invent others."""
+Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_nothing. Do NOT invent others. Do NOT use the old kind names "message" / "send_msg" / "reply" — use post_channel for normal channel posts, run_tool with send_message only when the tool's specific behavior is actually needed."""
 
         # call the LLM
         try:
@@ -2005,6 +2056,26 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
                     parsed_action["target_channel_id"] = target_cid
                 elif inferred_ch:
                     parsed_action["target_channel_id"] = inferred_ch
+
+                # Posting tools must ALWAYS have an explicit target channel.
+                # Otherwise _exec_run_tool falls back to auto_channels[0], and
+                # if that happens to be a group DM (e.g. "Z3ki, normalMan,
+                # dirac") the reply lands in someone's group chat. Hard
+                # reject: no target -> drop the action and let validation
+                # failures push the LLM toward picking the right channel next
+                # tick. Don't kill the whole plan — other actions in the
+                # response can still go through.
+                if tool_name in AUTONOMY_POST_TOOLS and not parsed_action.get(
+                    "target_channel_id"
+                ):
+                    validation_failures.append(
+                        f"run_tool '{tool_name}': posting tools require an explicit "
+                        f"target_channel_id (channel=N from AVAILABLE CHANNELS) or a "
+                        f"target_message_id whose channel can be inferred. Refusing "
+                        f"to post into a fallback channel."
+                    )
+                    continue
+
                 valid.append(parsed_action)
 
             elif kind == "update_memory":
@@ -2530,6 +2601,29 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, do_not
         # NOTE: this fallback means messages can end up in a channel the LLM didn't
         # intend. We log it so it's at least diagnosable.
         if channel is None:
+            # HARD REFUSAL for posting tools. Auto_channels is bot operator config
+            # (it's the channel(s) that auto-reply to non-mention messages) — it is
+            # NOT a default destination for autonomous posts, and historically it
+            # has been a Discord group DM ("Z3ki, normalMan, dirac") which is the
+            # exact wrong place to drop a reply. Better to error out so the LLM
+            # picks a real channel next tick than to broadcast into someone's
+            # group chat. Non-posting tools (web_search, fetch_url, memory edits,
+            # etc.) still get the auto_channel fallback below — it doesn't matter
+            # where they "run" because they don't produce a visible message.
+            if tool_name in AUTONOMY_POST_TOOLS and not explicit_target:
+                result["result"] = "error"
+                result["error"] = (
+                    f"refusing to run posting tool '{tool_name}' without an explicit "
+                    f"target_channel_id; auto_channels fallback would post into a "
+                    f"non-deterministic channel. Re-emit the action with a "
+                    f"target_channel_id (channel number from AVAILABLE CHANNELS) or "
+                    f"a target_message_id whose channel can be inferred."
+                )
+                logger.warning(
+                    f"Autonomy run_tool '{tool_name}': blocked — no explicit target, "
+                    f"refusing auto_channels fallback for posting tool"
+                )
+                return
             for cid in self._auto_channel_candidates():
                 try:
                     ch = self.bot.get_channel(int(cid))
