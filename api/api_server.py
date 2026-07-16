@@ -6,6 +6,7 @@ All API and data routes require Basic username/password auth by default.
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
@@ -158,7 +159,10 @@ def _json_response(data, status=200):
         headers={
             "Access-Control-Allow-Origin": CORS_ORIGIN,
             "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            # X-Discord-Token is the auth header for the remote Discord dashboard.
+            # Without it in Allow-Headers, the browser preflight fails and the
+            # dashboard can't talk to the API from a different origin.
+            "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Discord-Token",
         },
     )
 
@@ -200,10 +204,8 @@ def _safe_compare(a: str, b: str) -> bool:
     if len(a) != len(b):
         # Still run compare_digest on equal-length padding to keep timing flatter.
         dummy = a if len(a) >= len(b) else b
-        try:
+        with contextlib.suppress(Exception):
             hmac.compare_digest(dummy, dummy)
-        except Exception:
-            pass
         return False
     try:
         return hmac.compare_digest(a, b)
@@ -2345,7 +2347,7 @@ async def _options_handler(request):
         headers={
             "Access-Control-Allow-Origin": CORS_ORIGIN,
             "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Discord-Token",
         },
     )
 

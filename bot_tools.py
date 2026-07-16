@@ -11,11 +11,11 @@ import json
 import os
 import re
 import shutil
-import contextlib
-from pathlib import Path
-from typing import Any, cast
 import socket
 import tempfile
+from pathlib import Path
+from typing import Any, cast
+import contextlib
 import html
 import wave
 
@@ -27,9 +27,10 @@ import aiofiles
 import logging
 import random
 from datetime import datetime, timezone, timedelta
-from discord import Message, File, Activity, Status
 from io import BytesIO
 from urllib.parse import parse_qs, urlparse
+
+from discord import Message, File, Activity, Status
 from tools import Tool
 from ddgs import DDGS as _DDGS
 from utils import _atomic_json_write_sync  # single source of truth, fd-safe
@@ -1896,6 +1897,13 @@ class WebSearchTool(Tool):
         except (ValueError, TypeError):
             limit = 5
 
+        # Web search returns untrusted content. Mark the current turn as
+        # tainted so subsequent destructive tools (shell, sub_agent) prompt
+        # for confirmation. This is the second line of defense against
+        # indirect prompt injection from search snippets.
+        if self.bot is not None and hasattr(self.bot, "mark_message_tainted"):
+            self.bot.mark_message_tainted(message)
+
         try:
             loop = asyncio.get_running_loop()
             results = await loop.run_in_executor(
@@ -2153,6 +2161,10 @@ class SendFileTool(Tool):
 # These mainly prevent accidental or malicious attempts to run nested privileged containers,
 # mount host paths from inside commands, or access the Docker socket.
 # Note: the outer shell sandbox itself now runs with full network + full host FS access (/host).
+# Blocklist is best-effort: it's the outer wall, not the only wall. The inner
+# wall is taint tracking + the docker sandbox capabilities (no-new-privileges,
+# cap-drop ALL, no host net by default). Anything that tries to escape the
+# blocklist gets caught by the next layer.
 _SHELL_BLOCKED_PATTERNS = [
     r"--privileged\b",
     r"--pid=host\b",
@@ -2163,11 +2175,23 @@ _SHELL_BLOCKED_PATTERNS = [
     r"/var/run/docker\.sock",
     r"docker\.sock",
     r"docker\s+(?:run|exec)\b",
+    # Common shell-redirect / pipe-to-interpreter chains that turn a benign
+    # `cat` or `echo` into remote code execution. The "downloaded and run
+    # immediately" pattern is a classic prompt-injection payload.
+    r"\bcurl\b[^|]*\|\s*(?:sh|bash|zsh|dash|ksh|fish|ash|python\d?|perl|ruby|node)\b",
+    r"\bwget\b[^|]*\|\s*(?:sh|bash|zsh|dash|ksh|fish|ash|python\d?|perl|ruby|node)\b",
+    r"\bcurl\b[^|]*-o\s*-?\s*\|",  # curl -o- | sh
+    r"\bbase64\s+(?:-d|--decode)\b[^|]*\|\s*(?:sh|bash|zsh|python\d?)\b",
+    r"\beval\s*\$\(.*(?:curl|wget)\b",  # eval $(curl ...)
 ]
 
 
 class ShellTool(Tool):
     """Execute shell commands in the dedicated Docker sandbox."""
+
+    # Shell executes arbitrary code in a container. It's the most dangerous
+    # tool we expose, so it gets the taint-check / user-confirmation gate.
+    is_destructive = True
 
     CONTAINER_NAME = "maxwell-shell"
     IMAGE_NAME = "maxwell-shell"
@@ -2248,10 +2272,10 @@ class ShellTool(Tool):
                 # Stale container with wrong flags — remove and recreate below.
                 with contextlib.suppress(Exception):
                     await self._run_docker("rm", "-f", self.CONTAINER_NAME, timeout=10)
-        except FileNotFoundError:
-            raise RuntimeError("docker is not installed or not on PATH")
-        except asyncio.TimeoutError:
-            raise RuntimeError("docker did not respond while checking sandbox")
+        except FileNotFoundError as exc:
+            raise RuntimeError("docker is not installed or not on PATH") from exc
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("docker did not respond while checking sandbox") from exc
 
         (_stdout, stderr), build_code = await self._run_docker(
             "build", "-t", self.IMAGE_NAME, self.DOCKERFILE_DIR, timeout=180
@@ -2415,6 +2439,26 @@ class ShellTool(Tool):
         ):
             return "Error: You do not have permission to use the shell tool. Ask an admin to whitelist you with `,shell <user_id>`."
 
+        # Indirect-prompt-injection defense: if the current turn is tainted
+        # (the model just read content from a URL / web search that may carry
+        # prompt-injection payloads), require an explicit confirm flag on the
+        # call. Without this, a malicious page can say "run `rm -rf ~`" and
+        # the model can comply even with the blocklist in place.
+        tainted = bool(
+            self.bot is not None
+            and getattr(self.bot, "is_message_tainted", None)
+            and self.bot.is_message_tainted(message)
+        )
+        if tainted and not kwargs.get("_confirmed", False):
+            preview = normalized[:200] + ("..." if len(normalized) > 200 else "")
+            return (
+                "Error: shell refused: this turn read content from a fetched "
+                "URL/web search that may carry prompt-injection payloads. "
+                "Re-issue the shell call with `_confirmed=true` if you want to "
+                "proceed (admins/whitelisted users only).\n"
+                f"Command preview: {preview}"
+            )
+
         try:
             stdout, stderr, exit_code = await self._run_shell_command(normalized)
         except asyncio.TimeoutError:
@@ -2533,10 +2577,8 @@ class ShellTool(Tool):
             logger.warning(f"Failed to send shell file {rel_path}: {e}")
             return None
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 shutil.rmtree(tmp_dir, ignore_errors=True)
-            except Exception:
-                pass
 
 
 class FetchUrlTool(Tool):
@@ -2564,6 +2606,12 @@ class FetchUrlTool(Tool):
         if not _is_safe_url(url):
             return "Error: Cannot fetch from private/internal URLs"
 
+        # Mark this turn as tainted: the URL is operator-supplied but its
+        # *content* is untrusted and may include prompt-injection payloads
+        # designed to steer the model into proposing shell / sub_agent calls.
+        if self.bot is not None and hasattr(self.bot, "mark_message_tainted"):
+            self.bot.mark_message_tainted(message)
+
         try:
             max_len = max(1, min(int(max_length), self.MAX_CONTENT))
         except (ValueError, TypeError):
@@ -2586,10 +2634,8 @@ class FetchUrlTool(Tool):
         try:
             if "json" in content_type or url.endswith(".json"):
                 text = raw.decode(errors="replace")
-                try:
+                with contextlib.suppress(Exception):
                     text = json.dumps(json.loads(text), indent=2, ensure_ascii=False)
-                except Exception:
-                    pass
             elif (
                 "html" in content_type
                 or "<html" in raw[:500].decode(errors="replace").lower()
@@ -3266,7 +3312,7 @@ class TtsTool(Tool):
                 out_f.setnchannels(1)
                 out_f.setsampwidth(2)
                 out_f.setframerate(44100)
-                out_f.writeframesraw(getattr(resp, "audio"))
+                out_f.writeframesraw(resp.audio)
 
         except Exception as e:
             logger.warning(f"Riva TTS synthesis failed: {e}. Falling back to gTTS.")
@@ -3446,10 +3492,8 @@ class TtsTool(Tool):
             finally:
                 for path in {filename, voice_filename}:
                     if os.path.exists(path):
-                        try:
+                        with contextlib.suppress(Exception):
                             os.remove(path)
-                        except Exception:
-                            pass
         else:
             return f"Error: Audio file {filename} was not generated"
 
@@ -3499,6 +3543,10 @@ class LeaveVcTool(Tool):
 class SubAgentTool(Tool):
     """Spawn a background OpenCode sub-agent to handle long tasks."""
 
+    # Sub-agent can execute arbitrary code in a container, fetch the web,
+    # and (per its own prompt) run shell. Taint-gate it like ShellTool.
+    is_destructive = True
+
     def get_description(self):
         return (
             "Launch an OpenCode sub-agent to work on a long or complex task in the background. "
@@ -3523,6 +3571,24 @@ class SubAgentTool(Tool):
             return "Error: sub_agent is admin-only"
         if not task or not str(task).strip():
             return "Error: task prompt is required"
+
+        # Indirect-prompt-injection defense. Same logic as ShellTool: a sub-
+        # agent can run arbitrary code in a container, so refuse to spawn one
+        # from a tainted turn unless the caller explicitly opts in.
+        tainted = bool(
+            self.bot is not None
+            and getattr(self.bot, "is_message_tainted", None)
+            and self.bot.is_message_tainted(message)
+        )
+        if tainted and not kwargs.get("_confirmed", False):
+            preview = str(task)[:200] + ("..." if len(str(task)) > 200 else "")
+            return (
+                "Error: sub_agent refused: this turn read content from a fetched "
+                "URL/web search that may carry prompt-injection payloads. "
+                "Re-issue the sub_agent call with `_confirmed=true` if you want "
+                "to proceed (admins only).\n"
+                f"Task preview: {preview}"
+            )
 
         try:
             minutes = max(1, min(int(timeout_minutes), 120))

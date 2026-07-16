@@ -1907,6 +1907,15 @@ class MaxwellBot(commands.Bot):
         self._admins: set[str] = set(OWNER_IDS)
         self._guild_emojis: dict[str, dict[str, str]] = {}
         self._media_context: dict[str, list[dict]] = {}
+        # Indirect-prompt-injection defense. When the model has just read
+        # content from a less-trusted source (fetch_url, web_search, a URL in
+        # a user message, etc.), we mark the current message as "tainted" so
+        # destructive tools (shell, sub_agent) require explicit user
+        # confirmation before running. Taint is cleared on every new user
+        # message so it's strictly per-turn: a clean follow-up resets the flag.
+        # `message_id -> bool` lets us be precise when multiple replies are
+        # in flight on different channels.
+        self._tainted_messages: set[str] = set()
         self._control = dict(DEFAULT_CONTROL)
         self._control_mtime = 0
         self._reaction_seen: set[str] = set()  # "{message_id}:{emoji}" dedup
@@ -1925,6 +1934,9 @@ class MaxwellBot(commands.Bot):
         self._vc_playback_until: dict[int, float] = {}
         self._trace_lock = asyncio.Lock()
         self._tasks: list[Any] = []
+        # Last time we swept the task list for completed entries. Without this
+        # the list grew unboundedly with every provider churn / reinit.
+        self._last_task_sweep: float = 0.0
         self.autonomy_engine: Any = None  # initialized after tools
         self.autonomy_provider: Any = None
         self._autonomy_provider_sig: str = ""
@@ -1957,6 +1969,26 @@ class MaxwellBot(commands.Bot):
         if cid not in self._recent_users:
             self._recent_users[cid] = {}
         self._recent_users[cid][uid] = name
+
+    def _track_task(self, task: Any) -> Any:
+        """Add a fire-and-forget task to self._tasks, periodically sweeping
+        completed entries to keep the list bounded.
+
+        The naive pattern (always append) leaks one slot per provider churn /
+        reinit / config toggle. Sweep at most every 60s to amortize the cost.
+        """
+        import time as _time
+
+        self._tasks.append(task)
+        now = _time.monotonic()
+        if now - self._last_task_sweep > 60:
+            self._last_task_sweep = now
+            self._tasks = [t for t in self._tasks if not t.done()]
+        return task
+
+    def _sweep_tasks(self) -> None:
+        """Drop completed task handles. Called on a soft cadence; cheap."""
+        self._tasks = [t for t in self._tasks if not t.done()]
 
     def _setup_ai(self):
         self.ai_provider = OllamaProvider(
@@ -2027,7 +2059,7 @@ class MaxwellBot(commands.Bot):
                     try:
                         # Track the close task so shutdown can await/cancel it (prevents session leaks on churn).
                         task = asyncio.create_task(old.close())
-                        self._tasks.append(task)
+                        self._track_task(task)
                     except Exception as e:
                         logger.warning(
                             f"Failed to schedule old autonomy provider close: {e}"
@@ -2056,7 +2088,7 @@ class MaxwellBot(commands.Bot):
                     try:
                         # Track the close task so shutdown can await/cancel it (prevents session leaks on churn).
                         task = asyncio.create_task(old.close())
-                        self._tasks.append(task)
+                        self._track_task(task)
                     except Exception as e:
                         logger.warning(
                             f"Failed to schedule old autonomy provider close: {e}"
@@ -2396,6 +2428,10 @@ class MaxwellBot(commands.Bot):
         except Exception as e:
             logger.error(f"Failed to load control in on_message: {e}")
             return
+        # Each fresh user turn starts un-tainted. The taint flag is set by
+        # fetch_url / web_search when they return untrusted content, and is
+        # consulted by destructive tools (shell, sub_agent) to gate execution.
+        self.clear_message_taint(message)
         if not message.author.bot:
             preview = message.content[:100] if message.content else "[no text]"
             if not self._control.get("log_messages", True):
@@ -2947,9 +2983,10 @@ class MaxwellBot(commands.Bot):
                     await message.channel.send("Admin list reset to owners.")
                 else:
                     uid = args.strip().strip("<@!>")
-                    if not uid.isdigit():
+                    # Numeric IDs only (17-20 digit Discord snowflake range).
+                    if not uid.isdigit() or not (17 <= len(uid) <= 20):
                         await message.channel.send(
-                            "usage: `,admin <@user|user_id>` or `,admin clear`"
+                            "usage: `,admin <@user|user_id>` (a 17-20 digit Discord snowflake) or `,admin clear`"
                         )
                         return
                     if uid in self._admins:
@@ -2998,6 +3035,13 @@ class MaxwellBot(commands.Bot):
                     await message.channel.send("Shell whitelist cleared.")
                 else:
                     uid = args.strip().strip("<@!>")
+                    # Numeric IDs only: rejecting non-digits here keeps a stray
+                    # mention or url fragment from ending up in the whitelist.
+                    if not uid.isdigit() or not (17 <= len(uid) <= 20):
+                        await message.channel.send(
+                            "usage: `,shell <user_id>` (a 17-20 digit Discord snowflake) or `,shell clear`"
+                        )
+                        return
                     if uid in self._shell_whitelist:
                         self._shell_whitelist.discard(uid)
                         self._save_shell_whitelist()
@@ -3029,11 +3073,21 @@ class MaxwellBot(commands.Bot):
                         await message.channel.send("Blacklist cleared.")
                     else:
                         uid = args.strip().strip("<@!>")
+                        if not uid.isdigit() or not (17 <= len(uid) <= 20):
+                            await message.channel.send(
+                                "usage: `,blacklist <user_id>` (a 17-20 digit Discord snowflake) or `,blacklist clear`"
+                            )
+                            return
                         self._blacklist.add(uid)
                         self._save_blacklist()
                         await message.channel.send(f"Blacklisted <@{uid}>")
                 elif args:
                     uid = args.strip().strip("<@!>")
+                    if not uid.isdigit() or not (17 <= len(uid) <= 20):
+                        await message.channel.send(
+                            "usage: `,unblacklist <user_id>` (a 17-20 digit Discord snowflake)"
+                        )
+                        return
                     self._blacklist.discard(uid)
                     self._save_blacklist()
                     await message.channel.send(f"Unblacklisted <@{uid}>")
@@ -6657,11 +6711,38 @@ class MaxwellBot(commands.Bot):
         provider = getattr(self, "ai_provider", None)
         calls = list(getattr(provider, "_last_tool_calls", None) or [])
         if provider is not None:
-            try:
+            with contextlib.suppress(Exception):
                 provider._last_tool_calls = []
-            except Exception:
-                pass
         return calls
+
+    def mark_message_tainted(self, message) -> None:
+        """Mark a message as having read untrusted content in the current turn.
+
+        Tools that are flagged ``is_destructive`` (shell, sub_agent) must
+        consult ``is_message_tainted`` before running and ask the user to
+        confirm if the flag is set. This is the second line of defense
+        against indirect prompt injection from fetched content: even if a
+        malicious page tricks the model into proposing a shell command,
+        the user has to click Confirm before it runs.
+        """
+        if message is None:
+            return
+        mid = str(getattr(message, "id", "") or "")
+        if mid:
+            self._tainted_messages.add(mid)
+
+    def clear_message_taint(self, message) -> None:
+        """Drop the taint flag for a message (e.g. when a fresh user turn starts)."""
+        if message is None:
+            return
+        mid = str(getattr(message, "id", "") or "")
+        self._tainted_messages.discard(mid)
+
+    def is_message_tainted(self, message) -> bool:
+        """True if the current turn has read content from an untrusted source."""
+        if message is None:
+            return False
+        return str(getattr(message, "id", "") or "") in self._tainted_messages
 
     @overload
     async def _process_tool_calls(
@@ -6691,8 +6772,14 @@ class MaxwellBot(commands.Bot):
         )
         if not calls:
             return (response, [], []) if include_images else (response, [])
-        calls.sort(
-            key=lambda x: (1 if x[2] in {"send_message", "no_response"} else 0, x[0])
+        # BUG FIX: sort a COPY for execution order, keep `calls` in original
+        # document order for segment extraction. The old code sorted `calls`
+        # in place, then sliced the response using sorted positions — the
+        # text segments ended up in execution order instead of the order the
+        # model wrote them, producing visibly garbled output.
+        execution_order = sorted(
+            calls,
+            key=lambda x: (1 if x[2] in {"send_message", "no_response"} else 0, x[0]),
         )
         segments = []
         last = 0
@@ -6730,21 +6817,23 @@ class MaxwellBot(commands.Bot):
 
         async def run_calls():
             nonlocal last
-            # Pre-compute all segments (text between tool calls)
+            # Pre-compute all segments in DOCUMENT order (not execution order)
+            # so the stitched text reads as the model wrote it.
             for start, end, _name, _params in calls:
                 segments.append(response[last:start])
                 last = end
 
-            # Split into non-terminal and terminal calls.
-            # Calls are already sorted: non-terminal first, then terminal.
+            # Split into non-terminal and terminal calls using the
+            # pre-sorted execution_order copy, so helper tools fire first and
+            # the terminal tool (send_message/no_response) runs last.
             non_terminal = [
                 (s, e, n, p)
-                for s, e, n, p in calls
+                for s, e, n, p in execution_order
                 if n not in {"send_message", "no_response"}
             ]
             terminal = [
                 (s, e, n, p)
-                for s, e, n, p in calls
+                for s, e, n, p in execution_order
                 if n in {"send_message", "no_response"}
             ]
 
@@ -6780,9 +6869,7 @@ class MaxwellBot(commands.Bot):
                     result_text = str(result) if result else "executed successfully"
                     results.append(f"Tool {name}: {result_text}")
                     # Soft tool failures return "Error: ..." strings — count them.
-                    if result_text.startswith("Error") or result_text.startswith(
-                        "Error:"
-                    ):
+                    if result_text.startswith(("Error", "Error:")):
                         self._tool_breaker.record_failure(name)
                     else:
                         self._tool_breaker.record_success(name)
@@ -6843,9 +6930,7 @@ class MaxwellBot(commands.Bot):
                     result = await self.tools[name].execute(message, **params)
                     result_text = str(result) if result else "executed successfully"
                     tool_results.append(f"Tool {name}: {result_text}")
-                    if result_text.startswith("Error") or result_text.startswith(
-                        "Error:"
-                    ):
+                    if result_text.startswith(("Error", "Error:")):
                         self._tool_breaker.record_failure(name)
                     else:
                         self._tool_breaker.record_success(name)
@@ -6858,13 +6943,25 @@ class MaxwellBot(commands.Bot):
                     result_text = f"Error - {e}"
                     tool_results.append(f"Tool {name}: {result_text}")
                     await remember_tool_call(name, params, result_text)
+        # BUG FIX: run_calls must be called exactly once. The old code called
+        # it inside `async with message.channel.typing():` AND again in the
+        # `except discord.Forbidden` branch, so a Forbidden on the typing
+        # context (rare but happens when the bot is missing the
+        # SendMessagesInThreads permission) would re-execute every tool call.
+        # Tools like send_message / send_file / create_channel are NOT
+        # idempotent: re-running them would post the message twice, write the
+        # file twice, etc. Use a single `if/else` to guarantee one call.
         if self._control.get("typing_indicator", True) and not getattr(
             message, "suppress_typing", False
         ):
             try:
                 async with message.channel.typing():
                     await run_calls()
-            except discord.Forbidden as _exc:
+            except discord.Forbidden:
+                # Typing context was refused (missing perms). Run once without
+                # the typing indicator instead of falling through to a second
+                # run_calls invocation that would re-execute side-effecting
+                # tools.
                 await run_calls()
         else:
             await run_calls()
@@ -7913,15 +8010,13 @@ class MaxwellBot(commands.Bot):
                 else:
                     history_response_text = response_text
                     if "create_site" in (response_text or ""):
-                        try:
+                        with contextlib.suppress(Exception):
                             history_response_text = re.sub(
                                 r'(<parameter[^>]*\bname=["\']?body["\']?[^>]*>)(.*?)(</\s*parameter\s*>)',
                                 r'\1[large body elided]\3',
                                 history_response_text,
                                 flags=re.DOTALL | re.IGNORECASE,
                             )
-                        except Exception:
-                            pass
                     conversation_tail.append(
                         {"role": "assistant", "content": history_response_text}
                     )
@@ -8344,15 +8439,13 @@ class MaxwellBot(commands.Bot):
                             else:
                                 hrt = response_text
                                 if "create_site" in (response_text or ""):
-                                    try:
+                                    with contextlib.suppress(Exception):
                                         hrt = re.sub(
                                             r'(<parameter[^>]*\bname=["\']?body["\']?[^>]*>)(.*?)(</\s*parameter\s*>)',
                                             r'\1[elided]\3',
                                             hrt,
                                             flags=re.DOTALL | re.IGNORECASE,
                                         )
-                                    except Exception:
-                                        pass
                                 conversation_tail.append(
                                     {"role": "assistant", "content": hrt}
                                 )

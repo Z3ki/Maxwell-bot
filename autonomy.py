@@ -654,7 +654,12 @@ class AutonomyEngine:
         self.store = AutonomyStore(bot.config.DATA_DIR)
         self._running = False
         self._task: asyncio.Task | None = None
-        self._lock = asyncio.Lock()  # prevents concurrent ticks
+        self._lock = asyncio.Lock()  # serializes per-tick sections of state mutation
+        # Single-flight generation counter. Two concurrent ticks must never both
+        # run — the old `force release lock on timeout` path was a race that let
+        # overlapping ticks share state. A monotonic counter, compared at entry,
+        # guarantees at most one tick is in flight.
+        self._tick_in_flight = False
         self._last_thought = ""  # avoid AttributeError on early failure
         # Track posted message IDs for engagement checking: [{msg_id, channel_id, timestamp}]
         self._posted_messages: list[dict] = []
@@ -871,50 +876,63 @@ class AutonomyEngine:
 
     async def tick(self) -> dict:
         """One autonomy cycle. Skipped if previous tick still running."""
+        # Single-flight: bail early if a tick is already running. The legacy
+        # `force release lock after 600s` path was a real race — overlapping
+        # ticks could share state and post duplicate messages. The check-and-
+        # set is atomic in the asyncio sense (no await between read and write),
+        # so two concurrent tick() calls cannot both pass the guard.
+        if self._tick_in_flight:
+            logger.debug("Autonomy tick skipped: previous tick still in flight")
+            return {"skipped": True, "reason": "previous tick in flight"}
+        self._tick_in_flight = True
         acquired = False
         try:
-            # Always wait with a timeout; do not pre-check locked() which made the
-            # 600s path unreachable and left autonomy permanently skipped.
-            await asyncio.wait_for(self._lock.acquire(), timeout=600)
-            acquired = True
-        except asyncio.TimeoutError as _exc:
-            logger.error(
-                "Autonomy tick lock timed out — previous tick hung for >10m, forcing release"
-            )
-            # Force-release a stuck lock so future ticks can run.
-            if self._lock.locked():
-                with contextlib.suppress(RuntimeError, ValueError):
-                    self._lock.release()
-            return {"skipped": False, "error": "lock timeout"}
-        try:
-            # BUG FIX: capture tick START time as watermark. Events recorded during
-            # plan/execute have timestamps between start and end. Using end-of-tick
-            # as watermark (old behavior) drops those events from the next tick.
-            tick_start_iso = _utcnow_iso()
-            start = time.time()
+            # Bounded wait for the short critical section only. 10m was absurd
+            # for a state-mutation lock and forced the force-release hack.
             try:
-                context = await self.gather_context()
-                actions = await self.plan(context)
-                results = await self.execute(actions)
-                duration = time.time() - start
-                await self._log_tick(
-                    context, actions, results, duration, tick_start_iso
+                await asyncio.wait_for(self._lock.acquire(), timeout=30)
+                acquired = True
+            except asyncio.TimeoutError:
+                logger.error(
+                    "Autonomy tick lock timed out (>30s) — previous state mutation hung; skipping"
                 )
-                return {"skipped": False, "actions": len(results), "duration": duration}
-            except Exception as e:
-                duration = time.time() - start
-                logger.error(f"Autonomy tick failed: {e}")
-                await self.store.patch_state(
-                    {
-                        "last_tick": tick_start_iso,
-                        "last_tick_duration": round(duration, 2),
-                        "last_error": str(e)[:2000],
-                    }
-                )
-                return {"skipped": False, "error": str(e), "duration": duration}
-        finally:
-            if acquired:
-                self._lock.release()
+                return {"skipped": True, "reason": "lock timeout"}
+            try:
+                # BUG FIX: capture tick START time as watermark. Events recorded during
+                # plan/execute have timestamps between start and end. Using end-of-tick
+                # as watermark (old behavior) drops those events from the next tick.
+                tick_start_iso = _utcnow_iso()
+                start = time.time()
+                try:
+                    context = await self.gather_context()
+                    actions = await self.plan(context)
+                    results = await self.execute(actions)
+                    duration = time.time() - start
+                    await self._log_tick(
+                        context, actions, results, duration, tick_start_iso
+                    )
+                    return {"skipped": False, "actions": len(results), "duration": duration}
+                except Exception as e:
+                    duration = time.time() - start
+                    logger.error(f"Autonomy tick failed: {e}")
+                    await self.store.patch_state(
+                        {
+                            "last_tick": tick_start_iso,
+                            "last_tick_duration": round(duration, 2),
+                            "last_error": str(e)[:2000],
+                        }
+                    )
+                    return {"skipped": False, "error": str(e), "duration": duration}
+            finally:
+                if acquired:
+                    self._lock.release()
+                self._tick_in_flight = False
+        except BaseException:
+            # Safety net: never leave _tick_in_flight True on any exit (including
+            # CancelledError). Without this, a mid-tick cancellation would
+            # permanently disable autonomy.
+            self._tick_in_flight = False
+            raise
 
     async def _resolve_reference(
         self, message: Any, cache: dict[tuple[str, str], Any]

@@ -24,7 +24,13 @@ CONTAINER_WORKDIR = "/home/opencode"
 DEFAULT_TIMEOUT_MS = 600000
 DEFAULT_MEMORY = "2g"
 DEFAULT_CPUS = "1.0"
-DEFAULT_NETWORK = "none"
+# Default to 'bridge' so the container can reach the operator-configured
+# LLM endpoint. 'none' severs DNS resolution entirely and would break
+# every provider call. Operators who want a sealed sandbox can set
+# OPENCODE_SUBAGENT_NETWORK=none explicitly — but they must also expose
+# the LLM endpoint through a sidecar, host gateway, or pre-baked hosts
+# entries for this to be useful.
+DEFAULT_NETWORK = "bridge"
 
 
 logger = None  # initialized lazily via _ensure_logger
@@ -128,6 +134,66 @@ async def ensure_image() -> None:
         )
 
 
+async def _resolve_container_uid() -> int:
+    """Return the numeric UID of CONTAINER_USER inside the maxwell-opencode image.
+
+    The Dockerfile creates the user via `useradd -m -s /bin/bash opencode`, so the
+    UID is whatever the image build assigned (typically 1000, but could be higher
+    on hosts with a large UID range already taken). Resolving it dynamically means
+    the chown call below works regardless of host UID range.
+    """
+    stdout, _stderr, code = await _run_docker(
+        "run",
+        "--rm",
+        "--entrypoint",
+        "id",
+        IMAGE_NAME,
+        "-u",
+        CONTAINER_USER,
+        timeout=15,
+    )
+    if code != 0:
+        _ensure_logger().warning(
+            "Could not resolve container UID, falling back to 1000: %s",
+            _stderr.decode(errors="replace").strip() if _stderr else "",
+        )
+        return 1000
+    # `id -u opencode` prints a single number.
+    try:
+        return int(stdout.decode(errors="replace").strip().split()[0])
+    except (ValueError, IndexError):
+        return 1000
+
+
+async def _chown_workdir_to_container(workdir: Path, uid: int) -> None:
+    """Best-effort chown of workdir (and any existing children) to the container UID.
+
+    Only fixes ownership when the host UID is different from the target. We avoid
+    recursing on the entire tree to keep large workdirs cheap; the opencode runtime
+    only needs to write a handful of config/cache files at the top level.
+    """
+    try:
+        st = workdir.stat()
+    except OSError:
+        return
+    current_uid = st.st_uid
+    if current_uid == uid:
+        return
+    # Top-level chown (no -R) so we don't pay to walk megabytes of git history.
+    # If children exist with wrong ownership, the runtime will create the
+    # .opencode / .cache subdirs itself (they'll inherit the new owner).
+    try:
+        os.chown(workdir, uid, uid)
+    except PermissionError:
+        _ensure_logger().warning(
+            "Could not chown %s to UID %s (permission denied); container writes may fail",
+            workdir,
+            uid,
+        )
+    except OSError as e:
+        _ensure_logger().warning("chown %s -> %s failed: %s", workdir, uid, e)
+
+
 async def run_opencode_in_docker(
     workdir: Path,
     prompt: str,
@@ -152,6 +218,14 @@ async def run_opencode_in_docker(
     network = os.environ.get("OPENCODE_SUBAGENT_NETWORK", DEFAULT_NETWORK)
 
     container_name = f"maxwell-opencode-{os.urandom(8).hex()}"
+
+    # The container runs as the 'opencode' user (UID is determined by the image,
+    # usually 1000). If the host workdir is owned by root (e.g. PM2 under root,
+    # or any operator-owned path), the container can't write opencode.json or
+    # create .opencode/.cache and crashes. Resolve the in-image UID and chown
+    # before launching so this works regardless of host UID.
+    container_uid = await _resolve_container_uid()
+    await _chown_workdir_to_container(workdir, container_uid)
 
     # Prepare per-container tmpfs and env; do not mount host /tmp.
     run_env = {

@@ -280,10 +280,8 @@ class IntelEngine:
             except Exception as e:
                 consecutive_failures += 1
                 logger.error(f"IntelEngine loop error: {e}", exc_info=True)
-                try:
+                with contextlib.suppress(Exception):
                     await self.store.record_error(str(e))
-                except Exception:
-                    pass
             interval = max(300, min(self.interval_seconds, MAX_INTERVAL))
             backoff = min(2**consecutive_failures, 6) if consecutive_failures > 0 else 1
             await asyncio.sleep(max(300, int(interval * backoff)))
@@ -364,10 +362,8 @@ class IntelEngine:
                 "error": error,
             }
         )
-        try:
+        with contextlib.suppress(Exception):
             await self.store.patch_state({"running": False, "running_since": ""})
-        except Exception:
-            pass
 
     # -- gathering (feed-first "receive from outlet", no broad web search) --
 
@@ -419,13 +415,27 @@ class IntelEngine:
             "User-Agent": "Maxwell-Intel/1.0 (+https://github.com/maxwell-bot)",
             "Accept": "application/rss+xml, application/atom+xml, application/xml;q=0.9, */*;q=0.8",
         }
+        # Hard cap on bytes read from a feed. RSS is usually tens of KB; some
+        # pathological feeds balloon to MB and used to OOM the bot. 10 MB is
+        # far more than any sane feed and still cheap to read.
+        MAX_FEED_BYTES = 10 * 1024 * 1024
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=timeout, headers=headers, allow_redirects=True) as resp:
-                    if resp.status != 200:
-                        logger.debug(f"Intel feed HTTP {resp.status} for {url}")
-                        return ""
-                    return await resp.text(encoding="utf-8", errors="replace")
+            async with aiohttp.ClientSession() as session, session.get(
+                url, timeout=timeout, headers=headers, allow_redirects=True
+            ) as resp:
+                if resp.status != 200:
+                    logger.debug(f"Intel feed HTTP {resp.status} for {url}")
+                    return ""
+                # Enforce a length cap before decoding. If the server lies
+                # about Content-Length, the incremental reader also bails
+                # out at the same bound.
+                content_length = resp.headers.get("Content-Length")
+                if content_length and content_length.isdigit() and int(content_length) > MAX_FEED_BYTES:
+                    logger.debug(
+                        f"Intel feed too large for {url}: {content_length} bytes"
+                    )
+                    return ""
+                return await resp.text(encoding="utf-8", errors="replace")
         except Exception as e:
             logger.debug(f"Intel feed fetch error for {url}: {e}")
             return ""

@@ -61,10 +61,23 @@ def load_rem_defaults() -> dict:
     data = _load_json(_defaults_path(), {})
     if not isinstance(data, dict):
         data = {}
+    # Use `or` chains to fall back to defaults when the JSON value is missing
+    # OR an empty string/0/None. Each int() conversion is wrapped in a
+    # try/except so a malformed rem_defaults.json (e.g. "interval_seconds":
+    # "ten minutes") doesn't crash bot startup — it falls back to the
+    # hardcoded default instead.
+    try:
+        interval_seconds = int(data.get("interval_seconds") or 600)
+    except (TypeError, ValueError):
+        interval_seconds = 600
+    try:
+        max_turns = int(data.get("max_turns") or 3)
+    except (TypeError, ValueError):
+        max_turns = 3
     return {
         "prompt": str(data.get("prompt") or DEFAULT_REM_PROMPT_BODY),
-        "interval_seconds": int(data.get("interval_seconds") or 600),
-        "max_turns": int(data.get("max_turns") or 3),
+        "interval_seconds": interval_seconds,
+        "max_turns": max_turns,
     }
 
 
@@ -74,7 +87,13 @@ class RemStore:
         self.state_file = self.data_dir / "rem_state.json"
         self.runs_file = self.data_dir / "rem_runs.json"
         self.control_file = self.data_dir / "rem_control.json"
-        self.run_history = max(1, int(run_history or 50))
+        # run_history is operator-configured via env, but defense-in-depth:
+        # treat bogus values (negative, "lots") as the default 50 instead of
+        # letting an integer-only assertion crash bot startup.
+        try:
+            self.run_history = max(1, int(run_history or 50))
+        except (TypeError, ValueError):
+            self.run_history = 50
         self._lock = asyncio.Lock()
 
     async def load_state(self) -> dict:
@@ -177,7 +196,6 @@ async def run_rem_once(
         # Always clear the running flag in finally (covers CancelledError, exceptions,
         # and any partial success path). Prevents stuck "running: true" that blocks
         # the API from allowing new REM runs.
-        try:
+        import contextlib as _contextlib
+        with _contextlib.suppress(Exception):
             await store.patch_state({"running": False, "running_since": ""})
-        except Exception:
-            pass

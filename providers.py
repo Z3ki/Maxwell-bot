@@ -1,11 +1,12 @@
 """Ollama AI Provider for Maxwell Bot"""
 
 import asyncio
-import aiohttp
 import logging
 import os
 import time
 from dataclasses import dataclass
+
+import aiohttp
 
 logger = logging.getLogger(__name__)
 
@@ -79,12 +80,18 @@ def _is_usage_exhausted_error(status: int, error_text: str) -> bool:
     )
     if status != 429:
         return False
-    # Ordinary rate limiting is NOT exhausted.
-    if "rate limit" in text or "rate_limit" in text or "too many requests" in text:
-        # Unless also clearly quota-related
-        if not any(m in text for m in markers):
-            return False
-    return any(marker in text for marker in markers)
+    # Ordinary rate limiting is NOT exhausted. Only flag as exhausted when
+    # the body also clearly mentions quota/credit markers; rate-limit alone
+    # means transient and the caller should keep retrying.
+    is_rate_limit = (
+        "rate limit" in text
+        or "rate_limit" in text
+        or "too many requests" in text
+    )
+    is_quota_marker = any(m in text for m in markers)
+    if is_rate_limit and not is_quota_marker:
+        return False
+    return is_quota_marker
 
 
 @dataclass(frozen=True)
@@ -214,6 +221,18 @@ class OllamaProvider:
         temperature: float = None,
         disable_reasoning: bool = None,
     ) -> dict:
+        # Model override is honored ONLY on the primary endpoint. Fallback
+        # endpoints keep their configured model because the fallback is
+        # selected precisely because the primary model is unhealthy. If a
+        # caller passed a model override but we're routing to a fallback,
+        # log a debug line so it's visible why their model was swapped.
+        if model and endpoint.name != "primary" and model != endpoint.model:
+            logger.debug(
+                "Model override %r ignored on fallback endpoint %r (using %r)",
+                model,
+                endpoint.name,
+                endpoint.model,
+            )
         data = {
             "model": (model or endpoint.model)
             if endpoint.name == "primary"
@@ -798,7 +817,9 @@ class OllamaProvider:
                     fast_fallback=fast_fallback,
                 ):
                     continue
-                raise RuntimeError(f"Provider request timed out after {timeout}s")
+                raise RuntimeError(
+                    f"Provider request timed out after {timeout}s"
+                ) from asyncio.TimeoutError
             except ProviderUsageExhaustedError:
                 raise
             except RuntimeError as e:
@@ -822,7 +843,7 @@ class OllamaProvider:
                     fast_fallback=fast_fallback,
                 ):
                     continue
-                raise RuntimeError(f"Provider call failed: {last_error}")
+                raise RuntimeError(f"Provider call failed: {last_error}") from e
         if last_usage_error:
             raise last_usage_error
         raise RuntimeError("Provider call failed after retries")
