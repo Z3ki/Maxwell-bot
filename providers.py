@@ -58,6 +58,40 @@ class ProviderUsageExhaustedError(RuntimeError):
     user_message = USAGE_EXHAUSTED_MESSAGE
 
 
+class ProviderResult(str):
+    """A ``str`` subclass carrying per-call ``tool_calls`` / ``usage``.
+
+    Behaves exactly like a ``str`` everywhere a string is expected (f-strings,
+    ``len()``, ``or ""``, ``str()``, slicing, etc.), but also exposes the
+    native tool calls and token usage for *this specific call* so the caller
+    does not have to read shared provider instance state.
+
+    Reading ``provider._last_tool_calls`` / ``provider._last_usage`` after an
+    ``await`` was racy: with ``ai_concurrency > 1`` (or background ticks sharing
+    the same provider), a concurrent ``generate_response`` could overwrite the
+    shared state between the call and the consume, causing one channel to
+    execute another channel's tool calls. Attaching the values to the returned
+    object makes the handoff per-call and race-free.
+    """
+
+    __slots__ = ("tool_calls", "usage", "assistant_message")
+
+    def __new__(
+        cls,
+        content,
+        tool_calls: list | None = None,
+        usage: dict | None = None,
+        assistant_message: dict | None = None,
+    ):
+        inst = super().__new__(
+            cls, content if isinstance(content, str) else str(content or "")
+        )
+        inst.tool_calls = list(tool_calls) if tool_calls else []
+        inst.usage = dict(usage) if usage else {}
+        inst.assistant_message = assistant_message
+        return inst
+
+
 def _is_usage_exhausted_error(status: int, error_text: str) -> bool:
     """Detect true quota/credit exhaustion — not ordinary rate limits.
 
@@ -146,6 +180,13 @@ class OllamaProvider:
         self._last_usage: dict = {}
         self._last_tool_calls: list = []
         self._last_assistant_message: dict | None = None
+        # Per-endpoint learned max *output* token cap (name -> cap). Set when a
+        # 400 "maximum output tokens" is observed, and applied proactively on
+        # the next call to that endpoint so we don't waste a round-trip on the
+        # 400 again. Scoped per-endpoint (NOT on the shared instance) so one
+        # model's small output cap doesn't cripple other endpoints/concurrent
+        # requests that previously got mutated via self.max_tokens.
+        self._endpoint_output_caps: dict[str, int] = {}
         # Per-endpoint rate-limit cooldown: name -> monotonic expiry. While an
         # endpoint is cooling, _attempt_endpoint steers to an alternative (if
         # any) so a rate-limited upstream isn't retried immediately.
@@ -240,7 +281,14 @@ class OllamaProvider:
             "stream": False,
         }
         # Always include max_tokens from config or override
-        data["max_tokens"] = max_tokens if max_tokens is not None else self.max_tokens
+        effective_max = max_tokens if max_tokens is not None else self.max_tokens
+        # Proactively clamp to a previously-learned per-endpoint output cap so
+        # we don't waste a round-trip re-hitting the same 400. Per-endpoint so a
+        # small-cap model never lowers the cap for other endpoints.
+        learned_cap = self._endpoint_output_caps.get(endpoint.name)
+        if learned_cap and effective_max > learned_cap:
+            effective_max = learned_cap
+        data["max_tokens"] = effective_max
         # Per-call disable_reasoning overrides the endpoint default; a caller
         # that passes disable_reasoning=False can keep reasoning on a shared
         # provider whose endpoint.disable_reasoning is True.
@@ -341,7 +389,15 @@ class OllamaProvider:
                 raise
 
         tool_calls = message.get("tool_calls") or []
-        self._last_tool_calls = tool_calls if isinstance(tool_calls, list) else []
+        tool_calls = tool_calls if isinstance(tool_calls, list) else []
+        # Capture usage synchronously right after the await returns, before any
+        # further await can let a concurrent call overwrite shared state. This
+        # value is attached to the returned ProviderResult so the caller never
+        # has to read the racy shared ``self._last_usage``.
+        usage = dict(self._last_usage) if self._last_usage else {}
+        # Keep the shared stash for backward-compat callers / tests, but callers
+        # should prefer the ProviderResult attributes (race-free).
+        self._last_tool_calls = tool_calls
         self._last_assistant_message = message
         content = message.get("content") or ""
         # Multimodal / some providers return content as a list of parts
@@ -354,9 +410,14 @@ class OllamaProvider:
                     parts.append(part)
             content = "".join(parts)
         content = content if isinstance(content, str) else str(content or "")
-        if not content and not self._last_tool_calls:
+        if not content and not tool_calls:
             raise RuntimeError("Empty response from provider")
-        return content
+        return ProviderResult(
+            content,
+            tool_calls=tool_calls,
+            usage=usage,
+            assistant_message=message,
+        )
 
     async def generate_chat_completion(
         self,
@@ -691,7 +752,13 @@ class OllamaProvider:
                                         out_cap,
                                     )
                                     max_tokens = safe_output
-                                    self.max_tokens = min(self.max_tokens, safe_output)
+                                    # Remember per-endpoint so future calls to
+                                    # this endpoint clamp proactively without a
+                                    # wasted 400 round-trip. Do NOT mutate the
+                                    # shared self.max_tokens: that permanently
+                                    # crippled every other endpoint/concurrent
+                                    # request after one small-cap model was hit.
+                                    self._endpoint_output_caps[endpoint.name] = safe_output
                                     data["max_tokens"] = safe_output
                                     if await self._retry_after_attempt(
                                         attempt,

@@ -12,6 +12,29 @@ from discord.ext import voice_recv
 logger = logging.getLogger(__name__)
 
 
+def _safe_float(value, default: float) -> float:
+    """Parse a control value to float, falling back to default on bad input.
+
+    The VC control keys (vc_min_seconds, vc_pause_seconds, ...) are read on
+    every frame/finalize. A non-numeric dashboard value used to raise and kill
+    the flush loop silently, leaving the bot deaf with _running stuck True.
+    """
+    try:
+        f = float(value)
+        if f != f or f in (float("inf"), float("-inf")):  # NaN / inf
+            return default
+        return f
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value, default: int) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass
 class _SpeakerState:
     pre_roll: deque = field(default_factory=deque)
@@ -46,6 +69,10 @@ class LiveSpeechSink(voice_recv.AudioSink):
         self._lock = threading.RLock()
         self._ignore_until = 0.0
         self._running = True
+        # In-flight utterance-processing tasks, tracked so cleanup() can cancel
+        # them instead of letting them touch a torn-down sink (mutating VC state
+        # after disconnect).
+        self._utterance_tasks: set[asyncio.Task] = set()
         self._task = loop.create_task(self._flush_loop())
 
     def wants_opus(self):
@@ -78,7 +105,7 @@ class LiveSpeechSink(voice_recv.AudioSink):
         rms = self._rms16le(frame)
         with self._lock:
             if now < self._ignore_until:
-                if rms >= int(self.control.get("vc_rms_threshold", 500)) and self.control.get("vc_interrupt_enabled", True):
+                if rms >= _safe_int(self.control.get("vc_rms_threshold", 500), 500) and self.control.get("vc_interrupt_enabled", True):
                     vc = self.voice_client
                     if vc and vc.is_playing():
                         logger.info("VC playback interrupted by user=%s", uid)
@@ -96,10 +123,10 @@ class LiveSpeechSink(voice_recv.AudioSink):
             st.user_obj = user
             st.last_packet_time = now
             st.pre_roll.append(frame)
-            pre_roll_max = max(1, int(float(self.control.get("vc_preroll_seconds", 0.25)) / max(frame_dur, 0.001)))
+            pre_roll_max = max(1, int(_safe_float(self.control.get("vc_preroll_seconds", 0.25), 0.25) / max(frame_dur, 0.001)))
             while len(st.pre_roll) > pre_roll_max:
                 st.pre_roll.popleft()
-            if rms >= int(self.control.get("vc_rms_threshold", 500)):
+            if rms >= _safe_int(self.control.get("vc_rms_threshold", 500), 500):
                 st.last_voice_time = now
                 if not st.currently_speaking:
                     st.currently_speaking = True
@@ -113,7 +140,7 @@ class LiveSpeechSink(voice_recv.AudioSink):
                 st.voiced_frames += 1
                 st.voiced_seconds += frame_dur
                 st.active.extend(frame)
-                max_secs = float(self.control.get("vc_max_seconds", 18.0))
+                max_secs = _safe_float(self.control.get("vc_max_seconds", 18.0), 18.0)
                 if len(st.active) >= int(max_secs * self.sample_rate * self.channels * self.sample_width):
                     self._finalize_locked(st, now, "max")
             elif st.currently_speaking:
@@ -125,10 +152,16 @@ class LiveSpeechSink(voice_recv.AudioSink):
             st.active = bytearray()
             return
         duration = len(st.active) / (self.sample_rate * self.channels * self.sample_width)
-        min_secs = float(self.control.get("vc_min_seconds", 0.75))
-        min_voiced_secs = float(self.control.get("vc_min_voiced_seconds", min(0.35, max(0.12, min_secs * 0.45))))
-        min_voiced_frames = int(self.control.get("vc_min_voiced_frames", 8))
-        max_decode_drops = int(self.control.get("vc_max_decode_drops", max(8, int(st.voiced_frames * 0.25))))
+        min_secs = _safe_float(self.control.get("vc_min_seconds", 0.75), 0.75)
+        min_voiced_secs = _safe_float(
+            self.control.get("vc_min_voiced_seconds", min(0.35, max(0.12, min_secs * 0.45))),
+            min(0.35, max(0.12, min_secs * 0.45)),
+        )
+        min_voiced_frames = _safe_int(self.control.get("vc_min_voiced_frames", 8), 8)
+        max_decode_drops = _safe_int(
+            self.control.get("vc_max_decode_drops", max(8, int(st.voiced_frames * 0.25))),
+            max(8, int(st.voiced_frames * 0.25)),
+        )
         if duration >= min_secs and st.voiced_seconds >= min_voiced_secs and st.voiced_frames >= min_voiced_frames and st.decode_drops <= max_decode_drops and st.user_obj is not None:
             self._ready.append((st.user_obj, bytes(st.active), duration))
             if self.debug:
@@ -142,13 +175,13 @@ class LiveSpeechSink(voice_recv.AudioSink):
         st.decode_drops = 0
 
     async def _flush_loop(self):
-        try:
-            while self._running:
+        while self._running:
+            try:
                 await asyncio.sleep(0.1)
                 now = time.monotonic()
                 out = []
                 with self._lock:
-                    pause = float(self.control.get("vc_pause_seconds", 0.9))
+                    pause = _safe_float(self.control.get("vc_pause_seconds", 0.9), 0.9)
                     for st in self._states.values():
                         if st.currently_speaking and st.last_voice_time and (now - st.last_voice_time) >= pause:
                             self._finalize_locked(st, now, "pause")
@@ -157,9 +190,17 @@ class LiveSpeechSink(voice_recv.AudioSink):
                         self._ready.clear()
                 # Dispatch utterances as background tasks to avoid blocking pause detection
                 for user, pcm, dur in out:
-                    asyncio.ensure_future(self._process_utterance(user, pcm, dur))
-        except asyncio.CancelledError:
-            return
+                    t = asyncio.ensure_future(self._process_utterance(user, pcm, dur))
+                    self._utterance_tasks.add(t)
+                    t.add_done_callback(self._utterance_tasks.discard)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # A single bad finalize/config read must NOT kill the flush loop
+                # silently — that used to leave _running=True with no utterances
+                # ever dispatched (bot goes deaf, no error). Log and keep going.
+                logger.warning("VC flush loop iteration error (continuing): %s", e)
+                await asyncio.sleep(1.0)
 
     async def _process_utterance(self, user, pcm: bytes, dur: float):
         try:
@@ -216,6 +257,11 @@ class LiveSpeechSink(voice_recv.AudioSink):
         self._running = False
         if self._task and not self._task.done():
             self._task.cancel()
+        # Cancel in-flight utterance tasks so they don't touch a torn-down sink.
+        for t in list(self._utterance_tasks):
+            if not t.done():
+                t.cancel()
+        self._utterance_tasks.clear()
         with self._lock:
             self._states.clear()
             self._ready.clear()

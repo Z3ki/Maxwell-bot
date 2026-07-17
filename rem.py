@@ -25,12 +25,15 @@ def utcnow_iso() -> str:
 
 def rem_system_prompt(turns_remaining: int, prompt_body: str | None = None) -> str:
     body = (prompt_body or DEFAULT_REM_PROMPT_BODY).strip()
+    # NOTE: REM is a single-pass audit, not a multi-turn tool loop. The old
+    # prompt advertised "N turns left" but the runner never looped, which
+    # misled the model. Don't mention turns; just ask for one DONE audit.
     return (
         "You are Maxwell REM, a periodic memory assimilation process — not answering live chat. "
         "Organize the last slice of visible life into durable memory. Keep it useful, specific, deduplicated, inspectable; "
         "don't compress away decisions, preferences, unresolved tasks, or identity facts.\n\n"
         f"{body}\n\n"
-        f"You have {turns_remaining} REM turn(s) left. Do not call tools. Answer DONE with a short audit list."
+        "This is a single pass. Do not call tools. Answer DONE with a short audit list of what you consolidated."
     )
 
 
@@ -206,7 +209,8 @@ async def run_rem_once(
             "role": "system",
             "content": "Current long-term memory snapshot:\n"
             + json.dumps(
-                memory_manager.get_long_term_memory()[:200], ensure_ascii=False
+                (await asyncio.to_thread(memory_manager.get_long_term_memory))[:200],
+                ensure_ascii=False,
             ),
         },
     ]
@@ -237,10 +241,15 @@ async def run_rem_once(
         await store.append_run(run)
         return run
     finally:
-        # Always clear the running flag in finally (covers CancelledError, exceptions,
-        # and any partial success path). Prevents stuck "running: true" that blocks
-        # the API from allowing new REM runs.
-        import contextlib as _contextlib
-
-        with _contextlib.suppress(Exception):
+        # Always clear the running flag in finally (covers CancelledError,
+        # exceptions, and any partial success path). Prevents stuck
+        # "running: true" that blocks the API from allowing new REM runs.
+        # contextlib.suppress(Exception) does NOT cover CancelledError (a
+        # BaseException since 3.8), so handle it explicitly and re-raise so a
+        # mid-run cancel still clears the flag then propagates.
+        try:
             await store.patch_state({"running": False, "running_since": ""})
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass

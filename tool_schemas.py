@@ -56,11 +56,11 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     ),
     "memory_edit": _obj(
         {
-            "action": _str("add | delete | list | clear"),
-            "content": _str("Memory text (for add)"),
-            "index": _int("Memory index (for delete)"),
-            "query": _str("Optional search query for list"),
-        }
+            "action": _str("add | edit | remove"),
+            "content": _str("Memory text (required for add and edit)"),
+            "memory_id": _str("Memory id (required for edit and remove)"),
+        },
+        ["action"],
     ),
     "react": _obj({"emoji": _str("Emoji or custom emoji name")}, ["emoji"]),
     "edit_message": _obj(
@@ -80,11 +80,11 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     ),
     "set_activity": _obj(
         {
-            "name": _str("Activity or custom status text"),
+            "text": _str("Activity or custom status text"),
             "type": _str("playing | watching | listening | competing | custom"),
-            "status": _str("Optional online status"),
+            "elapsed": _str("Optional elapsed time (for custom status)"),
         },
-        ["name"],
+        ["text"],
     ),
     "create_poll": _obj(
         {
@@ -246,10 +246,14 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     "leave_vc": _obj({}),
     "sub_agent": _obj(
         {
-            "prompt": _str("Task description for the background sub-agent"),
+            "task": _str("Task description for the background sub-agent"),
+            "slug": _str("Optional short slug for the sub-agent workdir"),
             "timeout_minutes": _int("Optional timeout"),
+            "files": _str(
+                "Optional JSON list of local file paths to expose to the sub-agent"
+            ),
         },
-        ["prompt"],
+        ["task"],
     ),
 }
 

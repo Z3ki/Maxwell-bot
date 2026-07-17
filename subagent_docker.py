@@ -107,6 +107,14 @@ async def _run_docker(*args: str, timeout: int = 30) -> tuple[bytes, bytes, int]
         proc.kill()
         await proc.wait()
         raise
+    except BaseException:
+        # Covers CancelledError (shutdown/PM2 restart) so the docker client
+        # process isn't orphaned. Without this a cancelled run leaks the proc.
+        with contextlib.suppress(ProcessLookupError, Exception):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.wait()
+        raise
     return stdout, stderr, proc.returncode or 0
 
 
@@ -325,6 +333,14 @@ async def run_opencode_in_docker(
             "stdout": "",
             "stderr": f"Sub-agent timed out after {timeout_minutes} minutes",
         }
+    except BaseException:
+        # Covers CancelledError (shutdown/PM2 restart). Without this the
+        # started container keeps running (the `--rm` only removes on a clean
+        # exit, which never happens when the client is killed), leaking CPU
+        # and memory and counting against future --pids-limit runs.
+        with contextlib.suppress(Exception):
+            await _run_docker("rm", "-f", container_name, timeout=15)
+        raise
 
     return {
         "ok": exit_code == 0,

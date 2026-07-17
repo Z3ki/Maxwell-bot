@@ -33,7 +33,10 @@ from urllib.parse import parse_qs, urlparse
 from discord import Message, File, Activity, Status
 from tools import Tool
 from ddgs import DDGS as _DDGS
-from utils import _atomic_json_write_sync  # single source of truth, fd-safe
+from utils import (  # single source of truth, fd-safe
+    FileLock,
+    _atomic_json_write_sync,
+)
 from subagent_runner import run_subagent_task
 
 logger = logging.getLogger(__name__)
@@ -1713,20 +1716,41 @@ class CreateSiteTool(Tool):
 
                 img_dir = os.path.join(site_dir, "images")
                 os.makedirs(img_dir, exist_ok=True)
+                # Reuse the same broad-but-safe allowlist as SendFileTool so
+                # images produced by image_generator (Discord CDN downloads)
+                # and the shell sandbox (shelldocker) / subagents can actually be
+                # embedded. The old check only allowed MAXWELL_SITE_DIR, which
+                # rejected virtually every real image source (the feature was
+                # silently non-functional).
+                send_tool = self.bot.tools.get("send_file") if self.bot else None
+                if send_tool is not None and hasattr(send_tool, "_allowed_send_file_bases"):
+                    allowed_bases = send_tool._allowed_send_file_bases()
+                else:
+                    allowed_bases = [self.base_dir]
                 for entry in image_list:
                     if isinstance(entry, str):
                         entry = {"path": entry}
                     src_path = entry.get("path", "")
-                    if not src_path or not _is_path_allowed(src_path, self.base_dir):
+                    if not src_path or not any(
+                        _is_path_allowed(src_path, b) for b in allowed_bases
+                    ):
                         missing_images.append(src_path or "(empty path)")
                         logger.warning(f"Site image blocked or not found: {src_path}")
                         continue
                     filename = entry.get("filename") or os.path.basename(src_path)
-                    # Sanitize filename — only allow safe chars
-                    filename = re.sub(r"[^a-zA-Z0-9._-]", "_", filename)
-                    if not filename:
-                        continue
+                    # Sanitize filename: only safe chars, and strip path
+                    # separators / leading dots so ".." can't write outside
+                    # the images/ dir.
+                    filename = re.sub(r"[^a-zA-Z0-9._-]", "_", filename).strip(".")
+                    filename = re.sub(r"^[.\\/-]+", "", filename)
+                    if not filename or filename in {".", ".."}:
+                        filename = "image"
                     dest = os.path.join(img_dir, filename)
+                    # Final guard: ensure dest stays inside img_dir.
+                    if os.path.commonpath([os.path.abspath(dest), os.path.abspath(img_dir)]) != os.path.abspath(img_dir):
+                        missing_images.append(src_path)
+                        logger.warning(f"Site image filename escapes images dir: {filename}")
+                        continue
                     try:
                         shutil.copy2(src_path, dest)
                         public_url = f"{self.base_url}/{slug}/images/{filename}"
@@ -1813,14 +1837,42 @@ class CreateSiteTool(Tool):
                 await f.flush()
             os.replace(tmp_path, index_path)
 
-            sites[slug] = {
+            # Commit the site metadata under a cross-process FileLock so a
+            # concurrent create_site (or an API site_update/site_delete) can't
+            # lose this entry or have this entry overwrite theirs. Reload fresh
+            # inside the lock and re-check ownership/quota (they may have
+            # changed since the pre-check). If the save fails, remove the
+            # just-written HTML so we don't leave an untracked orphan site.
+            site_entry = {
                 "user_id": user_id,
                 "user_name": message.author.display_name,
                 "created_at": datetime.now(timezone.utc).timestamp(),
                 "title": title,
                 "path": site_dir,
             }
-            await self._save_sites()
+            try:
+                committed = await asyncio.to_thread(
+                    self._commit_site_locked, slug, user_id, is_admin, site_entry
+                )
+            except Exception as e:
+                # Best-effort cleanup of the orphaned live HTML we just published.
+                with contextlib.suppress(Exception):
+                    import shutil
+
+                    shutil.rmtree(site_dir, ignore_errors=True)
+                logger.error(f"Failed to commit site metadata for {slug}: {e}")
+                return f"Error creating site: {e}"
+            if not committed:
+                # Overwrite disallowed by a concurrent owner change / quota hit
+                # discovered under the lock; clean up the HTML we wrote.
+                with contextlib.suppress(Exception):
+                    import shutil
+
+                    shutil.rmtree(site_dir, ignore_errors=True)
+                return (
+                    f"Error: site slug '{slug}' could not be committed "
+                    "(owner/quota changed concurrently). Try again."
+                )
             result = f"Site created: {self.base_url}/{slug}/"
             if image_urls:
                 result += f"\nEmbedded images ({len(image_urls)}):\n" + "\n".join(
@@ -1836,12 +1888,74 @@ class CreateSiteTool(Tool):
             logger.error(f"Failed to create site {slug}: {e}")
             return f"Error creating site: {e}"
 
+    def _commit_site_locked(
+        self, slug: str, user_id: str, is_admin: bool, entry: dict
+    ) -> bool:
+        """Reload sites.json under a cross-process lock, re-check ownership and
+        quota, add the entry, and save atomically. Returns True on commit.
+
+        Runs in a worker thread (via asyncio.to_thread) because FileLock uses
+        blocking fcntl. This is the single locked RMW for create_site metadata,
+        closing the lost-update race with the API process and concurrent
+        creates.
+        """
+        path = Path(self.bot.config.DATA_DIR) / "sites.json"
+        max_sites = int(
+            (
+                getattr(self.bot, "control", {})
+                or getattr(self.bot, "_control", {})
+                or {}
+            ).get("create_site_quota_per_user", 10)
+        )
+        with FileLock(path, timeout=15.0):
+            sites = {}
+            try:
+                if path.exists():
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(data, dict):
+                        sites = {
+                            k: v for k, v in data.items() if isinstance(v, dict)
+                        }
+            except (json.JSONDecodeError, OSError, ValueError) as e:
+                logger.warning(f"Corrupt sites.json on commit, starting fresh: {e}")
+                sites = {}
+            # Re-check slug ownership under the lock (may have changed).
+            existing = sites.get(slug)
+            if isinstance(existing, dict):
+                owner = str(existing.get("user_id") or "")
+                if owner and owner != user_id and not is_admin:
+                    return False
+            # Re-check quota under the lock.
+            active = [s for s in sites.values() if s.get("user_id") == user_id]
+            # If this slug is already ours (overwrite), it doesn't count as new.
+            already_ours = isinstance(existing, dict) and str(
+                existing.get("user_id") or ""
+            ) == user_id
+            if not already_ours and len(active) >= max_sites:
+                return False
+            sites[slug] = entry
+            _atomic_json_write_sync(path, sites)
+            # Keep the in-memory map + mtime in sync for this process.
+            self.bot._sites = sites
+            try:
+                self.bot._sites_mtime = path.stat().st_mtime
+            except OSError:
+                pass
+            return True
+
     async def _save_sites(self):
         try:
             path = Path(self.bot.config.DATA_DIR) / "sites.json"
-            await asyncio.to_thread(_atomic_json_write_sync, path, self.bot._sites)
+            # Cross-process lock so the API's site_update/site_delete and this
+            # write can't interleave and lose an entry.
+            def _locked_write():
+                with FileLock(path, timeout=15.0):
+                    _atomic_json_write_sync(path, self.bot._sites)
+                    return path.stat().st_mtime if path.exists() else 0.0
+
+            mtime = await asyncio.to_thread(_locked_write)
             if hasattr(self.bot, "_sites_mtime"):
-                self.bot._sites_mtime = path.stat().st_mtime
+                self.bot._sites_mtime = mtime
         except Exception as e:
             logger.error(f"Failed to save sites: {e}")
             raise
@@ -1916,8 +2030,14 @@ class WebSearchTool(Tool):
 
         try:
             loop = asyncio.get_running_loop()
-            results = await loop.run_in_executor(
-                None, lambda: list(_DDGS().text(query, max_results=limit))
+            # Bound the search: DDGS uses sync requests internally with no
+            # timeout, so a hung endpoint would block this tool and occupy a
+            # default-executor thread indefinitely.
+            results = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None, lambda: list(_DDGS().text(query, max_results=limit))
+                ),
+                timeout=30,
             )
 
             if not results:
@@ -2466,8 +2586,8 @@ class ShellTool(Tool):
             return (
                 "Error: shell refused: this turn read content from a fetched "
                 "URL/web search that may carry prompt-injection payloads. "
-                "Re-issue the shell call with `_confirmed=true` if you want to "
-                "proceed (admins/whitelisted users only).\n"
+                "The user must confirm out-of-band with `,confirm` "
+                "(admins/whitelisted users only) before this can run.\n"
                 f"Command preview: {preview}"
             )
 
@@ -3305,6 +3425,12 @@ class SendMediaTool(Tool):
 class TtsTool(Tool):
     """Text to Speech generator tool"""
 
+    # Per-channel last-TTS monotonic timestamp; bounds Riva (paid) + gTTS
+    # quota drain and channel spam. The bot is single-process so a class-level
+    # dict is sufficient.
+    _COOLDOWN_SECONDS = 15.0
+    _last_tts: dict[str, float] = {}
+
     def get_description(self):
         return (
             "Convert a text response into a speech voice message and send it to the triggering channel. "
@@ -3321,6 +3447,25 @@ class TtsTool(Tool):
     ) -> str:
         if not text or not text.strip():
             return "Error: text parameter is required"
+
+        # Per-channel cooldown to prevent quota drain / voice-message spam.
+        channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
+        if channel_id:
+            now = asyncio.get_running_loop().time()
+            last = TtsTool._last_tts.get(channel_id, 0.0)
+            if now - last < TtsTool._COOLDOWN_SECONDS:
+                wait = int(TtsTool._COOLDOWN_SECONDS - (now - last))
+                return (
+                    f"Error: TTS on cooldown for this channel (~{wait}s left). "
+                    "Wait and try again."
+                )
+            TtsTool._last_tts[channel_id] = now
+            # Keep the map bounded.
+            if len(TtsTool._last_tts) > 200:
+                cutoff = now - 600
+                TtsTool._last_tts = {
+                    c: t for c, t in TtsTool._last_tts.items() if t > cutoff
+                }
 
         language_key = _tts_language_key(language, lang, **kwargs)
         lang_is_spanish = language_key == "spanish"
@@ -3374,7 +3519,11 @@ class TtsTool(Tool):
                 )
 
             loop = asyncio.get_running_loop()
-            resp = await loop.run_in_executor(None, run_riva)
+            # Bound the gRPC call: a stalled Riva endpoint would hang this tool
+            # and leak an executor thread otherwise.
+            resp = await asyncio.wait_for(
+                loop.run_in_executor(None, run_riva), timeout=30
+            )
             logger.info(
                 f"Riva TTS synthesized audio with voice={tts_voice_name!r}, language={tts_language_code!r}"
             )
@@ -3397,7 +3546,9 @@ class TtsTool(Tool):
                     tts.save(filename)
 
                 loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, run_gtts)
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, run_gtts), timeout=30
+                )
                 logger.warning(
                     "TTS used gTTS fallback; voice selection/emotion is unavailable in fallback audio"
                 )
@@ -3659,8 +3810,8 @@ class SubAgentTool(Tool):
             return (
                 "Error: sub_agent refused: this turn read content from a fetched "
                 "URL/web search that may carry prompt-injection payloads. "
-                "Re-issue the sub_agent call with `_confirmed=true` if you want "
-                "to proceed (admins only).\n"
+                "The user must confirm out-of-band with `,confirm` "
+                "(admins only) before this can run.\n"
                 f"Task preview: {preview}"
             )
 

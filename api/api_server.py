@@ -1028,21 +1028,34 @@ async def site_update(request):
     if not slug:
         return _json_response({"error": "bad slug"}, 400)
     path = DATA_DIR / "sites.json"
-    async with _file_lock:
-        try:
-            sites = _load_for_write(path, dict, {})
-        except ValueError as exc:
-            return _json_response({"error": str(exc)}, 409)
-        if slug not in sites or not isinstance(sites.get(slug), dict):
-            return _json_response({"error": "not found"}, 404)
-        site = dict(sites[slug])
-        if "title" in body:
-            site["title"] = str(body.get("title") or "untitled")[:200]
-        if body.get("extend_24h"):
-            site["created_at"] = time.time()
-        sites[slug] = site
-        await atomic_json_write(path, sites)
-    return _json_response({"ok": True, "site": site})
+
+    def _do_update():
+        # Cross-process FileLock so this RMW can't lose a concurrent
+        # create_site commit (bot process) or vice versa.
+        with FileLock(path, timeout=15.0):
+            try:
+                sites = _load_for_write(path, dict, {})
+            except ValueError as exc:
+                return ("err", str(exc), 409)
+            if not isinstance(sites, dict) or slug not in sites or not isinstance(
+                sites.get(slug), dict
+            ):
+                return ("notfound", None, 404)
+            site = dict(sites[slug])
+            if "title" in body:
+                site["title"] = str(body.get("title") or "untitled")[:200]
+            if body.get("extend_24h"):
+                site["created_at"] = time.time()
+            sites[slug] = site
+            _atomic_json_write_sync(path, sites)
+            return ("ok", site, 200)
+
+    kind, payload, code = await asyncio.to_thread(_do_update)
+    if kind == "err":
+        return _json_response({"error": payload}, code)
+    if kind == "notfound":
+        return _json_response({"error": "not found"}, code)
+    return _json_response({"ok": True, "site": payload})
 
 
 async def site_delete(request):
@@ -1053,15 +1066,26 @@ async def site_delete(request):
     if BASE_SITE_DIR not in site_dir.parents and site_dir != BASE_SITE_DIR:
         return _json_response({"error": "bad path"}, 400)
     path = DATA_DIR / "sites.json"
-    async with _file_lock:
-        try:
-            sites = _load_for_write(path, dict, {})
-        except ValueError as exc:
-            return _json_response({"error": str(exc)}, 409)
-        if slug not in sites:
-            return _json_response({"error": "not found"}, 404)
-        sites.pop(slug, None)
-        await atomic_json_write(path, sites)
+
+    def _do_delete():
+        # Cross-process FileLock (see site_update). Returns whether the slug
+        # existed so we only rmtree a dir we actually owned in the metadata.
+        with FileLock(path, timeout=15.0):
+            try:
+                sites = _load_for_write(path, dict, {})
+            except ValueError as exc:
+                return ("err", str(exc), 409)
+            if not isinstance(sites, dict) or slug not in sites:
+                return ("notfound", None, 404)
+            sites.pop(slug, None)
+            _atomic_json_write_sync(path, sites)
+            return ("ok", None, 200)
+
+    kind, payload, code = await asyncio.to_thread(_do_delete)
+    if kind == "err":
+        return _json_response({"error": payload}, code)
+    if kind == "notfound":
+        return _json_response({"error": "not found"}, code)
     if site_dir.exists():
         await asyncio.to_thread(shutil.rmtree, site_dir)
     return _json_response({"ok": True})

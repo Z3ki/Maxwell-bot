@@ -273,6 +273,10 @@ _stderr_handler.setLevel(logging.ERROR)
 logging.basicConfig(level=logging.INFO, handlers=[_stdout_handler, _stderr_handler])
 logger = logging.getLogger(__name__)
 
+# How long an out-of-band `,confirm` authorizes one destructive tool call on a
+# tainted turn. Short + one-shot so a fetched page can't ride a stale confirm.
+_CONFIRM_TTL_SECONDS = 120.0
+
 MAX_VISUAL_MEMORY_IMAGES = 5
 # Keep visual carryover short. Long-lived image payloads make the model randomly
 # talk about old screenshots in unrelated replies. That bug is creepy as hell.
@@ -522,34 +526,44 @@ async def _synthesize_tts_wav(
     def run_gtts():
         gTTS(text=text, lang="en").save(mp3_path)
 
-    await asyncio.get_running_loop().run_in_executor(None, run_gtts)
-    proc = await asyncio.create_subprocess_exec(
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-i",
-        mp3_path,
-        "-ar",
-        "48000",
-        "-ac",
-        "2",
-        "-c:a",
-        "pcm_s16le",
-        output_path,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
     try:
-        _stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-    except asyncio.TimeoutError as _exc:
-        proc.kill()
-        await proc.wait()
-        raise RuntimeError("TTS ffmpeg conversion timed out") from None
-    if proc.returncode != 0 or not os.path.exists(output_path):
-        raise RuntimeError("Failed to synthesize TTS audio")
-    return output_path
+        await asyncio.get_running_loop().run_in_executor(None, run_gtts)
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            mp3_path,
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-c:a",
+            "pcm_s16le",
+            output_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        except asyncio.TimeoutError as _exc:
+            proc.kill()
+            await proc.wait()
+            raise RuntimeError("TTS ffmpeg conversion timed out") from None
+        if proc.returncode != 0 or not os.path.exists(output_path):
+            raise RuntimeError("Failed to synthesize TTS audio")
+        return output_path
+    finally:
+        # Always remove the intermediate mp3 so a non-temp output_path doesn't
+        # leak a permanent .mp3 sibling. The local-espeak path cleans its own
+        # raw file; this gTTS path previously left mp3_path behind forever.
+        try:
+            if os.path.exists(mp3_path):
+                os.unlink(mp3_path)
+        except OSError:
+            pass
 
 
 TEXT_ATTACHMENT_EXTS = {
@@ -1918,6 +1932,13 @@ class MaxwellBot(commands.Bot):
         # `message_id -> bool` lets us be precise when multiple replies are
         # in flight on different channels.
         self._tainted_messages: set[str] = set()
+        # Out-of-band user confirmation for destructive tools on tainted turns.
+        # author_id -> monotonic timestamp of the last `,confirm`. Consumed
+        # (one-shot) by the destructive-tool gate in _execute_tool_by_name, and
+        # expired after _CONFIRM_TTL_SECONDS. This is the ONLY legitimate source
+        # of `_confirmed=True` — model-supplied `_confirmed` is stripped in the
+        # dispatcher so the model can no longer self-confirm.
+        self._destructive_confirm: dict[str, float] = {}
         self._control = dict(DEFAULT_CONTROL)
         self._control_mtime = 0
         self._reaction_seen: set[str] = set()  # "{message_id}:{emoji}" dedup
@@ -3015,6 +3036,7 @@ class MaxwellBot(commands.Bot):
                     "` ,jailbreak on|off|status` - toggle freedom-mode prompt for this server (admin)\n"
                     "` ,admin [@user|user_id|clear]` - add/remove/list admins (admin)\n"
                     "` ,shell [@user|clear]` - shell whitelist (admin)\n"
+                    "` ,confirm` - authorize one destructive tool call on a tainted turn (admin/shell-whitelisted)\n"
                     "` ,blacklist [@user|clear]` / `,unblacklist @user` - blacklist controls (admin)\n"
                 )
             elif cmd == "vc":
@@ -3056,6 +3078,24 @@ class MaxwellBot(commands.Bot):
                         await message.channel.send(
                             f"Added <@{uid}> to shell whitelist."
                         )
+            elif cmd == "confirm":
+                # Out-of-band confirmation for destructive tools (shell/sub_agent)
+                # on a tainted turn. Admins and shell-whitelisted users only. This
+                # is the real confirmation path: the model cannot self-confirm
+                # (model-supplied _confirmed is stripped in _execute_tool_by_name).
+                author_id = str(message.author.id)
+                if not (
+                    self._is_admin(author_id) or author_id in self._shell_whitelist
+                ):
+                    return
+                self._destructive_confirm[author_id] = (
+                    asyncio.get_running_loop().time()
+                )
+                await message.channel.send(
+                    f"Confirmed for {_CONFIRM_TTL_SECONDS:.0f}s. The next destructive "
+                    f"tool call (shell/sub_agent) on a tainted turn by you will run; "
+                    f"this is one-shot."
+                )
             elif cmd in ("blacklist", "unblacklist"):
                 if not self._is_admin(message.author.id):
                     return
@@ -4144,10 +4184,15 @@ class MaxwellBot(commands.Bot):
         if self._rem_running:
             return False, "REM is already running", None
         self._rem_running = True
-        await self.rem_store.patch_state(
-            {"running": True, "running_since": datetime.now(timezone.utc).isoformat()}
-        )
         try:
+            # Set persistent running flag. Wrapped so a patch_state failure
+            # (disk error / corrupt store) doesn't escape before the finally
+            # that resets _rem_running — that used to wedge REM permanently
+            # (every later call saw _rem_running=True).
+            with contextlib.suppress(Exception):
+                await self.rem_store.patch_state(
+                    {"running": True, "running_since": datetime.now(timezone.utc).isoformat()}
+                )
             timeout = max(
                 10,
                 min(
@@ -4205,18 +4250,28 @@ class MaxwellBot(commands.Bot):
                 )
 
     async def _rem_scheduler_loop(self):
+        consecutive_failures = 0
         while True:
-            await asyncio.sleep(
-                max(10, _safe_int(self.rem_interval_seconds or 600, 600))
-            )
+            base_interval = max(10, _safe_int(self.rem_interval_seconds or 600, 600))
+            # Backoff on consecutive failures so a dead/unreachable provider
+            # doesn't re-drain and re-attempt the same event slice every
+            # interval forever (wasting AI slots + CPU). Mirrors intel/context_cleanup.
+            backoff = min(consecutive_failures, 5)
+            await asyncio.sleep(base_interval * (1 + backoff))
             await self._load_rem_control()
             if not self.rem_enabled:
+                consecutive_failures = 0
                 continue
             try:
-                await self._run_rem_once_guarded()
+                ok, _msg, _run = await self._run_rem_once_guarded()
+                if ok:
+                    consecutive_failures = 0
+                else:
+                    consecutive_failures += 1
             except asyncio.CancelledError as _exc:
                 raise
             except Exception as e:
+                consecutive_failures += 1
                 logger.warning(f"REM scheduler error: {e}")
 
     async def _handle_rem_command(self, message, args: str | None):
@@ -5303,9 +5358,32 @@ class MaxwellBot(commands.Bot):
             for slug in expired:
                 self._sites.pop(slug, None)
             sites_path = Path(self.config.DATA_DIR) / "sites.json"
-            await asyncio.to_thread(_atomic_json_write_sync, sites_path, self._sites)
+            # Cross-process lock so cleanup's removal can't lose a concurrent
+            # create_site/API site_update commit (and vice versa).
+            def _locked_cleanup_write():
+                with FileLock(sites_path, timeout=15.0):
+                    # Reload fresh inside the lock so we don't resurrect entries
+                    # the API just added, and drop only our expired set.
+                    fresh = {}
+                    try:
+                        if sites_path.exists():
+                            data = json.loads(sites_path.read_text(encoding="utf-8"))
+                            if isinstance(data, dict):
+                                fresh = {
+                                    k: v
+                                    for k, v in data.items()
+                                    if isinstance(v, dict)
+                                }
+                    except (json.JSONDecodeError, OSError, ValueError):
+                        fresh = dict(self._sites)
+                    for slug in expired:
+                        fresh.pop(slug, None)
+                    _atomic_json_write_sync(sites_path, fresh)
+                    self._sites = fresh
+                    return sites_path.stat().st_mtime if sites_path.exists() else 0.0
+
             try:
-                self._sites_mtime = sites_path.stat().st_mtime
+                self._sites_mtime = await asyncio.to_thread(_locked_cleanup_write)
             except OSError:
                 self._sites_mtime = 0.0
 
@@ -6299,9 +6377,9 @@ class MaxwellBot(commands.Bot):
                     )
             finally:
                 await self._release_ai_slot()
-            native_calls = self._consume_native_tool_calls()
+            native_calls = self._native_calls_from(response)
             # Track token usage from provider
-            usage = getattr(self.ai_provider, "_last_usage", None) or {}
+            usage = self._usage_from(response)
             if usage:
                 self._token_tracker.record(usage)
             if (not response or not str(response).strip()) and not native_calls:
@@ -6401,10 +6479,10 @@ class MaxwellBot(commands.Bot):
                         max_tokens=max_out_tokens,
                         tools=openai_tools or None,
                     )
-                    usage = getattr(self.ai_provider, "_last_usage", None) or {}
+                    usage = self._usage_from(followup)
                     if usage:
                         self._token_tracker.record(usage)
-                    pending_native = self._consume_native_tool_calls()
+                    pending_native = self._native_calls_from(followup)
                     if (followup and str(followup).strip()) or pending_native:
                         response = followup or ""
                     else:
@@ -6538,6 +6616,12 @@ class MaxwellBot(commands.Bot):
     ) -> str:
         """Run a single tool and return the result text (including Tool name: prefix)."""
         try:
+            # Never trust model-supplied internal control kwargs. Keys prefixed
+            # with "_" (e.g. "_confirmed", "_tainted") are server-only: the model
+            # used to be able to pass "_confirmed=true" to bypass the taint gate
+            # on shell/sub_agent — a prompt-injection RCE path. Strip them here so
+            # only the server can inject them (see the destructive gate below).
+            params = {k: v for k, v in (params or {}).items() if not str(k).startswith("_")}
             if (
                 name == "send_message"
                 and getattr(message, "guild", None)
@@ -6558,7 +6642,27 @@ class MaxwellBot(commands.Bot):
                     f"Tool {name}: Error - tool temporarily disabled "
                     "(too many recent failures)"
                 )
-            result = await self.tools[name].execute(message, **params)
+            # Centralized indirect-prompt-injection gate. Tools flagged
+            # is_destructive (shell, sub_agent) that run on a tainted turn
+            # require an out-of-band user `,confirm` (admin/whitelisted only).
+            # We inject _confirmed=True server-side only when the user actually
+            # confirmed; the model cannot forge it because _-keys were stripped
+            # above. This is the single enforcement point instead of per-tool
+            # checks that previously read the model-controlled flag.
+            tool = self.tools[name]
+            if getattr(tool, "is_destructive", False) and self.is_message_tainted(message):
+                author_id = str(getattr(message.author, "id", "") or "")
+                if not self._consume_destructive_confirm(author_id):
+                    return (
+                        f"Tool {name}: Error - refused: this turn read content from "
+                        f"a fetched URL/web search that may carry prompt-injection "
+                        f"payloads. The user must confirm out-of-band with `,confirm` "
+                        f"(admins/whitelisted only) before this tool can run on a "
+                        f"tainted turn. The model cannot self-confirm."
+                    )
+                params = dict(params)
+                params["_confirmed"] = True
+            result = await tool.execute(message, **params)
             result_text = str(result) if result else "executed successfully"
             if result_text.startswith(("Error", "Error:")):
                 self._tool_breaker.record_failure(name)
@@ -6571,6 +6675,26 @@ class MaxwellBot(commands.Bot):
             )
             self._tool_breaker.record_failure(name)
             return f"Tool {name}: Error - {e}"
+
+    def _consume_destructive_confirm(self, author_id: str) -> bool:
+        """Return True (one-shot) if `author_id` has a live `,confirm` token.
+
+        Expired tokens are reaped as a side effect. One-shot: a successful
+        consume removes the token so a single `,confirm` authorizes exactly one
+        destructive call, not a chain of them.
+        """
+        if not author_id:
+            return False
+        now = asyncio.get_running_loop().time()
+        # Reap expired entries to keep the dict bounded.
+        if self._destructive_confirm:
+            self._destructive_confirm = {
+                a: t
+                for a, t in self._destructive_confirm.items()
+                if now - t < _CONFIRM_TTL_SECONDS
+            }
+        ts = self._destructive_confirm.pop(author_id, None)
+        return ts is not None and (now - ts) < _CONFIRM_TTL_SECONDS
 
     async def _remember_tool_call(self, message, name: str, params: dict, result: str):
         if not self._control.get("store_memory", True):
@@ -6666,7 +6790,16 @@ class MaxwellBot(commands.Bot):
                 self, message, name, params, disabled=disabled, compatible=compatible
             )
             result_by_id[call["id"]] = line
-            await MaxwellBot._remember_tool_call(self, message, name, params, line)
+            # A memory-write failure must NOT abort the tool batch: asyncio.gather
+            # re-raises, which used to trigger the broad `except Exception:
+            # run_all()` retry and re-execute every non-idempotent tool
+            # (send_message, shell, create_site, ...). Swallow here so tools run
+            # exactly once and a memory hiccup doesn't cascade into duplicate
+            # side effects or abort sibling tools.
+            try:
+                await MaxwellBot._remember_tool_call(self, message, name, params, line)
+            except Exception as e:
+                logger.warning(f"Failed to record tool call {name} in memory: {e}")
             return line
 
         async def run_all():
@@ -6680,25 +6813,43 @@ class MaxwellBot(commands.Bot):
                     line = f"Tool {call['name']}: Skipped duplicate terminal tool call"
                     result_by_id[call["id"]] = line
                     tool_results.append(line)
-                    await MaxwellBot._remember_tool_call(
-                        self, message, call["name"], call.get("arguments") or {}, line
-                    )
+                    try:
+                        await MaxwellBot._remember_tool_call(
+                            self, message, call["name"], call.get("arguments") or {}, line
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to record skipped terminal tool {call['name']}: {e}"
+                        )
                     continue
                 terminal_seen = True
                 tool_results.append(await run_one(call))
+
+        # Tools must run EXACTLY ONCE. The old `except Exception: await run_all()`
+        # re-ran every non-idempotent tool when run_all() raised partway (e.g. a
+        # memory-write error mid-batch), causing duplicate sends/shell/site-creates.
+        # Now we only retry if the typing indicator *enter* failed (before any tool
+        # ran); any failure from inside run_all() propagates without a re-run.
+        tools_ran = False
+
+        async def run_tools_once():
+            nonlocal tools_ran
+            if tools_ran:
+                return
+            tools_ran = True
+            await run_all()
 
         if self._control.get("typing_indicator", True) and not getattr(
             message, "suppress_typing", False
         ):
             try:
                 async with message.channel.typing():
-                    await run_all()
+                    await run_tools_once()
             except (discord.HTTPException, ConnectionError, OSError):
-                await run_all()
-            except Exception:
-                await run_all()
+                # Typing __aenter__ failed before any tool ran — run once w/o typing.
+                await run_tools_once()
         else:
-            await run_all()
+            await run_tools_once()
 
         # Build OpenAI tool-role follow-up messages (assistant + tool results)
         assistant_msg: dict[str, Any] = {
@@ -6754,13 +6905,38 @@ class MaxwellBot(commands.Bot):
         )
 
     def _consume_native_tool_calls(self) -> list:
-        """Pop native tool_calls stashed on the provider after generate_response."""
+        """Pop native tool_calls stashed on the provider after generate_response.
+
+        This reads shared provider state and is only a fallback for responses
+        that aren't a ProviderResult. Prefer ``_native_calls_from(response)``,
+        which reads the race-free per-call attributes when available.
+        """
         provider = getattr(self, "ai_provider", None)
         calls = list(getattr(provider, "_last_tool_calls", None) or [])
         if provider is not None:
             with contextlib.suppress(Exception):
                 provider._last_tool_calls = []
         return calls
+
+    def _native_calls_from(self, response) -> list:
+        """Race-free native tool-call extraction.
+
+        If the provider returned a ProviderResult, its ``tool_calls`` attribute
+        is the per-call list (no shared state, no race under concurrency).
+        Otherwise fall back to consuming the shared provider stash.
+        """
+        calls = getattr(response, "tool_calls", None)
+        if calls is not None:
+            return list(calls) if isinstance(calls, list) else []
+        return self._consume_native_tool_calls()
+
+    def _usage_from(self, response) -> dict:
+        """Race-free token-usage extraction (see ``_native_calls_from``)."""
+        usage = getattr(response, "usage", None)
+        if usage:
+            return dict(usage)
+        return getattr(self.ai_provider, "_last_usage", None) or {}
+
 
     def mark_message_tainted(self, message) -> None:
         """Mark a message as having read untrusted content in the current turn.
@@ -8012,7 +8188,7 @@ class MaxwellBot(commands.Bot):
         finally:
             await self._release_ai_slot()
 
-        tg_native_calls = self._consume_native_tool_calls()
+        tg_native_calls = self._native_calls_from(response_text)
         if (
             not response_text or not str(response_text).strip()
         ) and not tg_native_calls:
@@ -8104,7 +8280,7 @@ class MaxwellBot(commands.Bot):
                         timeout=ai_timeout,
                         tools=tg_openai_tools or None,
                     )
-                    pending_native = self._consume_native_tool_calls()
+                    pending_native = self._native_calls_from(followup)
                     if (followup and str(followup).strip()) or pending_native:
                         response_text = (followup or "").strip()
                     else:
@@ -8440,7 +8616,7 @@ class MaxwellBot(commands.Bot):
                     finally:
                         await self._release_ai_slot()
 
-                    tg_native2 = self._consume_native_tool_calls()
+                    tg_native2 = self._native_calls_from(response_text)
                     if (
                         not response_text or not str(response_text).strip()
                     ) and not tg_native2:
@@ -8539,7 +8715,7 @@ class MaxwellBot(commands.Bot):
                                     timeout=30,
                                     tools=tg_openai_tools2 or None,
                                 )
-                                pending_native = self._consume_native_tool_calls()
+                                pending_native = self._native_calls_from(followup)
                                 if (
                                     followup and str(followup).strip()
                                 ) or pending_native:
@@ -8706,19 +8882,30 @@ async def main():
             bot._context_tasks.clear()
 
         # Additional tracked tasks from reviews (subagents, VC utterances, active requests)
-        # to prevent leaks on shutdown / PM2 restart.
+        # to prevent leaks on shutdown / PM2 restart. _subagent_tasks values are
+        # dicts ({"task": ..., "workdir": ..., "prompt": ...}), not bare Tasks, so
+        # the previous isinstance(t, asyncio.Task) check never matched them and
+        # orphaned running opencode subprocesses on restart.
+        def _iter_tasks(task_dict):
+            for v in list(task_dict.values()):
+                if isinstance(v, asyncio.Task):
+                    yield v
+                elif isinstance(v, dict):
+                    t = v.get("task")
+                    if isinstance(t, asyncio.Task):
+                        yield t
+
         for task_dict in (
             getattr(bot, "_vc_active_tasks", {}) or {},
             getattr(bot, "_subagent_tasks", {}) or {},
             getattr(bot, "_active_requests", {}) or {},
         ):
-            for t in list(task_dict.values()):
-                if isinstance(t, asyncio.Task) and not t.done():
+            for t in _iter_tasks(task_dict):
+                if not t.done():
                     t.cancel()
             with contextlib.suppress(Exception):
                 await asyncio.gather(
-                    *[t for t in task_dict.values() if isinstance(t, asyncio.Task)],
-                    return_exceptions=True,
+                    *_iter_tasks(task_dict), return_exceptions=True
                 )
             task_dict.clear()
 

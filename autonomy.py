@@ -363,9 +363,13 @@ def _load_json_safe(path: Path, default):
         data = json.loads(raw)
         return data
     except (json.JSONDecodeError, OSError, ValueError) as e:
-        logger.warning(f"Corrupt/unreadable {path.name}, recreating defaults: {e}")
-        with contextlib.suppress(Exception):
-            path.write_text("{}", encoding="utf-8")
+        # Fail closed: do NOT overwrite the on-disk file with {} on a transient
+        # read error. Overwriting wiped state/goals/watermarks in production (a
+        # corrupt read of autonomy_goals.json silently deleted all user goals).
+        # Leave the file intact so a human can recover it.
+        logger.warning(
+            f"Corrupt/unreadable {path.name}, using defaults (file left intact): {e}"
+        )
         return default if not callable(default) else default()
 
 
@@ -840,6 +844,10 @@ class AutonomyEngine:
                         consecutive_failures += 1
                     elif not tick_result.get("skipped"):
                         consecutive_failures = 0
+                else:
+                    # Reset backoff while disabled so re-enabling after a run
+                    # of failures doesn't delay the first tick by up to 6x.
+                    consecutive_failures = 0
             except asyncio.CancelledError as _exc:
                 raise
             except Exception as e:
@@ -862,8 +870,13 @@ class AutonomyEngine:
             except (ValueError, TypeError):
                 interval = 300
             # Smoother backoff: cap at 6x instead of 10x
-            # 1 fail=2x, 2=4x, 3+=6x (cap). With 300s base: max 30 min, not 50.
-            backoff = min(2**consecutive_failures, 6) if consecutive_failures > 0 else 1
+            # 1 fail=2x, 2=4x, 3+=6x (cap). Cap the exponent first to avoid a
+            # huge 2**N on a long-dead endpoint. With 300s base: max 30 min.
+            backoff = (
+                min(1 << min(consecutive_failures, 3), 6)
+                if consecutive_failures > 0
+                else 1
+            )
             base_sleep = max(30, interval * backoff)
             # Randomize the tick so autonomy wakes at irregular, lifelike
             # intervals instead of a metronomic fixed cadence. Jitter ranges
@@ -896,6 +909,12 @@ class AutonomyEngine:
                 logger.error(
                     "Autonomy tick lock timed out (>30s) — previous state mutation hung; skipping"
                 )
+                # The inner try/finally below resets _tick_in_flight, but a
+                # `return` is NOT caught by `except BaseException`, so without
+                # this reset the flag would stay True forever and permanently
+                # disable autonomy (every later tick() bails on the in-flight
+                # check). Reset here on the lock-timeout exit path.
+                self._tick_in_flight = False
                 return {"skipped": True, "reason": "lock timeout"}
             try:
                 # BUG FIX: capture tick START time as watermark. Events recorded during
@@ -904,7 +923,21 @@ class AutonomyEngine:
                 tick_start_iso = _utcnow_iso()
                 start = time.time()
                 try:
-                    context = await self.gather_context()
+                    # gather_context does many Discord history fetches + up to 3
+                    # youtube fetches with no per-call timeout; one hung fetch
+                    # used to stall the tick (and, via single-flight, the whole
+                    # autonomy loop) indefinitely. Bound it generously so a true
+                    # hang is recovered instead of freezing the engine forever.
+                    try:
+                        context = await asyncio.wait_for(
+                            self.gather_context(), timeout=180
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error(
+                            "Autonomy gather_context timed out (>180s); "
+                            "skipping tick to recover the loop"
+                        )
+                        raise RuntimeError("gather_context timed out")
                     actions = await self.plan(context)
                     results = await self.execute(actions)
                     duration = time.time() - start
@@ -1430,7 +1463,13 @@ class AutonomyEngine:
         # 8. Long-term memory (includes fresh facts from the hourly Intel/news gatherer)
         try:
             memory = cast(Any, getattr(self.bot, "memory", None))
-            ltm = memory.get_long_term_memory() if memory else []
+            # get_long_term_memory() does a sync stat()+read_text via mtime reload;
+            # run it off the event loop so a slow disk doesn't stall the tick.
+            ltm = (
+                await asyncio.to_thread(memory.get_long_term_memory)
+                if memory
+                else []
+            )
             if ltm:
                 # Recent last (Intel appends new dated facts at the end)
                 recent = ltm[-40:] if len(ltm) > 40 else ltm

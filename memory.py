@@ -758,6 +758,57 @@ class MemoryManager:
                 return True
         return False
 
+    async def apply_ltm_batch(
+        self,
+        edits: dict[str, str] | None = None,
+        deletes: list[str] | set[str] | None = None,
+    ) -> tuple[int, int]:
+        """Apply many LTM edits/deletes in ONE locked pass with a single renumber.
+
+        The per-op remove_long_term_memory/edit_long_term_memory each call
+        _save_ltm, which renumbers every entry to positional id 1..N. Applying a
+        multi-op plan one-by-one therefore shifted ids after the first op, so
+        later ops targeted the WRONG entries (silently corrupting memory). This
+        batch method resolves all ids against the freshly-reloaded list, applies
+        every edit and delete, then renumbers exactly once at the end.
+
+        edits: {memory_id: new_content}. deletes: iterable of memory_ids to drop.
+        If an id is in both, delete wins (entry is dropped). Returns (edited, deleted).
+        """
+        edits = edits or {}
+        delete_set = {str(d) for d in (deletes or [])}
+        edit_map = {str(k): v for k, v in edits.items() if v is not None}
+        if not edit_map and not delete_set:
+            return 0, 0
+        async with self._lock:
+            self._reload_ltm_if_changed()
+            edited = 0
+            deleted = 0
+            kept: list[dict] = []
+            for entry in self.long_term_memory:
+                eid = str(entry.get("id"))
+                if eid in delete_set:
+                    deleted += 1
+                    continue
+                if eid in edit_map:
+                    new_content = _normalize_ltm_line(edit_map[eid])
+                    if new_content:
+                        entry = {"id": entry.get("id"), "content": new_content}
+                        edited += 1
+                    else:
+                        # An edit that empties the line is treated as a delete.
+                        deleted += 1
+                        continue
+                kept.append(entry)
+            self.long_term_memory = kept
+            await self._save_ltm()
+            logger.info(
+                f"LTM batch applied: {edited} edited, {deleted} deleted "
+                f"({len(self.long_term_memory)} remaining)"
+            )
+            return edited, deleted
+
+
     def get_long_term_memory(self) -> list:
         self._reload_ltm_if_changed()
         return list(self.long_term_memory)

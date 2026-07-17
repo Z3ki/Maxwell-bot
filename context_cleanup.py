@@ -84,9 +84,14 @@ def _load_json_safe(path: Path, default):
         data = json.loads(raw)
         return data
     except (json.JSONDecodeError, OSError, ValueError) as e:
-        logger.warning(f"Corrupt/unreadable {path.name}, recreating defaults: {e}")
-        with contextlib.suppress(Exception):
-            path.write_text("{}", encoding="utf-8")
+        # Fail closed: do NOT overwrite the on-disk file with {} on a transient
+        # read error. Overwriting wiped state/watermarks in production (a corrupt
+        # read of autonomy_goals/context_cleanup_state reset everything and made
+        # the next pass reprocess the entire slice). Leave the file intact so a
+        # human can recover it; the engine runs off in-memory defaults this cycle.
+        logger.warning(
+            f"Corrupt/unreadable {path.name}, using defaults (file left intact): {e}"
+        )
         return default() if callable(default) else default
 
 
@@ -263,9 +268,19 @@ class ContextCleanupEngine:
 
     async def start(self):
         """Start the background loop. Safe to call multiple times."""
-        await self.load_control()
+        # Guard FIRST, before any await, to avoid a double-start leaking a
+        # second _loop that stop() can't cancel.
         if self._task is not None and not self._task.done():
             return
+        await self.load_control()
+        # Clear a stale on-disk "running" flag left by a previous process that
+        # died mid-pass; otherwise status() reports running=True after a crash.
+        try:
+            state = await self.store.load_state()
+            if state.get("running"):
+                await self.store.patch_state({"running": False, "running_since": ""})
+        except Exception as e:
+            logger.debug(f"ContextCleanup stale-running clear failed: {e}")
         self._task = asyncio.create_task(self._loop())
         logger.info("ContextCleanupEngine started")
 
@@ -318,6 +333,10 @@ class ContextCleanupEngine:
                         consecutive_failures += 1
                     elif not result.get("skipped"):
                         consecutive_failures = 0
+                else:
+                    # Reset backoff while disabled so re-enabling after a run
+                    # of failures doesn't delay the first run by up to 6x.
+                    consecutive_failures = 0
             except asyncio.CancelledError as _exc:
                 raise
             except Exception as e:
@@ -326,7 +345,12 @@ class ContextCleanupEngine:
                 with contextlib.suppress(Exception):
                     await self.store.record_error(str(e))
             interval = max(60, min(self.interval_seconds, MAX_INTERVAL))
-            backoff = min(2**consecutive_failures, 6) if consecutive_failures > 0 else 1
+            # Cap the exponent first (avoid huge 2**N); max 6x backoff.
+            backoff = (
+                min(1 << min(consecutive_failures, 3), 6)
+                if consecutive_failures > 0
+                else 1
+            )
             await asyncio.sleep(max(60, interval * backoff))
 
     # -- single pass --
@@ -987,32 +1011,56 @@ class ContextCleanupEngine:
         memory = cast(Any, getattr(self.bot, "memory", None))
         if memory is None:
             return 0, len(plan)
+        # Flatten the plan into a single batch of edits + deletes and apply it
+        # in ONE locked pass. Applying ops one-by-one used to renumber every
+        # LTM entry (to positional 1..N) after each save, so the 2nd+ ops
+        # targeted the wrong ids and silently corrupted memory. The batch
+        # method resolves all ids against the freshly-reloaded list and
+        # renumbers exactly once at the end.
+        edit_map: dict[str, str] = {}
+        delete_ids: set[str] = set()
         applied = 0
         skipped = 0
         for op in plan[:MAX_OPS_PER_PASS]:
             kind = op.get("kind")
             try:
                 if kind == "delete":
-                    ok = await memory.remove_long_term_memory(op["id"])
+                    did = str(op.get("id"))
+                    if did and did not in delete_ids:
+                        delete_ids.add(did)
+                        applied += 1
+                    else:
+                        skipped += 1
                 elif kind == "edit":
-                    ok = await memory.edit_long_term_memory(op["id"], op["content"])
+                    mid = str(op.get("id"))
+                    content = op.get("content")
+                    if mid and content is not None:
+                        edit_map[mid] = content
+                        applied += 1
+                    else:
+                        skipped += 1
                 elif kind == "merge":
-                    ok = await memory.edit_long_term_memory(
-                        op["keep_id"], op["content"]
-                    )
-                    if ok:
-                        for did in op["delete_ids"]:
-                            with contextlib.suppress(Exception):
-                                await memory.remove_long_term_memory(did)
-                else:
-                    ok = False
-                if ok:
-                    applied += 1
+                    keep_id = str(op.get("keep_id"))
+                    content = op.get("content")
+                    if keep_id and content is not None:
+                        edit_map[keep_id] = content
+                        applied += 1
+                    else:
+                        skipped += 1
+                    for did in op.get("delete_ids", []) or []:
+                        did = str(did)
+                        if did and did != keep_id:
+                            delete_ids.add(did)
                 else:
                     skipped += 1
             except Exception as e:
-                logger.warning(f"ContextCleanup LTM op {kind} failed: {e}")
+                logger.warning(f"ContextCleanup LTM op {kind} parse failed: {e}")
                 skipped += 1
+        try:
+            await memory.apply_ltm_batch(edits=edit_map, deletes=delete_ids)
+        except Exception as e:
+            logger.warning(f"ContextCleanup LTM batch apply failed: {e}")
+            return 0, applied + skipped
         return applied, skipped
 
     # -- status for API --

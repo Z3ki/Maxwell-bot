@@ -7,7 +7,10 @@ def test_rem_system_prompt_shape():
     prompt = rem_system_prompt(2)
     assert "You are Maxwell REM" in prompt
     assert "not answering live chat" in prompt
-    assert "2 REM turn(s)" in prompt
+    # REM is a single pass (no multi-turn loop), so the prompt must not
+    # advertise a remaining turn count that the runner never honors.
+    assert "REM turn(s)" not in prompt
+    assert "single pass" in prompt
     assert "DONE" in prompt
 
 

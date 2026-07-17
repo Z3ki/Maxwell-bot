@@ -227,9 +227,21 @@ class IntelEngine:
     # -- lifecycle --
 
     async def start(self):
-        await self.load_control()
+        # Guard FIRST, before any await. Two concurrent start() calls both used
+        # to pass the (post-await) done-check and each create a _loop, leaking a
+        # second loop that stop() couldn't cancel.
         if self._task is not None and not self._task.done():
             return
+        await self.load_control()
+        # Clear a stale on-disk "running" flag left by a previous process that
+        # died mid-pass. Without this, status() reports running=True forever
+        # after a crash (the in-memory flag is False, but state.running sticks).
+        try:
+            state = await self.store.load_state()
+            if state.get("running"):
+                await self.store.patch_state({"running": False, "running_since": ""})
+        except Exception as e:
+            logger.debug(f"Intel stale-running clear failed: {e}")
         self._task = asyncio.create_task(self._loop())
         logger.info("IntelEngine started")
 
@@ -278,6 +290,10 @@ class IntelEngine:
                         consecutive_failures += 1
                     elif not result.get("skipped"):
                         consecutive_failures = 0
+                else:
+                    # Reset backoff while disabled so re-enabling after a run
+                    # of failures doesn't delay the first run by up to 6x.
+                    consecutive_failures = 0
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -286,7 +302,9 @@ class IntelEngine:
                 with contextlib.suppress(Exception):
                     await self.store.record_error(str(e))
             interval = max(300, min(self.interval_seconds, MAX_INTERVAL))
-            backoff = min(2**consecutive_failures, 6) if consecutive_failures > 0 else 1
+            # Cap the exponent first so we don't compute a huge 2**N int every
+            # iteration on a long-dead endpoint before min() clamps it. Max 6x.
+            backoff = min(1 << min(consecutive_failures, 3), 6) if consecutive_failures > 0 else 1
             await asyncio.sleep(max(300, int(interval * backoff)))
 
     # -- main run --
@@ -438,9 +456,7 @@ class IntelEngine:
                 if resp.status != 200:
                     logger.debug(f"Intel feed HTTP {resp.status} for {url}")
                     return ""
-                # Enforce a length cap before decoding. If the server lies
-                # about Content-Length, the incremental reader also bails
-                # out at the same bound.
+                # Pre-check the advertised length when present...
                 content_length = resp.headers.get("Content-Length")
                 if (
                     content_length
@@ -451,7 +467,17 @@ class IntelEngine:
                         f"Intel feed too large for {url}: {content_length} bytes"
                     )
                     return ""
-                return await resp.text(encoding="utf-8", errors="replace")
+                # ...and ALSO bound the actual read, because chunked feeds
+                # (Transfer-Encoding: chunked) have no Content-Length and would
+                # otherwise load an unbounded body into memory via resp.text().
+                # Read one byte over the cap; if we get it, the feed is too big.
+                raw = await resp.content.read(MAX_FEED_BYTES + 1)
+                if len(raw) > MAX_FEED_BYTES:
+                    logger.debug(
+                        f"Intel feed exceeded byte cap during stream for {url}"
+                    )
+                    return ""
+                return raw.decode(encoding="utf-8", errors="replace")
         except Exception as e:
             logger.debug(f"Intel feed fetch error for {url}: {e}")
             return ""
@@ -481,7 +507,15 @@ class IntelEngine:
                 or item.findtext("{http://purl.org/rss/1.0/modules/content/}encoded")
                 or ""
             ).strip()
-            pub = item.findtext("pubDate") or item.findtext("dc:date") or ""
+            pub = (
+                item.findtext("pubDate")
+                # ElementTree requires the full namespaced name for dc:date;
+                # the bare "dc:date" lookup always returned None, so feeds that
+                # publish dates only via Dublin Core (e.g. arXiv) bypassed the
+                # 7-day recency filter and crowded the 100-item cap with old items.
+                or item.findtext("{http://purl.org/dc/elements/1.1/}date")
+                or ""
+            )
             if title or link:
                 items.append(
                     {
@@ -553,7 +587,14 @@ class IntelEngine:
         s = pub_str.strip()
         try:
             # email.utils handles most RSS dates like "Wed, 08 Jul 2026 13:30:00 GMT"
-            return parsedate_to_datetime(s)
+            # parsedate_to_datetime returns a NAIVE datetime for tz-less / -0000
+            # dates (common in real feeds). Normalize to UTC so downstream
+            # (now_aware - dt) subtraction doesn't raise TypeError and nuke the
+            # whole intel pass on a single malformed date.
+            dt = parsedate_to_datetime(s)
+            if dt is not None and dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
         except Exception:
             pass
         # Try ISO
@@ -601,7 +642,14 @@ class IntelEngine:
             if dt is None:
                 recent.append(it)
                 continue
-            age = (now - dt).total_seconds()
+            # Defense in depth: even with tz normalization, a pathological date
+            # could still slip through and raise here. One bad item must not
+            # abort the entire intel gather for the cycle.
+            try:
+                age = (now - dt).total_seconds()
+            except Exception:
+                recent.append(it)
+                continue
             if age < 0:
                 age = 0
             if age <= 7 * 24 * 3600:  # 7 days for more general coverage

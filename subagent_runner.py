@@ -237,6 +237,15 @@ async def _run_opencode(
             "stdout": "",
             "stderr": f"Sub-agent timed out after {timeout_minutes} minutes",
         }
+    except BaseException:
+        # Covers asyncio.CancelledError (shutdown/PM2 restart cancels the task)
+        # and any other error. Without this, a cancelled sub-agent left the
+        # opencode subprocess orphaned and consuming CPU/memory indefinitely.
+        with contextlib.suppress(ProcessLookupError, Exception):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.wait()
+        raise
 
     return {
         "ok": proc.returncode == 0,
