@@ -2233,24 +2233,32 @@ class SendFileTool(Tool):
     ) -> str:
         if self.bot and not self.bot._is_admin(message.author.id):
             return "Error: send_file is admin-only"
-        # Path mode: send a file that already exists on disk.
+        # Path mode: send a file that already exists on disk (or in the shell
+        # container — we docker-cp it out as a fallback for container paths).
         if path:
-            allowed_bases = self._allowed_send_file_bases()
-            found_base = None
-            for base in allowed_bases:
-                if _is_path_allowed(path, base):
-                    found_base = base
-                    break
-            if not found_base:
-                return (
-                    f"Error: path '{path}' is not in an allowed directory. "
-                    f"Allowed: {', '.join(allowed_bases)}"
-                )
+            # Normalize container paths (/home/maxwell/...) to the host bind
+            # mount so the allowlist and resolver see a real host path.
+            resolved_input = self._resolve_send_file_path(path)
+            # First, the fast path: a regular host file the model knows about.
+            host_path, host_error = await self._try_read_host_file(resolved_input)
+            if host_path is not None:
+                target = host_path
+            else:
+                # Fallback: the model passed a container-only path (anything
+                # inside the maxwell-shell container). Try docker cp it out.
+                # Allowed for any path inside the container — the model
+                # already has shell access, and refusing "any file" creates
+                # an artificial one-step barrier that breaks the round-trip.
+                target, cp_error = await self._docker_cp_from_shell(path)
+                if target is None:
+                    return (
+                        f"Error: could not read file at '{path}'. "
+                        f"Host: {host_error or 'not found'}. "
+                        f"Container: {cp_error or 'not found or not readable'}."
+                    )
+
             try:
-                target = Path(path).resolve()
                 blob = await asyncio.to_thread(target.read_bytes)
-            except FileNotFoundError:
-                return f"Error: file not found at '{path}'"
             except Exception as e:
                 return f"Error reading file from disk: {e}"
             # Always sanitize the outbound attachment name (never trust filename=).
@@ -2301,10 +2309,118 @@ class SendFileTool(Tool):
                 bases.append(os.path.abspath(site_path))
         subagent_base = os.environ.get("OPENCODE_SUBAGENT_BASE_DIR", "subagents")
         bases.append(os.path.abspath(subagent_base))
-        # Shell tool working dir (volume mounted into container).
+        # Shell tool working dir (volume mounted into container as /home/maxwell).
         shell_host = os.path.join(os.path.dirname(__file__), "shelldocker")
         bases.append(os.path.abspath(shell_host))
         return bases
+
+    def _resolve_send_file_path(self, raw_path: str) -> str:
+        """Map a path the model might pass to the actual host path.
+
+        Accepts both forms:
+          * host paths: /root/maxwell/shelldocker/foo.png (or any allowed base)
+          * container paths: /home/maxwell/foo.png  -> shelldocker/foo.png
+
+        Returns the resolved absolute host path, or the original input if no
+        remap is needed (let the existing _is_path_allowed check decide).
+        """
+        cleaned = str(raw_path or "").strip()
+        if not cleaned:
+            return cleaned
+        # Normalize container-side /home/maxwell/<x> to the host bind mount.
+        # Match /home/maxwell, /home/maxwell/, or just home/maxwell (defensive).
+        m = re.match(r"^/?home/maxwell/?(.*)$", cleaned)
+        if m:
+            shell_host = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "shelldocker")
+            )
+            rel = m.group(1).lstrip("/")
+            return os.path.join(shell_host, rel) if rel else shell_host
+        return cleaned
+
+    async def _try_read_host_file(
+        self, resolved_path: str
+    ) -> tuple[Path | None, str | None]:
+        """Read a file from the host if it exists in an allowed base.
+
+        Returns (Path, None) on success, (None, error_string) on miss.
+        """
+        allowed_bases = self._allowed_send_file_bases()
+        for base in allowed_bases:
+            if _is_path_allowed(resolved_path, base):
+                try:
+                    p = Path(resolved_path).resolve()
+                    if p.is_file():
+                        return p, None
+                except OSError:
+                    continue
+        return None, "not in an allowed host directory or not found"
+
+    async def _docker_cp_from_shell(
+        self, container_path: str
+    ) -> tuple[Path | None, str | None]:
+        """docker-cp a file out of the maxwell-shell container to a local temp
+        path, then return that local Path. Used as a fallback when the model
+        passes a path that only exists inside the container.
+
+        Path safety: we only allow reads from inside the running
+        maxwell-shell container. The container's root is bounded by the
+        sandbox flags (no host FS mount by default; even in MAXWELL_SHELL_FULL_HOST
+        mode, /host is a separate root).
+        """
+        if not container_path or not isinstance(container_path, str):
+            return None, "empty path"
+        clean = container_path.strip()
+        if not clean.startswith("/"):
+            clean = "/" + clean  # require absolute inside container
+        # No traversal escapes from the container root; this is read-only.
+        if ".." in clean.split("/"):
+            return None, "path traversal not allowed"
+
+        # Confirm the container is running.
+        try:
+            shell_tool = (
+                self.bot.tools.get("shell") if self.bot else None
+            )
+            container_name = (
+                getattr(shell_tool, "CONTAINER_NAME", "maxwell-shell")
+                if shell_tool
+                else "maxwell-shell"
+            )
+        except Exception:
+            container_name = "maxwell-shell"
+
+        tmp_dir = tempfile.mkdtemp(prefix="maxwell_sendfile_")
+        local_path = os.path.join(tmp_dir, os.path.basename(clean) or "file")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "docker",
+                "cp",
+                f"{container_name}:{clean}",
+                local_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                _stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=15
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return None, "docker cp timed out"
+            if proc.returncode != 0:
+                return None, (
+                    stderr.decode(errors="replace").strip()
+                    or f"docker cp exit {proc.returncode}"
+                )
+            if not os.path.isfile(local_path):
+                return None, "docker cp reported success but file is missing"
+            return Path(local_path), None
+        except FileNotFoundError:
+            return None, "docker is not installed or not on PATH"
+        except Exception as e:
+            return None, f"docker cp failed: {e}"
 
     async def _send_blob(self, message: Message, blob: bytes, safe_name: str) -> str:
         if len(blob) > self.MAX_SIZE:
