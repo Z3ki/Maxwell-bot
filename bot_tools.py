@@ -265,6 +265,40 @@ def _clean_channel_name(value: str | None) -> str:
     return text[:100]
 
 
+def _strip_heredoc_blocks(command: str) -> str:
+    """Return `command` with heredoc bodies removed.
+
+    A heredoc looks like `... << 'EOF'` (or `<< "EOF"` / `<<EOF`) followed by
+    lines of literal content ending with a line containing only the delimiter
+    `EOF`. The literal block is the only place we permit newlines, so stripping
+    it lets us validate the remaining (non-heredoc) parts as a single line.
+    """
+    out: list[str] = []
+    i = 0
+    lines = command.split("\n")
+    while i < len(lines):
+        line = lines[i]
+        # Heredoc opener: find `<<` then the delimiter token. Anchor on the
+        # unquoted start of the line; backtracking-safe.
+        idx = line.find("<<")
+        if idx >= 0:
+            tail = line[idx + 2 :]
+            stripped = tail.strip()
+            m = re.match(r"^(['\"]?)([A-Za-z0-9_]+)\1\s*$", stripped)
+            if m:
+                delimiter = m.group(2)
+                i += 1
+                # Skip until we hit the closing delimiter on its own line.
+                while i < len(lines) and lines[i].strip() != delimiter:
+                    i += 1
+                # Discard the closing delimiter line itself.
+                i += 1
+                continue
+        out.append(line)
+        i += 1
+    return "\n".join(out)
+
+
 def _is_path_allowed(path: str, allowed_base: str) -> bool:
     """Return True if `path` resolves to a regular file under `allowed_base`.
 
@@ -2297,6 +2331,21 @@ class SendFileTool(Tool):
 # wall is taint tracking + the docker sandbox capabilities (no-new-privileges,
 # cap-drop ALL, no host net by default). Anything that tries to escape the
 # blocklist gets caught by the next layer.
+def _shell_exports_dir() -> str:
+    """Canonical dir where shell-produced files are staged for re-attach.
+
+    Defaults to <repo>/data/exports, overridable via MAXWELL_SHELL_EXPORT_DIR.
+    send_file already allowlists data/exports, so staged files can be
+    re-attached with a plain `send_file path=.../exports/<name>` call.
+    """
+    override = os.environ.get("MAXWELL_SHELL_EXPORT_DIR", "").strip()
+    if override:
+        return os.path.abspath(override)
+    return os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "data", "exports")
+    )
+
+
 _SHELL_BLOCKED_PATTERNS = [
     r"--privileged\b",
     r"--pid=host\b",
@@ -2329,7 +2378,7 @@ class ShellTool(Tool):
     IMAGE_NAME = "maxwell-shell"
     DOCKERFILE_DIR = os.path.join(os.path.dirname(__file__), "docker")
     MAX_OUTPUT = 8000
-    TIMEOUT = 180
+    TIMEOUT = 30
     MAX_COMMAND_LENGTH = 4000
     # Serialize container lifecycle + exec so parallel tool batches cannot
     # race docker rm -f / recreate.
@@ -2350,13 +2399,29 @@ class ShellTool(Tool):
             return (
                 "Run a shell command with bash -lc in the maxwell-shell container. "
                 "FULL ACCESS MODE (MAXWELL_SHELL_FULL_HOST): host network, host root at /host, root user. "
-                "Params: command (required), files (optional paths under /home/maxwell to attach)."
+                "Params: command (required), files (optional: a JSON array OR comma-separated list of "
+                "paths to attach to the reply). To send an artifact the command produced, pass its "
+                "path under /home/maxwell in `files` — e.g. files='[\"out.png\"]' or files='out.png, "
+                "data.zip'. The file will be docker-cp'd out and uploaded to the channel. "
+                "Examples:\n"
+                "  command=\"echo hi\"                       -> stdout only\n"
+                "  command=\"python3 make.py\", files='out.png' -> runs script + attaches out.png\n"
+                "  command=\"zip a.zip a.png b.png\", files='a.zip' -> runs zip + attaches archive"
             )
         return (
-            "Run a shell command with bash -lc in the maxwell-shell container. "
+            "Run a shell command with bash -lc in the maxwell-shell sandbox container. "
             "Isolated sandbox: no host filesystem mount, bridge network, memory/cpu/pids limits. "
             "Working directory is /home/maxwell (project shelldocker volume only). "
-            "Params: command (required), files (optional paths under /home/maxwell to attach)."
+            "Params: command (required), files (optional: a JSON array OR comma-separated list of "
+            "paths under /home/maxwell to attach to the reply). When your command produces an "
+            "artifact (image, video, audio, archive, pdf, csv, html, anything the user wants), "
+            "list its path in `files` and it will be docker-cp'd out of the container and uploaded "
+            "to the channel automatically. Examples:\n"
+            "  command=\"echo hi\"                              -> stdout only\n"
+            "  command=\"python3 make.py\", files='out.png'     -> runs script + attaches out.png\n"
+            "  command=\"ffmpeg -i in.mp4 out.mp4\", files='out.mp4' -> transcodes + attaches result\n"
+            "  command=\"convert x.svg x.png\", files='x.png'   -> rasterizes + attaches png\n"
+            "Max 10 MB per file. No path traversal (paths under /home/maxwell only)."
         )
 
     async def _run_docker(self, *args: str, timeout: int = 30):
@@ -2498,12 +2563,18 @@ class ShellTool(Tool):
             return "empty command"
         if len(command) > self.MAX_COMMAND_LENGTH:
             return f"command too long (max {self.MAX_COMMAND_LENGTH} chars)"
-        if "\n" in command or "\r" in command:
-            return "newlines are not allowed in shell commands"
-        if any(ord(c) < 32 for c in command):
+        # Heredocs (<< EOF / << 'EOF' / << "EOF") embed literal blocks. The
+        # content between the opener and the matching closing delimiter on
+        # its own line is passed verbatim to the child stdin — no shell
+        # expansion, no command chaining. We allow newlines ONLY inside such
+        # heredoc blocks; the rest of the command must stay single-line.
+        non_heredoc = _strip_heredoc_blocks(command)
+        if "\n" in non_heredoc or "\r" in non_heredoc:
+            return "newlines are not allowed outside of heredoc blocks (<< 'EOF' ... EOF)"
+        if any(ord(c) < 32 and c not in ("\t",) for c in non_heredoc):
             return "control characters are not allowed in shell commands"
         for pattern in _SHELL_BLOCKED_PATTERNS:
-            if re.search(pattern, command, re.IGNORECASE):
+            if re.search(pattern, non_heredoc, re.IGNORECASE):
                 return "blocked dangerous shell pattern"
         return None
 
@@ -2668,7 +2739,13 @@ class ShellTool(Tool):
         return [f.strip() for f in raw.split(",") if f.strip()]
 
     async def _send_container_file(self, message: Message, rel_path: str) -> str | None:
-        """Copy a file out of the container and send it to Discord. Returns filename on success."""
+        """Copy a file out of the container, stage it in data/exports/, and
+        send it to Discord. Returns filename on success.
+
+        Staging into data/exports/ (which send_file already allowlists) means a
+        follow-up `send_file path=.../exports/<name>` can re-attach the same
+        artifact without another docker cp — the round-trip is one-shot.
+        """
         # Sanitize — no path traversal escapes from /home/maxwell
         clean = rel_path.lstrip("/")
         if ".." in clean:
@@ -2694,13 +2771,29 @@ class ShellTool(Tool):
                 return None
 
             file_size = os.path.getsize(local_path)
-            if file_size > 25 * 1024 * 1024:
+            if file_size > 10 * 1024 * 1024:
                 logger.warning(f"Shell file too large to send: {file_size} bytes")
                 return None
 
             filename = os.path.basename(clean)
             await message.channel.send(file=File(local_path, filename=filename))
             logger.info(f"Sent shell file: {filename} ({file_size} bytes)")
+
+            # Stage a copy into the canonical exports dir for later re-attach.
+            try:
+                exports_dir = _shell_exports_dir()
+                os.makedirs(exports_dir, exist_ok=True)
+                staged = os.path.join(exports_dir, filename)
+                # Avoid clobbering an existing export with the same name.
+                if os.path.exists(staged):
+                    base, ext = os.path.splitext(filename)
+                    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+                    staged = os.path.join(exports_dir, f"{base}_{stamp}{ext}")
+                shutil.copy2(local_path, staged)
+                logger.info(f"Staged shell file to exports: {staged}")
+            except Exception as e:
+                logger.warning(f"Failed to stage shell file to exports: {e}")
+
             return filename
         except asyncio.TimeoutError:
             logger.warning(f"docker cp timed out for {container_path}")
