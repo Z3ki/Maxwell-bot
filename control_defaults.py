@@ -111,6 +111,18 @@ DEFAULT_CONTROL = {
     # while normal bot replies (mentions etc) can still work if not otherwise blocked.
     "autonomy_blocked_channels": [],
     "autonomy_blocked_servers": [],
+    # Self-directed agency: internal "drives" (curiosity/social/creative/reflective/restless)
+    # that evolve each tick and bias what Maxwell feels like doing, plus an idle-initiative
+    # hint that permits acting on your own when nothing external needs you. Lets the bot
+    # do what it wants, whenever, without a human triggering it.
+    "autonomy_drives_enabled": True,
+    # Goals not acted on for this many days are flagged STALE in context (candidates for
+    # the complete_goal action). Not auto-deleted — the bot decides to retire them.
+    "autonomy_goal_stale_days": 14,
+    # Periodic reflection nudge injected into context roughly every N seconds so Maxwell
+    # self-reviews goals/memory and sets new objectives on its own cadence.
+    "autonomy_reflect_enabled": True,
+    "autonomy_reflect_interval_seconds": 3600,
 }
 
 DEAD_CONTROL_KEYS = frozenset({

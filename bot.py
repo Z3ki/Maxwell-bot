@@ -4346,12 +4346,33 @@ class MaxwellBot(commands.Bot):
             thought = (state.get("last_thought") or "-")[:300]
             ab_ch = self._control.get("autonomy_blocked_channels", []) or []
             ab_sv = self._control.get("autonomy_blocked_servers", []) or []
+            raw_drives = state.get("drives") or {}
+            drives = raw_drives if isinstance(raw_drives, dict) else {}
+
+            def _drive_val(v):
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return None
+
+            drive_items = [
+                (str(k), _drive_val(v))
+                for k, v in drives.items()
+                if _drive_val(v) is not None
+            ]
+            drives_line = ", ".join(
+                f"{k} {v:.2f}"
+                for k, v in sorted(drive_items, key=lambda kv: kv[1], reverse=True)
+            ) or "(not yet computed)"
+            last_reflect = state.get("last_reflect_at") or "never"
             await message.channel.send(
                 "Autonomy status\n"
                 f"enabled: {enabled} interval: {interval}s\n"
                 f"last tick: {last_tick or 'never'}\n"
                 f"actions executed: {state.get('actions_executed_total', 0)} failed: {state.get('actions_failed_total', 0)}\n"
                 f"last error: {state.get('last_error') or '-'}\n"
+                f"drives: {drives_line}\n"
+                f"last reflection: {last_reflect}\n"
                 f"blacklists — channels: {', '.join(ab_ch) or '(none)'} servers: {', '.join(ab_sv) or '(none)'}\n"
                 f"thought: {thought}"
             )
