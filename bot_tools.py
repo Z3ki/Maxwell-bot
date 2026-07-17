@@ -2329,7 +2329,7 @@ class ShellTool(Tool):
     IMAGE_NAME = "maxwell-shell"
     DOCKERFILE_DIR = os.path.join(os.path.dirname(__file__), "docker")
     MAX_OUTPUT = 8000
-    TIMEOUT = 60
+    TIMEOUT = 180
     MAX_COMMAND_LENGTH = 4000
     # Serialize container lifecycle + exec so parallel tool batches cannot
     # race docker rm -f / recreate.
@@ -2410,7 +2410,7 @@ class ShellTool(Tool):
             raise RuntimeError("docker did not respond while checking sandbox") from exc
 
         (_stdout, stderr), build_code = await self._run_docker(
-            "build", "-t", self.IMAGE_NAME, self.DOCKERFILE_DIR, timeout=180
+            "build", "-t", self.IMAGE_NAME, self.DOCKERFILE_DIR, timeout=600
         )
         if build_code != 0:
             raise RuntimeError(

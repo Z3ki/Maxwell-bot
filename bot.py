@@ -1836,13 +1836,8 @@ class TokenBudgetTracker:
         self._prompt_tokens += _safe_int(usage.get("prompt_tokens", 0), 0)
         self._completion_tokens += _safe_int(usage.get("completion_tokens", 0), 0)
         self._total_tokens += _safe_int(usage.get("total_tokens", 0), 0)
-        if self._total_tokens > self.daily_budget and not self._alerted:
-            self._alerted = True
-            logger.warning(
-                "Daily token budget exceeded: %d / %d tokens",
-                self._total_tokens,
-                self.daily_budget,
-            )
+        # Tracking only — daily-budget enforcement was removed; we just keep
+        # the counter so dashboards/reports can still show usage if desired.
 
     @property
     def exceeded(self) -> bool:
@@ -2585,7 +2580,7 @@ class MaxwellBot(commands.Bot):
         _lock_acquired = False
         try:
             # Fail closed: never process the same channel unlocked (double replies / races).
-            await asyncio.wait_for(_lock.acquire(), timeout=30.0)
+            await asyncio.wait_for(_lock.acquire(), timeout=120.0)
             _lock_acquired = True
         except asyncio.TimeoutError as _exc:
             logger.warning(
@@ -4725,7 +4720,7 @@ class MaxwellBot(commands.Bot):
                     _safe_int(
                         control.get("prompt_context_budget", 200000) or 200000, 200000
                     ),
-                    500000,
+                    2000000,
                 ),
             )
             control["autonomy_interval_seconds"] = max(
@@ -6435,12 +6430,6 @@ class MaxwellBot(commands.Bot):
                 if time.monotonic() > tool_deadline:
                     logger.info("Tool iteration time budget exceeded, breaking")
                     break
-                if self._token_tracker.exceeded:
-                    logger.warning(
-                        "Daily token budget exceeded (%s); stopping tool loop",
-                        self._token_tracker.summary(),
-                    )
-                    break
                 response, tool_results, iter_images = await self._dispatch_tool_calls(
                     message,
                     response,
@@ -7507,7 +7496,7 @@ class MaxwellBot(commands.Bot):
                 _safe_int(
                     self._control.get("prompt_context_budget", 60000) or 60000, 60000
                 ),
-                200000,
+                2000000,
             ),
         )
         # Reserve output headroom so the model has room to generate a response.
@@ -7716,7 +7705,7 @@ class MaxwellBot(commands.Bot):
                     _safe_int(
                         self._control.get("memory_history_messages", 40) or 40, 40
                     ),
-                    100,
+                    1000,
                 ),
             )
             used = 0
