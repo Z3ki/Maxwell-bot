@@ -2345,7 +2345,6 @@ Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, comple
                 "reply": "post_channel",
                 "dm": "send_dm",
                 "direct_message": "send_dm",
-                "reasoning_log": "do_nothing",
                 "think": "do_nothing",
                 "log": "do_nothing",
                 "finish_goal": "complete_goal",

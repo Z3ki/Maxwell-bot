@@ -192,15 +192,10 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         },
         ["content"],
     ),
-    "reasoning_log": _obj(
-        {
-            "thoughts": _str("One plain-English sentence of reasoning"),
-            "intent": _str("Short intent label"),
-            "decision": _str("Short decision label"),
-            "confidence": _str("low | medium | high"),
-        },
-        ["thoughts"],
-    ),
+    # NOTE: no more `reasoning_log` tool. Reasoning now rides inside every
+    # tool call via the auto-injected `reasoning` param (see build_openai_tools
+    # above and tool_registry.record_reasoning). Plain chat goes through
+    # send_message, which itself carries a reasoning field.
     "no_response": _obj({}),
     "send_file": _obj(
         {
@@ -258,6 +253,20 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
 }
 
 
+# The reasoning parameter is stamped onto EVERY tool so the model does its
+# real reasoning *inside the tool call it wants to use* instead of a separate,
+# pointless `reasoning_log` tool. Same shape everywhere — see tool_registry.py.
+REASONING_PARAM: dict[str, Any] = {
+    "type": "string",
+    "description": (
+        "Your real, plain-English reasoning BEFORE you take this action: why "
+        "you are calling this tool, what you expect to happen, assumptions and "
+        "risks. Plain text only — no XML, no JSON, no tags. Fill this in for "
+        "EVERY tool call including send_message."
+    ),
+}
+
+
 def build_openai_tools(
     tools: dict[str, Any],
     *,
@@ -265,7 +274,13 @@ def build_openai_tools(
     disabled_names: set[str] | None = None,
     max_description_chars: int = 1024,
 ) -> list[dict[str, Any]]:
-    """Build OpenAI ``tools`` payload from live tool instances."""
+    """Build OpenAI ``tools`` payload from live tool instances.
+
+    Every tool gets an auto-injected `reasoning` parameter on top of whatever
+    it declared in TOOL_PARAMETERS. Reasoning lives INSIDE the tool call now —
+    there is no standalone reasoning_log tool anymore. If you add a new tool,
+    you do nothing special: it gets reasoning for free. Stop forgetting.
+    """
     disabled = disabled_names or set()
     out: list[dict[str, Any]] = []
     for name, tool in tools.items():
@@ -279,16 +294,28 @@ def build_openai_tools(
             desc = name
         if len(desc) > max_description_chars:
             desc = desc[: max_description_chars - 1] + "…"
-        parameters = TOOL_PARAMETERS.get(
-            name, {"type": "object", "properties": {}, "additionalProperties": True}
+        params = dict(
+            TOOL_PARAMETERS.get(
+                name, {"type": "object", "properties": {}, "additionalProperties": True}
+            )
         )
+        # Inject reasoning onto a COPY so we never mutate TOOL_PARAMETERS.
+        props = dict(params.get("properties") or {})
+        props.setdefault("reasoning", REASONING_PARAM)
+        params["properties"] = props
+        # reasoning must never end up required — let the model be concise.
+        required = [r for r in (params.get("required") or []) if r != "reasoning"]
+        if required:
+            params["required"] = required
+        else:
+            params.pop("required", None)
         out.append(
             {
                 "type": "function",
                 "function": {
                     "name": name,
                     "description": desc or name,
-                    "parameters": parameters,
+                    "parameters": params,
                 },
             }
         )

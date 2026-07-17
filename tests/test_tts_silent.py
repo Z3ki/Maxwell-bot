@@ -1,4 +1,5 @@
 import asyncio
+import json
 from types import SimpleNamespace
 
 from bot import (
@@ -40,30 +41,82 @@ class FakeMemory:
         return None
 
 
-def test_process_tool_calls_preserves_tts_sent_marker():
-    tts = FakeTool("__TTS_SENT__")
+def _native_call(name, args, call_id="call_1"):
+    """Build a raw OpenAI-style tool_call the native dispatcher expects."""
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": json.dumps(args)},
+    }
+
+
+def _native_bot(tools, **control):
+    """A stub bot good enough to drive _dispatch_tool_calls (native path).
+
+    Wires everything the rewritten _execute_tool_by_name touches: reasoning
+    recording, the destructive-confirm gate, platform compat, the breaker.
+    """
+    control_defaults = {
+        "tools_enabled": True,
+        "disabled_tools": [],
+        "typing_indicator": False,
+        "store_memory": False,
+    }
+    control_defaults.update(control)
+
+    class _Breaker:
+        def is_open(self, name):
+            return False
+
+        def record_failure(self, name):
+            pass
+
+        def record_success(self, name):
+            pass
+
     bot = SimpleNamespace(
-        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={
-            "tools_enabled": True,
-            "disabled_tools": [],
-            "typing_indicator": False,
-        },
-        tools={"tts": tts},
+        _tool_breaker=_Breaker(),
+        _control=control_defaults,
+        tools=dict(tools),
+        traces=[],
+        _tainted_messages=set(),
+        memory=FakeMemory(),
     )
-    message = SimpleNamespace()
+    bot._message_tool_platform = lambda _message: "discord"
+    bot._compatible_tool_names = lambda _platform: set(tools)
+    bot.is_message_tainted = lambda _message: False
+    bot._consume_destructive_confirm = lambda _author_id: False
+    bot._render_custom_emojis = lambda text, _guild: text
+
+    async def _record_llm_trace(message, payload):
+        bot.traces.append(payload)
+
+    bot._record_llm_trace = _record_llm_trace
+    return bot
+
+
+def memory_added(bot):
+    return bot.memory.added
+
+
+def test_dispatch_native_runs_tool_and_records_reasoning():
+    tts = FakeTool("__TTS_SENT__")
+    bot = _native_bot({"tts": tts})
+    message = SimpleNamespace(guild=None, channel=SimpleNamespace(id=123))
+    raw = [_native_call("tts", {"text": "say this", "reasoning": "user wants speech"})]
 
     async def run():
-        response, tool_results = await MaxwellBot._process_tool_calls(
-            bot,
-            message,
-            '<tool:tts text="say this" />',
+        return await MaxwellBot._dispatch_tool_calls(
+            bot, message, "", native_tool_calls=raw
         )
-        assert response == ""
-        assert tool_results == ["Tool tts: __TTS_SENT__"]
-        assert tts.calls == [{"text": "say this"}]
 
-    asyncio.run(run())
+    _, tool_results = asyncio.run(run())
+    assert tool_results == ["Tool tts: __TTS_SENT__"]
+    # reasoning must be stripped from the args passed to the tool
+    assert tts.calls == [{"text": "say this"}]
+    # and recorded to the trace attached to the real tool
+    assert bot.traces and bot.traces[0]["tool"] == "tts"
+    assert bot.traces[0]["thoughts"] == "user wants speech"
 
 
 def test_tts_results_do_not_block_tool_followup():
@@ -165,208 +218,121 @@ def test_reaction_on_maxwell_message_invokes_handler():
     assert replies == [("hi", {})]
 
 
-def test_process_tool_calls_still_returns_other_tool_results():
+def test_dispatch_native_runs_nonterminal_tool():
     react = FakeTool("Reacted with <:catjam:123>")
-    bot = SimpleNamespace(
-        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={
-            "tools_enabled": True,
-            "disabled_tools": [],
-            "typing_indicator": False,
-        },
-        tools={"react": react},
-    )
-    message = SimpleNamespace()
+    bot = _native_bot({"react": react})
+    message = SimpleNamespace(guild=None, channel=SimpleNamespace(id=123))
+    raw = [_native_call("react", {"emoji": "catjam", "reasoning": "reacting"})]
 
     async def run():
-        response, tool_results = await MaxwellBot._process_tool_calls(
-            bot,
-            message,
-            '<tool:react emoji="catjam" />',
+        return await MaxwellBot._dispatch_tool_calls(
+            bot, message, "", native_tool_calls=raw
         )
-        assert response == ""
-        assert tool_results == ["Tool react: Reacted with <:catjam:123>"]
-        assert react.calls == [{"emoji": "catjam"}]
 
-    asyncio.run(run())
-
-
-def test_process_tool_calls_handles_unclosed_send_message_without_leaking_environment_details():
-    send_message = FakeTool("__MESSAGE_SENT__ Sent 6 chars")
-    bot = SimpleNamespace(
-        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={
-            "tools_enabled": True,
-            "disabled_tools": [],
-            "typing_indicator": False,
-        },
-        tools={"send_message": send_message},
-    )
-    message = SimpleNamespace(guild=None)
-    response = "<tool:send_message>Hello!<|end|><environment_details>secret context</environment_details>"
-
-    async def run():
-        cleaned, tool_results = await MaxwellBot._process_tool_calls(
-            bot, message, response
-        )
-        assert cleaned == ""
-        assert tool_results == ["Tool send_message: __MESSAGE_SENT__ Sent 6 chars"]
-        assert send_message.calls == [{"content": "Hello!"}]
-
-    asyncio.run(run())
+    _, tool_results = asyncio.run(run())
+    assert tool_results == ["Tool react: Reacted with <:catjam:123>"]
+    assert react.calls == [{"emoji": "catjam"}]
 
 
-def test_process_tool_calls_handles_reasoning_json_tts_without_leaking_system_reminder():
-    tts = FakeTool("__TTS_SENT__")
-    bot = SimpleNamespace(
-        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={
-            "tools_enabled": True,
-            "disabled_tools": [],
-            "typing_indicator": False,
-        },
-        tools={"tts": tts},
-    )
-    message = SimpleNamespace()
-    response = """{
-  "thoughts": "User asked for a TTS.",
-  "intent": "Provide a text-to-speech response.",
-  "decision": "Call the tts tool.",
-  "tool_plan": "Use tts with text Hey there."
-}
-<tool:tts text="Hey there!" language="english" />
-<system-reminder>secret context</system-reminder>"""
-
-    async def run():
-        cleaned, tool_results = await MaxwellBot._process_tool_calls(
-            bot, message, response
-        )
-        assert cleaned == ""
-        assert tool_results == ["Tool tts: __TTS_SENT__"]
-        assert tts.calls == [{"text": "Hey there!", "language": "english"}]
-
-    asyncio.run(run())
-
-
-def test_process_tool_calls_handles_pipe_tts_format():
-    tts = FakeTool("__TTS_SENT__")
-    bot = SimpleNamespace(
-        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={
-            "tools_enabled": True,
-            "disabled_tools": [],
-            "typing_indicator": False,
-        },
-        tools={"tts": tts},
-    )
-    message = SimpleNamespace()
-
-    async def run():
-        cleaned, tool_results = await MaxwellBot._process_tool_calls(
-            bot,
-            message,
-            "<|tool_call_begin|>tts|>text=Test tts language=spanish<|tool_call_end|>",
-        )
-        assert cleaned == ""
-        assert tool_results == ["Tool tts: __TTS_SENT__"]
-        assert tts.calls == [{"text": "Test tts", "language": "spanish"}]
-
-    asyncio.run(run())
-
-
-def test_process_tool_calls_records_tool_history_in_memory():
+def test_dispatch_native_records_tool_history_in_memory():
     react = FakeTool("Reacted with <:catjam:123>")
-    memory = FakeMemory()
-    bot = SimpleNamespace(
-        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={
-            "tools_enabled": True,
-            "disabled_tools": [],
-            "typing_indicator": False,
-            "store_memory": True,
-        },
-        tools={"react": react},
-        memory=memory,
-    )
-    message = SimpleNamespace(channel=SimpleNamespace(id=123))
+    bot = _native_bot({"react": react}, store_memory=True)
+    message = SimpleNamespace(guild=None, channel=SimpleNamespace(id=123))
+    raw = [_native_call("react", {"emoji": "catjam"})]
 
     async def run():
-        response, tool_results = await MaxwellBot._process_tool_calls(
-            bot,
-            message,
-            '<tool:react emoji="catjam" />',
+        return await MaxwellBot._dispatch_tool_calls(
+            bot, message, "", native_tool_calls=raw
         )
-        assert response == ""
-        assert tool_results == ["Tool react: Reacted with <:catjam:123>"]
-        assert memory.added == [
-            (
-                "123",
-                {
-                    "author": "Tool",
-                    "content": 'Called react with {"emoji": "catjam"} -> Reacted with <:catjam:123>',
-                    "is_tool": True,
-                    "tool_name": "react",
-                    "tool_params": {"emoji": "catjam"},
-                    "tool_result": "Reacted with <:catjam:123>",
-                },
-            )
-        ]
 
-    asyncio.run(run())
-
-
-def test_process_tool_calls_strips_disabled_tool_call():
-    react = FakeTool("Reacted with <:catjam:123>")
-    bot = SimpleNamespace(
-        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={
-            "tools_enabled": True,
-            "disabled_tools": ["react"],
-            "typing_indicator": False,
-        },
-        tools={"react": react},
-    )
-    message = SimpleNamespace()
-
-    async def run():
-        response, tool_results = await MaxwellBot._process_tool_calls(
-            bot,
-            message,
-            '<tool:react emoji="catjam" />',
+    _, tool_results = asyncio.run(run())
+    assert tool_results == ["Tool react: Reacted with <:catjam:123>"]
+    # native path stores the full "Tool name: result" line as tool_result
+    assert memory_added(bot) == [
+        (
+            "123",
+            {
+                "author": "Tool",
+                "content": 'Called react with {"emoji": "catjam"} -> Tool react: Reacted with <:catjam:123>',
+                "is_tool": True,
+                "tool_name": "react",
+                "tool_params": {"emoji": "catjam"},
+                "tool_result": "Tool react: Reacted with <:catjam:123>",
+            },
         )
-        assert response == ""
-        assert tool_results == ["Tool react: Error - tool is disabled"]
-        assert react.calls == []
-
-    asyncio.run(run())
+    ]
 
 
-def test_process_tool_calls_strips_platform_incompatible_tool_call():
+def test_dispatch_native_strips_disabled_tool():
     react = FakeTool("Reacted")
-    bot = SimpleNamespace(
-        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={
-            "tools_enabled": True,
-            "disabled_tools": [],
-            "typing_indicator": False,
-        },
-        tools={"react": react},
-    )
-    message = SimpleNamespace(tool_platform="telegram")
+    bot = _native_bot({"react": react}, disabled_tools=["react"])
+    message = SimpleNamespace(guild=None, channel=SimpleNamespace(id=123))
+    raw = [_native_call("react", {"emoji": "catjam"})]
 
     async def run():
-        response, tool_results = await MaxwellBot._process_tool_calls(
-            bot,
-            message,
-            '<tool:react emoji="catjam" />',
+        return await MaxwellBot._dispatch_tool_calls(
+            bot, message, "", native_tool_calls=raw
         )
-        assert response == ""
-        assert tool_results == [
-            "Tool react: Error - tool is not available on this platform"
-        ]
-        assert react.calls == []
 
-    asyncio.run(run())
+    _, tool_results = asyncio.run(run())
+    assert tool_results == ["Tool react: Error - tool is disabled"]
+    assert react.calls == []
+
+
+def test_dispatch_native_rejects_platform_incompatible_tool():
+    react = FakeTool("Reacted")
+    bot = _native_bot({"react": react})
+    # react is Discord-only; pretend this turn is telegram so it's incompatible.
+    bot._message_tool_platform = lambda _message: "telegram"
+    bot._compatible_tool_names = lambda _platform: set()  # nothing compatible on tg here
+    message = SimpleNamespace(guild=None, channel=SimpleNamespace(id=123), tool_platform="telegram")
+    raw = [_native_call("react", {"emoji": "catjam"})]
+
+    async def run():
+        return await MaxwellBot._dispatch_tool_calls(
+            bot, message, "", native_tool_calls=raw
+        )
+
+    _, tool_results = asyncio.run(run())
+    assert tool_results == ["Tool react: Error - tool is not available on this platform"]
+    assert react.calls == []
+
+
+def test_dispatch_native_skips_duplicate_terminal_tools():
+    first = FakeTool("__MESSAGE_SENT__ Sent 1 chars")
+    second = FakeTool("__MESSAGE_SENT__ Sent 2 chars")
+    bot = _native_bot({"send_message": first, "no_response": second})
+    message = SimpleNamespace(guild=None, channel=SimpleNamespace(id=123))
+    raw = [
+        _native_call("send_message", {"content": "hi"}, "c1"),
+        _native_call("no_response", {}, "c2"),
+    ]
+
+    async def run():
+        return await MaxwellBot._dispatch_tool_calls(
+            bot, message, "", native_tool_calls=raw
+        )
+
+    _, tool_results = asyncio.run(run())
+    assert first.calls == [{"content": "hi"}]
+    assert second.calls == []
+    assert "Skipped duplicate terminal tool call" in tool_results[-1]
+
+
+def test_dispatch_no_native_calls_just_sanitizes_text():
+    # No tool calls -> nothing to run; leaked XML in the text gets scrubbed.
+    bot = _native_bot({"send_message": FakeTool("sent")})
+    message = SimpleNamespace(guild=None, channel=SimpleNamespace(id=123))
+
+    async def run():
+        return await MaxwellBot._dispatch_tool_calls(
+            bot, message, "hello <tool:send_message>leaked</tool:send_message> world"
+        )
+
+    cleaned, tool_results = asyncio.run(run())
+    assert tool_results == []
+    assert "leaked" not in cleaned
+    assert "hello" in cleaned and "world" in cleaned
 
 
 def test_tool_prompt_filters_discord_only_tools_for_telegram():
@@ -395,28 +361,71 @@ def test_tool_prompt_keeps_discord_tools_for_discord():
     assert "react:" in prompt
 
 
-def test_tool_prompt_requires_reasoning_before_terminal_action():
+def test_tool_prompt_describes_reasoning_inside_tool_calls():
+    # No more reasoning_log tool — the prompt must tell the model reasoning
+    # rides inside each tool's `reasoning` param, and chat goes via send_message.
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={"tools_enabled": True, "disabled_tools": [], "native_tool_calls": False},
-        tools={
-            "reasoning_log": FakeTool("__REASONING_RECORDED__"),
-            "send_message": FakeTool("sent"),
-        },
+        _control={"tools_enabled": True, "disabled_tools": [], "native_tool_calls": True},
+        tools={"send_message": FakeTool("sent")},
     )
 
     prompt = MaxwellBot._tool_system_prompt(bot, "discord")
 
-    assert "reasoning_log" in prompt.lower()
-    assert "reasoning_log first" in prompt.lower()
+    assert "reasoning_log" not in prompt.lower()
+    assert "reasoning" in prompt.lower()
+    assert "send_message" in prompt
+    # native-only: must NOT teach the XML tool-call FORM (the lone mention of
+    # <tool:name> is the "do not invent" warning, which is fine — assert the
+    # instructional FORM/Examples block is gone instead).
+    assert "TOOL CALL FORMAT" not in prompt
+    assert "<tool:send_file>" not in prompt
 
 
-def test_ensure_reasoning_trace_backfills_missing_trace():
-    reasoning = FakeTool("__REASONING_RECORDED__")
-    bot = SimpleNamespace(
-        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        tools={"reasoning_log": reasoning},
-    )
+def test_ensure_reasoning_trace_backfills_only_when_no_tool_ran():
+    # New contract: per-tool reasoning is recorded by record_reasoning during
+    # dispatch. _ensure_reasoning_trace only fires for the pure-text fallback
+    # (no tools ran at all -> tool_results empty). Use the backfill tool.
+    from bot_tools import ReasoningLogTool
+
+    class FakeBot:
+        def __init__(self):
+            self.traces = []
+
+        async def _record_llm_trace(self, message, payload):
+            self.traces.append(payload)
+
+    bot = FakeBot()
+    bot._reasoning_backfill = ReasoningLogTool(bot=bot)
+    message = SimpleNamespace()
+
+    async def run():
+        await MaxwellBot._ensure_reasoning_trace(
+            bot, message, [], "hi", "reply"
+        )
+
+    asyncio.run(run())
+    assert len(bot.traces) == 1
+    t = bot.traces[0]
+    assert t["intent"] == "forced_trace"
+    assert t["decision"] == "reply"
+    assert "without any tool call" in t["thoughts"]
+    assert t["data"]["response_preview"] == "hi"
+
+
+def test_ensure_reasoning_trace_skips_when_tools_ran():
+    # If tools ran this turn, reasoning was already recorded per-call -> no backfill.
+    from bot_tools import ReasoningLogTool
+
+    class FakeBot:
+        def __init__(self):
+            self.traces = []
+
+        async def _record_llm_trace(self, message, payload):
+            self.traces.append(payload)
+
+    bot = FakeBot()
+    bot._reasoning_backfill = ReasoningLogTool(bot=bot)
     message = SimpleNamespace()
 
     async def run():
@@ -429,37 +438,7 @@ def test_ensure_reasoning_trace_backfills_missing_trace():
         )
 
     asyncio.run(run())
-
-    assert reasoning.calls == [
-        {
-            "intent": "forced_trace",
-            "decision": "send_message",
-            "thoughts": "Auto-recorded because the model did not call reasoning_log before terminal output.",
-            "data": {
-                "response_preview": "hi",
-                "response_chars": 2,
-                "tool_results": ["Tool send_message: __MESSAGE_SENT__ Sent 2 chars"],
-            },
-        }
-    ]
-
-
-def test_ensure_reasoning_trace_skips_existing_trace():
-    reasoning = FakeTool("__REASONING_RECORDED__")
-    bot = SimpleNamespace(
-        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        tools={"reasoning_log": reasoning},
-    )
-    message = SimpleNamespace()
-
-    async def run():
-        await MaxwellBot._ensure_reasoning_trace(
-            bot, message, ["Tool reasoning_log: __REASONING_RECORDED__"], "hi", "reply"
-        )
-
-    asyncio.run(run())
-
-    assert reasoning.calls == []
+    assert bot.traces == []
 
 
 def test_build_messages_caps_tool_history_outside_recent_count():
@@ -532,36 +511,6 @@ def test_build_messages_caps_tool_history_outside_recent_count():
     asyncio.run(run())
 
 
-def test_process_tool_calls_skips_duplicate_terminal_tools():
-    first = FakeTool("__MESSAGE_SENT__ Sent 1 chars")
-    second = FakeTool("__MESSAGE_SENT__ Sent 2 chars")
-    bot = SimpleNamespace(
-        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={
-            "tools_enabled": True,
-            "disabled_tools": [],
-            "typing_indicator": False,
-            "store_memory": False,
-        },
-        tools={"send_message": first, "no_response": second},
-        _message_tool_platform=lambda _message: "discord",
-        _compatible_tool_names=lambda _platform: {"send_message", "no_response"},
-    )
-    message = SimpleNamespace(guild=None, channel=SimpleNamespace())
-
-    async def run():
-        _response, tool_results = await MaxwellBot._process_tool_calls(
-            bot,
-            message,
-            "<tool:send_message>hi</tool:send_message><tool:no_response />",
-        )
-        assert first.calls == [{"content": "hi"}]
-        assert second.calls == []
-        assert "Skipped duplicate terminal tool call" in tool_results[-1]
-
-    asyncio.run(run())
-
-
 def test_shell_tool_results_trigger_followup():
     assert _tool_results_need_followup(
         ["Tool shell: __SHELL_SENT__\n$ date\nSat May 23"]
@@ -590,7 +539,9 @@ def test_telegram_tool_followup_keeps_audio_turn_context_available():
     instruction = _telegram_tool_followup_instruction(has_original_media=True)
 
     assert "Original media isn't reattached here" in instruction
-    assert "<tool:send_message>" in instruction
+    assert "send_message" in instruction
+    # native-only: no XML tag forms in the followup instruction
+    assert "<tool:send_message>" not in instruction
 
 
 def test_telegram_tool_followup_without_media_does_not_claim_audio_context():
@@ -613,17 +564,18 @@ def test_reasoning_log_with_send_message_does_not_trigger_followup():
     )
 
 
-def test_tool_prompt_has_no_nested_tags_rule():
+def test_tool_prompt_keeps_reasoning_plain_text_rule():
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={"tools_enabled": True, "disabled_tools": [], "native_tool_calls": False},
-        tools={"reasoning_log": FakeTool("__REASONING_RECORDED__")},
+        _control={"tools_enabled": True, "disabled_tools": [], "native_tool_calls": True},
+        tools={"send_message": FakeTool("sent")},
     )
 
     prompt = MaxwellBot._tool_system_prompt(bot, "discord")
 
     assert "plain text" in prompt.lower()
-    assert "no nested tags" in prompt.lower()
+    # reasoning is plain text only — no nested tags / JSON / <thoughts>
+    assert "no xml" in prompt.lower() or "no nested" in prompt.lower() or "plain text only" in prompt.lower()
 
 
 def test_tool_prompt_native_mode_no_xml_instructions():

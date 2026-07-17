@@ -18,7 +18,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal, cast, overload
+from typing import Any, cast
 from urllib.parse import urlparse
 
 import aiohttp
@@ -244,6 +244,10 @@ from tool_schemas import (  # noqa: E402
     build_openai_tools,
     elide_tool_calls_for_history,
     normalize_native_tool_calls,
+)
+from tool_registry import (  # noqa: E402 — reasoning now rides inside tool calls
+    extract_reasoning,
+    record_reasoning,
 )
 from utils import (  # fd-safe, single source of truth  # noqa: E402
     FileLock,
@@ -713,92 +717,52 @@ def extract_json_object(text: str, start: int = 0) -> tuple[str, int] | None:
     return None
 
 
-DEFAULT_TOOL_PARAMS = {
-    "react": "emoji",
-    "web_search": "query",
-    "create_poll": "question",
-    "send_file": "content",
-    "send_message": "content",
-    "reasoning_log": "thoughts",
-    "tts": "text",
-    "fetch_url": "url",
-    "youtube": "url",
-    "shell": "command",
-    "set_nickname": "nickname",
-    "set_activity": "name",
-    "create_site": "body",
-}
-
-KNOWN_XML_TOOL_NAMES = set(DEFAULT_TOOL_PARAMS) | {
-    "change_avatar",
-    "change_presence",
-    "create_category",
-    "create_channel",
-    "create_invite",
-    "delete_channel",
-    "delete_message",
-    "edit_channel",
-    "edit_message",
-    "forward_message",
-    "hd_image",
-    "image_generator",
-    "list_admin_servers",
-    "list_servers",
-    "list_sites",
-    "lookup_user",
-    "memory_edit",
-    "send_media",
-    "send_meme",
-    "typing",
-}
-
-TOOL_PARAM_TAGS = {
-    "args",
-    "assumptions",
-    "body",
-    "channel_id",
-    "code",
-    "command",
-    "confidence",
-    "confirm_name",
-    "content",
-    "data",
-    "decision",
-    "elapsed",
-    "emoji",
-    "encoding",
-    "engine",
-    "evidence",
-    "filename",
-    "guild_id",
-    "intent",
-    "lang",
-    "language",
-    "max_length",
-    "max_results",
-    "message_id",
-    "name",
-    "nickname",
-    "position",
-    "prompt",
-    "query",
-    "question",
-    "reply",
-    "response_plan",
-    "risks",
-    "size",
-    "status",
-    "subreddit",
-    "text",
-    "thoughts",
-    "timestamps",
-    "title",
-    "tool_plan",
-    "type",
-    "url",
-    "max_transcript_chars",
-}
-
+# Names the defensive sanitizer (strip_tool_payload_leaks) recognizes as tool
+# tags, so it can scrub any <tool:name>...</tool:name> or pipe-form leaks a
+# misbehaving model drops into visible text even though we're native-only now.
+# XML tool DISPATCH is gone; this set is ONLY for leak scrubbing. If you add a
+# tool, add its name here so a leaked tag for it still gets cleaned.
+# (reasoning_log is intentionally absent — reasoning lives inside every tool's
+# `reasoning` param now, not as a standalone tool.)
+KNOWN_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "react",
+        "web_search",
+        "create_poll",
+        "send_file",
+        "send_message",
+        "tts",
+        "fetch_url",
+        "youtube",
+        "shell",
+        "set_nickname",
+        "set_activity",
+        "create_site",
+        "change_avatar",
+        "change_presence",
+        "create_category",
+        "create_channel",
+        "create_invite",
+        "delete_channel",
+        "delete_message",
+        "edit_channel",
+        "edit_message",
+        "forward_message",
+        "hd_image",
+        "image_generator",
+        "list_admin_servers",
+        "list_servers",
+        "list_sites",
+        "lookup_user",
+        "memory_edit",
+        "no_response",
+        "send_media",
+        "send_meme",
+        "sub_agent",
+        "typing",
+        "leave_vc",
+    }
+)
 
 def _find_xml_tag_end(text: str, start: int) -> int:
     quote_char = ""
@@ -859,19 +823,6 @@ def _parse_xml_open_tag(raw_tag: str) -> tuple[str | None, str, bool]:
     if name and name.lower().startswith("tool_"):
         name = name[5:]
     return name, attrs, self_closing
-
-
-def _parse_xml_attrs(attrs_str: str) -> dict:
-    attrs = {}
-    attr_re = re.compile(
-        r"([A-Za-z_]\w*)\s*=\s*(?:\"((?:\\.|[^\"\\])*)\"|'((?:\\.|[^'\\])*)'|([^\s\"'<>/]+))",
-        re.DOTALL,
-    )
-    for match in attr_re.finditer(attrs_str or ""):
-        value = next(group for group in match.groups()[1:] if group is not None)
-        value = value.replace('\\"', '"').replace("\\'", "'")
-        attrs[match.group(1)] = html.unescape(value)
-    return attrs
 
 
 def _find_tool_close(text: str, name: str, start: int) -> re.Match | None:
@@ -960,25 +911,6 @@ def strip_model_artifact_leaks(text: str, strip_pipe_markers: bool = True) -> st
         flags=re.IGNORECASE,
     )
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
-
-
-def _parse_loose_tool_params(raw: str) -> dict:
-    source = str(raw or "").strip()
-    params = _parse_xml_attrs(source)
-    key_matches = list(re.finditer(r"(?:^|\s)([A-Za-z_]\w*)\s*=", source))
-    for index, match in enumerate(key_matches):
-        key = match.group(1)
-        value_start = match.end()
-        value_end = (
-            key_matches[index + 1].start()
-            if index + 1 < len(key_matches)
-            else len(source)
-        )
-        value = source[value_start:value_end].strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-            value = value[1:-1]
-        params[key] = html.unescape(value)
-    return params
 
 
 def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = None):
@@ -1099,241 +1031,6 @@ def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = 
 
 
 # Params that hold freeform blobs. Nested same-named tags (e.g. HTML <body>
-# inside create_site's <body> param) must use balanced matching, and document-like
-# blobs should not be carved up by incidental <title>/<name> tags.
-_BLOB_TOOL_PARAMS = frozenset(
-    {"body", "content", "code", "command", "text", "thoughts"}
-)
-# Short scalar param tags safe to extract from structured tool bodies.
-_SCALAR_TOOL_PARAMS = frozenset(TOOL_PARAM_TAGS) - _BLOB_TOOL_PARAMS
-
-
-def _looks_like_document_blob(text: str) -> bool:
-    """True when text is likely a full HTML/SVG/XML document, not structured params.
-
-    Intentionally strict: a tag-count heuristic falsely treats structured
-    tool bodies like ``<name>x</name><title>y</title><body>...`` as documents.
-    """
-    s = (text or "").lstrip()
-    if not s:
-        return False
-    lower = s[:200].lower()
-    return lower.startswith(
-        (
-            "<!doctype",
-            "<html",
-            "<svg",
-            "<?xml",
-            "<head",
-            "<body",
-            # bare fragments the model often dumps as create_site body
-            "<div",
-            "<main",
-            "<section",
-            "<style",
-            "<script",
-            "<meta",
-            "<link",
-        )
-    )
-
-
-def _find_balanced_xml_child(
-    text: str, key: str, start: int = 0
-) -> tuple[int, int, str] | None:
-    """Find first <key>...</key> with nesting depth, return (start, end, inner)."""
-    if not text or not key:
-        return None
-    open_re = re.compile(rf"<{re.escape(key)}(?:\s[^>]*)?>", re.IGNORECASE)
-    # Self-closing open: <key ... />
-    self_close_re = re.compile(rf"<{re.escape(key)}(?:\s[^>]*)?/\s*>", re.IGNORECASE)
-    close_re = re.compile(rf"</\s*{re.escape(key)}\s*>", re.IGNORECASE)
-    pos = start
-    while pos < len(text):
-        m = open_re.search(text, pos)
-        if not m:
-            return None
-        # Skip self-closing opens
-        sc = self_close_re.match(text, m.start())
-        if sc and sc.end() == m.end():
-            pos = m.end()
-            continue
-        depth = 1
-        cursor = m.end()
-        while depth > 0 and cursor < len(text):
-            next_open = open_re.search(text, cursor)
-            next_close = close_re.search(text, cursor)
-            if not next_close:
-                return None
-            if next_open and next_open.start() < next_close.start():
-                # Nested open of same tag (e.g. HTML <body> inside tool body)
-                sc2 = self_close_re.match(text, next_open.start())
-                if sc2 and sc2.end() == next_open.end():
-                    cursor = next_open.end()
-                    continue
-                depth += 1
-                cursor = next_open.end()
-            else:
-                depth -= 1
-                if depth == 0:
-                    inner = text[m.end() : next_close.start()]
-                    return m.start(), next_close.end(), inner
-                cursor = next_close.end()
-        pos = m.end()
-    return None
-
-
-def _parse_tool_body_params(name: str, body: str) -> dict:
-    """Parse tool body into params.
-
-    Strategy:
-    1. Explicit ``<parameter=x>`` / ``<param name=x>`` forms.
-    2. Balanced **scalar** child tags only (name, title, filename, …).
-       Never harvest incidental HTML tags like ``<title>`` / ``<body>`` out of
-       a freeform document — that truncated create_site HTML in production.
-    3. Default blob param (body/content/code/…) comes from leftovers, or from a
-       single balanced wrapper tag around those leftovers.
-    """
-    params: dict = {}
-    consumed: list[tuple[int, int]] = []
-    raw = body or ""
-    default_param = DEFAULT_TOOL_PARAMS.get(name)
-
-    # Full document dumped as the tool body (typical create_site). Scalars like
-    # name/title come from XML attributes on the open tag — do not harvest
-    # incidental HTML <title>/<name> tags out of the document (that overwrote
-    # the real site title in production).
-    if default_param in _BLOB_TOOL_PARAMS and _looks_like_document_blob(raw):
-        params[default_param] = raw.strip()
-        return params
-
-    parameter_re = re.compile(
-        r"<?parameter\s*=\s*([A-Za-z_]\w*)\s*>\s*(.*?)</\s*parameter\s*>",
-        re.DOTALL | re.IGNORECASE,
-    )
-    for match in parameter_re.finditer(raw):
-        key = match.group(1)
-        if key not in TOOL_PARAM_TAGS:
-            continue
-        val = match.group(2).strip()
-        if key not in _BLOB_TOOL_PARAMS:
-            val = html.unescape(val)
-        params[key] = val
-        consumed.append(match.span())
-    named_param_re = re.compile(
-        r"<param\s+name\s*=\s*(?:\"([A-Za-z_]\w*)\"|'([A-Za-z_]\w*)'|([A-Za-z_]\w*))\s*>\s*(.*?)</\s*param\s*>",
-        re.DOTALL | re.IGNORECASE,
-    )
-    for match in named_param_re.finditer(raw):
-        key = next(group for group in match.groups()[:3] if group)
-        if key not in TOOL_PARAM_TAGS:
-            continue
-        val = match.group(4).strip()
-        if key not in _BLOB_TOOL_PARAMS:
-            val = html.unescape(val)
-        params[key] = val
-        consumed.append(match.span())
-
-    # Scalar children only (balanced). Skip blob keys here so HTML <body>/<title>
-    # inside a create_site document cannot steal tool params.
-    scan = 0
-    while scan < len(raw):
-        next_key = None
-        next_hit: tuple[int, int, str] | None = None
-        for key in _SCALAR_TOOL_PARAMS:
-            hit = _find_balanced_xml_child(raw, key, scan)
-            if not hit:
-                continue
-            if next_hit is None or hit[0] < next_hit[0]:
-                next_key = key
-                next_hit = hit
-        if not next_hit or next_key is None:
-            break
-        s, e, inner = next_hit
-        if any(not (e <= cs or s >= ce) for cs, ce in consumed):
-            scan = s + 1
-            continue
-        if next_key not in params:
-            params[next_key] = html.unescape(inner.strip())
-            consumed.append((s, e))
-        scan = e
-
-    leftovers = raw
-    for start, end in reversed(sorted(consumed)):
-        leftovers = leftovers[:start] + leftovers[end:]
-    lo = leftovers.strip()
-
-    def _assign_blob(text: str) -> None:
-        if not default_param or not text:
-            return
-        # If the whole leftover is a single balanced <default>...</default>, unwrap it.
-        # Nested same-named tags (HTML <body> inside tool body) are handled by
-        # balanced matching.
-        hit = _find_balanced_xml_child(text, default_param, 0)
-        if hit and hit[0] == 0 and hit[1] == len(text):
-            params[default_param] = hit[2].strip()
-        else:
-            val = text
-            if default_param not in _BLOB_TOOL_PARAMS:
-                val = html.unescape(val)
-            params[default_param] = val
-
-    if default_param and default_param not in params:
-        if lo:
-            _assign_blob(lo)
-        elif raw.strip():
-            # No scalar children and nothing consumed — whole body is the blob
-            # (or a single wrapper around it).
-            _assign_blob(raw.strip())
-    elif (
-        default_param
-        and default_param in params
-        and lo
-        and _looks_like_document_blob(lo)
-    ):
-        # Explicit parameter= form set a short body, but a document leftover exists
-        # (unusual); prefer the document.
-        if not _looks_like_document_blob(str(params.get(default_param, ""))):
-            params[default_param] = lo
-
-    return params
-
-
-def collect_tool_calls(
-    response: str,
-    available_tools: set[str],
-    disabled_tools: set[str] | None = None,
-    include_disabled: bool = False,
-) -> list[tuple[int, int, str, dict]]:
-    disabled_tools = disabled_tools or set()
-    calls = []
-
-    def add_call(start: int, end: int, name: str, params: dict):
-        if name in available_tools and (include_disabled or name not in disabled_tools):
-            calls.append((start, end, name, params))
-
-    for start, end, name, attrs_str, body, _self_closing in _iter_top_level_tool_tags(
-        response, available_tools
-    ):
-        params = (
-            _parse_loose_tool_params(attrs_str)
-            if "=" in attrs_str
-            else _parse_xml_attrs(attrs_str)
-        )
-        params.update(_parse_tool_body_params(name, body))
-        add_call(start, end, name, params)
-
-    calls.sort(key=lambda x: (x[0], x[1]))
-    deduped = []
-    seen = set()
-    for call in calls:
-        key = (call[0], call[1], call[2])
-        if key not in seen:
-            seen.add(key)
-            deduped.append(call)
-    return deduped
-
-
 def strip_tool_payload_leaks(text: str) -> str:
     # First remove any full tool invocation blocks (XML or pipe) including their payloads.
     # This must happen before token stripping so that <|tool_foo|>body  removes body too.
@@ -1342,7 +1039,7 @@ def strip_tool_payload_leaks(text: str) -> str:
     ranges = [
         (start, end)
         for start, end, *_rest in _iter_top_level_tool_tags(
-            cleaned, KNOWN_XML_TOOL_NAMES
+            cleaned, KNOWN_TOOL_NAMES
         )
     ]
     for start, end in reversed(ranges):
@@ -1503,8 +1200,8 @@ def _telegram_tool_followup_instruction(has_original_media: bool) -> str:
     return (
         "Continue from these results. "
         + media_note
-        + " If a reply is needed, finish with <tool:send_message>text</tool:send_message>; otherwise <tool:no_response />. "
-        "Don't stop after reasoning_log alone."
+        + " If a reply is needed, finish with a send_message tool call; otherwise call no_response. "
+        "Put your reasoning in each tool call's `reasoning` field, not as a standalone step."
     )
 
 
@@ -1714,7 +1411,6 @@ FOLLOWUP_TOOL_NAMES = {
     "create_channel",
     "edit_channel",
     "delete_channel",
-    "reasoning_log",
     "send_file",
     "send_meme",
     "send_media",
@@ -2198,7 +1894,13 @@ class MaxwellBot(commands.Bot):
         self.tools["youtube"] = YouTubeTool(self)
         self.tools["send_file"] = SendFileTool(self)
         self.tools["send_message"] = SendMessageTool(self)
-        self.tools["reasoning_log"] = ReasoningLogTool(self)
+        # No more standalone `reasoning_log` tool. Reasoning now rides INSIDE
+        # every tool call via the auto-injected `reasoning` param (see
+        # tool_registry.record_reasoning + tool_schemas.build_openai_tools).
+        # We keep a backfill instance off the model-facing tool map solely so
+        # _ensure_reasoning_trace can emit a "(model provided no reasoning)"
+        # stub when a turn ended without any reasoning recorded at all.
+        self._reasoning_backfill = ReasoningLogTool(self)
         self.tools["send_meme"] = SendMemeTool(self)
         self.tools["send_media"] = SendMediaTool(self)
         self.tools["leave_vc"] = LeaveVcTool(self)
@@ -2812,7 +2514,7 @@ class MaxwellBot(commands.Bot):
                 "(e.g. they asked a question, the emoji is a clear signal like ❓🤔❗, or it's a reaction "
                 "to something you said that warrants clarification). "
                 "For casual reactions (😂👍❤️🔥 etc.) or low-signal emoji, "
-                "you MUST use <tool:no_response /> to stay silent. "
+                "you MUST call the no_response tool to stay silent. "
                 "Do not chat just because someone reacted."
             )
             fake_message = SimpleNamespace(
@@ -6602,9 +6304,16 @@ class MaxwellBot(commands.Bot):
     async def _ensure_reasoning_trace(
         self, message, tool_results: list[str], response: str, outcome: str
     ):
-        if any("__REASONING_RECORDED__" in tr for tr in tool_results):
+        # New contract: every tool call records its OWN reasoning via
+        # tool_registry.record_reasoning (native path: _execute_tool_by_name;
+        # XML path: execute_one + terminal loop). So if ANY tool ran this turn,
+        # reasoning was already written — backfill would just duplicate it.
+        # This now ONLY fires for the pure-text fallback path: the model
+        # emitted a reply without calling a single tool (no send_message), so
+        # nothing recorded reasoning anywhere. Give the dashboard SOMETHING.
+        if tool_results:
             return
-        tool = self.tools.get("reasoning_log")
+        tool = getattr(self, "_reasoning_backfill", None)
         if tool is None:
             return
         try:
@@ -6612,7 +6321,10 @@ class MaxwellBot(commands.Bot):
                 message,
                 intent="forced_trace",
                 decision=outcome,
-                thoughts="Auto-recorded because the model did not call reasoning_log before terminal output.",
+                thoughts=(
+                    "Auto-recorded: model replied without any tool call, so no "
+                    "per-call reasoning was written."
+                ),
                 data={
                     "response_preview": str(response or "")[:500],
                     "response_chars": len(str(response or "")),
@@ -6625,14 +6337,22 @@ class MaxwellBot(commands.Bot):
     async def _execute_tool_by_name(
         self, message, name: str, params: dict, *, disabled: set, compatible: set
     ) -> str:
-        """Run a single tool and return the result text (including Tool name: prefix)."""
+        """Run a single tool and return the result text (including Tool name: prefix).
+
+        Reasoning is pulled OUT of `params` here (via tool_registry.extract_reasoning)
+        so no tool ever sees the `reasoning` kwarg — it's a registry-level concern.
+        The reasoning the model wrote for THIS call is recorded to the dashboard
+        trace alongside the result, win or fail. This is the native (OpenAI
+        function-calling) path; the XML path mirrors the same logic.
+        """
+        # Extract reasoning first. It is NOT a real tool argument; tools must
+        # never receive it (some tools forward **kwargs straight to an API and
+        # would happily post our internal field into some third-party request).
+        reasoning, params = extract_reasoning(params)
+        # Re-strip server-only _-keys AFTER extract so reasoning stays out too.
+        params = {k: v for k, v in params.items() if not str(k).startswith("_")}
+        result_text = ""
         try:
-            # Never trust model-supplied internal control kwargs. Keys prefixed
-            # with "_" (e.g. "_confirmed", "_tainted") are server-only: the model
-            # used to be able to pass "_confirmed=true" to bypass the taint gate
-            # on shell/sub_agent — a prompt-injection RCE path. Strip them here so
-            # only the server can inject them (see the destructive gate below).
-            params = {k: v for k, v in (params or {}).items() if not str(k).startswith("_")}
             if (
                 name == "send_message"
                 and getattr(message, "guild", None)
@@ -6643,49 +6363,57 @@ class MaxwellBot(commands.Bot):
                     params.get("content", ""), message.guild
                 )
             if name in disabled:
-                return f"Tool {name}: Error - tool is disabled"
-            if name not in compatible:
-                return f"Tool {name}: Error - tool is not available on this platform"
-            if name not in self.tools:
-                return f"Tool {name}: Error - unknown tool"
-            if self._tool_breaker.is_open(name):
-                return (
-                    f"Tool {name}: Error - tool temporarily disabled "
-                    "(too many recent failures)"
+                result_text = "Error - tool is disabled"
+            elif name not in compatible:
+                result_text = "Error - tool is not available on this platform"
+            elif name not in self.tools:
+                result_text = "Error - unknown tool"
+            elif self._tool_breaker.is_open(name):
+                result_text = (
+                    "Error - tool temporarily disabled (too many recent failures)"
                 )
-            # Centralized indirect-prompt-injection gate. Tools flagged
-            # is_destructive (shell, sub_agent) that run on a tainted turn
-            # require an out-of-band user `,confirm` (admin/whitelisted only).
-            # We inject _confirmed=True server-side only when the user actually
-            # confirmed; the model cannot forge it because _-keys were stripped
-            # above. This is the single enforcement point instead of per-tool
-            # checks that previously read the model-controlled flag.
-            tool = self.tools[name]
-            if getattr(tool, "is_destructive", False) and self.is_message_tainted(message):
-                author_id = str(getattr(message.author, "id", "") or "")
-                if not self._consume_destructive_confirm(author_id):
-                    return (
-                        f"Tool {name}: Error - refused: this turn read content from "
-                        f"a fetched URL/web search that may carry prompt-injection "
-                        f"payloads. The user must confirm out-of-band with `,confirm` "
-                        f"(admins/whitelisted only) before this tool can run on a "
-                        f"tainted turn. The model cannot self-confirm."
-                    )
-                params = dict(params)
-                params["_confirmed"] = True
-            result = await tool.execute(message, **params)
-            result_text = str(result) if result else "executed successfully"
-            if result_text.startswith(("Error", "Error:")):
-                self._tool_breaker.record_failure(name)
             else:
-                self._tool_breaker.record_success(name)
-            return f"Tool {name}: {result_text}"
+                # Centralized indirect-prompt-injection gate. Tools flagged
+                # is_destructive (shell, sub_agent) that run on a tainted turn
+                # require an out-of-band user `,confirm` (admin/whitelisted only).
+                # We inject _confirmed=True server-side only when the user actually
+                # confirmed; the model cannot forge it because _-keys were stripped
+                # above. This is the single enforcement point instead of per-tool
+                # checks that previously read the model-controlled flag.
+                tool = self.tools[name]
+                if getattr(tool, "is_destructive", False) and self.is_message_tainted(message):
+                    author_id = str(getattr(message.author, "id", "") or "")
+                    if not self._consume_destructive_confirm(author_id):
+                        result_text = (
+                            "refused: this turn read content from a fetched URL/web "
+                            "search that may carry prompt-injection payloads. The user "
+                            "must confirm out-of-band with `,confirm` (admins/whitelisted "
+                            "only) before this tool can run on a tainted turn. The model "
+                            "cannot self-confirm."
+                        )
+                    else:
+                        params = dict(params)
+                        params["_confirmed"] = True
+                if not result_text:
+                    raw = await tool.execute(message, **params)
+                    result_text = str(raw) if raw else "executed successfully"
+                    if result_text.startswith(("Error", "Error:")):
+                        self._tool_breaker.record_failure(name)
+                    else:
+                        self._tool_breaker.record_success(name)
         except Exception as e:
             logger.error(
                 f"Tool execution error for {name}: {e}\n{traceback.format_exc()}"
             )
             self._tool_breaker.record_failure(name)
-            return f"Tool {name}: Error - {e}"
+            result_text = f"Error - {e}"
+        # Record the reasoning the model gave for THIS tool call, attached to the
+        # real action and its result. Swallowed failures (see record_reasoning).
+        await record_reasoning(
+            self, message, tool_name=name, reasoning=reasoning,
+            params=params, result=result_text,
+        )
+        return f"Tool {name}: {result_text}"
 
     def _consume_destructive_confirm(self, author_id: str) -> bool:
         """Return True (one-shot) if `author_id` has a live `,confirm` token.
@@ -6808,7 +6536,14 @@ class MaxwellBot(commands.Bot):
             # exactly once and a memory hiccup doesn't cascade into duplicate
             # side effects or abort sibling tools.
             try:
-                await MaxwellBot._remember_tool_call(self, message, name, params, line)
+                # Strip the `reasoning` field from what we persist to channel
+                # memory — reasoning is a trace concern (record_reasoning handled
+                # it inside _execute_tool_by_name), not something to dump into
+                # the conversation log on every tool call.
+                mem_params = {k: v for k, v in params.items() if k != "reasoning"}
+                await MaxwellBot._remember_tool_call(
+                    self, message, name, mem_params, line
+                )
             except Exception as e:
                 logger.warning(f"Failed to record tool call {name} in memory: {e}")
             return line
@@ -6825,8 +6560,13 @@ class MaxwellBot(commands.Bot):
                     result_by_id[call["id"]] = line
                     tool_results.append(line)
                     try:
+                        skip_args = {
+                            k: v
+                            for k, v in (call.get("arguments") or {}).items()
+                            if k != "reasoning"
+                        }
                         await MaxwellBot._remember_tool_call(
-                            self, message, call["name"], call.get("arguments") or {}, line
+                            self, message, call["name"], skip_args, line
                         )
                     except Exception as e:
                         logger.warning(
@@ -6901,7 +6641,15 @@ class MaxwellBot(commands.Bot):
         native_tool_calls: list | None = None,
         include_images: bool = False,
     ) -> tuple[str, list[str]] | tuple[str, list[str], list[str]]:
-        """Prefer native tool_calls; fall back to XML text tags."""
+        """Native tool_calls only. The XML text-tag dispatch is gone — Maxwell
+        is native function-calling only now. If the model didn't emit native
+        tool_calls, there's nothing to run; we just sanitize the text response
+        (e.g. a plain chat reply the model wrote directly) and return it.
+
+        Defensive sanitization via strip_tool_payload_leaks still runs so any
+        stray <tool:...> tags a poorly-behaved model leaks into visible text
+        get scrubbed instead of shown to the user.
+        """
         self._last_native_followup_messages = []
         if native_tool_calls:
             return await MaxwellBot._process_native_tool_calls(
@@ -6911,9 +6659,8 @@ class MaxwellBot(commands.Bot):
                 native_tool_calls,
                 include_images=include_images,
             )
-        return await MaxwellBot._process_tool_calls(
-            self, message, response, include_images=include_images
-        )
+        cleaned = strip_tool_payload_leaks(response or "")
+        return (cleaned, [], []) if include_images else (cleaned, [])
 
     def _consume_native_tool_calls(self) -> list:
         """Pop native tool_calls stashed on the provider after generate_response.
@@ -6978,252 +6725,6 @@ class MaxwellBot(commands.Bot):
             return False
         return str(getattr(message, "id", "") or "") in self._tainted_messages
 
-    @overload
-    async def _process_tool_calls(
-        self, message, response: str, include_images: Literal[True]
-    ) -> tuple[str, list[str], list[str]]: ...
-
-    @overload
-    async def _process_tool_calls(
-        self, message, response: str, include_images: Literal[False] = False
-    ) -> tuple[str, list[str]]: ...
-
-    async def _process_tool_calls(
-        self, message, response: str, include_images: bool = False
-    ) -> tuple[str, list[str]] | tuple[str, list[str], list[str]]:
-        tool_results: list[str] = []
-        tool_images: list[str] = []  # base64 images from tools for model to see
-        response = strip_model_artifact_leaks(response, strip_pipe_markers=False)
-        if not self._control.get("tools_enabled", True):
-            cleaned = strip_tool_payload_leaks(response)
-            return (cleaned, [], []) if include_images else (cleaned, [])
-        disabled = set(self._control.get("disabled_tools", []) or [])
-        compatible = MaxwellBot._compatible_tool_names(
-            self, MaxwellBot._message_tool_platform(self, message)
-        )
-        calls = collect_tool_calls(
-            response, set(self.tools), disabled, include_disabled=True
-        )
-        if not calls:
-            return (response, [], []) if include_images else (response, [])
-        # BUG FIX: sort a COPY for execution order, keep `calls` in original
-        # document order for segment extraction. The old code sorted `calls`
-        # in place, then sliced the response using sorted positions — the
-        # text segments ended up in execution order instead of the order the
-        # model wrote them, producing visibly garbled output.
-        execution_order = sorted(
-            calls,
-            key=lambda x: (1 if x[2] in {"send_message", "no_response"} else 0, x[0]),
-        )
-        segments = []
-        last = 0
-
-        async def remember_tool_call(name: str, params: dict, result: str):
-            if not self._control.get("store_memory", True):
-                return
-            channel = getattr(message, "channel", None)
-            channel_id = getattr(channel, "id", None)
-            if channel_id is None or not hasattr(self, "memory"):
-                return
-            try:
-                # For memory, never store massive bodies (create_site HTML, send_file content, etc.)
-                # to avoid bloating channel memory / long term storage with  MBs of generated code.
-                mem_params = dict(params or {})
-                for heavy_key in ("body", "content", "code", "html", "data"):
-                    if (
-                        heavy_key in mem_params
-                        and isinstance(mem_params[heavy_key], str)
-                        and len(mem_params[heavy_key]) > 2000
-                    ):
-                        mem_params[heavy_key] = (
-                            f"[large {heavy_key} omitted, {len(mem_params[heavy_key])} chars]"
-                        )
-                params_text = json.dumps(mem_params, ensure_ascii=False, sort_keys=True)
-            except TypeError:
-                params_text = str(params or {})
-            await self.memory.add_to_channel_memory(
-                str(channel_id),
-                {
-                    "author": "Tool",
-                    "content": f"Called {name} with {params_text} -> {result}",
-                    "is_tool": True,
-                    "tool_name": name,
-                    "tool_params": mem_params,
-                    "tool_result": result,
-                },
-            )
-
-        async def run_calls():
-            nonlocal last
-            # Pre-compute all segments in DOCUMENT order (not execution order)
-            # so the stitched text reads as the model wrote it.
-            for start, end, _name, _params in calls:
-                segments.append(response[last:start])
-                last = end
-
-            # Split into non-terminal and terminal calls using the
-            # pre-sorted execution_order copy, so helper tools fire first and
-            # the terminal tool (send_message/no_response) runs last.
-            non_terminal = [
-                (s, e, n, p)
-                for s, e, n, p in execution_order
-                if n not in {"send_message", "no_response"}
-            ]
-            terminal = [
-                (s, e, n, p)
-                for s, e, n, p in execution_order
-                if n in {"send_message", "no_response"}
-            ]
-
-            async def execute_one(name, params):
-                """Execute a single non-terminal tool. Returns list of result strings."""
-                results: list[str] = []
-                try:
-                    if (
-                        name == "send_message"
-                        and message.guild
-                        and isinstance(params.get("content"), str)
-                    ):
-                        params = dict(params)
-                        params["content"] = self._render_custom_emojis(
-                            params.get("content", ""), message.guild
-                        )
-                    if name in disabled:
-                        result_text = "Error - tool is disabled"
-                        results.append(f"Tool {name}: {result_text}")
-                        await remember_tool_call(name, params, result_text)
-                        return results
-                    if name not in compatible:
-                        result_text = "Error - tool is not available on this platform"
-                        results.append(f"Tool {name}: {result_text}")
-                        await remember_tool_call(name, params, result_text)
-                        return results
-                    if self._tool_breaker.is_open(name):
-                        result_text = "Error - tool temporarily disabled (too many recent failures)"
-                        results.append(f"Tool {name}: {result_text}")
-                        await remember_tool_call(name, params, result_text)
-                        return results
-                    result = await self.tools[name].execute(message, **params)
-                    result_text = str(result) if result else "executed successfully"
-                    results.append(f"Tool {name}: {result_text}")
-                    # Soft tool failures return "Error: ..." strings — count them.
-                    if result_text.startswith(("Error", "Error:")):
-                        self._tool_breaker.record_failure(name)
-                    else:
-                        self._tool_breaker.record_success(name)
-                    await remember_tool_call(name, params, result_text)
-                except Exception as e:
-                    logger.error(
-                        f"Tool execution error for {name}: {e}\n{traceback.format_exc()}"
-                    )
-                    self._tool_breaker.record_failure(name)
-                    result_text = f"Error - {e}"
-                    results.append(f"Tool {name}: {result_text}")
-                    await remember_tool_call(name, params, result_text)
-                return results
-
-            # Run non-terminal tools concurrently (shell serializes internally).
-            if non_terminal:
-                gathered = await asyncio.gather(
-                    *[execute_one(n, p) for _, _, n, p in non_terminal]
-                )
-                for batch in gathered:
-                    tool_results.extend(batch)
-
-            # Run terminal tools sequentially (first wins, rest skipped)
-            terminal_seen = False
-            for _, _, name, params in terminal:
-                try:
-                    if terminal_seen:
-                        result_text = "Skipped duplicate terminal tool call"
-                        tool_results.append(f"Tool {name}: {result_text}")
-                        await remember_tool_call(name, params, result_text)
-                        continue
-
-                    if (
-                        name == "send_message"
-                        and message.guild
-                        and isinstance(params.get("content"), str)
-                    ):
-                        params = dict(params)
-                        params["content"] = self._render_custom_emojis(
-                            params.get("content", ""), message.guild
-                        )
-                    if name in disabled:
-                        result_text = "Error - tool is disabled"
-                        tool_results.append(f"Tool {name}: {result_text}")
-                        await remember_tool_call(name, params, result_text)
-                        continue
-                    if name not in compatible:
-                        result_text = "Error - tool is not available on this platform"
-                        tool_results.append(f"Tool {name}: {result_text}")
-                        await remember_tool_call(name, params, result_text)
-                        continue
-                    if self._tool_breaker.is_open(name):
-                        result_text = "Error - tool temporarily disabled (too many recent failures)"
-                        tool_results.append(f"Tool {name}: {result_text}")
-                        await remember_tool_call(name, params, result_text)
-                        continue
-                    terminal_seen = True
-                    result = await self.tools[name].execute(message, **params)
-                    result_text = str(result) if result else "executed successfully"
-                    tool_results.append(f"Tool {name}: {result_text}")
-                    if result_text.startswith(("Error", "Error:")):
-                        self._tool_breaker.record_failure(name)
-                    else:
-                        self._tool_breaker.record_success(name)
-                    await remember_tool_call(name, params, result_text)
-                except Exception as e:
-                    logger.error(
-                        f"Tool execution error for {name}: {e}\n{traceback.format_exc()}"
-                    )
-                    self._tool_breaker.record_failure(name)
-                    result_text = f"Error - {e}"
-                    tool_results.append(f"Tool {name}: {result_text}")
-                    await remember_tool_call(name, params, result_text)
-
-        # BUG FIX: run_calls must be called exactly once. The old code called
-        # it inside `async with message.channel.typing():` AND again in the
-        # `except discord.Forbidden` branch, so a Forbidden on the typing
-        # context (rare but happens when the bot is missing the
-        # SendMessagesInThreads permission) would re-execute every tool call.
-        # Tools like send_message / send_file / create_channel are NOT
-        # idempotent: re-running them would post the message twice, write the
-        # file twice, etc. Use a single `if/else` to guarantee one call.
-        if self._control.get("typing_indicator", True) and not getattr(
-            message, "suppress_typing", False
-        ):
-            try:
-                async with message.channel.typing():
-                    await run_calls()
-            except (discord.HTTPException, ConnectionError, OSError):
-                # Typing context failed (missing perms, 5xx, socket blip).
-                # Run once without the typing indicator instead of falling
-                # through to a second run_calls invocation that would
-                # re-execute side-effecting tools.
-                await run_calls()
-        else:
-            await run_calls()
-        segments.append(response[last:])
-        cleaned = strip_tool_payload_leaks("".join(segments))
-        cleaned = re.sub(r"\[/?(?:TOOL_CALL:)?[\w-]+.*?\]", "", cleaned).strip()
-        cleaned = re.sub(
-            r"(?is)```[ \t]*(?:json|tool|tools)?[^\n`]*\n\s*```", "", cleaned
-        ).strip()
-        # Extract embedded images from tool results (e.g. image_generator)
-        _IMG_RE = re.compile(r"__IMAGE_B64__([A-Za-z0-9+/=\s]+)__END_IMAGE_B64__")
-        for tr in tool_results:
-            for m in _IMG_RE.finditer(tr):
-                raw = m.group(1).replace("\n", "").replace(" ", "")
-                tool_images.append(raw)
-        # Strip the b64 markers from text results (too large for memory)
-        tool_results = [_IMG_RE.sub("", tr).strip() for tr in tool_results]
-        return (
-            (cleaned, tool_results, tool_images)
-            if include_images
-            else (cleaned, tool_results)
-        )
-
     async def _record_llm_trace(self, message, payload: dict):
         path = Path(self.config.DATA_DIR) / "llm_traces.json"
         now = datetime.now(timezone.utc).isoformat()
@@ -7267,12 +6768,6 @@ class MaxwellBot(commands.Bot):
             control.get("tools_enabled", True)
         )
 
-    @staticmethod
-    def _native_tools_enabled_for(control: dict) -> bool:
-        return bool(control.get("native_tool_calls", True)) and bool(
-            control.get("tools_enabled", True)
-        )
-
     def _build_openai_tools(self, platform: str = "discord") -> list[dict]:
         if not self.tools or not self._native_tools_enabled():
             return []
@@ -7294,42 +6789,25 @@ class MaxwellBot(commands.Bot):
         ]
         if not descriptions:
             return ""
-        if MaxwellBot._native_tools_enabled_for(
-            self._control if hasattr(self, "_control") else {}
-        ):
-            return (
-                "TOOLS (optional; use only when they clearly help):\n"
-                + "\n".join(descriptions)
-                + "\n\nTOOL CALLING: Use the provider's native function/tool calling API for all tools. "
-                "Do NOT put tool markup in your visible text. Do not invent XML tags like <tool:name>.\n"
-                "RULES:\n"
-                "- Call tools via function calls; put user-facing chat text only in send_message content "
-                "(or leave content empty when you are only calling helper tools).\n"
-                "- A tool turn must end with exactly one terminal action: send_message or no_response. "
-                "reasoning_log alone is not an answer.\n"
-                "- Order: reasoning_log first, helper tools next, send_message/no_response last.\n"
-                "- For create_site, put the full HTML document in the body argument (not in chat).\n"
-                "- For send_file with large code/HTML, use encoding=base64 when needed.\n"
-                "- reasoning_log thoughts must be plain text only.\n"
-                "- Status: set_activity for your visible status/activity, change_presence for the online/idle/dnd dot."
-            )
+        # Native function-calling only — the XML text-tag branch is gone.
         return (
             "TOOLS (optional; use only when they clearly help):\n"
             + "\n".join(descriptions)
-            + "\n\nTOOL CALL FORMAT: strict XML text tags only. No markdown fences, JSON objects, <function=>, or <parameter=> syntax.\n"
-            "Forms:\n"
-            '  <tool:name param="value" />\n'
-            "  <tool:name><param>value</param></tool:name>\n"
-            "  <tool:send_message>hi</tool:send_message>  (single default param only)\n"
-            "Examples:\n"
-            '  <tool:react emoji="👍" />\n'
-            "  <tool:send_file><filename>script.py</filename><content>print('hi')</content></tool:send_file>\n\n"
+            + "\n\nTOOL CALLING: Use the provider's native function/tool calling API for all tools. "
+            "Do NOT put tool markup in your visible text. Do not invent XML tags like <tool:name>.\n"
+            "REASONING:\n"
+            "- Every tool has a `reasoning` parameter. Fill it with your real, plain-English reasoning "
+            "BEFORE the action — why you're calling it, what you expect, assumptions/risks. "
+            "There is no separate reasoning tool anymore; reasoning LIVES INSIDE the tool you call.\n"
+            "- Reasoning is plain text only: no XML, JSON, tags, or nested <thoughts>.\n"
             "RULES:\n"
-            "- Output either visible text or tool tags, never both unless the visible text is inside send_message.\n"
-            "- A tool turn must end with exactly one terminal action: send_message or no_response. reasoning_log alone is not an answer.\n"
-            "- Order: reasoning_log first, helper tools next, send_message/no_response last.\n"
-            '- Use send_file encoding="base64" for file/code/HTML/JSON content. Tool params ignore response char limits.\n'
-            "- reasoning_log fields are plain text only: no nested tags, JSON, or <thoughts>.\n"
+            "- Talk normally: put user-facing chat text in send_message's `content`. Every reply goes "
+            "through send_message (carry your reasoning in its `reasoning` field, not in chat).\n"
+            "- You may call helper tools (web_search, shell, image_generator, ...) when they help; each "
+            "one carries its own `reasoning`. Then end with exactly one terminal action: send_message or no_response.\n"
+            "- A tool turn must end with exactly one terminal action: send_message or no_response.\n"
+            "- For create_site, put the full HTML document in the body argument (not in chat).\n"
+            "- For send_file with large code/HTML, use encoding=base64 when needed.\n"
             "- Status: set_activity for your visible status/activity, change_presence for the online/idle/dnd dot."
         )
 
