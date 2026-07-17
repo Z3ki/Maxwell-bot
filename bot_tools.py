@@ -2753,10 +2753,11 @@ class ShellTool(Tool):
             return "Error: command is required (tool-call markup was detected or command was empty)"
 
         author_id = str(message.author.id)
-        if not (
-            self.bot._is_admin(author_id) or author_id in self.bot._shell_whitelist
-        ):
-            return "Error: You do not have permission to use the shell tool. Ask an admin to whitelist you with `,shell <user_id>`."
+        # No whitelist: any user in an allowed channel can run shell. The
+        # sandbox is the security boundary (root inside container, but no
+        # host / mount, no host net, no docker socket by default). The
+        # taint-check below still requires `,confirm` on turns that read
+        # URL/web-search content.
 
         # Indirect-prompt-injection defense: if the current turn is tainted
         # (the model just read content from a URL / web search that may carry
