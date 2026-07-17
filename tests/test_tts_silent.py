@@ -77,6 +77,28 @@ def test_tts_results_do_not_block_tool_followup():
     assert _tool_results_need_followup(["Tool web_search: found 3 results"])
 
 
+def test_send_file_results_need_followup():
+    # send_file must trigger a follow-up turn so the model can send more files
+    # and finally reply. Without this, a batch of send_file with no terminal
+    # send_message breaks the tool loop and silently caps the number of files.
+    assert _tool_results_need_followup(
+        ["Tool send_file: __FILE_SENT__ Sent file: a.txt (4 bytes)"]
+    )
+    assert _tool_results_need_followup(
+        [
+            "Tool send_file: __FILE_SENT__ Sent file: a.txt (4 bytes)",
+            "Tool send_file: __FILE_SENT__ Sent file: b.txt (4 bytes)",
+        ]
+    )
+    # A terminal send_message still wins -> no followup needed.
+    assert not _tool_results_need_followup(
+        [
+            "Tool send_file: __FILE_SENT__ Sent file: a.txt (4 bytes)",
+            "Tool send_message: __MESSAGE_SENT__ Here you go",
+        ]
+    )
+
+
 def test_reaction_on_maxwell_message_invokes_handler():
     class NoopAsyncLock:
         async def __aenter__(self):

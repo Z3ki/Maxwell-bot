@@ -1715,6 +1715,7 @@ FOLLOWUP_TOOL_NAMES = {
     "edit_channel",
     "delete_channel",
     "reasoning_log",
+    "send_file",
     "send_meme",
     "send_media",
     "leave_vc",
