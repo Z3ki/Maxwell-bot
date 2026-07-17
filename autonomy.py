@@ -911,7 +911,11 @@ class AutonomyEngine:
                     await self._log_tick(
                         context, actions, results, duration, tick_start_iso
                     )
-                    return {"skipped": False, "actions": len(results), "duration": duration}
+                    return {
+                        "skipped": False,
+                        "actions": len(results),
+                        "duration": duration,
+                    }
                 except Exception as e:
                     duration = time.time() - start
                     logger.error(f"Autonomy tick failed: {e}")

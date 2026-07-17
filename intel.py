@@ -53,17 +53,18 @@ MAX_FACTS_PER_RUN = 8
 # These are "receive from the source" instead of web search.
 # User can override via control "intel_feed_urls" or intel_control.json.
 DEFAULT_AI_FEEDS: list[str] = [
-    "https://huggingface.co/blog/feed.xml",      # HF: models, tools, papers, releases
-    "https://www.marktechpost.com/feed/",        # Excellent for new model releases, papers, benchmarks
-    "https://tldr.tech/api/rss/ai",              # Daily curated AI digest covering many model launches
-    "https://arxiv.org/rss/cs.AI",               # arXiv AI research papers
-    "https://arxiv.org/rss/cs.LG",               # Machine learning papers
-    "https://simonwillison.net/atom/everything/", # Broad practical AI coverage, models, tools, analysis
+    "https://huggingface.co/blog/feed.xml",  # HF: models, tools, papers, releases
+    "https://www.marktechpost.com/feed/",  # Excellent for new model releases, papers, benchmarks
+    "https://tldr.tech/api/rss/ai",  # Daily curated AI digest covering many model launches
+    "https://arxiv.org/rss/cs.AI",  # arXiv AI research papers
+    "https://arxiv.org/rss/cs.LG",  # Machine learning papers
+    "https://simonwillison.net/atom/everything/",  # Broad practical AI coverage, models, tools, analysis
     "https://venturebeat.com/category/ai/feed/",  # Enterprise AI, new models, tech developments
-    "https://techcrunch.com/feed/",               # General tech + AI model releases and news
-    "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml", # Consumer tech/AI news and releases
+    "https://techcrunch.com/feed/",  # General tech + AI model releases and news
+    "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",  # Consumer tech/AI news and releases
     # Add/override more via bot control for full customization.
 ]
+
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -81,7 +82,9 @@ def _load_json_safe(path: Path, default):
     except (json.JSONDecodeError, OSError, ValueError) as e:
         # Fail closed: do NOT overwrite the on-disk file with {} on transient
         # read errors — that wiped feed_urls / state in production.
-        logger.warning(f"Corrupt/unreadable {path.name}, using defaults (file left intact): {e}")
+        logger.warning(
+            f"Corrupt/unreadable {path.name}, using defaults (file left intact): {e}"
+        )
         return default() if callable(default) else default
 
 
@@ -302,7 +305,9 @@ class IntelEngine:
             return {"skipped": False, "error": "lock timeout"}
         try:
             self._running_flag = True
-            await self.store.patch_state({"running": True, "running_since": _utcnow_iso()})
+            await self.store.patch_state(
+                {"running": True, "running_since": _utcnow_iso()}
+            )
             started = _utcnow_iso()
             start = time.time()
             try:
@@ -313,7 +318,11 @@ class IntelEngine:
                 added = await self._ingest_into_memory(facts)
                 duration = time.time() - start
                 src = "feeds" if feed_items else "search"
-                audit = f"added {added} new facts from {src}" if added else f"no new unique facts this cycle ({src})"
+                audit = (
+                    f"added {added} new facts from {src}"
+                    if added
+                    else f"no new unique facts this cycle ({src})"
+                )
                 await self._finish_pass(started, duration, audit, added, 0, None)
                 return {
                     "skipped": False,
@@ -420,9 +429,12 @@ class IntelEngine:
         # far more than any sane feed and still cheap to read.
         MAX_FEED_BYTES = 10 * 1024 * 1024
         try:
-            async with aiohttp.ClientSession() as session, session.get(
-                url, timeout=timeout, headers=headers, allow_redirects=True
-            ) as resp:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
+                    url, timeout=timeout, headers=headers, allow_redirects=True
+                ) as resp,
+            ):
                 if resp.status != 200:
                     logger.debug(f"Intel feed HTTP {resp.status} for {url}")
                     return ""
@@ -430,7 +442,11 @@ class IntelEngine:
                 # about Content-Length, the incremental reader also bails
                 # out at the same bound.
                 content_length = resp.headers.get("Content-Length")
-                if content_length and content_length.isdigit() and int(content_length) > MAX_FEED_BYTES:
+                if (
+                    content_length
+                    and content_length.isdigit()
+                    and int(content_length) > MAX_FEED_BYTES
+                ):
                     logger.debug(
                         f"Intel feed too large for {url}: {content_length} bytes"
                     )
@@ -467,13 +483,15 @@ class IntelEngine:
             ).strip()
             pub = item.findtext("pubDate") or item.findtext("dc:date") or ""
             if title or link:
-                items.append({
-                    "source": source_name,
-                    "title": title[:300],
-                    "link": link[:500],
-                    "summary": summary[:800],
-                    "published": pub,
-                })
+                items.append(
+                    {
+                        "source": source_name,
+                        "title": title[:300],
+                        "link": link[:500],
+                        "summary": summary[:800],
+                        "published": pub,
+                    }
+                )
 
         # Atom: feed > entry
         for entry in root.findall(".//{http://www.w3.org/2005/Atom}entry"):
@@ -491,13 +509,15 @@ class IntelEngine:
                 or ""
             )
             if title or link:
-                items.append({
-                    "source": source_name,
-                    "title": title[:300],
-                    "link": link[:500],
-                    "summary": summary[:800],
-                    "published": pub,
-                })
+                items.append(
+                    {
+                        "source": source_name,
+                        "title": title[:300],
+                        "link": link[:500],
+                        "summary": summary[:800],
+                        "published": pub,
+                    }
+                )
 
         # Fallback: any <item> or <entry> without namespace
         if not items:
@@ -505,16 +525,25 @@ class IntelEngine:
                 for el in root.findall(f".//{tag}"):
                     title = (el.findtext("title") or "").strip()
                     link = (el.findtext("link") or "").strip()
-                    summary = (el.findtext("description") or el.findtext("summary") or "").strip()
-                    pub = el.findtext("pubDate") or el.findtext("published") or el.findtext("updated") or ""
+                    summary = (
+                        el.findtext("description") or el.findtext("summary") or ""
+                    ).strip()
+                    pub = (
+                        el.findtext("pubDate")
+                        or el.findtext("published")
+                        or el.findtext("updated")
+                        or ""
+                    )
                     if title or link:
-                        items.append({
-                            "source": source_name,
-                            "title": title[:300],
-                            "link": link[:500],
-                            "summary": summary[:800],
-                            "published": pub,
-                        })
+                        items.append(
+                            {
+                                "source": source_name,
+                                "title": title[:300],
+                                "link": link[:500],
+                                "summary": summary[:800],
+                                "published": pub,
+                            }
+                        )
 
         return items
 
@@ -597,14 +626,24 @@ class IntelEngine:
         # ... (original search code could be restored here if needed)
         return []
 
-    async def _curate_with_model(self, feed_items: list[dict], search_fallback: list[dict] | None = None) -> list[str]:
+    async def _curate_with_model(
+        self, feed_items: list[dict], search_fallback: list[dict] | None = None
+    ) -> list[str]:
         """Use the exact same model/provider as autonomy to compile facts.
         Primary input is now direct feed items received from news outlets.
         """
         items = feed_items or []
         if not items and search_fallback:
             # legacy fallback shape
-            items = [{"source": "search", "title": s.get("query", ""), "summary": s.get("result", "")[:600], "link": ""} for s in search_fallback[:10]]
+            items = [
+                {
+                    "source": "search",
+                    "title": s.get("query", ""),
+                    "summary": s.get("result", "")[:600],
+                    "link": "",
+                }
+                for s in search_fallback[:10]
+            ]
 
         if not items:
             return []
@@ -613,7 +652,9 @@ class IntelEngine:
         # Limit input to keep total intel memory under control
         now_str = datetime.now().astimezone().strftime("%Y-%m-%d %A")
         ctx_parts = [f"Current date context: {now_str}"]
-        ctx_parts.append("The following items were received directly from general AI/tech news outlet feeds (HF, MarkTechPost, TLDR, arXiv, Simon Willison, VentureBeat, TechCrunch, The Verge, etc.).")
+        ctx_parts.append(
+            "The following items were received directly from general AI/tech news outlet feeds (HF, MarkTechPost, TLDR, arXiv, Simon Willison, VentureBeat, TechCrunch, The Verge, etc.)."
+        )
 
         total_ctx_words = 0
         max_ctx_words = 1500  # leave room for prompt + output <2k
@@ -659,14 +700,18 @@ class IntelEngine:
 
         try:
             provider = await self.bot._get_autonomy_provider()
-            if provider is None or not callable(getattr(provider, "generate_response", None)):
+            if provider is None or not callable(
+                getattr(provider, "generate_response", None)
+            ):
                 provider = getattr(self.bot, "ai_provider", None)
             if provider is None:
-                logger.warning("Intel: no provider available for curation, using smart extraction from feeds")
+                logger.warning(
+                    "Intel: no provider available for curation, using smart extraction from feeds"
+                )
                 # Strong fallback: extract specific model/release facts from titles + summaries
                 facts = []
                 seen = set()
-                for it in (feed_items or [])[:MAX_FACTS_PER_RUN * 2]:
+                for it in (feed_items or [])[: MAX_FACTS_PER_RUN * 2]:
                     title = (it.get("title") or "").strip()
                     summary = (it.get("summary") or "").strip()[:200]
                     src = it.get("source", "feed")
@@ -676,7 +721,20 @@ class IntelEngine:
                     seen.add(title.lower())
                     # Heuristically make good memory facts for AI models/news
                     fact = title
-                    if any(k in title.lower() for k in ["gpt", "model", "live", "release", "introducing", "llm", "claude", "gemini", "llama"]):
+                    if any(
+                        k in title.lower()
+                        for k in [
+                            "gpt",
+                            "model",
+                            "live",
+                            "release",
+                            "introducing",
+                            "llm",
+                            "claude",
+                            "gemini",
+                            "llama",
+                        ]
+                    ):
                         fact = f"AI release from {src}: {title}"
                         if summary and len(summary) > 20:
                             fact += f". {summary}"
@@ -719,7 +777,9 @@ class IntelEngine:
                     timeout=timeout,
                     model=model,
                     max_tokens=2048,
-                    disable_reasoning=bool(control.get("autonomy_disable_reasoning", True)),
+                    disable_reasoning=bool(
+                        control.get("autonomy_disable_reasoning", True)
+                    ),
                 )
             finally:
                 await self.bot._release_ai_slot()

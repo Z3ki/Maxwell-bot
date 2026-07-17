@@ -84,9 +84,7 @@ def _is_usage_exhausted_error(status: int, error_text: str) -> bool:
     # the body also clearly mentions quota/credit markers; rate-limit alone
     # means transient and the caller should keep retrying.
     is_rate_limit = (
-        "rate limit" in text
-        or "rate_limit" in text
-        or "too many requests" in text
+        "rate limit" in text or "rate_limit" in text or "too many requests" in text
     )
     is_quota_marker = any(m in text for m in markers)
     if is_rate_limit and not is_quota_marker:
@@ -393,7 +391,9 @@ class OllamaProvider:
                 continue
             if mime.startswith(("image/", "video/")):
                 payload_media.append(m)
-            elif mime.startswith("audio/") and getattr(self, "enable_audio_input", False):
+            elif mime.startswith("audio/") and getattr(
+                self, "enable_audio_input", False
+            ):
                 payload_media.append(m)
 
         if payload_media:
@@ -423,7 +423,9 @@ class OllamaProvider:
                     uri = f"data:{mime};base64,{b64}"
                     if mime.startswith("image/"):
                         parts.append({"type": "image_url", "image_url": {"url": uri}})
-                    elif mime.startswith("audio/") and getattr(self, "enable_audio_input", False):
+                    elif mime.startswith("audio/") and getattr(
+                        self, "enable_audio_input", False
+                    ):
                         audio_format = AUDIO_FORMATS.get(
                             mime.split(";", 1)[0].lower(), "wav"
                         )

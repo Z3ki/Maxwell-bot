@@ -1087,7 +1087,9 @@ def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = 
 # Params that hold freeform blobs. Nested same-named tags (e.g. HTML <body>
 # inside create_site's <body> param) must use balanced matching, and document-like
 # blobs should not be carved up by incidental <title>/<name> tags.
-_BLOB_TOOL_PARAMS = frozenset({"body", "content", "code", "command", "text", "thoughts"})
+_BLOB_TOOL_PARAMS = frozenset(
+    {"body", "content", "code", "command", "text", "thoughts"}
+)
 # Short scalar param tags safe to extract from structured tool bodies.
 _SCALAR_TOOL_PARAMS = frozenset(TOOL_PARAM_TAGS) - _BLOB_TOOL_PARAMS
 
@@ -1130,9 +1132,7 @@ def _find_balanced_xml_child(
         return None
     open_re = re.compile(rf"<{re.escape(key)}(?:\s[^>]*)?>", re.IGNORECASE)
     # Self-closing open: <key ... />
-    self_close_re = re.compile(
-        rf"<{re.escape(key)}(?:\s[^>]*)?/\s*>", re.IGNORECASE
-    )
+    self_close_re = re.compile(rf"<{re.escape(key)}(?:\s[^>]*)?/\s*>", re.IGNORECASE)
     close_re = re.compile(rf"</\s*{re.escape(key)}\s*>", re.IGNORECASE)
     pos = start
     while pos < len(text):
@@ -1189,10 +1189,7 @@ def _parse_tool_body_params(name: str, body: str) -> dict:
     # name/title come from XML attributes on the open tag — do not harvest
     # incidental HTML <title>/<name> tags out of the document (that overwrote
     # the real site title in production).
-    if (
-        default_param in _BLOB_TOOL_PARAMS
-        and _looks_like_document_blob(raw)
-    ):
+    if default_param in _BLOB_TOOL_PARAMS and _looks_like_document_blob(raw):
         params[default_param] = raw.strip()
         return params
 
@@ -1274,7 +1271,12 @@ def _parse_tool_body_params(name: str, body: str) -> dict:
             # No scalar children and nothing consumed — whole body is the blob
             # (or a single wrapper around it).
             _assign_blob(raw.strip())
-    elif default_param and default_param in params and lo and _looks_like_document_blob(lo):
+    elif (
+        default_param
+        and default_param in params
+        and lo
+        and _looks_like_document_blob(lo)
+    ):
         # Explicit parameter= form set a short body, but a document leftover exists
         # (unusual); prefer the document.
         if not _looks_like_document_blob(str(params.get(default_param, ""))):
@@ -3352,7 +3354,10 @@ class MaxwellBot(commands.Bot):
                         # Bail if unlisten/leave already tore this sink down.
                         if getattr(vc, "_maxwell_sink", None) is not None:
                             return
-                        if key in getattr(self, "_vc_sinks", {}) and self._vc_sinks.get(key) is not None:
+                        if (
+                            key in getattr(self, "_vc_sinks", {})
+                            and self._vc_sinks.get(key) is not None
+                        ):
                             return
                         if not vc.is_connected() or self._vc_is_listening(vc):
                             return
@@ -3514,8 +3519,16 @@ class MaxwellBot(commands.Bot):
                         "content": f"{msg.get('author', 'user')}: {msg.get('content', '')[:220]}",
                     }
                 )
-            use_audio = bool(self._control.get("process_audio", getattr(self.config, "ENABLE_AUDIO_INPUT", False)))
-            vc_note = "Audio is attached." if use_audio else "Voice activity detected (audio input disabled)."
+            use_audio = bool(
+                self._control.get(
+                    "process_audio", getattr(self.config, "ENABLE_AUDIO_INPUT", False)
+                )
+            )
+            vc_note = (
+                "Audio is attached."
+                if use_audio
+                else "Voice activity detected (audio input disabled)."
+            )
             messages.append(
                 {
                     "role": "user",
@@ -3554,7 +3567,12 @@ class MaxwellBot(commands.Bot):
             await self._acquire_ai_slot(timeout=vc_timeout, priority="user")
             try:
                 async with self._vc_ai_semaphore:
-                    use_audio = bool(self._control.get("process_audio", getattr(self.config, "ENABLE_AUDIO_INPUT", False)))
+                    use_audio = bool(
+                        self._control.get(
+                            "process_audio",
+                            getattr(self.config, "ENABLE_AUDIO_INPUT", False),
+                        )
+                    )
                     vc_media = [media] if use_audio else []
                     resp = await self.ai_provider.generate_response(
                         messages,
@@ -4133,7 +4151,9 @@ class MaxwellBot(commands.Bot):
             timeout = max(
                 10,
                 min(
-                    _safe_int(self._control.get("ai_timeout_seconds", 3600) or 3600, 3600),
+                    _safe_int(
+                        self._control.get("ai_timeout_seconds", 3600) or 3600, 3600
+                    ),
                     7200,
                 ),
             )
@@ -4369,11 +4389,17 @@ class MaxwellBot(commands.Bot):
                 )
                 return
             if len(parts) < 3:
-                await message.channel.send("Usage: `,autonomy blacklist channel <id>` / `server <id>` ; unblacklist to remove")
+                await message.channel.send(
+                    "Usage: `,autonomy blacklist channel <id>` / `server <id>` ; unblacklist to remove"
+                )
                 return
             kind = parts[1].lower()
             target = parts[2]
-            key = "autonomy_blocked_channels" if kind in ("channel", "chan", "ch", "c") else "autonomy_blocked_servers"
+            key = (
+                "autonomy_blocked_channels"
+                if kind in ("channel", "chan", "ch", "c")
+                else "autonomy_blocked_servers"
+            )
             control = dict(self._control)
             bl = list(control.get(key, []) or [])
             if sub == "blacklist":
@@ -4609,7 +4635,8 @@ class MaxwellBot(commands.Bot):
             control["max_response_chars"] = max(
                 80,
                 min(
-                    _safe_int(control.get("max_response_chars", 4000) or 4000, 4000), 8000
+                    _safe_int(control.get("max_response_chars", 4000) or 4000, 4000),
+                    8000,
                 ),
             )
             control["tool_history_messages"] = max(
@@ -4799,8 +4826,14 @@ class MaxwellBot(commands.Bot):
             scope = "global" if is_admin and is_dm else f"user:{author_id}"
         if not is_admin:
             # Force private user facts for non-admins (prevents shared-context poison).
-            scope = f"user:{author_id}" if not is_dm else (
-                f"dm:{author_id}" if f"dm:{author_id}" in allowed_scopes else f"user:{author_id}"
+            scope = (
+                f"user:{author_id}"
+                if not is_dm
+                else (
+                    f"dm:{author_id}"
+                    if f"dm:{author_id}" in allowed_scopes
+                    else f"user:{author_id}"
+                )
             )
             if visibility not in {"private", "admin_only"}:
                 visibility = "private"
@@ -5556,7 +5589,9 @@ class MaxwellBot(commands.Bot):
 
                 # Extract audio track only if process_audio (omni audio input) is enabled.
                 # This prevents sending audio to non-omni or when user disabled audio models.
-                proc_aud = bool((getattr(self, "_control", None) or {}).get("process_audio", False))
+                proc_aud = bool(
+                    (getattr(self, "_control", None) or {}).get("process_audio", False)
+                )
                 if proc_aud:
                     audio_path = tmp_path / "audio.wav"
                     audio_cmd = [
@@ -5875,7 +5910,11 @@ class MaxwellBot(commands.Bot):
             # not a new image. Bump uses_left on the existing entry instead of
             # appending a duplicate, otherwise the cap fills with N copies of the
             # newest image and they all expire in lockstep after a couple turns.
-            mid = str(item.get("message_id")) if item.get("message_id") is not None else None
+            mid = (
+                str(item.get("message_id"))
+                if item.get("message_id") is not None
+                else None
+            )
             fname = item.get("filename", "attachment")
             replaced = False
             if mid is not None:
@@ -6062,7 +6101,8 @@ class MaxwellBot(commands.Bot):
         ai_timeout = max(
             10,
             min(
-                _safe_int(self._control.get("ai_timeout_seconds", 3600) or 3600, 3600), 7200
+                _safe_int(self._control.get("ai_timeout_seconds", 3600) or 3600, 3600),
+                7200,
             ),
         )
         max_out_tokens = getattr(self.config, "OLLAMA_MAX_TOKENS", 200000) or 200000
@@ -6241,7 +6281,7 @@ class MaxwellBot(commands.Bot):
                                 max_tokens=max_out_tokens,
                                 tools=openai_tools or None,
                             )
-                    except discord.Forbidden as _exc:
+                    except (discord.HTTPException, ConnectionError, OSError) as _exc:
                         response = await self.ai_provider.generate_response(
                             messages,
                             media=active_media,
@@ -6330,7 +6370,7 @@ class MaxwellBot(commands.Bot):
                         with contextlib.suppress(Exception):
                             history_response = re.sub(
                                 r'(<parameter[^>]*\bname=["\']?body["\']?[^>]*>)(.*?)(</\s*parameter\s*>)',
-                                r'\1[large HTML/asset body elided to protect context budget; site creation succeeded from the original full body]\3',
+                                r"\1[large HTML/asset body elided to protect context budget; site creation succeeded from the original full body]\3",
                                 history_response,
                                 flags=re.DOTALL | re.IGNORECASE,
                             )
@@ -6387,9 +6427,10 @@ class MaxwellBot(commands.Bot):
                 normal_reply_sent = True
                 return
             # TTS-only: no residual text reply required.
-            if any("__TTS_SENT__" in tr for tr in all_tool_results) and not (
-                response or ""
-            ).strip():
+            if (
+                any("__TTS_SENT__" in tr for tr in all_tool_results)
+                and not (response or "").strip()
+            ):
                 return
             response = re.sub(
                 r"\[(\w+)\]\s*\n?\s*\{.*?\}\s*\n?\s*\[/\1\]",
@@ -6611,7 +6652,9 @@ class MaxwellBot(commands.Bot):
         history_tool_calls = elide_tool_calls_for_history(raw_for_history)
 
         # Non-terminal first, terminal last (same as XML path)
-        non_terminal = [c for c in calls if c["name"] not in {"send_message", "no_response"}]
+        non_terminal = [
+            c for c in calls if c["name"] not in {"send_message", "no_response"}
+        ]
         terminal = [c for c in calls if c["name"] in {"send_message", "no_response"}]
 
         result_by_id: dict[str, str] = {}
@@ -6650,7 +6693,7 @@ class MaxwellBot(commands.Bot):
             try:
                 async with message.channel.typing():
                     await run_all()
-            except discord.Forbidden:
+            except (discord.HTTPException, ConnectionError, OSError):
                 await run_all()
             except Exception:
                 await run_all()
@@ -6700,7 +6743,11 @@ class MaxwellBot(commands.Bot):
         self._last_native_followup_messages = []
         if native_tool_calls:
             return await MaxwellBot._process_native_tool_calls(
-                self, message, response, native_tool_calls, include_images=include_images
+                self,
+                message,
+                response,
+                native_tool_calls,
+                include_images=include_images,
             )
         return await MaxwellBot._process_tool_calls(
             self, message, response, include_images=include_images
@@ -6796,11 +6843,15 @@ class MaxwellBot(commands.Bot):
                 # to avoid bloating channel memory / long term storage with  MBs of generated code.
                 mem_params = dict(params or {})
                 for heavy_key in ("body", "content", "code", "html", "data"):
-                    if heavy_key in mem_params and isinstance(mem_params[heavy_key], str) and len(mem_params[heavy_key]) > 2000:
-                        mem_params[heavy_key] = f"[large {heavy_key} omitted, {len(mem_params[heavy_key])} chars]"
-                params_text = json.dumps(
-                    mem_params, ensure_ascii=False, sort_keys=True
-                )
+                    if (
+                        heavy_key in mem_params
+                        and isinstance(mem_params[heavy_key], str)
+                        and len(mem_params[heavy_key]) > 2000
+                    ):
+                        mem_params[heavy_key] = (
+                            f"[large {heavy_key} omitted, {len(mem_params[heavy_key])} chars]"
+                        )
+                params_text = json.dumps(mem_params, ensure_ascii=False, sort_keys=True)
             except TypeError:
                 params_text = str(params or {})
             await self.memory.add_to_channel_memory(
@@ -6943,6 +6994,7 @@ class MaxwellBot(commands.Bot):
                     result_text = f"Error - {e}"
                     tool_results.append(f"Tool {name}: {result_text}")
                     await remember_tool_call(name, params, result_text)
+
         # BUG FIX: run_calls must be called exactly once. The old code called
         # it inside `async with message.channel.typing():` AND again in the
         # `except discord.Forbidden` branch, so a Forbidden on the typing
@@ -6957,11 +7009,11 @@ class MaxwellBot(commands.Bot):
             try:
                 async with message.channel.typing():
                     await run_calls()
-            except discord.Forbidden:
-                # Typing context was refused (missing perms). Run once without
-                # the typing indicator instead of falling through to a second
-                # run_calls invocation that would re-execute side-effecting
-                # tools.
+            except (discord.HTTPException, ConnectionError, OSError):
+                # Typing context failed (missing perms, 5xx, socket blip).
+                # Run once without the typing indicator instead of falling
+                # through to a second run_calls invocation that would
+                # re-execute side-effecting tools.
                 await run_calls()
         else:
             await run_calls()
@@ -7055,7 +7107,9 @@ class MaxwellBot(commands.Bot):
         ]
         if not descriptions:
             return ""
-        if MaxwellBot._native_tools_enabled_for(self._control if hasattr(self, '_control') else {}):
+        if MaxwellBot._native_tools_enabled_for(
+            self._control if hasattr(self, "_control") else {}
+        ):
             return (
                 "TOOLS (optional; use only when they clearly help):\n"
                 + "\n".join(descriptions)
@@ -7628,14 +7682,12 @@ class MaxwellBot(commands.Bot):
         # Do not put the bot token in the public path; use a dedicated secret.
         import secrets as _secrets
 
-        webhook_path_secret = (
-            os.environ.get("TELEGRAM_WEBHOOK_PATH_SECRET", "").strip()
-            or _secrets.token_urlsafe(24)
-        )
-        secret_token = (
-            os.environ.get("TELEGRAM_WEBHOOK_SECRET", "").strip()
-            or _secrets.token_urlsafe(32)
-        )
+        webhook_path_secret = os.environ.get(
+            "TELEGRAM_WEBHOOK_PATH_SECRET", ""
+        ).strip() or _secrets.token_urlsafe(24)
+        secret_token = os.environ.get(
+            "TELEGRAM_WEBHOOK_SECRET", ""
+        ).strip() or _secrets.token_urlsafe(32)
         full_webhook_url = f"{webhook_url}/telegram/{webhook_path_secret}"
         url_base = f"https://api.telegram.org/bot{token}"
         session = await _get_shared_session()
@@ -7775,7 +7827,9 @@ class MaxwellBot(commands.Bot):
         audio = message.get("audio")
         tg_media = []
 
-        proc_aud = bool(self._control.get("process_audio", self.config.ENABLE_AUDIO_INPUT))
+        proc_aud = bool(
+            self._control.get("process_audio", self.config.ENABLE_AUDIO_INPUT)
+        )
         if (voice or audio) and not proc_aud:
             # Audio input disabled (omni model toggle); ignore audio/voice from TG but keep text.
             voice = None
@@ -7867,7 +7921,8 @@ class MaxwellBot(commands.Bot):
         ai_timeout = max(
             10,
             min(
-                _safe_int(self._control.get("ai_timeout_seconds", 3600) or 3600, 3600), 7200
+                _safe_int(self._control.get("ai_timeout_seconds", 3600) or 3600, 3600),
+                7200,
             ),
         )
         system_parts = [
@@ -7958,7 +8013,9 @@ class MaxwellBot(commands.Bot):
             await self._release_ai_slot()
 
         tg_native_calls = self._consume_native_tool_calls()
-        if (not response_text or not str(response_text).strip()) and not tg_native_calls:
+        if (
+            not response_text or not str(response_text).strip()
+        ) and not tg_native_calls:
             return
 
         response_text = (response_text or "").strip()
@@ -8013,7 +8070,7 @@ class MaxwellBot(commands.Bot):
                         with contextlib.suppress(Exception):
                             history_response_text = re.sub(
                                 r'(<parameter[^>]*\bname=["\']?body["\']?[^>]*>)(.*?)(</\s*parameter\s*>)',
-                                r'\1[large body elided]\3',
+                                r"\1[large body elided]\3",
                                 history_response_text,
                                 flags=re.DOTALL | re.IGNORECASE,
                             )
@@ -8187,7 +8244,11 @@ class MaxwellBot(commands.Bot):
                     audio = message.get("audio")
                     tg_media = []
 
-                    proc_aud = bool(self._control.get("process_audio", self.config.ENABLE_AUDIO_INPUT))
+                    proc_aud = bool(
+                        self._control.get(
+                            "process_audio", self.config.ENABLE_AUDIO_INPUT
+                        )
+                    )
                     if (voice or audio) and not proc_aud:
                         voice = None
                         audio = None
@@ -8380,7 +8441,9 @@ class MaxwellBot(commands.Bot):
                         await self._release_ai_slot()
 
                     tg_native2 = self._consume_native_tool_calls()
-                    if (not response_text or not str(response_text).strip()) and not tg_native2:
+                    if (
+                        not response_text or not str(response_text).strip()
+                    ) and not tg_native2:
                         continue
 
                     response_text = (response_text or "").strip()
@@ -8442,7 +8505,7 @@ class MaxwellBot(commands.Bot):
                                     with contextlib.suppress(Exception):
                                         hrt = re.sub(
                                             r'(<parameter[^>]*\bname=["\']?body["\']?[^>]*>)(.*?)(</\s*parameter\s*>)',
-                                            r'\1[elided]\3',
+                                            r"\1[elided]\3",
                                             hrt,
                                             flags=re.DOTALL | re.IGNORECASE,
                                         )
@@ -8477,7 +8540,9 @@ class MaxwellBot(commands.Bot):
                                     tools=tg_openai_tools2 or None,
                                 )
                                 pending_native = self._consume_native_tool_calls()
-                                if (followup and str(followup).strip()) or pending_native:
+                                if (
+                                    followup and str(followup).strip()
+                                ) or pending_native:
                                     response_text = (followup or "").strip()
                                 else:
                                     break

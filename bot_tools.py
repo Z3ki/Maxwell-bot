@@ -46,7 +46,11 @@ try:
     from pathlib import Path as _PathEarly
 
     _load_dotenv_early(
-        _PathEarly(os.getenv("MAXWELL_ENV_FILE", _PathEarly(__file__).resolve().parent / ".env")),
+        _PathEarly(
+            os.getenv(
+                "MAXWELL_ENV_FILE", _PathEarly(__file__).resolve().parent / ".env"
+            )
+        ),
         override=False,
     )
 except Exception:
@@ -165,7 +169,9 @@ async def _get_shared_session() -> aiohttp.ClientSession:
     async with _SESSION_LOCK:
         if _SHARED_SESSION is None or _SHARED_SESSION.closed:
             connector = aiohttp.TCPConnector(
-                resolver=cast(Any, _SafeResolver()), limit=30, limit_per_host=5,
+                resolver=cast(Any, _SafeResolver()),
+                limit=30,
+                limit_per_host=5,
                 force_close=True,
             )
             _SHARED_SESSION = aiohttp.ClientSession(connector=connector)
@@ -181,7 +187,9 @@ async def _recreate_shared_session():
             except Exception:
                 pass
         connector = aiohttp.TCPConnector(
-            resolver=cast(Any, _SafeResolver()), limit=30, limit_per_host=5,
+            resolver=cast(Any, _SafeResolver()),
+            limit=30,
+            limit_per_host=5,
             force_close=True,
         )
         _SHARED_SESSION = aiohttp.ClientSession(connector=connector)
@@ -489,7 +497,9 @@ class ImageGeneratorTool(Tool):
                 )
                 if "Server disconnected" in str(e) or "Connection" in str(e):
                     session = await _recreate_shared_session()
-                last_error = "Error generating image: connection failed. Try again later."
+                last_error = (
+                    "Error generating image: connection failed. Try again later."
+                )
                 if attempt < max_retries - 1:
                     wait_time = (attempt + 1) * 10
                     await asyncio.sleep(wait_time)
@@ -1670,11 +1680,11 @@ class CreateSiteTool(Tool):
                     "Pick a different name."
                 )
 
-        control = getattr(self.bot, "control", {}) or getattr(self.bot, "_control", {}) or {}
+        control = (
+            getattr(self.bot, "control", {}) or getattr(self.bot, "_control", {}) or {}
+        )
         max_sites = int(control.get("create_site_quota_per_user", 10))
-        active_user_sites = [
-            s for s in sites.values() if s.get("user_id") == user_id
-        ]
+        active_user_sites = [s for s in sites.values() if s.get("user_id") == user_id]
         if len(active_user_sites) >= max_sites:
             return f"Error: site quota reached ({len(active_user_sites)}/{max_sites} active sites). Delete an old site first."
 
@@ -1737,25 +1747,25 @@ class CreateSiteTool(Tool):
             # 'unsafe-inline' covers both script and style; data: URIs cover inline
             # SVG/embedded assets; https: allows CDNs without listing each host.
             if "<head" in body.lower():
-                head_match = re.search(
-                    r"<head[^>]*>", body, re.IGNORECASE
-                )
+                head_match = re.search(r"<head[^>]*>", body, re.IGNORECASE)
                 if head_match and re.search(
                     r"http-equiv\s*=\s*[\"']?Content-Security-Policy",
                     body,
                     re.IGNORECASE,
                 ):
-                    csp_meta = ""  # page already declares its own CSP; don't double-inject
+                    csp_meta = (
+                        ""  # page already declares its own CSP; don't double-inject
+                    )
                 else:
                     csp_meta = (
                         '<meta http-equiv="Content-Security-Policy" '
-                        "content=\"default-src https: data: blob:; "
+                        'content="default-src https: data: blob:; '
                         "img-src https: data: blob:; "
                         "style-src 'unsafe-inline' https:; "
                         "script-src 'unsafe-inline' 'unsafe-eval' https:; "
                         "font-src https: data:; "
                         "connect-src https:; "
-                        "media-src https: data: blob:;\">"
+                        'media-src https: data: blob:;">'
                     )
                 if csp_meta:
                     body = re.sub(
@@ -1768,13 +1778,13 @@ class CreateSiteTool(Tool):
             elif "<html" in body.lower():
                 csp_meta = (
                     '<meta http-equiv="Content-Security-Policy" '
-                    "content=\"default-src https: data: blob:; "
+                    'content="default-src https: data: blob:; '
                     "img-src https: data: blob:; "
                     "style-src 'unsafe-inline' https:; "
                     "script-src 'unsafe-inline' 'unsafe-eval' https:; "
                     "font-src https: data:; "
                     "connect-src https:; "
-                    "media-src https: data: blob:;\">"
+                    'media-src https: data: blob:;">'
                 )
                 body = re.sub(
                     r"(<html[^>]*>)",
@@ -1786,13 +1796,13 @@ class CreateSiteTool(Tool):
             else:
                 csp_meta = (
                     '<meta http-equiv="Content-Security-Policy" '
-                    "content=\"default-src https: data: blob:; "
+                    'content="default-src https: data: blob:; '
                     "img-src https: data: blob:; "
                     "style-src 'unsafe-inline' https:; "
                     "script-src 'unsafe-inline' 'unsafe-eval' https:; "
                     "font-src https: data:; "
                     "connect-src https:; "
-                    "media-src https: data: blob:;\">"
+                    'media-src https: data: blob:;">'
                 )
                 body = "<head>" + csp_meta + "</head>\n" + body
             # Atomic write for the public HTML to avoid truncated/orphan sites on
@@ -2123,7 +2133,9 @@ class SendFileTool(Tool):
         # Only export-safe subtrees and workspace dirs the tools themselves create.
         bases: list[str] = []
         data_dir = os.path.abspath(
-            getattr(getattr(getattr(self, "bot", None), "config", None), "DATA_DIR", "data")
+            getattr(
+                getattr(getattr(self, "bot", None), "config", None), "DATA_DIR", "data"
+            )
             or "data"
         )
         for sub in ("exports", "public_files", "attachments"):
@@ -2251,7 +2263,7 @@ class ShellTool(Tool):
             (stdout, _stderr), code = await self._run_docker(
                 "inspect",
                 "-f",
-                "{{.State.Running}} {{index .Config.Labels \"maxwell.shell.mode\"}}",
+                '{{.State.Running}} {{index .Config.Labels "maxwell.shell.mode"}}',
                 self.CONTAINER_NAME,
                 timeout=10,
             )
@@ -2689,7 +2701,9 @@ class YouTubeTool(Tool):
 
     MAX_TRANSCRIPT_CHARS = 20000
     MAX_FRAMES = 6
-    YOUTUBE_HOST_RE = re.compile(r"(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com)$", re.I)
+    YOUTUBE_HOST_RE = re.compile(
+        r"(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com)$", re.I
+    )
 
     def get_description(self):
         return (
@@ -2704,7 +2718,13 @@ class YouTubeTool(Tool):
         if raw_path:
             path = Path(raw_path).expanduser()
         else:
-            data_dir = Path(getattr(getattr(self.bot, "config", None), "DATA_DIR", os.environ.get("DATA_DIR", "data")))
+            data_dir = Path(
+                getattr(
+                    getattr(self.bot, "config", None),
+                    "DATA_DIR",
+                    os.environ.get("DATA_DIR", "data"),
+                )
+            )
             path = data_dir / "youtube_cookies.txt"
         try:
             if path.exists() and path.is_file() and path.stat().st_size > 0:
@@ -2738,7 +2758,12 @@ class YouTubeTool(Tool):
         text = str(raw or "").strip()
         if "<" in text and ">" in text:
             text = re.sub(r"</?param\b[^>]*>", "", text, flags=re.IGNORECASE).strip()
-            text = re.sub(r"</?(?:url|tool:youtube|youtube)\b[^>]*>", "", text, flags=re.IGNORECASE).strip()
+            text = re.sub(
+                r"</?(?:url|tool:youtube|youtube)\b[^>]*>",
+                "",
+                text,
+                flags=re.IGNORECASE,
+            ).strip()
         match = re.search(
             r"https?://(?:www\.)?(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/[^\s<>\"']+",
             text,
@@ -2756,7 +2781,9 @@ class YouTubeTool(Tool):
             query_id = parse_qs(parsed.query).get("v", [""])[0]
             if query_id:
                 return query_id
-            match = re.search(r"/(?:embed|shorts|live)/([A-Za-z0-9_-]{6,})", parsed.path)
+            match = re.search(
+                r"/(?:embed|shorts|live)/([A-Za-z0-9_-]{6,})", parsed.path
+            )
             return match.group(1) if match else ""
         except Exception:
             return ""
@@ -2801,7 +2828,9 @@ class YouTubeTool(Tool):
         m, s = divmod(rem, 60)
         return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
-    async def _run_cmd(self, args: list[str], timeout: int = 60) -> tuple[int, str, str]:
+    async def _run_cmd(
+        self, args: list[str], timeout: int = 60
+    ) -> tuple[int, str, str]:
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
@@ -2870,10 +2899,14 @@ class YouTubeTool(Tool):
             url,
         )
         _code, _stdout, _stderr = await self._run_cmd(args, timeout=60)
-        candidates = sorted(tmp.glob("subs*.vtt"), key=lambda p: p.stat().st_size, reverse=True)
+        candidates = sorted(
+            tmp.glob("subs*.vtt"), key=lambda p: p.stat().st_size, reverse=True
+        )
         if not candidates:
             return ""
-        return self._strip_vtt(candidates[0].read_text(encoding="utf-8", errors="replace"))
+        return self._strip_vtt(
+            candidates[0].read_text(encoding="utf-8", errors="replace")
+        )
 
     async def _download_timedtext(self, url: str, lang: str) -> str:
         video_id = self._video_id(url)
@@ -2903,18 +2936,28 @@ class YouTubeTool(Tool):
                 if params.get("fmt") == "json3":
                     try:
                         data = json.loads(text)
-                        events = data.get("events", []) if isinstance(data, dict) else []
+                        events = (
+                            data.get("events", []) if isinstance(data, dict) else []
+                        )
                         lines = []
                         for event in events:
-                            segs = event.get("segs") if isinstance(event, dict) else None
+                            segs = (
+                                event.get("segs") if isinstance(event, dict) else None
+                            )
                             if not isinstance(segs, list):
                                 continue
-                            line = "".join(str(seg.get("utf8", "")) for seg in segs if isinstance(seg, dict))
+                            line = "".join(
+                                str(seg.get("utf8", ""))
+                                for seg in segs
+                                if isinstance(seg, dict)
+                            )
                             line = re.sub(r"\s+", " ", line).strip()
                             if line:
                                 start = event.get("start")
                                 if isinstance(start, (int, float)) and start >= 0:
-                                    lines.append(f"[{YouTubeTool._format_ts(float(start))}] {line}")
+                                    lines.append(
+                                        f"[{YouTubeTool._format_ts(float(start))}] {line}"
+                                    )
                                 else:
                                     lines.append(line)
                         if lines:
@@ -2962,7 +3005,9 @@ class YouTubeTool(Tool):
         except json.JSONDecodeError:
             return fallback
 
-    async def _extract_frames(self, url: str, timestamps: list[float], tmp: Path) -> list[str]:
+    async def _extract_frames(
+        self, url: str, timestamps: list[float], tmp: Path
+    ) -> list[str]:
         if not timestamps or not shutil.which("ffmpeg") or not shutil.which("yt-dlp"):
             return []
         code, stream_url, stderr = await self._run_cmd(
@@ -2978,7 +3023,9 @@ class YouTubeTool(Tool):
             timeout=45,
         )
         if code != 0 or not stream_url.strip():
-            return [f"frame extraction unavailable: {stderr.strip()[:180] or 'no stream url'}"]
+            return [
+                f"frame extraction unavailable: {stderr.strip()[:180] or 'no stream url'}"
+            ]
         video_url = stream_url.strip().splitlines()[0]
         sent = []
         for i, ts in enumerate(timestamps[: self.MAX_FRAMES], 1):
@@ -3001,7 +3048,9 @@ class YouTubeTool(Tool):
             ]
             code, _stdout, stderr = await self._run_cmd(args, timeout=40)
             if code != 0 or not frame_path.exists():
-                sent.append(f"{self._format_ts(ts)} frame failed: {stderr.strip()[:120]}")
+                sent.append(
+                    f"{self._format_ts(ts)} frame failed: {stderr.strip()[:120]}"
+                )
                 continue
             try:
                 encoded = base64.b64encode(frame_path.read_bytes()).decode("ascii")
@@ -3030,7 +3079,9 @@ class YouTubeTool(Tool):
                     if not content_type.startswith("image/"):
                         continue
                     raw = await _read_response_limited(resp, 2 * 1024 * 1024)
-                    if not raw.startswith(b"\xff\xd8\xff") and not raw.startswith(b"\x89PNG"):
+                    if not raw.startswith(b"\xff\xd8\xff") and not raw.startswith(
+                        b"\x89PNG"
+                    ):
                         continue
                     encoded = base64.b64encode(raw).decode("ascii")
                     return (
@@ -3056,7 +3107,9 @@ class YouTubeTool(Tool):
         if not self._is_youtube_url(url):
             return "Error: expected a YouTube URL"
         try:
-            max_chars = max(1000, min(int(max_transcript_chars), self.MAX_TRANSCRIPT_CHARS))
+            max_chars = max(
+                1000, min(int(max_transcript_chars), self.MAX_TRANSCRIPT_CHARS)
+            )
         except (TypeError, ValueError):
             max_chars = 12000
         lang = re.sub(r"[^A-Za-z0-9_.-]", "", str(lang or "en"))[:20] or "en"
@@ -3075,16 +3128,33 @@ class YouTubeTool(Tool):
         title = str(info.get("title") or "YouTube video")
         uploader = str(info.get("uploader") or info.get("channel") or "unknown")
         duration = info.get("duration")
-        duration_text = self._format_ts(float(duration)) if isinstance(duration, (int, float)) else "unknown"
-        parts = [f"Title: {title}", f"Channel: {uploader}", f"Duration: {duration_text}"]
+        duration_text = (
+            self._format_ts(float(duration))
+            if isinstance(duration, (int, float))
+            else "unknown"
+        )
+        parts = [
+            f"Title: {title}",
+            f"Channel: {uploader}",
+            f"Duration: {duration_text}",
+        ]
         if transcript:
             if len(transcript) > max_chars:
                 transcript = transcript[:max_chars] + "\n... (transcript truncated)"
             parts.append("Transcript:\n" + transcript)
         else:
-            parts.append("Transcript: unavailable (no captions found or yt-dlp could not fetch them).")
+            parts.append(
+                "Transcript: unavailable (no captions found or yt-dlp could not fetch them)."
+            )
         if requested_ts:
-            parts.append("Frames: " + ("; ".join(frame_results) if frame_results else "requested but unavailable"))
+            parts.append(
+                "Frames: "
+                + (
+                    "; ".join(frame_results)
+                    if frame_results
+                    else "requested but unavailable"
+                )
+            )
         elif frame_results:
             parts.append("Visual context: " + "; ".join(frame_results))
         return "\n\n".join(parts)
@@ -3212,7 +3282,9 @@ class SendMediaTool(Tool):
         ):
             # Unknown extension: don't disguise it as a PNG; use a generic safe suffix.
             # Discord still transports the raw bytes, so this is only a naming hint.
-            logger.warning(f"SendMediaTool normalizing unknown extension {ext!r} to .bin")
+            logger.warning(
+                f"SendMediaTool normalizing unknown extension {ext!r} to .bin"
+            )
             filename = os.path.splitext(filename)[0] + ".bin"
 
         file = File(BytesIO(media_bytes), filename=filename)
@@ -3527,7 +3599,9 @@ class LeaveVcTool(Tool):
             # Cancel any in-flight VC reply/utterance tasks for this guild.
             key = None
             if hasattr(self.bot, "_vc_context_key"):
-                key = self.bot._vc_context_key(message.guild, vc.channel, message.channel)
+                key = self.bot._vc_context_key(
+                    message.guild, vc.channel, message.channel
+                )
             active = getattr(self.bot, "_vc_active_tasks", None) or {}
             for task in list(active.get(key, []) if key else []):
                 if task and not task.done():
@@ -3624,13 +3698,13 @@ class SubAgentTool(Tool):
             if any(_is_path_allowed(resolved, base) for base in allowed_bases):
                 safe_files.append(resolved)
             else:
-                logger.warning("sub_agent rejected extra file outside allowlist: %s", fpath)
+                logger.warning(
+                    "sub_agent rejected extra file outside allowlist: %s", fpath
+                )
         extra_files = safe_files
 
         try:
-            model = os.environ.get(
-                "OPENCODE_SUBAGENT_MODEL", "ollama-cloud/minimax-m3"
-            )
+            model = os.environ.get("OPENCODE_SUBAGENT_MODEL", "ollama-cloud/minimax-m3")
             return await run_subagent_task(
                 self.bot,
                 message,

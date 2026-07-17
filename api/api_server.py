@@ -489,7 +489,8 @@ def _sanitize_control(control):
     out["max_image_size_mb"] = max(1, min(out["max_image_size_mb"], 25))
     out["ai_timeout_seconds"] = max(10, min(out["ai_timeout_seconds"], 7200))
     out["tool_iteration_timeout_seconds"] = max(
-        60, min(_safe_int(out.get("tool_iteration_timeout_seconds") or 3600, 3600), 14400)
+        60,
+        min(_safe_int(out.get("tool_iteration_timeout_seconds") or 3600, 3600), 14400),
     )
     out["ai_concurrency"] = max(1, min(out["ai_concurrency"], 10))
     out["autonomy_interval_seconds"] = max(
@@ -507,7 +508,8 @@ def _sanitize_control(control):
         0, min(_safe_int(out.get("tool_history_messages") or 3, 3), 20)
     )
     out["prompt_context_budget"] = max(
-        10000, min(_safe_int(out.get("prompt_context_budget") or 200000, 200000), 500000)
+        10000,
+        min(_safe_int(out.get("prompt_context_budget") or 200000, 200000), 500000),
     )
     out["cross_context_max_items"] = max(
         1, min(_safe_int(out.get("cross_context_max_items"), 10), 50)
@@ -2136,10 +2138,7 @@ async def login_post(request):
         return _json_response({"error": "user and pass required"}, 400)
     if not ADMIN_USER or not ADMIN_PASSWORD:
         return _json_response({"error": "admin auth not configured"}, 503)
-    if not (
-        _safe_compare(user, ADMIN_USER)
-        and _safe_compare(pwd, ADMIN_PASSWORD)
-    ):
+    if not (_safe_compare(user, ADMIN_USER) and _safe_compare(pwd, ADMIN_PASSWORD)):
         _record_auth_failure(request)
         return _json_response({"error": "unauthorized"}, 401)
     return _json_response({"ok": True, "message": "credentials valid"})
@@ -2156,9 +2155,7 @@ _DISCORD_STATES: dict[str, float] = {}
 def _discord_redirect_base(request) -> str:
     # Prefer fixed public base so Host-header open redirects cannot steal tokens.
     fixed = (
-        os.getenv("MAXWELL_PUBLIC_BASE_URL")
-        or os.getenv("DISCORD_REDIRECT_BASE")
-        or ""
+        os.getenv("MAXWELL_PUBLIC_BASE_URL") or os.getenv("DISCORD_REDIRECT_BASE") or ""
     ).rstrip("/")
     if fixed:
         return fixed

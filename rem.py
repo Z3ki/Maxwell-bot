@@ -125,7 +125,7 @@ class RemStore:
             if not isinstance(runs, list):
                 runs = []
             runs.append(dict(run or {}))
-            await _save_json(self.runs_file, runs[-self.run_history:])
+            await _save_json(self.runs_file, runs[-self.run_history :])
 
     async def load_control(self) -> dict:
         async with self._lock:
@@ -142,13 +142,20 @@ def _message_content(message: dict) -> str:
 
 
 async def _provider_message(
-    provider, messages: list[dict], tools: list[dict], model: str, timeout: int, max_tokens: int | None = None
+    provider,
+    messages: list[dict],
+    tools: list[dict],
+    model: str,
+    timeout: int,
+    max_tokens: int | None = None,
 ) -> dict:
     if hasattr(provider, "generate_chat_completion"):
         return await provider.generate_chat_completion(
             messages, tools=tools, model=model, timeout=timeout, max_tokens=max_tokens
         )
-    content = await provider.generate_response(messages, timeout=timeout, max_tokens=max_tokens)
+    content = await provider.generate_response(
+        messages, timeout=timeout, max_tokens=max_tokens
+    )
     return {"role": "assistant", "content": content}
 
 
@@ -171,25 +178,62 @@ async def run_rem_once(
     since = state.get("last_rem_run_ts")
     events = await rem_log.drain_slice(since)
     if not events:
-        await store.patch_state({"last_rem_run_ts": started, "running": False, "running_since": "", "last_audit": "DONE - empty slice"})
-        run = {"ts": started, "turns_used": 0, "audit": "DONE - empty slice", "tool_counts": {}, "events": 0}
+        await store.patch_state(
+            {
+                "last_rem_run_ts": started,
+                "running": False,
+                "running_since": "",
+                "last_audit": "DONE - empty slice",
+            }
+        )
+        run = {
+            "ts": started,
+            "turns_used": 0,
+            "audit": "DONE - empty slice",
+            "tool_counts": {},
+            "events": 0,
+        }
         await store.append_run(run)
         return run
 
     messages = [
-        {"role": "system", "content": rem_system_prompt(max_turns, prompt_body=prompt_body)},
+        {
+            "role": "system",
+            "content": rem_system_prompt(max_turns, prompt_body=prompt_body),
+        },
         {"role": "system", "content": short_term_slice_prompt(events)},
-        {"role": "system", "content": "Current long-term memory snapshot:\n" + json.dumps(memory_manager.get_long_term_memory()[:200], ensure_ascii=False)},
+        {
+            "role": "system",
+            "content": "Current long-term memory snapshot:\n"
+            + json.dumps(
+                memory_manager.get_long_term_memory()[:200], ensure_ascii=False
+            ),
+        },
     ]
     audit = ""
     try:
         await store.patch_state({"running": True, "running_since": started})
-        response = await _provider_message(provider, messages, [], model, timeout, max_tokens)
+        response = await _provider_message(
+            provider, messages, [], model, timeout, max_tokens
+        )
         audit = _message_content(response).strip() or "DONE"
         finished = utcnow_iso()
         # Use 'started' as watermark so events recorded during the run are not lost
-        run = {"ts": finished, "turns_used": 0, "audit": audit[:4000], "tool_counts": {}, "events": len(events)}
-        await store.patch_state({"last_rem_run_ts": started, "last_audit": audit[:4000], "running": False, "running_since": ""})
+        run = {
+            "ts": finished,
+            "turns_used": 0,
+            "audit": audit[:4000],
+            "tool_counts": {},
+            "events": len(events),
+        }
+        await store.patch_state(
+            {
+                "last_rem_run_ts": started,
+                "last_audit": audit[:4000],
+                "running": False,
+                "running_since": "",
+            }
+        )
         await store.append_run(run)
         return run
     finally:
@@ -197,5 +241,6 @@ async def run_rem_once(
         # and any partial success path). Prevents stuck "running: true" that blocks
         # the API from allowing new REM runs.
         import contextlib as _contextlib
+
         with _contextlib.suppress(Exception):
             await store.patch_state({"running": False, "running_since": ""})
