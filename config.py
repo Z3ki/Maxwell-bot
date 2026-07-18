@@ -72,11 +72,12 @@ class Config:
     AUTONOMY_MODEL = os.getenv("AUTONOMY_MODEL", "").strip()
     AUTONOMY_DISABLE_REASONING = _bool_env("AUTONOMY_DISABLE_REASONING", False)
 
-    # Live tool progress messages. Off by default; opt in via .env.
+    # Live tool progress messages. ON by default; set MAXWELL_PROGRESS_MESSAGES=false
+    # in .env to revert to the pre-4a91368 silent-during-tool-calls behavior.
     # When enabled, the bot posts one short status message ("shell: checking
     # disk") per non-terminal tool batch, edits it in place as tools run,
     # and deletes it when the batch ends. See tool_progress.py for design.
-    PROGRESS_MESSAGES = _bool_env("MAXWELL_PROGRESS_MESSAGES", False)
+    PROGRESS_MESSAGES = _bool_env("MAXWELL_PROGRESS_MESSAGES", True)
 
     POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "flux")
 
