@@ -1596,7 +1596,7 @@ class ChangeAvatarTool(Tool):
     """Change the bot's own profile picture"""
 
     def get_description(self):
-        return "Change your profile picture. 30-min cooldown. Params: url (required, direct image URL jpg/png/gif/webp)."
+        return "Change your profile picture. Params: url (required, direct image URL jpg/png/gif/webp). Local cooldown is disabled by default (AVATAR_COOLDOWN_SECONDS env); Discord's own rate limit still applies."
 
     async def execute(self, message: Message, url: str | None = None, **kwargs) -> str:
         if self.bot and not self.bot._is_admin(message.author.id):
@@ -1607,9 +1607,15 @@ class ChangeAvatarTool(Tool):
         if not _is_safe_url(url):
             return "Error: Cannot fetch from private/internal URLs"
 
-        cooldown = 1800  # 30 minutes
+        # Cooldown is env-driven so we can disable it (Discord's own API
+        # rate limit still applies — you'll get a 429 from Discord instead
+        # of a friendly local error if you spam it). Default 0 = off.
+        try:
+            cooldown = int(os.environ.get("AVATAR_COOLDOWN_SECONDS", "0"))
+        except ValueError:
+            cooldown = 0
 
-        if self.bot._last_avatar_change:
+        if cooldown > 0 and self.bot._last_avatar_change:
             elapsed = (
                 datetime.now(timezone.utc).timestamp() - self.bot._last_avatar_change
             )
