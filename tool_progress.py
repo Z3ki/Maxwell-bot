@@ -121,6 +121,16 @@ class ToolProgress:
         # we then delete our message so the tool's output is the only thing
         # in the channel.
         self._tool_streaming = False
+        # A deferred flush scheduled when an update() was rate-limited. The
+        # model's reasoning often arrives mid-stream just *after* the tool-name
+        # edit (reasoning is usually the first field in the tool-call arguments
+        # JSON, so it lands within the 2s edit cooldown). Without this, that
+        # reasoning is cached in _current_reason but never flushed — the user
+        # sees "tool: generating…" for the whole 20s create_site generation
+        # instead of the model's actual intent. The deferred task flushes the
+        # latest cached content once the edit window reopens. Cancelled on
+        # stop() so we never edit a message we've already deleted.
+        self._deferred_task: asyncio.Task | None = None
 
     @property
     def posted(self) -> Any:
@@ -166,9 +176,13 @@ class ToolProgress:
         the first 140 chars so users see intent, not the whole inner
         monologue.
         """
-        logger.info(f"[TP] update called: tool={tool_name!r} stopped={self._stopped} streaming={self._tool_streaming} platform={self._platform} posted={self._posted is not None}")
+        logger.info(
+            f"[TP] update called: tool={tool_name!r} stopped={self._stopped} streaming={self._tool_streaming} platform={self._platform} posted={self._posted is not None}"
+        )
         if self._stopped or self._tool_streaming:
-            logger.info(f"[TP] update skipped: stopped={self._stopped} streaming={self._tool_streaming}")
+            logger.info(
+                f"[TP] update skipped: stopped={self._stopped} streaming={self._tool_streaming}"
+            )
             return
         # Telegram has no edit; the start() message is static.
         if self._platform != "discord":
@@ -190,7 +204,9 @@ class ToolProgress:
         self._current_reason = reasoning
 
         content = self._render()
-        logger.info(f"[TP] render: content={content!r} last_content={self._last_content!r} same={content == self._last_content}")
+        logger.info(
+            f"[TP] render: content={content!r} last_content={self._last_content!r} same={content == self._last_content}"
+        )
         if content == self._last_content:
             logger.info("[TP] update skipped: content unchanged")
             return
@@ -199,9 +215,19 @@ class ToolProgress:
         # coalesce (and if the tool batch finishes before then, the
         # intermediate line is deleted anyway).
         now = time.monotonic()
-        logger.info(f"[TP] rate check: now-last_edit={now - self._last_edit:.2f}s interval={_EDIT_INTERVAL_SECONDS}s")
+        logger.info(
+            f"[TP] rate check: now-last_edit={now - self._last_edit:.2f}s interval={_EDIT_INTERVAL_SECONDS}s"
+        )
         if now - self._last_edit < _EDIT_INTERVAL_SECONDS:
-            logger.info(f"[TP] update skipped: rate limited ({now - self._last_edit:.2f}s < {_EDIT_INTERVAL_SECONDS}s)")
+            # Rate limited right now — but the new content (e.g. the model's
+            # reasoning, which often lands just after the tool-name edit) is
+            # already cached in _current_tool/_current_reason. Schedule a
+            # deferred flush so it actually reaches the user once the edit
+            # window reopens, instead of being silently dropped on the floor.
+            logger.info(
+                f"[TP] update deferred: rate limited ({now - self._last_edit:.2f}s < {_EDIT_INTERVAL_SECONDS}s)"
+            )
+            self._schedule_deferred_flush()
             return
         logger.info(f"[TP] calling _flush with {content!r}")
         await self._flush(content)
@@ -209,7 +235,9 @@ class ToolProgress:
     async def _flush(self, content: str) -> None:
         async with self._lock:
             if self._stopped or not self._posted:
-                logger.info(f"[TP] _flush skipped: stopped={self._stopped} posted={self._posted is not None}")
+                logger.info(
+                    f"[TP] _flush skipped: stopped={self._stopped} posted={self._posted is not None}"
+                )
                 return
             try:
                 logger.info(f"[TP] _flush calling edit({content!r})...")
@@ -238,6 +266,42 @@ class ToolProgress:
             return f"{self._current_tool}: {self._current_reason}"
         return f"{self._current_tool}: working…"
 
+    def _schedule_deferred_flush(self) -> None:
+        """Flush the latest cached content once the edit cooldown reopens.
+
+        Called when ``update()`` was rate-limited. Only the most recent
+        deferred flush matters, so any prior one is cancelled first. The
+        task is a no-op if stop()/streaming overtook it.
+        """
+        if self._stopped:
+            return
+        if self._deferred_task and not self._deferred_task.done():
+            self._deferred_task.cancel()
+        elapsed = time.monotonic() - self._last_edit
+        delay = max(0.05, _EDIT_INTERVAL_SECONDS - elapsed) + 0.05
+        try:
+            self._deferred_task = asyncio.create_task(self._deferred_flush(delay))
+        except RuntimeError:
+            # No running loop (e.g. called from a synchronous test context) —
+            # nothing to defer to, the next update() will pick up the cache.
+            self._deferred_task = None
+
+    async def _deferred_flush(self, delay: float) -> None:
+        """Wait out the rate-limit window, then flush whatever is cached now."""
+        try:
+            await asyncio.sleep(delay)
+            if self._stopped or self._tool_streaming or not self._posted:
+                return
+            content = self._render()
+            if content == self._last_content:
+                return
+            logger.info(f"[TP] deferred flush firing with {content!r}")
+            await self._flush(content)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Deferred progress flush failed: %s", e)
+
     def notify_streaming(self) -> None:
         """Tool signaled it's about to stream its own output.
 
@@ -257,6 +321,10 @@ class ToolProgress:
         if self._stopped:
             return
         self._stopped = True
+        # Cancel any pending deferred flush so we never edit a message we're
+        # about to delete (and never leave a dangling task after the batch).
+        if self._deferred_task and not self._deferred_task.done():
+            self._deferred_task.cancel()
         if not self._posted:
             return
         if self._platform != "discord":

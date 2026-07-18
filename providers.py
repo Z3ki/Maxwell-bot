@@ -1,14 +1,54 @@
 """Ollama AI Provider for Maxwell Bot"""
 
 import asyncio
+import contextlib
+import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 
 import aiohttp
 
 logger = logging.getLogger(__name__)
+
+# Matches the `reasoning` string value inside a (possibly partial) tool-call
+# arguments JSON. Models emit reasoning as the FIRST field, well before any
+# huge field like create_site's `body`, so once this regex matches the value's
+# closing quote is in hand and we can surface the reasoning to the live
+# progress message without waiting for the rest of the stream.
+_PARTIAL_REASONING_RE = re.compile(r'"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)"')
+
+
+def _extract_partial_reasoning(arguments: str) -> str:
+    """Best-effort pull of the `reasoning` string from a PARTIAL arguments JSON.
+
+    Returns '' until the reasoning value's closing quote has arrived (i.e. the
+    model is still emitting it). Once complete, returns the decoded string.
+    Used to update the in-channel progress message with the model's real intent
+    mid-stream, instead of a static "generating…" for the whole generation.
+    """
+    if not arguments:
+        return ""
+    # Fast path: the whole arguments object already parses.
+    try:
+        parsed = json.loads(arguments)
+        if isinstance(parsed, dict):
+            r = parsed.get("reasoning")
+            if isinstance(r, str):
+                return r
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # Partial JSON: grab the reasoning value once its closing quote landed.
+    m = _PARTIAL_REASONING_RE.search(arguments)
+    if not m:
+        return ""
+    raw = m.group(1)
+    try:
+        return json.loads('"' + raw + '"')  # decode \n, \", etc.
+    except (json.JSONDecodeError, ValueError):
+        return raw
 
 
 async def _read_sse_response(
@@ -76,7 +116,7 @@ async def _read_sse_response(
             if not payload:
                 continue
             try:
-                obj = __import__("json").loads(payload)
+                obj = json.loads(payload)
             except ValueError:
                 # Malformed frame — skip rather than fail the whole stream.
                 # Providers occasionally send keepalives or partial frames.
@@ -127,21 +167,39 @@ async def _read_sse_response(
                             # model is still generating the HTML body).
                             # We AWAIT the callback directly (not fire-and-
                             # forget) so the Discord message edit happens
-                            # immediately — otherwise the callback wouldn't
-                            # run until after the stream finishes, by which
-                            # point the tool dispatch has already deleted the
-                            # progress message.
-                            if on_tool_call_name is not None:
-                                name_so_far = slot["function"]["name"]
-                                try:
-                                    await on_tool_call_name(name_so_far)
-                                except Exception:
-                                    pass
-                                on_tool_call_name = None
+                            # immediately. The callback may fire AGAIN below
+                            # with the model's reasoning once that field
+                            # finishes streaming — it is NOT one-shot.
+                            if on_tool_call_name is not None and not slot.get(
+                                "_name_sent"
+                            ):
+                                slot["_name_sent"] = True
+                                with contextlib.suppress(Exception):
+                                    await on_tool_call_name(
+                                        slot["function"]["name"], ""
+                                    )
                         if fn.get("arguments"):
                             slot["function"]["arguments"] = (
                                 slot["function"].get("arguments", "") + fn["arguments"]
                             )
+                            # Surface the model's reasoning mid-stream so the
+                            # progress message shows intent (not a static
+                            # "generating…") during long argument generation
+                            # (e.g. create_site's HTML body). Reasoning is
+                            # usually the first field emitted, so it completes
+                            # well before the big fields. Fires once per call.
+                            if on_tool_call_name is not None and not slot.get(
+                                "_reasoning_sent"
+                            ):
+                                reason = _extract_partial_reasoning(
+                                    slot["function"]["arguments"]
+                                )
+                                if reason:
+                                    slot["_reasoning_sent"] = True
+                                    with contextlib.suppress(Exception):
+                                        await on_tool_call_name(
+                                            slot["function"]["name"], reason
+                                        )
                 if choice.get("finish_reason"):
                     finish_reason = choice["finish_reason"]
             # Some providers stream usage in the final frame (Anthropic-style
@@ -164,7 +222,16 @@ async def _read_sse_response(
         raise RuntimeError("Provider stream produced no choices")
 
     # Sort tool calls by their index so the order matches the model's intent.
-    tool_calls_list = [tool_calls_by_index[k] for k in sorted(tool_calls_by_index)]
+    # Strip the internal callback-tracking flags ("_name_sent"/"_reasoning_sent")
+    # so they never leak into the tool_calls we hand back to the provider.
+    tool_calls_list = [
+        {
+            k: v
+            for k, v in tool_calls_by_index[idx].items()
+            if not str(k).startswith("_")
+        }
+        for idx in sorted(tool_calls_by_index)
+    ]
     message: dict = {"role": role or "assistant"}
     if content_parts:
         message["content"] = "".join(content_parts)
@@ -545,8 +612,12 @@ class OllamaProvider:
         tools = kwargs.get("tools")
         try:
             message = await self.generate_chat_completion(
-                messages, images=images, media=media, timeout=timeout,
-                on_tool_call_name=on_tool_call_name, **kwargs
+                messages,
+                images=images,
+                media=media,
+                timeout=timeout,
+                on_tool_call_name=on_tool_call_name,
+                **kwargs,
             )
         except RuntimeError as e:
             # Some endpoints reject tools/function calling with 400. Fall back to
@@ -637,10 +708,8 @@ class OllamaProvider:
             mime = str(m.get("mime_type", ""))
             if not m.get("b64"):
                 continue
-            if mime.startswith(("image/", "video/")):
-                payload_media.append(m)
-            elif mime.startswith("audio/") and getattr(
-                self, "enable_audio_input", False
+            if mime.startswith(("image/", "video/")) or (
+                mime.startswith("audio/") and getattr(self, "enable_audio_input", False)
             ):
                 payload_media.append(m)
 

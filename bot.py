@@ -6095,12 +6095,16 @@ class MaxwellBot(commands.Bot):
         # "working on it…" to "tool_name: generating…" so the user sees WHAT
         # the model is building while it's still generating the arguments
         # (e.g. the full HTML body for create_site).
-        async def _on_tool_call_name(tool_name: str):
-            logger.info(f"[PROGRESS] mid-stream callback fired: tool_name={tool_name!r} gen_progress={gen_progress}")
+        async def _on_tool_call_name(tool_name: str, reasoning: str = ""):
+            logger.info(
+                f"[PROGRESS] mid-stream callback fired: tool_name={tool_name!r} reasoning={reasoning!r} gen_progress={gen_progress}"
+            )
             if gen_progress is not None:
                 with contextlib.suppress(Exception):
-                    await gen_progress.update(tool_name, "generating…")
-                    logger.info(f"[PROGRESS] update() returned, last_content={gen_progress._last_content!r} posted={gen_progress.posted}")
+                    await gen_progress.update(tool_name, reasoning or "generating…")
+                    logger.info(
+                        f"[PROGRESS] update() returned, last_content={gen_progress._last_content!r} posted={gen_progress.posted}"
+                    )
             else:
                 logger.warning("[PROGRESS] callback fired but gen_progress is None!")
 
@@ -6256,13 +6260,17 @@ class MaxwellBot(commands.Bot):
                             await followup_progress.start()
 
                     async def _on_followup_tool_call_name(
-                        tool_name: str, _p=followup_progress
+                        tool_name: str, reasoning: str = "", _p=followup_progress
                     ):
-                        logger.info(f"[PROGRESS] followup mid-stream callback: tool_name={tool_name!r} progress={_p}")
+                        logger.info(
+                            f"[PROGRESS] followup mid-stream callback: tool_name={tool_name!r} reasoning={reasoning!r} progress={_p}"
+                        )
                         if _p is not None:
                             with contextlib.suppress(Exception):
-                                await _p.update(tool_name, "generating…")
-                                logger.info(f"[PROGRESS] followup update done, last_content={_p._last_content!r}")
+                                await _p.update(tool_name, reasoning or "generating…")
+                                logger.info(
+                                    f"[PROGRESS] followup update done, last_content={_p._last_content!r}"
+                                )
 
                     try:
                         followup = await self.ai_provider.generate_response(
@@ -6656,11 +6664,12 @@ class MaxwellBot(commands.Bot):
         async def run_one(call: dict) -> str:
             name = call["name"]
             params = dict(call.get("arguments") or {})
-            # Pull the reasoning out the SAME WAY _execute_tool_by_name will,
-            # so the snippet we show in the progress message matches what
-            # the trace will record. Don't pass it to the tool — it's a
-            # registry concern.
-            tool_reasoning, _ = extract_reasoning(params)
+            # Peek at the reasoning WITHOUT popping it. _execute_tool_by_name
+            # below pops it via extract_reasoning and records it to the trace —
+            # if we popped it here too, the trace would always read
+            # "(no reasoning provided by the model)" because the second pop
+            # finds nothing. We only need the value for the progress message.
+            tool_reasoning = str(params.get("reasoning", "") or "")
             if progress is not None:
                 import contextlib
 
