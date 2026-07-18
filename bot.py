@@ -6085,24 +6085,40 @@ class MaxwellBot(commands.Bot):
         # may spend 20+ seconds generating a full HTML document in the tool call
         # arguments, but the tool itself executes in milliseconds.
         gen_progress = None
+        _heartbeat_task = None
         if bool(self._control.get("progress_messages", False)):
             gen_progress = _make_tool_progress(message)
             with contextlib.suppress(Exception):
                 await gen_progress.start()
 
+            # Heartbeat: periodically update the progress message with elapsed
+            # time so the user sees the bot is still working during long LLM
+            # generations. The Ollama proxy buffers the SSE stream, so the
+            # mid-stream tool_name callback fires at the very end (useless).
+            # This heartbeat gives visible feedback throughout the generation.
+            _gen_start = time.monotonic()
+
+            async def _heartbeat():
+                await asyncio.sleep(5)  # grace before first heartbeat
+                while True:
+                    if gen_progress is None or gen_progress._stopped:
+                        return
+                    elapsed = int(time.monotonic() - _gen_start)
+                    with contextlib.suppress(Exception):
+                        await gen_progress.update("", f"thinking… ({elapsed}s)")
+                    await asyncio.sleep(10)
+
+            _heartbeat_task = asyncio.create_task(_heartbeat())
+
         # Callback fired by the SSE stream reader the moment a tool_call name
-        # arrives mid-generation. Updates the progress message from
-        # "working on it…" to "tool_name: generating…" so the user sees WHAT
-        # the model is building while it's still generating the arguments
-        # (e.g. the full HTML body for create_site).
+        # arrives mid-generation. With the Ollama proxy this fires at the very
+        # end (buffered stream), but with truly streaming providers it would
+        # fire mid-generation. Either way, it updates the progress message
+        # to show the tool name.
         async def _on_tool_call_name(tool_name: str):
-            logger.info(f"[PROGRESS] mid-stream callback fired: tool_name={tool_name!r} gen_progress={gen_progress}")
             if gen_progress is not None:
                 with contextlib.suppress(Exception):
                     await gen_progress.update(tool_name, "generating…")
-                    logger.info(f"[PROGRESS] update() returned, last_content={gen_progress._last_content!r} posted={gen_progress.posted}")
-            else:
-                logger.warning("[PROGRESS] callback fired but gen_progress is None!")
 
         try:
             platform = MaxwellBot._message_tool_platform(self, message)
@@ -6142,6 +6158,12 @@ class MaxwellBot(commands.Bot):
                     )
             finally:
                 await self._release_ai_slot()
+            # Cancel the heartbeat — generation is done
+            if _heartbeat_task is not None:
+                _heartbeat_task.cancel()
+                with contextlib.suppress(Exception):
+                    await _heartbeat_task
+                _heartbeat_task = None
             native_calls = self._native_calls_from(response)
             # If the model returned tool calls, hand the generation progress off
             # to the tool dispatch so the same Discord message transitions from
@@ -6258,11 +6280,9 @@ class MaxwellBot(commands.Bot):
                     async def _on_followup_tool_call_name(
                         tool_name: str, _p=followup_progress
                     ):
-                        logger.info(f"[PROGRESS] followup mid-stream callback: tool_name={tool_name!r} progress={_p}")
                         if _p is not None:
                             with contextlib.suppress(Exception):
                                 await _p.update(tool_name, "generating…")
-                                logger.info(f"[PROGRESS] followup update done, last_content={_p._last_content!r}")
 
                     try:
                         followup = await self.ai_provider.generate_response(
@@ -6383,6 +6403,12 @@ class MaxwellBot(commands.Bot):
                 except discord.Forbidden as _exc:
                     pass
         finally:
+            # Cancel heartbeat if still running
+            if _heartbeat_task is not None:
+                _heartbeat_task.cancel()
+                with contextlib.suppress(Exception):
+                    await _heartbeat_task
+                _heartbeat_task = None
             # Safety net: if gen_progress was never handed off to tool dispatch
             # (e.g. LLM error, empty response, or no tool calls), make sure it's
             # stopped so we don't leave an orphan "working on it…" message.
