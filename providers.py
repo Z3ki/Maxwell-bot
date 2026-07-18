@@ -11,9 +11,18 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 
-async def _read_sse_response(resp: aiohttp.ClientResponse) -> dict:
+async def _read_sse_response(
+    resp: aiohttp.ClientResponse,
+    on_tool_call_name=None,
+) -> dict:
     """Read an OpenAI-style SSE chat-completions stream and reassemble it into
     the same dict shape a non-streamed `await resp.json()` would return.
+
+    If ``on_tool_call_name`` is provided, it's called (fire-and-forget) the
+    first time a tool_call delta arrives with a function name. This lets the
+    caller update a live progress message mid-stream — e.g. show
+    "create_site: …" while the model is still generating the tool arguments
+    (the HTML body), instead of waiting for the entire response to finish.
 
     The OpenAI streaming protocol sends one JSON object per ``data:`` line, each
     with the same frame structure but only the *delta* of what changed since
@@ -112,6 +121,22 @@ async def _read_sse_response(resp: aiohttp.ClientResponse) -> dict:
                             slot["function"]["name"] = (
                                 slot["function"].get("name", "") + fn["name"]
                             )
+                            # Fire the callback the first time we see a tool
+                            # call name so the progress message can update
+                            # mid-stream (e.g. "create_site: …" while the
+                            # model is still generating the HTML body).
+                            if on_tool_call_name is not None:
+                                name_so_far = slot["function"]["name"]
+                                try:
+                                    if asyncio.iscoroutinefunction(on_tool_call_name):
+                                        asyncio.create_task(
+                                            on_tool_call_name(name_so_far)
+                                        )
+                                    else:
+                                        on_tool_call_name(name_so_far)
+                                except Exception:
+                                    pass
+                                on_tool_call_name = None
                         if fn.get("arguments"):
                             slot["function"]["arguments"] = (
                                 slot["function"].get("arguments", "") + fn["arguments"]
@@ -499,6 +524,7 @@ class OllamaProvider:
         images: list[str] = None,
         media: list[dict] = None,
         timeout: int = 3600,
+        on_tool_call_name=None,
         **kwargs,
     ) -> str:
         """Generate response. images is legacy b64 list, media is list of {b64, mime_type}.
@@ -508,11 +534,18 @@ class OllamaProvider:
         format) and ``self._last_assistant_message`` for the orchestration loop.
         Callers that pass ``tools=`` must check ``_last_tool_calls`` before treating
         empty content as a failure.
+
+        If ``on_tool_call_name`` is provided, it's forwarded to the streaming
+        layer so the caller gets a callback the moment a tool call name arrives
+        mid-stream — useful for updating a live progress message during long
+        generations (e.g. create_site where the model spends 20+ seconds
+        generating HTML in the tool arguments).
         """
         tools = kwargs.get("tools")
         try:
             message = await self.generate_chat_completion(
-                messages, images=images, media=media, timeout=timeout, **kwargs
+                messages, images=images, media=media, timeout=timeout,
+                on_tool_call_name=on_tool_call_name, **kwargs
             )
         except RuntimeError as e:
             # Some endpoints reject tools/function calling with 400. Fall back to
@@ -578,8 +611,14 @@ class OllamaProvider:
         temperature: float = None,
         disable_reasoning: bool = None,
         fast_fallback: bool = False,
+        on_tool_call_name=None,
     ) -> dict:
-        """Generate an OpenAI-compatible assistant message, optionally with tools."""
+        """Generate an OpenAI-compatible assistant message, optionally with tools.
+
+        If ``on_tool_call_name`` is provided, it's called (fire-and-forget) the
+        first time a tool_call delta with a function name arrives in the SSE
+        stream. This lets callers update a live progress message mid-generation.
+        """
         if not self.available:
             raise RuntimeError("Provider not available")
 
@@ -923,7 +962,9 @@ class OllamaProvider:
 
                     json_ms = 0.0
                     if data.get("stream"):
-                        merged = await _read_sse_response(resp)
+                        merged = await _read_sse_response(
+                            resp, on_tool_call_name=on_tool_call_name
+                        )
                         result = {
                             k: v for k, v in merged.items() if not k.startswith("__")
                         }

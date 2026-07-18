@@ -6090,6 +6090,16 @@ class MaxwellBot(commands.Bot):
             with contextlib.suppress(Exception):
                 await gen_progress.start()
 
+        # Callback fired by the SSE stream reader the moment a tool_call name
+        # arrives mid-generation. Updates the progress message from
+        # "working on it…" to "tool_name: generating…" so the user sees WHAT
+        # the model is building while it's still generating the arguments
+        # (e.g. the full HTML body for create_site).
+        async def _on_tool_call_name(tool_name: str):
+            if gen_progress is not None:
+                with contextlib.suppress(Exception):
+                    await gen_progress.update(tool_name, "generating…")
+
         try:
             platform = MaxwellBot._message_tool_platform(self, message)
             openai_tools = self._build_openai_tools(platform)
@@ -6106,6 +6116,7 @@ class MaxwellBot(commands.Bot):
                                 timeout=ai_timeout,
                                 max_tokens=max_out_tokens,
                                 tools=openai_tools or None,
+                                on_tool_call_name=_on_tool_call_name,
                             )
                     except (discord.HTTPException, ConnectionError, OSError) as _exc:
                         response = await self.ai_provider.generate_response(
@@ -6114,6 +6125,7 @@ class MaxwellBot(commands.Bot):
                             timeout=ai_timeout,
                             max_tokens=max_out_tokens,
                             tools=openai_tools or None,
+                            on_tool_call_name=_on_tool_call_name,
                         )
                 else:
                     response = await self.ai_provider.generate_response(
@@ -6122,6 +6134,7 @@ class MaxwellBot(commands.Bot):
                         timeout=ai_timeout,
                         max_tokens=max_out_tokens,
                         tools=openai_tools or None,
+                        on_tool_call_name=_on_tool_call_name,
                     )
             finally:
                 await self._release_ai_slot()
@@ -6225,18 +6238,57 @@ class MaxwellBot(commands.Bot):
                 try:
                     # Attach images from tools so the model can SEE them
                     followup_images = all_tool_images if all_tool_images else []
-                    followup = await self.ai_provider.generate_response(
-                        result_messages,
-                        images=followup_images,
-                        media=[],
-                        timeout=ai_timeout,
-                        max_tokens=max_out_tokens,
-                        tools=openai_tools or None,
-                    )
+                    # Post a progress message during the followup LLM generation
+                    # too — without this, the user sees the progress message
+                    # get deleted (by the previous tool dispatch) and then nothing
+                    # while the model generates its next response. This is
+                    # especially visible when the followup itself takes a long
+                    # time (e.g. generating a send_message with a long reply, or
+                    # deciding to call create_site again with new HTML).
+                    followup_progress = None
+                    if bool(self._control.get("progress_messages", False)):
+                        followup_progress = _make_tool_progress(message)
+                        with contextlib.suppress(Exception):
+                            await followup_progress.start()
+
+                    async def _on_followup_tool_call_name(
+                        tool_name: str, _p=followup_progress
+                    ):
+                        if _p is not None:
+                            with contextlib.suppress(Exception):
+                                await _p.update(tool_name, "generating…")
+
+                    try:
+                        followup = await self.ai_provider.generate_response(
+                            result_messages,
+                            images=followup_images,
+                            media=[],
+                            timeout=ai_timeout,
+                            max_tokens=max_out_tokens,
+                            tools=openai_tools or None,
+                            on_tool_call_name=_on_followup_tool_call_name,
+                        )
+                    except Exception:
+                        # Ensure followup progress is cleaned up on error
+                        if followup_progress is not None:
+                            with contextlib.suppress(Exception):
+                                await followup_progress.stop()
+                            followup_progress = None
+                        raise
                     usage = self._usage_from(followup)
                     if usage:
                         self._token_tracker.record(usage)
                     pending_native = self._native_calls_from(followup)
+                    # Hand off the followup progress to the next dispatch iteration
+                    # so the same message transitions to the tool name/reasoning.
+                    # If no tool calls, stop it before the reply is sent.
+                    if followup_progress is not None:
+                        if pending_native:
+                            first_dispatch_progress = followup_progress
+                        else:
+                            with contextlib.suppress(Exception):
+                                await followup_progress.stop()
+                            followup_progress = None
                     if (followup and str(followup).strip()) or pending_native:
                         response = followup or ""
                     else:
@@ -6590,9 +6642,9 @@ class MaxwellBot(commands.Bot):
         if existing_progress is not None:
             progress = existing_progress
         else:
-            progress_enabled = bool(self._control.get("progress_messages", False)) and bool(
-                non_terminal
-            )
+            progress_enabled = bool(
+                self._control.get("progress_messages", False)
+            ) and bool(non_terminal)
             progress = _make_tool_progress(message) if progress_enabled else None
 
         async def run_one(call: dict) -> str:
