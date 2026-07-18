@@ -2841,7 +2841,11 @@ class ShellTool(Tool):
         echo so the actual error/output — the useful part — always fits.
         """
         max_echo = 600
-        echo = command if len(command) <= max_echo else command[:max_echo] + " …(truncated)"
+        echo = (
+            command
+            if len(command) <= max_echo
+            else command[:max_echo] + " …(truncated)"
+        )
         parts = [f"$ {echo}"]
         parts.extend(s for s in suffixes if s)
         return "\n".join(parts)
@@ -2989,7 +2993,13 @@ class ShellTool(Tool):
         artifact without another docker cp — the round-trip is one-shot.
         """
         # Sanitize — no path traversal escapes from /home/maxwell
-        clean = rel_path.lstrip("/")
+        clean = rel_path.strip().lstrip("/")
+        # The model usually passes a full container path like
+        # /home/maxwell/img/foo.png (the system prompt tells it to). lstrip
+        # only killed the leading slash, so strip the home/maxwell prefix
+        # too — otherwise we re-prepend it and docker cp looks for
+        # /home/maxwell/home/maxwell/img/foo.png (which is the bug we're fixing).
+        clean = re.sub(r"^home/maxwell/?", "", clean)
         if ".." in clean:
             logger.warning(f"Shell file send blocked — path traversal: {rel_path}")
             return None
