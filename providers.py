@@ -18,9 +18,9 @@ async def _read_sse_response(
     """Read an OpenAI-style SSE chat-completions stream and reassemble it into
     the same dict shape a non-streamed `await resp.json()` would return.
 
-    If ``on_tool_call_name`` is provided, it's called (fire-and-forget) the
-    first time a tool_call delta arrives with a function name. This lets the
-    caller update a live progress message mid-stream — e.g. show
+    If ``on_tool_call_name`` is provided, it's awaited the first time a
+    tool_call delta arrives with a function name. This lets the caller
+    update a live progress message mid-stream — e.g. show
     "create_site: …" while the model is still generating the tool arguments
     (the HTML body), instead of waiting for the entire response to finish.
 
@@ -125,15 +125,16 @@ async def _read_sse_response(
                             # call name so the progress message can update
                             # mid-stream (e.g. "create_site: …" while the
                             # model is still generating the HTML body).
+                            # We AWAIT the callback directly (not fire-and-
+                            # forget) so the Discord message edit happens
+                            # immediately — otherwise the callback wouldn't
+                            # run until after the stream finishes, by which
+                            # point the tool dispatch has already deleted the
+                            # progress message.
                             if on_tool_call_name is not None:
                                 name_so_far = slot["function"]["name"]
                                 try:
-                                    if asyncio.iscoroutinefunction(on_tool_call_name):
-                                        asyncio.create_task(
-                                            on_tool_call_name(name_so_far)
-                                        )
-                                    else:
-                                        on_tool_call_name(name_so_far)
+                                    await on_tool_call_name(name_so_far)
                                 except Exception:
                                     pass
                                 on_tool_call_name = None
