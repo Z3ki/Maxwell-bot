@@ -1774,7 +1774,9 @@ class CreateSiteTool(Tool):
                 # rejected virtually every real image source (the feature was
                 # silently non-functional).
                 send_tool = self.bot.tools.get("send_file") if self.bot else None
-                if send_tool is not None and hasattr(send_tool, "_allowed_send_file_bases"):
+                if send_tool is not None and hasattr(
+                    send_tool, "_allowed_send_file_bases"
+                ):
                     allowed_bases = send_tool._allowed_send_file_bases()
                 else:
                     allowed_bases = [self.base_dir]
@@ -1798,9 +1800,13 @@ class CreateSiteTool(Tool):
                         filename = "image"
                     dest = os.path.join(img_dir, filename)
                     # Final guard: ensure dest stays inside img_dir.
-                    if os.path.commonpath([os.path.abspath(dest), os.path.abspath(img_dir)]) != os.path.abspath(img_dir):
+                    if os.path.commonpath(
+                        [os.path.abspath(dest), os.path.abspath(img_dir)]
+                    ) != os.path.abspath(img_dir):
                         missing_images.append(src_path)
-                        logger.warning(f"Site image filename escapes images dir: {filename}")
+                        logger.warning(
+                            f"Site image filename escapes images dir: {filename}"
+                        )
                         continue
                     try:
                         shutil.copy2(src_path, dest)
@@ -1964,9 +1970,7 @@ class CreateSiteTool(Tool):
                 if path.exists():
                     data = json.loads(path.read_text(encoding="utf-8"))
                     if isinstance(data, dict):
-                        sites = {
-                            k: v for k, v in data.items() if isinstance(v, dict)
-                        }
+                        sites = {k: v for k, v in data.items() if isinstance(v, dict)}
             except (json.JSONDecodeError, OSError, ValueError) as e:
                 logger.warning(f"Corrupt sites.json on commit, starting fresh: {e}")
                 sites = {}
@@ -1979,9 +1983,10 @@ class CreateSiteTool(Tool):
             # Re-check quota under the lock.
             active = [s for s in sites.values() if s.get("user_id") == user_id]
             # If this slug is already ours (overwrite), it doesn't count as new.
-            already_ours = isinstance(existing, dict) and str(
-                existing.get("user_id") or ""
-            ) == user_id
+            already_ours = (
+                isinstance(existing, dict)
+                and str(existing.get("user_id") or "") == user_id
+            )
             if not already_ours and len(active) >= max_sites:
                 return False
             sites[slug] = entry
@@ -1997,6 +2002,7 @@ class CreateSiteTool(Tool):
     async def _save_sites(self):
         try:
             path = Path(self.bot.config.DATA_DIR) / "sites.json"
+
             # Cross-process lock so the API's site_update/site_delete and this
             # write can't interleave and lose an entry.
             def _locked_write():
@@ -2396,9 +2402,7 @@ class SendFileTool(Tool):
 
         # Confirm the container is running.
         try:
-            shell_tool = (
-                self.bot.tools.get("shell") if self.bot else None
-            )
+            shell_tool = self.bot.tools.get("shell") if self.bot else None
             container_name = (
                 getattr(shell_tool, "CONTAINER_NAME", "maxwell-shell")
                 if shell_tool
@@ -2419,9 +2423,7 @@ class SendFileTool(Tool):
                 stderr=asyncio.subprocess.PIPE,
             )
             try:
-                _stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=15
-                )
+                _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
@@ -2474,9 +2476,7 @@ def _shell_exports_dir() -> str:
     override = os.environ.get("MAXWELL_SHELL_EXPORT_DIR", "").strip()
     if override:
         return os.path.abspath(override)
-    return os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "data", "exports")
-    )
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "data", "exports"))
 
 
 _SHELL_BLOCKED_PATTERNS = [
@@ -2776,7 +2776,9 @@ class ShellTool(Tool):
         # heredoc blocks; the rest of the command must stay single-line.
         non_heredoc = _strip_heredoc_blocks(command)
         if "\n" in non_heredoc or "\r" in non_heredoc:
-            return "newlines are not allowed outside of heredoc blocks (<< 'EOF' ... EOF)"
+            return (
+                "newlines are not allowed outside of heredoc blocks (<< 'EOF' ... EOF)"
+            )
         if any(ord(c) < 32 and c not in ("\t",) for c in non_heredoc):
             return "control characters are not allowed in shell commands"
         for pattern in _SHELL_BLOCKED_PATTERNS:
@@ -3860,9 +3862,7 @@ class TtsTool(Tool):
                     tts.save(filename)
 
                 loop = asyncio.get_running_loop()
-                await asyncio.wait_for(
-                    loop.run_in_executor(None, run_gtts), timeout=30
-                )
+                await asyncio.wait_for(loop.run_in_executor(None, run_gtts), timeout=30)
                 logger.warning(
                     "TTS used gTTS fallback; voice selection/emotion is unavailable in fallback audio"
                 )

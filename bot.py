@@ -765,6 +765,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset(
     }
 )
 
+
 def _find_xml_tag_end(text: str, start: int) -> int:
     quote_char = ""
     escaped = False
@@ -1039,9 +1040,7 @@ def strip_tool_payload_leaks(text: str) -> str:
     original = cleaned
     ranges = [
         (start, end)
-        for start, end, *_rest in _iter_top_level_tool_tags(
-            cleaned, KNOWN_TOOL_NAMES
-        )
+        for start, end, *_rest in _iter_top_level_tool_tags(cleaned, KNOWN_TOOL_NAMES)
     ]
     for start, end in reversed(ranges):
         cleaned = cleaned[:start] + cleaned[end:]
@@ -2792,9 +2791,7 @@ class MaxwellBot(commands.Bot):
                     self._is_admin(author_id) or author_id in self._shell_whitelist
                 ):
                     return
-                self._destructive_confirm[author_id] = (
-                    asyncio.get_running_loop().time()
-                )
+                self._destructive_confirm[author_id] = asyncio.get_running_loop().time()
                 await message.channel.send(
                     f"Confirmed for {_CONFIRM_TTL_SECONDS:.0f}s. The next destructive "
                     f"tool call (shell/sub_agent) on a tainted turn by you will run; "
@@ -3895,7 +3892,10 @@ class MaxwellBot(commands.Bot):
             # (every later call saw _rem_running=True).
             with contextlib.suppress(Exception):
                 await self.rem_store.patch_state(
-                    {"running": True, "running_since": datetime.now(timezone.utc).isoformat()}
+                    {
+                        "running": True,
+                        "running_since": datetime.now(timezone.utc).isoformat(),
+                    }
                 )
             timeout = max(
                 10,
@@ -4063,10 +4063,13 @@ class MaxwellBot(commands.Bot):
                 for k, v in drives.items()
                 if _drive_val(v) is not None
             ]
-            drives_line = ", ".join(
-                f"{k} {v:.2f}"
-                for k, v in sorted(drive_items, key=lambda kv: kv[1], reverse=True)
-            ) or "(not yet computed)"
+            drives_line = (
+                ", ".join(
+                    f"{k} {v:.2f}"
+                    for k, v in sorted(drive_items, key=lambda kv: kv[1], reverse=True)
+                )
+                or "(not yet computed)"
+            )
             last_reflect = state.get("last_reflect_at") or "never"
             await message.channel.send(
                 "Autonomy status\n"
@@ -5089,6 +5092,7 @@ class MaxwellBot(commands.Bot):
             for slug in expired:
                 self._sites.pop(slug, None)
             sites_path = Path(self.config.DATA_DIR) / "sites.json"
+
             # Cross-process lock so cleanup's removal can't lose a concurrent
             # create_site/API site_update commit (and vice versa).
             def _locked_cleanup_write():
@@ -5101,9 +5105,7 @@ class MaxwellBot(commands.Bot):
                             data = json.loads(sites_path.read_text(encoding="utf-8"))
                             if isinstance(data, dict):
                                 fresh = {
-                                    k: v
-                                    for k, v in data.items()
-                                    if isinstance(v, dict)
+                                    k: v for k, v in data.items() if isinstance(v, dict)
                                 }
                     except (json.JSONDecodeError, OSError, ValueError):
                         fresh = dict(self._sites)
@@ -6073,6 +6075,21 @@ class MaxwellBot(commands.Bot):
             self._active_requests[channel_id] = current_task
             self._active_request_user[channel_id] = str(message.author.id)
 
+        # Post a progress message BEFORE the LLM generation starts so the user
+        # sees liveness during the (potentially long) generation phase. Without
+        # this, the only feedback during generation is the typing indicator, and
+        # the tool-progress message only appears AFTER generation finishes —
+        # for fast-executing tools like create_site (which just writes a file)
+        # the progress message flashes by in under a second and the user never
+        # sees it.  This is especially critical for create_site where the model
+        # may spend 20+ seconds generating a full HTML document in the tool call
+        # arguments, but the tool itself executes in milliseconds.
+        gen_progress = None
+        if bool(self._control.get("progress_messages", False)):
+            gen_progress = _make_tool_progress(message)
+            with contextlib.suppress(Exception):
+                await gen_progress.start()
+
         try:
             platform = MaxwellBot._message_tool_platform(self, message)
             openai_tools = self._build_openai_tools(platform)
@@ -6109,6 +6126,16 @@ class MaxwellBot(commands.Bot):
             finally:
                 await self._release_ai_slot()
             native_calls = self._native_calls_from(response)
+            # If the model returned tool calls, hand the generation progress off
+            # to the tool dispatch so the same Discord message transitions from
+            # "working on it…" to "tool_name: reasoning" and gets deleted when
+            # tools finish.  If no tool calls (plain text reply), stop the
+            # progress now so it disappears before the reply is sent.
+            first_dispatch_progress = gen_progress if native_calls else None
+            if gen_progress is not None and not native_calls:
+                with contextlib.suppress(Exception):
+                    await gen_progress.stop()
+                gen_progress = None
             # Track token usage from provider
             usage = self._usage_from(response)
             if usage:
@@ -6149,7 +6176,9 @@ class MaxwellBot(commands.Bot):
                     response,
                     native_tool_calls=pending_native or None,
                     include_images=True,
+                    existing_progress=first_dispatch_progress,
                 )
+                first_dispatch_progress = None
                 pending_native = None
                 native_followup = list(
                     getattr(self, "_last_native_followup_messages", None) or []
@@ -6296,6 +6325,13 @@ class MaxwellBot(commands.Bot):
                 except discord.Forbidden as _exc:
                     pass
         finally:
+            # Safety net: if gen_progress was never handed off to tool dispatch
+            # (e.g. LLM error, empty response, or no tool calls), make sure it's
+            # stopped so we don't leave an orphan "working on it…" message.
+            if gen_progress is not None:
+                with contextlib.suppress(Exception):
+                    await gen_progress.stop()
+                gen_progress = None
             if self._active_requests.get(channel_id) is current_task:
                 self._active_requests.pop(channel_id, None)
                 self._active_request_user.pop(channel_id, None)
@@ -6393,7 +6429,9 @@ class MaxwellBot(commands.Bot):
                 # above. This is the single enforcement point instead of per-tool
                 # checks that previously read the model-controlled flag.
                 tool = self.tools[name]
-                if getattr(tool, "is_destructive", False) and self.is_message_tainted(message):
+                if getattr(tool, "is_destructive", False) and self.is_message_tainted(
+                    message
+                ):
                     author_id = str(getattr(message.author, "id", "") or "")
                     if not self._consume_destructive_confirm(author_id):
                         result_text = (
@@ -6422,8 +6460,12 @@ class MaxwellBot(commands.Bot):
         # Record the reasoning the model gave for THIS tool call, attached to the
         # real action and its result. Swallowed failures (see record_reasoning).
         await record_reasoning(
-            self, message, tool_name=name, reasoning=reasoning,
-            params=params, result=result_text,
+            self,
+            message,
+            tool_name=name,
+            reasoning=reasoning,
+            params=params,
+            result=result_text,
         )
         return f"Tool {name}: {result_text}"
 
@@ -6487,6 +6529,7 @@ class MaxwellBot(commands.Bot):
         response: str,
         raw_tool_calls: list,
         include_images: bool = False,
+        existing_progress=None,
     ) -> tuple[str, list[str]] | tuple[str, list[str], list[str]]:
         """Execute OpenAI-style native tool_calls from the provider."""
         tool_results: list[str] = []
@@ -6540,10 +6583,17 @@ class MaxwellBot(commands.Bot):
         # only the tool's real output and the final send_message reply.
         # Disabled by control flag (default off) so operators opt in.
         # See tool_progress.py for the full design.
-        progress_enabled = bool(
-            self._control.get("progress_messages", False)
-        ) and bool(non_terminal)
-        progress = _make_tool_progress(message) if progress_enabled else None
+        # If the caller already created+started a progress message (e.g. during
+        # the LLM generation phase in _handle_message), reuse it so the same
+        # Discord message transitions smoothly from "working on it…" to
+        # "tool_name: reasoning" instead of being deleted and re-posted.
+        if existing_progress is not None:
+            progress = existing_progress
+        else:
+            progress_enabled = bool(self._control.get("progress_messages", False)) and bool(
+                non_terminal
+            )
+            progress = _make_tool_progress(message) if progress_enabled else None
 
         async def run_one(call: dict) -> str:
             name = call["name"]
@@ -6567,7 +6617,12 @@ class MaxwellBot(commands.Bot):
             self._current_progress = progress
             try:
                 line = await MaxwellBot._execute_tool_by_name(
-                    self, message, name, params, disabled=disabled, compatible=compatible
+                    self,
+                    message,
+                    name,
+                    params,
+                    disabled=disabled,
+                    compatible=compatible,
                 )
             finally:
                 self._current_progress = prev_progress
@@ -6637,7 +6692,9 @@ class MaxwellBot(commands.Bot):
         # liveness before any tool begins. stop() in finally guarantees
         # the message disappears whether the batch succeeds, raises, or
         # is cancelled — no orphan "working on it…" lines.
-        if progress is not None:
+        # Skip start() if we're reusing an existing progress that's already
+        # been posted (from the generation phase).
+        if progress is not None and existing_progress is None:
             with contextlib.suppress(Exception):
                 await progress.start()
         try:
@@ -6695,11 +6752,17 @@ class MaxwellBot(commands.Bot):
         *,
         native_tool_calls: list | None = None,
         include_images: bool = False,
+        existing_progress=None,
     ) -> tuple[str, list[str]] | tuple[str, list[str], list[str]]:
         """Native tool_calls only. The XML text-tag dispatch is gone — Maxwell
         is native function-calling only now. If the model didn't emit native
         tool_calls, there's nothing to run; we just sanitize the text response
         (e.g. a plain chat reply the model wrote directly) and return it.
+
+        If ``existing_progress`` is provided (a ToolProgress already started
+        during the LLM generation phase), it's forwarded to the tool processor
+        so the same Discord message transitions from "working on it…" to the
+        tool's name/reasoning instead of being deleted and re-posted.
 
         Defensive sanitization via strip_tool_payload_leaks still runs so any
         stray <tool:...> tags a poorly-behaved model leaks into visible text
@@ -6713,6 +6776,7 @@ class MaxwellBot(commands.Bot):
                 response,
                 native_tool_calls,
                 include_images=include_images,
+                existing_progress=existing_progress,
             )
         cleaned = strip_tool_payload_leaks(response or "")
         return (cleaned, [], []) if include_images else (cleaned, [])
@@ -6749,7 +6813,6 @@ class MaxwellBot(commands.Bot):
         if usage:
             return dict(usage)
         return getattr(self.ai_provider, "_last_usage", None) or {}
-
 
     def mark_message_tainted(self, message) -> None:
         """Mark a message as having read untrusted content in the current turn.
@@ -8448,9 +8511,7 @@ async def main():
                 if not t.done():
                     t.cancel()
             with contextlib.suppress(Exception):
-                await asyncio.gather(
-                    *_iter_tasks(task_dict), return_exceptions=True
-                )
+                await asyncio.gather(*_iter_tasks(task_dict), return_exceptions=True)
             task_dict.clear()
 
         # Cleanup VC sinks

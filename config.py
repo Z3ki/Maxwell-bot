@@ -11,7 +11,9 @@ ENV_FILE = Path(os.getenv("MAXWELL_ENV_FILE", APP_ROOT / ".env"))
 load_dotenv(ENV_FILE, override=False)
 
 
-def _int_env(name: str, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
+def _int_env(
+    name: str, default: int, min_value: int | None = None, max_value: int | None = None
+) -> int:
     try:
         value = int(os.getenv(name, str(default)))
     except (TypeError, ValueError):
@@ -23,7 +25,12 @@ def _int_env(name: str, default: int, min_value: int | None = None, max_value: i
     return value
 
 
-def _float_env(name: str, default: float, min_value: float | None = None, max_value: float | None = None) -> float:
+def _float_env(
+    name: str,
+    default: float,
+    min_value: float | None = None,
+    max_value: float | None = None,
+) -> float:
     try:
         value = float(os.getenv(name, str(default)))
     except (TypeError, ValueError):
@@ -46,7 +53,9 @@ class Config:
     DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
     TELEGRAM_WEBHOOK_URL = os.getenv("TELEGRAM_WEBHOOK_URL", "").strip()
-    TELEGRAM_WEBHOOK_PORT = _int_env("TELEGRAM_WEBHOOK_PORT", 8443, min_value=1024, max_value=65535)
+    TELEGRAM_WEBHOOK_PORT = _int_env(
+        "TELEGRAM_WEBHOOK_PORT", 8443, min_value=1024, max_value=65535
+    )
 
     OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", os.getenv("OPENAI_COMPAT_API_KEY", ""))
@@ -54,21 +63,29 @@ class Config:
     OLLAMA_REM_MODEL = os.getenv("OLLAMA_REM_MODEL") or OLLAMA_MODEL
     # max_tokens = max *output* tokens per completion (not context window).
     # minimax-m3 allows huge context but caps output ~131072; 8192 is a sane default.
-    OLLAMA_MAX_TOKENS = _int_env("OLLAMA_MAX_TOKENS", 8192, min_value=1, max_value=131072)
+    OLLAMA_MAX_TOKENS = _int_env(
+        "OLLAMA_MAX_TOKENS", 8192, min_value=1, max_value=131072
+    )
     OLLAMA_TEMPERATURE = _float_env("OLLAMA_TEMPERATURE", 1.0, min_value=0.0)
     OLLAMA_DISABLE_REASONING = _bool_env("OLLAMA_DISABLE_REASONING", True)
     OLLAMA_FALLBACK_BASE_URL = os.getenv("OLLAMA_FALLBACK_BASE_URL", "").strip()
     OLLAMA_FALLBACK_API_KEY = os.getenv("OLLAMA_FALLBACK_API_KEY", "").strip()
     OLLAMA_FALLBACK_MODEL = os.getenv("OLLAMA_FALLBACK_MODEL", "").strip()
-    OLLAMA_FALLBACK_DISABLE_REASONING = _bool_env("OLLAMA_FALLBACK_DISABLE_REASONING", True)
-    OLLAMA_RETRY_ATTEMPTS = _int_env("OLLAMA_RETRY_ATTEMPTS", 3, min_value=1, max_value=10)
+    OLLAMA_FALLBACK_DISABLE_REASONING = _bool_env(
+        "OLLAMA_FALLBACK_DISABLE_REASONING", True
+    )
+    OLLAMA_RETRY_ATTEMPTS = _int_env(
+        "OLLAMA_RETRY_ATTEMPTS", 3, min_value=1, max_value=10
+    )
 
     # Toggle for "omni" (audio+vision capable) model input.
     # Default is now OFF. Set to true in .env to allow audio input for models that support it.
     ENABLE_AUDIO_INPUT = _bool_env("ENABLE_AUDIO_INPUT", False)
 
     AUTONOMY_BASE_URL = os.getenv("AUTONOMY_BASE_URL", "").strip()
-    AUTONOMY_API_KEY = os.getenv("AUTONOMY_API_KEY", os.getenv("OPENAI_COMPAT_API_KEY", "")).strip()
+    AUTONOMY_API_KEY = os.getenv(
+        "AUTONOMY_API_KEY", os.getenv("OPENAI_COMPAT_API_KEY", "")
+    ).strip()
     AUTONOMY_MODEL = os.getenv("AUTONOMY_MODEL", "").strip()
     AUTONOMY_DISABLE_REASONING = _bool_env("AUTONOMY_DISABLE_REASONING", False)
 
@@ -96,7 +113,9 @@ class Config:
     REM_ENABLED = _bool_env("REM_ENABLED", False)
     REM_INTERVAL_SECONDS = _int_env("REM_INTERVAL_SECONDS", 600, min_value=10)
     REM_MAX_TURNS = _int_env("REM_MAX_TURNS", 3, min_value=0, max_value=10)
-    REM_EVENT_BUFFER_MAX = _int_env("REM_EVENT_BUFFER_MAX", 500, min_value=1, max_value=10000)
+    REM_EVENT_BUFFER_MAX = _int_env(
+        "REM_EVENT_BUFFER_MAX", 500, min_value=1, max_value=10000
+    )
     REM_RUN_HISTORY = _int_env("REM_RUN_HISTORY", 50, min_value=1, max_value=1000)
 
     DATA_DIR = os.getenv("DATA_DIR", "data")
@@ -104,10 +123,14 @@ class Config:
     LOG_LEVEL = os.getenv("LOG_LEVEL", "info")
 
     MAXWELL_SITE_DIR = os.getenv("MAXWELL_SITE_DIR", "public/bot")
-    MAXWELL_PUBLIC_BASE_URL = os.getenv("MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com")
+    MAXWELL_PUBLIC_BASE_URL = os.getenv(
+        "MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com"
+    )
     MAXWELL_API_HOST = os.getenv("MAXWELL_API_HOST", "127.0.0.1")
     MAXWELL_API_PORT = _int_env("MAXWELL_API_PORT", 8765, min_value=1, max_value=65535)
-    MAXWELL_CORS_ORIGIN = os.getenv("MAXWELL_CORS_ORIGIN", MAXWELL_PUBLIC_BASE_URL.rstrip("/"))
+    MAXWELL_CORS_ORIGIN = os.getenv(
+        "MAXWELL_CORS_ORIGIN", MAXWELL_PUBLIC_BASE_URL.rstrip("/")
+    )
 
     @classmethod
     def validate(cls):
