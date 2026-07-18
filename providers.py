@@ -10,6 +10,153 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
+
+async def _read_sse_response(resp: aiohttp.ClientResponse) -> dict:
+    """Read an OpenAI-style SSE chat-completions stream and reassemble it into
+    the same dict shape a non-streamed `await resp.json()` would return.
+
+    The OpenAI streaming protocol sends one JSON object per ``data:`` line, each
+    with the same frame structure but only the *delta* of what changed since
+    the previous frame:
+
+        data: {"choices": [{"delta": {"role": "assistant"}, "index": 0}]}
+        data: {"choices": [{"delta": {"content": "hello"}, "index": 0}]}
+        data: {"choices": [{"delta": {"content": " world"}, "index": 0}]}
+        data: {"choices": [{"delta": {"tool_calls": [...]}, "index": 0}]}
+        data: {"choices": [{"finish_reason": "stop", "index": 0}]}
+        data: [DONE]
+
+    We accumulate content strings, tool_calls (pinned by ``index``), and any
+    usage payload that streams in at the end, then return a dict that matches
+    the non-streamed response shape so the rest of the request handler does
+    not need to care which mode produced the response.
+
+    Returns the merged dict, plus (via a sentinel) the time the first content
+    delta was received — encoded as ``__first_token_ms__`` in the returned
+    dict and popped by the caller.
+
+    Raises RuntimeError if the stream is malformed (no choices ever arrive) so
+    the upstream retry logic can take over.
+    """
+    merged: dict = {"choices": [{}]}
+    tool_calls_by_index: dict[int, dict] = {}
+    content_parts: list[str] = []
+    role: str | None = None
+    finish_reason: str | None = None
+    reasoning_parts: list[str] = []
+    first_token_s: float | None = None
+    done = False
+
+    buf = b""
+    async for raw_chunk in resp.content.iter_any():
+        if done:
+            break
+        buf += raw_chunk
+        while b"\n" in buf and not done:
+            line, buf = buf.split(b"\n", 1)
+            line = line.strip()
+            if not line:
+                continue
+            # SSE comments / non-data lines start with ":" — ignore.
+            if not line.startswith(b"data:"):
+                continue
+            payload = line[5:].lstrip()
+            if payload == b"[DONE]":
+                done = True
+                break
+            if not payload:
+                continue
+            try:
+                obj = __import__("json").loads(payload)
+            except ValueError:
+                # Malformed frame — skip rather than fail the whole stream.
+                # Providers occasionally send keepalives or partial frames.
+                continue
+            if first_token_s is None:
+                first_token_s = time.perf_counter()
+            for choice in obj.get("choices", []) or []:
+                idx = choice.get("index", 0)
+                # Ensure the choices slot for this index exists.
+                while len(merged["choices"]) <= idx:
+                    merged["choices"].append({})
+                delta = choice.get("delta") or {}
+                if delta.get("role"):
+                    role = delta["role"]
+                if "content" in delta and delta["content"] is not None:
+                    content_parts.append(delta["content"])
+                # Reasoning deltas: OpenAI/DeepSeek-style models use
+                # `reasoning_content`; Ollama cloud's minimax-m3 emits a
+                # `reasoning` field on the same delta. Treat both the same
+                # way so the bot's existing reasoning handler picks them up.
+                for rkey in ("reasoning_content", "reasoning"):
+                    rval = delta.get(rkey)
+                    if rval is not None:
+                        reasoning_parts.append(rval)
+                if "tool_calls" in delta and delta["tool_calls"]:
+                    for tc_delta in delta["tool_calls"]:
+                        tc_idx = tc_delta.get("index", 0)
+                        slot = tool_calls_by_index.get(tc_idx)
+                        if slot is None:
+                            slot = {
+                                "id": tc_delta.get("id"),
+                                "type": tc_delta.get("type", "function"),
+                                "function": {"name": "", "arguments": ""},
+                            }
+                            tool_calls_by_index[tc_idx] = slot
+                        if tc_delta.get("id"):
+                            slot["id"] = tc_delta["id"]
+                        if tc_delta.get("type"):
+                            slot["type"] = tc_delta["type"]
+                        fn = tc_delta.get("function") or {}
+                        if fn.get("name"):
+                            slot["function"]["name"] = (
+                                slot["function"].get("name", "") + fn["name"]
+                            )
+                        if fn.get("arguments"):
+                            slot["function"]["arguments"] = (
+                                slot["function"].get("arguments", "") + fn["arguments"]
+                            )
+                if choice.get("finish_reason"):
+                    finish_reason = choice["finish_reason"]
+            # Some providers stream usage in the final frame (Anthropic-style
+            # models on OpenRouter do this; OpenAI does it when
+            # stream_options.include_usage=true).
+            if obj.get("usage"):
+                merged["usage"] = obj["usage"]
+        else:
+            # No inner break — keep iterating. Outer loop continues.
+            continue
+        # Inner break hit [DONE]; stop reading.
+        break
+
+    if (
+        not tool_calls_by_index
+        and not content_parts
+        and not role
+        and finish_reason is None
+    ):
+        raise RuntimeError("Provider stream produced no choices")
+
+    # Sort tool calls by their index so the order matches the model's intent.
+    tool_calls_list = [tool_calls_by_index[k] for k in sorted(tool_calls_by_index)]
+    message: dict = {"role": role or "assistant"}
+    if content_parts:
+        message["content"] = "".join(content_parts)
+    if reasoning_parts:
+        message["reasoning_content"] = "".join(reasoning_parts)
+    if tool_calls_list:
+        message["tool_calls"] = tool_calls_list
+
+    # The first (and typically only) choice carries the finished message.
+    merged["choices"][0] = {
+        "index": 0,
+        "message": message,
+        "finish_reason": finish_reason,
+    }
+    merged["__first_token_s__"] = first_token_s
+    return merged
+
+
 # When an endpoint returns a 429 (rate-limited / usage-exhausted), we temporarily
 # steer traffic away from it for this long instead of retrying it in the same
 # request. This avoids hammering a shared upstream pool (e.g. OpenRouter's
@@ -278,7 +425,7 @@ class OllamaProvider:
             else endpoint.model,
             "messages": chat_messages,
             "temperature": self.temperature if temperature is None else temperature,
-            "stream": False,
+            "stream": True,
         }
         # Always include max_tokens from config or override
         effective_max = max_tokens if max_tokens is not None else self.max_tokens
@@ -758,7 +905,9 @@ class OllamaProvider:
                                     # shared self.max_tokens: that permanently
                                     # crippled every other endpoint/concurrent
                                     # request after one small-cap model was hit.
-                                    self._endpoint_output_caps[endpoint.name] = safe_output
+                                    self._endpoint_output_caps[endpoint.name] = (
+                                        safe_output
+                                    )
                                     data["max_tokens"] = safe_output
                                     if await self._retry_after_attempt(
                                         attempt,
@@ -772,8 +921,21 @@ class OllamaProvider:
                             f"Provider API error: {resp.status} - {error_text}"
                         )
 
-                    result = await resp.json()
-                    json_ms = (time.perf_counter() - request_start) * 1000
+                    json_ms = 0.0
+                    if data.get("stream"):
+                        merged = await _read_sse_response(resp)
+                        result = {
+                            k: v for k, v in merged.items() if not k.startswith("__")
+                        }
+                        first_token_s = merged.get("__first_token_s__")
+                        # Streaming has no JSON-parse step; report the
+                        # time-to-first-token so the latency log stays useful
+                        # instead of fabricating a json_ms value.
+                        if first_token_s is not None:
+                            json_ms = (first_token_s - request_start) * 1000
+                    else:
+                        result = await resp.json()
+                        json_ms = (time.perf_counter() - request_start) * 1000
                     if not isinstance(result, dict):
                         result_preview = (
                             str(result)[:600] if result is not None else "None"
