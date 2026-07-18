@@ -249,6 +249,7 @@ from tool_registry import (  # noqa: E402 — reasoning now rides inside tool ca
     extract_reasoning,
     record_reasoning,
 )
+from tool_progress import make_progress as _make_tool_progress  # noqa: E402
 from utils import (  # fd-safe, single source of truth  # noqa: E402
     FileLock,
     _atomic_json_write_sync,
@@ -1632,6 +1633,11 @@ class MaxwellBot(commands.Bot):
         # dispatcher so the model can no longer self-confirm.
         self._destructive_confirm: dict[str, float] = {}
         self._control = dict(DEFAULT_CONTROL)
+        # Env var seeds the initial value so operators can flip the
+        # feature on in .env without touching the control panel. The
+        # panel still overrides (saved control.json is loaded later and
+        # beats this default). See Config.PROGRESS_MESSAGES.
+        self._control["progress_messages"] = bool(self.config.PROGRESS_MESSAGES)
         self._control_mtime = 0
         self._reaction_seen: set[str] = set()  # "{message_id}:{emoji}" dedup
         self._reaction_seen_order: list[str] = []
@@ -4432,6 +4438,12 @@ class MaxwellBot(commands.Bot):
                 self._ai_concurrency = control["ai_concurrency"]
                 self._notify_ai_waiters()
             self._control = control
+            # Re-apply the env-var seed AFTER the panel loaded, so the
+            # .env knob wins over a stale or empty panel value. Operators
+            # can still flip the panel later, but the env var remains the
+            # durable default. Only this single key is env-driven; the
+            # rest of the panel still wins.
+            self._control["progress_messages"] = bool(self.config.PROGRESS_MESSAGES)
             self._control_mtime = mtime
             logger.info("Loaded dashboard control settings")
         except Exception as e:
@@ -6522,12 +6534,43 @@ class MaxwellBot(commands.Bot):
 
         result_by_id: dict[str, str] = {}
 
+        # One progress message per batch, not per tool. We edit it to show
+        # the CURRENT tool as it runs (one sentence, not a growing list).
+        # When the batch is over we delete it so the channel is left with
+        # only the tool's real output and the final send_message reply.
+        # Disabled by control flag (default off) so operators opt in.
+        # See tool_progress.py for the full design.
+        progress_enabled = bool(
+            self._control.get("progress_messages", False)
+        ) and bool(non_terminal)
+        progress = _make_tool_progress(message) if progress_enabled else None
+
         async def run_one(call: dict) -> str:
             name = call["name"]
             params = dict(call.get("arguments") or {})
-            line = await MaxwellBot._execute_tool_by_name(
-                self, message, name, params, disabled=disabled, compatible=compatible
-            )
+            # Pull the reasoning out the SAME WAY _execute_tool_by_name will,
+            # so the snippet we show in the progress message matches what
+            # the trace will record. Don't pass it to the tool — it's a
+            # registry concern.
+            tool_reasoning, _ = extract_reasoning(params)
+            if progress is not None:
+                import contextlib
+
+                with contextlib.suppress(Exception):
+                    await progress.update(name, tool_reasoning)
+            # Stash the progress on the bot so the tool can call
+            # notify_streaming() if it's about to post its own output
+            # (shell, send_file, etc). Cleared in the finally below so a
+            # later tool in the batch doesn't accidentally signal on the
+            # wrong tool's behalf.
+            prev_progress = getattr(self, "_current_progress", None)
+            self._current_progress = progress
+            try:
+                line = await MaxwellBot._execute_tool_by_name(
+                    self, message, name, params, disabled=disabled, compatible=compatible
+                )
+            finally:
+                self._current_progress = prev_progress
             result_by_id[call["id"]] = line
             # A memory-write failure must NOT abort the tool batch: asyncio.gather
             # re-raises, which used to trigger the broad `except Exception:
@@ -6590,17 +6633,29 @@ class MaxwellBot(commands.Bot):
             tools_ran = True
             await run_all()
 
-        if self._control.get("typing_indicator", True) and not getattr(
-            message, "suppress_typing", False
-        ):
-            try:
-                async with message.channel.typing():
+        # Post the progress message before the batch starts so users see
+        # liveness before any tool begins. stop() in finally guarantees
+        # the message disappears whether the batch succeeds, raises, or
+        # is cancelled — no orphan "working on it…" lines.
+        if progress is not None:
+            with contextlib.suppress(Exception):
+                await progress.start()
+        try:
+            if self._control.get("typing_indicator", True) and not getattr(
+                message, "suppress_typing", False
+            ):
+                try:
+                    async with message.channel.typing():
+                        await run_tools_once()
+                except (discord.HTTPException, ConnectionError, OSError):
+                    # Typing __aenter__ failed before any tool ran — run once w/o typing.
                     await run_tools_once()
-            except (discord.HTTPException, ConnectionError, OSError):
-                # Typing __aenter__ failed before any tool ran — run once w/o typing.
+            else:
                 await run_tools_once()
-        else:
-            await run_tools_once()
+        finally:
+            if progress is not None:
+                with contextlib.suppress(Exception):
+                    await progress.stop()
 
         # Build OpenAI tool-role follow-up messages (assistant + tool results)
         assistant_msg: dict[str, Any] = {

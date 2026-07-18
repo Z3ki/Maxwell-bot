@@ -503,6 +503,10 @@ class ImageGeneratorTool(Tool):
                     # Send to Discord so the model can SEE it in chat
                     file = File(BytesIO(image_bytes), filename="generated_image.png")
                     sent_msg = None
+                    # Step aside for the live progress message before we
+                    # post the image — the user should see the artifact,
+                    # not "running image_generator" anymore.
+                    self._signal_streaming()
                     try:
                         sent_msg = await message.channel.send(file=file)
                     except discord.Forbidden:
@@ -655,6 +659,10 @@ class HDImageGeneratorTool(Tool):
         # Upload to Discord and grab the CDN URL
         file = File(BytesIO(image_bytes), filename="hd_generated_image.png")
         sent_msg = None
+        # Step aside for the live progress message — the HD image is
+        # the user-visible result; the "running hd_image" status is
+        # redundant the moment the upload starts.
+        self._signal_streaming()
         try:
             sent_msg = await message.channel.send(file=file)
         except discord.Forbidden:
@@ -1036,6 +1044,9 @@ class CreatePollTool(Tool):
             for opt in option_list:
                 poll.add_answer(text=opt)
 
+            # Step aside for the live progress message before posting
+            # the poll. The poll itself is the user-visible action.
+            self._signal_streaming()
             await message.channel.send(poll=poll)
             return f"Poll created: '{question}' with options: {', '.join(option_list)}"
         except ValueError:
@@ -2499,9 +2510,66 @@ class ShellTool(Tool):
     CONTAINER_NAME = "maxwell-shell"
     IMAGE_NAME = "maxwell-shell"
     DOCKERFILE_DIR = os.path.join(os.path.dirname(__file__), "docker")
-    MAX_OUTPUT = 8000
-    TIMEOUT = 30
-    MAX_COMMAND_LENGTH = 4000
+
+    # Output / command-length caps. Read from env so the operator can tune
+    # without a code change. 0 = unlimited (use with care; see below).
+    # Defaults are generous: 100k chars of captured output covers any sane
+    # `cat /var/log/*` or `find` invocation, and 64k command length is enough
+    # for a multi-line ffmpeg pipeline. If you actually need more, raise
+    # MAXWELL_SHELL_MAX_OUTPUT / MAXWELL_SHELL_MAX_COMMAND_LENGTH in .env.
+    #
+    # Why not just remove the caps entirely? Because we still have to fit
+    # the response through Discord (2000 char chunks) AND through the LLM
+    # context window. A 50 MB stdout will OOM the model long before it
+    # OOMs us. 0/unlimited is fine if you've tuned your context budget.
+    _MAX_OUTPUT_DEFAULT = 100_000
+    _MAX_COMMAND_LENGTH_DEFAULT = 65_536
+
+    # Hard ceiling on shell timeout. The actual timeout is read from env at
+    # call time so the operator can raise/lower it, but we never let it
+    # exceed this regardless of config. Why a cap? Because the tool runs
+    # arbitrary code, and a runaway `cat /dev/zero` or `apt install
+    # chromium` can pin a core forever. The cap is high (1 hour) but not
+    # gone. If you find yourself wanting to remove it, you probably want
+    # a different tool (a job queue, not a chatbot tool call).
+    _TIMEOUT_CEILING_SECONDS = 3600
+
+    @classmethod
+    def _max_output(cls) -> int:
+        """Captured stdout+stderr cap. 0 = unlimited."""
+        raw = os.environ.get("MAXWELL_SHELL_MAX_OUTPUT", "").strip()
+        if not raw:
+            return cls._MAX_OUTPUT_DEFAULT
+        try:
+            v = int(raw)
+        except ValueError:
+            return cls._MAX_OUTPUT_DEFAULT
+        return max(0, v)  # 0 means unlimited
+
+    @classmethod
+    def _max_command_length(cls) -> int:
+        """Max chars in a single shell command. 0 = unlimited."""
+        raw = os.environ.get("MAXWELL_SHELL_MAX_COMMAND_LENGTH", "").strip()
+        if not raw:
+            return cls._MAX_COMMAND_LENGTH_DEFAULT
+        try:
+            v = int(raw)
+        except ValueError:
+            return cls._MAX_COMMAND_LENGTH_DEFAULT
+        return max(0, v)
+
+    @classmethod
+    def _timeout_seconds(cls) -> int:
+        """Max wall-clock seconds for a shell command. Always > 0; capped at 1h."""
+        raw = os.environ.get("MAXWELL_SHELL_TIMEOUT", "").strip()
+        if not raw:
+            return 600  # 10 min default — was 30s, way too tight for real work
+        try:
+            v = int(raw)
+        except ValueError:
+            return 600
+        return max(1, min(v, cls._TIMEOUT_CEILING_SECONDS))
+
     # Serialize container lifecycle + exec so parallel tool batches cannot
     # race docker rm -f / recreate.
     _lifecycle_lock = asyncio.Lock()
@@ -2517,6 +2585,18 @@ class ShellTool(Tool):
         }
 
     def get_description(self):
+        # Surface live limits so the model doesn't have to guess. Pulled at
+        # description-build time, which happens per-turn on tool registration.
+        max_out = self._max_output()
+        max_cmd = self._max_command_length()
+        to = self._timeout_seconds()
+        max_out_str = "unlimited" if max_out == 0 else f"{max_out:,} chars"
+        max_cmd_str = "unlimited" if max_cmd == 0 else f"{max_cmd:,} chars"
+        limits_note = (
+            f"Limits: command <= {max_cmd_str}, captured output <= {max_out_str}, "
+            f"timeout {to}s. Set MAXWELL_SHELL_MAX_OUTPUT=0 / "
+            f"MAXWELL_SHELL_MAX_COMMAND_LENGTH=0 in .env to disable."
+        )
         if self._full_host_access():
             return (
                 "Run a shell command with bash -lc in the maxwell-shell container. "
@@ -2526,9 +2606,10 @@ class ShellTool(Tool):
                 "path under /home/maxwell in `files` — e.g. files='[\"out.png\"]' or files='out.png, "
                 "data.zip'. The file will be docker-cp'd out and uploaded to the channel. "
                 "Examples:\n"
-                "  command=\"echo hi\"                       -> stdout only\n"
+                '  command="echo hi"                       -> stdout only\n'
                 "  command=\"python3 make.py\", files='out.png' -> runs script + attaches out.png\n"
-                "  command=\"zip a.zip a.png b.png\", files='a.zip' -> runs zip + attaches archive"
+                "  command=\"zip a.zip a.png b.png\", files='a.zip' -> runs zip + attaches archive\n"
+                f"{limits_note}"
             )
         return (
             "Run a shell command with bash -lc in the maxwell-shell sandbox container. "
@@ -2539,11 +2620,12 @@ class ShellTool(Tool):
             "artifact (image, video, audio, archive, pdf, csv, html, anything the user wants), "
             "list its path in `files` and it will be docker-cp'd out of the container and uploaded "
             "to the channel automatically. Examples:\n"
-            "  command=\"echo hi\"                              -> stdout only\n"
+            '  command="echo hi"                              -> stdout only\n'
             "  command=\"python3 make.py\", files='out.png'     -> runs script + attaches out.png\n"
             "  command=\"ffmpeg -i in.mp4 out.mp4\", files='out.mp4' -> transcodes + attaches result\n"
             "  command=\"convert x.svg x.png\", files='x.png'   -> rasterizes + attaches png\n"
-            "Max 10 MB per file. No path traversal (paths under /home/maxwell only)."
+            "Max 10 MB per file. No path traversal (paths under /home/maxwell only).\n"
+            f"{limits_note}"
         )
 
     async def _run_docker(self, *args: str, timeout: int = 30):
@@ -2683,8 +2765,10 @@ class ShellTool(Tool):
         """Return an error reason if the command looks dangerous, otherwise None."""
         if not command:
             return "empty command"
-        if len(command) > self.MAX_COMMAND_LENGTH:
-            return f"command too long (max {self.MAX_COMMAND_LENGTH} chars)"
+        # 0 = unlimited (operator opts in via MAXWELL_SHELL_MAX_COMMAND_LENGTH=0)
+        max_len = self._max_command_length()
+        if max_len and len(command) > max_len:
+            return f"command too long (max {max_len} chars; set MAXWELL_SHELL_MAX_COMMAND_LENGTH=0 to disable)"
         # Heredocs (<< EOF / << 'EOF' / << "EOF") embed literal blocks. The
         # content between the opener and the matching closing delimiter on
         # its own line is passed verbatim to the child stdin — no shell
@@ -2725,7 +2809,7 @@ class ShellTool(Tool):
             )
             try:
                 stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=self.TIMEOUT
+                    proc.communicate(), timeout=self._timeout_seconds()
                 )
                 return stdout, stderr, proc.returncode
             except asyncio.TimeoutError:
@@ -2758,7 +2842,6 @@ class ShellTool(Tool):
         if not normalized:
             return "Error: command is required (tool-call markup was detected or command was empty)"
 
-        author_id = str(message.author.id)
         # No whitelist: any user in an allowed channel can run shell. The
         # sandbox is the security boundary (root inside container, but no
         # host / mount, no host net, no docker socket by default). The
@@ -2788,11 +2871,15 @@ class ShellTool(Tool):
         try:
             stdout, stderr, exit_code = await self._run_shell_command(normalized)
         except asyncio.TimeoutError:
-            text = f"$ {normalized}\n\u23f1 Timed out after {self.TIMEOUT}s"
+            text = f"$ {normalized}\n\u23f1 Timed out after {self._timeout_seconds()}s"
+            # Even the error path posts its own message — tell the live
+            # progress line to step aside so we don't show both.
+            self._signal_streaming()
             await message.channel.send(f"```ansi\n{text}\n```")
             return f"__SHELL_SENT__\n{text}"
         except Exception as e:
             text = f"$ {normalized}\n\u274c Error: {e}"
+            self._signal_streaming()
             await message.channel.send(f"```ansi\n{text}\n```")
             return f"__SHELL_SENT__\n{text}"
 
@@ -2808,8 +2895,12 @@ class ShellTool(Tool):
         if exit_code != 0:
             combined += f"\n[exit code: {exit_code}]"
 
-        if len(combined) > self.MAX_OUTPUT:
-            combined = combined[: self.MAX_OUTPUT] + "\n... (truncated)"
+        # 0 = unlimited. Still useful as a safety belt against accidental
+        # 500 MB stdout floods — but if the operator really wants the
+        # full firehose, they can opt in.
+        max_out = self._max_output()
+        if max_out and len(combined) > max_out:
+            combined = combined[:max_out] + "\n... (truncated)"
 
         text = f"$ {normalized}\n{combined}"
         chunks = []
@@ -2825,6 +2916,10 @@ class ShellTool(Tool):
             chunks.append(remaining[:cut])
             remaining = remaining[cut:].lstrip("\n")
 
+        # First chunk about to go out — kick the live progress message
+        # out of the way so the user sees just the streamed output, not
+        # "shell: …" on top of it.
+        self._signal_streaming()
         for chunk in chunks:
             await message.channel.send(f"```ansi\n{chunk}\n```")
             if len(chunks) > 1:
@@ -2899,6 +2994,9 @@ class ShellTool(Tool):
                 return None
 
             filename = os.path.basename(clean)
+            # Step aside for the live progress message before posting
+            # the file artifact.
+            self._signal_streaming()
             await message.channel.send(file=File(local_path, filename=filename))
             logger.info(f"Sent shell file: {filename} ({file_size} bytes)")
 
