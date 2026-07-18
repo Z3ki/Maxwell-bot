@@ -121,6 +121,14 @@ class ToolProgress:
         # we then delete our message so the tool's output is the only thing
         # in the channel.
         self._tool_streaming = False
+        # Number of successful edits we've made to the posted message. The
+        # FIRST edit (the "working on it…" → "tool: …" transition) is exempt
+        # from the edit cooldown so the user always sees the tool name appear
+        # instantly — without this, a tool name arriving ~100ms after start()
+        # posts would be rate-limited and discarded, leaving the user staring
+        # at "working on it…" until stop() deletes it. Subsequent edits keep
+        # the 2s cooldown for Discord rate-limit safety.
+        self._edits_made: int = 0
         # A deferred flush scheduled when an update() was rate-limited. The
         # model's reasoning often arrives mid-stream just *after* the tool-name
         # edit (reasoning is usually the first field in the tool-call arguments
@@ -163,7 +171,19 @@ class ToolProgress:
             await asyncio.sleep(_GRACE_BEFORE_FIRST_POST)
             if self._tool_streaming or self._stopped:
                 return
-            self._posted = await self._msg.channel.send("working on it…")
+            # Post whatever is cached right now: normally "working on it…",
+            # but if a tool-name/reasoning callback already fired during the
+            # grace sleep (fast generation — the model emits the tool call
+            # within ~150ms), post the "tool: …" line directly instead of a
+            # stale placeholder the user would never see updated.
+            content = self._render()
+            self._posted = await self._msg.channel.send(content)
+            self._last_content = content
+            if self._current_tool:
+                # A tool was cached before we posted — that post IS the
+                # first visible edit, so count it for rate-limiting.
+                self._last_edit = time.monotonic()
+                self._edits_made = 1
         except Exception as e:  # noqa: BLE001
             logger.debug("Discord progress post failed: %s", e)
             self._posted = None
@@ -188,20 +208,24 @@ class ToolProgress:
         if self._platform != "discord":
             logger.debug("[TP] update skipped: non-discord platform")
             return
-        if not self._posted:
-            # Post was never created (Discord rejected the first send, or
-            # we skipped start). Nothing to edit.
-            logger.debug("[TP] update skipped: no posted message")
-            return
 
         reasoning = (reasoning or "").strip().replace("\n", " ")
         if len(reasoning) > _REASONING_PREVIEW_CHARS:
             reasoning = reasoning[: _REASONING_PREVIEW_CHARS - 1].rstrip() + "…"
-        # One line, one tool. Overwrite whatever was showing before —
-        # previous tool's name/reason is gone, not appended. The final
-        # reply is the only persistent record of the tool chain.
+        # Cache the tool/reasoning NOW, before the posted-check. On fast
+        # generations the tool-name callback can fire while start() is still
+        # in its grace sleep (no posted message yet); caching here means
+        # start() will post the "tool: …" line directly instead of a stale
+        # "working on it…" the user would never see updated.
         self._current_tool = tool_name
         self._current_reason = reasoning
+
+        if not self._posted:
+            # Post was never created (Discord rejected the first send, or
+            # we're still inside start()'s grace sleep). The cached values
+            # are picked up when start() posts (or the next update flushes).
+            logger.debug("[TP] update skipped: no posted message (cached for start)")
+            return
 
         content = self._render()
         logger.debug(
@@ -210,20 +234,20 @@ class ToolProgress:
         if content == self._last_content:
             logger.debug("[TP] update skipped: content unchanged")
             return
-        # Rate limit: skip if we edited too recently. The new content
-        # is already cached, so the next update() within 2s will
-        # coalesce (and if the tool batch finishes before then, the
-        # intermediate line is deleted anyway).
+        # Rate limit: skip if we edited too recently. The FIRST edit (the
+        # "working on it…" → "tool: …" transition) is ALWAYS allowed through
+        # so the user instantly sees which tool fired — without this, a tool
+        # name arriving ~100ms after start() posts gets discarded and the
+        # user only ever sees "working on it…". Subsequent edits keep the
+        # 2s cooldown for Discord rate-limit safety.
         now = time.monotonic()
         logger.debug(
-            f"[TP] rate check: now-last_edit={now - self._last_edit:.2f}s interval={_EDIT_INTERVAL_SECONDS}s"
+            f"[TP] rate check: edits_made={self._edits_made} now-last_edit={now - self._last_edit:.2f}s interval={_EDIT_INTERVAL_SECONDS}s"
         )
-        if now - self._last_edit < _EDIT_INTERVAL_SECONDS:
-            # Rate limited right now — but the new content (e.g. the model's
-            # reasoning, which often lands just after the tool-name edit) is
-            # already cached in _current_tool/_current_reason. Schedule a
-            # deferred flush so it actually reaches the user once the edit
-            # window reopens, instead of being silently dropped on the floor.
+        if self._edits_made > 0 and now - self._last_edit < _EDIT_INTERVAL_SECONDS:
+            # Rate limited (not the first edit) — the new content is cached,
+            # so schedule a deferred flush once the window reopens instead of
+            # dropping it on the floor.
             logger.debug(
                 f"[TP] update deferred: rate limited ({now - self._last_edit:.2f}s < {_EDIT_INTERVAL_SECONDS}s)"
             )
@@ -244,6 +268,7 @@ class ToolProgress:
                 await self._posted.edit(content=content)
                 self._last_edit = time.monotonic()
                 self._last_content = content
+                self._edits_made += 1
                 logger.debug("[TP] _flush edit succeeded!")
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[TP] _flush edit FAILED: {e}")
