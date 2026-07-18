@@ -159,37 +159,69 @@ class ToolProgress:
             self._posted = None
 
     async def update(self, tool_name: str, reasoning: str = "") -> None:
-        """Record a tool's progress. Coalesces edits; never raises."""
+        """Record a tool's progress. Coalesces edits; never raises.
+
+        The reasoning is the model's `thought` / `reasoning` field —
+        exactly what the model wrote to justify this tool call. We show
+        the first 140 chars so users see intent, not the whole inner
+        monologue.
+        """
+        logger.info(f"[TP] update called: tool={tool_name!r} stopped={self._stopped} streaming={self._tool_streaming} platform={self._platform} posted={self._posted is not None}")
         if self._stopped or self._tool_streaming:
+            logger.info(f"[TP] update skipped: stopped={self._stopped} streaming={self._tool_streaming}")
             return
+        # Telegram has no edit; the start() message is static.
         if self._platform != "discord":
+            logger.info("[TP] update skipped: non-discord platform")
             return
         if not self._posted:
+            # Post was never created (Discord rejected the first send, or
+            # we skipped start). Nothing to edit.
+            logger.info("[TP] update skipped: no posted message")
             return
 
         reasoning = (reasoning or "").strip().replace("\n", " ")
         if len(reasoning) > _REASONING_PREVIEW_CHARS:
             reasoning = reasoning[: _REASONING_PREVIEW_CHARS - 1].rstrip() + "…"
+        # One line, one tool. Overwrite whatever was showing before —
+        # previous tool's name/reason is gone, not appended. The final
+        # reply is the only persistent record of the tool chain.
         self._current_tool = tool_name
         self._current_reason = reasoning
 
         content = self._render()
+        logger.info(f"[TP] render: content={content!r} last_content={self._last_content!r} same={content == self._last_content}")
         if content == self._last_content:
+            logger.info("[TP] update skipped: content unchanged")
             return
+        # Rate limit: skip if we edited too recently. The new content
+        # is already cached, so the next update() within 2s will
+        # coalesce (and if the tool batch finishes before then, the
+        # intermediate line is deleted anyway).
         now = time.monotonic()
+        logger.info(f"[TP] rate check: now-last_edit={now - self._last_edit:.2f}s interval={_EDIT_INTERVAL_SECONDS}s")
         if now - self._last_edit < _EDIT_INTERVAL_SECONDS:
+            logger.info(f"[TP] update skipped: rate limited ({now - self._last_edit:.2f}s < {_EDIT_INTERVAL_SECONDS}s)")
             return
+        logger.info(f"[TP] calling _flush with {content!r}")
         await self._flush(content)
 
     async def _flush(self, content: str) -> None:
         async with self._lock:
             if self._stopped or not self._posted:
+                logger.info(f"[TP] _flush skipped: stopped={self._stopped} posted={self._posted is not None}")
                 return
             try:
+                logger.info(f"[TP] _flush calling edit({content!r})...")
                 await self._posted.edit(content=content)
                 self._last_edit = time.monotonic()
                 self._last_content = content
+                logger.info("[TP] _flush edit succeeded!")
             except Exception as e:  # noqa: BLE001
+                logger.warning(f"[TP] _flush edit FAILED: {e}")
+                # Most common: 429 rate limit, 404 message deleted out
+                # from under us, or channel perm lost. Either way: stop
+                # trying; the user already has the bot's reply.
                 logger.debug("Progress edit failed (%s) — disabling further edits", e)
                 self._posted = None
 
@@ -201,10 +233,6 @@ class ToolProgress:
         # users know which tool is acting, separated by ": " — same vibe
         # as a shell prompt label without the decoration.
         if not self._current_tool:
-            # Heartbeat mode: no tool name, but show reasoning if set
-            # (e.g. "thinking… (30s)")
-            if self._current_reason:
-                return self._current_reason
             return "working on it…"
         if self._current_reason:
             return f"{self._current_tool}: {self._current_reason}"

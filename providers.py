@@ -545,12 +545,8 @@ class OllamaProvider:
         tools = kwargs.get("tools")
         try:
             message = await self.generate_chat_completion(
-                messages,
-                images=images,
-                media=media,
-                timeout=timeout,
-                on_tool_call_name=on_tool_call_name,
-                **kwargs,
+                messages, images=images, media=media, timeout=timeout,
+                on_tool_call_name=on_tool_call_name, **kwargs
             )
         except RuntimeError as e:
             # Some endpoints reject tools/function calling with 400. Fall back to
