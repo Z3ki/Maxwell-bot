@@ -6096,13 +6096,13 @@ class MaxwellBot(commands.Bot):
         # the model is building while it's still generating the arguments
         # (e.g. the full HTML body for create_site).
         async def _on_tool_call_name(tool_name: str, reasoning: str = ""):
-            logger.info(
+            logger.debug(
                 f"[PROGRESS] mid-stream callback fired: tool_name={tool_name!r} reasoning={reasoning!r} gen_progress={gen_progress}"
             )
             if gen_progress is not None:
                 with contextlib.suppress(Exception):
                     await gen_progress.update(tool_name, reasoning or "generating…")
-                    logger.info(
+                    logger.debug(
                         f"[PROGRESS] update() returned, last_content={gen_progress._last_content!r} posted={gen_progress.posted}"
                     )
             else:
@@ -6262,13 +6262,13 @@ class MaxwellBot(commands.Bot):
                     async def _on_followup_tool_call_name(
                         tool_name: str, reasoning: str = "", _p=followup_progress
                     ):
-                        logger.info(
+                        logger.debug(
                             f"[PROGRESS] followup mid-stream callback: tool_name={tool_name!r} reasoning={reasoning!r} progress={_p}"
                         )
                         if _p is not None:
                             with contextlib.suppress(Exception):
                                 await _p.update(tool_name, reasoning or "generating…")
-                                logger.info(
+                                logger.debug(
                                     f"[PROGRESS] followup update done, last_content={_p._last_content!r}"
                                 )
 

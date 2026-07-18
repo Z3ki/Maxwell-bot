@@ -532,7 +532,16 @@ class ImageGeneratorTool(Tool):
                     result += "\nLook at the image you just posted. If it looks good, mention the URL or use it for the site. "
                     result += "If it looks bad, call image_generator again with an improved prompt."
                     return result
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"NVIDIA image timeout, attempt {attempt + 1}/{max_retries}"
+                )
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(5)
+                    continue
+                last_error = "Error: Image generation timed out after retries"
+                break
+            except aiohttp.ClientError as e:
                 logger.warning(
                     f"NVIDIA image connection error (attempt {attempt + 1}/{max_retries}): {e}"
                 )
@@ -545,15 +554,6 @@ class ImageGeneratorTool(Tool):
                     wait_time = (attempt + 1) * 10
                     await asyncio.sleep(wait_time)
                     continue
-                break
-            except asyncio.TimeoutError:
-                logger.warning(
-                    f"NVIDIA image timeout, attempt {attempt + 1}/{max_retries}"
-                )
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(5)
-                    continue
-                last_error = "Error: Image generation timed out after retries"
                 break
             except Exception as e:
                 logger.error(f"NVIDIA image generation error: {e}")
@@ -2769,17 +2769,17 @@ class ShellTool(Tool):
         max_len = self._max_command_length()
         if max_len and len(command) > max_len:
             return f"command too long (max {max_len} chars; set MAXWELL_SHELL_MAX_COMMAND_LENGTH=0 to disable)"
-        # Heredocs (<< EOF / << 'EOF' / << "EOF") embed literal blocks. The
-        # content between the opener and the matching closing delimiter on
-        # its own line is passed verbatim to the child stdin — no shell
-        # expansion, no command chaining. We allow newlines ONLY inside such
-        # heredoc blocks; the rest of the command must stay single-line.
+        # Newlines are allowed everywhere. The model writes multi-line scripts
+        # (python via heredoc, multi-step bash pipelines, ffmpeg chains) and the
+        # old heredoc-only newline restriction rejected valid commands
+        # constantly — shell was nearly unusable. The Docker sandbox is the
+        # real security boundary (no host FS/net/sock by default); the
+        # taint-check gate (in execute) + the blocked patterns below defend
+        # against prompt-injection command chaining. We still strip heredoc
+        # bodies before the blocked-pattern scan so literal heredoc content
+        # fed to an interpreter isn't false-flagged as a shell-level chain.
         non_heredoc = _strip_heredoc_blocks(command)
-        if "\n" in non_heredoc or "\r" in non_heredoc:
-            return (
-                "newlines are not allowed outside of heredoc blocks (<< 'EOF' ... EOF)"
-            )
-        if any(ord(c) < 32 and c not in ("\t",) for c in non_heredoc):
+        if any(ord(c) < 32 and c not in ("\t", "\n", "\r") for c in non_heredoc):
             return "control characters are not allowed in shell commands"
         for pattern in _SHELL_BLOCKED_PATTERNS:
             if re.search(pattern, non_heredoc, re.IGNORECASE):
@@ -2833,6 +2833,45 @@ class ShellTool(Tool):
                     except Exception:
                         pass
 
+    def _shell_echo_text(self, command: str, *suffixes: str) -> str:
+        """Build the body for a ```ansi block: a (truncated) command echo + suffix lines.
+
+        The command can be a long multi-line script; echoing it verbatim blows
+        past Discord's 2000-char limit once wrapped in a codeblock. Cap the
+        echo so the actual error/output — the useful part — always fits.
+        """
+        max_echo = 600
+        echo = command if len(command) <= max_echo else command[:max_echo] + " …(truncated)"
+        parts = [f"$ {echo}"]
+        parts.extend(s for s in suffixes if s)
+        return "\n".join(parts)
+
+    async def _send_ansi_chunks(self, message: Message, text: str) -> None:
+        """Send `text` as one or more ```ansi codeblocks, each ≤2000 chars.
+
+        Discord rejects (400 Invalid Form Body, 50035) any message over 2000
+        chars. The ```ansi\n...\n``` wrapper is 12 chars, so each chunk body
+        is capped at 1984 to stay safely under the limit. Splits on newlines
+        where possible so output stays readable.
+        """
+        wrapper = 12  # len("```ansi\n") + len("\n```")
+        limit = 2000 - wrapper
+        chunks: list[str] = []
+        remaining = text
+        while remaining:
+            if len(remaining) <= limit:
+                chunks.append(remaining)
+                break
+            cut = remaining.rfind("\n", 0, limit)
+            if cut <= 0:
+                cut = limit
+            chunks.append(remaining[:cut])
+            remaining = remaining[cut:].lstrip("\n")
+        for i, chunk in enumerate(chunks):
+            await message.channel.send(f"```ansi\n{chunk}\n```")
+            if len(chunks) > 1 and i < len(chunks) - 1:
+                await asyncio.sleep(0.3)
+
     async def execute(
         self,
         message: Message,
@@ -2873,16 +2912,18 @@ class ShellTool(Tool):
         try:
             stdout, stderr, exit_code = await self._run_shell_command(normalized)
         except asyncio.TimeoutError:
-            text = f"$ {normalized}\n\u23f1 Timed out after {self._timeout_seconds()}s"
+            text = self._shell_echo_text(
+                normalized, f"\u23f1 Timed out after {self._timeout_seconds()}s"
+            )
             # Even the error path posts its own message — tell the live
             # progress line to step aside so we don't show both.
             self._signal_streaming()
-            await message.channel.send(f"```ansi\n{text}\n```")
+            await self._send_ansi_chunks(message, text)
             return f"__SHELL_SENT__\n{text}"
         except Exception as e:
-            text = f"$ {normalized}\n\u274c Error: {e}"
+            text = self._shell_echo_text(normalized, f"\u274c Error: {e}")
             self._signal_streaming()
-            await message.channel.send(f"```ansi\n{text}\n```")
+            await self._send_ansi_chunks(message, text)
             return f"__SHELL_SENT__\n{text}"
 
         out = stdout.decode(errors="replace")
@@ -2904,28 +2945,9 @@ class ShellTool(Tool):
         if max_out and len(combined) > max_out:
             combined = combined[:max_out] + "\n... (truncated)"
 
-        text = f"$ {normalized}\n{combined}"
-        chunks = []
-        remaining = text
-        while remaining:
-            if len(remaining) <= 1990:
-                chunks.append(remaining)
-                break
-            header = f"$ {normalized}\n"
-            cut = remaining.rfind("\n", 0, 1990)
-            if cut <= len(header):
-                cut = 1990
-            chunks.append(remaining[:cut])
-            remaining = remaining[cut:].lstrip("\n")
-
-        # First chunk about to go out — kick the live progress message
-        # out of the way so the user sees just the streamed output, not
-        # "shell: …" on top of it.
+        text = self._shell_echo_text(normalized, combined)
         self._signal_streaming()
-        for chunk in chunks:
-            await message.channel.send(f"```ansi\n{chunk}\n```")
-            if len(chunks) > 1:
-                await asyncio.sleep(0.3)
+        await self._send_ansi_chunks(message, text)
 
         result = f"__SHELL_SENT__\n{text}"
 
