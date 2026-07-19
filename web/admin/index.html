@@ -611,8 +611,8 @@ function renderOverview() {
   const load = sys.load || ['-'];
 
   page.appendChild(el('div', {class:'grid g-4'}, [
-    stat(bot.pm2_env?.status === 'online' ? 'Online' : 'Offline',
-      'Bot', 'uptime ' + fmtUptime(bot.pm2_env?.pm_uptime), bot.pm2_env?.status === 'online' ? 'ok' : 'bad'),
+    stat(bot.status === 'online' ? 'Online' : 'Offline',
+      'Bot', 'uptime ' + fmtUptime(bot.uptime), bot.status === 'online' ? 'ok' : 'bad'),
     stat(load[0] + '', 'Load (1m)', load[1] + ' 5m · ' + load[2] + ' 15m', ''),
     stat(mem.total_mb ? Math.round(mem.used_mb/mem.total_mb*100) + '%' : '-',
       'RAM', mem.used_mb ? Math.round(mem.used_mb) + 'M / ' + Math.round(mem.total_mb) + 'M' : '', ''),
@@ -695,11 +695,11 @@ function statusBadge(text, kind='') {
   return el('span', {class: 'badge ' + kind}, [el('span', {class:'dot'}), text]);
 }
 function serviceRow(name, p, action) {
-  const status = p.pm2_env?.status || 'unknown';
+  const status = p.status || 'unknown';
   return el('div', {class:'switch-line'}, [
     el('div', {class:'text'}, [
       el('b', {}, name),
-      el('small', {class:'mono'}, 'uptime ' + fmtUptime(p.pm2_env?.pm_uptime) + ' · ' + fmtBytes(p.monit?.memory) + ' · cpu ' + (p.monit?.cpu || 0) + '%'),
+      el('small', {class:'mono'}, 'uptime ' + fmtUptime(p.uptime) + ' · ' + fmtBytes(p.memory) + ' · cpu ' + (p.cpu || 0) + '%'),
     ]),
     el('div', {style:{display:'flex',gap:'8px',alignItems:'center'}}, [
       statusBadge(status, status === 'online' ? 'ok' : 'bad'),
