@@ -102,77 +102,66 @@ def _last_sentence_in(text: str) -> str:
     return text[: last.end()].rstrip()
 
 
-def _format_thinking(buffer: str) -> str:
-    """Render a mid-stream reasoning buffer as a single coherent line.
+def _last_full_sentence(buffer: str) -> str:
+    """Return the most recent complete sentence in ``buffer``.
 
-    The user wanted the visible format to be:
+    A 'complete sentence' is text from the previous terminator (or
+    buffer start) up to and including the next terminator. If the
+    buffer has multiple sentences, only the LAST one is returned.
+    If the buffer has no terminator (the stream is mid-thought), the
+    empty string is returned — we never show partial sentences on the
+    progress line.
 
-        <last complete sentence before the previous dot>. <mid-stream
-        tail with clean ending>.
-
-    So a stream like
-
-        \"message here blah blah. half a thought in progress. and then
-        it ends.\"
-
-    renders as
-
-        \"blah. half a thought in progress. and then it ends.\"
-
-    Mechanics:
-      - Drop everything before the most recent sentence terminator
-        (the "PRE") — that's the recent context window the user wanted
-        a glimpse of. If no terminator exists, the whole buffer is the
-        tail.
-      - Keep the remaining tail verbatim (the "MIDDLE" — still streaming).
-      - If the tail itself ends without a terminator, cut at the last
-        word boundary inside the budget so we never expose a half-word.
-      - Reattach a leading PRE rounded to a single clean sentence, so the
-        visible message has the structure "<PRE>. <TAIL>" with no
-        stranded period at the seam.
-      - If the whole thing fits in the budget, just return it as-is.
-
-    Returns the empty string only if the buffer itself is empty.
+    The 2026-07-19 user directive: visible text must be a whole
+    sentence, never a half. The user can read a full thought; they
+    can't parse "the user wants me to look at the disk" without
+    re-reading it when the rest arrives.
     """
     if not buffer:
         return ""
-    text = " ".join(buffer.split())  # squash newlines/whitespace
+    text = " ".join(buffer.split())
+    matches = list(_TRAILING_SENTENCE_RE.finditer(text))
+    if not matches:
+        return ""
+    last = matches[-1]
+    # If there's more than one match, the start of the last sentence
+    # is right after the previous match's end. Otherwise it starts
+    # at the beginning of the buffer.
+    if len(matches) >= 2:
+        prev = matches[-2]
+        start = prev.end()
+    else:
+        start = 0
+    return text[start : last.end()].strip()
+
+
+def _format_thinking(buffer: str) -> str:
+    """Render a mid-stream reasoning buffer as a single coherent line.
+
+    The user wanted the visible format to follow the last completed
+    sentence. We always show the LAST full sentence (everything up to
+    and including the most recent terminator), never partial fragments.
+
+    If the buffer fits the budget and has only one sentence, return
+    the whole buffer. If it has multiple sentences, return just the
+    last one. The earlier sentences are noise — the user just needs
+    the most recent thought.
+    """
+    if not buffer:
+        return ""
+    text = " ".join(buffer.split())
+    # Always show the LAST complete sentence, never partials.
+    last = _last_full_sentence(text)
+    if last:
+        # Truncate at word boundary if it overflows the budget.
+        if len(last) > _VISIBLE_BUDGET:
+            return _trim_to_word_boundary(last, _VISIBLE_BUDGET)
+        return last
+    # No terminator yet (mid-thought). Show a clipped-with-ellipsis
+    # preview bounded by the budget so the user sees *something*.
     if len(text) <= _VISIBLE_BUDGET:
         return text
-    # Find the most recent sentence terminator and split there.
-    matches = list(_TRAILING_SENTENCE_RE.finditer(text))
-    if matches:
-        last_terminator = matches[-1]
-        pre = text[: last_terminator.end()].rstrip()
-        tail = text[last_terminator.end() :].lstrip()
-    else:
-        pre = ""
-        tail = text
-    # Trim pre to at most ~80 chars (keep ONE recent settled context).
-    if len(pre) > 80:
-        pre_head = pre[:80]
-        cut = pre_head.rfind(" ")
-        if cut > 0:
-            pre = pre_head[:cut].rstrip() + "."
-        else:
-            pre = pre_head.rstrip() + "."
-    # Now budget the whole preview to fit _VISIBLE_BUDGET.
-    full_no_budget = (pre + " " + tail).strip() if pre else tail
-    if len(full_no_budget) <= _VISIBLE_BUDGET:
-        return full_no_budget
-    # Tail too long; cut at the last word boundary inside the budget.
-    # We always want the tail (most recent stream content), so shrink
-    # the pre first, then trim tail if necessary.
-    if pre and len(tail) <= _VISIBLE_BUDGET - len(pre) - 2:
-        # Tail fits next to (smaller) pre. Trim pre to fit.
-        remaining = _VISIBLE_BUDGET - len(tail) - 2  # for " " separator
-        if len(pre) > remaining:
-            pre = _trim_to_word_boundary(pre, remaining)
-            if not pre.endswith((".", "!", "?")):
-                pre = pre.rstrip() + "."
-        return (pre + " " + tail).strip()
-    # Tail alone is too long — drop the pre entirely if necessary.
-    return _trim_to_word_boundary(tail, _VISIBLE_BUDGET)
+    return _trim_to_word_boundary(text, _VISIBLE_BUDGET)
 
 
 class ToolProgress:
@@ -194,9 +183,7 @@ class ToolProgress:
 
     def __init__(self, message: Any):
         self._msg = message
-        self._platform = str(
-            getattr(message, "tool_platform", "discord") or "discord"
-        )
+        self._platform = str(getattr(message, "tool_platform", "discord") or "discord")
         self._posted: Any = None
         self._last_edit: float = 0.0
         self._last_content: str = ""
@@ -231,7 +218,12 @@ class ToolProgress:
         if self._platform != "discord":
             try:
                 self._posted = True
-                await self._msg.channel.send("working on it…")
+                # Reply to the user's message (threads under it) rather
+                # than a freestanding channel.send. The 2026-07-19 user
+                # directive: a 'working on it…' status should reply to
+                # the user, not just be a new top-level post in the
+                # channel.
+                await self._post_reply("working on it…")
             except Exception as e:  # noqa: BLE001
                 logger.debug("Telegram progress post failed: %s", e)
                 self._posted = None
@@ -242,7 +234,7 @@ class ToolProgress:
             if self._tool_streaming or self._stopped:
                 return
             content = self._render()
-            self._posted = await self._msg.channel.send(content)
+            self._posted = await self._post_reply(content)
             self._last_content = content
             if self._current_tool or content:
                 self._last_edit = time.monotonic()
@@ -250,6 +242,25 @@ class ToolProgress:
         except Exception as e:  # noqa: BLE001
             logger.debug("Discord progress post failed: %s", e)
             self._posted = None
+
+    async def _post_reply(self, content: str) -> Any:
+        """Post the progress message as a REPLY to the user's original
+        message so it threads under their question. Falls back to a
+        channel send if the message object doesn't support ``reply()``
+        (Telegram adapter in this codebase, or mocked tests).
+        """
+        msg = self._msg
+        reply_fn = getattr(msg, "reply", None)
+        if reply_fn is not None and callable(reply_fn):
+            try:
+                return await reply_fn(content)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("reply() failed, falling back to send: %s", e)
+        channel = getattr(msg, "channel", None)
+        send_fn = getattr(channel, "send", None)
+        if send_fn is not None:
+            return await send_fn(content)
+        raise RuntimeError("No reply() or channel.send() available for progress post")
 
     async def update(self, tool_name: str, reasoning: str = "") -> None:
         """Record a tool's progress. Coalesces edits; never raises."""
@@ -264,11 +275,14 @@ class ToolProgress:
         prev_tool = self._current_tool
         self._current_tool = tool_name
         self._current_reason = reasoning
+        # update() carries a complete reasoning field, not a delta — so
+        # we replace the buffer wholesale. Without this a second
+        # update() with a longer string would not replace the first
+        # half-sentence, and the visible line would stay stuck on the
+        # earlier (partial) content.
+        self._reasoning_buffer = reasoning
         if prev_tool and prev_tool != tool_name:
-            self._reasoning_buffer = reasoning
             self._last_tool_name_announced = False
-        elif not self._reasoning_buffer:
-            self._reasoning_buffer = reasoning
 
         if not self._posted:
             return
@@ -342,53 +356,56 @@ class ToolProgress:
                 self._last_content = content
                 self._edits_made += 1
             except Exception as e:  # noqa: BLE001
-                logger.debug(
-                    "Progress edit failed (%s) — disabling further edits", e
-                )
+                logger.debug("Progress edit failed (%s) — disabling further edits", e)
                 self._posted = None
 
     def _has_meaningful_reasoning(self) -> bool:
-        """True when the buffered reasoning has enough substance to be
+        """True when the buffered reasoning contains a FULL sentence
         worth showing instead of the static 'working on it…' placeholder.
 
-        The 2026-07-19 bug was a single 4-char SSE token flashing as
-        'thinking: Cas' before any word boundary arrived. We hold off
-        until the buffer contains a real sentence terminator OR is at
-        least 6 chars of substance.
+        The 2026-07-19 user directive: only show whole sentences, never
+        half-sentences mid-stream. A 6-char 'Cas' fragment or a
+        mid-clause buffer like 'the user wants me to look at' should NOT
+        be rendered — wait until the model emits a terminator and we
+        have a complete thought to display. If the buffer is exactly one
+        complete sentence (ends with terminator) we show it; if it has
+        more after a terminator, the user will see the first complete
+        sentence until a second one arrives, at which point the rolling
+        window advances.
         """
         buf = self._reasoning_buffer.strip()
         if not buf:
             return False
-        if any(c in buf for c in ".!?"):
-            return True
-        return len(buf) >= 6
+        # Must contain at least one sentence terminator. The visible
+        # line is a complete sentence, never a partial.
+        return any(c in buf for c in ".!?")
 
     def _render(self) -> str:
         """Render the current state as a single user-facing line.
 
         Format:
-          - Reasoning phase, no real content yet: "working on it…"
-          - Reasoning phase with enough substance: "thinking: <sentence>"
-            (we KEEP the "thinking:" prefix here — that's the signal
-            that says "the model is reasoning").
-          - Tool active: just "<reasoning>" with NO "tool:" prefix. The
-            2026-07-19 UX report said "tool: dool shit here" reads as
-            noise; show the model's reasoning verbatim.
-          - Tool active but no reasoning buffer yet: "working…".
+          - Reasoning phase, no complete sentence yet: 'working on it…'
+          - Reasoning phase with at least one full sentence:
+            'thinking: <last full sentence>'. Only complete sentences
+            are shown; partial fragments wait for a terminator.
+          - Tool active with at least one full sentence of reasoning:
+            '<last full sentence>'. No 'tool:' prefix.
+          - Tool active but no complete sentence yet: 'working…'.
 
-        The "<reasoning>" itself uses _format_thinking() above so the
-        visible line follows the user's preferred structure of
-        "<PRE sentence>.<TAIL with clean end>.".
+        2026-07-19 directive: only show whole sentences on the
+        progress line, never partials. _has_meaningful_reasoning()
+        gates the placeholder-vs-real-content switch on the presence
+        of a sentence terminator; _last_full_sentence() picks which
+        sentence to render.
         """
         if self._current_tool:
-            buf = self._reasoning_buffer.strip()
-            if buf:
-                return _format_thinking(buf)
+            last = _last_full_sentence(self._reasoning_buffer)
+            if last:
+                return last
             return "working…"
         if not self._has_meaningful_reasoning():
             return "working on it…"
-        buf = self._reasoning_buffer.strip()
-        return f"thinking: {_format_thinking(buf)}"
+        return f"thinking: {_last_full_sentence(self._reasoning_buffer)}"
 
     def _schedule_deferred_flush(self) -> None:
         if self._stopped:

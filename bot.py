@@ -6229,7 +6229,9 @@ class MaxwellBot(commands.Bot):
                     for name, tool in self.tools.items()
                     if name in compatible and name not in disabled
                 ]
-                tool_list = "\n".join(tool_lines) if tool_lines else "(no tools available)"
+                tool_list = (
+                    "\n".join(tool_lines) if tool_lines else "(no tools available)"
+                )
                 snip = (
                     "TOOLS AVAILABLE (use only when they clearly help):\n"
                     f"{tool_list}\n\n"
@@ -6421,9 +6423,7 @@ class MaxwellBot(commands.Bot):
                                     f"[PROGRESS] followup update done, last_content={_p._last_content!r}"
                                 )
 
-                    def _on_followup_token(
-                        tok: dict, _p=followup_progress
-                    ) -> None:
+                    def _on_followup_token(tok: dict, _p=followup_progress) -> None:
                         if _p is None:
                             return
                         try:

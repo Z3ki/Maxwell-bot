@@ -63,6 +63,14 @@ class FakeMessage:
     def __init__(self, platform="discord"):
         self.channel = FakeChannel()
         self.tool_platform = platform
+        self.replies = []  # content of every reply() call
+
+    async def reply(self, content=None, **kwargs):
+        # Mirror the discord.Message.reply signature: post a new message
+        # referencing this one. For test purposes, post via the channel
+        # and record that a reply was used.
+        self.replies.append(content)
+        return await self.channel.send(content, **kwargs)
 
 
 def test_initial_post_is_generic():
@@ -74,28 +82,66 @@ def test_initial_post_is_generic():
     asyncio.run(prog.stop())
 
 
+def test_initial_post_uses_reply():
+    """2026-07-19: 'working on it…' must thread under the user's
+    message via reply(), not be a freestanding channel.send post."""
+    msg = FakeMessage()
+    prog = tool_progress.ToolProgress(msg)
+    asyncio.run(prog.start())
+    assert len(msg.replies) == 1
+    assert msg.replies[0] == "working on it…"
+    asyncio.run(prog.stop())
+
+
+def test_half_sentence_reasoning_stays_at_placeholder():
+    """A reasoning buffer with no terminator must NOT render as a
+    partial sentence. The user explicitly said 'must be full sentence
+    to show, not parts'. Buffer of 'the user wants me to look at' with
+    no terminator -> 'working…' until the model emits a period.
+    (Once a tool is set, the placeholder is 'working…'; before any
+    tool commits it's 'working on it…'.)"""
+    msg = FakeMessage()
+    prog = tool_progress.ToolProgress(msg)
+    asyncio.run(prog.start())
+    msg_obj = msg.channel.sent[0]
+    # No tool set yet; buffer is empty -> 'working on it…'
+    assert msg_obj.content == "working on it…"
+    # Set a tool but the reasoning buffer has no terminator yet.
+    prog._last_edit = 0
+    asyncio.run(prog.update("shell", "the user wants me to look at"))
+    # Tool is set; no full sentence yet -> 'working…' (the tool-active
+    # placeholder; the bot has committed to a tool but the model hasn't
+    # finished a thought).
+    assert msg_obj.content == "working…"
+    # Add a terminator and a follow-up sentence — now the LAST full
+    # sentence is rendered, not the half-sentence plus everything.
+    prog._last_edit = 0
+    asyncio.run(
+        prog.update(
+            "shell",
+            "the user wants me to look at the disk and report back. They asked about space.",
+        )
+    )
+    assert msg_obj.content == "They asked about space."
+    asyncio.run(prog.stop())
+
+
 def test_update_replaces_in_place_one_sentence():
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
     msg_obj = msg.channel.sent[0]
 
-    # First update
-    asyncio.run(prog.update("shell", "checking disk usage"))
-    # Rate limit blocks the immediate edit; force a flush
-    prog._last_edit = 0  # pretend it's been ages
-    asyncio.run(prog.update("shell", "checking disk usage"))
-    # The same sentence again — should be a no-op (content unchanged)
-    edits_before = len(msg.channel.edited)
-    asyncio.run(prog.update("shell", "checking disk usage"))
-    assert len(msg.channel.edited) == edits_before  # coalesced
+    # First update — reasoning must contain a terminator (full sentence)
+    # per the 2026-07-19 'show whole sentences only' directive.
+    prog._last_edit = 0
+    asyncio.run(prog.update("shell", "checking disk usage."))
+    assert msg_obj.content == "checking disk usage."
     # New sentence — replaces
     prog._last_edit = 0
-    asyncio.run(prog.update("web_search", "searching the docs"))
-    # Check last content of the edited message. Format policy (2026-07-19):
-    # the tool name is NOT prefixed onto the visible line — just the
-    # model's own reasoning sentence, no "web_search:" decoration.
-    assert msg_obj.content == "searching the docs"
+    asyncio.run(prog.update("web_search", "searching the docs."))
+    # Tool name is NOT prefixed; just the model's own sentence.
+    assert msg_obj.content == "searching the docs."
     asyncio.run(prog.stop())
 
 
@@ -106,9 +152,9 @@ def test_update_uses_models_own_words():
     asyncio.run(prog.start())
     msg_obj = msg.channel.sent[0]
     prog._last_edit = 0
-    asyncio.run(prog.update("shell", "verifying apt sources are sane"))
-    # New format: tool name is NOT prefixed onto the line.
-    assert msg_obj.content == "verifying apt sources are sane"
+    # Must end with a terminator; partial fragments stay as 'working…'.
+    asyncio.run(prog.update("shell", "verifying apt sources are sane."))
+    assert msg_obj.content == "verifying apt sources are sane."
     # No emoji, no backticks
     assert "⏳" not in msg_obj.content
     assert "`" not in msg_obj.content
@@ -138,17 +184,18 @@ def test_rate_limit_coalesces_rapid_updates():
     asyncio.run(prog.start())
     msg_obj = msg.channel.sent[0]
     # First update — go through (force last_edit to 0 so the rate limit
-    # treats the post-start window as already-elapsed).
+    # treats the post-start window as already-elapsed). Reasoning must
+    # be a full sentence to pass the meaningful-reasoning gate.
     prog._last_edit = 0
-    asyncio.run(prog.update("shell", "doing thing one"))
-    assert msg_obj.content == "doing thing one"
+    asyncio.run(prog.update("shell", "doing thing one."))
+    assert msg_obj.content == "doing thing one."
     # Second update immediately — should be cached but NOT edited
     edits_before = len(msg.channel.edited)
-    asyncio.run(prog.update("shell", "doing thing two"))
+    asyncio.run(prog.update("shell", "doing thing two."))
     # No new edit because we're within the rate limit window
     assert len(msg.channel.edited) == edits_before
     # The pending line is still recorded so a future call picks it up
-    assert prog._current_reason == "doing thing two"
+    assert prog._current_reason == "doing thing two."
     asyncio.run(prog.stop())
 
 
@@ -226,15 +273,14 @@ def test_long_reasoning_truncated_to_one_sentence():
     asyncio.run(prog.start())
     msg_obj = msg.channel.sent[0]
     prog._last_edit = 0
-    long = "checking disk usage\nand also looking at memory\n" + "x" * 500
+    long = "checking disk usage and memory now.\n" + "x" * 500
     asyncio.run(prog.update("shell", long))
     content = msg_obj.content
     # One line
     assert "\n" not in content
-    # New format: no "shell:" prefix. The visible line is the model's
-    # own words, possibly truncated to the visible budget.
-    assert content.startswith("checking disk usage")
-    assert "x" * 200 not in content  # the long tail was dropped
+    # Whole-sentence render: just the complete sentence, no prefix,
+    # no truncation of a partial mid-thought.
+    assert content == "checking disk usage and memory now."
     asyncio.run(prog.stop())
 
 
@@ -290,18 +336,19 @@ def test_progress_not_posted_when_start_skipped():
 def test_tick_shows_thinking_before_tool_name():
     """Long generations where the model thinks for seconds before committing
     to a tool used to be silent (just 'working on it…'). tick() should
-    surface the model's reasoning as 'thinking: …' so the user sees
-    liveness during the thinking phase."""
+    surface the model's reasoning as 'thinking: <full sentence>' so the
+    user sees liveness during the thinking phase. The 2026-07-19
+    directive: only show full sentences, never partials."""
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
     msg_obj = msg.channel.sent[0]
     edits_before = len(msg.channel.edited)
-    # First tick — always allowed through (the user is staring at
-    # 'working on it…', show them SOMETHING immediately).
-    asyncio.run(prog.tick(reasoning_delta="The user wants me to"))
+    # First tick — reasoning must include a sentence terminator to
+    # pass the meaningful-reasoning gate.
+    asyncio.run(prog.tick(reasoning_delta="The user wants me to draft a site about apples."))
     assert len(msg.channel.edited) > edits_before
-    assert msg_obj.content == "thinking: The user wants me to"
+    assert msg_obj.content == "thinking: The user wants me to draft a site about apples."
     asyncio.run(prog.stop())
 
 
@@ -424,3 +471,29 @@ def time_monotonic():
     import time
 
     return time.monotonic()
+
+
+def test_last_full_sentence_returns_most_recent():
+    """The visible line is the LAST complete sentence in the buffer,
+    not the first one or the whole buffer. The 2026-07-19 user
+    directive: full sentence to show, not parts."""
+    s = tool_progress._last_full_sentence
+    # No terminator -> empty.
+    assert s("the user wants me to look") == ""
+    # One sentence with terminator -> the whole string.
+    assert s("the user wants me to look at the disk.") == "the user wants me to look at the disk."
+    # Two sentences -> only the second (most recent) is returned.
+    assert (
+        s("the user wants me to look at the disk. They asked about space.")
+        == "They asked about space."
+    )
+    # Three sentences -> only the last one.
+    assert (
+        s("first thought. second thought. third thought.")
+        == "third thought."
+    )
+    # Mixed terminators.
+    assert (
+        s("the user asked a question! then I answered. finally, done?")
+        == "finally, done?"
+    )
