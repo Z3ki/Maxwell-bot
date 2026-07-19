@@ -141,15 +141,48 @@ def test_send_file_results_need_followup():
         [
             "Tool send_file: __FILE_SENT__ Sent file: a.txt (4 bytes)",
             "Tool send_file: __FILE_SENT__ Sent file: b.txt (4 bytes)",
-        ]
+        ],
     )
-    # A terminal send_message still wins -> no followup needed.
-    assert not _tool_results_need_followup(
+    # send_message does NOT short-circuit a batch that also contains a
+    # follow-up tool — the model still needs a turn to react to the
+    # non-terminal tool's output (otherwise shell/web_search/etc results
+    # get dropped on the floor).
+    assert _tool_results_need_followup(
         [
             "Tool send_file: __FILE_SENT__ Sent file: a.txt (4 bytes)",
             "Tool send_message: __MESSAGE_SENT__ Here you go",
         ]
     )
+
+
+def test_send_message_with_followup_tool_triggers_followup():
+    # Regression: a batch containing send_message AND a follow-up tool
+    # (shell, web_search, fetch_url, youtube, etc.) must loop back so the
+    # model sees and reacts to the follow-up tool's result. Previously the
+    # terminal send_message short-circuited the whole batch and the second
+    # tool's output was silently discarded.
+    assert _tool_results_need_followup(
+        [
+            "Tool send_message: __MESSAGE_SENT__ acknowledging",
+            "Tool shell: __SHELL_SENT__\n$ date\nSat May 23",
+        ]
+    )
+    assert _tool_results_need_followup(
+        [
+            "Tool send_message: __MESSAGE_SENT__ ok",
+            "Tool web_search: found 3 results",
+        ]
+    )
+    assert _tool_results_need_followup(
+        [
+            "Tool send_message: __MESSAGE_SENT__ looking",
+            "Tool fetch_url: <html>...</html>",
+        ]
+    )
+    # send_message alone (no follow-up tool) is still terminal -> no loop.
+    assert not _tool_results_need_followup(["Tool send_message: __MESSAGE_SENT__ done"])
+    # no_response alone is still terminal -> no loop.
+    assert not _tool_results_need_followup(["Tool no_response: __NO_RESPONSE__"])
 
 
 def test_reaction_on_maxwell_message_invokes_handler():
@@ -193,6 +226,11 @@ def test_reaction_on_maxwell_message_invokes_handler():
             "allowed_channels": [],
             "reply_mentions": True,
             "per_user_cooldown_seconds": 0,
+            # reactions-on-maxwell-messages only kick off a turn when this
+            # is on; the on_reaction_add gate added per the 2026-07-19 UX
+            # report (every emoji was firing an LLM turn) returns early
+            # otherwise. The test exercises the full path so we opt in.
+            "reaction_replies": True,
         },
         _blacklist=set(),
         _cooldowns={},
@@ -284,8 +322,12 @@ def test_dispatch_native_rejects_platform_incompatible_tool():
     bot = _native_bot({"react": react})
     # react is Discord-only; pretend this turn is telegram so it's incompatible.
     bot._message_tool_platform = lambda _message: "telegram"
-    bot._compatible_tool_names = lambda _platform: set()  # nothing compatible on tg here
-    message = SimpleNamespace(guild=None, channel=SimpleNamespace(id=123), tool_platform="telegram")
+    bot._compatible_tool_names = lambda _platform: (
+        set()
+    )  # nothing compatible on tg here
+    message = SimpleNamespace(
+        guild=None, channel=SimpleNamespace(id=123), tool_platform="telegram"
+    )
     raw = [_native_call("react", {"emoji": "catjam"})]
 
     async def run():
@@ -294,7 +336,9 @@ def test_dispatch_native_rejects_platform_incompatible_tool():
         )
 
     _, tool_results = asyncio.run(run())
-    assert tool_results == ["Tool react: Error - tool is not available on this platform"]
+    assert tool_results == [
+        "Tool react: Error - tool is not available on this platform"
+    ]
     assert react.calls == []
 
 
@@ -338,7 +382,11 @@ def test_dispatch_no_native_calls_just_sanitizes_text():
 def test_tool_prompt_filters_discord_only_tools_for_telegram():
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={"tools_enabled": True, "disabled_tools": [], "native_tool_calls": False},
+        _control={
+            "tools_enabled": True,
+            "disabled_tools": [],
+            "native_tool_calls": False,
+        },
         tools={"send_file": FakeTool("sent"), "react": FakeTool("Reacted")},
     )
 
@@ -351,7 +399,11 @@ def test_tool_prompt_filters_discord_only_tools_for_telegram():
 def test_tool_prompt_keeps_discord_tools_for_discord():
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={"tools_enabled": True, "disabled_tools": [], "native_tool_calls": False},
+        _control={
+            "tools_enabled": True,
+            "disabled_tools": [],
+            "native_tool_calls": False,
+        },
         tools={"send_file": FakeTool("sent"), "react": FakeTool("Reacted")},
     )
 
@@ -366,7 +418,11 @@ def test_tool_prompt_describes_reasoning_inside_tool_calls():
     # rides inside each tool's `reasoning` param, and chat goes via send_message.
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={"tools_enabled": True, "disabled_tools": [], "native_tool_calls": True},
+        _control={
+            "tools_enabled": True,
+            "disabled_tools": [],
+            "native_tool_calls": True,
+        },
         tools={"send_message": FakeTool("sent")},
     )
 
@@ -400,9 +456,7 @@ def test_ensure_reasoning_trace_backfills_only_when_no_tool_ran():
     message = SimpleNamespace()
 
     async def run():
-        await MaxwellBot._ensure_reasoning_trace(
-            bot, message, [], "hi", "reply"
-        )
+        await MaxwellBot._ensure_reasoning_trace(bot, message, [], "hi", "reply")
 
     asyncio.run(run())
     assert len(bot.traces) == 1
@@ -567,7 +621,11 @@ def test_reasoning_log_with_send_message_does_not_trigger_followup():
 def test_tool_prompt_keeps_reasoning_plain_text_rule():
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={"tools_enabled": True, "disabled_tools": [], "native_tool_calls": True},
+        _control={
+            "tools_enabled": True,
+            "disabled_tools": [],
+            "native_tool_calls": True,
+        },
         tools={"send_message": FakeTool("sent")},
     )
 
@@ -575,13 +633,21 @@ def test_tool_prompt_keeps_reasoning_plain_text_rule():
 
     assert "plain text" in prompt.lower()
     # reasoning is plain text only — no nested tags / JSON / <thoughts>
-    assert "no xml" in prompt.lower() or "no nested" in prompt.lower() or "plain text only" in prompt.lower()
+    assert (
+        "no xml" in prompt.lower()
+        or "no nested" in prompt.lower()
+        or "plain text only" in prompt.lower()
+    )
 
 
 def test_tool_prompt_native_mode_no_xml_instructions():
     bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
-        _control={"tools_enabled": True, "disabled_tools": [], "native_tool_calls": True},
+        _control={
+            "tools_enabled": True,
+            "disabled_tools": [],
+            "native_tool_calls": True,
+        },
         tools={"send_message": FakeTool("sent"), "react": FakeTool("Reacted")},
     )
 

@@ -1575,22 +1575,33 @@ JAILBREAK_PROMPT = (
 
 
 def _tool_results_need_followup(tool_results: list[str]) -> bool:
-    # Terminal actions: send_message and explicit no_response only.
-    # TTS uses __TTS_SENT__ (and legacy __NO_RESPONSE__ from older code) and must
-    # NOT abort follow-up when other tools in the batch need a model turn.
-    for result in tool_results:
-        if "__MESSAGE_SENT__" in result:
-            return False
-        if result.startswith("Tool no_response:") and "__NO_RESPONSE__" in result:
-            return False
-
+    # First pass: does the batch contain anything that needs a model turn
+    # (a follow-up tool result, or an error)? If yes, we ALWAYS loop back,
+    # even if the batch also contains a terminal send_message. Otherwise a
+    # send_message + shell pair in one batch would short-circuit, and the
+    # model would never get to react to the shell output.
+    has_followup_signal = False
     for result in tool_results:
         # Check for error prefixes, not just the substring "Error" anywhere
         # (prevents false positives like "Error handling in Python" search results)
         if result.startswith(("Error:", "Error ")) or "\nError:" in result:
             return True
         if any(result.startswith(f"Tool {name}:") for name in FOLLOWUP_TOOL_NAMES):
-            return True
+            has_followup_signal = True
+    if has_followup_signal:
+        return True
+
+    # Second pass: no follow-up tool in the batch, so a terminal action
+    # (send_message or explicit no_response) genuinely ends the turn.
+    # TTS uses __TTS_SENT__ and must NOT be treated as terminal — without
+    # the FOLLOWUP_TOOL_NAMES hit it would only reach this pass via an
+    # explicit no_response anyway.
+    for result in tool_results:
+        if "__MESSAGE_SENT__" in result:
+            return False
+        if result.startswith("Tool no_response:") and "__NO_RESPONSE__" in result:
+            return False
+
     return False
 
 
