@@ -206,11 +206,24 @@ class _CustomToolCallBuffer:
             i = end
         return "".join(out)
 
-    def feed(self, delta: str) -> None:
+    def feed(self, delta: str) -> str:
         """Accumulate a new text delta. Strips any completed tool-call
-        JSONs and appends the rest to text_parts."""
+        JSONs and appends the rest to text_parts.
+
+        Returns the newly-revealed VISIBLE text for this delta (tool-call
+        JSON already stripped out). Callers building a live preview (e.g.
+        the progress-message on_token callback) must use this return value
+        instead of the raw delta — the raw delta can contain a partial or
+        complete bare-JSON tool-call object
+        (``{"name": "shell", "arguments": {...}}``) that hasn't been
+        stripped yet, and showing that raw JSON to the user in the
+        "thinking: …" progress line is exactly the leak this return value
+        exists to prevent. While a tool-call opener is still balancing
+        (mid-JSON), this returns "" for that portion — nothing is shown
+        until we know whether it's a real tool call or just stray text.
+        """
         if not delta:
-            return
+            return ""
         # If we had a tail left over from the previous feed (braces hadn't
         # balanced yet), prepend it.
         if hasattr(self, "_pending_tail"):
@@ -229,6 +242,7 @@ class _CustomToolCallBuffer:
             self._buf = ""
         if visible:
             self.text_parts.append(visible)
+        return visible
 
     def drain(self) -> None:
         """Final call after the stream ends. Flushes any remaining tail."""
@@ -466,6 +480,7 @@ async def _read_sse_response(
                 delta = choice.get("delta") or {}
                 if delta.get("role"):
                     role = delta["role"]
+                visible_content_delta = ""
                 if "content" in delta and delta["content"] is not None:
                     content_parts.append(delta["content"])
                     # Custom tool-call protocol: pipe text deltas through
@@ -473,8 +488,22 @@ async def _read_sse_response(
                     # in the text stream get parsed incrementally and
                     # stripped from the visible content. Native path:
                     # leave content_parts alone.
+                    #
+                    # feed() returns the VISIBLE portion of this delta
+                    # (JSON already stripped, or "" while a tool-call
+                    # opener is still balancing). That return value — not
+                    # the raw delta — is what the on_token progress
+                    # preview below must use. Using the raw delta here
+                    # used to leak the model's literal bare-JSON tool
+                    # call (e.g. '{"name": "shell", "arguments": {...')
+                    # into the "thinking: …" status line character by
+                    # character, since native tool_name detection for the
+                    # custom protocol only fires once the opener is fully
+                    # parsed, not as raw text streams in.
                     if custom_buffer is not None:
-                        custom_buffer.feed(delta["content"])
+                        visible_content_delta = custom_buffer.feed(delta["content"])
+                    else:
+                        visible_content_delta = delta["content"]
                 # Reasoning deltas: OpenAI/DeepSeek-style models use
                 # `reasoning_content`; Ollama cloud's minimax-m3 emits a
                 # `reasoning` field on the same delta. Treat both the same
@@ -490,7 +519,7 @@ async def _read_sse_response(
                 # the NEW deltas from this frame plus an empty tool_name that
                 # the tool_call block below may fill in.
                 if on_token is not None:
-                    tok_content = delta.get("content") or ""
+                    tok_content = visible_content_delta
                     tok_reason = ""
                     for rkey in ("reasoning_content", "reasoning"):
                         rv = delta.get(rkey)

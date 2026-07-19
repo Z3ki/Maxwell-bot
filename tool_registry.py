@@ -127,7 +127,13 @@ class ToolSpec:
 
     name: str
     description: str
-    parameters: dict[str, Any] = field(default_factory=lambda: {"type": "object", "properties": {}, "additionalProperties": True})
+    parameters: dict[str, Any] = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": True,
+        }
+    )
     required: list[str] = field(default_factory=list)
     terminal: bool = False
     is_destructive: bool = False
@@ -230,7 +236,9 @@ class ToolRegistry:
             out.append(spec.openai_function())
         return out
 
-    def descriptions_block(self, *, allowed_names: set[str], disabled_names: set[str] | None = None) -> list[str]:
+    def descriptions_block(
+        self, *, allowed_names: set[str], disabled_names: set[str] | None = None
+    ) -> list[str]:
         """``name: description`` lines for the system prompt, filtered."""
         disabled = disabled_names or set()
         lines: list[str] = []

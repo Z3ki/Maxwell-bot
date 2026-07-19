@@ -1,5 +1,4 @@
 """Tests for the custom streaming tool-call buffer (bare-JSON protocol)."""
-import asyncio
 import sys
 from pathlib import Path
 
@@ -87,6 +86,76 @@ def test_buffer_malformed_json_is_kept_as_text():
     assert "oops" in visible
     # Either it parsed (best-effort) or it's preserved as text — no crash.
     assert len(buf.completed) >= 0
+
+
+def test_feed_return_value_never_leaks_raw_tool_json():
+    """Regression test: feed() must return "" (not raw JSON fragments)
+    while a tool-call opener is mid-stream and still balancing.
+
+    This is the value bot.py's progress preview ("thinking: …") is built
+    from. Before the fix, callers used the raw SSE delta instead of this
+    return value, so a streamed '{"name": "shell", "arguments": {"command"'
+    fragment would show up verbatim in the Discord status message.
+    """
+    buf = providers._CustomToolCallBuffer()
+    chunks = [
+        '{"name": "shell",',
+        ' "arguments": {"command": "rm -rf /tmp/x",',
+        ' "reasoning": "cleaning up"}}',
+        '\nAll done!',
+    ]
+    revealed = []
+    for c in chunks:
+        visible = buf.feed(c)
+        revealed.append(visible)
+        # No partial or complete tool-call JSON should ever be revealed.
+        assert '"name"' not in visible
+        assert '"arguments"' not in visible
+        assert "shell" not in visible
+        assert "rm -rf" not in visible
+    buf.drain()
+    assert len(buf.completed) == 1
+    assert buf.completed[0]["function"]["name"] == "shell"
+    # The only visible text across the whole stream is the trailing reply.
+    assert "".join(revealed).strip() == "All done!"
+
+
+def test_feed_returns_visible_text_immediately_when_no_tool_call():
+    """Plain reply text (no tool call) should be revealed immediately,
+    not buffered — otherwise the live progress preview would lag."""
+    buf = providers._CustomToolCallBuffer()
+    assert buf.feed("Hello ") == "Hello "
+    assert buf.feed("there!") == "there!"
+
+
+def test_on_token_preview_uses_filtered_text_not_raw_delta():
+    """End-to-end-ish: simulate what bot.py's _on_token callback receives
+    when custom_tool_calls streaming feeds it deltas, and confirm the
+    accumulated preview text never contains the raw tool-call JSON."""
+    on_partial_name_calls = []
+    buf = providers._CustomToolCallBuffer(
+        on_partial_name=on_partial_name_calls.append
+    )
+    preview_deltas = []
+    raw_chunks = [
+        "Let me check that.\n",
+        '{"name": "web_search", "argum',
+        'ents": {"query": "weather today", "reasoning": "looking it up"}}',
+        "\nHere's what I found.",
+    ]
+    for c in raw_chunks:
+        visible = buf.feed(c)
+        if visible:
+            preview_deltas.append(visible)
+    buf.drain()
+    preview_text = "".join(preview_deltas)
+    assert "web_search" not in preview_text
+    assert "weather today" not in preview_text
+    assert "Let me check that." in preview_text
+    assert "Here's what I found." in preview_text
+    # The tool name still reaches the progress UI via the dedicated
+    # partial-name callback, just not embedded as raw JSON text.
+    assert on_partial_name_calls == ["web_search"]
 
 
 def test_buffer_incremental_stream_simulation():
