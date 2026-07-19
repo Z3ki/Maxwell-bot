@@ -96,6 +96,18 @@ class Config:
     # and deletes it when the batch ends. See tool_progress.py for design.
     PROGRESS_MESSAGES = _bool_env("MAXWELL_PROGRESS_MESSAGES", True)
 
+    # Custom streaming tool-call protocol. Native OpenAI-style tools= doesn't
+    # stream incrementally on some providers (notably Ollama cloud's
+    # minimax-m3): the entire {name, arguments} block arrives in one final
+    # delta at ~88% of stream time, so the bot's progress message stays
+    # silent for the full 10-30s of generation. When this flag is on, the
+    # bot asks the model to emit the tool call as a bare JSON object on its
+    # own line ({"name": "...", "arguments": {...}}) and parses it from the
+    # text stream AS IT STREAMS. Tool name lands in the progress UI at
+    # ~12% of stream time vs ~88% for native. OFF by default to keep native
+    # behavior; turn on with MAXWELL_CUSTOM_TOOL_CALLS=true in .env.
+    CUSTOM_TOOL_CALLS = _bool_env("MAXWELL_CUSTOM_TOOL_CALLS", False)
+
     POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "flux")
 
     NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")

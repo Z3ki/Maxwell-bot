@@ -6180,6 +6180,62 @@ class MaxwellBot(commands.Bot):
         try:
             platform = MaxwellBot._message_tool_platform(self, message)
             openai_tools = self._build_openai_tools(platform)
+            # Custom streaming tool-call protocol: when enabled, the model
+            # emits the tool call as a bare JSON object on its own line
+            # ({"name": "...", "arguments": {...}}) instead of via the
+            # native tools= API. We then parse it from the text stream as it
+            # arrives. In this mode we DON'T pass native tools= to the
+            # provider (the model would then emit a proper tool_call which, on
+            # minimax-m3, arrives as one bundled final delta — defeating the
+            # purpose). The system prompt (appended below) explains the
+            # protocol to the model.
+            custom_tool_calls = bool(
+                getattr(self.config, "CUSTOM_TOOL_CALLS", False)
+                and self._control.get("tools_enabled", True)
+                and not (openai_tools is None or len(openai_tools) == 0)
+            )
+            provider_tools = None if custom_tool_calls else (openai_tools or None)
+            # When the custom protocol is on, instruct the model to emit the
+            # tool call as a single-line bare JSON object. The provider parses
+            # it from the text stream incrementally, so the bot's progress
+            # message can switch to "<tool>: …" as soon as the name appears
+            # (early in the stream) rather than at the very end.
+            if custom_tool_calls:
+                # List the available tools so the model knows valid names.
+                # (In native mode the same info goes via the tools= param,
+                # which we deliberately leave unset here.)
+                disabled = set(self._control.get("disabled_tools", []) or [])
+                compatible = MaxwellBot._compatible_tool_names(self, platform)
+                tool_lines = [
+                    f"- {name}: {tool.get_description()}"
+                    for name, tool in self.tools.items()
+                    if name in compatible and name not in disabled
+                ]
+                tool_list = "\n".join(tool_lines) if tool_lines else "(no tools available)"
+                snip = (
+                    "TOOLS AVAILABLE (use only when they clearly help):\n"
+                    f"{tool_list}\n\n"
+                    "TOOL CALLING — you MUST call tools by writing a single bare "
+                    "JSON object on its own line (no markdown fence, no code "
+                    "block, no surrounding text), exactly:\n"
+                    '{"name": "<tool_name>", "arguments": {<the tool\'s JSON params>}}\n'
+                    "The arguments object uses the SAME field names as the tool "
+                    "requires (including a `reasoning` string field describing "
+                    "why you're calling it). Write this JSON line BEFORE your "
+                    "reply to the user. After the JSON line, write your normal "
+                    "reply. Do NOT wrap the JSON in triple backticks. Do NOT use "
+                    "the API's native function-calling format. One JSON object "
+                    "per tool call; if you need several tools, write several "
+                    "JSON lines in a row."
+                )
+                messages = list(messages)
+                # Append to the first system message if present, else add one.
+                for _m in messages:
+                    if _m.get("role") == "system":
+                        _m["content"] = (_m["content"] or "") + "\n\n" + snip
+                        break
+                else:
+                    messages.insert(0, {"role": "system", "content": snip})
             await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
             try:
                 if self._control.get("typing_indicator", True) and not getattr(
@@ -6192,9 +6248,10 @@ class MaxwellBot(commands.Bot):
                                 media=active_media,
                                 timeout=ai_timeout,
                                 max_tokens=max_out_tokens,
-                                tools=openai_tools or None,
+                                tools=provider_tools,
                                 on_tool_call_name=_on_tool_call_name,
                                 on_token=_on_token,
+                                custom_tool_calls=custom_tool_calls,
                             )
                     except (discord.HTTPException, ConnectionError, OSError) as _exc:
                         response = await self.ai_provider.generate_response(
@@ -6202,9 +6259,10 @@ class MaxwellBot(commands.Bot):
                             media=active_media,
                             timeout=ai_timeout,
                             max_tokens=max_out_tokens,
-                            tools=openai_tools or None,
+                            tools=provider_tools,
                             on_tool_call_name=_on_tool_call_name,
                             on_token=_on_token,
+                            custom_tool_calls=custom_tool_calls,
                         )
                 else:
                     response = await self.ai_provider.generate_response(
@@ -6212,9 +6270,10 @@ class MaxwellBot(commands.Bot):
                         media=active_media,
                         timeout=ai_timeout,
                         max_tokens=max_out_tokens,
-                        tools=openai_tools or None,
+                        tools=provider_tools,
                         on_tool_call_name=_on_tool_call_name,
                         on_token=_on_token,
+                        custom_tool_calls=custom_tool_calls,
                     )
             finally:
                 await self._release_ai_slot()
@@ -6367,9 +6426,10 @@ class MaxwellBot(commands.Bot):
                             media=[],
                             timeout=ai_timeout,
                             max_tokens=max_out_tokens,
-                            tools=openai_tools or None,
+                            tools=provider_tools,
                             on_tool_call_name=_on_followup_tool_call_name,
                             on_token=_on_followup_token,
+                            custom_tool_calls=custom_tool_calls,
                         )
                     except Exception:
                         # Ensure followup progress is cleaned up on error
