@@ -1089,13 +1089,34 @@ def strip_tool_payload_leaks(text: str) -> str:
         try:
             parsed = json.loads(cleaned.strip())
             if isinstance(parsed, dict):
-                # Heuristic: if it has any key that smells like a tool or a thought,
-                # nuke the whole thing. If it has 2+ known tool keys, definitely.
-                tool_keys = {"name", "tool", "tool_name", "function", "arguments",
-                             "parameters", "input", "emoji", "reasoning", "thoughts",
-                             "intent", "decision", "tool_plan", "internal_monologue"}
-                hits = sum(1 for k in parsed if k.lower() in tool_keys)
-                if hits >= 1 and len(parsed) <= 8:
+                tool_keys = {
+                    "name", "tool", "tool_name", "function",
+                    "arguments", "parameters", "input",
+                    "emoji", "reasoning", "thoughts",
+                    "intent", "decision", "tool_plan", "internal_monologue",
+                }
+                # Response-envelope keys: the model sometimes emits a fake
+                # response object {"content": "...", "reply": true} as its
+                # visible reply instead of just the content string.
+                envelope_keys = {
+                    "content", "reply", "text", "message", "response",
+                    "channel", "recipient", "user_id", "message_id",
+                    "recipient_id", "target", "send", "should_reply",
+                }
+                keys = {k.lower() for k in parsed}
+                tool_hits = sum(1 for k in parsed if k.lower() in tool_keys)
+                env_hits = sum(1 for k in parsed if k.lower() in envelope_keys)
+                # 3) Single-key object with "content" -> the model forgot to
+                # strip the envelope, keep the inner text. Must run BEFORE the
+                # blanket envelope-strip below, otherwise the single content
+                # key matches the env-keys set and gets nuked.
+                if len(parsed) == 1 and "content" in keys:
+                    cleaned = str(parsed["content"] or "")
+                # 1) Any tool-shaped key, small dict -> nuke
+                # 2) Pure response envelope (all keys are envelope-shaped) -> nuke
+                elif (tool_hits >= 1 and len(parsed) <= 8) or (
+                    env_hits == len(parsed) and len(parsed) <= 6
+                ):
                     cleaned = ""
         except Exception:
             pass
