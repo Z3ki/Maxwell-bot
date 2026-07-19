@@ -185,6 +185,30 @@ def test_send_message_with_followup_tool_triggers_followup():
     assert not _tool_results_need_followup(["Tool no_response: __NO_RESPONSE__"])
 
 
+def test_email_tools_need_followup():
+    # All four email tools must be in FOLLOWUP_TOOL_NAMES — their results
+    # are data the model needs to read and react to. A batch like
+    # email_send + send_message, or any email_read_inbox call, must
+    # trigger a follow-up turn so the model can summarize / act on the
+    # result instead of going silent.
+    for name in (
+        "email_send",
+        "email_read_inbox",
+        "email_get_message",
+        "email_search",
+    ):
+        assert _tool_results_need_followup(
+            [f"Tool {name}: returned some data"]
+        )
+    # Mixed-batch case from the actual bug: send_message + email_send.
+    assert _tool_results_need_followup(
+        [
+            "Tool send_message: __MESSAGE_SENT__ sent",
+            "Tool email_send: __EMAIL_SENT__ To: leonw@leonw.dev",
+        ]
+    )
+
+
 def test_reaction_on_maxwell_message_invokes_handler():
     class NoopAsyncLock:
         async def __aenter__(self):

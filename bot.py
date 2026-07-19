@@ -1497,6 +1497,15 @@ FOLLOWUP_TOOL_NAMES = {
     "send_file",
     "send_meme",
     "send_media",
+    # Email tools must trigger a follow-up so the model can read the result
+    # and act on it. email_send ALSO needs follow-up so a batch like
+    # email_send + send_message still gets a second turn to summarize or
+    # react; without it the model would post the message and go silent even
+    # when the user asked for a confirmation, retry, or related action.
+    "email_send",
+    "email_read_inbox",
+    "email_get_message",
+    "email_search",
     "leave_vc",
     # Status: set_activity gets a follow-up turn so the model can react to
     # its own status change (re-pick a better one based on the latest user
