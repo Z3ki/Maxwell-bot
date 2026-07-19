@@ -2863,12 +2863,18 @@ class ShellTool(Tool):
         """Send `text` as one or more ```ansi codeblocks, each ≤2000 chars.
 
         Discord rejects (400 Invalid Form Body, 50035) any message over 2000
-        chars. The ```ansi\n...\n``` wrapper is 12 chars, so each chunk body
-        is capped at 1984 to stay safely under the limit. Splits on newlines
-        where possible so output stays readable.
+        chars. The ```ansi\n...\n``` wrapper is 13 chars (8 for the opener
+        `` ```ansi\n`` + 5 for the closer `` \n``` ``) and we leave an
+        extra few chars of headroom in case a future change tacks on a
+        leading space, a language hint, or a trailing newline. Each chunk
+        body is therefore capped at 1980 to stay safely under the limit.
+        Without that headroom the chunker silently produced 2001-char
+        messages that 400'd (see the 19:16 error flood in the bot log).
+        Splits on newlines where possible so output stays readable.
         """
-        wrapper = 12  # len("```ansi\n") + len("\n```")
-        limit = 2000 - wrapper
+        wrapper = 13  # len("```ansi\n") + len("\n```")
+        headroom = 7  # safety margin for tweaks / stray whitespace
+        limit = 2000 - wrapper - headroom
         chunks: list[str] = []
         remaining = text
         while remaining:
