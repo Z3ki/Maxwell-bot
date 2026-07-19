@@ -197,9 +197,7 @@ def test_email_tools_need_followup():
         "email_get_message",
         "email_search",
     ):
-        assert _tool_results_need_followup(
-            [f"Tool {name}: returned some data"]
-        )
+        assert _tool_results_need_followup([f"Tool {name}: returned some data"])
     # Mixed-batch case from the actual bug: send_message + email_send.
     assert _tool_results_need_followup(
         [
