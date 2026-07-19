@@ -120,7 +120,7 @@ class Config:
     GPT_IMAGE_API_KEY = os.getenv("GPT_IMAGE_API_KEY", "")
 
     MEMORY_MESSAGE_LIMIT = _int_env(
-        "MEMORY_MESSAGE_LIMIT", 500, min_value=1, max_value=2000
+        "MEMORY_MESSAGE_LIMIT", 2000, min_value=1, max_value=10000
     )
     REM_ENABLED = _bool_env("REM_ENABLED", False)
     REM_INTERVAL_SECONDS = _int_env("REM_INTERVAL_SECONDS", 600, min_value=10)

@@ -211,7 +211,13 @@ class MemoryManager:
 
     def __init__(self, data_dir: str, max_messages: int = 100):
         self.data_dir = Path(data_dir)
-        self.max_messages = min(max_messages, 500)
+        # 2026-07-19: model context is 1M. Keep more history per channel
+        # so the bot can actually remember long conversations. The old
+        # 500-cap silently truncated active channels and forced LTM to
+        # remember things that were never summarised. 10000 is a sane
+        # upper bound; operators tune MEMORY_MESSAGE_LIMIT downward if
+        # they want a tighter window.
+        self.max_messages = min(max_messages, 10000)
         self.memory_file = self.data_dir / "memory.json"
         self.ltm_file = self.data_dir / "long_term_memory.txt"
         self.shared_context_file = self.data_dir / "shared_context.json"

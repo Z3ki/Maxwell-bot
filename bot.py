@@ -7787,11 +7787,16 @@ class MaxwellBot(commands.Bot):
         )
 
     def _apply_prompt_budget(self, messages: list[dict]) -> list[dict]:
+        # 2026-07-19: model context window is 256k. Use most of it. The
+        # previous default of 60k left ~190k of context unused while the
+        # bot forgot things said 10 minutes ago. Output reserve scales
+        # so we don't over-fill and starve the reply.
         raw_budget = max(
             10000,
             min(
                 _safe_int(
-                    self._control.get("prompt_context_budget", 60000) or 60000, 60000
+                    self._control.get("prompt_context_budget", 240000) or 240000,
+                    240000,
                 ),
                 2000000,
             ),
@@ -7985,23 +7990,30 @@ class MaxwellBot(commands.Bot):
         messages = [{"role": "system", "content": "\n\n".join(system_parts)}]
         memory = await self.memory.get_channel_memory(channel_id)
         if memory:
+            # 2026-07-19: model context is 256k. Use most of it. The previous defaults
+            # here were 50k budget / 40 history / 3 tool history — leaving
+            # ~200k of context completely unused while the bot forgot
+            # everything said two minutes ago. Clamps now let operators push
+            # the budget near the model's full window without overshooting
+            # the output-token budget.
             budget = max(
                 1000,
                 min(
                     _safe_int(
-                        self._control.get("memory_context_budget", 50000) or 50000,
-                        50000,
+                        self._control.get("memory_context_budget", 200000) or 200000,
+                        200000,
                     ),
-                    100000,
+                    240000,
                 ),
             )
             count = max(
                 0,
                 min(
                     _safe_int(
-                        self._control.get("memory_history_messages", 40) or 40, 40
+                        self._control.get("memory_history_messages", 500) or 500,
+                        500,
                     ),
-                    1000,
+                    2000,
                 ),
             )
             used = 0
@@ -8012,7 +8024,8 @@ class MaxwellBot(commands.Bot):
             tool_limit = max(
                 0,
                 min(
-                    _safe_int(self._control.get("tool_history_messages", 3) or 0, 0), 20
+                    _safe_int(self._control.get("tool_history_messages", 20) or 20, 20),
+                    50,
                 ),
             )
             tool_history = (
@@ -8035,7 +8048,7 @@ class MaxwellBot(commands.Bot):
                 stamp = _format_context_timestamp(msg.get("timestamp"), now=context_now)
                 prefix = f"[{stamp}] " if stamp else ""
                 if msg.get("is_tool"):
-                    line = f"{prefix}[Tool] {msg.get('content', '')[:4000]}"
+                    line = f"{prefix}[Tool] {msg.get('content', '')[:12000]}"
                 else:
                     author = str(msg.get("author", "?"))
                     author_id = str(msg.get("author_id") or "")
@@ -8087,7 +8100,7 @@ class MaxwellBot(commands.Bot):
                         if reason:
                             autonomy_tag += f"; reason: {reason[:200]}"
                         autonomy_tag += "]"
-                    line = f"{prefix}{author_label}{relation}{autonomy_tag}: {str(msg.get('content', ''))[:4000]}"
+                    line = f"{prefix}{author_label}{relation}{autonomy_tag}: {str(msg.get('content', ''))[:12000]}"
                 if used + len(line) > budget:
                     break
                 lines.append(line)
