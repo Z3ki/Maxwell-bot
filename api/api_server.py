@@ -1069,8 +1069,10 @@ async def site_update(request):
                 sites = _load_for_write(path, dict, {})
             except ValueError as exc:
                 return ("err", str(exc), 409)
-            if not isinstance(sites, dict) or slug not in sites or not isinstance(
-                sites.get(slug), dict
+            if (
+                not isinstance(sites, dict)
+                or slug not in sites
+                or not isinstance(sites.get(slug), dict)
             ):
                 return ("notfound", None, 404)
             site = dict(sites[slug])
@@ -2299,8 +2301,8 @@ async def discord_auth_callback(request):
         f"https://cdn.discordapp.com/avatars/{user_id}/{avatar}.png" if avatar else ""
     )
     # Source of truth: the bot's live admins.json (updated by `,admin @user`).
-    # Falls back to DISCORD_ALLOWED_USER_IDS env when no file is present, so
-    # a fresh install still has a way to seed the allowlist.
+    # Anyone in this list can use the bot's admin commands AND log into the
+    # dashboard via Discord OAuth. No hardcoded env list to keep in sync.
     allowed = _load_bot_admins()
     if not allowed:
         logger.error(
