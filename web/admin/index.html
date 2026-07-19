@@ -1243,8 +1243,9 @@
             Object.assign(e.style, v);
           else if (k.startsWith("on") && typeof v === "function")
             e.addEventListener(k.slice(2).toLowerCase(), v);
-          else if (k === "html") { /* disabled for XSS safety */ }
-          else if (v === false || v == null) continue;
+          else if (k === "html") {
+            /* disabled for XSS safety */
+          } else if (v === false || v == null) continue;
           else if (v === true) e.setAttribute(k, "");
           else e.setAttribute(k, v);
         }
@@ -1304,6 +1305,8 @@
         return d.toTimeString().slice(0, 8);
       };
       const fmtNum = (n) => Number(n || 0).toLocaleString();
+      // id can be a number, a string, an object — coerce to a stable string for display + DOM ids.
+      const sid = (id, len = 16) => String(id ?? "").slice(0, len);
       const debounce = (fn, ms = 300) => {
         let t;
         return (...a) => {
@@ -1580,6 +1583,16 @@
         };
         $("#pageTitle").firstChild.textContent = titleMap[S.page] || "Admin";
         $("#pageSub").textContent = "";
+        // If we have no data yet, show a loading state and trigger a load.
+        if (!S.lastLoad && !S.loading) {
+          page.appendChild(
+            el("div", { class: "card" }, [
+              el("div", { class: "muted" }, "Loading admin data…"),
+            ]),
+          );
+          loadAll();
+          return;
+        }
         try {
           ({
             overview: renderOverview,
@@ -1780,7 +1793,7 @@
                     c.result || "—",
                   ),
                   el("div", { class: "meta" }, [
-                    el("span", { class: "mono" }, c.id?.slice(0, 16) || ""),
+                    el("span", { class: "mono" }, sid(c.id, 16) || ""),
                     el("span", {}, fmtAgo(c.ts ? c.ts * 1000 : null)),
                     statusBadge(c.status),
                   ]),
@@ -2091,7 +2104,7 @@
           cmds.forEach((c) => {
             tbody.appendChild(
               el("tr", {}, [
-                el("td", { class: "mono" }, c.id?.slice(0, 12) || ""),
+                el("td", { class: "mono" }, sid(c.id, 12) || ""),
                 el("td", {}, c.type),
                 el(
                   "td",
@@ -2779,8 +2792,8 @@
         const c = S.data.control?.control || {};
         const on = !!d.enabled;
         const interval = d.interval_seconds || 300;
-        const goals = S.data.autonomyGoals || [];
-        const log = (S.data.autonomyLog?.entries || []).slice().reverse();
+        const goals = Array.isArray(S.data.autonomyGoals) ? S.data.autonomyGoals : (S.data.autonomyGoals?.goals || []);
+        const log = (S.data.autonomyLog?.entries || S.data.autonomyLog || []).slice().reverse();
 
         // Engine card
         const engine = el("div", { class: "card" }, [
@@ -3096,7 +3109,7 @@
               el("div", { class: "body" }, [
                 el("b", {}, g.description),
                 el("div", { class: "meta" }, [
-                  el("span", { class: "mono" }, g.id?.slice(0, 16) || ""),
+                  el("span", { class: "mono" }, sid(g.id, 16) || ""),
                   el("span", {}, "last acted: " + (g.last_acted_on || "never")),
                 ]),
               ]),
@@ -3477,11 +3490,11 @@
             renderItem: (m) => ({
               title:
                 m.content?.slice(0, 100) + (m.content?.length > 100 ? "…" : ""),
-              meta: [{ mono: m.id?.slice(0, 16) || "" }],
+              meta: [{ mono: sid(m.id, 16) || "" }],
               expand: el("div", { class: "stack" }, [
                 el(
                   "textarea",
-                  { class: "field", id: "mem_" + m.id },
+                  { class: "field", id: "mem_" + sid(m.id) },
                   m.content || "",
                 ),
                 el("div", { class: "btn-row" }, [
@@ -3569,7 +3582,7 @@
                   f.visibility,
                 ),
               ],
-              meta: [{ mono: f.id?.slice(0, 16) || "" }],
+              meta: [{ mono: sid(f.id, 16) || "" }],
               actions: [
                 el(
                   "button",
