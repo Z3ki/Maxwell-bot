@@ -1,236 +1,1528 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Maxwell Admin</title>
 <style>
-:root{--bg:#0a0a0c;--nav:#0a0a0c;--panel:#0f0f12;--panel2:#14141a;--line:#1c1c22;--line2:#2a2a32;--text:#e4e4e8;--muted:#8a8a96;--dim:#4a4a56;--green:#7dd87f;--yellow:#d8c873;--red:#e57585;--mono:"SF Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--font:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font-family:var(--font);font-size:14px;line-height:1.45;-webkit-font-smoothing:antialiased}button,input,textarea,select{font:inherit}button{cursor:pointer}a{color:var(--text);text-decoration:none}a:hover{color:var(--muted)}.hidden{display:none!important}
-.login-wrap{min-height:100vh;display:grid;place-items:center;padding:24px}.login{width:min(380px,100%);background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:24px}.login h1{font-size:20px;margin:0 0 6px;font-weight:600}.login p{margin:0 0 18px;color:var(--muted)}.err{min-height:20px;color:var(--red);font-size:13px}
-.app{display:none;min-height:100vh}.app.authed{display:grid;grid-template-columns:220px 1fr}.side{background:var(--bg);border-right:1px solid var(--line);padding:18px;position:sticky;top:0;height:100vh}.brand{font-weight:600;font-size:16px;margin-bottom:2px;letter-spacing:-.02em}.sub{color:var(--muted);font-size:12px;margin-bottom:20px}.navbtn{display:block;width:100%;text-align:left;border:none;background:transparent;color:var(--muted);padding:8px 10px;border-radius:6px;margin:2px 0;transition:background .15s,color .15s}.navbtn:hover{color:var(--text)}.navbtn.active{background:var(--panel2);color:var(--text)}.side-bottom{position:absolute;left:18px;right:18px;bottom:18px;display:grid;gap:8px}
-.main{min-width:0}.top{height:56px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 20px;background:var(--bg);position:sticky;top:0;z-index:3}.top h2{font-size:15px;margin:0;font-weight:600}.top-actions{display:flex;gap:8px;align-items:center}.content{padding:20px;max-width:1420px}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.grid.two{grid-template-columns:repeat(2,1fr)}.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px}.card h3{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin:0 0 14px;font-weight:600}.metric{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px}.metric b{display:block;font-size:24px;font-weight:600;letter-spacing:-.02em}.metric span{color:var(--muted);font-size:12px}.panel{display:none}.panel.active{display:block}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.stack{display:grid;gap:8px}.field{width:100%;background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:9px 10px;outline:none;transition:border-color .15s}.field:focus{border-color:var(--line2)}textarea.field{min-height:110px;resize:vertical}.btn{border:1px solid var(--line);background:var(--bg);color:var(--text);border-radius:8px;padding:8px 12px;transition:border-color .15s}.btn:hover{border-color:var(--line2)}.btn.primary{background:var(--text);color:var(--bg);border-color:var(--text)}.btn.primary:hover{background:#fff;border-color:#fff}.btn.red{color:var(--red);border-color:var(--line)}.btn.red:hover{border-color:var(--red)}.btn.green{color:var(--green);border-color:var(--line)}.btn.green:hover{border-color:var(--green)}.btn.small{padding:6px 10px;font-size:13px}.badge{display:inline-block;font-size:11px;padding:2px 8px;border-radius:4px;border:1px solid var(--line);color:var(--muted);font-weight:500}.badge.ok{color:var(--green);border-color:rgba(125,216,127,.25)}.badge.bad{color:var(--red);border-color:rgba(229,117,133,.25)}.badge.warn{color:var(--yellow);border-color:rgba(216,200,115,.25)}.mono{font-family:var(--mono)}.muted{color:var(--muted)}
-.switchline{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);padding:10px 0}.switchline:last-child{border-bottom:0}.switch{position:relative;width:42px;height:24px;flex:0 0 auto}.switch input{opacity:0}.knob{position:absolute;inset:0;background:#26262e;border-radius:999px}.knob:before{content:"";position:absolute;width:18px;height:18px;top:3px;left:3px;background:#7a7a86;border-radius:50%;transition:.14s}input:checked+.knob{background:rgba(125,216,127,.25)}input:checked+.knob:before{transform:translateX(18px);background:var(--green)}
-table{width:100%;border-collapse:collapse}th,td{border-bottom:1px solid var(--line);padding:9px;text-align:left;vertical-align:top}th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em;font-weight:600}.table{overflow:auto}.list{display:grid;gap:8px}.item{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px}pre{margin:0;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:12px;white-space:pre-wrap;max-height:420px;overflow:auto;font-size:12px;line-height:1.6;font-family:var(--mono);color:var(--muted)}.toast{position:fixed;right:18px;bottom:18px;background:var(--text);color:var(--bg);border-radius:8px;padding:10px 14px;font-weight:600;opacity:0;pointer-events:none;transition:.16s}.toast.show{opacity:1}
-@media(max-width:980px){.app.authed{display:block}.side{position:sticky;top:0;height:auto;z-index:5;padding:12px;border-right:0;border-bottom:1px solid var(--line)}.sub{margin-bottom:10px}#nav{display:flex;gap:6px;overflow-x:auto;padding:4px 0 8px;scrollbar-width:thin;-webkit-overflow-scrolling:touch}.navbtn{flex:0 0 auto;width:auto;white-space:nowrap;margin:0;padding:8px 10px}.navbtn.active{background:var(--panel2)}.side-bottom{position:static;margin-top:8px;display:flex}.side-bottom .btn{flex:1;text-align:center}.main{min-width:0}.top{position:sticky;top:96px;height:auto;min-height:52px;align-items:flex-start;gap:8px;padding:10px 12px}.top-actions{flex-wrap:wrap;justify-content:flex-end}.content{padding:14px;max-width:none}.grid,.grid.two{grid-template-columns:1fr}.metric{padding:14px}.metric b{font-size:21px}.card{padding:14px}.row{align-items:stretch}.row>.field{max-width:none!important}.btn{min-height:40px}.btn.small{min-height:34px}.switchline{gap:14px}.table{overflow-x:auto;-webkit-overflow-scrolling:touch}table{min-width:680px}pre{max-height:55vh}.toast{left:12px;right:12px;bottom:12px;text-align:center}.login-wrap{padding:16px}}
-@media(max-width:520px){html,body{font-size:13px}.brand{font-size:15px}.top{top:92px}.top h2{width:100%;font-size:14px}.top-actions{width:100%;justify-content:space-between}.top-actions .badge{flex:1;text-align:center}.content{padding:10px}.card,.metric,.item{border-radius:8px}.login{padding:18px}.field,textarea.field{font-size:16px}.row{display:grid;grid-template-columns:1fr}.row .btn,.stack .btn{width:100%}.side-bottom{display:grid;grid-template-columns:1fr 1fr}.switch{width:46px}.knob:before{width:20px;height:20px;top:2px;left:2px}input:checked+.knob:before{transform:translateX(22px)}}
+  /* ----- design tokens -----------------------------------------------------*/
+  :root{
+    --bg:#0a0a0c; --surface:#101015; --panel:#15151c; --panel-2:#1c1c25;
+    --line:#22222b; --line-2:#2f2f3a;
+    --text:#e8e8ee; --muted:#8a8a96; --dim:#5a5a66;
+    --accent:#a78bfa; --accent-2:#7c3aed;
+    --green:#7dd87f; --yellow:#e8c87a; --red:#e57585; --blue:#7ab8e8;
+    --radius:10px; --radius-sm:6px;
+    --shadow:0 1px 0 rgba(255,255,255,.02) inset, 0 8px 24px rgba(0,0,0,.35);
+    --mono:"SF Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --font:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font-family:var(--font);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  button,input,textarea,select{font:inherit;color:inherit}
+  button{cursor:pointer;background:none;border:0}
+  a{color:var(--text);text-decoration:none}
+  a:hover{color:var(--accent)}
+  ::selection{background:rgba(167,139,250,.35)}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:#25252e;border-radius:8px}
+  ::-webkit-scrollbar-thumb:hover{background:#34343f}
+  ::-webkit-scrollbar-track{background:transparent}
+
+  /* ----- shell ------------------------------------------------------------*/
+  .shell{display:grid;grid-template-columns:240px 1fr;min-height:100vh}
+  .shell.collapsed{grid-template-columns:64px 1fr}
+  .sidebar{background:var(--surface);border-right:1px solid var(--line);padding:18px 12px;position:sticky;top:0;height:100vh;display:flex;flex-direction:column;gap:6px;overflow:hidden}
+  .brand{display:flex;align-items:center;gap:10px;padding:4px 8px 14px;border-bottom:1px solid var(--line);margin-bottom:10px}
+  .brand-mark{width:28px;height:28px;border-radius:8px;background:linear-gradient(135deg,var(--accent),var(--accent-2));display:grid;place-items:center;font-weight:700;color:#0b0b10;font-size:14px;flex:0 0 auto}
+  .brand-text{font-weight:600;letter-spacing:-.01em;font-size:15px;line-height:1.1}
+  .brand-text small{display:block;color:var(--muted);font-size:11px;font-weight:500;margin-top:2px}
+  .nav-section{font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--dim);padding:14px 8px 6px;font-weight:600}
+  .nav{display:flex;flex-direction:column;gap:1px}
+  .nav button{all:unset;display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:var(--radius-sm);color:var(--muted);font-size:13px;cursor:pointer;white-space:nowrap;overflow:hidden}
+  .nav button:hover{background:var(--panel);color:var(--text)}
+  .nav button.active{background:var(--panel-2);color:var(--text);box-shadow:inset 0 0 0 1px var(--line-2)}
+  .nav .icon{width:18px;height:18px;flex:0 0 auto;display:grid;place-items:center;color:var(--dim)}
+  .nav button.active .icon{color:var(--accent)}
+  .nav .pill{margin-left:auto;background:var(--panel-2);color:var(--muted);font-size:10px;padding:1px 6px;border-radius:999px}
+  .sidebar-foot{margin-top:auto;padding:10px 8px 2px;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:6px}
+  .sidebar-foot a,.sidebar-foot button{all:unset;display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:var(--radius-sm);color:var(--muted);font-size:12px;cursor:pointer}
+  .sidebar-foot a:hover,.sidebar-foot button:hover{color:var(--text);background:var(--panel)}
+  .shell.collapsed .brand-text,.shell.collapsed .nav-section,.shell.collapsed .nav button span:not(.icon),.shell.collapsed .sidebar-foot a span,.shell.collapsed .sidebar-foot button span{display:none}
+  .shell.collapsed .nav button{justify-content:center}
+
+  /* ----- main -------------------------------------------------------------*/
+  .main{display:flex;flex-direction:column;min-width:0}
+  .topbar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:12px;padding:0 24px;height:60px;background:rgba(10,10,12,.85);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+  .topbar h1{margin:0;font-size:16px;font-weight:600;letter-spacing:-.01em}
+  .topbar h1 small{color:var(--muted);font-weight:500;margin-left:8px;font-size:12px}
+  .topbar .spacer{flex:1}
+  .topbar .status-strip{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+  .topbar .search{position:relative}
+  .topbar .search input{width:0;padding:7px 10px 7px 30px;background:var(--panel);border:1px solid var(--line);border-radius:8px;color:var(--text);transition:width .18s,border-color .15s;outline:none}
+  .topbar .search input:focus{width:240px;border-color:var(--line-2)}
+  .topbar .search input:not(:placeholder-shown){width:240px}
+  .topbar .search svg{position:absolute;left:9px;top:50%;transform:translateY(-50%);color:var(--dim)}
+
+  /* ----- generic building blocks ----------------------------------------*/
+  .page{padding:24px;max-width:1440px;width:100%;margin:0 auto;flex:1}
+  .page h2{font-size:13px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);font-weight:600;margin:0 0 14px}
+  .grid{display:grid;gap:14px}
+  .g-1{grid-template-columns:1fr}
+  .g-2{grid-template-columns:repeat(2,1fr)}
+  .g-3{grid-template-columns:repeat(3,1fr)}
+  .g-4{grid-template-columns:repeat(4,1fr)}
+  @media(max-width:1180px){.g-3,.g-4{grid-template-columns:repeat(2,1fr)}}
+  @media(max-width:780px){.g-2,.g-3,.g-4{grid-template-columns:1fr}}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:18px;box-shadow:var(--shadow)}
+  .card h3{margin:0 0 12px;font-size:11px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);font-weight:600;display:flex;align-items:center;gap:8px}
+  .card h3 .count{margin-left:auto;background:var(--panel-2);color:var(--muted);padding:1px 7px;border-radius:999px;font-size:10px;letter-spacing:0}
+  .card .subtle{color:var(--muted);font-size:12px;margin:0 0 12px;line-height:1.55}
+
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px;display:flex;flex-direction:column;gap:4px;min-width:0}
+  .stat .label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;font-weight:600}
+  .stat .value{font-size:24px;font-weight:600;letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1.1}
+  .stat .meta{font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums}
+  .stat.ok .value{color:var(--green)}
+  .stat.bad .value{color:var(--red)}
+  .stat.warn .value{color:var(--yellow)}
+
+  .btn{display:inline-flex;align-items:center;gap:6px;padding:7px 12px;border:1px solid var(--line);background:var(--surface);color:var(--text);border-radius:8px;font-size:13px;transition:all .12s;white-space:nowrap}
+  .btn:hover{border-color:var(--line-2);background:var(--panel)}
+  .btn:active{transform:translateY(1px)}
+  .btn.primary{background:var(--text);color:#0a0a0c;border-color:var(--text);font-weight:500}
+  .btn.primary:hover{background:#fff;border-color:#fff}
+  .btn.danger{color:var(--red);border-color:rgba(229,117,133,.3)}
+  .btn.danger:hover{border-color:var(--red);background:rgba(229,117,133,.08)}
+  .btn.ghost{border-color:transparent;color:var(--muted)}
+  .btn.ghost:hover{color:var(--text);background:var(--panel);border-color:transparent}
+  .btn.sm{padding:5px 9px;font-size:12px}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn-row{display:flex;gap:8px;flex-wrap:wrap}
+
+  .field{display:block;width:100%;background:var(--surface);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:9px 11px;outline:none;transition:border-color .12s,background .12s;font-size:13px}
+  .field:focus{border-color:var(--accent);background:var(--bg)}
+  textarea.field{min-height:90px;resize:vertical;line-height:1.5}
+  .field::placeholder{color:var(--dim)}
+  .label{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:600;margin-bottom:6px;display:block}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .stack{display:flex;flex-direction:column;gap:10px}
+  .grow{flex:1;min-width:0}
+
+  .badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;padding:2px 8px;border-radius:4px;border:1px solid var(--line);color:var(--muted);font-weight:500;background:var(--surface);letter-spacing:.01em}
+  .badge .dot{width:6px;height:6px;border-radius:50%;background:currentColor;box-shadow:0 0 8px currentColor}
+  .badge.ok{color:var(--green);border-color:rgba(125,216,127,.25);background:rgba(125,216,127,.06)}
+  .badge.bad{color:var(--red);border-color:rgba(229,117,133,.25);background:rgba(229,117,133,.06)}
+  .badge.warn{color:var(--yellow);border-color:rgba(232,200,122,.25);background:rgba(232,200,122,.06)}
+  .badge.info{color:var(--blue);border-color:rgba(122,184,232,.25);background:rgba(122,184,232,.06)}
+  .badge.accent{color:var(--accent);border-color:rgba(167,139,250,.25);background:rgba(167,139,250,.06)}
+
+  .muted{color:var(--muted)}
+  .dim{color:var(--dim)}
+  .mono{font-family:var(--mono);font-size:12.5px}
+  .truncate{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  .divider{height:1px;background:var(--line);margin:14px 0;border:0}
+
+  /* ----- table ------------------------------------------------------------*/
+  .table{width:100%;border-collapse:collapse}
+  .table th,.table td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:middle}
+  .table th{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.1em;font-weight:600;background:var(--surface);position:sticky;top:0;z-index:1}
+  .table tbody tr:hover{background:rgba(255,255,255,.02)}
+  .table tbody tr:last-child td{border-bottom:0}
+  .table-wrap{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;overflow-x:auto}
+
+  /* ----- list items -------------------------------------------------------*/
+  .item-list{display:flex;flex-direction:column;gap:8px;max-height:520px;overflow-y:auto;padding-right:4px}
+  .item{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:12px 14px;display:flex;gap:12px;align-items:flex-start;transition:border-color .12s}
+  .item:hover{border-color:var(--line-2)}
+  .item .body{flex:1;min-width:0}
+  .item .body p{margin:4px 0 0;color:var(--text);line-height:1.5;word-wrap:break-word}
+  .item .body .meta{font-size:11px;color:var(--muted);margin-top:6px;display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .item .actions{display:flex;gap:6px;flex:0 0 auto}
+
+  /* ----- switch -----------------------------------------------------------*/
+  .switch{position:relative;display:inline-block;width:38px;height:22px;flex:0 0 auto}
+  .switch input{opacity:0;width:0;height:0}
+  .knob{position:absolute;inset:0;background:#26262e;border-radius:999px;cursor:pointer;transition:background .15s}
+  .knob:before{content:"";position:absolute;width:16px;height:16px;top:3px;left:3px;background:#7a7a86;border-radius:50%;transition:.15s}
+  .switch input:checked+.knob{background:rgba(125,216,127,.3)}
+  .switch input:checked+.knob:before{transform:translateX(16px);background:var(--green)}
+  .switch-line{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--line);gap:14px}
+  .switch-line:last-child{border-bottom:0}
+  .switch-line .text{flex:1;min-width:0}
+  .switch-line .text b{display:block;font-size:13px;font-weight:500}
+  .switch-line .text small{color:var(--muted);font-size:11.5px;display:block;margin-top:2px}
+
+  /* ----- pre / code blocks (logs, raw) ----------------------------------*/
+  pre.log{background:#07070a;border:1px solid var(--line);border-radius:8px;padding:14px;white-space:pre-wrap;max-height:520px;overflow:auto;font-size:12px;line-height:1.55;font-family:var(--mono);color:var(--text);margin:0}
+
+  /* ----- toast -----------------------------------------------------------*/
+  .toast-wrap{position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:8px;z-index:50;pointer-events:none}
+  .toast{background:var(--text);color:#0a0a0c;padding:10px 14px;border-radius:8px;font-weight:500;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.4);transform:translateY(8px);opacity:0;transition:.18s;pointer-events:auto;display:flex;align-items:center;gap:8px;min-width:200px;max-width:380px}
+  .toast.show{transform:translateY(0);opacity:1}
+  .toast.error{background:var(--red);color:#1a0a0e}
+  .toast.ok{background:var(--green);color:#0a1a0b}
+  .toast .x{margin-left:auto;opacity:.6;cursor:pointer;font-size:16px;line-height:1}
+
+  /* ----- modal -----------------------------------------------------------*/
+  .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);z-index:100;display:none;align-items:center;justify-content:center;padding:20px}
+  .modal-bg.show{display:flex}
+  .modal{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:24px;max-width:480px;width:100%;box-shadow:0 24px 60px rgba(0,0,0,.5)}
+  .modal h3{margin:0 0 8px;font-size:16px;font-weight:600}
+  .modal p{color:var(--muted);margin:0 0 18px;font-size:13px;line-height:1.5}
+  .modal .btn-row{justify-content:flex-end}
+
+  /* ----- login -----------------------------------------------------------*/
+  .login-wrap{min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(ellipse at top,rgba(124,58,237,.08),transparent 60%)}
+  .login{width:min(380px,100%);background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:28px;box-shadow:var(--shadow)}
+  .login h1{font-size:22px;margin:0 0 4px;font-weight:600;letter-spacing:-.01em}
+  .login p{margin:0 0 20px;color:var(--muted);font-size:13px}
+  .err{min-height:18px;color:var(--red);font-size:12.5px;margin:4px 0}
+  .login .divider{text-align:center;margin:18px 0 12px;color:var(--muted);font-size:11px;position:relative}
+  .login .divider:before,.login .divider:after{content:"";position:absolute;top:50%;width:calc(50% - 24px);height:1px;background:var(--line)}
+  .login .divider:before{left:0}
+  .login .divider:after{right:0}
+
+  /* ----- page-specific styles -------------------------------------------*/
+  .toolbar{display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+  .toolbar .field,.toolbar input,.toolbar select{width:auto;min-width:160px;flex:1;max-width:300px}
+  .toolbar .spacer{flex:1}
+
+  .timeline{border-left:2px solid var(--line);padding-left:14px;margin-left:6px}
+  .timeline .entry{position:relative;padding:8px 0 14px}
+  .timeline .entry:before{content:"";position:absolute;left:-20px;top:12px;width:10px;height:10px;border-radius:50%;background:var(--panel-2);border:2px solid var(--line-2)}
+  .timeline .entry.ok:before{background:var(--green);border-color:rgba(125,216,127,.3)}
+  .timeline .entry.bad:before{background:var(--red);border-color:rgba(229,117,133,.3)}
+  .timeline .entry.warn:before{background:var(--yellow);border-color:rgba(232,200,122,.3)}
+  .timeline .entry time{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+  .timeline .entry .what{font-size:13px;margin:2px 0 4px}
+  .timeline .entry .who{font-size:12px;color:var(--muted)}
+
+  .empty{text-align:center;padding:30px 20px;color:var(--muted);font-size:13px}
+  .empty .icon{font-size:32px;opacity:.4;margin-bottom:8px}
+
+  .kbd{background:var(--surface);border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-family:var(--mono);font-size:11px;color:var(--muted)}
+
+  /* ----- responsive ------------------------------------------------------*/
+  .menu-toggle{display:none}
+  @media(max-width:980px){
+    .shell{grid-template-columns:1fr}
+    .sidebar{position:fixed;top:0;left:0;width:240px;height:100vh;z-index:30;transform:translateX(-100%);transition:transform .2s;box-shadow:0 0 30px rgba(0,0,0,.4)}
+    .sidebar.open{transform:translateX(0)}
+    .menu-toggle{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid var(--line);background:var(--surface);color:var(--text);border-radius:8px;font-size:13px}
+    .topbar{padding:0 16px;height:54px}
+    .page{padding:16px}
+    .topbar .search input:focus,.topbar .search input:not(:placeholder-shown){width:160px}
+  }
+  @media(max-width:520px){
+    html,body{font-size:13px}
+    .stat .value{font-size:20px}
+    .card,.stat{padding:14px}
+    .page{padding:12px}
+    .field,textarea.field{font-size:16px}
+  }
+
+  /* loading shimmer */
+  .loading{position:relative;overflow:hidden}
+  .loading:after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.04),transparent);animation:shimmer 1.4s infinite}
+  @keyframes shimmer{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
 </style>
 </head>
 <body>
-<div id="login" class="login-wrap"><form id="loginForm" class="login"><h1>Maxwell Admin</h1><p>Sign in to open the command center.</p><div class="stack"><input id="user" class="field" autocomplete="username" placeholder="Username"><input id="pass" class="field" type="password" autocomplete="current-password" placeholder="Password"><div id="error" class="err"></div><button class="btn primary" type="submit">Login</button><button id="clear" class="btn" type="button">Clear saved login</button><div style="margin:14px 0 8px;text-align:center;color:var(--muted);font-size:12px">— or —</div><button id="discordLogin" class="btn primary" type="button" style="display:flex;align-items:center;justify-content:center;gap:10px;width:100%">Continue with Discord</button></div></form></div>
-<div id="app" class="app"><aside class="side"><div class="brand">maxwell</div><div class="sub">command center</div><nav id="nav"></nav><div class="side-bottom"><a class="btn small" href="/">Main page</a><button id="logout" class="btn small red">Logout</button></div></aside><main class="main"><header class="top"><h2 id="title">Overview</h2><div class="top-actions"><span id="autoState" class="badge">manual refresh</span><span id="apiState" class="badge">API</span><button id="refresh" class="btn small primary">Refresh</button></div></header><div class="content"><section class="grid" id="metrics"></section><section id="overview" class="panel"></section><section id="commands" class="panel"></section><section id="discord" class="panel"></section><section id="llm" class="panel"></section><section id="rem" class="panel"></section><section id="autonomy" class="panel"></section><section id="intel" class="panel"></section><section id="controls" class="panel"></section><section id="memory" class="panel"></section><section id="context" class="panel"></section><section id="logs" class="panel"></section><section id="raw" class="panel"></section></div></main></div><div id="toast" class="toast"></div>
-<script>
-const S={auth:null,discordToken:null,tab:'overview',status:null,system:null,control:{},tools:[],memory:[],memoryJson:{},context:[],sites:{},prompts:{},blacklist:[],auto:[],commands:[],channels:[],discord:{guilds:[],dms:[]},rem:null,autonomyStatus:null,autonomyLog:[],autonomyGoals:[],cleanup:null,intel:null,pm2:[],traces:[],logs:'',timer:null};
-const T=[['overview','Overview'],['commands','Commands'],['discord','Discord'],['llm','LLM'],['rem','REM'],['autonomy','Autonomy'],['intel','Intel'],['controls','Controls'],['memory','Memory'],['context','Context'],['logs','Logs'],['raw','Raw']];
-const $=id=>document.getElementById(id);const esc=v=>String(v??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-function toast(t){const e=$('toast');e.textContent=t;e.classList.add('show');setTimeout(()=>e.classList.remove('show'),1800)}
-function auth(){return S.auth?{'Authorization':'Basic '+btoa(S.auth.user+':'+S.auth.pass)}:(S.discordToken?{'X-Discord-Token':S.discordToken}:{})}
-async function api(url,opt={}){const r=await fetch(url,{...opt,headers:{...(opt.headers||{}),...auth()}});let d={};try{d=await r.json()}catch(e){}if(r.status===401){logout(false);throw new Error('Unauthorized')}if(!r.ok)throw new Error(d.error||'HTTP '+r.status);return d}
-async function login(user,pass){const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user,pass})});const d=await r.json().catch(()=>({}));if(!r.ok||!d.ok)throw new Error(d.error||'Login failed');S.auth={user,pass};localStorage.setItem('mw_basic',btoa(user+':'+pass));$('login').classList.add('hidden');$('app').classList.add('authed');await loadAll()}
-async function loginDiscord(){const r=await fetch('/api/auth/discord/state');const d=await r.json().catch(()=>({}));if(!r.ok||!d.authorize_url)throw new Error(d.error||'Discord login not configured');const u=d.authorize_url;if(!/^https:\/\/(discord\.com|(([a-z0-9-]+\.)?discordapp\.com))\//i.test(u))throw new Error('Refusing redirect to unexpected authorize URL');window.location=u}
-async function loginDiscordToken(token){S.discordToken=token;localStorage.setItem('mw_discord_token',token);try{const v=await api('/api/auth/discord/verify');if(!v.ok)throw new Error('invalid token');S.discordUser=v;$('login').classList.add('hidden');$('app').classList.add('authed');await loadAll()}catch(e){S.discordToken=null;localStorage.removeItem('mw_discord_token');throw e}}
-function logout(clear=true){S.auth=null;S.discordToken=null;S.discordUser=null;$('app').classList.remove('authed');$('login').classList.remove('hidden');if(clear){localStorage.removeItem('mw_basic');localStorage.removeItem('mw_discord_token');try{fetch('/api/auth/discord/logout',{method:'POST',headers:S.discordToken?{'X-Discord-Token':S.discordToken}:{}})}catch(e){}}}
-function badge(v,k=''){return `<span class="badge ${k}">${esc(v)}</span>`}function bytes(n){n=Number(n||0);if(n<1024)return n+'B';if(n<1048576)return(n/1024).toFixed(1)+'K';if(n<1073741824)return(n/1048576).toFixed(1)+'M';return(n/1073741824).toFixed(1)+'G'}function up(ms){if(!ms)return'-';const s=Math.max(0,Math.floor((Date.now()-Number(ms))/1000));return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m'}
-async function loadAll(){try{$('apiState').textContent='loading';$('apiState').className='badge warn';const [status,system,controlData,memory,memoryJson,context,sites,prompts,blacklist,auto,commands,channels,discord,rem,autonomyStatus,autonomyLog,autonomyGoals,cleanup,intelStatus,pm2,traces]=await Promise.all([api('/api/status'),api('/api/system'),api('/data/bot_control.json'),api('/data/long_term_memory.json'),api('/data/memory.json'),api('/api/context'),api('/data/sites.json'),api('/data/prompts.json'),api('/data/blacklist.json'),api('/data/auto_channels.json'),api('/api/commands'),api('/api/channels'),api('/api/discord/state'),api('/api/rem/status'),api('/api/autonomy/status'),api('/api/autonomy/log'),api('/api/autonomy/goals'),api('/api/context_cleanup/status'),api('/api/intel/status'),api('/api/pm2'),api('/api/llm/traces?limit=200')]);Object.assign(S,{status,system,control:controlData.control||{},tools:controlData.tools||[],memory:Array.isArray(memory)?memory:[],memoryJson:memoryJson||{},context:Array.isArray(context)?context:[],sites:sites||{},prompts:prompts||{},blacklist:Array.isArray(blacklist)?blacklist:[],auto:Array.isArray(auto)?auto:[],commands:Array.isArray(commands)?commands:[],channels:Array.isArray(channels)?channels:[],discord:discord&&typeof discord==='object'?discord:{guilds:[],dms:[]},rem,autonomyStatus:autonomyStatus||null,autonomyLog:Array.isArray(autonomyLog?.entries)?autonomyLog.entries:[],autonomyGoals:Array.isArray(autonomyGoals?.goals)?autonomyGoals.goals:[],cleanup:cleanup||null,intel:intelStatus||null,pm2:Array.isArray(pm2)?pm2:[],traces:Array.isArray(traces)?traces:[]});$('apiState').textContent=status.online?'online':'offline';$('apiState').className='badge '+(status.online?'ok':'bad');render()}catch(e){$('apiState').textContent='error';$('apiState').className='badge bad';toast(e.message)}}
-function render(){nav();metrics();overview();commands();discord();llm();rem();autonomy();intel();controls();memory();context();logs();raw();document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active',p.id===S.tab));$('title').textContent=T.find(t=>t[0]===S.tab)?.[1]||'Admin';bindOps()}
-function nav(){$('nav').innerHTML=T.map(([id,l])=>`<button class="navbtn ${S.tab===id?'active':''}" data-tab="${id}">${l}</button>`).join('');document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{S.tab=b.dataset.tab;render()})}
-function metrics(){const m=S.system?.memory||{},d=S.system?.disk||{},l=S.system?.load||['-'];$('metrics').innerHTML=[['Bot',S.status?.online?'online':'offline'],['Load',l[0]],['RAM',m.total_mb?Math.round(m.used_mb/m.total_mb*100)+'%':'-'],['Disk',d.total_bytes?Math.round(d.used_bytes/d.total_bytes*100)+'%':'-'],['Servers',(S.discord.guilds||[]).length],['DMs',(S.discord.dms||[]).length],['Context',S.context.length],['Commands',S.commands.length]].map(x=>`<div class="metric"><b>${esc(x[1])}</b><span>${esc(x[0])}</span></div>`).join('')}
-function overview(){const bot=S.pm2.find(p=>p.name==='maxwell-bot')||{},ap=S.pm2.find(p=>p.name==='maxwell-api')||{};$('overview').innerHTML=`<div class="grid two" style="margin-top:12px"><div class="card"><h3>Processes</h3><div class="list"><div class="item"><b>maxwell-bot</b> ${badge(bot.status||'unknown',bot.status==='online'?'ok':'bad')}<div class="muted">uptime ${up(bot.uptime)} · restarts ${esc(bot.restart_time??0)} · cpu ${esc(bot.cpu??'-')}%</div><div class="row"><button class="btn small green" data-restart="maxwell-bot">Restart bot</button></div></div><div class="item"><b>maxwell-api</b> ${badge(ap.status||'unknown',ap.status==='online'?'ok':'bad')}<div class="muted">uptime ${up(ap.uptime)} · memory ${bytes(ap.memory)}</div><div class="row"><button class="btn small" data-restart="maxwell-api">Restart API</button></div></div></div></div><div class="card"><h3>Live Discord Snapshot</h3><div class="item"><b>${esc((S.discord.guilds||[]).length)} servers</b><div class="muted">${esc((S.discord.dms||[]).length)} DM/group channels · updated ${esc(S.discord.updated_at||'not yet')}</div></div><div class="row"><button class="btn small" onclick="S.tab='discord';render()">Open Discord panel</button></div></div></div>`;bindOps()}
-function commands(){$('commands').innerHTML=`<div class="grid two" style="margin-top:12px"><div class="card"><h3>Send Server/Channel Message</h3><div class="stack"><input id="chan" class="field" placeholder="Channel ID"><textarea id="msg" class="field" placeholder="Message"></textarea><button id="send" class="btn primary">Queue send</button></div></div><div class="card"><h3>Send DM</h3><div class="stack"><input id="dmuser" class="field" placeholder="Discord user ID"><textarea id="dmmsg" class="field" placeholder="DM message"></textarea><button id="senddm" class="btn primary">Queue DM</button></div></div><div class="card"><h3>Shell Command</h3><div class="stack"><textarea id="shell" class="field" placeholder="Command"></textarea><button id="runshell" class="btn red">Queue shell</button></div></div><div class="card"><h3>Safe Commands</h3><div class="row"><button class="btn small" onclick="queue('reload_controls')">Reload controls</button><button class="btn small" onclick="queue('rem_run')">Run REM</button><button class="btn small" onclick="queue('intel_run')">Run Intel</button></div><p class="muted">Forced client-close command removed. Use PM2 restart in Overview if you need a restart.</p></div></div><div class="card" style="margin-top:12px"><h3>Command History</h3><div class="list">${S.commands.slice(-40).reverse().map(c=>`<div class="item"><b>${esc(c.type)}</b> ${badge(c.status||'pending',c.status==='done'?'ok':'warn')}<div class="mono muted">${esc(c.id)} ${esc(c.result||'')}</div></div>`).join('')||'<div class="muted">No commands.</div>'}</div></div>`;$('send').onclick=()=>queue('send_message',{channel_id:$('chan').value,content:$('msg').value});$('senddm').onclick=()=>queue('send_dm',{user_id:$('dmuser').value,content:$('dmmsg').value});$('runshell').onclick=()=>queue('shell',{command:$('shell').value})}
 
-function discord(){const guilds=S.discord.guilds||[],dms=S.discord.dms||[];$('discord').innerHTML=`<div class="grid two" style="margin-top:12px"><div class="card"><h3>Servers from Discord</h3><p class="muted">This is snapshotted by the running Discord client, not inferred from memory.</p><div class="list">${guilds.map(g=>`<div class="item"><b>${esc(g.name)}</b><div class="mono muted">${esc(g.id)} · ${esc((g.channels||[]).length)} text channels · ${esc(g.member_count??'?')} members</div><div class="list" style="margin-top:8px">${(g.channels||[]).slice(0,12).map(ch=>`<button class="btn small" data-chan-id="${esc(ch.id)}">#${esc(ch.name)}</button>`).join('')}</div></div>`).join('')||'<div class="muted">No server snapshot yet. Wait up to 60 seconds after bot restart.</div>'}</div></div><div class="card"><h3>DM / Group Channels</h3><div class="list">${dms.map(dm=>`<div class="item"><b>${esc(dm.name)}</b><div class="mono muted">channel ${esc(dm.id)} ${dm.recipient_id?'· user '+esc(dm.recipient_id):''}</div>${dm.recipient_id?`<button class="btn small" data-dm-user="${esc(dm.recipient_id)}">DM this user</button>`:''}</div>`).join('')||'<div class="muted">No DM snapshot yet.</div>'}</div></div></div>`;document.querySelectorAll('[data-chan-id]').forEach(b=>b.onclick=()=>{S.tab='commands';render();setTimeout(()=>{$('chan').value=b.dataset.chanId},0)});document.querySelectorAll('[data-dm-user]').forEach(b=>b.onclick=()=>{S.tab='commands';render();setTimeout(()=>{$('dmuser').value=b.dataset.dmUser},0)})}
-
-function llm(){const latest=S.traces.slice(-1)[0]||null;const traceList=S.traces.slice(-80).reverse();const carrierTools=['send_message'];const recentTraces=S.traces.slice(-50);const withReason=recentTraces.filter(t=>{const th=(t.payload&&t.payload.thoughts)||'';return th&&!String(th).includes('no reasoning provided');}).length;const cov=recentTraces.length?Math.round(100*withReason/recentTraces.length):0;const covBadge=cov>=80?'ok':cov>=40?'warn':'bad';$('llm').innerHTML=`<div class="grid two" style="margin-top:12px"><div class="card"><h3>Reasoning Wiring</h3><p class="muted">The latest commit moved reasoning INSIDE every tool call's <code>reasoning</code> param — no more standalone <code>reasoning</code> tool. Every tool gets the param auto-injected by <code>build_openai_tools</code>; this card verifies the carrier tool exists and that traces actually carry the model's reasoning.</p><div class="list">${carrierTools.map(t=>`<div class="item"><b class="mono">${esc(t)}</b> ${badge(S.tools.includes(t)?'available':'missing',S.tools.includes(t)?'ok':'bad')}<div class="muted">chat carrier — carries its own reasoning field</div></div>`).join('')}<div class="item"><b class="mono">reasoning param</b> ${badge('wired','ok')}<div class="muted">auto-injected onto every tool schema; never required</div></div><div class="item"><b>trace coverage</b> ${badge(cov+'% ('+withReason+'/'+recentTraces.length+')',covBadge)}<div class="muted">recent traces with real model reasoning (not the empty stub)</div></div></div></div><div class="card"><h3>Trace Summary</h3><div class="item"><b>${esc(S.traces.length)}</b><div class="muted">loaded LLM reasoning traces</div></div><div class="item"><b>${esc(latest?.ts||'none')}</b><div class="mono muted">platform ${esc(latest?.platform||'-')} · channel ${esc(latest?.channel_id||'-')} · user ${esc(latest?.user_id||'-')}</div></div></div></div><div class="card" style="margin-top:12px"><h3>LLM Reasoning Traces</h3><div class="list">${traceList.map(t=>`<div class="item"><b>${esc(t.ts||'')}</b> <span class="mono">${esc(t.platform||'')}</span> <span class="mono">ch:${esc(t.channel_id||'')}</span> <span class="mono">user:${esc(t.user_id||'')}</span><pre>${esc(JSON.stringify(t.payload||{},null,2))}</pre></div>`).join('')||'<div class="muted">No traces yet. Each tool call records its own reasoning via the reasoning param.</div>'}</div></div>`}
-
-function rem(){$('rem').innerHTML=`<div class="grid two" style="margin-top:12px"><div class="card"><h3>What REM Does</h3><p class="muted">REM is Maxwell's background review loop. It reads recent visible events and writes an audit. It does not currently edit long-term memory/context; that old promise was documentation fan fiction.</p><div class="item">${badge(S.rem?.enabled?'enabled':'disabled',S.rem?.enabled?'ok':'')}<div class="muted">running ${S.rem?.running?'yes':'no'} · interval ${esc(S.rem?.interval_s??0)}s · buffered events ${esc(S.rem?.events_buffered??0)}</div></div><div class="row"><button class="btn small" data-rem="run">Run now</button><button class="btn small green" data-rem="enable">Enable</button><button class="btn small red" data-rem="disable">Disable</button></div></div><div class="card"><h3>REM Model</h3><p class="muted">REM shares the Autonomy model config — it uses the same provider, base_url, api key, and model set in the <b>Autonomy</b> tab ("Autonomy Model" card). If that is blank, REM falls back to the configured <code>OLLAMA_REM_MODEL</code>, then the main bot model.</p><div class="item"><b class="mono">${esc(S.control.autonomy_model||'(unset — using OLLAMA_REM_MODEL / main)')}</b><div class="muted">model currently resolved for both REM and autonomy</div></div><div class="row"><button class="btn small" onclick="S.tab='autonomy';render()">Open Autonomy model config</button></div></div><div class="card"><h3>Last Audit</h3><pre>${esc(S.rem?.last_audit_preview||'No REM audit yet.')}</pre></div></div>`;bindOps()}
-function autonomy(){const a=S.autonomyStatus||{};const on=!!a.enabled;const interval=a.interval_seconds||300;const lastTick=a.last_tick?new Date(a.last_tick):null;const ago=lastTick?((Date.now()-lastTick.getTime())/1000):null;const agoText=ago!==null?(ago<60?Math.round(ago)+'s ago':ago<3600?Math.round(ago/60)+'m ago':Math.round(ago/3600)+'h ago'):'never';const logEntries=S.autonomyLog.slice(-50).reverse();const kindColor=k=>({send_dm:'var(--blue)',post_channel:'var(--green)',run_tool:'var(--yellow)',update_memory:'var(--muted)',create_goal:'var(--green)',do_nothing:'var(--dim)'}[k]||'var(--muted)');$('autonomy').innerHTML=`<div class="grid two" style="margin-top:12px"><div class="card"><h3>Autonomy Engine</h3><p class="muted">Maxwell's self-directed life loop. He wakes up on his own, reads his DMs, checks his goals, and decides what to do. No approval queues.</p><label class="switchline"><span>Enabled</span><span class="switch"><input id="autoToggle" type="checkbox" ${on?'checked':''}><span class="knob"></span></span></label><div class="item"><div class="muted">interval <b>${esc(interval)}</b>s · last tick <b>${esc(agoText)}</b> · duration <b>${a.last_tick_duration!=null?Number(a.last_tick_duration).toFixed(1)+'s':'-'}</b></div><div class="muted">executed <b>${esc(a.actions_executed_total||0)}</b> · failed <b>${esc(a.actions_failed_total||0)}</b></div></div><div class="row"><button class="btn small" data-auto="run">Force tick</button><button class="btn small green" data-auto="enable">Enable</button><button class="btn small red" data-auto="disable">Disable</button></div><div class="row" style="margin-top:8px"><input id="autoInterval" class="field" style="max-width:120px" type="number" min="30" value="${esc(interval)}" placeholder="seconds"><button id="autoIntervalBtn" class="btn small">Set interval</button></div></div><div class="card"><h3>Autonomy Model</h3><p class="muted">Optional. Leave blank to use the main bot model. Set a base_url + key to run autonomy on a separate endpoint/model.</p><div class="row" style="margin-top:8px"><input id="autoBaseUrl" class="field" style="flex:1" placeholder="base_url (blank = main)" value="${esc(S.control.autonomy_base_url||'')}"></div><div class="row" style="margin-top:8px"><input id="autoApiKey" class="field" style="flex:1" type="password" placeholder="api key (blank = main)" value="${esc(S.control.autonomy_api_key||'')}"><button id="autoKeyReveal" class="btn small">show</button></div><div class="row" style="margin-top:8px"><input id="autoModel" class="field" style="flex:1" placeholder="model name (blank = main)" value="${esc(S.control.autonomy_model||'')}"></div><div class="row" style="margin-top:8px"><label class="switchline" style="flex:1;border:0;padding:0"><span>Disable reasoning (off for endpoints that reject it, e.g. NVIDIA)</span><span class="switch"><input id="autoDisableReasoning" type="checkbox" ${S.control.autonomy_disable_reasoning!==false?'checked':''}><span class="knob"></span></span></label></div><div class="row" style="margin-top:8px"><span class="muted" style="flex:1">Block autonomy post if bot replied in-channel within (seconds, 0=off)</span><input id="autoReplyBlock" class="field" style="max-width:120px" type="number" min="0" value="${esc(S.control.autonomy_recent_reply_block_seconds??0)}"></div><div class="row" style="margin-top:8px"><button id="autoModelBtn" class="btn primary">Save model config</button></div></div><div class="card"><h3>Last Thought</h3><pre style="max-height:200px;overflow:auto">${esc(a.last_thought||'No thoughts yet.')}</pre>${a.last_error?`<div style="margin-top:8px;color:var(--red)"><b>Error:</b> ${esc(a.last_error)}</div>`:''}</div></div><div class="grid two" style="margin-top:12px"><div class="card"><h3>Goals (${S.autonomyGoals.length})</h3><div class="stack"><textarea id="newGoalDesc" class="field" placeholder="New goal description" maxlength="2000" style="min-height:80px"></textarea><div class="row"><span class="muted" id="goalCharCount" style="font-size:12px">0 / 2000</span><button id="addGoalBtn" class="btn primary">Add</button></div></div><div class="list" style="margin-top:8px">${S.autonomyGoals.map(g=>`<div class="item"><b>${esc(g.description)}</b><div class="mono muted">${esc(g.id)} · created ${esc((g.created_at||'').slice(0,19))} · last acted: ${esc(g.last_acted_on||'never')}</div><button class="btn small red" data-auto-goal-del="${esc(g.id)}" style="margin-top:4px">Delete</button></div>`).join('')||'<div class="muted">No goals set.</div>'}</div></div><div class="card"><h3>Action Log (${logEntries.length})</h3><div class="row"><button class="btn small red" data-auto="clear-log">Clear Log</button></div><div class="list" style="margin-top:8px;max-height:500px;overflow:auto">${logEntries.map(e=>`<div class="item"><div class="row"><span style="color:${kindColor(e.action_kind)}" class="mono">${esc(e.action_kind)}</span><span class="mono muted">${esc((e.timestamp||'').slice(11,19))}</span><span class="badge ${e.result==='success'?'ok':e.result==='error'?'bad':''}">${esc(e.result||'?')}</span></div><div class="muted">${(()=>{const t=esc(e.target||''),c=esc(e.content_summary||'');return t&&c?`${t} · ${c}`:(t||c)})()}</div>${e.thought?`<details><summary class="muted" style="cursor:pointer;font-size:11px">thought</summary><div class="mono" style="font-size:11px;margin-top:4px">${esc(e.thought)}</div></details>`:''}${e.error?`<div style="color:var(--red);font-size:12px;margin-top:4px">${esc(e.error)}</div>`:''}</div>`).join('')||'<div class="muted">No actions yet.</div>'}</div></div></div>`;const toggle=$('autoToggle');if(toggle)toggle.onchange=async()=>{if(toggle.checked){await api('/api/autonomy/enable',{method:'POST'});toast('Autonomy enabled')}else{await api('/api/autonomy/disable',{method:'POST'});toast('Autonomy disabled')}loadAll()};bindOps()}
-function controls(){const bools=['bot_enabled','reply_dms','reply_groups','reply_mentions','tools_enabled','store_memory','cross_context_enabled','cross_context_extract_enabled','process_images','process_audio'];$('controls').innerHTML=`<div class="grid two" style="margin-top:12px"><div class="card"><h3>Runtime Switches</h3>${bools.map(k=>`<label class="switchline"><span>${esc(k.replaceAll('_',' '))}</span><span class="switch"><input data-bool="${k}" type="checkbox" ${S.control[k]?'checked':''}><span class="knob"></span></span></label>`).join('')}<button id="saveSwitch" class="btn primary">Save switches</button></div><div class="card"><h3>Tools</h3>${S.tools.map(t=>`<label class="switchline"><span class="mono">${esc(t)}</span><span class="switch"><input data-tool="${esc(t)}" type="checkbox" ${!(S.control.disabled_tools||[]).includes(t)?'checked':''}><span class="knob"></span></span></label>`).join('')}<button id="saveTools" class="btn primary">Save tools</button></div></div><div class="card" style="margin-top:12px"><h3>Base Personality</h3><textarea id="persona" class="field">${esc(S.control.base_personality||'')}</textarea><button id="savePersona" class="btn primary">Save personality</button></div><div class="card" style="margin-top:12px"><h3>Autonomy Blacklists (Channels &amp; Servers)</h3><p class="muted">Separate from general blocked/allowed. Autonomy skips these servers (guilds) and channels. Use ,autonomy blacklist in chat or edit here. IDs only.</p><div class="row"><span class="muted" style="width:140px;flex:0 0 auto">Blocked channels</span><input id="abChannels" class="field" placeholder="123456789, 987654321" value="${esc((S.control.autonomy_blocked_channels||[]).join(', '))}"></div><div class="row" style="margin-top:6px"><span class="muted" style="width:140px;flex:0 0 auto">Blocked servers</span><input id="abServers" class="field" placeholder="guild-id-1, guild-id-2" value="${esc((S.control.autonomy_blocked_servers||[]).join(', '))}"></div><button id="saveAutonomyBlack" class="btn primary" style="margin-top:8px">Save autonomy blacklists</button><div class="muted" style="margin-top:4px;font-size:11px">After save, autonomy will respect immediately on next tick. Use raw or ,autonomy blacklist for quick edits too.</div></div>`;$('saveSwitch').onclick=()=>saveControl(Object.fromEntries([...document.querySelectorAll('[data-bool]')].map(i=>[i.dataset.bool,i.checked])));$('saveTools').onclick=()=>saveControl({disabled_tools:[...document.querySelectorAll('[data-tool]')].filter(i=>!i.checked).map(i=>i.dataset.tool)});$('savePersona').onclick=()=>saveControl({base_personality:$('persona').value});if($('saveAutonomyBlack')){$('saveAutonomyBlack').onclick=()=>{const chStr=($('abChannels').value||'').trim();const svStr=($('abServers').value||'').trim();const toArr=s=>s?s.split(/[\s,]+/).map(x=>x.trim()).filter(Boolean).slice(0,100):[];saveControl({autonomy_blocked_channels:toArr(chStr),autonomy_blocked_servers:toArr(svStr)});}}}
-function memory(){$('memory').innerHTML=`<div class="card" style="margin-top:12px"><h3>Add Memory</h3><textarea id="newmem" class="field"></textarea><button id="addmem" class="btn primary">Add</button></div><div class="card" style="margin-top:12px"><h3>Long-Term Memory</h3><div class="table"><table><thead><tr><th>ID</th><th>Content</th><th></th></tr></thead><tbody>${S.memory.map(m=>`<tr><td class="mono">${esc(m.id)}</td><td><textarea class="field" data-mem="${esc(m.id)}">${esc(m.content)}</textarea></td><td><button class="btn small" data-save-mem="${esc(m.id)}">Save</button> <button class="btn small red" data-del-mem="${esc(m.id)}">Delete</button></td></tr>`).join('')}</tbody></table></div></div>`;$('addmem').onclick=async()=>{await api('/api/memory',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:$('newmem').value})});toast('Memory added');loadAll()};document.querySelectorAll('[data-save-mem]').forEach(b=>b.onclick=async()=>{const id=b.dataset.saveMem;await api('/api/memory',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,content:document.querySelector(`[data-mem="${CSS.escape(id)}"]`).value})});toast('Memory saved');loadAll()});document.querySelectorAll('[data-del-mem]').forEach(b=>b.onclick=async()=>{await api('/api/memory?id='+encodeURIComponent(b.dataset.delMem),{method:'DELETE'});toast('Memory deleted');loadAll()})}
-function context(){
-  const c=S.cleanup||{};const on=!!c.enabled;const interval=c.interval_seconds||1800;const lastRun=c.last_run?new Date(c.last_run):null;const ago=lastRun?((Date.now()-lastRun.getTime())/1000):null;const agoText=ago!==null?(ago<60?Math.round(ago)+'s ago':ago<3600?Math.round(ago/60)+'m ago':Math.round(ago/3600)+'h ago'):'never';const logEntries=(c.log||[]).slice().reverse();
-  $('context').innerHTML=`<div class="card" style="margin-top:12px">
-    <h3>Context Cleanup Agent</h3>
-    <p class="muted">A janitor that reviews shared context on a schedule and deletes duplicates / weird garbage, merges near-duplicates, and edits messy entries. Uses the SAME model as Autonomy and REM. Every mutation goes through the locked memory API, so the on-add dedup/eviction still applies.</p>
-    <div class="item">${badge(on?'enabled':'disabled',on?'ok':'')} ${badge(c.running?'running':'idle',c.running?'warn':'')}
-      <div class="muted">interval <b>${esc(interval)}</b>s · last run <b>${esc(agoText)}</b> · duration <b>${c.last_duration!=null?Number(c.last_duration).toFixed(1)+'s':'-'}</b></div>
-      <div class="muted">passes <b>${esc(c.passes_total||0)}</b> · ops applied <b>${esc(c.ops_applied_total||0)}</b> · skipped <b>${esc(c.ops_skipped_total||0)}</b></div>
-    </div>
-    <div class="row" style="margin-top:8px">
-      <button class="btn small" data-cleanup="run">Run now</button>
-      <button class="btn small green" data-cleanup="enable">Enable</button>
-      <button class="btn small red" data-cleanup="disable">Disable</button>
-    </div>
-    <div class="row" style="margin-top:8px">
-      <input id="cleanupInterval" class="field" style="max-width:120px" type="number" min="300" value="${esc(interval)}" placeholder="seconds">
-      <button id="cleanupIntervalBtn" class="btn small">Set interval</button>
-      <button class="btn small red" data-cleanup="clear-log">Clear log</button>
-    </div>
-    ${c.last_error?`<div style="margin-top:8px;color:var(--red)"><b>Last error:</b> ${esc(c.last_error)}</div>`:''}
-    <details style="margin-top:8px"><summary class="muted" style="cursor:pointer">Last audit</summary><pre style="margin-top:6px">${esc(c.last_audit||'No cleanup run yet.')}</pre></details>
-    <details style="margin-top:8px"><summary class="muted" style="cursor:pointer">Recent passes (${logEntries.length})</summary><div class="list" style="margin-top:6px">${logEntries.map(e=>`<div class="item"><div class="row"><span class="mono muted">${esc((e.timestamp||'').slice(0,19))}</span> <span class="badge ${e.error?'bad':'ok'}">${esc(e.error?'error':'ok')}</span> <span class="muted">applied ${esc(e.ops_applied||0)} · skipped ${esc(e.ops_skipped||0)} · ${esc(Number(e.duration||0).toFixed(1))}s</span></div><div class="muted">${esc(e.audit||'')}</div>${e.error?`<div style="color:var(--red);font-size:12px;margin-top:4px">${esc(e.error)}</div>`:''}</div>`).join('')||'<div class="muted">No passes yet.</div>'}</div></details>
-  </div>
-  <div class="card" style="margin-top:12px">
-    <h3>Add Context</h3>
+<!-- ========================== LOGIN ========================== -->
+<div id="login" class="login-wrap">
+  <form id="loginForm" class="login">
+    <h1>Maxwell Admin</h1>
+    <p>Sign in to open the command center.</p>
     <div class="stack">
-      <div class="row">
-        <select id="ctx_type" class="field" style="max-width:200px">
-          <option value="global">Global</option>
-          <option value="user">User-Specific</option>
-          <option value="channel">Channel-Specific</option>
-          <option value="guild">Guild-Specific</option>
-          <option value="custom">Custom Scope</option>
-        </select>
-        <input id="ctx_id" class="field hidden" placeholder="Target ID">
-        <input id="ctx_custom_scope" class="field hidden" value="global" placeholder="Scope name">
-      </div>
-      <div class="row">
-        <select id="ctx_visibility" class="field" style="max-width:200px">
-          <option value="shared">Shared Visibility</option>
-          <option value="private">Private Visibility</option>
-        </select>
-        <select id="ctx_importance" class="field" style="max-width:200px">
-          <option value="1">Importance 1 (Low)</option>
-          <option value="2">Importance 2</option>
-          <option value="3">Importance 3</option>
-          <option value="4">Importance 4</option>
-          <option value="5">Importance 5 (Medium)</option>
-          <option value="6">Importance 6</option>
-          <option value="7">Importance 7</option>
-          <option value="8" selected>Importance 8 (High)</option>
-          <option value="9">Importance 9</option>
-          <option value="10">Importance 10 (Critical)</option>
-        </select>
-      </div>
-      <textarea id="ctxcontent" class="field" placeholder="Fact"></textarea>
-      <button id="addctx" class="btn primary">Add fact</button>
+      <div><input id="user" class="field" autocomplete="username" placeholder="Username"></div>
+      <div><input id="pass" class="field" type="password" autocomplete="current-password" placeholder="Password"></div>
+      <div id="error" class="err"></div>
+      <button class="btn primary" type="submit" style="width:100%">Sign in</button>
+      <button id="clear" class="btn ghost" type="button" style="width:100%">Clear saved login</button>
+      <div class="divider">or</div>
+      <button id="discordLogin" class="btn" type="button" style="width:100%">Continue with Discord</button>
     </div>
+  </form>
+</div>
+
+<!-- ========================== APP ========================== -->
+<div id="app" class="shell" style="display:none">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="brand-mark">M</div>
+      <div class="brand-text">Maxwell<small>command center</small></div>
+    </div>
+    <div class="nav-section">Overview</div>
+    <div class="nav" id="nav-primary"></div>
+    <div class="nav-section">Knowledge</div>
+    <div class="nav" id="nav-knowledge"></div>
+    <div class="nav-section">Operations</div>
+    <div class="nav" id="nav-ops"></div>
+    <div class="sidebar-foot">
+      <a href="/"><span>↗</span><span>Main page</span></a>
+      <button id="logout"><span>⎋</span><span>Sign out</span></button>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <button class="menu-toggle" id="menuToggle">☰ Menu</button>
+      <h1 id="pageTitle">Overview <small id="pageSub"></small></h1>
+      <div class="spacer"></div>
+      <div class="status-strip" id="statusStrip">
+        <span class="badge" id="botBadge"><span class="dot"></span>connecting</span>
+        <span class="badge" id="apiBadge"><span class="dot"></span>api</span>
+        <span class="badge" id="autoBadge"><span class="dot"></span>auto-refresh</span>
+      </div>
+      <button class="btn" id="refresh" title="Refresh (R)">↻ Refresh</button>
+    </header>
+    <main class="page" id="page"></main>
   </div>
-  <div class="card" style="margin-top:12px">
-    <h3>Facts</h3>
-    <div class="list">
-      ${S.context.map(f=>`
-        <div class="item" style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
-          <div>
-            <b>${esc(f.scope)}</b> ${badge('i'+f.importance, f.importance>=8?'ok':f.importance>=5?'warn':'bad')}
-            <div style="margin-top:4px">${esc(f.content)}</div>
-            <div class="mono muted" style="margin-top:4px">${esc(f.id)} · ${esc(f.visibility)}</div>
-          </div>
-          <button class="btn small red" data-del-ctx="${esc(f.id)}">Delete</button>
-        </div>
-      `).join('')||'<div class="muted">No facts.</div>'}
-    </div>
-  </div>`;
+</div>
 
-  $('ctx_type').onchange=()=>{
-    const t=$('ctx_type').value;
-    if(t==='global'){
-      $('ctx_id').classList.add('hidden');
-      $('ctx_custom_scope').classList.add('hidden');
-    }else if(t==='custom'){
-      $('ctx_id').classList.add('hidden');
-      $('ctx_custom_scope').classList.remove('hidden');
-    }else{
-      $('ctx_id').classList.remove('hidden');
-      $('ctx_custom_scope').classList.add('hidden');
-      $('ctx_id').placeholder=t.charAt(0).toUpperCase()+t.slice(1)+' ID';
-    }
-  };
+<div class="toast-wrap" id="toasts"></div>
+<div class="modal-bg" id="modal">
+  <div class="modal">
+    <h3 id="modalTitle">Confirm</h3>
+    <p id="modalText">Are you sure?</p>
+    <div class="btn-row" id="modalActions"></div>
+  </div>
+</div>
 
-  $('addctx').onclick=async()=>{
-    const t=$('ctx_type').value;
-    let scope='global';
-    if(t==='custom'){
-      scope=$('ctx_custom_scope').value.trim()||'global';
-    }else if(t!=='global'){
-      const id=$('ctx_id').value.trim();
-      if(!id){
-        toast('Please enter a '+t+' ID');
-        return;
-      }
-      scope=t+':'+id;
-    }
-    const content=$('ctxcontent').value.trim();
-    if(!content){
-      toast('Please enter the fact content');
-      return;
-    }
-    await api('/api/context',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({
-        scope,
-        content,
-        importance:parseInt($('ctx_importance').value)||8,
-        visibility:$('ctx_visibility').value,
-        tags:['manual']
-      })
-    });
-    toast('Context added');
-    loadAll();
-  };
+<script>
+"use strict";
 
-  document.querySelectorAll('[data-del-ctx]').forEach(b=>b.onclick=async()=>{
-    if(confirm('Are you sure you want to delete this fact?')){
-      await api('/api/context?id='+encodeURIComponent(b.dataset.delCtx),{method:'DELETE'});
-      toast('Context deleted');
-      loadAll();
-    }
+/* ============================================================ *
+ * State
+ * ============================================================ */
+const S = {
+  auth: null,             // {user, pass}
+  discordToken: null,
+  discordUser: null,
+  page: 'overview',
+  data: {},
+  loading: false,
+  pollTimer: null,
+  lastLoad: 0,
+  filter: '',
+};
+
+const PAGES = [
+  {id:'overview',  label:'Overview',   section:'primary',  icon:'◐'},
+  {id:'commands',  label:'Commands',   section:'primary',  icon:'⌘'},
+  {id:'discord',   label:'Discord',    section:'primary',  icon:'◆'},
+  {id:'logs',      label:'Logs',       section:'primary',  icon:'☰'},
+  {id:'memory',    label:'Memory',     section:'knowledge',icon:'◇'},
+  {id:'context',   label:'Context',    section:'knowledge',icon:'☷'},
+  {id:'llm',       label:'LLM',        section:'knowledge',icon:'∞'},
+  {id:'rem',       label:'REM',        section:'ops',      icon:'⟲'},
+  {id:'autonomy',  label:'Autonomy',   section:'ops',      icon:'◇'},
+  {id:'intel',     label:'Intel',      section:'ops',      icon:'☉'},
+  {id:'cleanup',   label:'Cleanup',    section:'ops',      icon:'✦'},
+  {id:'controls',  label:'Controls',   section:'ops',      icon:'⚙'},
+  {id:'raw',       label:'Raw JSON',   section:'ops',      icon:'{}'},
+];
+
+/* ============================================================ *
+ * Tiny helpers
+ * ============================================================ */
+const $ = sel => document.querySelector(sel);
+const $$ = sel => Array.from(document.querySelectorAll(sel));
+const el = (tag, attrs={}, children=[]) => {
+  const e = document.createElement(tag);
+  for (const [k,v] of Object.entries(attrs)) {
+    if (k === 'class') e.className = v;
+    else if (k === 'style' && typeof v === 'object') Object.assign(e.style, v);
+    else if (k.startsWith('on') && typeof v === 'function') e.addEventListener(k.slice(2), v);
+    else if (k === 'html') e.innerHTML = v;
+    else if (v === false || v == null) continue;
+    else if (v === true) e.setAttribute(k,'');
+    else e.setAttribute(k, v);
+  }
+  (Array.isArray(children) ? children : [children]).filter(Boolean).forEach(c => {
+    e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
   });
+  return e;
+};
+const esc = v => String(v ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+const fmtBytes = n => { n = Number(n || 0); if (n < 1024) return n + 'B';
+  if (n < 1048576) return (n/1024).toFixed(1) + 'K';
+  if (n < 1073741824) return (n/1048576).toFixed(1) + 'M';
+  return (n/1073741824).toFixed(1) + 'G'; };
+const fmtUptime = ms => { if (!ms) return '-';
+  const s = Math.max(0, Math.floor((Date.now() - Number(ms)) / 1000));
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's';
+  return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm'; };
+const fmtAgo = ts => { if (!ts) return 'never';
+  const s = Math.max(0, Math.floor((Date.now() - Number(ts)) / 1000));
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s/60) + 'm ago';
+  if (s < 86400) return Math.floor(s/3600) + 'h ago';
+  return Math.floor(s/86400) + 'd ago'; };
+const fmtTs = ts => { if (!ts) return '-';
+  const d = new Date(ts); if (isNaN(d)) return String(ts);
+  return d.toISOString().replace('T',' ').slice(0,19) + ' UTC'; };
+const fmtTime = ts => { if (!ts) return '-';
+  const d = new Date(ts); if (isNaN(d)) return String(ts);
+  return d.toTimeString().slice(0,8); };
+const fmtNum = n => Number(n || 0).toLocaleString();
+const debounce = (fn, ms=300) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 
-  document.querySelectorAll('[data-cleanup]').forEach(b=>b.onclick=async()=>{
-    const m=b.dataset.cleanup;
-    if(m==='run'){await api('/api/context_cleanup/run',{method:'POST'});toast('Cleanup run queued')}
-    else if(m==='enable'){await api('/api/context_cleanup/enable',{method:'POST'});toast('Cleanup enabled')}
-    else if(m==='disable'){await api('/api/context_cleanup/disable',{method:'POST'});toast('Cleanup disabled')}
-    else if(m==='clear-log'){if(confirm('Clear all cleanup log entries?')){await api('/api/context_cleanup/log',{method:'DELETE'});toast('Log cleared')}}
-    loadAll();
-  });
-  document.querySelectorAll('[data-intel]').forEach(b=>b.onclick=async()=>{
-    const m=b.dataset.intel;
-    if(m==='run'){await api('/api/intel/run',{method:'POST'});toast('Intel run queued')}
-    else if(m==='enable'){await api('/api/intel/enable',{method:'POST'});toast('Intel enabled')}
-    else if(m==='disable'){await api('/api/intel/disable',{method:'POST'});toast('Intel disabled')}
-    else if(m==='clear-log'){if(confirm('Clear all intel log entries?')){await api('/api/intel/log',{method:'DELETE'});toast('Log cleared')}}
-    loadAll();
-  });
-  if($('cleanupIntervalBtn')){
-    $('cleanupIntervalBtn').onclick=async()=>{
-      const v=parseInt($('cleanupInterval').value);
-      if(!v||v<300){toast('Interval must be >= 300 seconds');return}
-      await api('/api/context_cleanup/interval',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({interval_seconds:v})});
-      toast('Interval updated');
-      loadAll();
-    };
+/* ============================================================ *
+ * Toast + modal
+ * ============================================================ */
+function toast(msg, kind='') {
+  const t = el('div', {class: 'toast ' + kind}, [msg, el('span', {class:'x', onClick: e => e.target.parentNode.remove()}, '×')]);
+  $('#toasts').appendChild(t);
+  requestAnimationFrame(() => t.classList.add('show'));
+  setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 200); }, 3000);
+}
+function confirmModal(title, text, onYes, opts={}) {
+  const m = $('#modal');
+  $('#modalTitle').textContent = title;
+  $('#modalText').textContent = text;
+  const actions = $('#modalActions');
+  actions.replaceChildren();
+  const no = el('button', {class: 'btn'}, 'Cancel');
+  const yes = el('button', {class: 'btn ' + (opts.danger ? 'danger' : 'primary')}, opts.confirm || 'Confirm');
+  actions.append(no, yes);
+  m.classList.add('show');
+  const close = () => m.classList.remove('show');
+  no.onclick = close;
+  yes.onclick = () => { close(); onYes(); };
+}
+
+/* ============================================================ *
+ * API
+ * ============================================================ */
+function authHeaders() {
+  if (S.auth) return {'Authorization': 'Basic ' + btoa(S.auth.user + ':' + S.auth.pass)};
+  if (S.discordToken) return {'X-Discord-Token': S.discordToken};
+  return {};
+}
+async function api(url, opt={}) {
+  const r = await fetch(url, {...opt, headers: {...(opt.headers||{}), ...authHeaders()}});
+  let d = {}; try { d = await r.json(); } catch(e) {}
+  if (r.status === 401) { logout(false); throw new Error('Unauthorized'); }
+  if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+  return d;
+}
+
+/* ============================================================ *
+ * Auth
+ * ============================================================ */
+async function login(user, pass) {
+  const r = await fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({user, pass})});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok || !d.ok) throw new Error(d.error || 'Login failed');
+  S.auth = {user, pass};
+  localStorage.setItem('mw_basic', btoa(user + ':' + pass));
+  showApp();
+}
+async function loginDiscord() {
+  const d = await api('/api/auth/discord/state');
+  if (!d.authorize_url) throw new Error(d.error || 'Discord login not configured');
+  // Validate the authorize URL host at the redirect site itself — never trust
+  // anything but discord.com / discordapp.com for the OAuth dance.
+  const u = d.authorize_url;
+  if (!/^https:\/\/(discord\.com|(([a-z0-9-]+\.)?discordapp\.com))\//i.test(u))
+    throw new Error('Refusing redirect to unexpected authorize URL');
+  window.location.assign(u);
+}
+async function loginDiscordToken(token) {
+  S.discordToken = token;
+  localStorage.setItem('mw_discord_token', token);
+  try {
+    const v = await api('/api/auth/discord/verify');
+    if (!v.ok) throw new Error('invalid token');
+    S.discordUser = v;
+    showApp();
+  } catch(e) {
+    S.discordToken = null;
+    localStorage.removeItem('mw_discord_token');
+    throw e;
   }
 }
-function intel(){const i=S.intel||{};const on=!!i.enabled;const interval=i.interval_seconds||3600;const lastRun=i.last_run?new Date(i.last_run):null;const ago=lastRun?((Date.now()-lastRun.getTime())/1000):null;const agoText=ago!==null?(ago<60?Math.round(ago)+'s ago':ago<3600?Math.round(ago/60)+'m ago':Math.round(ago/3600)+'h ago'):'never';const logEntries=(i.log||[]).slice().reverse();$('intel').innerHTML=`<div class="card" style="margin-top:12px">
-    <h3>Intel / News Gatherer (AI & Tech)</h3>
-    <p class="muted">Background agent that receives fresh AI model / tech news directly from official outlet feeds (OpenAI, Hugging Face, MarkTechPost, arXiv, TLDR AI, etc.) every hour. Uses the <b>same model as Autonomy/REM</b> to curate facts into long-term memory so the main bot stays up-to-date instead of guessing.</p>
-    <div class="item">${badge(on?'enabled':'disabled',on?'ok':'')} ${badge(i.running?'running':'idle',i.running?'warn':'')}
-      <div class="muted">interval <b>${esc(interval)}</b>s · last run <b>${esc(agoText)}</b> · duration <b>${i.last_duration!=null?Number(i.last_duration).toFixed(1)+'s':'-'}</b></div>
-      <div class="muted">passes <b>${esc(i.passes_total||0)}</b> · facts added total <b>${esc(i.facts_added_total||0)}</b></div>
-    </div>
-    <div class="row" style="margin-top:8px">
-      <button class="btn small" data-intel="run">Run now</button>
-      <button class="btn small green" data-intel="enable">Enable</button>
-      <button class="btn small red" data-intel="disable">Disable</button>
-    </div>
-    <div class="row" style="margin-top:8px">
-      <input id="intelInterval" class="field" style="max-width:120px" type="number" min="300" value="${esc(interval)}" placeholder="seconds">
-      <button id="intelIntervalBtn" class="btn small">Set interval</button>
-      <button class="btn small red" data-intel="clear-log">Clear log</button>
-    </div>
-    ${i.last_error?`<div style="margin-top:8px;color:var(--red)"><b>Last error:</b> ${esc(i.last_error)}</div>`:''}
-    <details style="margin-top:8px"><summary class="muted" style="cursor:pointer">Last audit</summary><pre style="margin-top:6px">${esc(i.last_audit||'No intel run yet.')}</pre></details>
-    <details style="margin-top:8px"><summary class="muted" style="cursor:pointer">Recent passes (${logEntries.length})</summary><div class="list" style="margin-top:6px">${logEntries.map(e=>`<div class="item"><div class="row"><span class="mono muted">${esc((e.timestamp||'').slice(0,19))}</span> <span class="badge ${e.error?'bad':'ok'}">${esc(e.error?'error':'ok')}</span> <span class="muted">added ${esc(e.facts_added||0)} · ${esc(Number(e.duration||0).toFixed(1))}s</span></div><div class="muted">${esc(e.audit||'')}</div>${e.error?`<div style="color:var(--red);font-size:12px;margin-top:4px">${esc(e.error)}</div>`:''}</div>`).join('')||'<div class="muted">No passes yet.</div>'}</div></details>
-    <div class="muted" style="margin-top:8px;font-size:12px">Default feeds: huggingface.co/blog, marktechpost.com, tldr.tech/api/rss/ai, arxiv.org (cs.AI/LG), simonwillison.net, venturebeat.com/ai, techcrunch.com, theverge.com/ai. Override via intel_control.json or bot control "intel_feed_urls". Tracks broad model releases + tech news.</div>
-  </div>`;if($('intelIntervalBtn')){$('intelIntervalBtn').onclick=async()=>{const v=parseInt($('intelInterval').value);if(!v||v<300){toast('Interval must be >= 300 seconds');return}await api('/api/intel/interval',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({interval_seconds:v})});toast('Interval updated');loadAll()}};}
-function logs(){$('logs').innerHTML=`<div class="card" style="margin-top:12px"><h3>PM2 Logs</h3><div class="row"><select id="logproc" class="field" style="max-width:220px"><option>maxwell-bot</option><option>maxwell-api</option></select><button id="loadlogs" class="btn primary">Load</button></div><pre>${esc(S.logs||'Pick a process and load logs.')}</pre></div>`;$('loadlogs').onclick=async()=>{const d=await api('/api/pm2/logs?process='+encodeURIComponent($('logproc').value)+'&lines=160');S.logs=d.log||'';logs()}}
-function raw(){$('raw').innerHTML=`<div class="grid two" style="margin-top:12px"><div class="card"><h3>control</h3><pre>${esc(JSON.stringify(S.control,null,2))}</pre></div><div class="card"><h3>memory</h3><pre>${esc(JSON.stringify(S.memoryJson,null,2))}</pre></div><div class="card"><h3>sites</h3><pre>${esc(JSON.stringify(S.sites,null,2))}</pre></div><div class="card"><h3>prompts</h3><pre>${esc(JSON.stringify(S.prompts,null,2))}</pre></div><div class="card"><h3>tools</h3><pre>${esc(JSON.stringify(S.tools,null,2))}</pre></div><div class="card"><h3>llm traces</h3><pre>${esc(JSON.stringify(S.traces,null,2))}</pre></div></div>`}
-async function queue(type,body={}){await api('/api/commands',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type,...body})});toast('Queued');loadAll()}async function saveControl(body){const d=await api('/api/control',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});S.control=d.control;toast('Saved');render()}function bindOps(){document.querySelectorAll('[data-restart]').forEach(b=>b.onclick=async()=>{await api('/api/pm2/restart?target='+b.dataset.restart,{method:'POST'});toast('Restarted');setTimeout(loadAll,1200)});document.querySelectorAll('[data-rem]').forEach(b=>b.onclick=async()=>{const m=b.dataset.rem;await api('/api/rem/'+(m==='run'?'run':m),{method:'POST'});toast('REM updated');loadAll()});document.querySelectorAll('[data-auto]').forEach(b=>b.onclick=async()=>{const m=b.dataset.auto;if(m==='run'){await api('/api/autonomy/run',{method:'POST'});toast('Autonomy tick queued')}else if(m==='enable'){await api('/api/autonomy/enable',{method:'POST'});toast('Autonomy enabled')}else if(m==='disable'){await api('/api/autonomy/disable',{method:'POST'});toast('Autonomy disabled')}else if(m==='clear-log'){if(confirm('Clear all autonomy log entries?')){await api('/api/autonomy/log',{method:'DELETE'});toast('Log cleared')}}loadAll()});document.querySelectorAll('[data-auto-goal-del]').forEach(b=>b.onclick=async()=>{if(confirm('Delete this goal?')){await api('/api/autonomy/goals/'+encodeURIComponent(b.dataset.autoGoalDel),{method:'DELETE'});toast('Goal deleted');loadAll()}});if($('autoIntervalBtn')){$('autoIntervalBtn').onclick=async()=>{const v=parseInt($('autoInterval').value);if(!v||v<30){toast('Interval must be >= 30 seconds');return}await api('/api/autonomy/interval',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({interval_seconds:v})});toast('Interval updated');loadAll()}}if($('autoModelBtn')){$('autoModelBtn').onclick=async()=>{const body={autonomy_base_url:$('autoBaseUrl').value,autonomy_api_key:$('autoApiKey').value,autonomy_model:$('autoModel').value,autonomy_disable_reasoning:$('autoDisableReasoning').checked,autonomy_recent_reply_block_seconds:Math.max(0,parseInt($('autoReplyBlock').value)||0)};await saveControl(body)};$('autoKeyReveal').onclick=()=>{const el=$('autoApiKey');if(el.type==='password'){el.type='text'}else{el.type='password'}}}if($('addGoalBtn')){$('addGoalBtn').onclick=async()=>{const desc=$('newGoalDesc').value.trim();if(!desc){toast('Enter a goal description');return}await api('/api/autonomy/goals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({description:desc})});toast('Goal added');$('newGoalDesc').value='';if($('goalCharCount')){$('goalCharCount').textContent='0 / 2000'}loadAll()};const gc=$('newGoalDesc');if(gc){gc.oninput=()=>{if($('goalCharCount')){$('goalCharCount').textContent=gc.value.length+' / 2000'}}}}}
-$('loginForm').onsubmit=async e=>{e.preventDefault();$('error').textContent='';try{await login($('user').value.trim(),$('pass').value)}catch(err){$('error').textContent=err.message}};$('clear').onclick=()=>{$('user').value='';$('pass').value=''};$('logout').onclick=()=>logout(true);$('refresh').onclick=loadAll;
-$('discordLogin').onclick=async()=>{try{await loginDiscord()}catch(err){$('error').textContent=err.message}};
-(async function(){const m=location.hash.match(/discord_token=([^&]+)/);if(m){history.replaceState(null,'',location.pathname+location.search);try{await loginDiscordToken(m[1])}catch(err){$('error').textContent=err.message}return}try{const t=localStorage.getItem('mw_discord_token');if(t){await loginDiscordToken(t)}else{const b=localStorage.getItem('mw_basic');if(b){const[u,p]=atob(b).split(':');await login(u,p)}}}catch(e){logout(false)}})();
+function logout(clear=true) {
+  S.auth = null;
+  S.discordToken = null;
+  S.discordUser = null;
+  $('#app').style.display = 'none';
+  $('#login').style.display = '';
+  if (clear) {
+    localStorage.removeItem('mw_basic');
+    localStorage.removeItem('mw_discord_token');
+    fetch('/api/auth/discord/logout', {method:'POST', headers: S.discordToken?{'X-Discord-Token':S.discordToken}:{}}).catch(()=>{});
+  }
+}
+function showApp() {
+  $('#login').style.display = 'none';
+  $('#app').style.display = '';
+  buildNav();
+  setPage('overview');
+  loadAll();
+  startPolling();
+}
+
+/* ============================================================ *
+ * Nav
+ * ============================================================ */
+function buildNav() {
+  for (const section of ['primary','knowledge','ops']) {
+    const nav = $('#nav-' + section);
+    if (!nav) continue;
+    nav.replaceChildren();
+    PAGES.filter(p => p.section === section).forEach(p => {
+      const b = el('button', {
+        class: 'navbtn' + (S.page === p.id ? ' active' : ''),
+        onClick: () => { S.page = p.id; buildNav(); setPage(p.id); }
+      }, [
+        el('span', {class:'icon'}, p.icon),
+        el('span', {}, p.label),
+        ...(p.count ? [el('span', {class:'pill'}, p.count)] : []),
+      ]);
+      nav.appendChild(b);
+    });
+  }
+}
+
+function setPage(id) {
+  S.page = id;
+  S.filter = '';
+  buildNav();
+  render();
+  $('#sidebar').classList.remove('open');
+}
+
+/* ============================================================ *
+ * Data load
+ * ============================================================ */
+async function loadAll(silent=false) {
+  if (S.loading) return;
+  S.loading = true;
+  if (!silent) setStatus('autoBadge', 'loading', 'warn');
+  try {
+    const urls = [
+      ['status',     '/api/status'],
+      ['system',     '/api/system'],
+      ['control',    '/data/bot_control.json'],
+      ['memory',     '/data/long_term_memory.json'],
+      ['memoryJson', '/data/memory.json'],
+      ['context',    '/api/context'],
+      ['sites',      '/data/sites.json'],
+      ['prompts',    '/data/prompts.json'],
+      ['blacklist',  '/data/blacklist.json'],
+      ['autoChans',  '/data/auto_channels.json'],
+      ['commands',   '/api/commands'],
+      ['channels',   '/api/channels'],
+      ['discord',    '/api/discord/state'],
+      ['rem',        '/api/rem/status'],
+      ['remRuns',    '/api/rem/runs'],
+      ['autonomy',   '/api/autonomy/status'],
+      ['autonomyLog','/api/autonomy/log'],
+      ['autonomyGoals','/api/autonomy/goals'],
+      ['cleanup',    '/api/context_cleanup/status'],
+      ['intel',      '/api/intel/status'],
+      ['pm2',        '/api/pm2'],
+      ['traces',     '/api/llm/traces?limit=200'],
+    ];
+    const results = await Promise.allSettled(urls.map(([,u]) => api(u)));
+    const data = {};
+    urls.forEach(([k], i) => { data[k] = results[i].status === 'fulfilled' ? results[i].value : null; });
+    S.data = data;
+    S.lastLoad = Date.now();
+    setStatus('autoBadge', 'live', 'ok');
+    const bot = data.status?.pm2?.bot?.status;
+    setStatus('botBadge', bot || 'unknown', bot === 'online' ? 'ok' : 'bad');
+    setStatus('apiBadge', 'api ok', 'ok');
+    render();
+  } catch(e) {
+    setStatus('autoBadge', 'error', 'bad');
+    toast(e.message, 'error');
+  } finally {
+    S.loading = false;
+  }
+}
+function startPolling() {
+  if (S.pollTimer) clearInterval(S.pollTimer);
+  S.pollTimer = setInterval(() => loadAll(true), 15000);
+}
+
+function setStatus(id, text, kind='') {
+  const e = $('#' + id);
+  if (!e) return;
+  e.className = 'badge ' + kind;
+  e.replaceChildren(el('span', {class:'dot'}), text);
+}
+
+/* ============================================================ *
+ * Page router
+ * ============================================================ */
+function render() {
+  const page = $('#page');
+  clear(page);
+  const titleMap = {
+    overview:'Overview', commands:'Commands', discord:'Discord', llm:'LLM', rem:'REM',
+    autonomy:'Autonomy', intel:'Intel', cleanup:'Context cleanup', controls:'Controls',
+    memory:'Memory', context:'Context', logs:'Logs', raw:'Raw JSON'
+  };
+  $('#pageTitle').firstChild.textContent = titleMap[S.page] || 'Admin';
+  $('#pageSub').textContent = '';
+  try {
+    ({
+      overview: renderOverview, commands: renderCommands, discord: renderDiscord,
+      llm: renderLLM, rem: renderREM, autonomy: renderAutonomy, intel: renderIntel,
+      cleanup: renderCleanup, controls: renderControls, memory: renderMemory,
+      context: renderContext, logs: renderLogs, raw: renderRaw,
+    })[S.page]();
+  } catch(e) {
+    console.error(e);
+    page.appendChild(el('div', {class:'card'}, ['Failed to render: ' + e.message]));
+  }
+}
+
+/* ============================================================ *
+ * Overview
+ * ============================================================ */
+function renderOverview() {
+  const d = S.data, page = $('#page');
+  const status = d.status || {};
+  const sys = d.system || {};
+  const pm2 = d.pm2 || [];
+  const bot = pm2.find(p => p.name === 'maxwell-bot') || {};
+  const ap = pm2.find(p => p.name === 'maxwell-api') || {};
+  const guilds = d.discord?.guilds || [];
+  const dms = d.discord?.dms || [];
+  const cmds = d.commands || [];
+  const lastCmd = cmds[cmds.length - 1];
+  const lastError = [d.rem?.last_error, d.autonomy?.last_error, d.intel?.last_error, d.cleanup?.last_error]
+    .filter(Boolean)[0];
+  const mem = sys.memory || {};
+  const disk = sys.disk || {};
+  const load = sys.load || ['-'];
+
+  page.appendChild(el('div', {class:'grid g-4'}, [
+    stat(bot.pm2_env?.status === 'online' ? 'Online' : 'Offline',
+      'Bot', 'uptime ' + fmtUptime(bot.pm2_env?.pm_uptime), bot.pm2_env?.status === 'online' ? 'ok' : 'bad'),
+    stat(load[0] + '', 'Load (1m)', load[1] + ' 5m · ' + load[2] + ' 15m', ''),
+    stat(mem.total_mb ? Math.round(mem.used_mb/mem.total_mb*100) + '%' : '-',
+      'RAM', mem.used_mb ? Math.round(mem.used_mb) + 'M / ' + Math.round(mem.total_mb) + 'M' : '', ''),
+    stat(disk.total_bytes ? Math.round(disk.used_bytes/disk.total_bytes*100) + '%' : '-',
+      'Disk', disk.used_bytes ? fmtBytes(disk.used_bytes) + ' / ' + fmtBytes(disk.total_bytes) : '', ''),
+  ]));
+
+  page.appendChild(el('div', {class:'grid g-4', style:{marginTop:'14px'}}, [
+    stat(guilds.length, 'Servers', d.discord?.updated_at ? 'updated ' + fmtAgo(new Date(d.discord.updated_at).getTime()) : 'no snapshot', ''),
+    stat(dms.length, 'DMs / groups', '', ''),
+    stat(fmtNum(d.context?.length), 'Context facts', '', ''),
+    stat(fmtNum(cmds.length), 'Queued commands', lastCmd ? 'last ' + lastCmd.type : '', cmds.length ? 'warn' : ''),
+  ]));
+
+  // Quick actions
+  const actions = el('div', {class:'card'}, [
+    el('h3', {}, 'Quick actions'),
+    el('div', {class:'btn-row'}, [
+      el('button', {class:'btn', onClick: () => api('/api/rem/run',{method:'POST'}).then(()=>toast('REM run queued','ok'))}, '⟲ Run REM'),
+      el('button', {class:'btn', onClick: () => api('/api/intel/run',{method:'POST'}).then(()=>toast('Intel run queued','ok'))}, '☉ Run Intel'),
+      el('button', {class:'btn', onClick: () => api('/api/autonomy/run',{method:'POST'}).then(()=>toast('Autonomy tick queued','ok'))}, '◇ Force autonomy tick'),
+      el('button', {class:'btn', onClick: () => api('/api/context_cleanup/run',{method:'POST'}).then(()=>toast('Cleanup run queued','ok'))}, '✦ Run cleanup'),
+      el('button', {class:'btn primary', onClick: () => confirmModal('Restart maxwell-bot', 'This will drop in-flight requests. Continue?',
+        () => api('/api/pm2/restart?target=maxwell-bot',{method:'POST'}).then(()=>toast('Restart queued','ok')), {danger:true, confirm:'Restart'})}, '↻ Restart bot'),
+    ]),
+  ]);
+
+  // Recent commands
+  const recent = cmds.slice(-12).reverse();
+  const cmdList = el('div', {class:'item-list'});
+  if (recent.length === 0) cmdList.appendChild(el('div', {class:'empty'}, ['No commands yet.']));
+  else recent.forEach(c => {
+    cmdList.appendChild(el('div', {class:'item'}, [
+      el('div', {class:'body'}, [
+        el('b', {}, c.type),
+        el('p', {class:'mono truncate', style:{fontSize:'12px',margin:'4px 0 0'}}, c.result || '—'),
+        el('div', {class:'meta'}, [
+          el('span', {class:'mono'}, c.id?.slice(0,16) || ''),
+          el('span', {}, fmtAgo(c.ts ? c.ts * 1000 : null)),
+          statusBadge(c.status),
+        ]),
+      ]),
+    ]));
+  });
+
+  const cmdCard = el('div', {class:'card'}, [
+    el('h3', {}, ['Recent commands', el('span', {class:'count'}, cmds.length)]),
+    cmdList,
+  ]);
+
+  // Errors / status
+  const statusCard = el('div', {class:'card'}, [
+    el('h3', {}, 'Services'),
+    serviceRow('maxwell-bot', bot, 'Restart'),
+    serviceRow('maxwell-api', ap, 'Restart'),
+    el('div', {class:'divider'}),
+    el('div', {class:'switch-line'}, [el('div', {class:'text'}, [el('b', {}, 'Autonomy'), el('small', {}, 'Self-directed loop')]), statusBadge(d.autonomy?.enabled ? 'enabled' : 'disabled', d.autonomy?.enabled ? 'ok' : '')]),
+    el('div', {class:'switch-line'}, [el('div', {class:'text'}, [el('b', {}, 'REM'), el('small', {}, 'Background review loop')]), statusBadge(d.rem?.enabled ? 'enabled' : 'disabled', d.rem?.enabled ? 'ok' : '')]),
+    el('div', {class:'switch-line'}, [el('div', {class:'text'}, [el('b', {}, 'Intel'), el('small', {}, 'News gatherer')]), statusBadge(d.intel?.enabled ? 'enabled' : 'disabled', d.intel?.enabled ? 'ok' : '')]),
+    el('div', {class:'switch-line'}, [el('div', {class:'text'}, [el('b', {}, 'Context cleanup'), el('small', {}, 'Janitor agent')]), statusBadge(d.cleanup?.enabled ? 'enabled' : 'disabled', d.cleanup?.enabled ? 'ok' : '')]),
+  ]);
+
+  if (lastError) {
+    statusCard.appendChild(el('div', {class:'divider'}));
+    statusCard.appendChild(el('div', {class:'badge bad', style:{display:'block',whiteSpace:'normal',padding:'8px 10px'}}, 'Last error: ' + lastError));
+  }
+
+  page.appendChild(el('div', {class:'grid g-2', style:{marginTop:'14px'}}, [actions, statusCard]));
+  page.appendChild(el('div', {class:'grid g-2', style:{marginTop:'14px'}}, [cmdCard, renderDiscordList(guilds, dms, 'Live Discord snapshot')]));
+}
+
+function stat(value, label, meta, kind='') {
+  return el('div', {class: 'stat ' + kind}, [
+    el('div', {class: 'label'}, label),
+    el('div', {class: 'value'}, String(value)),
+    meta ? el('div', {class: 'meta'}, meta) : null,
+  ]);
+}
+function statusBadge(text, kind='') {
+  return el('span', {class: 'badge ' + kind}, [el('span', {class:'dot'}), text]);
+}
+function serviceRow(name, p, action) {
+  const status = p.pm2_env?.status || 'unknown';
+  return el('div', {class:'switch-line'}, [
+    el('div', {class:'text'}, [
+      el('b', {}, name),
+      el('small', {class:'mono'}, 'uptime ' + fmtUptime(p.pm2_env?.pm_uptime) + ' · ' + fmtBytes(p.monit?.memory) + ' · cpu ' + (p.monit?.cpu || 0) + '%'),
+    ]),
+    el('div', {style:{display:'flex',gap:'8px',alignItems:'center'}}, [
+      statusBadge(status, status === 'online' ? 'ok' : 'bad'),
+      el('button', {class:'btn sm ghost', onClick: () => confirmModal('Restart ' + name, 'This will drop in-flight requests. Continue?',
+        () => api('/api/pm2/restart?target=' + name, {method:'POST'}).then(() => { toast('Restart queued', 'ok'); setTimeout(loadAll, 1200); }),
+        {danger:true, confirm:'Restart'})}, 'Restart'),
+    ]),
+  ]);
+}
+
+/* ============================================================ *
+ * Commands
+ * ============================================================ */
+function renderCommands() {
+  const d = S.data, page = $('#page');
+  const sendCard = el('div', {class:'card'}, [
+    el('h3', {}, 'Send server/channel message'),
+    el('div', {class:'stack'}, [
+      el('div', {}, [el('label', {class:'label'}, 'Channel ID'), el('input', {class:'field', id:'chan', placeholder:'123456789012345678'})]),
+      el('div', {}, [el('label', {class:'label'}, 'Message'), el('textarea', {class:'field', id:'msg', placeholder:'Message text'})]),
+      el('button', {class:'btn primary', onClick: () => {
+        const c = $('#chan').value.trim(), m = $('#msg').value.trim();
+        if (!c || !m) return toast('Channel ID and message required','error');
+        queueCmd('send_message', {channel_id:c, content:m});
+      }}, 'Queue send'),
+    ]),
+  ]);
+  const dmCard = el('div', {class:'card'}, [
+    el('h3', {}, 'Send DM'),
+    el('div', {class:'stack'}, [
+      el('div', {}, [el('label', {class:'label'}, 'Discord user ID'), el('input', {class:'field', id:'dmuser', placeholder:'123456789012345678'})]),
+      el('div', {}, [el('label', {class:'label'}, 'Message'), el('textarea', {class:'field', id:'dmmsg', placeholder:'DM text'})]),
+      el('button', {class:'btn primary', onClick: () => {
+        const u = $('#dmuser').value.trim(), m = $('#dmmsg').value.trim();
+        if (!u || !m) return toast('User ID and message required','error');
+        queueCmd('send_dm', {user_id:u, content:m});
+      }}, 'Queue DM'),
+    ]),
+  ]);
+  const shellCard = el('div', {class:'card'}, [
+    el('h3', {}, 'Shell command'),
+    el('div', {class:'stack'}, [
+      el('div', {}, [el('label', {class:'label'}, 'Command'), el('textarea', {class:'field', id:'shell', placeholder:'echo hello'})]),
+      el('button', {class:'btn danger', onClick: () => {
+        const c = $('#shell').value.trim();
+        if (!c) return toast('Enter a command','error');
+        confirmModal('Queue shell command', 'Run: ' + c, () => queueCmd('shell', {command:c}), {danger:true, confirm:'Queue'});
+      }}, 'Queue shell'),
+    ]),
+  ]);
+  const safeCard = el('div', {class:'card'}, [
+    el('h3', {}, 'Safe commands'),
+    el('p', {class:'subtle'}, 'No-arg actions that just kick a background job.'),
+    el('div', {class:'btn-row'}, [
+      el('button', {class:'btn', onClick: () => queueCmd('reload_controls')}, 'Reload controls'),
+      el('button', {class:'btn', onClick: () => queueCmd('rem_run')}, 'Run REM'),
+      el('button', {class:'btn', onClick: () => queueCmd('intel_run')}, 'Run Intel'),
+    ]),
+  ]);
+
+  page.appendChild(el('div', {class:'grid g-2'}, [sendCard, dmCard, shellCard, safeCard]));
+
+  // History table
+  const cmds = (d.commands || []).slice().reverse();
+  const tbody = el('tbody');
+  if (cmds.length === 0) {
+    tbody.appendChild(el('tr', {}, [el('td', {colspan:5, class:'empty'}, 'No commands yet.')]));
+  } else {
+    cmds.forEach(c => {
+      tbody.appendChild(el('tr', {}, [
+        el('td', {class:'mono'}, c.id?.slice(0,12) || ''),
+        el('td', {}, c.type),
+        el('td', {}, statusBadge(c.status || 'pending', c.status === 'done' ? 'ok' : c.status === 'error' ? 'bad' : 'warn')),
+        el('td', {class:'mono truncate', style:{maxWidth:'420px'}}, c.result || '—'),
+        el('td', {class:'muted', style:{fontSize:'12px', whiteSpace:'nowrap'}}, fmtTime(c.ts ? c.ts * 1000 : null)),
+      ]));
+    });
+  }
+  const table = el('div', {class:'table-wrap', style:{marginTop:'14px'}}, [
+    el('table', {class:'table'}, [
+      el('thead', {}, el('tr', {}, [
+        el('th', {}, 'ID'), el('th', {}, 'Type'), el('th', {}, 'Status'),
+        el('th', {}, 'Result'), el('th', {}, 'Time'),
+      ])),
+      tbody,
+    ])
+  ]);
+  const histCard = el('div', {}, [
+    el('h2', {}, 'Command history'),
+    table,
+  ]);
+  page.appendChild(histCard);
+}
+async function queueCmd(type, body={}) {
+  try {
+    await api('/api/commands', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({type, ...body})});
+    toast('Queued ' + type, 'ok');
+    loadAll();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+/* ============================================================ *
+ * Discord
+ * ============================================================ */
+function renderDiscord() {
+  const page = $('#page');
+  const guilds = S.data.discord?.guilds || [];
+  const dms = S.data.discord?.dms || [];
+  page.appendChild(el('div', {class:'grid g-2'}, [renderDiscordList(guilds, dms, 'Servers'), renderDMs(dms)]));
+  page.appendChild(el('div', {class:'card', style:{marginTop:'14px'}}, [
+    el('h3', {}, 'Auto-reply channels'),
+    el('p', {class:'subtle'}, 'Channels where Maxwell will respond to everything (not just mentions).'),
+    renderAutoChannels(),
+  ]));
+}
+function renderDiscordList(guilds, dms, title) {
+  const list = el('div', {class:'item-list'});
+  if (!guilds.length) list.appendChild(el('div', {class:'empty'}, ['No server snapshot yet.']));
+  guilds.forEach(g => {
+    list.appendChild(el('div', {class:'item'}, [
+      el('div', {class:'body'}, [
+        el('b', {}, g.name),
+        el('div', {class:'meta'}, [
+          el('span', {class:'mono'}, g.id),
+          el('span', {}, (g.channels?.length || 0) + ' text channels'),
+          el('span', {}, (g.member_count ?? '?') + ' members'),
+        ]),
+        g.channels?.length ? el('div', {style:{display:'flex',gap:'4px',flexWrap:'wrap',marginTop:'8px'}},
+          g.channels.slice(0, 16).map(ch =>
+            el('button', {class:'btn sm ghost', onClick: () => { S.page = 'commands'; setPage('commands'); setTimeout(() => $('#chan').value = ch.id, 0); }}, '#' + ch.name))) : null,
+      ]),
+    ]));
+  });
+  return el('div', {class:'card'}, [
+    el('h3', {}, [title, el('span', {class:'count'}, guilds.length)]),
+    list,
+  ]);
+}
+function renderDMs(dms) {
+  const list = el('div', {class:'item-list'});
+  if (!dms.length) list.appendChild(el('div', {class:'empty'}, ['No DM snapshot yet.']));
+  dms.forEach(dm => {
+    list.appendChild(el('div', {class:'item'}, [
+      el('div', {class:'body'}, [
+        el('b', {}, dm.name),
+        el('div', {class:'meta'}, [
+          el('span', {class:'mono'}, 'channel ' + dm.id),
+          dm.recipient_id ? el('span', {class:'mono'}, 'user ' + dm.recipient_id) : null,
+        ]),
+      ]),
+      dm.recipient_id ? el('div', {class:'actions'}, [
+        el('button', {class:'btn sm', onClick: () => { S.page='commands'; setPage('commands'); setTimeout(()=>$('#dmuser').value = dm.recipient_id, 0); }}, 'DM this user'),
+      ]) : null,
+    ]));
+  });
+  return el('div', {class:'card'}, [
+    el('h3', {}, ['DM / group channels', el('span', {class:'count'}, dms.length)]),
+    list,
+  ]);
+}
+function renderAutoChannels() {
+  const list = S.data.autoChans || [];
+  const wrap = el('div', {class:'stack'});
+  const row = el('div', {class:'row'}, [
+    el('input', {class:'field', id:'newAutoChan', placeholder:'Channel ID'}),
+    el('button', {class:'btn primary', onClick: async () => {
+      const v = $('#newAutoChan').value.trim(); if (!v) return;
+      await api('/api/auto_channels', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({channel_id:v})});
+      toast('Added','ok'); loadAll();
+    }}, 'Add'),
+  ]);
+  wrap.appendChild(row);
+  if (list.length) {
+    const ul = el('div', {class:'item-list', style:{maxHeight:'240px'}});
+    list.forEach(id => ul.appendChild(el('div', {class:'item'}, [
+      el('div', {class:'body'}, [el('span', {class:'mono'}, id)]),
+      el('div', {class:'actions'}, [el('button', {class:'btn sm danger', onClick: async () => {
+        await api('/api/auto_channels?channel_id=' + encodeURIComponent(id), {method:'DELETE'});
+        toast('Removed','ok'); loadAll();
+      }}, 'Remove')]),
+    ])));
+    wrap.appendChild(ul);
+  }
+  return wrap;
+}
+
+/* ============================================================ *
+ * LLM
+ * ============================================================ */
+function renderLLM() {
+  const page = $('#page');
+  const traces = S.data.traces || [];
+  const recent = traces.slice(-50);
+  const withReason = recent.filter(t => {
+    const th = (t.payload && t.payload.thoughts) || '';
+    return th && !String(th).includes('no reasoning provided');
+  });
+  const cov = recent.length ? Math.round(100 * withReason.length / recent.length) : 0;
+  const latest = traces[traces.length - 1];
+
+  page.appendChild(el('div', {class:'grid g-3'}, [
+    stat(traces.length, 'Total traces', '', ''),
+    stat(cov + '%', 'Reasoning coverage', withReason.length + ' / ' + recent.length + ' recent', cov >= 80 ? 'ok' : cov >= 40 ? 'warn' : 'bad'),
+    stat(latest?.platform || '-', 'Latest platform', latest?.ts || 'no traces', ''),
+  ]));
+
+  const traceList = el('div', {class:'item-list', style:{maxHeight:'640px'}});
+  if (!traces.length) traceList.appendChild(el('div', {class:'empty'}, ['No traces yet.']));
+  else traces.slice().reverse().slice(0, 80).forEach(t => {
+    const p = t.payload || {};
+    const th = p.thoughts || '';
+    traceList.appendChild(el('div', {class:'item'}, [
+      el('div', {class:'body'}, [
+        el('div', {class:'row'}, [
+          el('span', {class:'badge accent'}, p.tool || 'unknown'),
+          el('span', {class:'mono dim'}, t.ts || ''),
+          el('span', {class:'mono dim'}, (t.channel_id || '').slice(0,10)),
+        ]),
+        th ? el('p', {class:'muted', style:{margin:'6px 0 0',whiteSpace:'pre-wrap',fontSize:'12.5px'}}, th.length > 600 ? th.slice(0,600) + '…' : th) : null,
+        el('details', {}, [
+          el('summary', {class:'muted', style:{cursor:'pointer',fontSize:'11px',marginTop:'4px'}}, 'payload'),
+          el('pre', {class:'log', style:{marginTop:'6px',maxHeight:'200px'}}, JSON.stringify(p, null, 2)),
+        ]),
+      ]),
+    ]));
+  });
+  page.appendChild(el('div', {class:'card', style:{marginTop:'14px'}}, [
+    el('h3', {}, ['Recent traces', el('span', {class:'count'}, traces.length)]),
+    traceList,
+  ]));
+}
+
+/* ============================================================ *
+ * Background-loop page (REM / Autonomy / Intel / Cleanup)
+ * shared renderer
+ * ============================================================ */
+function renderLoopPage({key, title, description, kindColors, kindActions}) {
+  const page = $('#page');
+  const d = S.data[key] || {};
+  const on = !!d.enabled;
+  const interval = d.interval_seconds || 0;
+  const lastRun = d.last_run;
+  const ago = lastRun ? fmtAgo(new Date(lastRun).getTime()) : 'never';
+  const log = (d.log || []).slice().reverse();
+  const err = d.last_error;
+  const lastAudit = d.last_audit;
+
+  page.appendChild(el('div', {class:'grid g-3'}, [
+    el('div', {class:'card'}, [
+      el('h3', {}, 'Status'),
+      el('div', {class:'switch-line'}, [el('div', {class:'text'}, [el('b', {}, 'Enabled'), el('small', {}, 'Background loop runs on this schedule')]),
+        switchToggle(on, v => api(`/api/${key}/${v?'enable':'disable'}`, {method:'POST'}).then(() => { toast((v?'Enabled ':'Disabled ') + title, 'ok'); loadAll(); }))]),
+      el('div', {class:'switch-line'}, [el('div', {class:'text'}, [el('b', {}, 'Interval'), el('small', {}, 'Seconds between runs (min 30/300 depending on page)')]),
+        el('div', {class:'row'}, [
+          el('input', {class:'field', id: key + 'Int', type:'number', value: interval, style:{width:'90px'}}),
+          el('button', {class:'btn', onClick: () => {
+            const v = parseInt($('#'+key+'Int').value);
+            const min = (key === 'autonomy') ? 30 : 300;
+            if (!v || v < min) return toast('Min ' + min + 's', 'error');
+            api(`/api/${key}/interval`, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({interval_seconds:v})}).then(() => { toast('Interval updated', 'ok'); loadAll(); });
+          }}, 'Set'),
+        ])]),
+      el('div', {class:'switch-line'}, [el('div', {class:'text'}, [el('b', {}, 'Last run'), el('small', {}, 'Most recent execution')]),
+        el('span', {class:'muted', style:{fontSize:'13px'}}, ago + (d.last_duration != null ? ' · ' + Number(d.last_duration).toFixed(1) + 's' : ''))]),
+      el('div', {class:'btn-row', style:{marginTop:'12px'}}, [
+        el('button', {class:'btn primary', onClick: () => api(`/api/${key}/run`, {method:'POST'}).then(() => { toast('Run queued', 'ok'); loadAll(); })}, '▶ Run now'),
+        el('button', {class:'btn danger', onClick: () => confirmModal('Clear ' + title + ' log', 'Erase all recorded log entries?', async () => {
+          await api(`/api/${key}/log`, {method:'DELETE'}); toast('Log cleared','ok'); loadAll();
+        }, {danger:true, confirm:'Clear'})}, 'Clear log'),
+      ]),
+    ]),
+    el('div', {class:'card'}, [
+      el('h3', {}, 'Description'),
+      el('p', {class:'subtle'}, description),
+      err ? el('div', {class:'badge bad', style:{display:'block',whiteSpace:'normal',padding:'8px 10px',marginTop:'8px'}}, 'Last error: ' + err) : null,
+    ]),
+    el('div', {class:'card'}, [
+      el('h3', {}, 'Last audit'),
+      el('pre', {class:'log', style:{maxHeight:'200px'}}, lastAudit || 'No ' + title + ' run yet.'),
+    ]),
+  ]));
+
+  // Log
+  const logList = el('div', {class:'item-list', style:{maxHeight:'520px'}});
+  if (!log.length) logList.appendChild(el('div', {class:'empty'}, ['No log entries.']));
+  else log.forEach(e => {
+    const ok = !e.error;
+    const what = kindActions ? (kindActions(e) || e.action_kind || e.action || 'event') : (e.action_kind || e.action || e.kind || 'event');
+    const meta = [];
+    if (e.timestamp) meta.push(el('span', {class:'mono'}, e.timestamp.slice(0,19)));
+    if (e.duration != null) meta.push(el('span', {}, Number(e.duration).toFixed(1) + 's'));
+    if (e.ops_applied != null) meta.push(el('span', {}, 'applied ' + e.ops_applied));
+    if (e.facts_added != null) meta.push(el('span', {}, 'added ' + e.facts_added));
+    logList.appendChild(el('div', {class:'item'}, [
+      el('div', {class:'body'}, [
+        el('div', {class:'row'}, [
+          el('span', {class:'badge ' + (ok ? 'ok' : 'bad')}, [el('span',{class:'dot'}), ok ? 'ok' : 'error']),
+          el('b', {}, what),
+        ]),
+        el('div', {class:'meta'}, meta),
+        e.audit ? el('p', {class:'muted', style:{fontSize:'12px',margin:'6px 0 0',whiteSpace:'pre-wrap'}}, e.audit) : null,
+        e.thought ? el('details', {}, [el('summary', {class:'muted', style:{cursor:'pointer',fontSize:'11px',marginTop:'4px'}}, 'thought'),
+          el('pre', {class:'log', style:{marginTop:'4px',maxHeight:'160px'}}, e.thought)]) : null,
+        e.error ? el('div', {class:'badge bad', style:{display:'block',whiteSpace:'normal',padding:'6px 8px',marginTop:'6px'}}, e.error) : null,
+      ]),
+    ]));
+  });
+  page.appendChild(el('div', {class:'card', style:{marginTop:'14px'}}, [
+    el('h3', {}, ['Log', el('span', {class:'count'}, log.length)]),
+    logList,
+  ]));
+}
+
+// extras is an object of {attr: value} pairs to merge into the input.
+function switchToggle(on, onChange, extras={}) {
+  const id = 'sw_' + Math.random().toString(36).slice(2,8);
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.id = id;
+  input.checked = !!on;
+  input.addEventListener('change', e => onChange(e.target.checked));
+  for (const [k, v] of Object.entries(extras)) input.setAttribute(k, v);
+  return el('label', {class:'switch'}, [input, el('span', {class:'knob'})]);
+}
+
+function renderREM() {
+  renderLoopPage({
+    key: 'rem',
+    title: 'REM',
+    description: 'Background review loop. Reads recent visible events and writes an audit. Does not currently edit long-term memory or context.',
+  });
+}
+
+function renderCleanup() {
+  renderLoopPage({
+    key: 'cleanup',
+    title: 'Context cleanup',
+    description: 'Janitor agent that reviews shared context on a schedule, dedupes/merges/edits messy entries. Uses the same model as Autonomy and REM.',
+  });
+}
+
+function renderIntel() {
+  renderLoopPage({
+    key: 'intel',
+    title: 'Intel',
+    description: 'News gatherer. Polls AI/tech feeds hourly and curates facts into long-term memory so the main bot stays current.',
+  });
+}
+
+/* ============================================================ *
+ * Autonomy (has goals + model config)
+ * ============================================================ */
+function renderAutonomy() {
+  const page = $('#page');
+  const d = S.data.autonomy || {};
+  const c = S.data.control?.control || {};
+  const on = !!d.enabled;
+  const interval = d.interval_seconds || 300;
+  const goals = S.data.autonomyGoals || [];
+  const log = (S.data.autonomyLog?.entries || []).slice().reverse();
+
+  // Engine card
+  const engine = el('div', {class:'card'}, [
+    el('h3', {}, 'Autonomy engine'),
+    el('p', {class:'subtle'}, 'Maxwell\'s self-directed life loop. Wakes up on his own, reads DMs, checks goals, decides what to do. No approval queue.'),
+    el('div', {class:'switch-line'}, [el('div', {class:'text'}, [el('b', {}, 'Enabled')]),
+      switchToggle(on, v => api('/api/autonomy/' + (v?'enable':'disable'), {method:'POST'}).then(() => { toast('Autonomy ' + (v?'enabled':'disabled'),'ok'); loadAll(); }))]),
+    el('div', {class:'switch-line'}, [el('div', {class:'text'}, [el('b', {}, 'Interval'), el('small', {}, 'seconds between ticks (min 30)')]),
+      el('div', {class:'row'}, [
+        el('input', {class:'field', id:'autoInt', type:'number', value: interval, style:{width:'90px'}}),
+        el('button', {class:'btn', onClick: () => {
+          const v = parseInt($('#autoInt').value); if (!v || v < 30) return toast('Min 30s','error');
+          api('/api/autonomy/interval', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({interval_seconds:v})}).then(()=>{toast('Updated','ok');loadAll();});
+        }}, 'Set'),
+      ])]),
+    el('div', {class:'switch-line'}, [el('div', {class:'text'}, [el('b', {}, 'Last tick'), el('small', {}, 'Duration of last run')]),
+      el('span', {class:'muted', style:{fontSize:'13px'}}, fmtAgo(d.last_tick ? new Date(d.last_tick).getTime() : null) + (d.last_tick_duration != null ? ' · ' + Number(d.last_tick_duration).toFixed(1) + 's' : ''))]),
+    el('div', {class:'switch-line'}, [el('div', {class:'text'}, [el('b', {}, 'Totals')]),
+      el('span', {class:'muted', style:{fontSize:'13px'}}, 'executed ' + (d.actions_executed_total || 0) + ' · failed ' + (d.actions_failed_total || 0))]),
+    el('div', {class:'btn-row', style:{marginTop:'12px'}}, [
+      el('button', {class:'btn primary', onClick: () => api('/api/autonomy/run', {method:'POST'}).then(()=>{toast('Tick queued','ok');loadAll();})}, '▶ Force tick'),
+    ]),
+  ]);
+
+  // Model config card
+  const modelCard = el('div', {class:'card'}, [
+    el('h3', {}, 'Autonomy model'),
+    el('p', {class:'subtle'}, 'Optional. Leave blank to use the main bot model. Set base_url + key to run autonomy on a separate endpoint.'),
+    el('div', {class:'stack'}, [
+      el('div', {}, [el('label', {class:'label'}, 'Base URL'), el('input', {class:'field', id:'autoBaseUrl', value: c.autonomy_base_url || '', placeholder:'blank = main'})]),
+      el('div', {class:'row'}, [el('div', {class:'grow'}, [el('label', {class:'label'}, 'API key'), el('input', {class:'field', id:'autoApiKey', type:'password', value: c.autonomy_api_key || '', placeholder:'blank = main'})]),
+        el('button', {class:'btn sm', onClick: () => { const e = $('#autoApiKey'); e.type = e.type === 'password' ? 'text' : 'password'; }}, 'show')]),
+      el('div', {}, [el('label', {class:'label'}, 'Model name'), el('input', {class:'field', id:'autoModel', value: c.autonomy_model || '', placeholder:'blank = main'})]),
+      el('div', {class:'switch-line', style:{padding:'6px 0'}}, [el('div', {class:'text'}, [el('b', {}, 'Disable reasoning'), el('small', {}, 'For endpoints that reject reasoning (e.g. NVIDIA)')]),
+        switchToggle(c.autonomy_disable_reasoning !== false, v => null, {id: 'autoDisableReasoning'})]),
+      el('div', {class:'switch-line', style:{padding:'6px 0'}}, [el('div', {class:'text'}, [el('b', {}, 'Block if replied in channel'), el('small', {}, 'Skip posting if bot replied in the same channel within N seconds (0 = off)')]),
+        el('input', {class:'field', id:'autoReplyBlock', type:'number', value: c.autonomy_recent_reply_block_seconds || 0, style:{width:'90px'}})]),
+      el('button', {class:'btn primary', onClick: async () => {
+        const body = {
+          autonomy_base_url: $('#autoBaseUrl').value,
+          autonomy_api_key: $('#autoApiKey').value,
+          autonomy_model: $('#autoModel').value,
+          autonomy_disable_reasoning: $('#autoDisableReasoning').checked,
+          autonomy_recent_reply_block_seconds: Math.max(0, parseInt($('#autoReplyBlock').value) || 0),
+        };
+        await api('/api/control', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+        toast('Saved','ok'); loadAll();
+      }}, 'Save model config'),
+    ]),
+  ]);
+
+  // Last thought card
+  const thoughtCard = el('div', {class:'card'}, [
+    el('h3', {}, 'Last thought'),
+    el('pre', {class:'log', style:{maxHeight:'260px'}}, d.last_thought || 'No thoughts yet.'),
+    d.last_error ? el('div', {class:'badge bad', style:{display:'block',whiteSpace:'normal',padding:'8px 10px',marginTop:'8px'}}, 'Error: ' + d.last_error) : null,
+  ]);
+
+  page.appendChild(el('div', {class:'grid g-2'}, [engine, modelCard, thoughtCard, renderAutonomyBlacklist(c)]));
+  page.appendChild(el('div', {class:'grid g-2', style:{marginTop:'14px'}}, [renderGoalsCard(goals), renderAutonomyLogCard(log)]));
+}
+function renderAutonomyBlacklist(c) {
+  return el('div', {class:'card'}, [
+    el('h3', {}, 'Blacklists'),
+    el('p', {class:'subtle'}, 'IDs only. Autonomy skips these servers and channels.'),
+    el('div', {class:'stack'}, [
+      el('div', {}, [el('label', {class:'label'}, 'Blocked channels'), el('input', {class:'field', id:'abCh', value: (c.autonomy_blocked_channels || []).join(', '), placeholder:'123, 456'})]),
+      el('div', {}, [el('label', {class:'label'}, 'Blocked servers (guilds)'), el('input', {class:'field', id:'abSv', value: (c.autonomy_blocked_servers || []).join(', '), placeholder:'guild-id-1'})]),
+      el('button', {class:'btn primary', onClick: () => {
+        const toArr = s => s ? s.split(/[\s,]+/).map(x=>x.trim()).filter(Boolean).slice(0, 200) : [];
+        api('/api/control', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+          autonomy_blocked_channels: toArr($('#abCh').value),
+          autonomy_blocked_servers: toArr($('#abSv').value),
+        })}).then(() => { toast('Saved', 'ok'); loadAll(); });
+      }}, 'Save blacklists'),
+    ]),
+  ]);
+}
+function renderGoalsCard(goals) {
+  const list = el('div', {class:'item-list'});
+  if (!goals.length) list.appendChild(el('div', {class:'empty'}, ['No goals set.']));
+  goals.forEach(g => {
+    list.appendChild(el('div', {class:'item'}, [
+      el('div', {class:'body'}, [
+        el('b', {}, g.description),
+        el('div', {class:'meta'}, [
+          el('span', {class:'mono'}, g.id?.slice(0,16) || ''),
+          el('span', {}, 'last acted: ' + (g.last_acted_on || 'never')),
+        ]),
+      ]),
+      el('div', {class:'actions'}, [
+        el('button', {class:'btn sm danger', onClick: () => confirmModal('Delete goal?', g.description, async () => {
+          await api('/api/autonomy/goals/' + encodeURIComponent(g.id), {method:'DELETE'});
+          toast('Deleted','ok'); loadAll();
+        }, {danger:true, confirm:'Delete'})}, 'Delete'),
+      ]),
+    ]));
+  });
+  const desc = el('textarea', {class:'field', id:'newGoal', placeholder:'What should Maxwell work toward? (max 2000 chars)', maxlength:2000, style:{minHeight:'80px'}});
+  return el('div', {class:'card'}, [
+    el('h3', {}, ['Goals', el('span', {class:'count'}, goals.length)]),
+    el('div', {class:'stack', style:{marginBottom:'12px'}}, [
+      desc,
+      el('div', {class:'row'}, [
+        el('span', {class:'muted', style:{fontSize:'11px'}}, '0 / 2000'),
+        el('button', {class:'btn primary', onClick: async () => {
+          const v = desc.value.trim(); if (!v) return;
+          await api('/api/autonomy/goals', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({description:v})});
+          toast('Added','ok'); desc.value=''; loadAll();
+        }}, 'Add goal'),
+      ]),
+    ]),
+    list,
+  ]);
+}
+function renderAutonomyLogCard(log) {
+  const list = el('div', {class:'item-list', style:{maxHeight:'500px'}});
+  if (!log.length) list.appendChild(el('div', {class:'empty'}, ['No actions yet.']));
+  log.forEach(e => {
+    const ok = e.result === 'success';
+    const kind = e.action_kind || e.action || 'event';
+    list.appendChild(el('div', {class:'item'}, [
+      el('div', {class:'body'}, [
+        el('div', {class:'row'}, [
+          el('span', {class:'badge ' + (ok ? 'ok' : e.result === 'error' ? 'bad' : 'warn')}, [el('span',{class:'dot'}), ok ? 'ok' : (e.result || '?')]),
+          el('b', {}, kind),
+          el('span', {class:'mono dim', style:{fontSize:'12px'}}, (e.timestamp || '').slice(11,19)),
+        ]),
+        (e.target || e.content_summary) ? el('p', {style:{margin:'4px 0 0',fontSize:'13px'}}, (e.target || '') + (e.content_summary ? ' · ' + e.content_summary : '')) : null,
+        e.thought ? el('details', {}, [el('summary', {class:'muted', style:{cursor:'pointer',fontSize:'11px',marginTop:'4px'}}, 'thought'),
+          el('pre', {class:'log', style:{marginTop:'4px',maxHeight:'160px'}}, e.thought)]) : null,
+        e.error ? el('div', {class:'badge bad', style:{display:'block',whiteSpace:'normal',padding:'6px 8px',marginTop:'6px'}}, e.error) : null,
+      ]),
+    ]));
+  });
+  return el('div', {class:'card'}, [
+    el('h3', {}, ['Action log', el('span', {class:'count'}, log.length)]),
+    list,
+  ]);
+}
+
+/* ============================================================ *
+ * Controls
+ * ============================================================ */
+function renderControls() {
+  const page = $('#page');
+  const data = S.data.control || {};
+  const c = data.control || {};
+  const tools = data.tools || [];
+  const bools = ['bot_enabled','reply_dms','reply_groups','reply_mentions','tools_enabled','store_memory','cross_context_enabled','cross_context_extract_enabled','process_images','process_audio'];
+  const disabled = c.disabled_tools || [];
+
+  const runtime = el('div', {class:'card'}, [
+    el('h3', {}, 'Runtime switches'),
+    ...bools.map(k => el('div', {class:'switch-line'}, [
+      el('div', {class:'text'}, [el('b', {}, k.replaceAll('_',' ')), el('small', {}, switchHint(k))]),
+      switchToggle(!!c[k], v => null, {'data-bool-key': k}),
+    ])),
+    el('div', {class:'btn-row', style:{marginTop:'12px'}}, [
+      el('button', {class:'btn primary', onClick: () => {
+        const body = {};
+        document.querySelectorAll('input[data-bool-key]').forEach(inp => { body[inp.dataset.boolKey] = inp.checked; });
+        saveControl(body);
+      }}, 'Save switches'),
+    ]),
+  ]);
+
+  const toolsCard = el('div', {class:'card'}, [
+    el('h3', {}, ['Tools', el('span', {class:'count'}, tools.length)]),
+    el('p', {class:'subtle'}, 'Disable a tool to make Maxwell pretend it does not exist.'),
+    ...tools.map(t => el('div', {class:'switch-line'}, [
+      el('div', {class:'text'}, [el('b', {class:'mono'}, t), el('small', {}, disabled.includes(t) ? 'disabled' : 'available')]),
+      switchToggle(!disabled.includes(t), v => null, {'data-tool-key': t}),
+    ])),
+    el('div', {class:'btn-row', style:{marginTop:'12px'}}, [
+      el('button', {class:'btn primary', onClick: () => {
+        const off = [];
+        document.querySelectorAll('input[data-tool-key]').forEach(inp => { if (!inp.checked) off.push(inp.dataset.toolKey); });
+        saveControl({disabled_tools: off});
+      }}, 'Save tools'),
+    ]),
+  ]);
+
+  const personaCard = el('div', {class:'card', style:{marginTop:'14px'}}, [
+    el('h3', {}, 'Base personality'),
+    el('textarea', {class:'field', id:'persona', style:{minHeight:'180px'}}, c.base_personality || ''),
+    el('div', {class:'btn-row', style:{marginTop:'8px'}}, [
+      el('button', {class:'btn primary', onClick: () => saveControl({base_personality: $('#persona').value})}, 'Save personality'),
+      el('button', {class:'btn danger', onClick: () => confirmModal('Reset control file', 'Restore defaults? Your edits will be lost.', async () => {
+        await api('/api/control', {method:'DELETE'}); toast('Reset','ok'); loadAll();
+      }, {danger:true, confirm:'Reset'})}, 'Reset all'),
+    ]),
+  ]);
+
+  page.appendChild(el('div', {class:'grid g-2'}, [runtime, toolsCard]));
+  page.appendChild(personaCard);
+}
+function switchHint(k) {
+  const h = {
+    bot_enabled: 'Master kill switch. When off, Maxwell ignores everything.',
+    reply_dms: 'Respond to direct messages.',
+    reply_groups: 'Respond in group DMs.',
+    reply_mentions: 'Respond when mentioned in a server.',
+    tools_enabled: 'Master switch for tool use.',
+    store_memory: 'Persist conversations to long-term memory.',
+    cross_context_enabled: 'Inject cross-context facts into prompts.',
+    cross_context_extract_enabled: 'Extract facts from conversations automatically.',
+    process_images: 'Accept and process image attachments.',
+    process_audio: 'Accept and process audio attachments.',
+  };
+  return h[k] || '';
+}
+async function saveControl(body) {
+  try {
+    const d = await api('/api/control', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    S.data.control = d;
+    toast('Saved','ok'); render();
+  } catch(e) { toast(e.message,'error'); }
+}
+
+/* ============================================================ *
+ * Memory
+ * ============================================================ */
+function renderMemory() {
+  const page = $('#page');
+  const mem = S.data.memory || [];
+  page.appendChild(el('div', {class:'card', style:{marginBottom:'14px'}}, [
+    el('h3', {}, 'Add memory'),
+    el('textarea', {class:'field', id:'newMem', placeholder:'Memory content'}),
+    el('div', {class:'btn-row', style:{marginTop:'8px'}}, [
+      el('button', {class:'btn primary', onClick: async () => {
+        const v = $('#newMem').value.trim(); if (!v) return;
+        await api('/api/memory', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({content:v})});
+        toast('Added','ok'); $('#newMem').value=''; loadAll();
+      }}, 'Add'),
+    ]),
+  ]));
+  page.appendChild(renderFilterableList({
+    title: 'Long-term memory',
+    items: mem,
+    totalCount: mem.length,
+    placeholder: 'Search memory',
+    renderItem: (m) => ({
+      title: m.content?.slice(0, 100) + (m.content?.length > 100 ? '…' : ''),
+      meta: [{mono: m.id?.slice(0,16) || ''}],
+      expand: el('div', {class:'stack'}, [
+        el('textarea', {class:'field', id:'mem_' + m.id}, m.content || ''),
+        el('div', {class:'btn-row'}, [
+          el('button', {class:'btn primary sm', onClick: async () => {
+            const v = $('#mem_' + m.id).value;
+            await api('/api/memory', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: m.id, content: v})});
+            toast('Saved','ok'); loadAll();
+          }}, 'Save'),
+          el('button', {class:'btn danger sm', onClick: () => confirmModal('Delete memory?', m.content?.slice(0, 100), async () => {
+            await api('/api/memory?id=' + encodeURIComponent(m.id), {method:'DELETE'});
+            toast('Deleted','ok'); loadAll();
+          }, {danger:true, confirm:'Delete'})}, 'Delete'),
+        ]),
+      ]),
+    }),
+  }));
+}
+
+/* ============================================================ *
+ * Context
+ * ============================================================ */
+function renderContext() {
+  const page = $('#page');
+  const ctx = S.data.context || [];
+  page.appendChild(renderContextAdd());
+  page.appendChild(renderFilterableList({
+    title: 'Facts',
+    items: ctx,
+    totalCount: ctx.length,
+    placeholder: 'Search facts',
+    renderItem: (f) => ({
+      title: f.content,
+      badges: [
+        el('span', {class:'badge'}, f.scope),
+        el('span', {class:'badge ' + (f.importance >= 8 ? 'ok' : f.importance >= 5 ? 'warn' : 'bad')}, 'i' + f.importance),
+        el('span', {class:'badge ' + (f.visibility === 'private' ? 'warn' : '')}, f.visibility),
+      ],
+      meta: [{mono: f.id?.slice(0,16) || ''}],
+      actions: [el('button', {class:'btn sm danger', onClick: () => confirmModal('Delete fact?', f.content, async () => {
+        await api('/api/context?id=' + encodeURIComponent(f.id), {method:'DELETE'});
+        toast('Deleted','ok'); loadAll();
+      }, {danger:true, confirm:'Delete'})}, 'Delete')],
+    }),
+  }));
+}
+function renderContextAdd() {
+  return el('div', {class:'card', style:{marginBottom:'14px'}}, [
+    el('h3', {}, 'Add fact'),
+    el('div', {class:'grid g-3', style:{gap:'10px'}}, [
+      el('div', {}, [el('label', {class:'label'}, 'Scope type'), el('select', {class:'field', id:'ctxType', onChange: () => {
+        const t = $('#ctxType').value;
+        $('#ctxIdWrap').style.display = (t === 'global' || t === 'custom') ? 'none' : '';
+        $('#ctxCustomWrap').style.display = t === 'custom' ? '' : 'none';
+      }}, [
+        el('option', {value:'global'}, 'Global'),
+        el('option', {value:'user'}, 'User-specific'),
+        el('option', {value:'channel'}, 'Channel-specific'),
+        el('option', {value:'guild'}, 'Guild-specific'),
+        el('option', {value:'custom'}, 'Custom scope'),
+      ])]),
+      el('div', {id:'ctxIdWrap'}, [el('label', {class:'label'}, 'Target ID'), el('input', {class:'field', id:'ctxId', placeholder:'ID'})]),
+      el('div', {id:'ctxCustomWrap', style:{display:'none'}}, [el('label', {class:'label'}, 'Custom scope name'), el('input', {class:'field', id:'ctxCustom', value:'global'})]),
+    ]),
+    el('div', {class:'row', style:{marginTop:'10px'}}, [
+      el('div', {class:'grow'}, [el('label', {class:'label'}, 'Visibility'), el('select', {class:'field', id:'ctxVis'}, [el('option', {value:'shared'}, 'Shared'), el('option', {value:'private'}, 'Private')])]),
+      el('div', {class:'grow'}, [
+        el('label', {class:'label'}, 'Importance'),
+        (() => {
+          const sel = el('select', {class:'field', id:'ctxImp'});
+          for (let i = 1; i <= 10; i++) {
+            const opt = document.createElement('option');
+            opt.value = String(i);
+            opt.textContent = 'Importance ' + i + (i === 8 ? ' (High, default)' : '');
+            if (i === 8) opt.selected = true;
+            sel.appendChild(opt);
+          }
+          return sel;
+        })(),
+      ]),
+    ]),
+    el('div', {style:{marginTop:'10px'}}, [el('label', {class:'label'}, 'Fact'), el('textarea', {class:'field', id:'ctxContent', placeholder:'Fact content'})]),
+    el('div', {class:'btn-row', style:{marginTop:'8px'}}, [
+      el('button', {class:'btn primary', onClick: async () => {
+        const t = $('#ctxType').value;
+        let scope = 'global';
+        if (t === 'custom') scope = $('#ctxCustom').value.trim() || 'global';
+        else if (t !== 'global') {
+          const id = $('#ctxId').value.trim();
+          if (!id) return toast('Target ID required','error');
+          scope = t + ':' + id;
+        }
+        const content = $('#ctxContent').value.trim();
+        if (!content) return toast('Fact content required','error');
+        await api('/api/context', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+          scope, content,
+          importance: parseInt($('#ctxImp').value) || 8,
+          visibility: $('#ctxVis').value,
+          tags: ['manual'],
+        })});
+        toast('Added','ok'); $('#ctxContent').value=''; loadAll();
+      }}, 'Add fact'),
+    ]),
+  ]);
+}
+
+/* ============================================================ *
+ * Filterable list (memory + context)
+ * ============================================================ */
+function renderFilterableList({title, items, totalCount, placeholder, renderItem}) {
+  const list = el('div', {class:'item-list'});
+  const search = el('input', {class:'field', placeholder: placeholder || 'Filter…', onInput: debounce(e => { S.filter = e.target.value.toLowerCase(); drawList(); }, 200)});
+  function drawList() {
+    list.replaceChildren();
+    const filtered = !S.filter ? items : items.filter(it => JSON.stringify(it).toLowerCase().includes(S.filter));
+    const countEl = document.getElementById('listCount_' + title.replace(/\W/g,''));
+    if (countEl) countEl.textContent = (S.filter ? filtered.length + ' / ' : '') + totalCount;
+    if (!filtered.length) list.appendChild(el('div', {class:'empty'}, [S.filter ? 'No matches.' : 'Nothing here yet.']));
+    filtered.forEach(it => {
+      const r = renderItem(it);
+      const body = el('div', {class:'body'}, [
+        el('b', {}, r.title),
+        r.badges ? el('div', {style:{display:'flex',gap:'4px',flexWrap:'wrap',marginTop:'4px'}}, r.badges) : null,
+        r.meta?.length ? el('div', {class:'meta'}, r.meta.map(m => {
+          if (m.mono) return el('span', {class:'mono'}, m.mono);
+          return el('span', {}, m.text || '');
+        })) : null,
+        r.expand ? r.expand : null,
+      ]);
+      const actions = r.actions?.length ? el('div', {class:'actions'}, r.actions) : null;
+      list.appendChild(el('div', {class:'item'}, [body, actions].filter(Boolean)));
+    });
+  }
+  drawList();
+  return el('div', {class:'card'}, [
+    el('h3', {}, [title, el('span', {class:'count', id: 'listCount_' + title.replace(/\W/g,'')}, totalCount)]),
+    el('div', {class:'toolbar'}, [search]),
+    list,
+  ]);
+}
+
+/* ============================================================ *
+ * Logs
+ * ============================================================ */
+function renderLogs() {
+  const page = $('#page');
+  const sel = el('select', {class:'field', style:{maxWidth:'200px'}}, [el('option', {value:'maxwell-bot'}, 'maxwell-bot'), el('option', {value:'maxwell-api'}, 'maxwell-api')]);
+  const out = el('pre', {class:'log'}, 'Pick a process and click Load.');
+  const btn = el('button', {class:'btn primary', onClick: async () => {
+    btn.disabled = true; out.textContent = 'Loading…';
+    try {
+      const d = await api('/api/pm2/logs?process=' + encodeURIComponent(sel.value) + '&lines=200');
+      out.textContent = d.log || '(empty)';
+    } catch(e) { out.textContent = 'Error: ' + e.message; }
+    finally { btn.disabled = false; }
+  }}, 'Load');
+  page.appendChild(el('div', {class:'card'}, [
+    el('h3', {}, 'PM2 logs'),
+    el('div', {class:'row', style:{marginBottom:'12px'}}, [sel, btn]),
+    out,
+  ]));
+}
+
+/* ============================================================ *
+ * Raw JSON
+ * ============================================================ */
+function renderRaw() {
+  const page = $('#page');
+  const sections = [
+    ['control', 'Control'],
+    ['memoryJson', 'Memory (chat)'],
+    ['sites', 'Sites'],
+    ['prompts', 'Prompts'],
+    ['traces', 'LLM traces'],
+  ];
+  page.appendChild(el('div', {class:'grid g-2'}, sections.map(([k, label]) => {
+    return el('div', {class:'card'}, [
+      el('h3', {}, label),
+      el('pre', {class:'log', style:{maxHeight:'420px'}}, JSON.stringify(S.data[k] ?? '—', null, 2)),
+    ]);
+  })));
+}
+
+/* ============================================================ *
+ * Bindings
+ * ============================================================ */
+$('#loginForm').onsubmit = async e => {
+  e.preventDefault();
+  $('#error').textContent = '';
+  try { await login($('#user').value.trim(), $('#pass').value); }
+  catch(err) { $('#error').textContent = err.message; }
+};
+$('#clear').onclick = () => { $('#user').value=''; $('#pass').value=''; };
+$('#logout').onclick = () => logout(true);
+$('#refresh').onclick = () => loadAll();
+$('#discordLogin').onclick = async () => {
+  try { await loginDiscord(); } catch(err) { $('#error').textContent = err.message; }
+};
+$('#menuToggle').onclick = () => $('#sidebar').classList.toggle('open');
+
+document.addEventListener('keydown', e => {
+  // ignore if typing
+  if (/input|textarea|select/i.test(e.target.tagName)) return;
+  if (e.key === 'r' && !e.ctrlKey && !e.metaKey) { e.preventDefault(); loadAll(); }
+  if (e.key === '/') { e.preventDefault(); const s = document.querySelector('.topbar .search input'); if (s) s.focus(); }
+});
+
+(async function bootstrap() {
+  try {
+    const m = location.hash.match(/discord_token=([^&]+)/);
+    if (m) {
+      history.replaceState(null, '', location.pathname + location.search);
+      try { await loginDiscordToken(m[1]); return; }
+      catch(err) { $('#error').textContent = err.message; }
+    }
+    const t = localStorage.getItem('mw_discord_token');
+    if (t) { try { await loginDiscordToken(t); return; } catch(e) { localStorage.removeItem('mw_discord_token'); } }
+    const b = localStorage.getItem('mw_basic');
+    if (b) { try { const [u,p] = atob(b).split(':'); await login(u,p); return; } catch(e) { localStorage.removeItem('mw_basic'); } }
+  } catch(e) { /* fall through to login */ }
+})();
 </script>
 </body>
 </html>
