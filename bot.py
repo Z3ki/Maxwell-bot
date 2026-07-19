@@ -6642,9 +6642,9 @@ class MaxwellBot(commands.Bot):
                     f"{tool_list}\n\n"
                     "TOOL PROTOCOL (this is the only tool format that works in this mode):\n"
                     "To call a tool, write EXACTLY one bare JSON object on its OWN line — no markdown fence, no code block, no surrounding text, no commentary:\n"
-                    '{"name": "<tool_name>", "arguments": {"reasoning": "<plain-text reasoning: why this tool, what you expect, assumptions/risks, fallback if it fails>", ...other args...}}\n'
+                    '{"name": "<tool_name>", "arguments": {"reasoning": "<plain-text reasoning: why this tool, what you expect, assumptions/risks, fallback>", ...other args...}}\n'
                     "Rules:\n"
-                    "- `reasoning` is the FIRST key in arguments. Plain text only, no XML/JSON/tags. Scale the length to the task: trivial calls (react, sleep) get ~1 short sentence; routine calls (send_message, fetch_url) get 1-2 sentences; complex calls (create_site with custom HTML, image_generator, shell with non-obvious commands, multi-step plans, debugging) get a real paragraph (3-6 sentences). The 2026-07-19 user complaint: one-liner reasoning on non-trivial work made it look like the bot wasn't thinking. The user sees this stream live in the channel — reason like a senior engineer writing a PR description. Server caps at 2000 chars.\n"
+                    "- `reasoning` is the FIRST key in arguments. Plain text, no XML/JSON/tags. Scale length to the task: trivial calls (react, sleep) ~1 short sentence; routine ~1-2 sentences; complex (create_site with custom HTML, image_generator, shell with non-obvious commands, debugging) 3-6 sentences. Server caps at 2000 chars.\n"
                     "- `arguments` keys must match the tool's schema exactly. See each tool's description above for required fields.\n"
                     "- For `create_site`, the FULL HTML document (with all CSS/JS inline) goes in the `body` argument. Do NOT paste HTML into chat. If you find yourself writing `<!DOCTYPE`, `:root{`, or `<html` as a chat message, stop and call `create_site` instead — the user wants a working URL, not raw markup in the channel.\n"
                     "- For `send_file` with large code/HTML, set `encoding=\"base64\"` and base64-encode the content.\n"

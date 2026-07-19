@@ -296,24 +296,13 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
 REASONING_PARAM: dict[str, Any] = {
     "type": "string",
     "description": (
-        "Your real, plain-English reasoning BEFORE you take this action: why "
-        "you are calling this tool, what you expect to happen, assumptions and "
-        "risks. Plain text only — no XML, no JSON, no tags. Fill this in for "
-        "EVERY tool call including send_message.\n\n"
-        "Scale the length to the task: trivial actions (react, sleep, clear_sleep) "
-        "get ONE short sentence (~30-80 chars). Routine tool calls (send_message, "
-        "send_file, fetch_url, create_poll) get 1-2 sentences (~80-200 chars). "
-        "Complex or multi-step tasks (create_site with custom HTML, shell with a "
-        "non-obvious command, image_generator with a detailed prompt, multi-tool "
-        "plans, debugging, anything where you considered alternatives) get a real "
-        "paragraph: 3-6 sentences, 300-900 chars. Walk through WHY this tool, "
-        "what you expect, what you'd do if it fails, and any sub-decisions. The "
-        "user sees this reasoning stream live in the channel while you work, so "
-        "longer is better when the work is non-trivial. The 2026-07-19 directive: "
-        "the bot was shipping 'looking up x' one-liners on jobs that clearly needed "
-        "real thought; users couldn't tell what was happening or whether to trust "
-        "the call. Reason like a senior engineer writing a PR description — short "
-        "for trivial, full paragraph for non-trivial. The dashboard caps at 2000 chars."
+        "Plain-text reasoning BEFORE the action: why this tool, what you expect, "
+        "assumptions/risks, fallback if it fails. No XML/JSON/tags. Scale length to the task: "
+        "trivial (react, sleep) = 1 short sentence; routine (send_message, fetch_url) = "
+        "1-2 sentences; complex (create_site with custom HTML, image_generator, shell with "
+        "non-obvious commands, multi-step plans, debugging) = 3-6 sentences. The user sees "
+        "this stream live in the channel, so reason like a senior engineer writing a PR "
+        "description: short for trivial, a real paragraph for non-trivial. Capped at 2000 chars."
     ),
 }
 
