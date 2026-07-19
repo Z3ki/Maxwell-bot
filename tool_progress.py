@@ -60,16 +60,23 @@ _GRACE_BEFORE_FIRST_POST = 0.15
 
 # Per-token ticks fire on EVERY streamed delta. Most providers chunk
 # into ~50-200 char deltas. We MUST coalesce or we'd 429 us into silence.
-_TOKEN_TICK_INTERVAL = 1.5
+# The 2026-07-19 directive: 1.5s made the progress message feel like it
+# jumped straight to the last sentence — the user couldn't watch the model
+# think. Slow this so each ~50-100 char chunk of reasoning actually
+# shows as its own visible progression. Discord's 5/5s edit budget still
+# gives us 3+ edits per turn, plenty.
+_TOKEN_TICK_INTERVAL = 3.0
 
-# Total visible budget. The preview is the model's reasoning rendered
-# as "<short leading context sentence>.<full stream tail with clean
-# sentence end>." Words inside the budget are whole, mid-word never.
-_VISIBLE_BUDGET = 220
+# Total visible budget. Long enough to show real thought, short enough to
+# fit a Discord message and not overflow. The 2026-07-19 directive: 220
+# chars clipped multi-paragraph reasoning to one sentence and made the
+# bot look like it was skipping straight to the answer. Show the model's
+# actual thinking, not a tweet-length summary.
+_VISIBLE_BUDGET = 600
 
 # Hard-cut fallback. If the model's stream is one giant unbroken token
 # (no whitespace, no terminators) longer than this, we hard-cut.
-_HARD_FALLBACK_CHARS = 240
+_HARD_FALLBACK_CHARS = 640
 
 
 # Matches sentence-ending punctuation: . ! ? followed by whitespace / EOL.
@@ -136,32 +143,44 @@ def _last_full_sentence(buffer: str) -> str:
 
 
 def _format_thinking(buffer: str) -> str:
-    """Render a mid-stream reasoning buffer as a single coherent line.
+    """Render a mid-stream reasoning buffer as a single coherent block.
 
-    The user wanted the visible format to follow the last completed
-    sentence. We always show the LAST full sentence (everything up to
-    and including the most recent terminator), never partial fragments.
+    The 2026-07-19 user directive: visible reasoning should grow as the
+    model thinks, not snap to a final summary. We show the LAST 1-3
+    complete sentences that fit in the budget, so the user watches the
+    thought unfold. The first tick may show one sentence; the next tick
+    appends a second; the next tick a third — and the rolling window
+    advances.
 
-    If the buffer fits the budget and has only one sentence, return
-    the whole buffer. If it has multiple sentences, return just the
-    last one. The earlier sentences are noise — the user just needs
-    the most recent thought.
+    We never show partial sentences (mid-thought) because half-sentences
+    are unreadable when re-read at a later tick.
     """
     if not buffer:
         return ""
     text = " ".join(buffer.split())
-    # Always show the LAST complete sentence, never partials.
-    last = _last_full_sentence(text)
-    if last:
-        # Truncate at word boundary if it overflows the budget.
-        if len(last) > _VISIBLE_BUDGET:
-            return _trim_to_word_boundary(last, _VISIBLE_BUDGET)
-        return last
-    # No terminator yet (mid-thought). Show a clipped-with-ellipsis
-    # preview bounded by the budget so the user sees *something*.
-    if len(text) <= _VISIBLE_BUDGET:
-        return text
-    return _trim_to_word_boundary(text, _VISIBLE_BUDGET)
+    matches = list(_TRAILING_SENTENCE_RE.finditer(text))
+    if not matches:
+        return ""
+    # A 'sentence' spans from right after the previous terminator (or
+    # buffer start) up to and including the next terminator.
+    spans: list[tuple[int, int]] = []
+    for i, m in enumerate(matches):
+        start = matches[i - 1].end() if i > 0 else 0
+        spans.append((start, m.end()))
+    # Walk back from the most recent sentence, accumulating as long as
+    # the block fits in the budget.
+    idx = len(spans) - 1
+    block_start, block_end = spans[idx]
+    while idx > 0:
+        prev_start, prev_end = spans[idx - 1]
+        if block_end - prev_start > _VISIBLE_BUDGET:
+            break
+        block_start = prev_start
+        idx -= 1
+    sentence = text[block_start:block_end].rstrip()
+    if len(sentence) > _VISIBLE_BUDGET:
+        return _trim_to_word_boundary(sentence, _VISIBLE_BUDGET)
+    return sentence
 
 
 class ToolProgress:
@@ -270,17 +289,16 @@ class ToolProgress:
             return
 
         reasoning = (reasoning or "").strip()
-        if not reasoning:
-            return
         prev_tool = self._current_tool
         self._current_tool = tool_name
-        self._current_reason = reasoning
-        # update() carries a complete reasoning field, not a delta — so
-        # we replace the buffer wholesale. Without this a second
-        # update() with a longer string would not replace the first
-        # half-sentence, and the visible line would stay stuck on the
-        # earlier (partial) content.
-        self._reasoning_buffer = reasoning
+        # Only overwrite the streaming buffer when the caller passed real
+        # reasoning. The legacy _on_tool_call_name callback often fires
+        # with an empty string just to announce the tool name — clobbering
+        # the buffer in that case wipes the per-token reasoning the
+        # tick() path just spent the last several seconds accumulating.
+        if reasoning:
+            self._current_reason = reasoning
+            self._reasoning_buffer = reasoning
         if prev_tool and prev_tool != tool_name:
             self._last_tool_name_announced = False
 
@@ -407,29 +425,29 @@ class ToolProgress:
         Format:
           - Reasoning phase, no complete sentence yet: 'working on it…'
           - Reasoning phase with at least one full sentence:
-            'thinking: <last full sentence>'. Only complete sentences
-            are shown; partial fragments wait for a terminator.
-          - Tool active: '<tool>: <last full sentence>'. The tool name
+            'thinking: <last 1-3 sentences within budget>'. The block
+            grows as the model emits more sentences, so the user can
+            actually watch the reasoning stream by.
+          - Tool active: '<tool>: <last 1-3 sentences>'. The tool name
             comes first (so the user instantly sees which tool the
-            model committed to), followed by the latest complete
-            sentence of the model's reasoning or the tool's own
-            description. If there's no complete sentence yet, the
-            line is just '<tool>: generating…'.
+            model committed to), followed by the latest reasoning. If
+            no complete sentence exists yet, the line is just
+            '<tool>: generating…'.
 
-        2026-07-19 directive: only show whole sentences on the
-        progress line, never partials. _has_meaningful_reasoning()
-        gates the placeholder-vs-real-content switch on the presence
-        of a sentence terminator; _last_full_sentence() picks which
-        sentence to render.
+        2026-07-19 directive: show real thought progression, not a
+        one-sentence summary. _has_meaningful_reasoning() gates the
+        placeholder-vs-real-content switch on the presence of a
+        sentence terminator; _format_thinking() picks which sentences
+        to render.
         """
+        formatted = _format_thinking(self._reasoning_buffer)
         if self._current_tool:
-            last = _last_full_sentence(self._reasoning_buffer)
-            if last:
-                return f"{self._current_tool}: {last}"
+            if formatted:
+                return f"{self._current_tool}: {formatted}"
             return f"{self._current_tool}: generating…"
         if not self._has_meaningful_reasoning():
             return "working on it…"
-        return f"thinking: {_last_full_sentence(self._reasoning_buffer)}"
+        return f"thinking: {formatted}"
 
     def _schedule_deferred_flush(self) -> None:
         if self._stopped:
