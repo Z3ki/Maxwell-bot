@@ -79,6 +79,24 @@ _CUSTOM_TOOL_OPEN_RE = re.compile(r'\{\s*"name"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"
 # silently disabling extraction for the rest of the stream.
 _GIVE_UP_BYTES = 65536
 
+# When no opener regex match is found in the unreleased buffer, how many
+# bytes of recent text we hold back before emitting everything else as
+# visible. The opener `{"name": "<value>"` can be up to ~50 chars depending
+# on the tool name; 256 chars is comfortably larger and keeps a near-zero
+# memory footprint. This is what lets the buffer find a tool call whose
+# opener arrives split across many small SSE deltas — without it, the
+# leading chunk would be released as visible and the partial opener lost
+# forever.
+_HOLD_BACK = 256
+
+# Conservative upper bound on the length of one opener match
+# (e.g. `{"name": "<30-char tool name>"}`). If the unreleased tail is
+# no longer than this, no future chunk can still split an opener
+# across a boundary — release it all as visible. Keeping a separate
+# constant from _HOLD_BACK (which is the "ambiguous" window for chunks
+# still arriving) makes the intent obvious at the call site.
+_CUSTOM_TOOL_OPEN_RE_MAX_LEN = 64
+
 
 class _CustomToolCallBuffer:
     """Incrementally extracts bare-JSON tool calls from a streaming text delta.
@@ -207,86 +225,140 @@ class _CustomToolCallBuffer:
         return "".join(out)
 
     def feed(self, delta: str) -> str:
-        """Accumulate a new text delta. Strips any completed tool-call
-        JSONs and appends the rest to text_parts.
+        """Accumulate a new text delta. Extracts any complete bare-JSON
+        tool calls and returns the newly-revealed VISIBLE text for this
+        delta.
 
-        Returns the newly-revealed VISIBLE text for this delta (tool-call
-        JSON already stripped out). Callers building a live preview (e.g.
-        the progress-message on_token callback) must use this return value
-        instead of the raw delta — the raw delta can contain a partial or
-        complete bare-JSON tool-call object
-        (``{"name": "shell", "arguments": {...}}``) that hasn't been
-        stripped yet, and showing that raw JSON to the user in the
-        "thinking: …" progress line is exactly the leak this return value
-        exists to prevent. While a tool-call opener is still balancing
-        (mid-JSON), this returns "" for that portion — nothing is shown
-        until we know whether it's a real tool call or just stray text.
+        Design: ``_buf`` is the running buffer. ``_released_len`` is the
+        byte offset up to which text has been emitted as visible. On
+        each feed:
+          1. Append delta to _buf.
+          2. Search _buf for the first opener past _released_len.
+          3. If found, the text from _released_len to the opener is
+             plain visible — emit it now and advance _released_len to
+             the opener position. Then try to find a balanced end for
+             the opener.
+          4. If balanced end found, parse the candidate. Real tool
+             call → append to completed, advance _released_len past
+             the closer, and loop. Parse fail / wrong shape → advance
+             past opener's first char (false-positive recovery) and
+             loop.
+          5. If no balanced end (opener mid-JSON): hold; the prefix
+             already released covers everything safe. Any text after
+             the opener (still buffering) is hidden.
+          6. If no opener at all in the buffer: emit everything up to
+             ``len(_buf) - _HOLD_BACK`` as visible. The trailing
+             _HOLD_BACK window is held back so a chunk boundary can't
+             split a fresh opener (max opener length is ~50 chars;
+             _HOLD_BACK is comfortably larger).
+
+        Works regardless of chunk size: we always search the full _buf
+        from _released_len onward, so a tool call spanning 100 tiny
+        deltas is found the moment the closing brace arrives. Text
+        before the opener is released immediately, so the caller sees
+        "All done!" the moment it streams in (not at drain time).
         """
         if not delta:
             return ""
-        # If we had a tail left over from the previous feed (braces hadn't
-        # balanced yet), prepend it.
-        if hasattr(self, "_pending_tail"):
-            delta = self._pending_tail + delta
-            del self._pending_tail
+        if not hasattr(self, "_released_len"):
+            self._released_len = 0
         self._buf += delta
-        visible = self._strip_completed(self._buf)
-        # _strip_completed consumed up to len(self._buf) minus any
-        # remaining _pending_tail. Update self._buf to be just the tail
-        # (whatever's left after the last complete JSON), so the next
-        # feed() can prepend it.
-        if hasattr(self, "_pending_tail"):
-            self._buf = self._pending_tail
-            del self._pending_tail
-        else:
-            self._buf = ""
-        if visible:
-            self.text_parts.append(visible)
-        return visible
+        newly_visible_total = ""
+        while True:
+            m = _CUSTOM_TOOL_OPEN_RE.search(self._buf, self._released_len)
+            if not m:
+                # No opener in the unreleased region. The only thing
+                # that could be a "starter" for a future opener is a
+                # bare `{` that's not yet followed by enough text. Find
+                # the last `{` in the unreleased region and hold back
+                # from there — anything before that `{` cannot grow
+                # into an opener, so it's safe to release as visible.
+                # If there's no `{` at all, release the whole thing.
+                unreleased = self._buf[self._released_len:]
+                last_open = unreleased.rfind("{")
+                if last_open == -1:
+                    # No possible opener prefix. Release all.
+                    release_to = len(self._buf)
+                else:
+                    # Hold back from the last `{` onward; release
+                    # everything before it as visible.
+                    release_to = self._released_len + last_open
+                if release_to > self._released_len:
+                    nv = self._buf[self._released_len:release_to]
+                    self.text_parts.append(nv)
+                    self._released_len = release_to
+                    newly_visible_total += nv
+                break
+            # Opener found. Text BEFORE the opener is plain visible.
+            if m.start() > self._released_len:
+                prefix = self._buf[self._released_len:m.start()]
+                self.text_parts.append(prefix)
+                self._released_len = m.start()
+                newly_visible_total += prefix
+            # Fire partial-name callback (idempotent).
+            opener_name = m.group(1)
+            if (
+                self._on_partial_name is not None
+                and opener_name not in self._announced_names
+            ):
+                self._announced_names.add(opener_name)
+                with contextlib.suppress(Exception):
+                    self._on_partial_name(str(opener_name))
+            # Try to find a balanced end for this opener.
+            end = _find_balanced_json_end(self._buf, m.start())
+            if end is None:
+                # Opener mid-JSON. Hold; wait for more deltas.
+                break
+            # Validate by parsing.
+            candidate = self._buf[m.start():end]
+            try:
+                obj = json.loads(candidate)
+            except (json.JSONDecodeError, ValueError):
+                # Balanced but not valid JSON — false positive. Skip
+                # past the opener's first char and keep searching.
+                self._released_len = m.start() + 1
+                continue
+            if not isinstance(obj, dict) or not obj.get("name"):
+                # Not a tool-call shape. Advance past the opener.
+                self._released_len = m.start() + 1
+                continue
+            # Real tool call. Append to completed and advance past
+            # the closer; loop continues for any further text/calls.
+            tool_name = str(obj.get("name", ""))
+            args = obj.get("arguments", {})
+            if not isinstance(args, dict):
+                args = {}
+            self.completed.append(
+                {
+                    "id": f"call_custom_{len(self.completed) + 1}",
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": json.dumps(args, ensure_ascii=False),
+                    },
+                }
+            )
+            self._released_len = end
+        return newly_visible_total
 
     def drain(self) -> None:
-        """Final call after the stream ends. Flushes any remaining tail."""
-        if hasattr(self, "_pending_tail"):
-            tail = self._pending_tail
-            del self._pending_tail
-            # Try once more to extract; if it parses, stash it; otherwise
-            # keep it as visible text.
-            m = _CUSTOM_TOOL_OPEN_RE.search(tail)
-            if m:
-                end = _find_balanced_json_end(tail, m.start())
-                if end is not None:
-                    try:
-                        obj = json.loads(tail[m.start() : end])
-                    except (json.JSONDecodeError, ValueError):
-                        obj = None
-                    if isinstance(obj, dict) and obj.get("name"):
-                        tool_name = str(obj.get("name", ""))
-                        args = obj.get("arguments", {})
-                        if not isinstance(args, dict):
-                            args = {}
-                        self.completed.append(
-                            {
-                                "id": f"call_custom_{len(self.completed) + 1}",
-                                "type": "function",
-                                "function": {
-                                    "name": tool_name,
-                                    "arguments": json.dumps(args, ensure_ascii=False),
-                                },
-                            }
-                        )
-                        if (
-                            self._on_partial_name is not None
-                            and tool_name not in self._announced_names
-                        ):
-                            self._announced_names.add(tool_name)
-                            with contextlib.suppress(Exception):
-                                self._on_partial_name(tool_name)
-                        self.text_parts.append(tail[: m.start()] + tail[end:])
-                        return
-            self.text_parts.append(tail)
-        if self._buf:
-            self.text_parts.append(self._buf)
-            self._buf = ""
+        """Final call after the stream ends. Emit any remaining unreleased
+        text as visible. If there's a partial tool call still in flight
+        (opener received but no closing brace), it can't have been a real
+        tool call — the stream is over — so emit the held opener region as
+        visible text too.
+        """
+        if not hasattr(self, "_released_len"):
+            return
+        held = self._buf[self._released_len:]
+        if held:
+            self.text_parts.append(held)
+            self._released_len = len(self._buf)
+        # If _buf grew unreasonably large pointing at a never-closed
+        # opener, that opener was a false positive (e.g. it appeared
+        # mid-string); drop the held region so we don't carry junk.
+        # (We only get here after the loop above stopped finding a
+        # balanced end for the opener.)
 
 
 def _find_balanced_json_end(text: str, start: int) -> int | None:
