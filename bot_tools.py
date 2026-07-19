@@ -927,11 +927,13 @@ class SetActivityTool(Tool):
     def get_description(self):
         return (
             "Set your activity or custom status message (the visible text under your name). "
-            "Use this proactively to keep your status fresh — you should call it on most turns "
-            "when it would feel natural: after starting/finishing a task, when your mood or "
-            "vibe shifts, when you switch topics, or roughly every handful of replies. "
-            "Treat your custom status like a live ticker, not a static bio. If a user asks you "
-            "to change/update your status, activity, vibe, or what you are doing, definitely call it. "
+            "Use this proactively to keep your status fresh — call it on most turns when it "
+            "would feel natural: after starting/finishing a task, when your mood or vibe "
+            "shifts, when you switch topics, or roughly every handful of replies. "
+            "Treat your custom status like a live ticker, not a static bio. If a user asks "
+            "you to change/update your status, activity, vibe, or what you are doing, definitely "
+            "call it. The tool triggers a follow-up LLM turn, so pick a status that actually "
+            "matches the latest message — you may revise it on the follow-up turn. "
             "Params: type (playing/watching/listening/competing/custom), text (the status text), "
             "elapsed (optional, show time played, e.g. '2h 30m' or '45m'). "
             "Use type='custom' for a plain status message like 'chilling'. "

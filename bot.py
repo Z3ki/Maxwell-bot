@@ -1415,6 +1415,15 @@ FOLLOWUP_TOOL_NAMES = {
     "send_meme",
     "send_media",
     "leave_vc",
+    # Status: set_activity gets a follow-up turn so the model can react to
+    # its own status change (re-pick a better one based on the latest user
+    # message, or produce a final text reply that leans into the new vibe).
+    # Without this the tool just returns and the conversation ends, which
+    # is how Maxwell's status used to go stale for hours. We deliberately
+    # do NOT add change_presence here — that one is the online/idle/dnd
+    # dot the user just explicitly set, and a follow-up turn would race to
+    # undo it.
+    "set_activity",
 }
 
 TELEGRAM_COMPATIBLE_TOOL_NAMES = {
