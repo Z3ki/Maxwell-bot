@@ -2792,8 +2792,12 @@
         const c = S.data.control?.control || {};
         const on = !!d.enabled;
         const interval = d.interval_seconds || 300;
-        const goals = Array.isArray(S.data.autonomyGoals) ? S.data.autonomyGoals : (S.data.autonomyGoals?.goals || []);
-        const log = (S.data.autonomyLog?.entries || S.data.autonomyLog || []).slice().reverse();
+        const goals = Array.isArray(S.data.autonomyGoals)
+          ? S.data.autonomyGoals
+          : S.data.autonomyGoals?.goals || [];
+        const log = (S.data.autonomyLog?.entries || S.data.autonomyLog || [])
+          .slice()
+          .reverse();
 
         // Engine card
         const engine = el("div", { class: "card" }, [
