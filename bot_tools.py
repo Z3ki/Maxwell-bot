@@ -531,7 +531,8 @@ class ImageGeneratorTool(Tool):
                     if cdn_url:
                         result += f"\nImage URL: {cdn_url}"
                     result += "\nLook at the image you just posted. If it looks good, mention the URL or use it for the site. "
-                    result += "If it looks bad, call image_generator again with an improved prompt."
+                    result += "If it looks bad, call image_generator again with an improved prompt. "
+                    result += "If you were generating this for a site, call create_site NOW (in your next response) with the URL embedded in the body — do not call create_site before image_generator returns this URL."
                     return result
             except asyncio.TimeoutError:
                 logger.warning(
@@ -1755,9 +1756,15 @@ class CreateSiteTool(Tool):
             "Written as-is to file, no template wrapping), encoding (optional: text or base64; use base64 for exact full HTML). "
             "Inline <script> and <style> are allowed and will run. External CDN libraries (e.g. https:// cdnjs, jsdelivr, "
             "Google Fonts, unpkg) work too. This is the right tool for coding full websites, apps, games, calculators, "
-            "demos, portfolios, and anything interactive — write the complete working HTML/JS/CSS in body. "
-            "Only generate images with image_generator if the site NEEDS images (visual showcase, portfolio, etc). "
-            "Plain text/CSS sites do NOT need images. If you do generate images, use the returned Discord CDN URL in <img> tags."
+            "demos, portfolios, and anything interactive — write the complete working HTML/JS/CSS in body.\n\n"
+            "IMAGE ORDERING — READ CAREFULLY: If the site needs images (visual showcase, portfolio, hero graphic, etc), "
+            "you MUST call image_generator (or hd_image) FIRST in a separate turn/response and wait for the Discord CDN URL. "
+            "Do NOT call create_site in the same response as image_generator. The image is generated asynchronously, the URL "
+            "comes back in the tool result, and only then do you call create_site embedding that <img src=\"URL\"> in the body. "
+            "Calling create_site before the image exists means the site goes live with a broken/missing <img src>.\n\n"
+            "Plain text/CSS sites (no <img> tags) do NOT need images — just write the HTML and call create_site once.\n\n"
+            "If the user said 'make a site about X' and X is visual (art, design, photography, a product mockup, a game), "
+            "decide FIRST whether you need an image, and if yes, generate it BEFORE you write the site body."
         )
 
     async def execute(
