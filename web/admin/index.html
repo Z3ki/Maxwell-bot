@@ -1224,7 +1224,6 @@
         { id: "llm", label: "LLM", section: "knowledge", icon: "∞" },
         { id: "rem", label: "REM", section: "ops", icon: "⟲" },
         { id: "autonomy", label: "Autonomy", section: "ops", icon: "◇" },
-        { id: "intel", label: "Intel", section: "ops", icon: "☉" },
         { id: "cleanup", label: "Cleanup", section: "ops", icon: "✦" },
         { id: "controls", label: "Controls", section: "ops", icon: "⚙" },
         { id: "raw", label: "Raw JSON", section: "ops", icon: "{}" },
@@ -1520,7 +1519,6 @@
             ["autonomyLog", "/api/autonomy/log"],
             ["autonomyGoals", "/api/autonomy/goals"],
             ["cleanup", "/api/context_cleanup/status"],
-            ["intel", "/api/intel/status"],
             ["pm2", "/api/pm2"],
             ["traces", "/api/llm/traces?limit=200"],
           ];
@@ -1573,7 +1571,6 @@
           llm: "LLM",
           rem: "REM",
           autonomy: "Autonomy",
-          intel: "Intel",
           cleanup: "Context cleanup",
           controls: "Controls",
           memory: "Memory",
@@ -1601,7 +1598,6 @@
             llm: renderLLM,
             rem: renderREM,
             autonomy: renderAutonomy,
-            intel: renderIntel,
             cleanup: renderCleanup,
             controls: renderControls,
             memory: renderMemory,
@@ -1635,7 +1631,6 @@
         const lastError = [
           d.rem?.last_error,
           d.autonomy?.last_error,
-          d.intel?.last_error,
           d.cleanup?.last_error,
         ].filter(Boolean)[0];
         const mem = sys.memory || {};
@@ -1717,17 +1712,6 @@
                   ),
               },
               "⟲ Run REM",
-            ),
-            el(
-              "button",
-              {
-                class: "btn",
-                onClick: () =>
-                  api("/api/intel/run", { method: "POST" }).then(() =>
-                    toast("Intel run queued", "ok"),
-                  ),
-              },
-              "☉ Run Intel",
             ),
             el(
               "button",
@@ -1834,16 +1818,6 @@
             statusBadge(
               d.rem?.enabled ? "enabled" : "disabled",
               d.rem?.enabled ? "ok" : "",
-            ),
-          ]),
-          el("div", { class: "switch-line" }, [
-            el("div", { class: "text" }, [
-              el("b", {}, "Intel"),
-              el("small", {}, "News gatherer"),
-            ]),
-            statusBadge(
-              d.intel?.enabled ? "enabled" : "disabled",
-              d.intel?.enabled ? "ok" : "",
             ),
           ]),
           el("div", { class: "switch-line" }, [
@@ -2073,11 +2047,6 @@
               "button",
               { class: "btn", onClick: () => queueCmd("rem_run") },
               "Run REM",
-            ),
-            el(
-              "button",
-              { class: "btn", onClick: () => queueCmd("intel_run") },
-              "Run Intel",
             ),
           ]),
         ]);
@@ -2771,15 +2740,6 @@
           title: "Context cleanup",
           description:
             "Janitor agent that reviews shared context on a schedule, dedupes/merges/edits messy entries. Uses the same model as Autonomy and REM.",
-        });
-      }
-
-      function renderIntel() {
-        renderLoopPage({
-          key: "intel",
-          title: "Intel",
-          description:
-            "News gatherer. Polls AI/tech feeds hourly and curates facts into long-term memory so the main bot stays current.",
         });
       }
 
@@ -3553,6 +3513,41 @@
       function renderContext() {
         const page = $("#page");
         const ctx = S.data.context || [];
+        const c = S.data.control?.control || {};
+        const enabled = c.cross_context_enabled !== false;
+        page.appendChild(
+          el("div", { class: "card", style: { marginBottom: "14px" } }, [
+            el("h3", {}, "Context (cross-channel facts)"),
+            el(
+              "p",
+              { class: "subtle" },
+              "Inject relevant facts from other channels/users/guilds into the prompt. Turn off to keep the bot's context strictly local to the current channel.",
+            ),
+            el("div", { class: "switch-line" }, [
+              el("div", { class: "text" }, [
+                el("b", {}, "Cross-context enabled"),
+                el(
+                  "small",
+                  {},
+                  "When off, the bot only sees facts scoped to this exact channel/user.",
+                ),
+              ]),
+              switchToggle(enabled, (v) =>
+                api("/api/control", {
+                  method: "PUT",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ cross_context_enabled: v }),
+                }).then(() => {
+                  toast(
+                    "Cross-context " + (v ? "enabled" : "disabled"),
+                    "ok",
+                  );
+                  loadAll();
+                }),
+              ),
+            ]),
+          ]),
+        );
         page.appendChild(renderContextAdd());
         page.appendChild(
           renderFilterableList({

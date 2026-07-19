@@ -738,106 +738,8 @@ async def data_file(request):
         "long_term_memory.json",
         "blacklist.json",
         "auto_channels.json",
-        "intel_state.json",
-        "intel_log.json",
         "bot_control.json",
     }
-    if file not in ALLOWED_FILES:
-        return _json_response({"error": "forbidden"}, 403)
-    if file == "long_term_memory.json":
-        return _json_response(_memory_json())
-    if file == "bot_control.json":
-        return _json_response({"control": _load_control(), "tools": KNOWN_TOOLS})
-    path = DATA_DIR / file
-    if not path.exists():
-        return _json_response({"error": "not found"}, 404)
-    text = await asyncio.to_thread(path.read_text, encoding="utf-8")
-    return web.Response(
-        text=text,
-        content_type="application/json",
-        headers={"Access-Control-Allow-Origin": CORS_ORIGIN},
-    )
-
-
-# ---------- Memory ----------
-async def _handle_memory():
-    return _memory_text_path(), _memory_lines()
-
-
-async def memory_add(request):
-    try:
-        body = await request.json()
-    except Exception:
-        return _json_response({"error": "invalid json"}, 400)
-    content = body.get("content", "").strip()
-    if not content:
-        return _json_response({"error": "empty"}, 400)
-    content = _normalize_memory_line(content)
-    async with _file_lock:
-        path, mem = await _handle_memory()
-        mem.append(content)
-        mem = mem[-MAX_LTM_LINES:]
-        await atomic_text_write(path, "\n".join(mem) + ("\n" if mem else ""))
-        nxt = len(mem)
-    return _json_response({"ok": True, "id": nxt})
-
-
-async def memory_update(request):
-    try:
-        body = await request.json()
-    except Exception:
-        return _json_response({"error": "invalid json"}, 400)
-    mid = body.get("id", "")
-    content = _normalize_memory_line(body.get("content", ""))
-    if not content:
-        return _json_response({"error": "empty"}, 400)
-    try:
-        idx = int(mid) - 1
-    except (TypeError, ValueError):
-        return _json_response({"error": "not found"}, 404)
-    async with _file_lock:
-        path, mem = await _handle_memory()
-        if idx < 0 or idx >= len(mem):
-            return _json_response({"error": "not found"}, 404)
-        mem[idx] = content
-        await atomic_text_write(path, "\n".join(mem) + ("\n" if mem else ""))
-    return _json_response({"ok": True})
-
-
-async def memory_delete(request):
-    mid = request.query.get("id", "")
-    try:
-        idx = int(mid) - 1
-    except ValueError:
-        return _json_response({"error": "not found"}, 404)
-    async with _file_lock:
-        path, mem = await _handle_memory()
-        if idx < 0 or idx >= len(mem):
-            return _json_response({"error": "not found"}, 404)
-        del mem[idx]
-        await atomic_text_write(path, "\n".join(mem) + ("\n" if mem else ""))
-    return _json_response({"ok": True})
-
-
-# ---------- Shared context ----------
-async def context_get(request):
-    if not _has_admin_auth(request):
-        return _json_response({"error": "unauthorized"}, 401)
-    entries = _load_context_entries()
-    query = str(request.query.get("q", "")).strip().lower()
-    if query:
-        entries = [
-            e
-            for e in entries
-            if query
-            in (
-                e.get("content", "")
-                + " "
-                + e.get("scope", "")
-                + " "
-                + " ".join(e.get("tags", []))
-            ).lower()
-        ]
     return _json_response(entries[:500])
 
 
@@ -1545,10 +1447,6 @@ def _context_cleanup_state_path():
     return DATA_DIR / "context_cleanup_state.json"
 
 
-def _intel_state_path():
-    return DATA_DIR / "intel_state.json"
-
-
 def _context_cleanup_control_path():
     return DATA_DIR / "context_cleanup_control.json"
 
@@ -1610,79 +1508,6 @@ async def context_cleanup_status(request):
     if not _has_admin_auth(request):
         return _json_response({"error": "unauthorized"}, 401)
     return _json_response(_load_context_cleanup_status())
-
-
-def _load_intel_control():
-    try:
-        p = DATA_DIR / "intel_control.json"
-        if p.exists():
-            raw = json.loads(p.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                return raw
-    except Exception:
-        pass
-    return {}
-
-
-def _intel_control_path():
-    return DATA_DIR / "intel_control.json"
-
-
-def _intel_log_path():
-    return DATA_DIR / "intel_log.json"
-
-
-def _load_intel_status():
-    control = _load_intel_control()
-    state = _safe_object(_load(_intel_state_path()))
-    log = _safe_list(_load(_intel_log_path()))
-    entries = log if isinstance(log, list) else []
-    bot_control = _safe_object(_load(_control_path()))
-    enabled = _parse_bool(
-        control.get("enabled"),
-        _parse_bool(
-            bot_control.get("intel_enabled"), DEFAULT_CONTROL.get("intel_enabled", True)
-        ),
-    )
-    try:
-        interval = max(
-            300,
-            int(
-                control.get("interval_seconds")
-                or bot_control.get(
-                    "intel_interval_seconds",
-                    DEFAULT_CONTROL.get("intel_interval_seconds", 3600),
-                )
-                or 3600
-            ),
-        )
-    except (TypeError, ValueError):
-        interval = 3600
-    return {
-        "enabled": enabled,
-        "interval_seconds": interval,
-        "running": bool(state.get("running")),
-        "last_run": state.get("last_run", ""),
-        "last_duration": state.get("last_duration"),
-        "last_audit": str(state.get("last_audit") or "")[:4000],
-        "last_error": state.get("last_error"),
-        "facts_added_total": state.get("facts_added_total", 0),
-        "passes_total": state.get("passes_total", 0),
-        "log": entries[-15:],
-    }
-
-
-async def intel_status(request):
-    if not _has_admin_auth(request):
-        return _json_response({"error": "unauthorized"}, 401)
-    return _json_response(_load_intel_status())
-
-
-async def intel_run(request):
-    cmd_id, err = await _queue_command("intel_run")
-    if err:
-        return _json_response({"error": err}, 409)
-    return _json_response({"ok": True, "started": True, "id": cmd_id})
 
 
 async def context_cleanup_run(request):
@@ -1757,80 +1582,6 @@ async def context_cleanup_log_clear(request):
     if not _has_admin_auth(request):
         return _json_response({"error": "unauthorized"}, 401)
     await atomic_json_write(_context_cleanup_log_path(), {"entries": []})
-    return _json_response({"ok": True})
-
-
-async def _set_intel_enabled(enabled: bool, cmd_type: str):
-    async with _file_lock:
-        try:
-            control = _load_intel_control()
-            control["enabled"] = bool(enabled)
-            await atomic_json_write(_intel_control_path(), control)
-            cmd_id = str(_uuid.uuid4())[:8]
-            cmds = _load_commands_for_write()
-            cmds.append(
-                {
-                    "id": cmd_id,
-                    "type": cmd_type,
-                    "status": "pending",
-                    "result": "",
-                    "created_at": time.time(),
-                }
-            )
-            if len(cmds) > MAX_COMMANDS:
-                cmds = cmds[-MAX_COMMANDS:]
-            await atomic_json_write(_commands_path(), cmds)
-            return cmd_id, ""
-        except ValueError as exc:
-            return "", str(exc)
-
-
-async def intel_enable(request):
-    if not _has_admin_auth(request):
-        return _json_response({"error": "unauthorized"}, 401)
-    cmd_id, err = await _set_intel_enabled(True, "intel_enable")
-    if err:
-        return _json_response({"error": err}, 409)
-    return _json_response({"ok": True, "enabled": True, "id": cmd_id})
-
-
-async def intel_disable(request):
-    if not _has_admin_auth(request):
-        return _json_response({"error": "unauthorized"}, 401)
-    cmd_id, err = await _set_intel_enabled(False, "intel_disable")
-    if err:
-        return _json_response({"error": err}, 409)
-    return _json_response({"ok": True, "enabled": False, "id": cmd_id})
-
-
-async def intel_interval(request):
-    if not _has_admin_auth(request):
-        return _json_response({"error": "unauthorized"}, 401)
-    try:
-        body = await request.json()
-    except Exception:
-        return _json_response({"error": "invalid json"}, 400)
-    try:
-        new_interval = max(300, int(body.get("interval_seconds", 3600)))
-    except (TypeError, ValueError):
-        return _json_response({"error": "interval_seconds must be >= 300"}, 400)
-    cmd_id, err = await _queue_command(
-        "intel_interval", {"interval_seconds": new_interval}
-    )
-    if err:
-        return _json_response({"error": err}, 409)
-    # Persist immediately
-    async with _file_lock:
-        control = _load_intel_control()
-        control["interval_seconds"] = new_interval
-        await atomic_json_write(_intel_control_path(), control)
-    return _json_response({"ok": True, "interval_seconds": new_interval, "id": cmd_id})
-
-
-async def intel_log_clear(request):
-    if not _has_admin_auth(request):
-        return _json_response({"error": "unauthorized"}, 401)
-    await atomic_json_write(_intel_log_path(), {"entries": []})
     return _json_response({"ok": True})
 
 
@@ -2458,12 +2209,6 @@ app.router.add_delete("/api/autonomy/goals/{goal_id}", autonomy_goal_delete)
 app.router.add_delete("/api/autonomy/log", autonomy_log_clear)
 app.router.add_get("/api/context_cleanup/status", context_cleanup_status)
 app.router.add_post("/api/context_cleanup/run", context_cleanup_run)
-app.router.add_get("/api/intel/status", intel_status)
-app.router.add_post("/api/intel/run", intel_run)
-app.router.add_post("/api/intel/enable", intel_enable)
-app.router.add_post("/api/intel/disable", intel_disable)
-app.router.add_put("/api/intel/interval", intel_interval)
-app.router.add_delete("/api/intel/log", intel_log_clear)
 app.router.add_post("/api/context_cleanup/enable", context_cleanup_enable)
 app.router.add_post("/api/context_cleanup/disable", context_cleanup_disable)
 app.router.add_put("/api/context_cleanup/interval", context_cleanup_interval)

@@ -238,7 +238,6 @@ from control_defaults import (  # noqa: E402
     DEFAULT_CONTROL,
     parse_bool,
 )
-from intel import IntelEngine  # noqa: E402
 from memory import MemoryManager, RemEventLog  # noqa: E402
 from providers import (  # noqa: E402
     MIME_MAP,
@@ -1833,7 +1832,6 @@ class MaxwellBot(commands.Bot):
         self._setup_tools()
         self.autonomy_engine = AutonomyEngine(self)
         self.context_cleanup_engine = ContextCleanupEngine(self)
-        self.intel_engine = IntelEngine(self)
 
     def _update_recent_users(self, channel_id: str, user: Any):
         """Track users seen in this channel's conversation so render can resolve
@@ -2204,7 +2202,6 @@ class MaxwellBot(commands.Bot):
         ]
         await self.autonomy_engine.start()
         await self.context_cleanup_engine.start()
-        await self.intel_engine.start()
         if self.config.TELEGRAM_TOKEN:
             if self.config.TELEGRAM_WEBHOOK_URL:
                 self._tasks.append(asyncio.create_task(self._telegram_webhook_loop()))
@@ -2765,7 +2762,6 @@ class MaxwellBot(commands.Bot):
             "vc",
             "autonomy",
             "jailbreak",
-            "intel",
         }
         if cmd in admin_commands and not self._is_admin(message.author.id):
             await message.channel.send("not authorized")
@@ -2814,8 +2810,6 @@ class MaxwellBot(commands.Bot):
                 await self._handle_rem_command(message, args)
             elif cmd == "autonomy":
                 await self._handle_autonomy_command(message, args)
-            elif cmd == "intel":
-                await self._handle_intel_command(message, args)
             elif cmd == "drug":
                 now = asyncio.get_running_loop().time()
                 arg = (args or "").strip().lower()
@@ -4434,99 +4428,6 @@ class MaxwellBot(commands.Bot):
             "`blacklist`/`unblacklist channel|server <id>`"
         )
 
-    async def _handle_intel_command(self, message, args: str | None):
-        arg = (args or "").strip().lower()
-        try:
-            if not arg:
-                st = await self.intel_engine.status()
-                feeds = getattr(self.intel_engine, "_get_feed_urls", list)()
-                feed_count = len(feeds) if feeds else 0
-                await message.channel.send(
-                    "Intel (tech/AI news gatherer) status\n"
-                    f"enabled: {st['enabled']} running: {st['running']}\n"
-                    f"interval: {st['interval_seconds']}s  feeds: {feed_count}\n"
-                    f"last run: {st.get('last_run') or 'never'} facts added total: {st.get('facts_added_total', 0)}\n"
-                    f"audit: {(st.get('last_audit') or '-')[:300]}"
-                )
-                return
-            if arg in {"now", "tick", "run"}:
-                await message.channel.send("Running intel gather now...")
-                res = await self.intel_engine.trigger_now()
-                if res.get("skipped"):
-                    await message.channel.send("Intel pass skipped (already running).")
-                elif res.get("error"):
-                    await message.channel.send(f"Intel error: {res['error']}")
-                else:
-                    await message.channel.send(
-                        f"Intel done. {res.get('audit', '')} (added: {res.get('facts_added', 0)})"
-                    )
-                return
-        except Exception as e:
-            logger.error(f"Intel command failed: {e}", exc_info=True)
-            with contextlib.suppress(BaseException):
-                await message.channel.send(f"Intel command error: {e}")
-            return
-        try:
-            if arg == "on":
-                self.intel_engine.enabled = True
-                await self.intel_engine.save_control()
-                await message.channel.send("Intel gatherer enabled.")
-                return
-            if arg == "off":
-                self.intel_engine.enabled = False
-                await self.intel_engine.save_control()
-                await message.channel.send("Intel gatherer disabled.")
-                return
-            if arg.startswith("interval"):
-                parts = arg.split()
-                if len(parts) < 2:
-                    await message.channel.send(
-                        f"Current intel interval: {self.intel_engine.interval_seconds}s. Usage: `,intel interval <seconds>`"
-                    )
-                    return
-                try:
-                    new_int = max(300, _safe_int(parts[1], 1))
-                except ValueError:
-                    await message.channel.send("Invalid number.")
-                    return
-                self.intel_engine.interval_seconds = new_int
-                await self.intel_engine.save_control()
-                await message.channel.send(f"Intel interval set to {new_int}s.")
-                return
-            if arg == "log":
-                log = (await self.intel_engine.store.load_log())[-10:]
-                if not log:
-                    await message.channel.send("No intel runs logged yet.")
-                    return
-                lines = [
-                    f"{e.get('timestamp', '?')[:19]} added={e.get('facts_added', 0)} {str(e.get('audit', ''))[:120]}"
-                    for e in log
-                ]
-                for chunk in self._split_response("\n".join(lines), limit=1900):
-                    await message.channel.send(chunk)
-                return
-            if arg in {"feeds", "sources", "outlets"}:
-                feeds = (
-                    self.intel_engine._get_feed_urls()
-                    if hasattr(self.intel_engine, "_get_feed_urls")
-                    else []
-                )
-                if not feeds:
-                    await message.channel.send("No feeds configured.")
-                    return
-                lines = [f"- {f}" for f in feeds[:15]]
-                await message.channel.send(
-                    "Current Intel news feeds/outlets:\n" + "\n".join(lines)
-                )
-                return
-            await message.channel.send(
-                "Usage: `,intel`, `,intel now`, `,intel on`, `,intel off`, `,intel interval <sec>`, `,intel log`, `,intel feeds`"
-            )
-        except Exception as e:
-            logger.error(f"Intel command failed: {e}", exc_info=True)
-            with contextlib.suppress(BaseException):
-                await message.channel.send(f"Intel command error: {e}")
-
     def _visible_event_content(self, message, content: str | None = None) -> str:
         text = render_discord_context_text(
             message,
@@ -5181,9 +5082,6 @@ class MaxwellBot(commands.Bot):
                         elif typ == "context_cleanup_run":
                             result = await self.context_cleanup_engine.run_once()
                             cmd["result"] = f"context cleanup: {result}"
-                        elif typ == "intel_run":
-                            result = await self.intel_engine.trigger_now()
-                            cmd["result"] = f"intel gather: {result}"
                         elif typ == "context_cleanup_enable":
                             self.context_cleanup_engine.enabled = True
                             await self.context_cleanup_engine.save_control()
@@ -5202,21 +5100,6 @@ class MaxwellBot(commands.Bot):
                                 f"context cleanup interval set to "
                                 f"{self.context_cleanup_engine.interval_seconds}s"
                             )
-                        elif typ == "intel_enable":
-                            self.intel_engine.enabled = True
-                            await self.intel_engine.save_control()
-                            cmd["result"] = "intel enabled"
-                        elif typ == "intel_disable":
-                            self.intel_engine.enabled = False
-                            await self.intel_engine.save_control()
-                            cmd["result"] = "intel disabled"
-                        elif typ == "intel_interval":
-                            new_interval = max(
-                                300, int(cmd.get("interval_seconds", 3600) or 3600)
-                            )
-                            self.intel_engine.interval_seconds = new_interval
-                            await self.intel_engine.save_control()
-                            cmd["result"] = f"intel interval set to {new_interval}s"
                         else:
                             cmd["result"] = "unknown command"
                     except Exception as e:
@@ -9185,12 +9068,6 @@ async def main():
                 await cc.stop()
         except Exception as e:
             logger.error(f"Failed to stop context cleanup engine: {e}")
-        try:
-            ie = getattr(bot, "intel_engine", None)
-            if ie is not None and hasattr(ie, "stop"):
-                await ie.stop()
-        except Exception as e:
-            logger.error(f"Failed to stop intel engine: {e}")
         for task in getattr(bot, "_tasks", []):
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
