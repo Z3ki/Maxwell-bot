@@ -6549,6 +6549,16 @@ class MaxwellBot(commands.Bot):
             with contextlib.suppress(Exception):
                 await gen_progress.start()
 
+        # Every progress object created in this turn — the pre-gen progress
+        # plus any followup-gen progress for later iterations. The safety
+        # net in finally() walks this list and calls stop() on anything
+        # still alive, so a stray "thinking: …" or "tool: …" message can
+        # never outlive the bot's reply.
+        active_progresses: list[Any] = []
+        if gen_progress is not None:
+            active_progresses.append(gen_progress)
+        gen_progress_owned = gen_progress
+
         # Callback fired by the SSE stream reader the moment a tool_call name
         # arrives mid-generation. Updates the progress message from
         # "working on it…" to "tool_name: generating…" so the user sees WHAT
@@ -6810,6 +6820,7 @@ class MaxwellBot(commands.Bot):
                         followup_progress = _make_tool_progress(message)
                         with contextlib.suppress(Exception):
                             await followup_progress.start()
+                        active_progresses.append(followup_progress)
 
                     async def _on_followup_tool_call_name(
                         tool_name: str, reasoning: str = "", _p=followup_progress
@@ -7011,13 +7022,18 @@ class MaxwellBot(commands.Bot):
                 except discord.Forbidden as _exc:
                     pass
         finally:
-            # Safety net: if gen_progress was never handed off to tool dispatch
-            # (e.g. LLM error, empty response, or no tool calls), make sure it's
-            # stopped so we don't leave an orphan "working on it…" message.
-            if gen_progress is not None:
+            # Safety net: walk every progress object this turn ever created
+            # and stop() anything still alive, so we never leave an orphan
+            # "working on it…", "thinking: …", or "<tool>: …" message
+            # after the bot's reply has gone out. Covers LLM errors,
+            # empty responses, no-tool-call branches, followup leaks, etc.
+            for _prog in active_progresses:
+                if _prog is None:
+                    continue
                 with contextlib.suppress(Exception):
-                    await gen_progress.stop()
-                gen_progress = None
+                    await _prog.stop()
+            active_progresses.clear()
+            gen_progress = None
             if self._active_requests.get(channel_id) is current_task:
                 self._active_requests.pop(channel_id, None)
                 self._active_request_user.pop(channel_id, None)
