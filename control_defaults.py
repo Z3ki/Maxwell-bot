@@ -40,6 +40,13 @@ DEFAULT_CONTROL = {
     "reply_groups": False,
     "reply_mentions": True,
     "reply_to_bots": False,
+    # When False, reactions on the bot's own messages are swallowed
+    # silently (logged + deduped) — no fake_message, no LLM turn, and
+    # crucially no 'XYZ reacted to your message with …' status posted in
+    # the channel. Reactions are not text and shouldn't kick off a
+    # generation. Default off so channel reactions don't spam noise,
+    # opt-in via dashboard control if you want emoji-aware replies.
+    "reaction_replies": False,
     "per_user_cooldown_seconds": 1.5,
     "process_images": True,
     "process_audio": False,

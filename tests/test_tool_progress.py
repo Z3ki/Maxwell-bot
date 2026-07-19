@@ -92,8 +92,10 @@ def test_update_replaces_in_place_one_sentence():
     # New sentence — replaces
     prog._last_edit = 0
     asyncio.run(prog.update("web_search", "searching the docs"))
-    # Check last content of the edited message
-    assert msg_obj.content == "web_search: searching the docs"
+    # Check last content of the edited message. Format policy (2026-07-19):
+    # the tool name is NOT prefixed onto the visible line — just the
+    # model's own reasoning sentence, no "web_search:" decoration.
+    assert msg_obj.content == "searching the docs"
     asyncio.run(prog.stop())
 
 
@@ -105,7 +107,8 @@ def test_update_uses_models_own_words():
     msg_obj = msg.channel.sent[0]
     prog._last_edit = 0
     asyncio.run(prog.update("shell", "verifying apt sources are sane"))
-    assert msg_obj.content == "shell: verifying apt sources are sane"
+    # New format: tool name is NOT prefixed onto the line.
+    assert msg_obj.content == "verifying apt sources are sane"
     # No emoji, no backticks
     assert "⏳" not in msg_obj.content
     assert "`" not in msg_obj.content
@@ -113,14 +116,18 @@ def test_update_uses_models_own_words():
 
 
 def test_update_without_reason_uses_placeholder():
-    """If the model didn't write a thought, show a non-empty fallback."""
+    """If the model didn't write a thought, the placeholder stays
+    'working on it…' until reasoning arrives. We deliberately don't
+    set the tool name on the visible line either (2026-07-19)."""
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
     msg_obj = msg.channel.sent[0]
     prog._last_edit = 0
     asyncio.run(prog.update("fetch_url", ""))
-    assert msg_obj.content == "fetch_url: working…"
+    # Empty reasoning -> no edit; the original "working on it…" placeholder
+    # stays on the line. update() is a no-op until reasoning has substance.
+    assert msg_obj.content == "working on it…"
     asyncio.run(prog.stop())
 
 
@@ -130,9 +137,11 @@ def test_rate_limit_coalesces_rapid_updates():
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
     msg_obj = msg.channel.sent[0]
-    # First update — goes through
+    # First update — go through (force last_edit to 0 so the rate limit
+    # treats the post-start window as already-elapsed).
+    prog._last_edit = 0
     asyncio.run(prog.update("shell", "doing thing one"))
-    assert msg_obj.content == "shell: doing thing one"
+    assert msg_obj.content == "doing thing one"
     # Second update immediately — should be cached but NOT edited
     edits_before = len(msg.channel.edited)
     asyncio.run(prog.update("shell", "doing thing two"))
@@ -222,8 +231,9 @@ def test_long_reasoning_truncated_to_one_sentence():
     content = msg_obj.content
     # One line
     assert "\n" not in content
-    # Truncated with ellipsis (or short enough to fit)
-    assert content.startswith("shell: ")
+    # New format: no "shell:" prefix. The visible line is the model's
+    # own words, possibly truncated to the visible budget.
+    assert content.startswith("checking disk usage")
     assert "x" * 200 not in content  # the long tail was dropped
     asyncio.run(prog.stop())
 
@@ -318,10 +328,12 @@ def test_tick_accumulates_reasoning_text():
     asyncio.run(prog.stop())
 
 
-def test_tick_tool_name_switches_to_tool_prefix():
-    """When tick() is called with tool_name, the message format switches
-    from 'thinking: …' to '<tool>: …' so the user sees which tool the
-    model committed to."""
+def test_tick_tool_name_drops_thinking_prefix():
+    """When tick() is called with tool_name, the visible line drops the
+    'thinking:' prefix and just shows the reasoning. The 2026-07-19 UX
+    report said '<tool>: <reasoning>' reads as the bot shouting its
+    own name — we don't include the tool name on the visible line at
+    all, just the model's reasoning."""
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
@@ -331,9 +343,12 @@ def test_tick_tool_name_switches_to_tool_prefix():
     asyncio.run(prog.tick(reasoning_delta="Let me check that user."))
     assert msg_obj.content.startswith("thinking:")
     # Now the model commits to a tool — the very first tool_name tick
-    # must go through even if we're inside the rate-limit window.
+    # must go through even if we're inside the rate-limit window, and
+    # it drops the 'thinking:' prefix in favour of bare reasoning.
+    prog._last_edit = 0
     asyncio.run(prog.tick(reasoning_delta="", tool_name="lookup_user"))
-    assert msg_obj.content.startswith("lookup_user:")
+    assert "lookup_user:" not in msg_obj.content
+    assert "thinking:" not in msg_obj.content
     asyncio.run(prog.stop())
 
 
@@ -345,22 +360,23 @@ def test_tick_rate_limits_to_avoid_429():
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
     msg_obj = msg.channel.sent[0]
-    # First tick — goes through.
+    # First tick — goes through (first-tick exemption + buffer has
+    # enough substance to clear the meaningful-reasoning gate).
     prog._last_edit = 0
-    asyncio.run(prog.tick(reasoning_delta="one"))
+    asyncio.run(prog.tick(reasoning_delta="Reasoning that is long enough to render."))
     edits_after_first = len(msg.channel.edited)
     # Two rapid ticks inside the window — must coalesce.
-    asyncio.run(prog.tick(reasoning_delta=" two"))
-    asyncio.run(prog.tick(reasoning_delta=" three"))
+    asyncio.run(prog.tick(reasoning_delta=" More after."))
+    asyncio.run(prog.tick(reasoning_delta=" And more."))
     # Still only the first edit landed (rate-limited), but the buffer
     # accumulated so a future tick picks it up.
     assert len(msg.channel.edited) == edits_after_first
-    assert "three" in prog._reasoning_buffer
+    assert "And more." in prog._reasoning_buffer
     # Next tick past the window — flushes the accumulated buffer.
     prog._last_edit = 0
-    asyncio.run(prog.tick(reasoning_delta=" four"))
+    asyncio.run(prog.tick(reasoning_delta=" Even more reasoning here."))
     assert len(msg.channel.edited) > edits_after_first
-    assert "four" in msg_obj.content
+    assert "Even more" in msg_obj.content
     asyncio.run(prog.stop())
 
 
@@ -386,8 +402,9 @@ def test_stop_drains_final_tick_before_delete():
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
     msg_obj = msg.channel.sent[0]
-    # Stream a tick within the rate-limit window — content is cached
-    # in the buffer but not edited.
+    # Pretend an earlier tick already used the first-tick exemption so
+    # subsequent ticks are rate-limited normally.
+    prog._first_tick_done = True
     prog._edits_made = 1
     prog._last_edit = time_monotonic()  # pretend we just edited
     asyncio.run(prog.tick(reasoning_delta="Final thought before tool runs."))

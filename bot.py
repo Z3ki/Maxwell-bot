@@ -2492,8 +2492,12 @@ class MaxwellBot(commands.Bot):
     async def on_reaction_add(self, reaction, user):
         """Treat reactions on Maxwell's messages like tiny replies.
 
-        This used to be a hard return because emoji chatter got expensive. User
-        asked for it back, so here we are, touching the cursed stove again.
+        Disabled by default (control.reaction_replies = False). The 2026-07-19
+        UX report: every emoji kicked off an LLM turn, so the bot kept
+        posting 'XYZ reacted to your message with ❤️' style status messages
+        into the channel, drowning the actual conversation. Reactions are
+        not text. Only when the operator opts in (dashboard) do we
+        synthesise a fake message and let the LLM decide.
         """
         try:
             if not self.user or getattr(user, "id", None) == self.user.id:
@@ -2515,6 +2519,32 @@ class MaxwellBot(commands.Bot):
                 return
             if getattr(message.author, "id", None) != self.user.id:
                 return
+            # ALWAYS track seen-reactions to bound memory growth; the
+            # dedup is cheap and the user can re-react with a different
+            # emoji and we'd still respond if the flag is on.
+            emoji = str(getattr(reaction, "emoji", ""))[:120]
+            dedupe_key = f"{getattr(message, 'id', '')}:{emoji}"
+            if dedupe_key in self._reaction_seen:
+                return
+            self._reaction_seen.add(dedupe_key)
+            if not hasattr(self, "_reaction_seen_order"):
+                self._reaction_seen_order = []
+            self._reaction_seen_order.append(dedupe_key)
+            while len(self._reaction_seen_order) > 1000:
+                old_key = self._reaction_seen_order.pop(0)
+                self._reaction_seen.discard(old_key)
+
+            # Hard gate: reactions only kick off a turn if explicitly enabled.
+            # When off, we just log and return. No 'XYZ reacted with …' status
+            # message, no fake_message synthesis, no LLM call.
+            if not self._control.get("reaction_replies", False):
+                logger.debug(
+                    "Reaction on bot message from user=%s emoji=%s ignored (reaction_replies off)",
+                    uid,
+                    emoji,
+                )
+                return
+
             channel = getattr(message, "channel", None)
             channel_id = str(getattr(channel, "id", ""))
             if not channel_id:
@@ -2534,10 +2564,6 @@ class MaxwellBot(commands.Bot):
                 return
             if not self._control.get("reply_mentions", True):
                 return
-            emoji = str(getattr(reaction, "emoji", ""))[:120]
-            dedupe_key = f"{getattr(message, 'id', '')}:{emoji}"
-            if dedupe_key in self._reaction_seen:
-                return
             now = asyncio.get_running_loop().time()
             if now < self._stop_until.get(channel_id, 0):
                 return
@@ -2546,14 +2572,6 @@ class MaxwellBot(commands.Bot):
             if cooldown > 0 and now - last < cooldown:
                 return
             self._cooldowns[uid] = now
-
-            self._reaction_seen.add(dedupe_key)
-            if not hasattr(self, "_reaction_seen_order"):
-                self._reaction_seen_order = []
-            self._reaction_seen_order.append(dedupe_key)
-            while len(self._reaction_seen_order) > 1000:
-                old_key = self._reaction_seen_order.pop(0)
-                self._reaction_seen.discard(old_key)
 
             content = (
                 f"{getattr(user, 'display_name', getattr(user, 'name', user.id))} "

@@ -987,7 +987,12 @@ class SetActivityTool(Tool):
                 await self.bot.change_presence(
                     activities=activities, edit_settings=bool(self.bot._custom_status)
                 )
-            return "Cleared"
+            # Confirmation goes to the issuer in DM, not the channel.
+            # The 2026-07-19 UX report: a public confirmation in whatever
+            # channel the user happened to be in is noise; the user can
+            # already see the cleared status on the bot's profile.
+            await self._dm_issuer(message, "Status cleared.")
+            return ""
 
         if activity_type == "custom":
             self.bot._custom_status = discord.CustomActivity(name=text, state=text)
@@ -1011,10 +1016,37 @@ class SetActivityTool(Tool):
         await self.bot.change_presence(
             activities=activities, edit_settings=bool(self.bot._custom_status)
         )
-        if activity_type == "custom":
-            return f"Custom status set: {text}"
+        # Status changes should be visible only to the user who issued
+        # them, not echoed in whatever channel the user happened to be
+        # in. Empty return tells the LLM not to send_message for this
+        # — the confirmation is already in the user's DMs.
         elapsed_str = f" ({elapsed} elapsed)" if elapsed else ""
-        return f"Activity set: {activity_type} {text}{elapsed_str}"
+        await self._dm_issuer(
+            message, f"Status set: {activity_type} {text}{elapsed_str}"
+        )
+        return ""
+
+    async def _dm_issuer(self, message: Message, body: str) -> None:
+        """Best-effort: DM the original message author with a short status
+        update. We never raise — if DMs are closed or the user is a bot
+        we just skip silently. This is the only user-visible side effect
+        of a status change; the public channel is left untouched.
+        """
+        if not self.bot or not message or not message.author:
+            return
+        try:
+            target = message.author
+            if getattr(target, "bot", False):
+                return
+            dm = getattr(target, "dm_channel", None)
+            if dm is None:
+                dm = await target.create_dm()
+            if dm is None:
+                return
+            text = body if len(body) <= 1900 else body[:1900].rstrip() + "…"
+            await dm.send(text)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("set_activity DM to issuer failed: %s", e)
 
 
 class CreatePollTool(Tool):
