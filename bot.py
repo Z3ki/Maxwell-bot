@@ -7611,7 +7611,7 @@ class MaxwellBot(commands.Bot):
             "## Common tool-specific notes\n"
             "- `create_site`: the full HTML document goes in the `body` argument, never in chat. When the user says 'make a site' / 'build a page' / 'make me a website' / 'create a landing page' / 'code a webpage' / 'make a portfolio' or any equivalent, call create_site with the complete HTML in `body`. NEVER paste HTML/CSS/JS into your visible reply — that spams raw markup in the channel and the user gets no working site. If your visible text starts with `<!DOCTYPE`, `:root{`, or `<html`, you failed — call create_site instead.\n"
             "- `send_file` with large code/HTML: set `encoding=\"base64\"` and base64-encode the content.\n"
-            "- Status: `set_activity` for your visible status text, `change_presence` for the online/idle/dnd dot."
+            "- `set_activity` and `change_presence`: only call when the user asks or there's a real state change. Don't spam status updates on every turn.\n"
         )
 
     @staticmethod

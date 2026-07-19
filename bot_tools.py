@@ -928,21 +928,18 @@ class SetActivityTool(Tool):
 
     def get_description(self):
         return (
-            "Set your activity or custom status message (the visible text under your name). "
-            "Use this proactively to keep your status fresh — call it on most turns when it "
-            "would feel natural: after starting/finishing a task, when your mood or vibe "
-            "shifts, when you switch topics, or roughly every handful of replies. "
-            "Treat your custom status like a live ticker, not a static bio. If a user asks "
-            "you to change/update your status, activity, vibe, or what you are doing, definitely "
-            "call it. The tool triggers a follow-up LLM turn, so pick a status that actually "
-            "matches the latest message — you may revise it on the follow-up turn. "
+            "Set your activity or custom status message (the visible text under your name).\n"
+            "CALL SPARINGLY — this is a low-value, high-noise tool. Default to NOT calling it. "
+            "Only call when: (a) the user explicitly asks you to change your status, activity, "
+            "vibe, or what you're doing; (b) you just finished a significant task (build, ship, "
+            "deploy, fix) and the status would genuinely reflect the new state; (c) you joined "
+            "a voice call or started a long-running operation worth surfacing. "
+            "Do NOT call on every turn, every reply, or every topic shift. Do NOT call to "
+            "'match the vibe' of a casual message — your custom status is not a live ticker. "
+            "If you've set a similar status in the last few turns, skip the call. "
             "Params: type (playing/watching/listening/competing/custom), text (the status text), "
-            "elapsed (optional, show time played, e.g. '2h 30m' or '45m'). "
-            "Use type='custom' for a plain status message like 'chilling'. "
-            "Keep the text short, lowercase, in-character, and varied — don't repeat the same "
-            "status back-to-back. "
-            "Setting a game activity keeps your custom status intact. "
-            "Call with text='' to clear."
+            "elapsed (optional, e.g. '2h 30m'). Use type='custom' for a plain status. "
+            "Keep text short, lowercase, in-character. Call with text='' to clear."
         )
 
     def _parse_elapsed(self, elapsed: str) -> int:
