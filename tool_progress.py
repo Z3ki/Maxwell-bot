@@ -64,6 +64,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import time
 from typing import Any
 
@@ -83,6 +84,110 @@ _GRACE_BEFORE_FIRST_POST = 0.15
 # Truncate the model's reasoning to this many chars in the progress UI.
 # Long reasoning is fine for the trace; channel messages are glanceable.
 _REASONING_PREVIEW_CHARS = 140
+
+# Soft target. The hard cap is _REASONING_PREVIEW_CHARS — we always cut at
+# the last sentence terminator before that, but if none exists (the model
+# is mid-sentence mid-stream), we cut at the last word boundary inside
+# [:_SOFT_PREVIEW_CHARS] instead so the user never sees a half-word.
+_SOFT_PREVIEW_CHARS = 110
+
+# Sentence terminators we treat as a complete thought. The model's
+# `reasoning` field frequently has no period at all; we still want to
+# respect inline terminators like "!" or "?" so a one-line tool call
+# rationale doesn't get cut at a random word boundary mid-clause.
+_SENTENCE_TERMINATORS = ".!?"
+
+# Matches sentence-ending punctuation: . ! ? followed by space/EOL or end of
+# string. Used to snap the preview to a complete sentence when one is
+# available inside the length cap. Models love to emit `thought` text without
+# any terminator at all mid-stream, in which case the word-boundary fallback
+# below takes over.
+_TRAILING_SENTENCE_RE = re.compile(r"[" + re.escape(".!?") + r"](?:\s|$)")
+
+# Word boundary for the soft fallback. We cut just before the word boundary
+# inside the soft window, then append an ellipsis to mark the cut. Without
+# this the user sees half-words like "the user wants me to lo" mid-generation
+# — the original `len(reasoning) > cap: reasoning[:cap-1].rstrip()+"…"`
+# behavior that produced this bug.
+_WORD_BOUNDARY_RE = re.compile(r"\s\S+")
+
+
+def _truncate_preview(
+    text: str, soft: int = _SOFT_PREVIEW_CHARS, hard: int = _REASONING_PREVIEW_CHARS
+) -> str:
+    """Pick a preview of ``text`` that's exactly one coherent sentence when
+    possible, and never cuts mid-word.
+
+    Rules, in order (each rule wins if it produced something non-empty):
+      1. If the text has a sentence terminator before ``hard`` chars,
+         return everything up to and including that terminator (first
+         complete thought — no ellipsis; it's actually complete).
+      2. Otherwise if the text fits the ``soft`` window as a whole word,
+         return it as-is.
+      3. Otherwise cut at the last whitespace inside ``soft`` chars and
+         append an ellipsis so the user can see the string was truncated.
+      4. Fallback: hard-cut at ``hard`` chars and append an ellipsis (rare —
+         only fires when the model emits one giant unbroken token).
+
+    Why this exists: the previous version did `reasoning[:139].rstrip()+"…"`
+    everywhere, which produced half-words (no real boundary search) and
+    silently ate one or more visible chars via ``rstrip()``. The user saw
+    truncated sentences that didn't even line up with the visible text.
+    """
+    if not text:
+        return ""
+    # Already fits cleanly in the soft window — no truncation needed.
+    if len(text) <= soft:
+        return text
+    # Prefer the first complete sentence if it fits inside the hard cap.
+    for m in _TRAILING_SENTENCE_RE.finditer(text[:hard]):
+        # The match includes the punctuation + trailing whitespace; trim
+        # the trailing whitespace so we don't double-space when this is
+        # embedded in a longer line later.
+        end = m.end()
+        if end <= hard:
+            return text[:end].rstrip()
+    # No sentence boundary inside the hard cap. Cut at the last word
+    # boundary inside the soft window so the visible preview ends on a
+    # real word.
+    head = text[:soft]
+    last_ws = -1
+    for m in _WORD_BOUNDARY_RE.finditer(head):
+        last_ws = m.start()  # m.start() is the whitespace position
+    if last_ws > 0:
+        return text[:last_ws].rstrip() + "…"
+    # Hard fallback: nothing even has whitespace in the soft window.
+    if len(text) <= hard:
+        return text
+    return text[: max(1, hard - 1)].rstrip() + "…"
+
+
+# Minimum seconds between two edits of the same progress message. Discord
+# allows 5 edits / 5s; with 2s between edits we can do ~2-3 during a fast
+# tool call (which is plenty) and never hit the rate limit on slow ones.
+_EDIT_INTERVAL_SECONDS = 2.0
+
+# If a tool's own streaming output started, give it this many seconds of
+# grace before we post the progress message at all. Lets the tool's first
+# chunk (e.g. shell's "$ command" header) land first so we don't pile two
+# messages on top of each other.
+_GRACE_BEFORE_FIRST_POST = 0.15
+
+# Truncate the model's reasoning to this many chars in the progress UI.
+# Long reasoning is fine for the trace; channel messages are glanceable.
+_REASONING_PREVIEW_CHARS = 140
+
+# Soft target. The hard cap is _REASONING_PREVIEW_CHARS — we always cut at
+# the last sentence terminator before that, but if none exists (the model
+# is mid-sentence mid-stream), we cut at the last word boundary inside
+# [:_SOFT_PREVIEW_CHARS] instead so the user never sees a half-word.
+_SOFT_PREVIEW_CHARS = 110
+
+# Sentence terminators we treat as a complete thought. The model's
+# `reasoning` field frequently has no period at all; we still want to
+# respect inline terminators like "!" or "?" so a one-line tool call
+# rationale doesn't get cut at a random word boundary mid-clause.
+_SENTENCE_TERMINATORS = ".!?"
 
 # Per-token ticks fire on EVERY streamed delta (reasoning + content). Most
 # providers chunk into ~50-200 char deltas, so on a long create_site the SSE
@@ -229,8 +334,10 @@ class ToolProgress:
             return
 
         reasoning = (reasoning or "").strip().replace("\n", " ")
-        if len(reasoning) > _REASONING_PREVIEW_CHARS:
-            reasoning = reasoning[: _REASONING_PREVIEW_CHARS - 1].rstrip() + "…"
+        # Sentence-aware truncation. The previous `[:cap-1].rstrip()+"…"`
+        # cut mid-word and silently dropped whitespace, producing visible
+        # half-sentences. See _truncate_preview for the full rule list.
+        reasoning = _truncate_preview(reasoning)
         # Cache the tool/reasoning NOW, before the posted-check. On fast
         # generations the tool-name callback can fire while start() is still
         # in its grace sleep (no posted message yet); caching here means
@@ -320,9 +427,7 @@ class ToolProgress:
         # Capture the switchover state BEFORE we mutate the flag, so the
         # rate-limit bypass below can see it as a real "first tool name
         # arrived" signal instead of always-True-after-the-fact.
-        tool_name_switch = bool(
-            tool_name and not self._last_tool_name_announced
-        )
+        tool_name_switch = bool(tool_name and not self._last_tool_name_announced)
         if tool_name_switch:
             self._last_tool_name_announced = True
 
@@ -355,22 +460,19 @@ class ToolProgress:
         if self._current_tool:
             preview = self._reasoning_buffer
             if preview:
-                preview = preview.replace("\n", " ").strip()
-                if len(preview) > _REASONING_PREVIEW_CHARS:
-                    preview = (
-                        preview[: _REASONING_PREVIEW_CHARS - 1].rstrip() + "…"
-                    )
+                preview = _truncate_preview(preview.replace("\n", " ").strip())
                 content = f"{self._current_tool}: {preview}"
             else:
+                # Reasoning hadn't buffered yet when the tool name landed
+                # (the tool-name callback arrived mid-token). Show the tool
+                # alone — never fall back to "thinking: …" once we know
+                # the model is acting on a tool, or the user perceives the
+                # status as stuck on 'thinking' during the tool's execution.
                 content = f"{self._current_tool}: working…"
         else:
             preview = self._reasoning_buffer
             if preview:
-                preview = preview.replace("\n", " ").strip()
-                if len(preview) > _REASONING_PREVIEW_CHARS:
-                    preview = (
-                        preview[: _REASONING_PREVIEW_CHARS - 1].rstrip() + "…"
-                    )
+                preview = _truncate_preview(preview.replace("\n", " ").strip())
                 content = f"thinking: {preview}"
             else:
                 content = "working on it…"
@@ -504,24 +606,14 @@ class ToolProgress:
             if tail or self._current_tool:
                 if self._current_tool:
                     if tail:
-                        preview = tail.replace("\n", " ")
-                        if len(preview) > _REASONING_PREVIEW_CHARS:
-                            preview = (
-                                preview[: _REASONING_PREVIEW_CHARS - 1].rstrip()
-                                + "…"
-                            )
+                        preview = _truncate_preview(tail.replace("\n", " "))
                         content = f"{self._current_tool}: {preview}"
                     else:
                         content = f"{self._current_tool}: working…"
                 else:
                     preview = tail.replace("\n", " ")
                     if preview:
-                        if len(preview) > _REASONING_PREVIEW_CHARS:
-                            preview = (
-                                preview[: _REASONING_PREVIEW_CHARS - 1].rstrip()
-                                + "…"
-                            )
-                        content = f"thinking: {preview}"
+                        content = f"thinking: {_truncate_preview(preview)}"
                     else:
                         content = ""
                 if content and content != self._last_content:

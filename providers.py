@@ -70,6 +70,15 @@ _PARTIAL_REASONING_RE = re.compile(r'"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)"')
 # find the start position even before we know the full JSON will parse.
 _CUSTOM_TOOL_OPEN_RE = re.compile(r'\{\s*"name"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"')
 
+# Opener-match failure recovery threshold. If the brace counter can't find
+# a balanced close inside this many characters after a `{"name":` match,
+# we give up on this opener and look for the next one. Prevents a single
+# pathological opener (think: create_site's HTML body with embedded
+# unbalanced `'{"name": "...' substrings from a prior tool's args, or
+# a stray `"` inside CSS that strands the string-state counter) from
+# silently disabling extraction for the rest of the stream.
+_GIVE_UP_BYTES = 65536
+
 
 class _CustomToolCallBuffer:
     """Incrementally extracts bare-JSON tool calls from a streaming text delta.
@@ -105,6 +114,21 @@ class _CustomToolCallBuffer:
         Returns the visible portion (text before/after/between tool-call
         JSON objects). Any matched JSON that isn't yet balanced is left in
         ``self._pending_tail`` for the next feed.
+
+        Failure recovery (added 2026-07-18): a `{"name": "<x>", "arguments":
+        {"body": "<huge HTML with embedded '{' / '}' and stray '"' in
+        CSS>"}}` opener can fool the brace counter for tens of thousands
+        of chars (body's content holds the balancer in ``in_str=True``
+        until a stray CSS quote strands the string-state counter). The
+        previous behaviour was to set ``_pending_tail = text[m.start():]``
+        and *wait for the close*. The close never came, so the entire
+        response was buffered permanently, parsed by ``drain()`` to no
+        effect, and shipped as ``content_chars=N tool_calls=0`` with raw
+        JSON fragments leaking into the channel as separate Maxwell
+        messages. We now: (1) give up on the bad opener if it's grown
+        past ``_GIVE_UP_BYTES`` without resolving, advancing one char so
+        the next opener search retries; (2) on a parse-failing candidate
+        JSON, skip past the bad opener for the same recovery reason.
         """
         out = []
         i = 0
@@ -119,9 +143,24 @@ class _CustomToolCallBuffer:
             # Try to extract a balanced JSON object starting at m.start().
             end = _find_balanced_json_end(text, m.start())
             if end is None:
-                # Haven't reached the closing brace yet. Keep the opener
-                # (and everything after) buffered for the next feed.
-                self._pending_tail = text[m.start():]
+                # Haven't reached the closing brace yet. If the buffer
+                # has grown unreasonably without resolving, abandon this
+                # opener and search for the next one — otherwise a single
+                # mismatched opener (think a giant HTML body field that
+                # fools the brace balancer) silently disables extraction
+                # for the rest of the stream and the entire response
+                # bubbles up as raw JSON in content_parts.
+                if (len(text) - m.start()) > _GIVE_UP_BYTES:
+                    # Advance just past the opener's first char so the
+                    # next iteration searches fresh — the false opener
+                    # might be a substring of a string field, and the
+                    # *next* opener after it is the real tool call.
+                    i = m.start() + 1
+                    continue
+                # Still early in the stream: keep buffering and try again
+                # on the next feed. This is the protocol's normal "more
+                # chars arriving" case.
+                self._pending_tail = text[m.start() :]
                 return "".join(out)
             # Fire the partial-name callback the moment we see the opener,
             # even though the args may still be streaming — this lets the
@@ -134,14 +173,19 @@ class _CustomToolCallBuffer:
                 self._announced_names.add(opener_name)
                 with contextlib.suppress(Exception):
                     self._on_partial_name(str(opener_name))
-            # We have a complete tool-call JSON object. Validate by parsing.
-            candidate = text[m.start():end]
+            # We have a balanced-brace candidate. Validate by parsing.
+            candidate = text[m.start() : end]
             try:
                 obj = json.loads(candidate)
             except (json.JSONDecodeError, ValueError):
-                # Not actually valid JSON — emit as text and continue.
-                out.append(text[m.start():end])
-                i = end
+                # Balanced braces but not actually valid JSON — this
+                # opener was a substring inside a string field, not a real
+                # tool call. Skip past it so a *later* real tool call
+                # still gets extracted. Old behaviour re-emitted the bad
+                # region as text and stopped hunting (line ``i = end``,
+                # ``continue``), which is why any opener failure silently
+                # disabled extraction for the rest of the response.
+                i = m.start() + 1
                 continue
             # Looks like a real tool call. Strip from text and stash.
             tool_name = obj.get("name", "")
@@ -151,7 +195,7 @@ class _CustomToolCallBuffer:
             if tool_name:
                 self.completed.append(
                     {
-                        "id": f"call_custom_{len(self.completed)+1}",
+                        "id": f"call_custom_{len(self.completed) + 1}",
                         "type": "function",
                         "function": {
                             "name": str(tool_name),
@@ -198,7 +242,7 @@ class _CustomToolCallBuffer:
                 end = _find_balanced_json_end(tail, m.start())
                 if end is not None:
                     try:
-                        obj = json.loads(tail[m.start():end])
+                        obj = json.loads(tail[m.start() : end])
                     except (json.JSONDecodeError, ValueError):
                         obj = None
                     if isinstance(obj, dict) and obj.get("name"):
@@ -208,7 +252,7 @@ class _CustomToolCallBuffer:
                             args = {}
                         self.completed.append(
                             {
-                                "id": f"call_custom_{len(self.completed)+1}",
+                                "id": f"call_custom_{len(self.completed) + 1}",
                                 "type": "function",
                                 "function": {
                                     "name": tool_name,
@@ -223,7 +267,7 @@ class _CustomToolCallBuffer:
                             self._announced_names.add(tool_name)
                             with contextlib.suppress(Exception):
                                 self._on_partial_name(tool_name)
-                        self.text_parts.append(tail[:m.start()] + tail[end:])
+                        self.text_parts.append(tail[: m.start()] + tail[end:])
                         return
             self.text_parts.append(tail)
         if self._buf:
@@ -377,11 +421,11 @@ async def _read_sse_response(
     # See _CustomToolCallBuffer for the protocol details.
     custom_buffer: _CustomToolCallBuffer | None = (
         _CustomToolCallBuffer(
-            on_partial_name=lambda nm: on_token(
-                {"content": "", "reasoning": "", "tool_name": nm}
+            on_partial_name=lambda nm: (
+                on_token({"content": "", "reasoning": "", "tool_name": nm})
+                if on_token is not None
+                else None
             )
-            if on_token is not None
-            else None
         )
         if custom_tool_calls
         else None
@@ -541,9 +585,7 @@ async def _read_sse_response(
                                     cb = on_tool_call_name
                                     args = (slot["function"]["name"], reason)
                                     try:
-                                        asyncio.create_task(
-                                            _safe_call(cb, *args)
-                                        )
+                                        asyncio.create_task(_safe_call(cb, *args))
                                     except RuntimeError:
                                         with contextlib.suppress(Exception):
                                             await cb(*args)
