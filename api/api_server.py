@@ -129,6 +129,38 @@ def _load_admin_creds():
     return ADMIN_USER, ADMIN_PASSWORD
 
 
+def _load_bot_admins():
+    """Read the bot's live admin allowlist from admins.json.
+
+    The bot writes this file every time `,admin @user` / `,admin clear` runs,
+    so a user promoted via chat can immediately OAuth into the dashboard
+    without a restart. We read it on every call (it's tiny) so promotions
+    take effect without bouncing the API process.
+
+    Falls back to DISCORD_ALLOWED_USER_IDS env if no file is present, so an
+    operator who hasn't run the bot yet can still seed the allowlist.
+
+    Returns a set of user-id strings. Empty set = nobody allowed.
+    """
+    path = DATA_DIR / "admins.json"
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, ValueError):
+            return set(DISCORD_ALLOWED_USER_IDS)
+        if isinstance(data, list):
+            return {str(x).strip() for x in data if str(x).strip()}
+        if isinstance(data, dict):
+            ids = set()
+            for key in ("admins", "owners", "user_ids"):
+                values = data.get(key)
+                if isinstance(values, list):
+                    ids.update(str(x).strip() for x in values if str(x).strip())
+            if ids:
+                return ids
+    return set(DISCORD_ALLOWED_USER_IDS)
+
+
 _load_admin_creds()
 MAX_LTM_LINES = 999
 MAX_LTM_CHARS = 1000
@@ -2266,15 +2298,19 @@ async def discord_auth_callback(request):
     avatar_url = (
         f"https://cdn.discordapp.com/avatars/{user_id}/{avatar}.png" if avatar else ""
     )
-    # Fail closed: OAuth requires an explicit allowlist. Empty list = nobody.
-    if not DISCORD_ALLOWED_USER_IDS:
+    # Source of truth: the bot's live admins.json (updated by `,admin @user`).
+    # Falls back to DISCORD_ALLOWED_USER_IDS env when no file is present, so
+    # a fresh install still has a way to seed the allowlist.
+    allowed = _load_bot_admins()
+    if not allowed:
         logger.error(
-            "discord oauth denied: DISCORD_ALLOWED_USER_IDS is empty (fail closed)"
+            "discord oauth denied: admins.json missing/empty and "
+            "DISCORD_ALLOWED_USER_IDS unset (fail closed)"
         )
         return _json_response(
             {"error": "discord oauth not configured (no allowed user ids)"}, 403
         )
-    if user_id not in DISCORD_ALLOWED_USER_IDS:
+    if user_id not in allowed:
         logger.warning("discord oauth denied for user %s (%s)", user_id, username)
         return _json_response({"error": "discord account not authorized"}, 403)
     import secrets as _secrets

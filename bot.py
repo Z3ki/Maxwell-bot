@@ -2855,7 +2855,7 @@ class MaxwellBot(commands.Bot):
                     "` ,jailbreak on|off|status` - toggle freedom-mode prompt for this server (admin)\n"
                     "` ,sleep [minutes|off|status]` - take a 1-60m sleep window; pings get a notice (admin)\n"
                     "` ,wake` - clear active sleep window (admin)\n"
-                    "` ,admin [@user|user_id|clear]` - add/remove/list admins (admin)\n"
+                    "` ,admin [@user|user_id|clear]` - add/remove/list admins (admin). Promoted users can log into the dashboard at /admin via 'Continue with Discord'."
                     "` ,shell [@user|clear]` - shell whitelist (admin)\n"
                     "` ,confirm` - authorize one destructive tool call on a tainted turn (admin/shell-whitelisted)\n"
                     "` ,blacklist [@user|clear]` / `,unblacklist @user` - blacklist controls (admin)\n"
