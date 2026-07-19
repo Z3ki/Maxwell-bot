@@ -458,24 +458,18 @@ class ToolProgress:
             return  # coalesce: the next tick or the deferred flush will fire
 
         if self._current_tool:
-            preview = self._reasoning_buffer
-            if preview:
-                preview = _truncate_preview(preview.replace("\n", " ").strip())
-                content = f"{self._current_tool}: {preview}"
-            else:
-                # Reasoning hadn't buffered yet when the tool name landed
-                # (the tool-name callback arrived mid-token). Show the tool
-                # alone — never fall back to "thinking: …" once we know
-                # the model is acting on a tool, or the user perceives the
-                # status as stuck on 'thinking' during the tool's execution.
-                content = f"{self._current_tool}: working…"
+            # Tool is known — always show its name, never 'thinking:'.
+            content = (
+                f"{self._current_tool}: {_truncate_preview(self._reasoning_buffer.replace(chr(10), ' ').strip())}"
+                if self._reasoning_buffer.strip()
+                else f"{self._current_tool}: working…"
+            )
         else:
-            preview = self._reasoning_buffer
-            if preview:
-                preview = _truncate_preview(preview.replace("\n", " ").strip())
-                content = f"thinking: {preview}"
-            else:
-                content = "working on it…"
+            # Pure-reasoning phase: defer to _render's gate so we don't
+            # flash one-word half-streams like 'thinking: Cas' the moment
+            # an SSE token arrives (2026-07-19 bug). _render returns
+            # 'working on it…' until the buffer has enough substance.
+            content = self._render()
         if content == self._last_content:
             return
         await self._flush(content)
@@ -502,6 +496,32 @@ class ToolProgress:
                 logger.debug("Progress edit failed (%s) — disabling further edits", e)
                 self._posted = None
 
+    def _has_meaningful_reasoning(self) -> bool:
+        """True when the buffered reasoning is long enough to be worth
+        showing instead of the static 'working on it\\u2026' placeholder.
+
+        Fires the moment either of these holds:
+          - Buffer contains a sentence terminator (a real 'thought', not a
+            half-streamed word like 'Cas' that the user reported as the
+            visible preview — it landed before any word boundary arrived).
+          - Buffer is at least ~4 word-likes long (>= 6 chars after
+            whitespace collapse), so even a no-period middle-of-thought
+            is at least one readable token. Below that we wait the SSE
+            out; 'thinking: <gibberish>' looks worse than 'working on
+            it\\u2026'.
+
+        Buffer is the raw, un-flushed rolling text the tick path
+        accumulates; we recompute truncation-bearing semantics here
+        rather than carrying a separate flag.
+        """
+        buf = self._reasoning_buffer.strip()
+        if not buf:
+            return False
+        if any(c in buf for c in ".!?"):
+            return True
+        # No sentence terminator yet: require chunky enough to read.
+        return len(buf) >= 6
+
     def _render(self) -> str:
         # One sentence. No emoji, no backticks — the user wants the
         # model's own thought, not a status widget. If we have a
@@ -510,7 +530,16 @@ class ToolProgress:
         # users know which tool is acting, separated by ": " — same vibe
         # as a shell prompt label without the decoration.
         if not self._current_tool:
-            return "working on it…"
+            # During pure-reasoning (no tool yet), don't show a one-word
+            # half-stream buffer as 'thinking: <one-token>' — wait until
+            # the model has produced at least one readable thought. The
+            # 2026-07-19 'thinking: Cas' bug logs proved users see this
+            # immediately after SSE token-arrival bursts and read it as
+            # a stale / cut message.
+            if not self._has_meaningful_reasoning():
+                return "working on it…"
+            preview = _truncate_preview(self._reasoning_buffer.replace("\n", " ").strip())
+            return f"thinking: {preview}"
         if self._current_reason:
             return f"{self._current_tool}: {self._current_reason}"
         return f"{self._current_tool}: working…"
