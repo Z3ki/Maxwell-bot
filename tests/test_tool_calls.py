@@ -11,8 +11,8 @@ sanitizer plus the new reasoning contract:
 """
 
 from bot import strip_tool_payload_leaks
-from tool_schemas import build_openai_tools, REASONING_PARAM
 from tool_registry import extract_reasoning, _sanitize_reasoning, record_reasoning
+from tool_schemas import REASONING_PARAM, build_openai_tools
 
 
 class _FakeTool:
@@ -105,13 +105,16 @@ def test_every_tool_gets_reasoning_param():
         assert "reasoning" in props, f"{name} is missing the reasoning param, damn it"
 
 
-def test_reasoning_is_never_required():
+def test_reasoning_is_always_required():
     tools = {"send_message": _FakeTool()}
     out = build_openai_tools(tools)[0]
     required = out["function"]["parameters"].get("required", [])
-    assert "reasoning" not in required
-    # the tool's own required field (content) is preserved
-    assert required == ["content"]
+    # reasoning is always in required so the provider rejects empty calls
+    # instead of silently dropping the trace. The tool's own required field
+    # (content) is preserved alongside.
+    assert "reasoning" in required
+    assert "content" in required
+    assert set(required) == {"reasoning", "content"}
 
 
 def test_reasoning_param_schema_is_stable():

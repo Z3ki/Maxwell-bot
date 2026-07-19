@@ -114,10 +114,13 @@ class ToolSpec:
         props = dict(self.parameters.get("properties") or {})
         props = dict(props)  # don't mutate the spec's dict, Jesus
         props.setdefault("reasoning", REASONING_PARAM_SCHEMA)
-        # reasoning is never required — let the model be terse on a trivial
-        # call instead of forcing a paragraph. The AUTO BACKFILL records
-        # "no reasoning provided" if it's empty.
+        # reasoning is ALWAYS required — no exceptions, no "terse on a trivial
+        # call" carve-out. If the model thinks before it acts, we want the
+        # trace. If it skips reasoning, the provider will reject the call
+        # instead of silently dropping it (which is what bit us before).
         required = [r for r in (self.required or []) if r != "reasoning"]
+        if "reasoning" not in required:
+            required.append("reasoning")
         return {
             "type": "function",
             "function": {

@@ -303,12 +303,14 @@ def build_openai_tools(
         props = dict(params.get("properties") or {})
         props.setdefault("reasoning", REASONING_PARAM)
         params["properties"] = props
-        # reasoning must never end up required — let the model be concise.
+        # reasoning is ALWAYS required — no exceptions, no "terse on a trivial
+        # call" carve-out. If the model thinks before it acts, we want the
+        # trace. If it skips reasoning, the provider rejects the call instead
+        # of silently dropping it (which is what bit us before).
         required = [r for r in (params.get("required") or []) if r != "reasoning"]
-        if required:
-            params["required"] = required
-        else:
-            params.pop("required", None)
+        if "reasoning" not in required:
+            required.append("reasoning")
+        params["required"] = required
         out.append(
             {
                 "type": "function",
