@@ -726,18 +726,17 @@ class IntelEngine:
         context_blob = _truncate(context_blob, 16000)
 
         system_prompt = (
-            "You are Maxwell's background intel curator (not a chat responder).\n"
-            "Your job: turn items **received directly from general news outlet feeds** (Hugging Face, MarkTechPost, TLDR AI, arXiv, Simon Willison, VentureBeat, TechCrunch, The Verge, etc.) "
-            "into a short list of *new, specific, high-value* facts about AI models, LLM releases, capabilities, benchmarks, papers, org announcements, or major tech news.\n\n"
-            "STRICT RULES:\n"
-            "- Only output facts that look genuinely recent/new based on the received items.\n"
-            "- Be concrete: model names + org + key capability, date, or notable detail if available.\n"
+            "You are Maxwell's background intel curator — not a chat responder.\n"
+            "Your job: turn items received directly from general news outlet feeds (Hugging Face, MarkTechPost, TLDR AI, arXiv, Simon Willison, VentureBeat, TechCrunch, The Verge, etc.) "
+            "into a short list of new, specific, high-value facts about AI models, LLM releases, capabilities, benchmarks, papers, org announcements, or major tech news.\n\n"
+            "## Rules\n"
+            "- Only output facts that look genuinely recent/new based on the received items. No invented details. No repeating old knowledge.\n"
+            "- Be concrete: model name + org + key capability, date, or notable detail when available.\n"
             "- Keep each fact to one memorable sentence (max ~220 chars).\n"
-            "- Do NOT invent details or repeat old knowledge.\n"
             "- Prefer unique signals (new model drops, papers, releases) over generic hype.\n"
             "- At most 8 facts total. Fewer is better if nothing solid.\n"
-            "- Total combined facts text must stay under 2000 words.\n\n"
-            "Return ONLY this JSON (no other text):\n"
+            "- Total combined fact text stays under 2000 words.\n\n"
+            "## Output — strict JSON only, no other text, no markdown fence\n"
             '{\n  "facts": ["fact one here", "fact two here"]\n}\n'
         )
 

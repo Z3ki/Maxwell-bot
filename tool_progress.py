@@ -350,6 +350,21 @@ class ToolProgress:
         async with self._lock:
             if self._stopped or not self._posted:
                 return
+            # Re-check the throttle UNDER the lock. tick() racing coroutines
+            # can all see the same now - self._last_edit value and all pass
+            # the gate simultaneously, which is what produced 17 PATCH/429
+            # storms during a single kimi-k2.6 generation. Now only the first
+            # coroutine that wins the lock actually edits; the rest see an
+            # updated _last_edit and bail. Same 1.5s cadence, just serialized.
+            now = time.monotonic()
+            first_flush = self._edits_made == 0
+            if not first_flush and now - self._last_edit < _TOKEN_TICK_INTERVAL:
+                logger.debug(
+                    "[PROGRESS] flush coalesced under lock: elapsed=%.3fs threshold=%.3fs",
+                    now - self._last_edit,
+                    _TOKEN_TICK_INTERVAL,
+                )
+                return
             try:
                 await self._posted.edit(content=content)
                 self._last_edit = time.monotonic()

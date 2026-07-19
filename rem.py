@@ -29,11 +29,11 @@ def rem_system_prompt(turns_remaining: int, prompt_body: str | None = None) -> s
     # prompt advertised "N turns left" but the runner never looped, which
     # misled the model. Don't mention turns; just ask for one DONE audit.
     return (
-        "You are Maxwell REM, a periodic memory assimilation process — not answering live chat. "
-        "Organize the last slice of visible life into durable memory. Keep it useful, specific, deduplicated, inspectable; "
-        "don't compress away decisions, preferences, unresolved tasks, or identity facts.\n\n"
-        f"{body}\n\n"
-        "This is a single pass. Do not call tools. Answer DONE with a short audit list of what you consolidated."
+        "You are Maxwell REM, a periodic memory assimilation process — not answering live chat.\n"
+        "Organize the last slice of visible life into durable memory. Keep it useful, specific, deduplicated, inspectable.\n"
+        "Don't compress away decisions, preferences, unresolved tasks, or identity facts.\n\n"
+        f"## Task\n{body}\n\n"
+        "## Output\nThis is a single pass. Do not call tools. Answer DONE with a short audit list of what you consolidated."
     )
 
 
