@@ -272,3 +272,138 @@ def test_progress_not_posted_when_start_skipped():
     # No post, no edit
     assert msg.channel.sent == []
     assert msg.channel.edited == []
+
+
+# ---- per-token tick() (live streaming progress) ----
+
+
+def test_tick_shows_thinking_before_tool_name():
+    """Long generations where the model thinks for seconds before committing
+    to a tool used to be silent (just 'working on it…'). tick() should
+    surface the model's reasoning as 'thinking: …' so the user sees
+    liveness during the thinking phase."""
+    msg = FakeMessage()
+    prog = tool_progress.ToolProgress(msg)
+    asyncio.run(prog.start())
+    msg_obj = msg.channel.sent[0]
+    edits_before = len(msg.channel.edited)
+    # First tick — always allowed through (the user is staring at
+    # 'working on it…', show them SOMETHING immediately).
+    asyncio.run(prog.tick(reasoning_delta="The user wants me to"))
+    assert len(msg.channel.edited) > edits_before
+    assert msg_obj.content == "thinking: The user wants me to"
+    asyncio.run(prog.stop())
+
+
+def test_tick_accumulates_reasoning_text():
+    """Multiple reasoning deltas should accumulate into the buffer; the
+    rendered preview is the latest tail, not a stale snapshot."""
+    msg = FakeMessage()
+    prog = tool_progress.ToolProgress(msg)
+    asyncio.run(prog.start())
+    msg_obj = msg.channel.sent[0]
+    # Stream three deltas within the rate-limit window — only the first
+    # actually edits; the rest accumulate in the buffer.
+    prog._last_edit = 0
+    asyncio.run(prog.tick(reasoning_delta="First bit. "))
+    assert "First bit." in msg_obj.content
+    # Force the second tick past the rate-limit so it can edit.
+    prog._last_edit = 0
+    asyncio.run(prog.tick(reasoning_delta="Then more thinking. "))
+    # The preview should now contain both pieces (or at least the tail).
+    assert "Then more thinking" in msg_obj.content
+    prog._last_edit = 0
+    asyncio.run(prog.tick(reasoning_delta="Final sentence."))
+    assert "Final sentence" in msg_obj.content
+    asyncio.run(prog.stop())
+
+
+def test_tick_tool_name_switches_to_tool_prefix():
+    """When tick() is called with tool_name, the message format switches
+    from 'thinking: …' to '<tool>: …' so the user sees which tool the
+    model committed to."""
+    msg = FakeMessage()
+    prog = tool_progress.ToolProgress(msg)
+    asyncio.run(prog.start())
+    msg_obj = msg.channel.sent[0]
+    # First, a thinking tick.
+    prog._last_edit = 0
+    asyncio.run(prog.tick(reasoning_delta="Let me check that user."))
+    assert msg_obj.content.startswith("thinking:")
+    # Now the model commits to a tool — the very first tool_name tick
+    # must go through even if we're inside the rate-limit window.
+    asyncio.run(prog.tick(reasoning_delta="", tool_name="lookup_user"))
+    assert msg_obj.content.startswith("lookup_user:")
+    asyncio.run(prog.stop())
+
+
+def test_tick_rate_limits_to_avoid_429():
+    """Rapid ticks within _TOKEN_TICK_INTERVAL coalesce; only the latest
+    content survives. The Discord edit limit is 5/5s; a 10s long reasoning
+    burst can produce 30+ deltas."""
+    msg = FakeMessage()
+    prog = tool_progress.ToolProgress(msg)
+    asyncio.run(prog.start())
+    msg_obj = msg.channel.sent[0]
+    # First tick — goes through.
+    prog._last_edit = 0
+    asyncio.run(prog.tick(reasoning_delta="one"))
+    edits_after_first = len(msg.channel.edited)
+    # Two rapid ticks inside the window — must coalesce.
+    asyncio.run(prog.tick(reasoning_delta=" two"))
+    asyncio.run(prog.tick(reasoning_delta=" three"))
+    # Still only the first edit landed (rate-limited), but the buffer
+    # accumulated so a future tick picks it up.
+    assert len(msg.channel.edited) == edits_after_first
+    assert "three" in prog._reasoning_buffer
+    # Next tick past the window — flushes the accumulated buffer.
+    prog._last_edit = 0
+    asyncio.run(prog.tick(reasoning_delta=" four"))
+    assert len(msg.channel.edited) > edits_after_first
+    assert "four" in msg_obj.content
+    asyncio.run(prog.stop())
+
+
+def test_tick_is_noop_after_stop():
+    """Ticks fired after stop() must be silently dropped, not raise."""
+    msg = FakeMessage()
+    prog = tool_progress.ToolProgress(msg)
+    asyncio.run(prog.start())
+    asyncio.run(prog.stop())
+    # Stopped — tick should not raise, not edit.
+    edits_before = len(msg.channel.edited)
+    asyncio.run(prog.tick(reasoning_delta="after stop"))
+    assert len(msg.channel.edited) == edits_before
+
+
+def test_stop_drains_final_tick_before_delete():
+    """A tick that fired <_TOKEN_TICK_INTERVAL before stop() gets its
+    content cached in the buffer but never rendered — without a drain
+    in stop(), the user stares at the second-to-last update while the
+    tool runs. stop() must do a final best-effort edit so the message
+    reflects the latest model state when it disappears."""
+    msg = FakeMessage()
+    prog = tool_progress.ToolProgress(msg)
+    asyncio.run(prog.start())
+    msg_obj = msg.channel.sent[0]
+    # Stream a tick within the rate-limit window — content is cached
+    # in the buffer but not edited.
+    prog._edits_made = 1
+    prog._last_edit = time_monotonic()  # pretend we just edited
+    asyncio.run(prog.tick(reasoning_delta="Final thought before tool runs."))
+    # The buffer accumulated, but the rate-limit blocked the edit.
+    assert "Final thought" in prog._reasoning_buffer
+    # Now stop() — must do one last edit so the user sees the final
+    # reasoning before the message disappears.
+    edits_before_stop = len(msg.channel.edited)
+    asyncio.run(prog.stop())
+    assert len(msg.channel.edited) > edits_before_stop
+    assert "Final thought" in msg_obj.content
+    # And then the message was deleted.
+    assert msg_obj in msg.channel.deleted
+
+
+def time_monotonic():
+    import time
+
+    return time.monotonic()

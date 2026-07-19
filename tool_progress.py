@@ -62,6 +62,7 @@ about what shows up in the Discord/Telegram channel.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from typing import Any
@@ -82,6 +83,15 @@ _GRACE_BEFORE_FIRST_POST = 0.15
 # Truncate the model's reasoning to this many chars in the progress UI.
 # Long reasoning is fine for the trace; channel messages are glanceable.
 _REASONING_PREVIEW_CHARS = 140
+
+# Per-token ticks fire on EVERY streamed delta (reasoning + content). Most
+# providers chunk into ~50-200 char deltas, so on a long create_site the SSE
+# can emit 30+ deltas over 10s. We MUST coalesce — Discord's edit limit is
+# 5 / 5s, and a naive "edit on every delta" would 429 us into silence.
+# 1.5s is the right balance: fast enough that the user sees the model's
+# thoughts scroll by (one update per ~1-2 reasoning chunks), slow enough to
+# stay under the rate limit during a long generation.
+_TOKEN_TICK_INTERVAL = 1.5
 
 
 class ToolProgress:
@@ -139,6 +149,15 @@ class ToolProgress:
         # latest cached content once the edit window reopens. Cancelled on
         # stop() so we never edit a message we've already deleted.
         self._deferred_task: asyncio.Task | None = None
+        # Rolling buffer of reasoning text accumulated from per-token SSE
+        # deltas. tick() grows this and renders the latest tail; we don't
+        # render every tick (that would 429 us) but we DO keep the buffer
+        # fresh so the next allowed edit has the latest model words.
+        self._reasoning_buffer: str = ""
+        # One-shot flag: after the first tool_name arrives via tick(), we
+        # always allow the next tick flush through even if we're inside the
+        # rate-limit window — the model committed to a tool, that's news.
+        self._last_tool_name_announced: bool = False
 
     @property
     def posted(self) -> Any:
@@ -217,8 +236,18 @@ class ToolProgress:
         # in its grace sleep (no posted message yet); caching here means
         # start() will post the "tool: …" line directly instead of a stale
         # "working on it…" the user would never see updated.
+        prev_tool = self._current_tool
         self._current_tool = tool_name
         self._current_reason = reasoning
+        # If we switched tools (e.g. shell → web_search in the same batch),
+        # reset the rolling reasoning buffer so the new tool's preview
+        # doesn't show the previous tool's tail. Tick-driven updates
+        # accumulate the buffer per tool.
+        if prev_tool and prev_tool != tool_name:
+            self._reasoning_buffer = reasoning
+            self._last_tool_name_announced = False
+        elif not self._reasoning_buffer:
+            self._reasoning_buffer = reasoning
 
         if not self._posted:
             # Post was never created (Discord rejected the first send, or
@@ -254,6 +283,99 @@ class ToolProgress:
             self._schedule_deferred_flush()
             return
         logger.debug(f"[TP] calling _flush with {content!r}")
+        await self._flush(content)
+
+    async def tick(
+        self,
+        reasoning_delta: str = "",
+        tool_name: str | None = None,
+    ) -> None:
+        """Update the progress message with a rolling preview of the model's
+        own streaming reasoning.
+
+        Fired on every SSE reasoning/content delta. We coalesce hard —
+        Discord's per-channel edit limit is 5 / 5s, and a 10s create_site
+        can produce 30+ deltas. Most ticks are no-ops; we only do an actual
+        edit every ``_TOKEN_TICK_INTERVAL`` seconds, with the latest
+        accumulated reasoning text. The user sees their model's thoughts
+        scroll by at human-readable speed instead of staring at "working on
+        it…" for the whole generation.
+
+        ``tool_name`` switches the UI from "thinking: …" to "<tool>: …"
+        the moment the model commits to a tool call.
+
+        Safe to call from anywhere. Never raises. No-op if we've been
+        stopped or the tool started streaming its own output.
+        """
+        if self._stopped or self._tool_streaming:
+            return
+        if self._platform != "discord":
+            return
+
+        # Tool name switchover is cheap and one-shot — the first delta that
+        # introduces a tool name should update the message immediately even
+        # if a tick just fired (the model decided, that's news).
+        if tool_name:
+            self._current_tool = tool_name
+        # Capture the switchover state BEFORE we mutate the flag, so the
+        # rate-limit bypass below can see it as a real "first tool name
+        # arrived" signal instead of always-True-after-the-fact.
+        tool_name_switch = bool(
+            tool_name and not self._last_tool_name_announced
+        )
+        if tool_name_switch:
+            self._last_tool_name_announced = True
+
+        # Accumulate the new reasoning delta. We don't render every tick —
+        # we just keep growing the buffer, and the rate-limited flush below
+        # picks up the latest tail.
+        if reasoning_delta:
+            tail = (self._reasoning_buffer + reasoning_delta).strip()
+            # Bound growth so a 10k-char reasoning doesn't accumulate in RAM.
+            if len(tail) > _REASONING_PREVIEW_CHARS * 4:
+                tail = tail[-_REASONING_PREVIEW_CHARS * 4 :]
+            self._reasoning_buffer = tail
+
+        if not self._posted:
+            return
+
+        now = time.monotonic()
+        # First tick is always allowed through (the user just posted
+        # "working on it…" and is staring at it — show them SOMETHING).
+        # Also: if a tool_name just arrived, always allow it through even
+        # if we're inside the rate-limit window — the model committed to
+        # a tool, that's news the user needs to see immediately.
+        if (
+            self._edits_made > 0
+            and not tool_name_switch
+            and now - self._last_edit < _TOKEN_TICK_INTERVAL
+        ):
+            return  # coalesce: the next tick or the deferred flush will fire
+
+        if self._current_tool:
+            preview = self._reasoning_buffer
+            if preview:
+                preview = preview.replace("\n", " ").strip()
+                if len(preview) > _REASONING_PREVIEW_CHARS:
+                    preview = (
+                        preview[: _REASONING_PREVIEW_CHARS - 1].rstrip() + "…"
+                    )
+                content = f"{self._current_tool}: {preview}"
+            else:
+                content = f"{self._current_tool}: working…"
+        else:
+            preview = self._reasoning_buffer
+            if preview:
+                preview = preview.replace("\n", " ").strip()
+                if len(preview) > _REASONING_PREVIEW_CHARS:
+                    preview = (
+                        preview[: _REASONING_PREVIEW_CHARS - 1].rstrip() + "…"
+                    )
+                content = f"thinking: {preview}"
+            else:
+                content = "working on it…"
+        if content == self._last_content:
+            return
         await self._flush(content)
 
     async def _flush(self, content: str) -> None:
@@ -367,6 +489,47 @@ class ToolProgress:
             # round trip is enough latency to make the ack feel laggy.)
             self._posted = None
             return
+        # Drain any pending tick update BEFORE deleting so the user sees
+        # the model's final thought/tool name at least once. Without this,
+        # a tick that fired <_TOKEN_TICK_INTERVAL before stop() (very
+        # common — the LLM often finishes streaming the same instant the
+        # tool dispatch begins) gets its content cached in the buffer but
+        # never rendered, so the user stares at the second-to-last update
+        # while the tool runs. Bypasses the rate-limit for this one final
+        # edit so the message reflects the latest model state when it
+        # disappears. Best-effort: if the edit fails (message already
+        # gone, channel lost perms) we still delete.
+        try:
+            tail = self._reasoning_buffer.strip()
+            if tail or self._current_tool:
+                if self._current_tool:
+                    if tail:
+                        preview = tail.replace("\n", " ")
+                        if len(preview) > _REASONING_PREVIEW_CHARS:
+                            preview = (
+                                preview[: _REASONING_PREVIEW_CHARS - 1].rstrip()
+                                + "…"
+                            )
+                        content = f"{self._current_tool}: {preview}"
+                    else:
+                        content = f"{self._current_tool}: working…"
+                else:
+                    preview = tail.replace("\n", " ")
+                    if preview:
+                        if len(preview) > _REASONING_PREVIEW_CHARS:
+                            preview = (
+                                preview[: _REASONING_PREVIEW_CHARS - 1].rstrip()
+                                + "…"
+                            )
+                        content = f"thinking: {preview}"
+                    else:
+                        content = ""
+                if content and content != self._last_content:
+                    with contextlib.suppress(Exception):
+                        await self._posted.edit(content=content)
+                        self._last_content = content
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Final progress drain edit failed: %s", e)
         try:
             await self._posted.delete()
         except Exception as e:  # noqa: BLE001

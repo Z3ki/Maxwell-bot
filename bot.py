@@ -1491,7 +1491,6 @@ JAILBREAK_PROMPT = (
 )
 
 
-
 def _tool_results_need_followup(tool_results: list[str]) -> bool:
     # Terminal actions: send_message and explicit no_response only.
     # TTS uses __TTS_SENT__ (and legacy __NO_RESPONSE__ from older code) and must
@@ -6152,6 +6151,32 @@ class MaxwellBot(commands.Bot):
             else:
                 logger.warning("[PROGRESS] callback fired but gen_progress is None!")
 
+        # Per-token callback. Fires on EVERY reasoning/content delta so the
+        # progress message can show the model's own thoughts streaming by.
+        # Critical for long generations: without this, the user stares at
+        # "working on it…" for the entire 10-30s the model takes to think
+        # before the final tool_call delta arrives (which is the only thing
+        # the legacy _on_tool_call_name path catches). Tick rate-limits
+        # internally to stay under Discord's 5/5s edit limit.
+        def _on_token(tok: dict) -> None:
+            if gen_progress is None:
+                return
+            try:
+                # Schedule the coroutine on the running loop. tick() itself
+                # is async because it may need to await a Discord edit, but
+                # the SSE reader must NOT be blocked on a slow edit (it would
+                # back-pressure the upstream provider). Fire-and-forget.
+                asyncio.create_task(
+                    gen_progress.tick(
+                        reasoning_delta=tok.get("reasoning", "")
+                        or tok.get("content", ""),
+                        tool_name=tok.get("tool_name"),
+                    )
+                )
+            except RuntimeError:
+                # No running loop (shouldn't happen in normal use) — drop.
+                pass
+
         try:
             platform = MaxwellBot._message_tool_platform(self, message)
             openai_tools = self._build_openai_tools(platform)
@@ -6169,6 +6194,7 @@ class MaxwellBot(commands.Bot):
                                 max_tokens=max_out_tokens,
                                 tools=openai_tools or None,
                                 on_tool_call_name=_on_tool_call_name,
+                                on_token=_on_token,
                             )
                     except (discord.HTTPException, ConnectionError, OSError) as _exc:
                         response = await self.ai_provider.generate_response(
@@ -6178,6 +6204,7 @@ class MaxwellBot(commands.Bot):
                             max_tokens=max_out_tokens,
                             tools=openai_tools or None,
                             on_tool_call_name=_on_tool_call_name,
+                            on_token=_on_token,
                         )
                 else:
                     response = await self.ai_provider.generate_response(
@@ -6187,6 +6214,7 @@ class MaxwellBot(commands.Bot):
                         max_tokens=max_out_tokens,
                         tools=openai_tools or None,
                         on_tool_call_name=_on_tool_call_name,
+                        on_token=_on_token,
                     )
             finally:
                 await self._release_ai_slot()
@@ -6316,6 +6344,22 @@ class MaxwellBot(commands.Bot):
                                     f"[PROGRESS] followup update done, last_content={_p._last_content!r}"
                                 )
 
+                    def _on_followup_token(
+                        tok: dict, _p=followup_progress
+                    ) -> None:
+                        if _p is None:
+                            return
+                        try:
+                            asyncio.create_task(
+                                _p.tick(
+                                    reasoning_delta=tok.get("reasoning", "")
+                                    or tok.get("content", ""),
+                                    tool_name=tok.get("tool_name"),
+                                )
+                            )
+                        except RuntimeError:
+                            pass
+
                     try:
                         followup = await self.ai_provider.generate_response(
                             result_messages,
@@ -6325,6 +6369,7 @@ class MaxwellBot(commands.Bot):
                             max_tokens=max_out_tokens,
                             tools=openai_tools or None,
                             on_tool_call_name=_on_followup_tool_call_name,
+                            on_token=_on_followup_token,
                         )
                     except Exception:
                         # Ensure followup progress is cleaned up on error

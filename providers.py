@@ -21,6 +21,16 @@ logger = logging.getLogger(__name__)
 _PARTIAL_REASONING_RE = re.compile(r'"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)"')
 
 
+async def _safe_call(cb, *args, **kwargs):
+    """Await an SSE callback, swallowing any exception. Used for fire-and-forget
+    callbacks (``asyncio.create_task(_safe_call(...))``) so a buggy callback
+    never crashes the streaming read loop."""
+    try:
+        await cb(*args, **kwargs)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("SSE callback raised: %s", e)
+
+
 def _extract_partial_reasoning(arguments: str) -> str:
     """Best-effort pull of the `reasoning` string from a PARTIAL arguments JSON.
 
@@ -54,6 +64,7 @@ def _extract_partial_reasoning(arguments: str) -> str:
 async def _read_sse_response(
     resp: aiohttp.ClientResponse,
     on_tool_call_name=None,
+    on_token=None,
 ) -> dict:
     """Read an OpenAI-style SSE chat-completions stream and reassemble it into
     the same dict shape a non-streamed `await resp.json()` would return.
@@ -63,6 +74,20 @@ async def _read_sse_response(
     update a live progress message mid-stream — e.g. show
     "create_site: …" while the model is still generating the tool arguments
     (the HTML body), instead of waiting for the entire response to finish.
+
+    If ``on_token`` is provided, it's called (fire-and-forget, NEVER awaited
+    inline) on every content and reasoning delta so the caller can show a
+    live progress message with a rolling preview of the model's own words.
+    Inline awaiting would back-pressure the SSE read on a slow Discord edit
+    and stall the upstream. The callback gets a small dict with the new
+    delta (NOT an accumulator) plus a flag distinguishing reasoning from
+    visible content::
+
+        {"reasoning": str, "content": str, "tool_name": str|None}
+
+    ``tool_name`` is set only on the delta that first introduces a tool call
+    name (so the callback can switch the progress UI from "model is
+    thinking" to "tool_name: …" the moment the model decides).
 
     The OpenAI streaming protocol sends one JSON object per ``data:`` line, each
     with the same frame structure but only the *delta* of what changed since
@@ -141,6 +166,31 @@ async def _read_sse_response(
                     rval = delta.get(rkey)
                     if rval is not None:
                         reasoning_parts.append(rval)
+                # Per-token progress callback (fire-and-forget, NEVER awaited
+                # inline). A slow Discord edit must not back-pressure the SSE
+                # read — that would stall the upstream provider and add visible
+                # latency to the stream. We hand the caller a small dict with
+                # the NEW deltas from this frame plus an empty tool_name that
+                # the tool_call block below may fill in.
+                if on_token is not None:
+                    tok_content = delta.get("content") or ""
+                    tok_reason = ""
+                    for rkey in ("reasoning_content", "reasoning"):
+                        rv = delta.get(rkey)
+                        if rv:
+                            tok_reason = rv
+                            break
+                    if tok_content or tok_reason:
+                        try:
+                            on_token(
+                                {
+                                    "content": tok_content,
+                                    "reasoning": tok_reason,
+                                    "tool_name": None,
+                                }
+                            )
+                        except Exception:
+                            pass
                 if "tool_calls" in delta and delta["tool_calls"]:
                     for tc_delta in delta["tool_calls"]:
                         tc_idx = tc_delta.get("index", 0)
@@ -161,23 +211,42 @@ async def _read_sse_response(
                             slot["function"]["name"] = (
                                 slot["function"].get("name", "") + fn["name"]
                             )
-                            # Fire the callback the first time we see a tool
-                            # call name so the progress message can update
-                            # mid-stream (e.g. "create_site: …" while the
-                            # model is still generating the HTML body).
-                            # We AWAIT the callback directly (not fire-and-
-                            # forget) so the Discord message edit happens
-                            # immediately. The callback may fire AGAIN below
-                            # with the model's reasoning once that field
-                            # finishes streaming — it is NOT one-shot.
+                            # Fire the tool-name callback the first time we
+                            # see it. This is the *old* path kept for
+                            # backwards-compat (legacy callers still use it).
+                            # The new ``on_token`` path below also surfaces
+                            # the tool name to the per-token progress callback
+                            # so the UI can switch from "model is thinking"
+                            # to "<tool_name>: …" the moment the model
+                            # commits to a tool.
                             if on_tool_call_name is not None and not slot.get(
                                 "_name_sent"
                             ):
                                 slot["_name_sent"] = True
-                                with contextlib.suppress(Exception):
-                                    await on_tool_call_name(
-                                        slot["function"]["name"], ""
+                                cb = on_tool_call_name
+                                args = (slot["function"]["name"], "")
+                                try:
+                                    asyncio.create_task(_safe_call(cb, *args))
+                                except RuntimeError:
+                                    with contextlib.suppress(Exception):
+                                        await cb(*args)
+                            # Same signal on the new per-token path. The
+                            # token callback is fire-and-forget so a slow
+                            # Discord edit doesn't stall the SSE read.
+                            if on_token is not None and not slot.get(
+                                "_token_name_sent"
+                            ):
+                                slot["_token_name_sent"] = True
+                                try:
+                                    on_token(
+                                        {
+                                            "content": "",
+                                            "reasoning": "",
+                                            "tool_name": slot["function"]["name"],
+                                        }
                                     )
+                                except Exception:
+                                    pass
                         if fn.get("arguments"):
                             slot["function"]["arguments"] = (
                                 slot["function"].get("arguments", "") + fn["arguments"]
@@ -196,10 +265,15 @@ async def _read_sse_response(
                                 )
                                 if reason:
                                     slot["_reasoning_sent"] = True
-                                    with contextlib.suppress(Exception):
-                                        await on_tool_call_name(
-                                            slot["function"]["name"], reason
+                                    cb = on_tool_call_name
+                                    args = (slot["function"]["name"], reason)
+                                    try:
+                                        asyncio.create_task(
+                                            _safe_call(cb, *args)
                                         )
+                                    except RuntimeError:
+                                        with contextlib.suppress(Exception):
+                                            await cb(*args)
                 if choice.get("finish_reason"):
                     finish_reason = choice["finish_reason"]
             # Some providers stream usage in the final frame (Anthropic-style
@@ -593,6 +667,7 @@ class OllamaProvider:
         media: list[dict] = None,
         timeout: int = 3600,
         on_tool_call_name=None,
+        on_token=None,
         **kwargs,
     ) -> str:
         """Generate response. images is legacy b64 list, media is list of {b64, mime_type}.
@@ -617,6 +692,7 @@ class OllamaProvider:
                 media=media,
                 timeout=timeout,
                 on_tool_call_name=on_tool_call_name,
+                on_token=on_token,
                 **kwargs,
             )
         except RuntimeError as e:
@@ -684,6 +760,7 @@ class OllamaProvider:
         disable_reasoning: bool = None,
         fast_fallback: bool = False,
         on_tool_call_name=None,
+        on_token=None,
     ) -> dict:
         """Generate an OpenAI-compatible assistant message, optionally with tools.
 
@@ -1033,7 +1110,9 @@ class OllamaProvider:
                     json_ms = 0.0
                     if data.get("stream"):
                         merged = await _read_sse_response(
-                            resp, on_tool_call_name=on_tool_call_name
+                            resp,
+                            on_tool_call_name=on_tool_call_name,
+                            on_token=on_token,
                         )
                         result = {
                             k: v for k, v in merged.items() if not k.startswith("__")
