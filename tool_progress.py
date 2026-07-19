@@ -356,8 +356,13 @@ class ToolProgress:
             # storms during a single kimi-k2.6 generation. Now only the first
             # coroutine that wins the lock actually edits; the rest see an
             # updated _last_edit and bail. Same 1.5s cadence, just serialized.
+            #
+            # Also exempt the very first tick after start() — the user just
+            # saw "working on it…" and is waiting; the model's first coherent
+            # sentence is worth an edit slot even though start() set the
+            # throttle timestamp a few hundred ms ago.
             now = time.monotonic()
-            first_flush = self._edits_made == 0
+            first_flush = self._edits_made == 0 or not self._first_tick_done
             if not first_flush and now - self._last_edit < _TOKEN_TICK_INTERVAL:
                 logger.debug(
                     "[PROGRESS] flush coalesced under lock: elapsed=%.3fs threshold=%.3fs",
@@ -370,6 +375,7 @@ class ToolProgress:
                 self._last_edit = time.monotonic()
                 self._last_content = content
                 self._edits_made += 1
+                self._first_tick_done = True
             except Exception as e:  # noqa: BLE001
                 logger.debug("Progress edit failed (%s) — disabling further edits", e)
                 self._posted = None
@@ -403,9 +409,12 @@ class ToolProgress:
           - Reasoning phase with at least one full sentence:
             'thinking: <last full sentence>'. Only complete sentences
             are shown; partial fragments wait for a terminator.
-          - Tool active with at least one full sentence of reasoning:
-            '<last full sentence>'. No 'tool:' prefix.
-          - Tool active but no complete sentence yet: 'working…'.
+          - Tool active: '<tool>: <last full sentence>'. The tool name
+            comes first (so the user instantly sees which tool the
+            model committed to), followed by the latest complete
+            sentence of the model's reasoning or the tool's own
+            description. If there's no complete sentence yet, the
+            line is just '<tool>: generating…'.
 
         2026-07-19 directive: only show whole sentences on the
         progress line, never partials. _has_meaningful_reasoning()
@@ -416,8 +425,8 @@ class ToolProgress:
         if self._current_tool:
             last = _last_full_sentence(self._reasoning_buffer)
             if last:
-                return last
-            return "working…"
+                return f"{self._current_tool}: {last}"
+            return f"{self._current_tool}: generating…"
         if not self._has_meaningful_reasoning():
             return "working on it…"
         return f"thinking: {_last_full_sentence(self._reasoning_buffer)}"

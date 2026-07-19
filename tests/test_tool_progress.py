@@ -97,9 +97,8 @@ def test_half_sentence_reasoning_stays_at_placeholder():
     """A reasoning buffer with no terminator must NOT render as a
     partial sentence. The user explicitly said 'must be full sentence
     to show, not parts'. Buffer of 'the user wants me to look at' with
-    no terminator -> 'working…' until the model emits a period.
-    (Once a tool is set, the placeholder is 'working…'; before any
-    tool commits it's 'working on it…'.)"""
+    no terminator -> '<tool>: generating…' until the model emits a
+    period. (Before any tool commits it's 'working on it…'.)"""
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
@@ -109,12 +108,12 @@ def test_half_sentence_reasoning_stays_at_placeholder():
     # Set a tool but the reasoning buffer has no terminator yet.
     prog._last_edit = 0
     asyncio.run(prog.update("shell", "the user wants me to look at"))
-    # Tool is set; no full sentence yet -> 'working…' (the tool-active
-    # placeholder; the bot has committed to a tool but the model hasn't
-    # finished a thought).
-    assert msg_obj.content == "working…"
+    # Tool is set; no full sentence yet -> 'shell: generating…' (the
+    # tool-active placeholder; the bot has committed to a tool but the
+    # model hasn't finished a thought).
+    assert msg_obj.content == "shell: generating…"
     # Add a terminator and a follow-up sentence — now the LAST full
-    # sentence is rendered, not the half-sentence plus everything.
+    # sentence is rendered, with the tool-name prefix.
     prog._last_edit = 0
     asyncio.run(
         prog.update(
@@ -122,7 +121,7 @@ def test_half_sentence_reasoning_stays_at_placeholder():
             "the user wants me to look at the disk and report back. They asked about space.",
         )
     )
-    assert msg_obj.content == "They asked about space."
+    assert msg_obj.content == "shell: They asked about space."
     asyncio.run(prog.stop())
 
 
@@ -136,25 +135,25 @@ def test_update_replaces_in_place_one_sentence():
     # per the 2026-07-19 'show whole sentences only' directive.
     prog._last_edit = 0
     asyncio.run(prog.update("shell", "checking disk usage."))
-    assert msg_obj.content == "checking disk usage."
-    # New sentence — replaces
+    assert msg_obj.content == "shell: checking disk usage."
+    # New sentence + new tool — replaces with the new tool prefix
     prog._last_edit = 0
     asyncio.run(prog.update("web_search", "searching the docs."))
-    # Tool name is NOT prefixed; just the model's own sentence.
-    assert msg_obj.content == "searching the docs."
+    assert msg_obj.content == "web_search: searching the docs."
     asyncio.run(prog.stop())
 
 
 def test_update_uses_models_own_words():
-    """The reason field IS the message — no decoration, no backticks, no emoji."""
+    """The reason field IS the message — no decoration, no backticks, no emoji.
+    The tool name now leads the line so the user sees which tool is running."""
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
     msg_obj = msg.channel.sent[0]
     prog._last_edit = 0
-    # Must end with a terminator; partial fragments stay as 'working…'.
+    # Must end with a terminator; partial fragments stay as the placeholder.
     asyncio.run(prog.update("shell", "verifying apt sources are sane."))
-    assert msg_obj.content == "verifying apt sources are sane."
+    assert msg_obj.content == "shell: verifying apt sources are sane."
     # No emoji, no backticks
     assert "⏳" not in msg_obj.content
     assert "`" not in msg_obj.content
@@ -188,7 +187,7 @@ def test_rate_limit_coalesces_rapid_updates():
     # be a full sentence to pass the meaningful-reasoning gate.
     prog._last_edit = 0
     asyncio.run(prog.update("shell", "doing thing one."))
-    assert msg_obj.content == "doing thing one."
+    assert msg_obj.content == "shell: doing thing one."
     # Second update immediately — should be cached but NOT edited
     edits_before = len(msg.channel.edited)
     asyncio.run(prog.update("shell", "doing thing two."))
@@ -278,9 +277,8 @@ def test_long_reasoning_truncated_to_one_sentence():
     content = msg_obj.content
     # One line
     assert "\n" not in content
-    # Whole-sentence render: just the complete sentence, no prefix,
-    # no truncation of a partial mid-thought.
-    assert content == "checking disk usage and memory now."
+    # Whole-sentence render with the tool-name prefix.
+    assert content == "shell: checking disk usage and memory now."
     asyncio.run(prog.stop())
 
 
@@ -379,12 +377,12 @@ def test_tick_accumulates_reasoning_text():
     asyncio.run(prog.stop())
 
 
-def test_tick_tool_name_drops_thinking_prefix():
-    """When tick() is called with tool_name, the visible line drops the
-    'thinking:' prefix and just shows the reasoning. The 2026-07-19 UX
-    report said '<tool>: <reasoning>' reads as the bot shouting its
-    own name — we don't include the tool name on the visible line at
-    all, just the model's reasoning."""
+def test_tick_tool_name_shows_tool_prefix():
+    """When tick() is called with tool_name, the visible line is prefixed
+    with the tool name so the user sees which tool the model committed to.
+    The reasoning sentence (if complete) follows after a colon. The
+    2026-07-19 UX reversal: '<tool>: <reasoning>' IS desired — the user
+    wants to see the tool name in flight, not just the assistant's words."""
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
@@ -395,10 +393,14 @@ def test_tick_tool_name_drops_thinking_prefix():
     assert msg_obj.content.startswith("thinking:")
     # Now the model commits to a tool — the very first tool_name tick
     # must go through even if we're inside the rate-limit window, and
-    # it drops the 'thinking:' prefix in favour of bare reasoning.
+    # it shows the tool name on the visible line.
     prog._last_edit = 0
     asyncio.run(prog.tick(reasoning_delta="", tool_name="lookup_user"))
-    assert "lookup_user:" not in msg_obj.content
+    assert "lookup_user" in msg_obj.content
+    # The reasoning sentence is preserved after the tool name.
+    assert "Let me check that user." in msg_obj.content
+    # And the old 'thinking:' prefix is gone.
+    assert not msg_obj.content.startswith("thinking:")
     assert "thinking:" not in msg_obj.content
     asyncio.run(prog.stop())
 
