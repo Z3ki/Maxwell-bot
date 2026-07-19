@@ -1059,12 +1059,46 @@ def strip_tool_payload_leaks(text: str) -> str:
     cleaned = re.sub(
         r"<think\b[^>]*>.*?</think>", "", cleaned, flags=re.IGNORECASE | re.DOTALL
     )
-    cleaned = re.sub(
-        r"^\s*\{[\s\S]*?(?:\"thoughts\"|\"intent\"|\"decision\"|\"tool_plan\")[\s\S]*?\}\s*",
-        "",
-        cleaned,
-        flags=re.IGNORECASE,
+    # Strip leading JSON decision/tool-call blocks. The previous trigger set
+    # missed models that invent their own keys ("reasoning", "name", "arguments",
+    # "emoji") and emit the raw tool JSON as their visible reply. Match any JSON
+    # object that LOOKS like a tool invocation: has both a "name"/"tool" key and
+    # an "arguments"/"parameters" key, OR has a "thoughts" key.
+    tool_call_obj_re = re.compile(
+        r"\{(?:[^{}]|\{[^{}]*\})*?"
+        r"(?:\"name\"|\"tool\"|\"tool_name\"|\"function\")"
+        r"(?:[^{}]|\{[^{}]*\})*?"
+        r"(?:\"arguments\"|\"parameters\"|\"input\")"
+        r"(?:[^{}]|\{[^{}]*\})*\}",
+        re.IGNORECASE | re.DOTALL,
     )
+    cleaned = tool_call_obj_re.sub("", cleaned)
+    # Also catch decision objects that have just a "reasoning" / "intent" / etc key
+    # but no proper arguments block — the model is leaking its scratchpad.
+    decision_obj_re = re.compile(
+        r"^\s*\{[\s\S]*?"
+        r"(?:\"thoughts\"|\"intent\"|\"decision\"|\"tool_plan\"|\"reasoning\"|"
+        r"\"internal_monologue\"|\"plan\"|\"action_plan\")"
+        r"[\s\S]*?\}\s*",
+        re.IGNORECASE,
+    )
+    cleaned = decision_obj_re.sub("", cleaned)
+    # Final catch-all: if a reply is *just* a JSON object (possibly with surrounding
+    # whitespace / quotes), treat it as a leak. Real replies don't start with `{`.
+    if cleaned.strip().startswith("{") and cleaned.strip().endswith("}"):
+        try:
+            parsed = json.loads(cleaned.strip())
+            if isinstance(parsed, dict):
+                # Heuristic: if it has any key that smells like a tool or a thought,
+                # nuke the whole thing. If it has 2+ known tool keys, definitely.
+                tool_keys = {"name", "tool", "tool_name", "function", "arguments",
+                             "parameters", "input", "emoji", "reasoning", "thoughts",
+                             "intent", "decision", "tool_plan", "internal_monologue"}
+                hits = sum(1 for k in parsed if k.lower() in tool_keys)
+                if hits >= 1 and len(parsed) <= 8:
+                    cleaned = ""
+        except Exception:
+            pass
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     if len(cleaned) < len(original) * 0.95 and logger.isEnabledFor(logging.DEBUG):
         # Significant sanitization happened; helps debug persistent leak issues without always logging.
@@ -6362,7 +6396,7 @@ class MaxwellBot(commands.Bot):
         def _on_token(tok: dict) -> None:
             if gen_progress is None:
                 return
-            try:
+            with contextlib.suppress(RuntimeError):
                 # Schedule the coroutine on the running loop. tick() itself
                 # is async because it may need to await a Discord edit, but
                 # the SSE reader must NOT be blocked on a slow edit (it would
@@ -6374,9 +6408,6 @@ class MaxwellBot(commands.Bot):
                         tool_name=tok.get("tool_name"),
                     )
                 )
-            except RuntimeError:
-                # No running loop (shouldn't happen in normal use) — drop.
-                pass
 
         try:
             platform = MaxwellBot._message_tool_platform(self, message)
@@ -6614,7 +6645,7 @@ class MaxwellBot(commands.Bot):
                     def _on_followup_token(tok: dict, _p=followup_progress) -> None:
                         if _p is None:
                             return
-                        try:
+                        with contextlib.suppress(RuntimeError):
                             asyncio.create_task(
                                 _p.tick(
                                     reasoning_delta=tok.get("reasoning", "")
@@ -6622,8 +6653,6 @@ class MaxwellBot(commands.Bot):
                                     tool_name=tok.get("tool_name"),
                                 )
                             )
-                        except RuntimeError:
-                            pass
 
                     try:
                         followup = await self.ai_provider.generate_response(
@@ -6711,9 +6740,33 @@ class MaxwellBot(commands.Bot):
                 chunks = self._split_response(response, limit=1900)
                 for i, chunk in enumerate(chunks):
                     if i == 0:
-                        await message.reply(chunk)
+                        try:
+                            await message.reply(chunk)
+                        except discord.NotFound:
+                            # Referenced message was deleted between read and reply;
+                            # fall back to a plain channel send so the user still sees it.
+                            logger.warning(
+                                "message.reply hit 404 (deleted parent), falling back to channel.send in channel %s",
+                                getattr(message.channel, "id", "?"),
+                            )
+                            await message.channel.send(chunk)
+                        except discord.Forbidden:
+                            # No permission to send here; don't blow up the whole turn.
+                            logger.warning(
+                                "message.reply hit 403 (missing permissions) in channel %s",
+                                getattr(message.channel, "id", "?"),
+                            )
+                            break
                     else:
-                        await message.channel.send(chunk)
+                        try:
+                            await message.channel.send(chunk)
+                        except (discord.Forbidden, discord.NotFound) as send_exc:
+                            logger.warning(
+                                "follow-up chunk send failed (%s) in channel %s",
+                                send_exc.__class__.__name__,
+                                getattr(message.channel, "id", "?"),
+                            )
+                            break
                     if len(chunks) > 1:
                         await asyncio.sleep(0.3)
                 await self._record_rem_event(message, "assistant", response)
