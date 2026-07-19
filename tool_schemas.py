@@ -224,9 +224,7 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         },
         ["url"],
     ),
-    "send_meme": _obj(
-        {"subreddit": _str("Optional subreddit name (e.g. me_irl)")}
-    ),
+    "send_meme": _obj({"subreddit": _str("Optional subreddit name (e.g. me_irl)")}),
     "send_media": _obj(
         {"url": _str("Direct media URL to attach")},
         ["url"],
@@ -249,6 +247,45 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             ),
         },
         ["task"],
+    ),
+    # maxwell@z3ki.dev email — local MTA. Bot talks to local Postfix
+    # (127.0.0.1:25, SMTP+STARTTLS+SASL) and local Dovecot (127.0.0.1:993,
+    # IMAPS+SASL). No third-party relay. See bot_tools.py and
+    # email_integration/README.md.
+    "email_send": _obj(
+        {
+            "to": _str(
+                "Recipient(s). Comma-separated for multiple. e.g. 'a@x.com, b@y.com'"
+            ),
+            "subject": _str("Email subject line"),
+            "body": _str("Plain text or HTML body (set is_html=true for HTML)"),
+            "is_html": _bool("If true, body is sent as HTML. Default false."),
+            "reply_to": _str("Optional Reply-To address"),
+            "cc": _str("Optional comma-separated CC list"),
+            "bcc": _str("Optional comma-separated BCC list"),
+        },
+        ["to", "subject", "body"],
+    ),
+    "email_read_inbox": _obj(
+        {
+            "max_results": _int("Max messages to return (default 10, max 50)"),
+            "days_back": _int("Bound the window in days (default 7, max 90)"),
+            "unread_only": _bool("If true, only show unread mail (default false)"),
+        }
+    ),
+    "email_get_message": _obj(
+        {
+            "message_id": _str("Message id (from email_read_inbox or email_search)"),
+            "max_chars": _int("Max body characters to return (default 8000)"),
+        },
+        ["message_id"],
+    ),
+    "email_search": _obj(
+        {
+            "query": _str("Free-text query, e.g. 'github', 'invoice', 'unsubscribe'"),
+            "max_results": _int("Max matches to return (default 10, max 50)"),
+        },
+        ["query"],
     ),
 }
 

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, cast
 import contextlib
 import html
+import ssl
 import wave
 
 import asyncio
@@ -1016,6 +1017,7 @@ class SetActivityTool(Tool):
         # no channel echo, no LLM-visible text — the user can see it
         # themselves without the bot narrating the change.
         return ""
+
 
 class SleepTool(Tool):
     """Take a sleep window. While sleeping the bot won't dispatch
@@ -4298,3 +4300,803 @@ class SubAgentTool(Tool):
         except Exception as e:
             logger.exception("Failed to start sub-agent")
             return f"Error starting sub-agent: {e}"
+
+
+# =============================================================================
+# Email tools (maxwell@z3ki.dev) — local MTA only
+#
+# Design note — read this before you touch any of the classes below:
+#
+# Sending and receiving both go through Postfix+Dovecot on localhost.
+# Outbound: bot connects to 127.0.0.1:25, EHLO, STARTTLS, SASL PLAIN, MAIL FROM,
+#   RCPT TO, DATA. Postfix handles all DNS lookup, queueing, retry, and the
+#   actual TCP hand-off to the recipient's MX. We never touch port 25 directly.
+# Inbound: bot connects to 127.0.0.1:993 (IMAPS), SASL PLAIN, SELECT INBOX,
+#   FETCH. Mail is delivered to /var/mail/vmail/z3ki.dev/maxwell/ via the
+#   Postfix virtual(5) transport, which is maildir-format. Dovecot serves it
+#   over IMAP.
+#
+# No Mailgun, no Gmail, no third party. Pure VPS, by design. The cost of that
+# is that Contabo's IP range is on most DNSBLs, so mail we send to Gmail/Outlook/
+# Yahoo will land in spam or get rejected outright (we already saw Gmail return
+# 550 5.7.26 — "your email has been blocked because the sender is unauthenticated"
+# — because there's no SPF or DKIM yet). When the operator finishes the manual
+# DNS work (SPF + DKIM TXT records) and opendkim is wired in, the situation
+# improves. The tools themselves don't care either way.
+#
+# The blocking I/O (`smtplib`, `imaplib`) runs through asyncio.to_thread so
+# the bot's event loop isn't held up by a 30-second SMTP timeout. This is the
+# same pattern other tools in this file use implicitly.
+# =============================================================================
+
+
+def _email_cfg(bot) -> dict:
+    """Pull the email-related config keys in one place.
+
+    Defaults are tuned for the local Postfix+Dovecot setup; if the operator
+    ever wants to point the bot at a remote SMTP/IMAP server (e.g. for
+    testing against Mailgun's sandbox), they only edit env vars, not code.
+    """
+    cfg = getattr(bot, "config", None)
+    return {
+        "host": getattr(cfg, "MAXWELL_SMTP_HOST", "127.0.0.1"),
+        "smtp_port": int(getattr(cfg, "MAXWELL_SMTP_PORT", "25")),
+        "imap_host": getattr(cfg, "MAXWELL_IMAP_HOST", "127.0.0.1"),
+        "imap_port": int(getattr(cfg, "MAXWELL_IMAP_PORT", "993")),
+        "user": getattr(cfg, "MAXWELL_EMAIL_USER", "maxwell@z3ki.dev"),
+        "password": getattr(cfg, "MAXWELL_EMAIL_PASSWORD", ""),
+        "from_addr": getattr(cfg, "MAXWELL_EMAIL_FROM", "maxwell@z3ki.dev"),
+        "from_name": getattr(cfg, "MAXWELL_EMAIL_FROM_NAME", "Maxwell"),
+    }
+
+
+def _smtp_send_sync(
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    from_addr: str,
+    from_name: str,
+    to_addrs: list[str],
+    cc_addrs: list[str],
+    bcc_addrs: list[str],
+    subject: str,
+    body: str,
+    is_html: bool,
+    reply_to: str | None,
+) -> str:
+    """Blocking SMTP send. Runs in a thread.
+
+    Returns a one-line status string the bot shows the user. On failure,
+    returns "Error: ..." with the underlying exception's text, truncated.
+    """
+    import smtplib
+    from email.message import EmailMessage
+    from email.utils import formatdate, make_msgid
+
+    msg = EmailMessage()
+    msg["From"] = f"{from_name} <{from_addr}>" if from_name else from_addr
+    msg["To"] = ", ".join(to_addrs)
+    if cc_addrs:
+        msg["Cc"] = ", ".join(cc_addrs)
+    msg["Subject"] = subject
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid(domain=from_addr.split("@", 1)[-1])
+    if reply_to:
+        msg["Reply-To"] = reply_to
+    if is_html:
+        msg.set_content("This message requires an HTML-capable client.")
+        msg.add_alternative(body, subtype="html")
+    else:
+        msg.set_content(body)
+
+    # All recipients in one RCPT TO list, including BCC. Postfix delivers
+    # to each. BCC addresses are stripped from headers (EmailMessage does
+    # this automatically) but still in the envelope.
+    all_rcpts = to_addrs + cc_addrs + bcc_addrs
+
+    # Per-recipient timeout is the right knob here. 30s connects +
+    # 60s message I/O is generous; a hung SMTP server shouldn't keep us
+    # in a thread for longer than that.
+    timeout = 60
+    with smtplib.SMTP(host, port, timeout=timeout) as s:
+        s.ehlo()
+        # STARTTLS or nothing. The local MTA requires it (smtpd_tls_auth_only=yes);
+        # if we ever point at a remote server without TLS, that server's not
+        # one we should be talking to.
+        s.starttls()
+        s.ehlo()
+        s.login(user, password)
+        refused = s.sendmail(from_addr, all_rcpts, msg.as_string())
+    if refused:
+        # sendmail returns a dict of {recipient: error} for any it couldn't
+        # queue. Postfix should queue everything if the recipient domain is
+        # real; if we see something here, treat it as a hard error.
+        return "Error: SMTP refused recipients: " + ", ".join(
+            f"{r}: {e}" for r, e in refused.items()
+        )
+    return f"Email queued for {len(all_rcpts)} recipient(s)."
+
+
+def _imap_connect_sync(host: str, port: int, user: str, password: str):
+    """Open IMAPS, return the connection. Caller must close it.
+
+    Use the public Mailbox API instead of poking the raw IMAP4 object; the
+    high-level API handles quoting/escaping and gives a sane exception
+    hierarchy (imaplib.IMAP4.error) on auth or protocol failures.
+    """
+    import imaplib
+
+    # The local Dovecot uses a self-signed snakeoil cert. We don't want
+    # to make every email read fail with CERTIFICATE_VERIFY_FAILED, so
+    # we build a context that doesn't verify. If you swap to a real cert
+    # later, remove this and let the default validation apply.
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    M = imaplib.IMAP4_SSL(host, port, ssl_context=ctx)
+    M.login(user, password)
+    return M
+
+
+def _imap_list_recent_sync(
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    limit: int,
+    days_back: int,
+    unread_only: bool,
+) -> str:
+    """List recent messages in INBOX. Returns a multi-line string for the model."""
+    M = _imap_connect_sync(host, port, user, password)
+    try:
+        M.select("INBOX")
+        # Build the IMAP search criteria. We use SINCE for date bounding
+        # because it's the most universally supported. The cutoff is
+        # today - days_back, which Dovecot's IMAP server computes from
+        # the local clock. SUBJECT and other keys aren't relevant here.
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = datetime.now(timezone.utc).date() - timedelta(days=days_back)
+        # IMAP date format is DD-Mon-YYYY, locale-independent.
+        date_str = cutoff.strftime("%d-%b-%Y")
+        criteria_parts = [f"SINCE {date_str}"]
+        if unread_only:
+            criteria_parts.append("UNSEEN")
+        criteria = " ".join(criteria_parts)
+        typ, data = M.search(None, criteria)
+        if typ != "OK" or not data or not data[0]:
+            return "Inbox is empty for the given filter."
+        ids = data[0].split()[-limit:]  # most recent N (highest UIDs last)
+        if not ids:
+            return "Inbox is empty for the given filter."
+
+        # Fetch ENVELOPE for each id — From, Subject, Date, Size, etc. in
+        # one round-trip per message. RFC822.HEADER would pull the whole
+        # header block; ENVELOPE is the structured form, easier on the
+        # model and on the wire.
+        lines: list[str] = []
+        for mid in ids:
+            typ, msgdata = M.fetch(mid, "(ENVELOPE)")
+            if typ != "OK" or not msgdata or not msgdata[0]:
+                lines.append(f"- id={mid.decode(errors='replace')} (fetch failed)")
+                continue
+            # imaplib's response shape varies by server. Dovecot collapses
+            # the inline literal into a single response line so msgdata[0]
+            # is one bytes blob: b'5 (ENVELOPE ("Sun..." ...))'. Older
+            # servers split into two tuple entries. Handle both: pick the
+            # first entry that's a bytes object (NOT an int — iterating
+            # bytes would give ints, and a single bytes entry is what we
+            # actually want).
+            try:
+                env_bytes: bytes | None = None
+                if isinstance(msgdata[0], bytes):
+                    env_bytes = msgdata[0]
+                else:
+                    for entry in msgdata[0]:
+                        if isinstance(entry, bytes):
+                            env_bytes = entry
+                            break
+                if env_bytes is None:
+                    lines.append(
+                        f"- id={mid.decode(errors='replace')} (no envelope in response)"
+                    )
+                    continue
+                env = env_bytes.decode("utf-8", errors="replace")
+                # Strip the "mid (ENVELOPE " prefix and trailing ")".
+                idx = env.find("(ENVELOPE ")
+                if idx < 0:
+                    lines.append(
+                        f"- id={mid.decode(errors='replace')} (no envelope marker)"
+                    )
+                    continue
+                env = env[idx + len("(ENVELOPE ") :]
+                # Trim the trailing ")". We need to do this at the right
+                # depth because the envelope contains nested parens.
+                # The closing of ENVELOPE is the LAST ")" at depth 0.
+                depth = 0
+                end_idx = -1
+                for i, ch in enumerate(env):
+                    if ch == "(":
+                        depth += 1
+                    elif ch == ")":
+                        if depth == 0:
+                            end_idx = i
+                            break
+                        depth -= 1
+                if end_idx > 0:
+                    env = env[:end_idx]
+                # ENVELOPE is now `(date subject from sender reply-to to
+                # cc bcc in-reply-to message-id)`. We want from/subject/date.
+                from_addr = _imap_extract_envelope_field(env, "from")
+                subj = _imap_extract_envelope_field(env, "subject")
+                date = _imap_extract_envelope_field(env, "date")
+            except Exception as e:
+                lines.append(f"- id={mid.decode(errors='replace')} (parse failed: {e})")
+                continue
+            lines.append(
+                f"- id={mid.decode(errors='replace')}\n"
+                f"  From: {from_addr}\n"
+                f"  Subject: {subj}\n"
+                f"  Date: {date}"
+            )
+        return f"Found {len(lines)} message(s):\n\n" + "\n\n".join(lines)
+    finally:
+        contextlib.suppress(Exception)
+        M.close()
+        contextlib.suppress(Exception)
+        M.logout()
+
+
+def _imap_extract_envelope_field(envelope_str: str, field_name: str) -> str:
+    """Pull one named field out of an IMAP ENVELOPE response.
+
+    The ENVELOPE response is a parenthesized space-separated list of NIL
+    markers and quoted strings. We walk it and match by position, since
+    the field order is fixed in the RFC. Returns '?' on any failure.
+    """
+    try:
+        if not envelope_str:
+            return "?"
+        # Strip the outer parens.
+        s = envelope_str.strip()
+        if s.startswith("("):
+            s = s[1:]
+        if s.endswith(")"):
+            s = s[:-1]
+
+        # Walk the parenthesized list, handling nested parens and quoted
+        # strings. The ENVELOPE structure has nested parens around
+        # address lists, so this is more than a split() away.
+        tokens = _imap_tokenize(s)
+        # Field order: date subject from sender reply-to to cc bcc
+        # in-reply-to message-id
+        order = [
+            "date",
+            "subject",
+            "from",
+            "sender",
+            "reply-to",
+            "to",
+            "cc",
+            "bcc",
+            "in-reply-to",
+            "message-id",
+        ]
+        if field_name not in order:
+            return "?"
+        # Skip the fields we don't want.
+        idx = order.index(field_name)
+        return _imap_format_envelope_value(tokens, idx)
+    except Exception:
+        return "?"
+
+
+def _imap_tokenize(s: str) -> list[str]:
+    """Tokenize an IMAP parenthesized list into top-level entries.
+
+    Handles nested parens and quoted strings with escapes. Returns each
+    top-level item as a string (with its own surrounding parens kept
+    where relevant, or NIL for empty).
+    """
+    out: list[str] = []
+    i = 0
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if c.isspace():
+            i += 1
+            continue
+        if c == "(":
+            # Find matching close, handling nested.
+            depth = 1
+            j = i + 1
+            while j < n and depth > 0:
+                if s[j] == "(":
+                    depth += 1
+                elif s[j] == ")":
+                    depth -= 1
+                j += 1
+            out.append(s[i:j])
+            i = j
+            continue
+        if c == '"':
+            # Quoted string; collect until matching unescaped quote.
+            j = i + 1
+            buf: list[str] = ['"']
+            while j < n:
+                if s[j] == "\\" and j + 1 < n:
+                    buf.append(s[j : j + 2])
+                    j += 2
+                    continue
+                if s[j] == '"':
+                    buf.append('"')
+                    j += 1
+                    break
+                buf.append(s[j])
+                j += 1
+            out.append("".join(buf))
+            i = j
+            continue
+        if s[i : i + 3] == "NIL":
+            out.append("NIL")
+            i += 3
+            continue
+        # Atom (unquoted, no spaces/parens).
+        j = i
+        while j < n and not s[j].isspace() and s[j] not in "()":
+            j += 1
+        out.append(s[i:j])
+        i = j
+    return out
+
+
+def _imap_format_envelope_value(tokens: list[str], field_index: int) -> str:
+    """Render a single ENVELOPE field for the model.
+
+    The "from", "to", "cc", "bcc" fields are parenthesized address lists
+    of the form `((name route mailbox host))`. We collapse those into
+    "Name <mailbox@host>" or just "mailbox@host" when no name. Other
+    fields (date, subject, message-id) are quoted strings or NIL — we
+    unwrap quotes and return the bare value.
+    """
+    if field_index >= len(tokens):
+        return "?"
+    tok = tokens[field_index]
+    if tok == "NIL":
+        return ""
+    if tok.startswith("("):
+        # Address list. Walk it and format each entry.
+        return _imap_format_address_list(tok)
+    if tok.startswith('"') and tok.endswith('"'):
+        return tok[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    return tok
+
+
+def _imap_format_address_list(s: str) -> str:
+    """Render `((name route mailbox host) ...)` as comma-separated addresses."""
+    if not s:
+        return ""
+    inner = s.strip()
+    if inner.startswith("("):
+        inner = inner[1:]
+    if inner.endswith(")"):
+        inner = inner[:-1]
+    tokens = _imap_tokenize(inner)
+    addrs: list[str] = []
+    for tok in tokens:
+        if not tok.startswith("("):
+            continue
+        # Each address: (name route mailbox host)
+        a_inner = tok.strip()
+        if a_inner.startswith("("):
+            a_inner = a_inner[1:]
+        if a_inner.endswith(")"):
+            a_inner = a_inner[:-1]
+        parts = _imap_tokenize(a_inner)
+        # parts = [name, route, mailbox, host]
+        name = ""
+        if len(parts) >= 1 and parts[0] != "NIL":
+            name = parts[0]
+            if name.startswith('"') and name.endswith('"'):
+                name = name[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+        mailbox = ""
+        if len(parts) >= 3 and parts[2] != "NIL":
+            mailbox = parts[2]
+            if mailbox.startswith('"') and mailbox.endswith('"'):
+                mailbox = mailbox[1:-1]
+        host = ""
+        if len(parts) >= 4 and parts[3] != "NIL":
+            host = parts[3]
+            if host.startswith('"') and host.endswith('"'):
+                host = host[1:-1]
+        addr = f"{mailbox}@{host}" if host else mailbox
+        if name:
+            addrs.append(f"{name} <{addr}>")
+        else:
+            addrs.append(addr)
+    return ", ".join(addrs)
+
+
+def _imap_get_message_sync(
+    host: str, port: int, user: str, password: str, message_id: str, max_chars: int
+) -> str:
+    """Fetch one message and return its headers + body, capped at max_chars."""
+    M = _imap_connect_sync(host, port, user, password)
+    try:
+        M.select("INBOX")
+        typ, data = M.fetch(message_id, "(RFC822)")
+        if typ != "OK" or not data or not data[0]:
+            return f"Error: IMAP fetch failed for message {message_id}"
+        raw = data[0][1]
+        if isinstance(raw, bytes):
+            raw_bytes = raw
+        else:
+            raw_bytes = raw.encode("utf-8", errors="replace")
+
+        from email import policy
+        from email.parser import BytesParser
+
+        msg = BytesParser(policy=policy.default).parsebytes(raw_bytes)
+        body = _extract_text_body(msg) or "(no plain-text body found)"
+        if len(body) > max_chars:
+            body = body[: max_chars - 1].rstrip() + "…"
+
+        from_addr = msg.get("From", "?")
+        to_addr = msg.get("To", "?")
+        subject = msg.get("Subject", "(no subject)")
+        date = msg.get("Date", "?")
+
+        out_lines = [
+            f"Message id: {message_id}",
+            f"From: {from_addr}",
+            f"To: {to_addr}",
+            f"Subject: {subject}",
+            f"Date: {date}",
+            "",
+            "---",
+            body,
+        ]
+        return "\n".join(out_lines)
+    finally:
+        contextlib.suppress(Exception)
+        M.close()
+        contextlib.suppress(Exception)
+        M.logout()
+
+
+def _extract_text_body(msg) -> str:
+    """Walk an email Message and return the best text body we can find.
+
+    Prefers text/plain. If only text/html is present, strips tags as a
+    last resort. Multipart/alternative is common: same content in two
+    formats, the model wants the plain one.
+    """
+    import re
+
+    # Walk parts in order; collect any text/plain we find. If we find
+    # multiple, the first is usually the most relevant.
+    plain: str | None = None
+    html: str | None = None
+    if msg.is_multipart():
+        for part in msg.walk():
+            ctype = part.get_content_type()
+            if ctype == "text/plain" and not part.is_multipart():
+                with contextlib.suppress(Exception):
+                    plain = part.get_content()
+                    break  # first text/plain wins
+            if ctype == "text/html" and html is None and not part.is_multipart():
+                with contextlib.suppress(Exception):
+                    html = part.get_content()
+        if plain is not None:
+            return plain
+        if html is not None:
+            return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html)).strip()
+    # Single-part message: try text/plain, then text/html, then raw.
+    try:
+        return msg.get_content()
+    except Exception:
+        try:
+            payload = msg.get_payload(decode=True) or b""
+            return payload.decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+
+def _imap_search_sync(
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    query: str,
+    limit: int,
+) -> str:
+    """Run an IMAP SEARCH and return matching message ids + envelopes."""
+    M = _imap_connect_sync(host, port, user, password)
+    try:
+        M.select("INBOX")
+        typ, data = M.search(None, f'TEXT "{query}"')
+        if typ != "OK" or not data or not data[0]:
+            return f"No messages matched: {query!r}"
+        ids = data[0].split()[-limit:]
+        if not ids:
+            return f"No messages matched: {query!r}"
+
+        # ENVELOPE for each so the model has subject/from without a second
+        # round-trip. Same shape as in the list tool above.
+        lines = [f"Search results for {query!r} ({len(ids)} match(es)):"]
+        for mid in ids:
+            typ, msgdata = M.fetch(mid, "(ENVELOPE)")
+            if typ != "OK" or not msgdata or not msgdata[0]:
+                lines.append(f"- id={mid.decode(errors='replace')}")
+                continue
+            try:
+                env_bytes: bytes | None = None
+                if isinstance(msgdata[0], bytes):
+                    env_bytes = msgdata[0]
+                else:
+                    for entry in msgdata[0]:
+                        if isinstance(entry, bytes):
+                            env_bytes = entry
+                            break
+                if env_bytes is None:
+                    lines.append(f"- id={mid.decode(errors='replace')}")
+                    continue
+                env = env_bytes.decode("utf-8", errors="replace")
+                idx = env.find("(ENVELOPE ")
+                if idx >= 0:
+                    env = env[idx + len("(ENVELOPE ") :]
+                    depth = 0
+                    end_idx = -1
+                    for i, ch in enumerate(env):
+                        if ch == "(":
+                            depth += 1
+                        elif ch == ")":
+                            if depth == 0:
+                                end_idx = i
+                                break
+                            depth -= 1
+                    if end_idx > 0:
+                        env = env[:end_idx]
+                from_addr = _imap_extract_envelope_field(env, "from")
+                subj = _imap_extract_envelope_field(env, "subject")
+                date = _imap_extract_envelope_field(env, "date")
+            except Exception:
+                from_addr = subj = date = "?"
+            lines.append(
+                f"- id={mid.decode(errors='replace')}\n"
+                f"  From: {from_addr}\n"
+                f"  Subject: {subj}\n"
+                f"  Date: {date}"
+            )
+        return "\n\n".join(lines)
+    finally:
+        contextlib.suppress(Exception)
+        M.close()
+        contextlib.suppress(Exception)
+        M.logout()
+
+
+class EmailSendTool(Tool):
+    """Send mail FROM the local mailbox via local Postfix."""
+
+    # Sending mail is the obvious prompt-injection target ("send my password
+    # to attacker@evil") and on a tainted turn the user has to confirm.
+    is_destructive: bool = True
+
+    def get_description(self) -> str:
+        return (
+            "Send an email from the bot's local mailbox (maxwell@z3ki.dev by default) "
+            "through the local Postfix instance on 127.0.0.1:25. No third-party relay; "
+            "Postfix handles delivery to the recipient's MX. "
+            "Params: to (required, comma-separated for multiple), subject (required), "
+            "body (required, plain text or HTML — set is_html=true for HTML), "
+            "is_html (optional bool, default false), reply_to (optional), "
+            "cc (optional, comma-separated), bcc (optional, comma-separated)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        to: str | None = None,
+        subject: str | None = None,
+        body: str | None = None,
+        is_html: str = "false",
+        reply_to: str | None = None,
+        cc: str | None = None,
+        bcc: str | None = None,
+        **kwargs,
+    ) -> str:
+        cfg = _email_cfg(self.bot)
+        if not cfg["password"]:
+            return (
+                "Error: local mail is not configured. Set MAXWELL_EMAIL_PASSWORD "
+                "in .env (the same password Dovecot knows about — /etc/dovecot/users)."
+            )
+        if not to or not str(to).strip():
+            return "Error: 'to' is required"
+        if not subject or not str(subject).strip():
+            return "Error: 'subject' is required"
+        if body is None:
+            return "Error: 'body' is required"
+
+        # Indirect-prompt-injection gate. If this turn was tainted by a
+        # fetched URL or web search result, refuse without an explicit user
+        # confirmation. Same pattern as shell/sub_agent.
+        tainted = bool(
+            self.bot is not None
+            and getattr(self.bot, "is_message_tainted", None)
+            and self.bot.is_message_tainted(message)
+        )
+        if tainted and not kwargs.get("_confirmed", False):
+            preview = str(body)[:200] + ("..." if len(str(body)) > 200 else "")
+            return (
+                "Error: email_send refused: this turn read content from a "
+                "fetched URL/web search that may carry prompt-injection "
+                "payloads. The user must confirm out-of-band with `,confirm` "
+                "(admins only) before this can run.\n"
+                f"Recipient: {to}\n"
+                f"Subject: {subject}\n"
+                f"Body preview: {preview}"
+            )
+
+        to_addrs = [a.strip() for a in str(to).split(",") if a.strip()]
+        cc_addrs = [a.strip() for a in str(cc).split(",") if a.strip()] if cc else []
+        bcc_addrs = [a.strip() for a in str(bcc).split(",") if a.strip()] if bcc else []
+
+        try:
+            return await asyncio.to_thread(
+                _smtp_send_sync,
+                cfg["host"],
+                cfg["smtp_port"],
+                cfg["user"],
+                cfg["password"],
+                cfg["from_addr"],
+                cfg["from_name"],
+                to_addrs,
+                cc_addrs,
+                bcc_addrs,
+                str(subject),
+                str(body),
+                str(is_html).lower() in {"1", "true", "yes"},
+                str(reply_to).strip() if reply_to else None,
+            )
+        except Exception as e:
+            return f"Error: SMTP send failed: {e}"
+
+
+class EmailReadInboxTool(Tool):
+    """List recent messages in the local mailbox."""
+
+    is_destructive: bool = False
+
+    def get_description(self) -> str:
+        return (
+            "Read recent emails from the local mailbox (maxwell@z3ki.dev). "
+            "Returns a compact list: id, from, subject, date. Use email_get_message "
+            "to fetch a message body. Params: max_results (optional, default 10, max 50), "
+            "days_back (optional, default 7, max 90), unread_only (optional bool, default false)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        max_results: str = "10",
+        days_back: str = "7",
+        unread_only: str = "false",
+        **kwargs,
+    ) -> str:
+        cfg = _email_cfg(self.bot)
+        if not cfg["password"]:
+            return (
+                "Error: local mail is not configured. Set MAXWELL_EMAIL_PASSWORD "
+                "in .env (the same password Dovecot knows about — /etc/dovecot/users)."
+            )
+        try:
+            limit = max(1, min(int(max_results), 50))
+        except (TypeError, ValueError):
+            limit = 10
+        try:
+            days = max(0, min(int(days_back), 90))
+        except (TypeError, ValueError):
+            days = 7
+        try:
+            return await asyncio.to_thread(
+                _imap_list_recent_sync,
+                cfg["imap_host"],
+                cfg["imap_port"],
+                cfg["user"],
+                cfg["password"],
+                limit,
+                days,
+                str(unread_only).lower() in {"1", "true", "yes"},
+            )
+        except Exception as e:
+            return f"Error: IMAP read failed: {e}"
+
+
+class EmailGetMessageTool(Tool):
+    """Fetch the full body of a single local message by id."""
+
+    is_destructive: bool = False
+
+    def get_description(self) -> str:
+        return (
+            "Fetch the full body and headers of a single email by its id. "
+            "Get the id from email_read_inbox or email_search. Params: message_id (required), "
+            "max_chars (optional, default 8000) — caps the returned body length."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        message_id: str | None = None,
+        max_chars: str = "8000",
+        **kwargs,
+    ) -> str:
+        if not message_id or not str(message_id).strip():
+            return "Error: message_id is required"
+        try:
+            cap = max(200, min(int(max_chars), 50000))
+        except (TypeError, ValueError):
+            cap = 8000
+
+        cfg = _email_cfg(self.bot)
+        if not cfg["password"]:
+            return "Error: local mail is not configured. Set MAXWELL_EMAIL_PASSWORD in .env."
+        try:
+            return await asyncio.to_thread(
+                _imap_get_message_sync,
+                cfg["imap_host"],
+                cfg["imap_port"],
+                cfg["user"],
+                cfg["password"],
+                str(message_id).strip(),
+                cap,
+            )
+        except Exception as e:
+            return f"Error: IMAP fetch failed: {e}"
+
+
+class EmailSearchTool(Tool):
+    """Full-text search of the local mailbox."""
+
+    is_destructive: bool = False
+
+    def get_description(self) -> str:
+        return (
+            "Search the local mailbox (maxwell@z3ki.dev) using IMAP TEXT search. "
+            "Params: query (required, e.g. 'github', 'invoice', 'from:support'), "
+            "max_results (optional, default 10, max 50). Returns matching message ids "
+            "plus subject/from/date. Use email_get_message to read the body."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        query: str | None = None,
+        max_results: str = "10",
+        **kwargs,
+    ) -> str:
+        if not query or not str(query).strip():
+            return "Error: query is required"
+        try:
+            limit = max(1, min(int(max_results), 50))
+        except (TypeError, ValueError):
+            limit = 10
+        cfg = _email_cfg(self.bot)
+        if not cfg["password"]:
+            return "Error: local mail is not configured. Set MAXWELL_EMAIL_PASSWORD in .env."
+        try:
+            return await asyncio.to_thread(
+                _imap_search_sync,
+                cfg["imap_host"],
+                cfg["imap_port"],
+                cfg["user"],
+                cfg["password"],
+                str(query).strip(),
+                limit,
+            )
+        except Exception as e:
+            return f"Error: IMAP search failed: {e}"

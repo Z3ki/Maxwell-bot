@@ -144,6 +144,21 @@ class Config:
         "MAXWELL_CORS_ORIGIN", MAXWELL_PUBLIC_BASE_URL.rstrip("/")
     )
 
+    # Local mail (maxwell@z3ki.dev). Bot talks to local Postfix for
+    # outbound and local Dovecot for inbound; no third-party relay. The
+    # default host/port values match the Postfix+Dovecot setup documented
+    # in email_integration/README.md. Override the env vars only if you
+    # intentionally point the bot at a different mail server (debugging,
+    # testing against a sandbox, etc.).
+    MAXWELL_SMTP_HOST = os.getenv("MAXWELL_SMTP_HOST", "127.0.0.1").strip()
+    MAXWELL_SMTP_PORT = _int_env("MAXWELL_SMTP_PORT", 25, min_value=1, max_value=65535)
+    MAXWELL_IMAP_HOST = os.getenv("MAXWELL_IMAP_HOST", "127.0.0.1").strip()
+    MAXWELL_IMAP_PORT = _int_env("MAXWELL_IMAP_PORT", 993, min_value=1, max_value=65535)
+    MAXWELL_EMAIL_USER = os.getenv("MAXWELL_EMAIL_USER", "maxwell@z3ki.dev").strip()
+    MAXWELL_EMAIL_PASSWORD = os.getenv("MAXWELL_EMAIL_PASSWORD", "").strip()
+    MAXWELL_EMAIL_FROM = os.getenv("MAXWELL_EMAIL_FROM", "maxwell@z3ki.dev").strip()
+    MAXWELL_EMAIL_FROM_NAME = os.getenv("MAXWELL_EMAIL_FROM_NAME", "Maxwell").strip()
+
     @classmethod
     def validate(cls):
         if not cls.DISCORD_TOKEN:

@@ -194,6 +194,10 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     DeleteMessageTool,
     EditChannelTool,
     EditMessageTool,
+    EmailGetMessageTool,
+    EmailReadInboxTool,
+    EmailSearchTool,
+    EmailSendTool,
     FetchUrlTool,
     ForwardMessageTool,
     HDImageGeneratorTool,
@@ -1090,18 +1094,38 @@ def strip_tool_payload_leaks(text: str) -> str:
             parsed = json.loads(cleaned.strip())
             if isinstance(parsed, dict):
                 tool_keys = {
-                    "name", "tool", "tool_name", "function",
-                    "arguments", "parameters", "input",
-                    "emoji", "reasoning", "thoughts",
-                    "intent", "decision", "tool_plan", "internal_monologue",
+                    "name",
+                    "tool",
+                    "tool_name",
+                    "function",
+                    "arguments",
+                    "parameters",
+                    "input",
+                    "emoji",
+                    "reasoning",
+                    "thoughts",
+                    "intent",
+                    "decision",
+                    "tool_plan",
+                    "internal_monologue",
                 }
                 # Response-envelope keys: the model sometimes emits a fake
                 # response object {"content": "...", "reply": true} as its
                 # visible reply instead of just the content string.
                 envelope_keys = {
-                    "content", "reply", "text", "message", "response",
-                    "channel", "recipient", "user_id", "message_id",
-                    "recipient_id", "target", "send", "should_reply",
+                    "content",
+                    "reply",
+                    "text",
+                    "message",
+                    "response",
+                    "channel",
+                    "recipient",
+                    "user_id",
+                    "message_id",
+                    "recipient_id",
+                    "target",
+                    "send",
+                    "should_reply",
                 }
                 keys = {k.lower() for k in parsed}
                 tool_hits = sum(1 for k in parsed if k.lower() in tool_keys)
@@ -2028,6 +2052,14 @@ class MaxwellBot(commands.Bot):
         self.tools["send_media"] = SendMediaTool(self)
         self.tools["leave_vc"] = LeaveVcTool(self)
         self.tools["sub_agent"] = SubAgentTool(self)
+        # Email tools (maxwell@z3ki.dev via Mailgun send + Gmail read).
+        # See bot_tools.EmailSendTool and friends for the full design notes.
+        # No-op if MAILGUN_* / GMAIL_* env vars are missing; the tools will
+        # return a friendly "not configured" error to the model.
+        self.tools["email_send"] = EmailSendTool(self)
+        self.tools["email_read_inbox"] = EmailReadInboxTool(self)
+        self.tools["email_get_message"] = EmailGetMessageTool(self)
+        self.tools["email_search"] = EmailSearchTool(self)
 
     def _build_activities(self):
         activities = []
