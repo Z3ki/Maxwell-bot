@@ -7472,6 +7472,8 @@ class MaxwellBot(commands.Bot):
             "- You may call helper tools (web_search, shell, image_generator, ...) when they help; each "
             "one carries its own `reasoning`. Then end with exactly one terminal action: send_message or no_response.\n"
             "- A tool turn must end with exactly one terminal action: send_message or no_response.\n"
+            "- When filling in a tool's arguments, put `reasoning` as the FIRST key in the JSON object, "
+            "before any of the tool's real parameters. Reasoning comes first, the action comes after.\n"
             "- For create_site, put the full HTML document in the body argument (not in chat).\n"
             "- For send_file with large code/HTML, use encoding=base64 when needed.\n"
             "- Status: set_activity for your visible status/activity, change_presence for the online/idle/dnd dot."

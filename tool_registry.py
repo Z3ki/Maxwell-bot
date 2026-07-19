@@ -271,8 +271,8 @@ async def record_reasoning(
     """
     cleaned = _sanitize_reasoning(reasoning)
     payload: dict[str, Any] = {
-        "tool": tool_name,
         "thoughts": cleaned or "(no reasoning provided by the model)",
+        "tool": tool_name,
         "params_preview": _summarize_params(params),
     }
     try:
