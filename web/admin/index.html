@@ -344,7 +344,9 @@ const el = (tag, attrs={}, children=[]) => {
     else e.setAttribute(k, v);
   }
   (Array.isArray(children) ? children : [children]).filter(Boolean).forEach(c => {
-    e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+    if (typeof c === 'string' || typeof c === 'number') e.appendChild(document.createTextNode(String(c)));
+    else if (c && c.nodeType) e.appendChild(c);
+    else { console.error('el() got non-node child:', c, 'in', tag, attrs); throw new TypeError('el child: ' + typeof c); }
   });
   return e;
 };
