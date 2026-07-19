@@ -346,9 +346,13 @@ def test_tick_shows_thinking_before_tool_name():
     edits_before = len(msg.channel.edited)
     # First tick — reasoning must include a sentence terminator to
     # pass the meaningful-reasoning gate.
-    asyncio.run(prog.tick(reasoning_delta="The user wants me to draft a site about apples."))
+    asyncio.run(
+        prog.tick(reasoning_delta="The user wants me to draft a site about apples.")
+    )
     assert len(msg.channel.edited) > edits_before
-    assert msg_obj.content == "thinking: The user wants me to draft a site about apples."
+    assert (
+        msg_obj.content == "thinking: The user wants me to draft a site about apples."
+    )
     asyncio.run(prog.stop())
 
 
@@ -481,17 +485,17 @@ def test_last_full_sentence_returns_most_recent():
     # No terminator -> empty.
     assert s("the user wants me to look") == ""
     # One sentence with terminator -> the whole string.
-    assert s("the user wants me to look at the disk.") == "the user wants me to look at the disk."
+    assert (
+        s("the user wants me to look at the disk.")
+        == "the user wants me to look at the disk."
+    )
     # Two sentences -> only the second (most recent) is returned.
     assert (
         s("the user wants me to look at the disk. They asked about space.")
         == "They asked about space."
     )
     # Three sentences -> only the last one.
-    assert (
-        s("first thought. second thought. third thought.")
-        == "third thought."
-    )
+    assert s("first thought. second thought. third thought.") == "third thought."
     # Mixed terminators.
     assert (
         s("the user asked a question! then I answered. finally, done?")

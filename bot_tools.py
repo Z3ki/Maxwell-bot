@@ -1049,6 +1049,75 @@ class SetActivityTool(Tool):
             logger.debug("set_activity DM to issuer failed: %s", e)
 
 
+class SleepTool(Tool):
+    """Take a sleep window. While sleeping the bot won't dispatch
+    LLM turns — anyone who pings or DMs gets a 'max is sleeping,
+    back in Xm' notification (deduped per user). The 2026-07-19 user
+    directive: the bot kept spamming goodnight/goodbye in chat; a
+    real sleep window is the structural fix. Use this when the
+    conversation is genuinely winding down — not as a generic
+    goodbye."""
+
+    is_destructive: bool = False
+    streams_output: bool = False
+
+    def get_description(self):
+        return (
+            "Take a sleep window (1-60 minutes). While sleeping, the bot "
+            "won't dispatch any LLM turns; pings and DMs get a single "
+            "'max is sleeping, back in ~Xm' notice. Use this when the "
+            "conversation is genuinely done (the user said goodnight, or "
+            "it's a natural end-of-day lull) — NOT as a way to add a "
+            "goodbye to a normal reply. The 2026-07-19 user complaint was "
+            "that the bot kept signing off unnecessarily; the sleep tool "
+            "is the actual off-switch when a real rest is warranted. "
+            "Params: duration_minutes (1-60, default 30). The max is "
+            "enforced server-side. Calling again resets the window."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        duration_minutes: int | str = 30,
+        **kwargs,
+    ) -> str:
+        # Defensive parse — the model may emit a string.
+        try:
+            n = int(duration_minutes)
+        except (TypeError, ValueError):
+            n = 30
+        if n < 1:
+            n = 1
+        if n > 60:
+            n = 60
+        if self.bot is None:
+            return "Error: bot not attached, cannot sleep"
+        return self.bot.set_sleep(n)
+
+
+class ClearSleepTool(Tool):
+    """Cancel an active sleep window. Idempotent — safe to call when
+    not sleeping. Use when the bot decided to sleep but the user
+    immediately needs a reply."""
+
+    is_destructive: bool = False
+    streams_output: bool = False
+
+    def get_description(self):
+        return (
+            "Cancel the active sleep window and wake up immediately. "
+            "Use sparingly — only when you called sleep and the user "
+            "unexpectedly pings right after. The 2026-07-19 user note: "
+            "the bot said 'goodnight, sleeping 30m' and the user said "
+            "'wait no I have a question'."
+        )
+
+    async def execute(self, message: Message, **kwargs) -> str:
+        if self.bot is None:
+            return "Error: bot not attached"
+        return self.bot.clear_sleep()
+
+
 class CreatePollTool(Tool):
     """Create a poll in the channel"""
 

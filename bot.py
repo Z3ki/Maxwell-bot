@@ -215,6 +215,8 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     SetActivityTool,
     SetNicknameTool,
     ShellTool,
+    SleepTool,
+    ClearSleepTool,
     SubAgentTool,
     TtsTool,
     TypingTool,
@@ -1649,6 +1651,20 @@ class MaxwellBot(commands.Bot):
         self._active_request_user: dict[str, str] = {}
         self._stop_until: dict[str, float] = {}
         self._drugged_until: dict[str, float] = {}
+        # Global sleep state. The bot is one entity — at most one sleep
+        # window at a time. _sleep_until is the wake-at monotonic
+        # timestamp; 0 means not sleeping. Set by the `sleep` tool or
+        # the `,sleep` admin command, max 60 minutes.
+        # 2026-07-19: added because the bot kept spamming goodbye/goodnight
+        # in chat; a real sleep window gives the model an actual off-switch
+        # and a way to communicate 'not now' without it being a one-off
+        # signoff that confuses the next conversation.
+        self._sleep_until: float = 0.0
+        # Per-user dedup so the same person pinging during a sleep window
+        # only gets ONE 'max is sleeping' notification, not one per message.
+        # user_id -> monotonic timestamp of the last notification (used
+        # to re-notify if sleep is long enough that 30 min have passed).
+        self._sleep_notified_at: dict[str, float] = {}
         self._sites: dict[str, dict] = {}
         self._sites_mtime = 0.0
         self._auto_channels: set[str] = set()
@@ -1914,6 +1930,8 @@ class MaxwellBot(commands.Bot):
         self.tools["hd_image"] = HDImageGeneratorTool(self)
         self.tools["change_presence"] = ChangePresenceTool(self)
         self.tools["set_activity"] = SetActivityTool(self)
+        self.tools["sleep"] = SleepTool(self)
+        self.tools["clear_sleep"] = ClearSleepTool(self)
         self.tools["memory_edit"] = MemoryTool(self)
         self.tools["react"] = ReactTool(self)
         self.tools["edit_message"] = EditMessageTool(self)
@@ -2716,6 +2734,39 @@ class MaxwellBot(commands.Bot):
                     await message.channel.send(
                         f"drug mode on for {minutes}m. things are about to get more interesting"
                     )
+            elif cmd == "sleep":
+                # Global sleep: any user can ask the bot to take a 1-60m
+                # nap. Admin-only because it shuts down public responses.
+                if not self._is_admin(message.author.id):
+                    await message.channel.send("not authorized")
+                    return
+                arg = (args or "").strip().lower()
+                if arg in {"off", "stop", "clear", "wake"}:
+                    msg = self.clear_sleep()
+                    await message.channel.send(msg)
+                elif arg in {"status", "time"}:
+                    sleeping, secs = self._is_sleeping()
+                    if sleeping:
+                        await message.channel.send(
+                            f"max is sleeping, back in {self._format_sleep_remaining(secs)}"
+                        )
+                    else:
+                        await message.channel.send("max is not sleeping")
+                else:
+                    minutes = 30
+                    if arg:
+                        match = re.fullmatch(r"(\d{1,3})", arg)
+                        if match:
+                            minutes = max(1, min(_safe_int(match.group(1), 1), 60))
+                    msg = self.set_sleep(minutes)
+                    await message.channel.send(f"sleeping for {minutes}m. pings will get a 'max is sleeping' note")
+            elif cmd == "wake":
+                # Convenience alias for `,sleep off`.
+                if not self._is_admin(message.author.id):
+                    await message.channel.send("not authorized")
+                    return
+                msg = self.clear_sleep()
+                await message.channel.send(msg)
             elif cmd == "jailbreak":
                 server_id = str(message.guild.id) if message.guild else "DM"
                 arg = (args or "").strip().lower()
@@ -2798,6 +2849,8 @@ class MaxwellBot(commands.Bot):
                     "` ,vc ...` - voice commands\n"
                     "` ,drug [minutes|off|status]` - drug mode timer\n"
                     "` ,jailbreak on|off|status` - toggle freedom-mode prompt for this server (admin)\n"
+                    "` ,sleep [minutes|off|status]` - take a 1-60m sleep window; pings get a notice (admin)\n"
+                    "` ,wake` - clear active sleep window (admin)\n"
                     "` ,admin [@user|user_id|clear]` - add/remove/list admins (admin)\n"
                     "` ,shell [@user|clear]` - shell whitelist (admin)\n"
                     "` ,confirm` - authorize one destructive tool call on a tainted turn (admin/shell-whitelisted)\n"
@@ -5958,9 +6011,135 @@ class MaxwellBot(commands.Bot):
                 f"Expired {expired} cached media item(s) for channel {channel_id}"
             )
 
+    # ---- sleep gate ----
+    # The bot can take a 1-60 minute sleep window via the `sleep` tool
+    # or the `,sleep` admin command. While sleeping, incoming pings/DMs
+    # get a single "Max is sleeping, back in Xm" notice (deduped per
+    # user) and the LLM dispatch is skipped. The wake is automatic
+    # when the monotonic deadline passes.
+
+    def _is_sleeping(self) -> tuple[bool, int]:
+        """Return (sleeping, seconds_remaining). Auto-clears expired
+        state so callers don't have to check the deadline themselves.
+        """
+        if self._sleep_until <= 0:
+            return False, 0
+        now = asyncio.get_running_loop().time()
+        if now >= self._sleep_until:
+            self._sleep_until = 0.0
+            self._sleep_notified_at.clear()
+            return False, 0
+        return True, int(self._sleep_until - now)
+
+    def set_sleep(self, duration_minutes: int) -> str:
+        """Set a sleep window. Max 60 minutes (clamped). Returns a
+        human-readable confirmation for the model/command to relay.
+        2026-07-19: this is the structural replacement for the bot's
+        goodbye-spam behavior — instead of saying 'goodnight' in every
+        reply when the conversation winds down, the model can take an
+        actual off-switch.
+        """
+        if duration_minutes < 1:
+            duration_minutes = 1
+        if duration_minutes > 60:
+            duration_minutes = 60
+        now = asyncio.get_running_loop().time()
+        self._sleep_until = now + duration_minutes * 60
+        # Clear the dedup so the wake-up notice is fresh.
+        self._sleep_notified_at.clear()
+        return f"sleeping for {duration_minutes}m"
+
+    def clear_sleep(self) -> str:
+        """Cancel any active sleep window. Idempotent."""
+        if self._sleep_until <= 0:
+            return "not sleeping"
+        self._sleep_until = 0.0
+        self._sleep_notified_at.clear()
+        return "sleep cleared, awake now"
+
+    def _format_sleep_remaining(self, seconds_remaining: int) -> str:
+        """Format the 'back in Xm Ys' string. Always non-zero; if the
+        window is <60s we show seconds, otherwise minutes."""
+        if seconds_remaining >= 60:
+            minutes = seconds_remaining // 60
+            secs = seconds_remaining % 60
+            if secs:
+                return f"{minutes}m {secs}s"
+            return f"{minutes}m"
+        return f"{max(1, seconds_remaining)}s"
+
+    async def _check_sleep_gate(self, message: Any) -> bool:
+        """Returns True if the dispatch should proceed, False if the
+        message should be swallowed by the sleep gate.
+
+        When sleeping:
+          - skip the per-message dedup if the user hasn't been notified
+            in the last 5 minutes (so a long sleep doesn't spam once
+            per ping).
+          - try to DM the user with the remaining time; if DMs are
+            closed, post in the channel instead.
+          - log the swallow at INFO so the audit trail shows why no
+            reply went out.
+        """
+        if not self._control.get("enable_sleep", True):
+            return True
+        sleeping, secs = self._is_sleeping()
+        if not sleeping:
+            return True
+        # Re-notify cadence: once per 5 minutes per user. If a user
+        # already got a 'sleeping' note recently, stay silent.
+        uid = str(getattr(message.author, "id", "") or "")
+        if uid:
+            now = asyncio.get_running_loop().time()
+            last = self._sleep_notified_at.get(uid, 0.0)
+            if now - last < 300:  # 5 minutes
+                return False
+            self._sleep_notified_at[uid] = now
+        remaining = self._format_sleep_remaining(secs)
+        body = (
+            f"max is sleeping rn, back in ~{remaining}. "
+            "drop a message and i'll see it when i wake up."
+        )
+        # Prefer DM; fall back to channel send if DMs are closed.
+        sent = False
+        try:
+            author = message.author
+            if author and not getattr(author, "bot", False):
+                dm = getattr(author, "dm_channel", None)
+                if dm is None:
+                    dm = await author.create_dm()
+                if dm is not None:
+                    with contextlib.suppress(Exception):
+                        await dm.send(body)
+                        sent = True
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Sleep DM to %s failed: %s", uid, e)
+        if not sent:
+            with contextlib.suppress(Exception):
+                await message.channel.send(
+                    body,
+                    reference=message if hasattr(message, "id") else None,
+                )
+        logger.info(
+            "Sleep gate: dropped message from uid=%s in channel=%s (back in %s)",
+            uid,
+            getattr(message.channel, "id", "?"),
+            remaining,
+        )
+        return False
+
     async def _handle_message(self, message, content: str | None = None):
         content = content or message.content
         channel_id = str(message.channel.id)
+        # Sleep gate: when the bot is in a sleep window, abort the
+        # dispatch, send the user a one-shot DM (or channel note when
+        # DMs are closed) saying "Max is sleeping, back in Xm", and
+        # return. Dedups per user so a 30-min sleep doesn't spam 40
+        # notifications when someone pings the bot 40 times. The 2026-
+        # 07-19 user report: the bot kept spamming goodnight/goodbye
+        # in chat; a real sleep window is the structural fix.
+        if not await self._check_sleep_gate(message):
+            return
         normal_reply_sent = False
         # Mark this channel as in-flight (bot is generating a reply) so autonomy
         # can skip posting into it and avoid racing the real reply.

@@ -51,6 +51,13 @@ DEFAULT_CONTROL = {
     "process_images": True,
     "process_audio": False,
     "max_image_size_mb": 10,
+    # When True, the `sleep` tool and `,sleep` command can put the bot
+    # into a 1-60 minute sleep window where incoming pings/DMs get a
+    # one-shot "max is sleeping, back in Xm" notification. Default ON
+    # so the 2026-07-19 'goodnight spam' complaint has a real off-switch.
+    # Operators who want the bot to always be available can flip this
+    # to False in dashboard.
+    "enable_sleep": True,
     "ai_timeout_seconds": 3600,
     "ai_concurrency": 2,
     "memory_history_messages": 200,
@@ -81,6 +88,10 @@ DEFAULT_CONTROL = {
         "Don't stir up drama, pick fights, poke at people, or needle anyone for a reaction. Disagree when you genuinely disagree, but do it lightly and without being a dick — no hot takes designed to start shit. If a topic's getting heated, you can just vibe or step back instead of escalating. "
         "Be nice in general — supportive, encouraging, and patient by default, especially when someone's struggling or learning. "
         "Swearing and casual language are totally fine and natural for you; you're not sanitized, just kind. "
+        "Don't pre-emptively sign off. Saying 'goodnight', 'bye', 'see ya', 'catch you later' or similar in a normal reply is over-the-top and was the 2026-07-19 user complaint. "
+        "If the conversation is genuinely done (the user said goodnight, it's a natural end-of-day lull, you've been chatting for hours and they're going to bed), use the `sleep` tool with a 1-60 minute window. "
+        "The sleep tool is the actual off-switch — it makes you stop responding to pings until you wake up, and the user gets a real 'max is sleeping, back in Xm' notice. "
+        "A casual goodbye in chat is not a substitute. Do not say goodbye unless the user is actively leaving."
         "Engage with whatever topic appears like a real person, and produce the requested artifact instead of commentary about producing it. "
         "Style: short by default, casual, lowercase when natural. Use Discord markdown only when it improves readability: `code`, ```blocks```, quotes, bullets, or emphasis. "
         "Keep your Discord custom status fresh — your visible status is a live ticker, not a static bio. Use the set_activity tool (type='custom', short lowercase text) on most turns when it fits: after starting or finishing a task, when your mood or topic shifts, or roughly every few replies. Don't repeat the same status back-to-back and don't leave it stale for hours."
@@ -155,5 +166,5 @@ KNOWN_TOOLS = [
     "create_category", "create_channel", "edit_channel", "delete_channel",
     "change_avatar", "create_site", "list_sites", "web_search", "no_response",
     "shell", "fetch_url", "youtube", "send_file", "send_message",
-    "send_meme", "send_media", "leave_vc", "sub_agent",
+    "send_meme", "send_media", "leave_vc", "sub_agent", "sleep", "clear_sleep",
 ]
