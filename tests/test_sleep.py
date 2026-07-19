@@ -81,6 +81,7 @@ class FakeBot:
         # the test mirror here uses time.monotonic() — same epoch,
         # no event-loop dependency.
         import time
+
         return time.monotonic()
 
     def _is_sleeping(self):
@@ -166,17 +167,26 @@ def test_sleep_tool_clamps_to_60_minutes():
     tool = bot_tools.SleepTool(bot)
     # Out-of-range value: the tool clamps server-side.
     result = asyncio.run(
-        tool.execute(SimpleNamespace(author=SimpleNamespace(id=1, bot=False)), duration_minutes=999)
+        tool.execute(
+            SimpleNamespace(author=SimpleNamespace(id=1, bot=False)),
+            duration_minutes=999,
+        )
     )
     assert result == "sleeping for 60m"
     # String input is also accepted (the model might pass "30").
     result = asyncio.run(
-        tool.execute(SimpleNamespace(author=SimpleNamespace(id=1, bot=False)), duration_minutes="45")
+        tool.execute(
+            SimpleNamespace(author=SimpleNamespace(id=1, bot=False)),
+            duration_minutes="45",
+        )
     )
     assert result == "sleeping for 45m"
     # Garbage input falls back to 30.
     result = asyncio.run(
-        tool.execute(SimpleNamespace(author=SimpleNamespace(id=1, bot=False)), duration_minutes="banana")
+        tool.execute(
+            SimpleNamespace(author=SimpleNamespace(id=1, bot=False)),
+            duration_minutes="banana",
+        )
     )
     assert result == "sleeping for 30m"
 

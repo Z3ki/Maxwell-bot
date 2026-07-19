@@ -49,25 +49,54 @@ REASONING_PARAM_SCHEMA: dict[str, Any] = {
 
 # Max chars we keep from a reasoning string. The trace file is shown on a
 # dashboard; a novel here helps nobody and bloats the context budget.
-REASONING_MAX_CHARS = 1000
+REASONING_MAX_CHARS = 280
 
 
 def _sanitize_reasoning(raw: Any) -> str:
     """Coerce reasoning to a bounded, plain-text string.
 
     The model occasionally wraps thoughts in <thoughts>...</thoughts> like a
-    smartass, or dumps JSON. Strip the tags, cap the length, move on. We do NOT
-    try to be clever and parse nested payloads — reasoning is one string. If
-    the model can't follow that, it gets clamped, not interpreted.
+    smartass, or dumps JSON. Strip the tags, cap the length, cut at the first
+    sentence terminator inside the cap so we never see half-sentences or
+    whole-artifact dumps in the trace, move on. We do NOT try to be clever
+    and parse nested payloads — reasoning is one string. If the model can't
+    follow that, it gets clamped, not interpreted.
+
+    The 2026-07-19 user complaint: the model was dumping the entire Spanish
+    joke site body into the `reasoning` field for create_site, and the user
+    saw the whole body on the progress message and the trace. We now cap
+    hard at 280 chars AND prefer a clean sentence break inside that window.
     """
+    import re
+
     text = str(raw or "").strip()
     if "<" in text and ">" in text:
-        # Cheap, ruthless tag strip: drop anything that looks like <...>.
-        import re
-
         text = re.sub(r"<[^>]+>", " ", text).strip()
+    if not text:
+        return ""
     if len(text) > REASONING_MAX_CHARS:
-        text = text[: REASONING_MAX_CHARS - 1] + "…"
+        # Cut at the last sentence terminator inside the cap, so a long
+        # reasoning that contains a complete sentence + a half-thought
+        # shows just the complete sentence. Falls back to a hard cap
+        # with ellipsis if no terminator exists in the window.
+        head = text[: REASONING_MAX_CHARS - 1]  # leave 1 char for the ellipsis
+        last_term = -1
+        for m in re.finditer(r"[.!?](?:\s|$)", head):
+            last_term = m.end()
+        if last_term > 0:
+            text = head[:last_term].rstrip()
+        else:
+            # No sentence break in the window. Cut at the last word
+            # boundary so the trace doesn't end on a half-word. The
+            # cap is REASONING_MAX_CHARS - 1 chars + "…" so the final
+            # length is exactly REASONING_MAX_CHARS.
+            cut = head.rfind(" ")
+            # Only use the word boundary if it's in the back half of
+            # the window — otherwise the cap leaves a tiny fragment.
+            if cut > REASONING_MAX_CHARS * 0.5:
+                text = head[:cut].rstrip() + "…"
+            else:
+                text = head.rstrip() + "…"
     return text
 
 
