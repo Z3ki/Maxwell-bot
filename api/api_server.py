@@ -740,7 +740,24 @@ async def data_file(request):
         "auto_channels.json",
         "bot_control.json",
     }
-    return _json_response(entries[:500])
+    if file not in ALLOWED_FILES:
+        return _json_response({"error": "not allowed"}, 403)
+    path = DATA_DIR / file
+    if not path.exists():
+        return _json_response([])
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, ValueError):
+        return _json_response({"error": "read failed"}, 500)
+    if isinstance(data, list):
+        return _json_response(data[:500])
+    return _json_response(data)
+
+
+async def context_get(request):
+    async with _file_lock:
+        entries = _load_context_entries()
+    return _json_response(entries)
 
 
 async def context_post(request):
@@ -2160,6 +2177,90 @@ async def _options_handler(request):
             "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Discord-Token",
         },
     )
+
+
+# ---------- Long-term memory (one editable text file, line = one entry) ----------
+# Format is shared with the bot process (memory.add_long_term_memory et al.):
+# one non-empty line per entry, ids are positional 1..N, file is the source of
+# truth. We don't try to keep an in-memory cache here — the API process can
+# restart any time and the bot rewrites the file under its own lock.
+async def _read_memory_lines() -> list[str]:
+    path = _memory_text_path()
+    try:
+        raw = await asyncio.to_thread(path.read_text, "utf-8")
+    except OSError:
+        return []
+    return [_normalize_memory_line(line) for line in raw.splitlines() if line.strip()][
+        :MAX_LTM_LINES
+    ]
+
+
+async def _write_memory_lines(lines: list[str]) -> None:
+    cleaned = [_normalize_memory_line(line) for line in lines if line and line.strip()][
+        :MAX_LTM_LINES
+    ]
+    text = "\n".join(cleaned)
+    if text:
+        text += "\n"
+    await atomic_text_write(_memory_text_path(), text)
+
+
+async def memory_add(request):
+    try:
+        body = await request.json()
+    except Exception:
+        return _json_response({"error": "invalid json"}, 400)
+    content = _normalize_memory_line(body.get("content", ""))
+    if not content:
+        return _json_response({"error": "empty"}, 400)
+    async with _file_lock:
+        lines = await _read_memory_lines()
+        if len(lines) >= MAX_LTM_LINES:
+            return _json_response({"error": "memory full"}, 409)
+        lines.append(content)
+        await _write_memory_lines(lines)
+    new_id = len(lines)
+    return _json_response(
+        {"ok": True, "id": new_id, "entry": {"id": new_id, "content": content}}
+    )
+
+
+async def memory_update(request):
+    try:
+        body = await request.json()
+    except Exception:
+        return _json_response({"error": "invalid json"}, 400)
+    try:
+        target_id = int(body.get("id"))
+    except (TypeError, ValueError):
+        return _json_response({"error": "id required"}, 400)
+    content = _normalize_memory_line(body.get("content", ""))
+    async with _file_lock:
+        lines = await _read_memory_lines()
+        if target_id < 1 or target_id > len(lines):
+            return _json_response({"error": "not found"}, 404)
+        # An edit that empties the line is treated as a delete.
+        if not content:
+            del lines[target_id - 1]
+        else:
+            lines[target_id - 1] = content
+        await _write_memory_lines(lines)
+    return _json_response({"ok": True})
+
+
+async def memory_delete(request):
+    raw_id = request.query.get("id", "")
+    try:
+        target_id = int(raw_id)
+    except (TypeError, ValueError):
+        return _json_response({"error": "id required"}, 400)
+    async with _file_lock:
+        lines = await _read_memory_lines()
+        if target_id < 1 or target_id > len(lines):
+            return _json_response({"error": "not found"}, 404)
+        del lines[target_id - 1]
+        await _write_memory_lines(lines)
+    return _json_response({"ok": True})
 
 
 app = web.Application(
