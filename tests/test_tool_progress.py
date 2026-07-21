@@ -82,14 +82,17 @@ def test_initial_post_is_generic():
     asyncio.run(prog.stop())
 
 
-def test_initial_post_uses_reply():
-    """2026-07-19: 'working on it…' must thread under the user's
-    message via reply(), not be a freestanding channel.send post."""
+def test_initial_post_uses_channel_send_not_reply():
+    """2026-07-21: 'working on it…' must NOT thread as a reply to the
+    user's message. A reply pings the user with a desktop push on every
+    tool call, which is noise. The progress is informational, so it
+    goes to the channel as a plain message.send() instead."""
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
-    assert len(msg.replies) == 1
-    assert msg.replies[0] == "working on it…"
+    assert len(msg.replies) == 0
+    assert len(msg.channel.sent) == 1
+    assert msg.channel.sent[0].content == "working on it…"
     asyncio.run(prog.stop())
 
 

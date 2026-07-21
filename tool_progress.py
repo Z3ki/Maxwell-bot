@@ -326,23 +326,30 @@ class ToolProgress:
             self._posted = None
 
     async def _post_reply(self, content: str) -> Any:
-        """Post the progress message as a REPLY to the user's original
-        message so it threads under their question. Falls back to a
-        channel send if the message object doesn't support ``reply()``
-        (Telegram adapter in this codebase, or mocked tests).
+        """Post the progress message to the channel WITHOUT replying to
+        the user's message.
+
+        2026-07-21: was a reply to the triggering message, which made
+        the bot visibly '@ mention' the user every time it started a
+        tool call (Discord sends a desktop push for replies). User
+        feedback: don't ping me for a 'working on it…' status. The
+        progress is informational, not directed at anyone, so it goes
+        to the channel as a plain message. Falls back to reply() if
+        the message object doesn't expose a channel send (Telegram
+        adapter, mocked tests).
         """
         msg = self._msg
-        reply_fn = getattr(msg, "reply", None)
-        if reply_fn is not None and callable(reply_fn):
-            try:
-                return await reply_fn(content)
-            except Exception as e:  # noqa: BLE001
-                logger.debug("reply() failed, falling back to send: %s", e)
         channel = getattr(msg, "channel", None)
         send_fn = getattr(channel, "send", None)
-        if send_fn is not None:
-            return await send_fn(content)
-        raise RuntimeError("No reply() or channel.send() available for progress post")
+        if send_fn is not None and callable(send_fn):
+            try:
+                return await send_fn(content)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("channel.send() failed, falling back to reply: %s", e)
+        reply_fn = getattr(msg, "reply", None)
+        if reply_fn is not None and callable(reply_fn):
+            return await reply_fn(content)
+        raise RuntimeError("No channel.send() or reply() available for progress post")
 
     async def update(self, tool_name: str, reasoning: str = "") -> None:
         """Record a tool's progress. Coalesces edits; never raises."""
