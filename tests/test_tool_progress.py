@@ -96,16 +96,11 @@ def test_initial_post_uses_channel_send_not_reply():
     asyncio.run(prog.stop())
 
 
-def test_half_sentence_reasoning_stays_at_placeholder():
-    """A reasoning buffer with no terminator must NOT render as a
-    partial sentence. The user explicitly said 'must be full sentence
-    to show, not parts'. Buffer of 'the user wants me to look at' with
-    no terminator -> the neutral 'working on it…' placeholder stays
-    until the model emits a period. The tool name is NOT shown on the
-    placeholder because a fast tool (create_site, send_message) would
-    flash '<tool>: generating…' for under a second before being deleted
-    and replaced by the real reply — the user complained about exactly
-    that flicker."""
+def test_half_sentence_reasoning_shows_partial_tail():
+    """2026-07-21 rewrite: the visible line is the last N chars of
+    the streaming buffer, NOT a complete-sentence extraction. A
+    partial buffer (no terminator) is shown as-is. The user watches
+    the words scroll by in real time, no waiting for a period."""
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
@@ -115,13 +110,9 @@ def test_half_sentence_reasoning_stays_at_placeholder():
     # Set a tool but the reasoning buffer has no terminator yet.
     prog._last_edit = 0
     asyncio.run(prog.update("shell", "the user wants me to look at"))
-    # No full sentence yet -> neutral placeholder, no tool-name prefix.
-    # The bot committed to a tool, but the model hasn't finished a
-    # thought, so we wait. Showing the tool name now would only
-    # matter if there were something for the user to read.
-    assert msg_obj.content == "working on it…"
-    # Add a terminator and a follow-up sentence — now the LAST full
-    # sentence is rendered, with the tool-name prefix.
+    # Partial buffer -> the partial text is shown, with tool prefix.
+    assert msg_obj.content == "shell: the user wants me to look at"
+    # More reasoning — visible line scrolls forward with it.
     prog._last_edit = 0
     asyncio.run(
         prog.update(
@@ -129,22 +120,26 @@ def test_half_sentence_reasoning_stays_at_placeholder():
             "the user wants me to look at the disk and report back. They asked about space.",
         )
     )
-    assert msg_obj.content == "shell: They asked about space."
-    asyncio.run(prog.stop())
+    # The whole reasoning is in the buffer (under _VISIBLE_BUDGET=200
+    # chars), so the visible line is the full reasoning. The rolling
+    # tail design shows up only when the buffer overflows 200 chars.
+    assert msg_obj.content == (
+        "shell: the user wants me to look at the disk and report back. "
+        "They asked about space."
+    )
 
 
-def test_update_replaces_in_place_one_sentence():
+def test_update_replaces_in_place():
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
     msg_obj = msg.channel.sent[0]
 
-    # First update — reasoning must contain a terminator (full sentence)
-    # per the 2026-07-19 'show whole sentences only' directive.
+    # First update — tool name + reasoning appended to buffer.
     prog._last_edit = 0
     asyncio.run(prog.update("shell", "checking disk usage."))
     assert msg_obj.content == "shell: checking disk usage."
-    # New sentence + new tool — replaces with the new tool prefix
+    # New tool — buffer resets to the new reasoning (new tool = new line).
     prog._last_edit = 0
     asyncio.run(prog.update("web_search", "searching the docs."))
     assert msg_obj.content == "web_search: searching the docs."
@@ -191,8 +186,7 @@ def test_rate_limit_coalesces_rapid_updates():
     asyncio.run(prog.start())
     msg_obj = msg.channel.sent[0]
     # First update — go through (force last_edit to 0 so the rate limit
-    # treats the post-start window as already-elapsed). Reasoning must
-    # be a full sentence to pass the meaningful-reasoning gate.
+    # treats the post-start window as already-elapsed).
     prog._last_edit = 0
     asyncio.run(prog.update("shell", "doing thing one."))
     assert msg_obj.content == "shell: doing thing one."
@@ -202,7 +196,7 @@ def test_rate_limit_coalesces_rapid_updates():
     # No new edit because we're within the rate limit window
     assert len(msg.channel.edited) == edits_before
     # The pending line is still recorded so a future call picks it up
-    assert prog._current_reason == "doing thing two."
+    assert "doing thing two." in prog._reasoning_buffer
     asyncio.run(prog.stop())
 
 
@@ -273,8 +267,10 @@ def test_start_is_idempotent():
     asyncio.run(prog.stop())
 
 
-def test_long_reasoning_truncated_to_one_sentence():
-    """Multi-line or long reasoning is collapsed to one line and trimmed."""
+def test_long_reasoning_truncated_to_visible_budget():
+    """A 500-char reasoning run is shown as the last _VISIBLE_BUDGET
+    chars of the buffer (trimmed to a word boundary) so the line
+    fits in a Discord message and doesn't overflow."""
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
@@ -283,10 +279,15 @@ def test_long_reasoning_truncated_to_one_sentence():
     long = "checking disk usage and memory now.\n" + "x" * 500
     asyncio.run(prog.update("shell", long))
     content = msg_obj.content
-    # One line
+    # Newlines collapsed to spaces.
     assert "\n" not in content
-    # Whole-sentence render with the tool-name prefix.
-    assert content == "shell: checking disk usage and memory now."
+    # The tool name is prepended.
+    assert content.startswith("shell: ")
+    # The visible line is at most _VISIBLE_BUDGET + the tool-prefix length.
+    assert len(content) <= tool_progress._VISIBLE_BUDGET + len("shell: ")
+    # The leading part of the reasoning isn't in the visible tail
+    # (we kept only the last _VISIBLE_BUDGET chars).
+    assert "checking disk usage and memory now." not in content
     asyncio.run(prog.stop())
 
 
@@ -523,30 +524,12 @@ def time_monotonic():
     return time.monotonic()
 
 
-def test_last_full_sentence_returns_most_recent():
-    """The visible line is the LAST complete sentence in the buffer,
-    not the first one or the whole buffer. The 2026-07-19 user
-    directive: full sentence to show, not parts."""
-    s = tool_progress._last_full_sentence
-    # No terminator -> empty.
-    assert s("the user wants me to look") == ""
-    # One sentence with terminator -> the whole string.
-    assert (
-        s("the user wants me to look at the disk.")
-        == "the user wants me to look at the disk."
-    )
-    # Two sentences -> only the second (most recent) is returned.
-    assert (
-        s("the user wants me to look at the disk. They asked about space.")
-        == "They asked about space."
-    )
-    # Three sentences -> only the last one.
-    assert s("first thought. second thought. third thought.") == "third thought."
-    # Mixed terminators.
-    assert (
-        s("the user asked a question! then I answered. finally, done?")
-        == "finally, done?"
-    )
+# 2026-07-21: sentence-extraction (last full sentence, terminator regex,
+# _format_thinking) is GONE. The progress UI now just shows the last
+# _VISIBLE_BUDGET chars of the streaming buffer with the tool name
+# prefix. No more "is this a complete sentence?" heuristic, no more
+# glued-delta bug, no more "user can't read a half-sentence" debate.
+# The user watches the words scroll by in real time.
 
 
 # ---- fast-tool fix: deferred post + transition_to_final ----
@@ -860,10 +843,17 @@ def test_streaming_tick_inserts_space_between_glued_deltas():
                 raise AssertionError(
                     f"deltas were not space-joined: {glued!r} in {buf!r}"
                 )
-        # The progress message should show at least one full sentence
-        assert any(":" in e and "." in e for e in edits), (
-            f"no complete sentence rendered: {edits!r}"
+        # The progress message should show the model's rolling output
+        # (the last _VISIBLE_BUDGET chars of the buffer). The buffer
+        # must have grown from at least one tick — i.e. the progress
+        # message captured the streaming text.
+        assert prog._reasoning_buffer.strip(), (
+            f"no streaming text was captured: {prog._reasoning_buffer!r}"
         )
+        # At least one edit should reflect the captured text
+        assert any(
+            "thinking" in e or ":" in e for e in edits
+        ), f"no useful progress rendered: {edits!r}"
         # Final response should contain the same text as the buffer.
         # ProviderResult is a str subclass, so str(result) IS the content
         # we care about. (The real bot reads the .choices[0].message

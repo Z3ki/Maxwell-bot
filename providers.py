@@ -125,6 +125,15 @@ class _CustomToolCallBuffer:
         self._on_partial_name = on_partial_name
         self._announced_names: set[str] = set()
 
+    @property
+    def has_pending_json(self) -> bool:
+        """True when the buffer holds a bare-JSON tool call that's still
+        being parsed (opener seen, close not yet). The progress UI can
+        use this to show 'still writing…' instead of 'frozen' when the
+        visible-content delta is empty for several frames.
+        """
+        return self._buf.rfind("{") > self._buf.rfind("}")
+
     def _strip_completed(self, text: str) -> str:
         """Remove any tool-call JSON objects we already extracted from `text`
         so the visible assistant content doesn't show raw JSON.
@@ -590,6 +599,16 @@ async def _read_sse_response(
                 # latency to the stream. We hand the caller a small dict with
                 # the NEW deltas from this frame plus an empty tool_name that
                 # the tool_call block below may fill in.
+                #
+                # 2026-07-21: in the custom tool-call protocol, the model
+                # often emits the entire reasoning + tool call as a single
+                # huge JSON object — so the visible-content delta is empty
+                # for most frames and the progress UI just sits on
+                # "working on it…". Pass a short HEAD of the raw content
+                # as a "still streaming" preview so the user sees the
+                # model is alive and writing. The bot's tick() rate-limits
+                # this anyway (3s between edits), so the volume is
+                # harmless.
                 if on_token is not None:
                     tok_content = visible_content_delta
                     tok_reason = ""
@@ -598,6 +617,20 @@ async def _read_sse_response(
                         if rv:
                             tok_reason = rv
                             break
+                    # If the custom buffer swallowed the entire delta
+                    # into a pending JSON tool call, surface a short
+                    # preview of the raw content so the progress UI
+                    # still shows motion. Trim to 60 chars to keep the
+                    # status line readable; the next delta's preview
+                    # overwrites it.
+                    if not tok_content and not tok_reason:
+                        raw = delta.get("content") or ""
+                        if raw and custom_buffer is not None and custom_buffer.has_pending_json:
+                            # Mid-JSON: surface a short raw preview so
+                            # the progress UI shows the model is still
+                            # writing. 60 chars keeps the status line
+                            # readable; tick() rate-limits at 3s.
+                            tok_content = raw[:60]
                     if tok_content or tok_reason:
                         try:
                             on_token(
