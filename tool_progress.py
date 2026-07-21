@@ -78,6 +78,21 @@ _HARD_FALLBACK_CHARS = 4000
 # which the user correctly flagged as "weird and bad".
 _VISIBLE_STRIP_CHARS = set("{}[\\]\"`:")
 
+# Code-snippet preview budget. The model often spends its time
+# generating a large artifact (full HTML document for create_site, a
+# multi-line shell command, etc.) that the user can't see at all while
+# the tool runs. We surface a SHORT head of the artifact on the
+# progress line so the user can watch the code scroll by in real time.
+# 2026-07-21: per the user request "show a snippet of the code its
+# generating" — the model is producing content, the user wants to
+# SEE the content, not just a label.
+_SNIPPET_BUDGET = 80
+
+# Newline collapsing char. The model emits multi-line HTML; we squash
+# runs of whitespace into a single space so the preview fits one line
+# in Discord.
+_SNIPPET_JOIN_CHAR = " "
+
 # Fast-tool fix. start() is called before generation / tool dispatch and
 # posts a 'working on it…' message. For fast paths the progress message
 # posts, sits for a few ms, then gets deleted by stop() — and a fresh
@@ -141,6 +156,12 @@ class ToolProgress:
         # Rolling buffer of streaming text (the last thing the model said).
         # We just append + cap. render() slices the tail.
         self._reasoning_buffer: str = ""
+        # Code-snippet preview buffer. While the model is generating a
+        # large artifact (HTML body, shell script, etc.) the caller
+        # feeds head-slices into here via update(snippet=...) and the
+        # progress line shows a rolling tail — so the user can WATCH
+        # the code being written, not just hear "thinking…".
+        self._snippet_buffer: str = ""
         # First tool-name arrival is always allowed through the rate
         # limit immediately, so the user instantly sees the model
         # committed to a tool.
@@ -253,7 +274,7 @@ class ToolProgress:
             merged = merged[-_HARD_FALLBACK_CHARS:]
         self._reasoning_buffer = merged
 
-    async def update(self, tool_name: str, reasoning: str = "") -> None:
+    async def update(self, tool_name: str, reasoning: str = "", snippet: str = "") -> None:
         """Record a tool's progress. Coalesces edits; never raises.
 
         update() is called by the tool-dispatch callback with a NEW
@@ -261,6 +282,12 @@ class ToolProgress:
         REPLACE the buffer (not append) because the new string is
         the model's latest thought, not an accumulation. tick() is
         the path that APPENDS per-token streaming deltas.
+
+        ``snippet`` is an optional code/artifact head (e.g. the first
+        ~80 chars of an HTML body or a shell command). When set, it's
+        shown on a second line of the progress message so the user
+        can watch the model generate the artifact in real time.
+        Pass ``""`` to clear it; omit to leave the current value.
         """
         if self._stopped or self._tool_streaming:
             return
@@ -271,13 +298,26 @@ class ToolProgress:
         self._current_tool = tool_name
         if prev_tool and prev_tool != tool_name:
             # Tool switched: also reset the announcement flag so the
-            # new tool name bypasses the rate limit on first arrival.
+            # new tool name bypasses the rate limit on first arrival,
+            # and clear the snippet — a different tool = different
+            # artifact.
             self._last_tool_name_announced = False
+            self._snippet_buffer = ""
         if reasoning and reasoning != _GENERATING_PLACEHOLDER:
             # Normalize and set (not append — update() carries full
             # reasoning strings from the model's tool-call announcement,
             # not per-token deltas. tick() owns the per-token append.)
             self._reasoning_buffer = " ".join(reasoning.split())
+        if snippet:
+            # Replace the snippet buffer with a normalized head of
+            # the new artifact. The user wants to see the code
+            # scroll by, so we keep the LAST _SNIPPET_BUDGET chars
+            # (the most recently generated portion is what reads as
+            # "still being written").
+            normalized = _SNIPPET_JOIN_CHAR.join(snippet.split())
+            if len(normalized) > _SNIPPET_BUDGET:
+                normalized = normalized[-_SNIPPET_BUDGET:]
+            self._snippet_buffer = normalized
 
         if not self._posted:
             return
@@ -376,11 +416,12 @@ class ToolProgress:
                 self._posted = None
 
     def _render(self) -> str:
-        """Render the progress line. Three states, one per line:
+        """Render the progress line. Up to two lines:
 
-        1. No tool yet, no reasoning yet -> ``working on it…``
-        2. Tool announced, no reasoning yet -> ``using <tool>…``
-        3. Tool + reasoning -> ``thinking: <one sentence> → <tool>``
+        1. Reasoning (one sentence) + tool tag — always present when
+           we have any state to show.
+        2. Code-snippet preview — present only when a snippet has been
+           fed via update(snippet=...).
 
         2026-07-21: the model's reasoning is the useful content for
         the user — it explains what the model is about to do in its
@@ -395,37 +436,50 @@ class ToolProgress:
         so mid-tool-call previews don't leak raw JSON. When the
         buffer has no terminator yet, we fall back to showing the
         first _VISIBLE_BUDGET chars of what's there.
+
+        2026-07-21 (cont.): the user asked to also see a snippet of
+        the code the model is generating. The artifact head (HTML
+        body, shell cmd, message text, etc.) is appended on a
+        second line, prefixed with '⤷ ' so it's visually distinct
+        from the reasoning line. When the artifact is multi-line
+        (HTML, code) we collapse whitespace so the preview fits
+        one Discord line and is readable while scrolling.
         """
         raw = self._reasoning_buffer.strip()
         if not raw:
             # No reasoning yet. If a tool name was announced, say so
             # plainly so the user knows what the model committed to.
             if self._current_tool:
-                return f"using {self._current_tool}…"
-            return "working on it…"
-        # Strip JSON / code artefacts that show up when the model is
-        # mid-tool-call (custom protocol emits a bare-JSON object in
-        # the text stream; the custom buffer keeps it in pending tail
-        # but the raw deltas still flow into on_token). Without this
-        # the user sees things like "create_site: :center;background
-        # :linear -gradient( 90deg ,red" which is unreadable.
-        cleaned = "".join(c for c in raw if c not in _VISIBLE_STRIP_CHARS)
-        cleaned = " ".join(cleaned.split())
-        # Extract ONE complete sentence: from buffer start to the
-        # first '.', '!', or '?'. If no terminator, show the first
-        # _VISIBLE_BUDGET chars (the user's first sight of a partial
-        # sentence is still useful as a 'coming in' preview).
-        sentence = _first_sentence(cleaned)
-        if not sentence:
-            sentence = cleaned[:_VISIBLE_BUDGET]
-        if len(sentence) > _VISIBLE_BUDGET:
-            head = sentence[:_VISIBLE_BUDGET]
-            last_ws = head.rfind(" ")
-            if last_ws > _VISIBLE_BUDGET // 2:
-                head = head[:last_ws]
-            sentence = head
-        tag = f" → {self._current_tool}" if self._current_tool else ""
-        return f"thinking: {sentence}{tag}"
+                head = f"using {self._current_tool}…"
+            else:
+                head = "working on it…"
+        else:
+            # Strip JSON / code artefacts that show up when the model is
+            # mid-tool-call (custom protocol emits a bare-JSON object in
+            # the text stream; the custom buffer keeps it in pending tail
+            # but the raw deltas still flow into on_token). Without this
+            # the user sees things like "create_site: :center;background
+            # :linear -gradient( 90deg ,red" which is unreadable.
+            cleaned = "".join(c for c in raw if c not in _VISIBLE_STRIP_CHARS)
+            cleaned = " ".join(cleaned.split())
+            # Extract ONE complete sentence: from buffer start to the
+            # first '.', '!', or '?'. If no terminator, show the first
+            # _VISIBLE_BUDGET chars (the user's first sight of a partial
+            # sentence is still useful as a 'coming in' preview).
+            sentence = _first_sentence(cleaned)
+            if not sentence:
+                sentence = cleaned[:_VISIBLE_BUDGET]
+            if len(sentence) > _VISIBLE_BUDGET:
+                head2 = sentence[:_VISIBLE_BUDGET]
+                last_ws = head2.rfind(" ")
+                if last_ws > _VISIBLE_BUDGET // 2:
+                    head2 = head2[:last_ws]
+                sentence = head2
+            tag = f" → {self._current_tool}" if self._current_tool else ""
+            head = f"thinking: {sentence}{tag}"
+        if self._snippet_buffer:
+            return f"{head}\n⤷ {self._snippet_buffer}"
+        return head
 
     def _schedule_deferred_flush(self) -> None:
         if self._stopped:

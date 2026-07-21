@@ -7532,6 +7532,42 @@ class MaxwellBot(commands.Bot):
             ) and bool(non_terminal)
             progress = _make_tool_progress(message) if progress_enabled else None
 
+        # 2026-07-21: pick a per-tool "artifact" field for the progress
+        # line's code-snippet preview. The user wants to see the code
+        # the model is generating scroll by in real time. Per-tool
+        # field map keeps the preview accurate (HTML for create_site,
+        # command for shell, etc.) instead of leaking a slug or URL
+        # which would be useless. The progress line renderer in
+        # tool_progress.py handles whitespace collapsing and the
+        # ~80-char tail window.
+        def _artifact_snippet_for(tool_name: str, params: dict) -> str:
+            _ARTIFACT_FIELDS = {
+                "create_site": "body",
+                "shell": "command",
+                "send_file": "content",
+                "send_message": "body",
+                "edit_message": "content",
+                "image_generator": "prompt",
+                "hd_image_generator": "prompt",
+                "web_search": "query",
+                "tts": "text",
+            }
+            field = _ARTIFACT_FIELDS.get(tool_name)
+            if not field:
+                # Unknown tool: pick the first non-reasoning string
+                # field. Falls back to whatever the model wrote —
+                # usually the most interesting argument.
+                for k, v in params.items():
+                    if k == "reasoning":
+                        continue
+                    if isinstance(v, str) and v.strip():
+                        return v
+                return ""
+            val = params.get(field)
+            if not isinstance(val, str):
+                return ""
+            return val
+
         async def run_one(call: dict) -> str:
             name = call["name"]
             params = dict(call.get("arguments") or {})
@@ -7541,6 +7577,15 @@ class MaxwellBot(commands.Bot):
             # "(no reasoning provided by the model)" because the second pop
             # finds nothing. We only need the value for the progress message.
             tool_reasoning = str(params.get("reasoning", "") or "")
+            # 2026-07-21: also peek at the artifact so the progress line
+            # can show a snippet of the code the model is generating.
+            # The user wants to SEE the artifact scroll by, not just
+            # hear "thinking: building the page…". For create_site the
+            # snippet is the HTML body; for shell it's the command; for
+            # send_file it's the file content; etc. We pick a
+            # per-tool field rather than the first non-reasoning key
+            # so we surface the actual code, not a slug or URL.
+            artifact_snippet = _artifact_snippet_for(name, params)
             if progress is not None:
                 import contextlib
 
@@ -7551,7 +7596,9 @@ class MaxwellBot(commands.Bot):
                     # doesn't bleed into the visible line.
                     if hasattr(progress, "_reasoning_buffer"):
                         progress._reasoning_buffer = ""
-                    await progress.update(name, tool_reasoning)
+                    await progress.update(
+                        name, tool_reasoning, snippet=artifact_snippet
+                    )
             # Stash the progress on the bot so the tool can call
             # notify_streaming() if it's about to post its own output
             # (shell, send_file, etc). Cleared in the finally below so a
