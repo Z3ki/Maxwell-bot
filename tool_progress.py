@@ -57,8 +57,8 @@ _GRACE_BEFORE_FIRST_POST = 0.15
 
 # Per-token ticks fire on EVERY streamed delta. Most providers chunk
 # into ~50-200 char deltas. We MUST coalesce or we'd 429 us into silence.
-# 2026-07-21: was 3.0s, user said "show a bit of thinking every 2 secs".
-_TOKEN_TICK_INTERVAL = 2.0
+# 2026-07-21: lowered to 1.0s per user request "every 1 sec".
+_TOKEN_TICK_INTERVAL = 1.0
 
 # Total visible budget. The last N characters of the streaming buffer
 # are what the user sees. Long enough to show a real sentence fragment,
@@ -363,19 +363,20 @@ class ToolProgress:
 
         1. No tool yet, no reasoning yet -> ``working on it…``
         2. Tool announced, no reasoning yet -> ``using <tool>…``
-        3. Tool + reasoning -> ``using <tool>: <last 120 chars>``
+        3. Tool + reasoning -> ``<reasoning> → <tool>``
+
+        2026-07-21: every tool call carries a 'reasoning' argument
+        that the model wrote as the "why I'm calling this tool".
+        That reasoning is the useful content for the user — it
+        explains what the model is about to do in its own words.
+        So reasoning goes FIRST, tool name goes as a small trailing
+        tag with an arrow. Format: "I'll send a friendly reply →
+        send_message". When reasoning is short enough, both fit on
+        one line; when long, the tail wins and the tool tag may
+        wrap off the visible window.
 
         The 120 chars are stripped of JSON artefacts ({, }, \\, ", `, :)
         and cut on a whitespace boundary so the line is always readable.
-
-        2026-07-21: user feedback that every tool carries its own
-        reasoning (the model's "reasoning" argument on the tool call).
-        The visible line should show that reasoning, not the model's
-        pre-tool streaming chatter. Since update() REPLACES the buffer
-        with the tool's reasoning when the tool is dispatched, the
-        reasoning you see is the tool's own — and the tool name is
-        what makes it useful. Hence the "using <tool>:" prefix when
-        both are present, not the bare "thinking:" prefix.
         """
         tail = self._reasoning_buffer.strip()
         if not tail:
@@ -392,16 +393,20 @@ class ToolProgress:
         # :linear -gradient( 90deg ,red" which is unreadable.
         tail = "".join(c for c in tail if c not in _VISIBLE_STRIP_CHARS)
         tail = " ".join(tail.split())  # collapse whitespace
-        if len(tail) > _VISIBLE_BUDGET:
-            head = tail[-_VISIBLE_BUDGET:]
+        # Reserve a few chars for the trailing tool tag so we don't
+        # cut mid-reasoning and leave the tag dangling off the end.
+        tag = f" → {self._current_tool}" if self._current_tool else ""
+        # The visible budget is for the REASONING only — the tag is
+        # appended on top of the truncated tail.
+        reasoning_budget = max(0, _VISIBLE_BUDGET - len(tag))
+        if len(tail) > reasoning_budget:
+            head = tail[-reasoning_budget:]
             # Cut on whitespace so we don't show a half-word.
             last_ws = head.find(" ")
             if 0 < last_ws < len(head) - 1:
                 head = head[last_ws + 1 :]
             tail = head
-        if self._current_tool:
-            return f"using {self._current_tool}: {tail}"
-        return f"thinking: {tail}"
+        return f"{tail}{tag}"
 
     def _schedule_deferred_flush(self) -> None:
         if self._stopped:

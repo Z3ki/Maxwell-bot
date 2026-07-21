@@ -112,8 +112,8 @@ def test_half_sentence_reasoning_shows_partial_tail():
     # Set a tool but the reasoning buffer has no terminator yet.
     prog._last_edit = 0
     asyncio.run(prog.update("shell", "the user wants me to look at"))
-    # Partial buffer with tool -> "using <tool>: <tail>".
-    assert msg_obj.content == "using shell: the user wants me to look at"
+    # Partial buffer with tool -> "<reasoning> → <tool>".
+    assert msg_obj.content == "the user wants me to look at → shell"
     # More reasoning — visible line scrolls forward with it.
     prog._last_edit = 0
     asyncio.run(
@@ -126,8 +126,8 @@ def test_half_sentence_reasoning_shows_partial_tail():
     # chars), so the visible line is the full reasoning. The rolling
     # tail design shows up only when the buffer overflows 120 chars.
     assert msg_obj.content == (
-        "using shell: the user wants me to look at the disk and report back. "
-        "They asked about space."
+        "the user wants me to look at the disk and report back. "
+        "They asked about space. → shell"
     )
 
 
@@ -140,11 +140,11 @@ def test_update_replaces_in_place():
     # First update — tool name + reasoning appended to buffer.
     prog._last_edit = 0
     asyncio.run(prog.update("shell", "checking disk usage."))
-    assert msg_obj.content == "using shell: checking disk usage."
+    assert msg_obj.content == "checking disk usage. → shell"
     # New tool — buffer resets to the new reasoning (new tool = new line).
     prog._last_edit = 0
     asyncio.run(prog.update("web_search", "searching the docs."))
-    assert msg_obj.content == "using web_search: searching the docs."
+    assert msg_obj.content == "searching the docs. → web_search"
     asyncio.run(prog.stop())
 
 
@@ -157,7 +157,7 @@ def test_update_uses_models_own_words():
     msg_obj = msg.channel.sent[0]
     prog._last_edit = 0
     asyncio.run(prog.update("shell", "verifying apt sources are sane."))
-    assert msg_obj.content == "using shell: verifying apt sources are sane."
+    assert msg_obj.content == "verifying apt sources are sane. → shell"
     # No emoji, no backticks
     assert "⏳" not in msg_obj.content
     assert "`" not in msg_obj.content
@@ -189,7 +189,7 @@ def test_rate_limit_coalesces_rapid_updates():
     # treats the post-start window as already-elapsed).
     prog._last_edit = 0
     asyncio.run(prog.update("shell", "doing thing one."))
-    assert msg_obj.content == "using shell: doing thing one."
+    assert msg_obj.content == "doing thing one. → shell"
     # Second update immediately — should be cached but NOT edited
     edits_before = len(msg.channel.edited)
     asyncio.run(prog.update("shell", "doing thing two."))
@@ -281,10 +281,10 @@ def test_long_reasoning_truncated_to_visible_budget():
     content = msg_obj.content
     # Newlines collapsed to spaces.
     assert "\n" not in content
-    # Format is "using <tool>: <tail>" with the JSON-stripped tail.
-    assert content.startswith("using shell: ")
-    # The visible line is at most _VISIBLE_BUDGET + the prefix length.
-    assert len(content) <= tool_progress._VISIBLE_BUDGET + len("using shell: ")
+    # Format is "<reasoning> → <tool>" with the JSON-stripped tail.
+    assert content.endswith(" → shell")
+    # The visible line is at most _VISIBLE_BUDGET total (tag included).
+    assert len(content) <= tool_progress._VISIBLE_BUDGET
     # The leading part of the reasoning isn't in the visible tail
     # (we kept only the last _VISIBLE_BUDGET chars).
     assert "checking disk usage and memory now." not in content
@@ -394,7 +394,7 @@ def test_tick_shows_thinking_before_tool_name():
     )
     assert len(msg.channel.edited) > edits_before
     assert (
-        msg_obj.content == "thinking: The user wants me to draft a site about apples."
+        msg_obj.content == "The user wants me to draft a site about apples."
     )
     asyncio.run(prog.stop())
 
@@ -439,12 +439,12 @@ def test_tick_tool_name_shows_tool_prefix():
     # First, a thinking tick — reasoning arrives, tool not yet announced.
     prog._last_edit = 0
     asyncio.run(prog.tick(reasoning_delta="Let me check that user."))
-    assert msg_obj.content == "thinking: Let me check that user."
+    assert msg_obj.content == "Let me check that user."
     # Now the model commits to a tool. The reasoning stays (the
-    # tool name is added as a prefix on the next render).
+    # tool name is added as a trailing tag on the next render).
     prog._last_edit = 0
     asyncio.run(prog.tick(reasoning_delta="", tool_name="lookup_user"))
-    assert msg_obj.content == "using lookup_user: Let me check that user."
+    assert msg_obj.content == "Let me check that user. → lookup_user"
     asyncio.run(prog.stop())
 
 
@@ -460,10 +460,10 @@ def test_tick_tool_name_only_shows_using_when_no_reasoning():
     prog._last_edit = 0
     asyncio.run(prog.tick(reasoning_delta="", tool_name="lookup_user"))
     assert msg_obj.content == "using lookup_user…"
-    # Reasoning arrives, transitions to 'using <tool>: <tail>'.
+    # Reasoning arrives, transitions to '<reasoning> → <tool>'.
     prog._last_edit = 0
     asyncio.run(prog.tick(reasoning_delta="looking that up."))
-    assert msg_obj.content == "using lookup_user: looking that up."
+    assert msg_obj.content == "looking that up. → lookup_user"
     asyncio.run(prog.stop())
 
 
@@ -864,13 +864,15 @@ def test_streaming_tick_inserts_space_between_glued_deltas():
         # (the last _VISIBLE_BUDGET chars of the buffer). The buffer
         # must have grown from at least one tick — i.e. the progress
         # message captured the streaming text.
+        # At least one edit should reflect the captured text. The
+        # new format is just the rolling tail (no "thinking:" or
+        # "using X:" prefix), so any edit that captured the model's
+        # streaming text is a pass.
+        assert edits, f"no progress edits at all: {msg.channel.edited!r}"
+        # The buffer must show streaming content.
         assert prog._reasoning_buffer.strip(), (
             f"no streaming text was captured: {prog._reasoning_buffer!r}"
         )
-        # At least one edit should reflect the captured text
-        assert any(
-            "thinking" in e or ":" in e for e in edits
-        ), f"no useful progress rendered: {edits!r}"
         # Final response should contain the same text as the buffer.
         # ProviderResult is a str subclass, so str(result) IS the content
         # we care about. (The real bot reads the .choices[0].message
