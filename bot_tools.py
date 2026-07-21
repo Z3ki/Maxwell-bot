@@ -507,7 +507,7 @@ class ImageGeneratorTool(Tool):
                     # Step aside for the live progress message before we
                     # post the image — the user should see the artifact,
                     # not "running image_generator" anymore.
-                    self._signal_streaming()
+                    self._signal_streaming(message)
                     try:
                         sent_msg = await message.channel.send(file=file)
                     except discord.Forbidden:
@@ -664,7 +664,7 @@ class HDImageGeneratorTool(Tool):
         # Step aside for the live progress message — the HD image is
         # the user-visible result; the "running hd_image" status is
         # redundant the moment the upload starts.
-        self._signal_streaming()
+        self._signal_streaming(message)
         try:
             sent_msg = await message.channel.send(file=file)
         except discord.Forbidden:
@@ -1124,7 +1124,7 @@ class CreatePollTool(Tool):
 
             # Step aside for the live progress message before posting
             # the poll. The poll itself is the user-visible action.
-            self._signal_streaming()
+            self._signal_streaming(message)
             await message.channel.send(poll=poll)
             return f"Poll created: '{question}' with options: {', '.join(option_list)}"
         except ValueError:
@@ -1756,11 +1756,11 @@ class CreateSiteTool(Tool):
             "encoding (text|base64, default text). Inline <script>/<style> run; external https CDNs "
             "(cdnjs, jsdelivr, unpkg, Google Fonts) load. Use this for full websites, apps, games, "
             "calculators, demos, portfolios — anything interactive. Supports Discord server widgets "
-            "(<iframe src=\"https://discord.com/widget?id=GUILD_ID\">; widget must be enabled in "
+            '(<iframe src="https://discord.com/widget?id=GUILD_ID">; widget must be enabled in '
             "Server Settings > Widget), YouTube/Vimeo/Twitch/Spotify/SoundCloud <iframe> embeds, "
-            "external images/video/audio, model-viewer/Chart.js/D3, etc. Put <meta property=\"og:title\">, "
-            "og:description, og:image (absolute https URL), og:url, <meta name=\"theme-color\">, "
-            "<meta name=\"twitter:card\" content=\"summary_large_image\">, <link rel=\"icon\">, and "
+            'external images/video/audio, model-viewer/Chart.js/D3, etc. Put <meta property="og:title">, '
+            'og:description, og:image (absolute https URL), og:url, <meta name="theme-color">, '
+            '<meta name="twitter:card" content="summary_large_image">, <link rel="icon">, and '
             "<title> in <head> so the link unfurls with a rich preview when shared in Discord.\n\n"
             "IMAGE ORDERING: if the site needs images, call image_generator (or hd_image) FIRST in a "
             "separate turn and wait for the Discord CDN URL. Do NOT batch create_site with image_generator. "
@@ -3011,12 +3011,12 @@ class ShellTool(Tool):
             )
             # Even the error path posts its own message — tell the live
             # progress line to step aside so we don't show both.
-            self._signal_streaming()
+            self._signal_streaming(message)
             await self._send_ansi_chunks(message, text)
             return f"__SHELL_SENT__\n{text}"
         except Exception as e:
             text = self._shell_echo_text(normalized, f"\u274c Error: {e}")
-            self._signal_streaming()
+            self._signal_streaming(message)
             await self._send_ansi_chunks(message, text)
             return f"__SHELL_SENT__\n{text}"
 
@@ -3040,7 +3040,7 @@ class ShellTool(Tool):
             combined = combined[:max_out] + "\n... (truncated)"
 
         text = self._shell_echo_text(normalized, combined)
-        self._signal_streaming()
+        self._signal_streaming(message)
         await self._send_ansi_chunks(message, text)
 
         result = f"__SHELL_SENT__\n{text}"
@@ -3120,7 +3120,7 @@ class ShellTool(Tool):
             filename = os.path.basename(clean)
             # Step aside for the live progress message before posting
             # the file artifact.
-            self._signal_streaming()
+            self._signal_streaming(message)
             await message.channel.send(file=File(local_path, filename=filename))
             logger.info(f"Sent shell file: {filename} ({file_size} bytes)")
 

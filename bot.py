@@ -1749,6 +1749,14 @@ class MaxwellBot(commands.Bot):
         self._cooldowns: dict[str, float] = {}
         self._active_requests: dict[str, asyncio.Task] = {}
         self._active_request_user: dict[str, str] = {}
+        # Per-channel current progress. Under load many channels can
+        # have tool batches in flight concurrently; a single bot-wide
+        # attribute would let channel B's run_one clobber channel A's,
+        # causing the wrong progress to be marked streaming or stopped
+        # when channel A's tool posts output. Old code used a single
+        # ``self._current_progress``; see _process_native_tool_calls
+        # ``run_one`` for the per-channel keying.
+        self._current_progress_by_channel: dict[str, Any] = {}
         self._stop_until: dict[str, float] = {}
         self._drugged_until: dict[str, float] = {}
         # Global sleep state. The bot is one entity — at most one sleep
@@ -2800,6 +2808,7 @@ class MaxwellBot(commands.Bot):
                 self._active_request_user.pop(channel_id, None)
                 self._stop_until.pop(channel_id, None)
                 self._drugged_until.pop(channel_id, None)
+                self._current_progress_by_channel.pop(channel_id, None)
                 self._reaction_seen.clear()
                 await message.channel.send(
                     "Memory, media context, and channel state cleared."
@@ -5261,7 +5270,10 @@ class MaxwellBot(commands.Bot):
         low = content.lower().strip()
         if low in {"site", "website", "webpage", "page", "landing"}:
             return True
-        if re.match(r"^(make|build|create|code|design)\s+me\s+a\s+(site|website|page|landing)", low):
+        if re.match(
+            r"^(make|build|create|code|design)\s+me\s+a\s+(site|website|page|landing)",
+            low,
+        ):
             return True
         return False
 
@@ -5281,24 +5293,21 @@ class MaxwellBot(commands.Bot):
             return False
         low = text.lower()
         # Real HTML document markers
-        if "<!doctype html" in low or "<html" in low or "<head" in low or "<body" in low:
+        if (
+            "<!doctype html" in low
+            or "<html" in low
+            or "<head" in low
+            or "<body" in low
+        ):
             return True
         # Common landing-page fingerprint: :root{} CSS vars + body{} selector
         # (model's go-to opener for any "build a site" task). Require length
         # to avoid false positives on a normal chat reply that pastes a
         # one-line CSS snippet.
-        if (
-            ":root{" in low
-            and "body{" in low
-            and len(text) >= 1500
-        ):
+        if ":root{" in low and "body{" in low and len(text) >= 1500:
             return True
         # Long block with a CSS root and a script body — generated page.
-        if (
-            ":root{" in low
-            and "<script" in low
-            and len(text) >= 2000
-        ):
+        if ":root{" in low and "<script" in low and len(text) >= 2000:
             return True
         # Generic fallback: 3+ distinct HTML/CSS/JS markers and 2K+ chars.
         hits = sum(1 for h in cls._HTML_DOC_HINTS if h in low)
@@ -5320,10 +5329,9 @@ class MaxwellBot(commands.Bot):
         slug_seed = re.sub(r"[^a-z0-9]+", "-", (original_content or "").lower())[:24]
         slug_seed = re.sub(r"-+", "-", slug_seed).strip("-") or "site"
         slug = f"{slug_seed[:20]}-{int(time.time()) % 100000}"
-        title = (
-            (original_content or "").strip().splitlines()[0][:80].strip()
-            or "untitled site"
-        )
+        title = (original_content or "").strip().splitlines()[0][
+            :80
+        ].strip() or "untitled site"
         result = await tool.execute(
             message,
             name=slug,
@@ -6426,11 +6434,19 @@ class MaxwellBot(commands.Bot):
         # sees it.  This is especially critical for create_site where the model
         # may spend 20+ seconds generating a full HTML document in the tool call
         # arguments, but the tool itself executes in milliseconds.
+        #
+        # Fire-and-forget via start_defer(): the actual post waits 800ms in
+        # the background. If the LLM generation finishes in <800ms with a
+        # tool call (create_site, send_message, memory lookup) the deferred
+        # post never lands — no flash, no delete, no flicker. If generation
+        # runs longer, the user sees 'working on it…' as before. The
+        # awaitable form (start()) would block the LLM call for 800ms which
+        # defeats the point.
         gen_progress = None
         if bool(self._control.get("progress_messages", False)):
             gen_progress = _make_tool_progress(message)
             with contextlib.suppress(Exception):
-                await gen_progress.start()
+                await gen_progress.start_defer()
 
         # Every progress object created in this turn — the pre-gen progress
         # plus any followup-gen progress for later iterations. The safety
@@ -6530,17 +6546,17 @@ class MaxwellBot(commands.Bot):
                     "- `reasoning` is the FIRST key in arguments. Plain text, no XML/JSON/tags. Scale length to the task: trivial calls (react, sleep) ~1 short sentence; routine ~1-2 sentences; complex (create_site with custom HTML, image_generator, shell with non-obvious commands, debugging) 3-6 sentences. Server caps at 2000 chars.\n"
                     "- `arguments` keys must match the tool's schema exactly. See each tool's description above for required fields.\n"
                     "- For `create_site`, the FULL HTML document (with all CSS/JS inline) goes in the `body` argument. Do NOT paste HTML into chat. If you find yourself writing `<!DOCTYPE`, `:root{`, or `<html` as a chat message, stop and call `create_site` instead — the user wants a working URL, not raw markup in the channel.\n"
-                    "- For `send_file` with large code/HTML, set `encoding=\"base64\"` and base64-encode the content.\n"
+                    '- For `send_file` with large code/HTML, set `encoding="base64"` and base64-encode the content.\n'
                     "- The JSON line must come BEFORE your user-facing reply. After the JSON, write a short normal reply to the user.\n"
                     "- Call multiple tools by writing multiple JSON lines in a row, each on its own line.\n"
                     "- When you're done with tools and have a final answer, just reply normally with NO JSON line.\n"
                     "- Never wrap the JSON in ``` or use the provider's native function-call format — this server parses bare JSON from your text stream.\n\n"
                     "EXAMPLES (do this, don't do that):\n"
-                    "✓ {\"name\": \"web_search\", \"arguments\": {\"reasoning\": \"looking up the latest Claude release notes\", \"query\": \"Claude 4.5 release notes 2026\"}}\n"
-                    "✓ {\"name\": \"create_site\", \"arguments\": {\"reasoning\": \"building the user's portfolio page\", \"name\": \"portfolio\", \"title\": \"My Portfolio\", \"body\": \"<!DOCTYPE html>...\"}}\n"
-                    "✗ ```json\\n{\"name\": \"shell\", \"arguments\": ...}\\n```  (never wrap in backticks)\n"
+                    '✓ {"name": "web_search", "arguments": {"reasoning": "looking up the latest Claude release notes", "query": "Claude 4.5 release notes 2026"}}\n'
+                    '✓ {"name": "create_site", "arguments": {"reasoning": "building the user\'s portfolio page", "name": "portfolio", "title": "My Portfolio", "body": "<!DOCTYPE html>..."}}\n'
+                    '✗ ```json\\n{"name": "shell", "arguments": ...}\\n```  (never wrap in backticks)\n'
                     "✗ <tool:shell>ls -la</tool:shell>  (no XML tags)\n"
-                    "✗ <function_calls><invoke name=\"shell\">...</invoke></function_calls>  (no native function-calling format)"
+                    '✗ <function_calls><invoke name="shell">...</invoke></function_calls>  (no native function-calling format)'
                 )
                 messages = list(messages)
                 # Append to the first system message if present, else add one.
@@ -6698,11 +6714,19 @@ class MaxwellBot(commands.Bot):
                     # especially visible when the followup itself takes a long
                     # time (e.g. generating a send_message with a long reply, or
                     # deciding to call create_site again with new HTML).
+                    #
+                    # Fire-and-forget via start_defer() — same fast-tool fix
+                    # as gen_progress. If the followup completes with a
+                    # no-tool reply in <800ms, the deferred post never lands
+                    # and the user just sees the final reply. The old code
+                    # would post 'working on it…', delete it via the
+                    # _handle_message finally block, then the reply — the
+                    # exact flicker the user complained about.
                     followup_progress = None
                     if bool(self._control.get("progress_messages", False)):
                         followup_progress = _make_tool_progress(message)
                         with contextlib.suppress(Exception):
-                            await followup_progress.start()
+                            await followup_progress.start_defer()
                         active_progresses.append(followup_progress)
 
                     async def _on_followup_tool_call_name(
@@ -6755,14 +6779,16 @@ class MaxwellBot(commands.Bot):
                     pending_native = self._native_calls_from(followup)
                     # Hand off the followup progress to the next dispatch iteration
                     # so the same message transitions to the tool name/reasoning.
-                    # If no tool calls, stop it before the reply is sent.
+                    # If no tool calls, KEEP the progress alive so the final
+                    # ``message.reply(...)`` below can transition it into the
+                    # reply (see the fast-tool fix in tool_progress). The old
+                    # code called stop() here which deleted the progress and
+                    # then a fresh reply posted underneath — the exact flicker
+                    # the user reported.
                     if followup_progress is not None:
                         if pending_native:
                             first_dispatch_progress = followup_progress
-                        else:
-                            with contextlib.suppress(Exception):
-                                await followup_progress.stop()
-                            followup_progress = None
+                        # else: leave it alive for the transition below
                     if (followup and str(followup).strip()) or pending_native:
                         response = followup or ""
                     else:
@@ -6817,8 +6843,7 @@ class MaxwellBot(commands.Bot):
                 response
                 and not all_tool_results
                 and "create_site" in self.tools
-                and "create_site"
-                not in (self._control.get("disabled_tools", []) or [])
+                and "create_site" not in (self._control.get("disabled_tools", []) or [])
                 and self._looks_like_site_request(content or "")
                 and self._looks_like_html_document(response)
             ):
@@ -6844,8 +6869,45 @@ class MaxwellBot(commands.Bot):
                 response = _auto_format_discord(response)
                 response = self._render_custom_emojis(response, message.guild)
                 chunks = self._split_response(response, limit=1900)
+                # Fast-tool fix: try to transition the live progress message
+                # (if any) into the final reply instead of deleting it and
+                # posting a fresh reply. The old code always did
+                # ``await message.reply(chunk)`` which posts a new message;
+                # the safety-net finally block had already called stop()
+                # on the progress, which deleted the placeholder — so the
+                # user saw: <placeholder> <deletion> <reply>. The
+                # transition path turns the placeholder into the reply in
+                # place, no flicker. If the progress already stopped (tool
+                # batch ran) or never posted (deferred window won the race),
+                # transition_to_final returns False and we fall through to
+                # the normal reply path.
+                transitioned = False
+                if chunks and chunks[0]:
+                    for _prog in reversed(active_progresses):
+                        if _prog is None:
+                            continue
+                        try:
+                            with contextlib.suppress(Exception):
+                                if await _prog.transition_to_final(chunks[0]):
+                                    transitioned = True
+                                    break
+                        except Exception as _e:  # noqa: BLE001
+                            logger.debug("transition_to_final failed: %s", _e)
                 for i, chunk in enumerate(chunks):
-                    if i == 0:
+                    if i == 0 and transitioned:
+                        # Progress message is now the reply; no second
+                        # message needed. Fall through to chunks 2+ if any.
+                        if len(chunks) > 1:
+                            try:
+                                await message.channel.send(chunk)
+                            except (discord.Forbidden, discord.NotFound) as send_exc:
+                                logger.warning(
+                                    "follow-up chunk send failed (%s) in channel %s",
+                                    send_exc.__class__.__name__,
+                                    getattr(message.channel, "id", "?"),
+                                )
+                                break
+                    elif i == 0:
                         try:
                             await message.reply(chunk)
                         except discord.NotFound:
@@ -6916,6 +6978,14 @@ class MaxwellBot(commands.Bot):
                 with contextlib.suppress(Exception):
                     await _prog.stop()
             active_progresses.clear()
+            # Drop this channel's entry from the per-channel progress
+            # dict so it doesn't accumulate over the bot's lifetime
+            # under load. The next message in this channel will
+            # re-stash. run_one() already does set/restore around
+            # each tool call, so this is belt-and-suspenders for the
+            # case where an exception escaped run_one before the
+            # finally restored the prior value.
+            self._current_progress_by_channel.pop(channel_id, None)
             gen_progress = None
             if self._active_requests.get(channel_id) is current_task:
                 self._active_requests.pop(channel_id, None)
@@ -7199,8 +7269,27 @@ class MaxwellBot(commands.Bot):
             # (shell, send_file, etc). Cleared in the finally below so a
             # later tool in the batch doesn't accidentally signal on the
             # wrong tool's behalf.
-            prev_progress = getattr(self, "_current_progress", None)
-            self._current_progress = progress
+            #
+            # Keyed by CHANNEL ID, not a single bot attribute. Under load
+            # many channels run tool batches concurrently and the old
+            # single-attribute design let channel B's progress get
+            # stomped on by channel A's run_one. _signal_streaming() in
+            # the Tool base helper would then call notify_streaming() on
+            # the wrong progress — channel A's batch would silently
+            # delete its message because channel B's tool streamed
+            # output. The user reported this as "messages getting
+            # deleted mid-tool under load".
+            chan_key = str(getattr(message.channel, "id", id(message)))
+            per_chan = getattr(self, "_current_progress_by_channel", None)
+            # ``per_chan`` is None in unit tests that fake the bot with
+            # ``SimpleNamespace``; under load in production it's always
+            # present. Falling back to a temporary dict keeps the
+            # set/restore logic working in both paths.
+            if per_chan is None:
+                per_chan = {}
+                self._current_progress_by_channel = per_chan
+            prev_progress = per_chan.get(chan_key)
+            per_chan[chan_key] = progress
             try:
                 line = await MaxwellBot._execute_tool_by_name(
                     self,
@@ -7211,7 +7300,15 @@ class MaxwellBot(commands.Bot):
                     compatible=compatible,
                 )
             finally:
-                self._current_progress = prev_progress
+                # Restore the prior value (not blindly pop — a nested
+                # run_one inside the same channel would otherwise wipe
+                # the outer progress). If no one was there before,
+                # remove the key so the dict doesn't grow without bound
+                # when channels churn.
+                if prev_progress is None:
+                    per_chan.pop(chan_key, None)
+                else:
+                    per_chan[chan_key] = prev_progress
             result_by_id[call["id"]] = line
             # A memory-write failure must NOT abort the tool batch: asyncio.gather
             # re-raises, which used to trigger the broad `except Exception:
@@ -7509,7 +7606,7 @@ class MaxwellBot(commands.Bot):
             "- Call helper tools (web_search, shell, image_generator, ...) when they help; each carries its own `reasoning`.\n\n"
             "## Common tool-specific notes\n"
             "- `create_site`: the full HTML document goes in the `body` argument, never in chat. When the user says 'make a site' / 'build a page' / 'make me a website' / 'create a landing page' / 'code a webpage' / 'make a portfolio' or any equivalent, call create_site with the complete HTML in `body`. NEVER paste HTML/CSS/JS into your visible reply — that spams raw markup in the channel and the user gets no working site. If your visible text starts with `<!DOCTYPE`, `:root{`, or `<html`, you failed — call create_site instead.\n"
-            "- `send_file` with large code/HTML: set `encoding=\"base64\"` and base64-encode the content.\n"
+            '- `send_file` with large code/HTML: set `encoding="base64"` and base64-encode the content.\n'
             "- `set_activity` and `change_presence`: only call when the user asks or there's a real state change. Don't spam status updates on every turn.\n"
         )
 

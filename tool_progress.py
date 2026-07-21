@@ -78,6 +78,30 @@ _VISIBLE_BUDGET = 600
 # (no whitespace, no terminators) longer than this, we hard-cut.
 _HARD_FALLBACK_CHARS = 640
 
+# Fast-tool fix. start() is called before generation / tool dispatch and
+# posts a 'working on it…' message. For fast paths (create_site finishes
+# in ms, send_message dispatches instantly, pure-text replies) the
+# progress message posts, sits for 50-200ms, then gets deleted by
+# stop() — and a fresh message.reply(response) lands right after. The
+# user sees: <progress> <deletion flicker> <reply>. Annoying.
+#
+# Fix: defer the FIRST post. If the tool batch finishes (stop() called)
+# before the window elapses, no message is ever posted. The window has
+# to be long enough that a real long tool (shell, web_search) will
+# definitely still be running when it fires, and short enough that the
+# user doesn't sit through silence before seeing the placeholder.
+# 800ms is the empirical sweet spot: create_site / send_message /
+# memory lookups all complete in <200ms, so they fall inside the
+# window; real tools (shell, fetch_url, autonomy) take seconds.
+_DEFERRED_POST_WINDOW = 0.8
+
+# The string the bot uses as a placeholder when a tool name arrives
+# before any reasoning. We use this to NOT clobber the per-token
+# reasoning buffer the tick() path spent the last several seconds
+# accumulating — if update() is called with this string, we treat it
+# as a no-reasoning announcement and keep the existing buffer intact.
+_GENERATING_PLACEHOLDER = "generating…"
+
 
 # Matches sentence-ending punctuation: . ! ? followed by whitespace / EOL.
 _TRAILING_SENTENCE_RE = re.compile(r"[.!?](?:\s|$)")
@@ -143,44 +167,20 @@ def _last_full_sentence(buffer: str) -> str:
 
 
 def _format_thinking(buffer: str) -> str:
-    """Render a mid-stream reasoning buffer as a single coherent block.
+    """Render a mid-stream reasoning buffer as a single coherent line.
 
-    The 2026-07-19 user directive: visible reasoning should grow as the
-    model thinks, not snap to a final summary. We show the LAST 1-3
-    complete sentences that fit in the budget, so the user watches the
-    thought unfold. The first tick may show one sentence; the next tick
-    appends a second; the next tick a third — and the rolling window
-    advances.
+    The 2026-07-19 user directive: the visible line is the LAST complete
+    sentence the model emitted. A growing multi-sentence block was tested
+    and rejected — it ballooned the edit payload (more bytes per PATCH,
+    more chance of 429) and forced the user to re-read the whole
+    paragraph every time a new sentence arrived. One sentence, always,
+    rolling forward as the model emits more terminators.
 
-    We never show partial sentences (mid-thought) because half-sentences
-    are unreadable when re-read at a later tick.
+    The function is the public face of "what sentence to show". Under
+    the hood it delegates to ``_last_full_sentence`` for the actual
+    extraction so the two stay in lockstep.
     """
-    if not buffer:
-        return ""
-    text = " ".join(buffer.split())
-    matches = list(_TRAILING_SENTENCE_RE.finditer(text))
-    if not matches:
-        return ""
-    # A 'sentence' spans from right after the previous terminator (or
-    # buffer start) up to and including the next terminator.
-    spans: list[tuple[int, int]] = []
-    for i, m in enumerate(matches):
-        start = matches[i - 1].end() if i > 0 else 0
-        spans.append((start, m.end()))
-    # Walk back from the most recent sentence, accumulating as long as
-    # the block fits in the budget.
-    idx = len(spans) - 1
-    block_start, block_end = spans[idx]
-    while idx > 0:
-        prev_start, prev_end = spans[idx - 1]
-        if block_end - prev_start > _VISIBLE_BUDGET:
-            break
-        block_start = prev_start
-        idx -= 1
-    sentence = text[block_start:block_end].rstrip()
-    if len(sentence) > _VISIBLE_BUDGET:
-        return _trim_to_word_boundary(sentence, _VISIBLE_BUDGET)
-    return sentence
+    return _last_full_sentence(buffer)
 
 
 class ToolProgress:
@@ -204,6 +204,11 @@ class ToolProgress:
         self._msg = message
         self._platform = str(getattr(message, "tool_platform", "discord") or "discord")
         self._posted: Any = None
+        # Background task for the deferred 'working on it…' post. None
+        # when no post is scheduled, set during the window, cleared in
+        # the task's finally block. ``stop()`` cancels it so a fast
+        # tool batch never produces a flash-flicker.
+        self._post_task: asyncio.Task | None = None
         self._last_edit: float = 0.0
         self._last_content: str = ""
         self._lock = asyncio.Lock()
@@ -232,32 +237,90 @@ class ToolProgress:
         return self._posted
 
     async def start(self) -> None:
-        if self._stopped or self._posted is not None:
+        """Begin tracking progress for this tool batch.
+
+        Awaits until the first post is complete. Internally, that means
+        a ``_DEFERRED_POST_WINDOW`` sleep on Discord so a fast tool
+        batch (create_site in 50ms, send_message in 200ms, pure-text
+        reply in 300ms) never produces a flash-delete-replace flicker
+        in the channel. The user complaint that motivated this: the
+        bot would post 'working on it…', delete it 100ms later when
+        stop() ran, then send a fresh reply — three API events for
+        what should have been one.
+
+        ``start_defer()`` is the fire-and-forget variant for callers
+        that can't await the window (the SSE reader callback, for
+        example, must not be blocked by the post). Use it from any
+        code path where the bot's reply is going to fire through
+        ``transition_to_final`` or ``stop()`` and the caller doesn't
+        need to know when the post lands.
+        """
+        if self._stopped or self._posted is not None or self._post_task is not None:
             return
         if self._platform != "discord":
+            # Telegram: post the ack synchronously (no deferred window
+            # for Telegram — the adapter has its own quirks handled
+            # elsewhere).
             try:
                 self._posted = True
-                # Reply to the user's message (threads under it) rather
-                # than a freestanding channel.send. The 2026-07-19 user
-                # directive: a 'working on it…' status should reply to
-                # the user, not just be a new top-level post in the
-                # channel.
                 await self._post_reply("working on it…")
             except Exception as e:  # noqa: BLE001
                 logger.debug("Telegram progress post failed: %s", e)
                 self._posted = None
             return
 
+        # Discord: wait the deferred window, then post IF the progress
+        # is still alive and no tool has begun streaming. stop() racing
+        # us sets _stopped=True; we bail silently.
+        await self._do_deferred_post()
+
+    async def start_defer(self) -> None:
+        """Same as ``start()`` but returns immediately. The deferred
+        post runs in a background task. Use this from the SSE reader
+        callback where blocking the reader on the post would
+        back-pressure the upstream provider.
+        """
+        if self._stopped or self._posted is not None or self._post_task is not None:
+            return
+        if self._platform != "discord":
+            await self.start()
+            return
+        try:
+            self._post_task = asyncio.create_task(self._do_deferred_post())
+        except RuntimeError:
+            # No running loop. Fall back to synchronous start.
+            await self._do_deferred_post()
+
+    async def _do_deferred_post(self) -> None:
+        """Wait the deferred window, then post IF the progress is still
+        alive and no tool has begun streaming its own output. Bails
+        silently on every other path. Idempotent — both start() and
+        start_defer() call into here.
+        """
+        try:
+            await asyncio.sleep(_DEFERRED_POST_WINDOW)
+            if self._stopped or self._tool_streaming or self._posted is not None:
+                return
+            await self._do_first_post()
+        except asyncio.CancelledError:  # noqa: PERF203
+            pass
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Deferred progress post failed: %s", e)
+        finally:
+            self._post_task = None
+
+    async def _do_first_post(self) -> None:
+        """Actually post the 'working on it…' message. Called either
+        eagerly (no-loop fallback) or after the deferred window."""
         try:
             await asyncio.sleep(_GRACE_BEFORE_FIRST_POST)
-            if self._tool_streaming or self._stopped:
+            if self._stopped or self._tool_streaming or self._posted is not None:
                 return
             content = self._render()
             self._posted = await self._post_reply(content)
             self._last_content = content
-            if self._current_tool or content:
-                self._last_edit = time.monotonic()
-                self._edits_made = 1
+            self._last_edit = time.monotonic()
+            self._edits_made = 1
         except Exception as e:  # noqa: BLE001
             logger.debug("Discord progress post failed: %s", e)
             self._posted = None
@@ -296,7 +359,16 @@ class ToolProgress:
         # with an empty string just to announce the tool name — clobbering
         # the buffer in that case wipes the per-token reasoning the
         # tick() path just spent the last several seconds accumulating.
-        if reasoning:
+        #
+        # Same trap when the caller passes the literal placeholder
+        # ``_GENERATING_PLACEHOLDER`` ("generating…") — the bot's
+        # ``_on_tool_call_name`` callback does ``reasoning or "generating…"``
+        # which means a tool-name announcement that arrives before any
+        # reasoning text is sent as the placeholder. Treating that as
+        # "real reasoning" would wipe the per-token buffer just as
+        # egregiously as an empty string. Both are announcements, not
+        # thoughts; the tick() path owns the buffer.
+        if reasoning and reasoning != _GENERATING_PLACEHOLDER:
             self._current_reason = reasoning
             self._reasoning_buffer = reasoning
         if prev_tool and prev_tool != tool_name:
@@ -423,30 +495,33 @@ class ToolProgress:
         """Render the current state as a single user-facing line.
 
         Format:
-          - Reasoning phase, no complete sentence yet: 'working on it…'
-          - Reasoning phase with at least one full sentence:
-            'thinking: <last 1-3 sentences within budget>'. The block
-            grows as the model emits more sentences, so the user can
-            actually watch the reasoning stream by.
-          - Tool active: '<tool>: <last 1-3 sentences>'. The tool name
-            comes first (so the user instantly sees which tool the
-            model committed to), followed by the latest reasoning. If
-            no complete sentence exists yet, the line is just
-            '<tool>: generating…'.
+          - No complete sentence in the buffer yet: the model hasn't
+            told us anything worth reading. We deliberately do NOT
+            prefix the tool name on this placeholder — the 2026-07-19
+            directive is "don't show the tool name until there's
+            something to show", because a bare '<tool>: generating…'
+            flashes during a fast tool call (create_site) and is gone
+            before the user can read it. Better: stay on the neutral
+            'working on it…' until we have a sentence, then transition
+            to '<tool>: <sentence>' or 'thinking: <sentence>'.
 
-        2026-07-19 directive: show real thought progression, not a
-        one-sentence summary. _has_meaningful_reasoning() gates the
-        placeholder-vs-real-content switch on the presence of a
-        sentence terminator; _format_thinking() picks which sentences
-        to render.
+          - One or more complete sentences in the buffer:
+              * With a tool committed: '<tool>: <last sentence>'
+              * Without a tool: 'thinking: <last sentence>'
+
+        The rolling-window effect comes from ``_format_thinking``
+        returning the most-recent terminator-bounded sentence; as the
+        model emits more sentences, the visible line advances.
         """
         formatted = _format_thinking(self._reasoning_buffer)
-        if self._current_tool:
-            if formatted:
-                return f"{self._current_tool}: {formatted}"
-            return f"{self._current_tool}: generating…"
-        if not self._has_meaningful_reasoning():
+        if not formatted:
+            # No complete sentence yet — stay on the neutral placeholder.
+            # The 2026-07-19 user directive explicitly rejected a bare
+            # '<tool>: generating…' here because it flashes for fast
+            # tools and never gives the user time to read it.
             return "working on it…"
+        if self._current_tool:
+            return f"{self._current_tool}: {formatted}"
         return f"thinking: {formatted}"
 
     def _schedule_deferred_flush(self) -> None:
@@ -470,7 +545,7 @@ class ToolProgress:
             if content == self._last_content:
                 return
             await self._flush(content)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError:  # noqa: PERF203 — task cancellation, not error
             pass
         except Exception as e:  # noqa: BLE001
             logger.debug("Deferred progress flush failed: %s", e)
@@ -484,6 +559,14 @@ class ToolProgress:
         if self._stopped:
             return
         self._stopped = True
+        # Cancel the deferred-post task so a stop() called during the
+        # 800ms window doesn't leave a half-sleeping task that wakes up
+        # later and posts an orphan 'working on it…' right after the
+        # tool's reply has gone out. The user complaint: a stray
+        # progress message appearing AFTER the bot's reply because
+        # the deferred post woke up after the reply was sent.
+        if self._post_task and not self._post_task.done():
+            self._post_task.cancel()
         if self._deferred_task and not self._deferred_task.done():
             self._deferred_task.cancel()
         if not self._posted:
@@ -507,6 +590,55 @@ class ToolProgress:
             logger.debug("Progress delete failed: %s", e)
         finally:
             self._posted = None
+
+    async def transition_to_final(self, content: str) -> bool:
+        """Replace the live progress message with the final reply.
+
+        The fast-tool fix that started all this: when a tool batch
+        completes with a final reply in hand, the bot used to do
+        ``await progress.stop()`` (which deletes the 'working on it…'
+        message) and then ``await message.reply(response)`` (which
+        posts a fresh reply). Three API events, one of them a delete,
+        and the user sees a flicker.
+
+        Now: edit the existing progress message in place to show the
+        final reply. The bot's tool dispatch calls this right before
+        the final ``message.reply(...)`` falls through. If no message
+        was ever posted (deferred window won the race, fast tool),
+        the bot posts the reply normally — no double-post. If a
+        message was posted, we hand it off: it BECOMES the reply, no
+        flicker.
+
+        Returns True if the message was transitioned (caller can
+        skip its own reply()), False if there's nothing to transition
+        (caller should post the reply itself).
+        """
+        if self._stopped or self._platform != "discord" or not self._posted:
+            return False
+        if not content:
+            return False
+        try:
+            async with self._lock:
+                # Re-check under the lock in case stop() raced us.
+                if self._stopped or not self._posted:
+                    return False
+                await self._posted.edit(content=content)
+                # Mark the instance as stopped without deleting the
+                # message — it's now the final reply and should stay.
+                # The ``_posted`` reference is kept so a followup
+                # ``stop()`` call from a finally block is a no-op
+                # (we already short-circuit on _stopped).
+                self._stopped = True
+                self._last_content = content
+                if self._deferred_task and not self._deferred_task.done():
+                    self._deferred_task.cancel()
+                return True
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Progress transition-to-final edit failed: %s", e)
+            # Disable further edits so a followup stop() doesn't try
+            # to delete a message we no longer control.
+            self._posted = None
+            return False
 
 
 def make_progress(message: Any) -> ToolProgress:

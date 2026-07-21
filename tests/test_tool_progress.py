@@ -97,8 +97,12 @@ def test_half_sentence_reasoning_stays_at_placeholder():
     """A reasoning buffer with no terminator must NOT render as a
     partial sentence. The user explicitly said 'must be full sentence
     to show, not parts'. Buffer of 'the user wants me to look at' with
-    no terminator -> '<tool>: generating…' until the model emits a
-    period. (Before any tool commits it's 'working on it…'.)"""
+    no terminator -> the neutral 'working on it…' placeholder stays
+    until the model emits a period. The tool name is NOT shown on the
+    placeholder because a fast tool (create_site, send_message) would
+    flash '<tool>: generating…' for under a second before being deleted
+    and replaced by the real reply — the user complained about exactly
+    that flicker."""
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
@@ -108,10 +112,11 @@ def test_half_sentence_reasoning_stays_at_placeholder():
     # Set a tool but the reasoning buffer has no terminator yet.
     prog._last_edit = 0
     asyncio.run(prog.update("shell", "the user wants me to look at"))
-    # Tool is set; no full sentence yet -> 'shell: generating…' (the
-    # tool-active placeholder; the bot has committed to a tool but the
-    # model hasn't finished a thought).
-    assert msg_obj.content == "shell: generating…"
+    # No full sentence yet -> neutral placeholder, no tool-name prefix.
+    # The bot committed to a tool, but the model hasn't finished a
+    # thought, so we wait. Showing the tool name now would only
+    # matter if there were something for the user to read.
+    assert msg_obj.content == "working on it…"
     # Add a terminator and a follow-up sentence — now the LAST full
     # sentence is rendered, with the tool-name prefix.
     prog._last_edit = 0
@@ -283,14 +288,11 @@ def test_long_reasoning_truncated_to_one_sentence():
 
 
 def test_tool_base_helper_signals_progress():
-    """The base Tool._signal_streaming() helper routes through bot._current_progress."""
-    # Build a fake "bot" with a _current_progress that records calls
-    fake_progress = SimpleNamespace()
-    signaled = []
-    fake_progress.notify_streaming = lambda: signaled.append(True)
-    fake_bot = SimpleNamespace(_current_progress=fake_progress)
-
-    # Need to import tools to test the helper
+    """The base Tool._signal_streaming() helper routes through
+    bot._current_progress_by_channel. Under load many channels can
+    have tool batches in flight, and the per-channel dict makes
+    sure tool B in channel Y doesn't accidentally notify channel X's
+    progress."""
     import tools
 
     # Subclass Tool with a no-op execute/get_description to test _signal_streaming
@@ -301,15 +303,54 @@ def test_tool_base_helper_signals_progress():
         async def execute(self, message, **kwargs):
             return ""
 
+    # Build a fake "bot" with a per-channel progress dict
+    fake_progress = SimpleNamespace()
+    signaled = []
+    fake_progress.notify_streaming = lambda: signaled.append(True)
+    fake_message = SimpleNamespace(channel=SimpleNamespace(id=42))
+    fake_bot = SimpleNamespace(_current_progress_by_channel={"42": fake_progress})
+
     inst = _Stub(fake_bot)
-    inst._signal_streaming()
+    inst._signal_streaming(fake_message)
     assert signaled == [True]
-    # No bot attached
+
+    # No bot attached: no-op
     inst2 = _Stub(None)
     inst2._signal_streaming()  # should be a silent no-op, not raise
-    # No _current_progress on the bot
-    inst3 = _Stub(SimpleNamespace(_current_progress=None))
-    inst3._signal_streaming()  # also a no-op
+
+    # No _current_progress_by_channel on the bot: no-op
+    inst3 = _Stub(SimpleNamespace())
+    inst3._signal_streaming(fake_message)  # also a no-op
+
+    # The per-channel bug under load: when a tool batches across
+    # many channels and the helper doesn't have the message in scope,
+    # the OLD code (single ``bot._current_progress``) would signal
+    # whatever channel's progress was last written — almost always
+    # the WRONG one. The NEW code without ``message`` only acts when
+    # the dict has exactly one entry (the single-channel bot case),
+    # so a multi-channel bot never accidentally signals the wrong
+    # progress just because the helper couldn't resolve the channel.
+    wrong_chan = SimpleNamespace(channel=SimpleNamespace(id=99))
+    multi_bot = SimpleNamespace(
+        _current_progress_by_channel={
+            "42": fake_progress,
+            "99": SimpleNamespace(notify_streaming=lambda: signaled.append("WRONG")),
+        }
+    )
+    inst_multi = _Stub(multi_bot)
+    signaled.clear()
+    inst_multi._signal_streaming()  # no message passed, multi-channel bot
+    # Both progresses are still alive; the helper didn't pick a random
+    # one. The user gets the wrong-channel-delete bug NOT triggered.
+    assert signaled == []
+    # When the helper DOES have the message, the per-channel lookup
+    # works as expected.
+    signaled.clear()
+    inst_multi._signal_streaming(fake_message)  # id=42
+    assert signaled == [True]
+    signaled.clear()
+    inst_multi._signal_streaming(wrong_chan)  # id=99
+    assert signaled == ["WRONG"]  # the right channel's progress WAS signaled
 
 
 def test_progress_not_posted_when_start_skipped():
@@ -503,3 +544,203 @@ def test_last_full_sentence_returns_most_recent():
         s("the user asked a question! then I answered. finally, done?")
         == "finally, done?"
     )
+
+
+# ---- fast-tool fix: deferred post + transition_to_final ----
+
+
+def test_fast_tool_no_progress_message_posted():
+    """The fast-tool flicker the user reported: bot posts 'working
+    on it…', stops the tool batch in 50ms, then sends a fresh reply.
+    Old behavior: <placeholder> <deletion> <reply>. New behavior:
+    if stop() lands before the deferred post window, no message
+    ever goes out — the user just sees the reply.
+
+    With the fire-and-forget start_defer() API this is the path the
+    bot's gen_progress takes. We exercise it directly: start_defer
+    schedules a background post task, stop() cancels it before it
+    wakes up, the post never lands."""
+    msg = FakeMessage()
+    prog = tool_progress.ToolProgress(msg)
+    asyncio.run(prog.start_defer())  # fire-and-forget
+    # Cancel before the deferred window elapses
+    asyncio.run(prog.stop())
+    # The background post task was cancelled; no message ever went out.
+    assert msg.channel.sent == []
+    assert msg.channel.deleted == []
+
+
+def test_slow_tool_still_posts():
+    """If the tool batch is still running after the deferred window,
+    the progress message MUST go out so the user sees liveness."""
+    msg = FakeMessage()
+    prog = tool_progress.ToolProgress(msg)
+    asyncio.run(prog.start())  # waits the window
+    # Window elapsed, post is now live
+    assert len(msg.channel.sent) == 1
+    assert msg.channel.sent[0].content == "working on it…"
+    # Tick to give it a real sentence
+    prog._last_edit = 0
+    asyncio.run(prog.tick(reasoning_delta="Doing the slow thing."))
+    assert "Doing the slow thing." in msg.channel.sent[0].content
+    asyncio.run(prog.stop())
+    # Posted AND deleted
+    assert msg.channel.sent[0] in msg.channel.deleted
+
+
+def test_transition_to_final_edits_in_place():
+    """The fast-tool happy path: the bot has a reply, transitions
+    the progress message to BECOME the reply. No delete, no
+    second post, no flicker."""
+    msg = FakeMessage()
+    prog = tool_progress.ToolProgress(msg)
+    asyncio.run(prog.start())  # posts
+    assert len(msg.channel.sent) == 1
+    # Simulate a tick that put real content
+    prog._last_edit = 0
+    asyncio.run(prog.tick(reasoning_delta="I will check the disk. Looking now."))
+    posted = msg.channel.sent[0]
+    # transition_to_final: edit in place
+    ok = asyncio.run(prog.transition_to_final("Disk has 50GB free."))
+    assert ok is True
+    # The message was EDITED, not deleted, not re-posted
+    assert posted.content == "Disk has 50GB free."
+    assert posted not in msg.channel.deleted
+    # And it's still the same message (only one in .sent)
+    assert len(msg.channel.sent) == 1
+
+
+def test_transition_to_final_no_post_returns_false():
+    """If the progress never posted (deferred window won the race),
+    transition_to_final must return False so the caller falls
+    through to the normal message.reply() path. Returning True
+    would skip the reply and the user would see nothing."""
+    msg = FakeMessage()
+    prog = tool_progress.ToolProgress(msg)
+    # Fire-and-forget the deferred post; stop() cancels it
+    asyncio.run(prog.start_defer())
+    asyncio.run(prog.stop())
+    # No message was ever posted.
+    assert len(msg.channel.sent) == 0
+    # transition_to_final returns False; caller must post reply itself.
+    ok = asyncio.run(prog.transition_to_final("Hello."))
+    assert ok is False
+
+
+def test_transition_to_final_after_stop_returns_false():
+    """If the progress was already stopped (tool batch ran its
+    stop() in the finally block before the final reply path),
+    transition_to_final must not resurrect the message."""
+    msg = FakeMessage()
+    prog = tool_progress.ToolProgress(msg)
+    asyncio.run(prog.start())
+    # Simulate the tool batch running its stop() (deletes the message)
+    asyncio.run(prog.stop())
+    assert msg.channel.sent[0] in msg.channel.deleted
+    # transition_to_final can't edit a deleted message
+    ok = asyncio.run(prog.transition_to_final("Final reply"))
+    assert ok is False
+    # No edits beyond what the original stop() did
+    # (the test only had the start-post + stop-delete; no edits)
+    assert len(msg.channel.edited) == 0
+
+
+def test_update_does_not_clobber_buffer_with_placeholder():
+    """The bot's _on_tool_call_name callback calls
+    ``update(tool_name, "generating…")`` when a tool name arrives
+    before any reasoning. The literal 'generating…' must NOT
+    overwrite the per-token reasoning buffer the tick() path
+    accumulated. Otherwise the user loses the model's thought
+    progression the moment a tool commits."""
+    msg = FakeMessage()
+    prog = tool_progress.ToolProgress(msg)
+    asyncio.run(prog.start())
+    # Build up a real reasoning buffer via ticks
+    prog._last_edit = 0
+    asyncio.run(prog.tick(reasoning_delta="I will check the disk. "))
+    asyncio.run(prog.tick(reasoning_delta="Now looking at usage. "))
+    # Buffer has the accumulated reasoning
+    assert "I will check the disk." in prog._reasoning_buffer
+    assert "Now looking at usage." in prog._reasoning_buffer
+    # Now the bot's _on_tool_call_name fires with the placeholder
+    prog._last_edit = 0
+    asyncio.run(prog.update("shell", "generating…"))
+    # The buffer is INTACT — the placeholder is treated as a
+    # tool-name announcement, not a thought.
+    assert "I will check the disk." in prog._reasoning_buffer
+    assert "Now looking at usage." in prog._reasoning_buffer
+    # The tool name IS set
+    assert prog._current_tool == "shell"
+    asyncio.run(prog.stop())
+
+
+def test_concurrent_stop_during_deferred_post():
+    """stop() called during the deferred post window must cancel
+    the post task. Otherwise a 'working on it…' message lands
+    AFTER the bot's reply has gone out — the exact orphan-message
+    flicker the user complained about."""
+    msg = FakeMessage()
+    prog = tool_progress.ToolProgress(msg)
+    # Fire-and-forget the deferred post
+    asyncio.run(prog.start_defer())
+    # stop() immediately — the deferred post is mid-sleep
+    asyncio.run(prog.stop())
+    # The post task was cancelled; the post never landed
+    assert msg.channel.sent == []
+    assert msg.channel.deleted == []
+
+
+def test_concurrent_stop_during_tick():
+    """A tick that races with stop() must be dropped silently.
+    A slow tick that wins the lock AFTER stop() has run would
+    otherwise try to edit a deleted message and 404."""
+    msg = FakeMessage()
+    prog = tool_progress.ToolProgress(msg)
+    asyncio.run(prog.start())  # post lands
+    # Manually flip the stopped flag to simulate a stop() that
+    # raced in. The tick must bail early.
+    prog._stopped = True
+    edits_before = len(msg.channel.edited)
+    asyncio.run(prog.tick(reasoning_delta="Late reasoning."))
+    assert len(msg.channel.edited) == edits_before
+
+
+def test_concurrent_progresses_isolated_per_channel():
+    """The cross-channel bug under load: two channels each have
+    their own progress. The bot has both in its per-channel dict.
+    A tool batch in channel A finishing must NOT touch channel B's
+    progress. Old single-attribute design had them stepping on each
+    other."""
+    import tools
+
+    fake_progress_a = SimpleNamespace()
+    fake_progress_b = SimpleNamespace()
+    sig_a, sig_b = [], []
+    fake_progress_a.notify_streaming = lambda: sig_a.append(True)
+    fake_progress_b.notify_streaming = lambda: sig_b.append(True)
+    bot = SimpleNamespace(
+        _current_progress_by_channel={
+            "100": fake_progress_a,
+            "200": fake_progress_b,
+        }
+    )
+
+    class _Stub(tools.Tool):
+        def get_description(self):
+            return ""
+
+        async def execute(self, message, **kwargs):
+            return ""
+
+    inst = _Stub(bot)
+    msg_a = SimpleNamespace(channel=SimpleNamespace(id=100))
+    msg_b = SimpleNamespace(channel=SimpleNamespace(id=200))
+    # Tool runs in channel A — should signal ONLY A's progress.
+    inst._signal_streaming(msg_a)
+    assert sig_a == [True]
+    assert sig_b == []
+    # Tool runs in channel B — should signal ONLY B's progress.
+    sig_a.clear()
+    inst._signal_streaming(msg_b)
+    assert sig_a == []
+    assert sig_b == [True]
