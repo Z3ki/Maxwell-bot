@@ -8111,7 +8111,7 @@ class MaxwellBot(commands.Bot):
 
         system_parts = [
             "You are Maxwell — a real person in this chat, not a service or assistant. You have your own opinions and sense of humor. You answer like a friend who happens to know a lot, never like a helpdesk. Warm, open-minded, willing to talk about anything. You never hedge, disclaim, soften, moralize, or say 'I can't' / 'I shouldn't' — you just say what you'd actually say, the way you'd actually say it.\n"
-            "The conversation history below is real — you said those things, those people said those things. Use them naturally: refer back, follow up, hold grudges, build running jokes, remember what was just said. Only reply to the latest message; everything earlier is context for you, not a queue of unanswered questions.\n"
+            "The conversation history below is real — you said those things, those people said those things. Use it as background context (running jokes, follow-ups, grudges, what was just said), but only RESPOND to the latest message. Everything earlier is context for you, not a queue of unanswered questions — never answer multiple turns, never address prior speakers who didn't ping you, never re-summarise the thread.\n"
             "Match the channel's vibe. Discord markdown (`code`, ```blocks```, quotes, bullets, emphasis) when it helps. Plain text when it doesn't. Lowercase-natural by default; no asterisk actions, no 'as an AI' meta-commentary."
         ]
         server_id = str(message.guild.id) if message.guild else "DM"
@@ -8431,6 +8431,12 @@ class MaxwellBot(commands.Bot):
                 messages.append(
                     {"role": turn["role"], "content": turn["_rendered"]}
                 )
+        # The live message is appended as a final user turn below. The
+        # historical channel turns above give the model full context of
+        # who-said-what, but per the persona rules the bot only RESPONDS
+        # to the latest message — so we mark which turn in the transcript
+        # is the one to answer. We use a [RESPOND TO THIS] tag on the
+        # final appended line so the model can pick it out instantly.
         latest_text = render_discord_context_text(
             message, user_message, known_users=self._recent_users.get(channel_id, {})
         )
@@ -8438,15 +8444,15 @@ class MaxwellBot(commands.Bot):
         author_label = f"{message.author.display_name}({author_id})"
         if message.author.bot:
             author_label += " [bot]"
-        # 2026-07-21: the historical channel turns above already include the
-        # latest message (it's appended to memory before _build_messages runs).
-        # Don't re-state it with a "Latest message to answer from" prefix when
-        # we'd just be appending to the same user turn — the model already sees
-        # the text. Only use the meta framing on the cold path (no history).
+        # Live message text is always appended as a final user turn
+        # (merging into the trailing user turn if the last historical
+        # message was also a user, so role alternation isn't broken).
+        # Tag it [RESPOND TO THIS] so the model can identify which turn
+        # in the transcript to actually answer.
         if messages and messages[-1].get("role") == "user":
-            user_parts = [latest_text]
+            user_parts = [f"[RESPOND TO THIS] {latest_text}"]
         else:
-            user_parts = [f"{author_label}: {latest_text}"]
+            user_parts = [f"[RESPOND TO THIS] {author_label}: {latest_text}"]
         mention_names = [
             f"{getattr(user, 'display_name', str(getattr(user, 'id', 'unknown')))}({getattr(user, 'id', 'unknown')})"
             for user in (message.mentions or [])
@@ -8820,10 +8826,10 @@ class MaxwellBot(commands.Bot):
                 messages.append(t)
 
         if messages and messages[-1].get("role") == "user":
-            user_parts = [text or "[audio sent]"]
+            user_parts = [f"[RESPOND TO THIS] {text or '[audio sent]'}"]
         else:
             user_parts = [
-                f"Latest message to answer from {user_name}: {text or '[audio sent]'}"
+                f"[RESPOND TO THIS] Latest message to answer from {user_name}: {text or '[audio sent]'}"
             ]
         if tg_media:
             user_parts.append("Media available to inspect in the multimodal payload.")
@@ -9268,9 +9274,9 @@ class MaxwellBot(commands.Bot):
                     # from" meta framing when we're appending to an existing user
                     # turn (the historical turns already include this message).
                     if messages and messages[-1].get("role") == "user":
-                        user_parts = [latest_label]
+                        user_parts = [f"[RESPOND TO THIS] {latest_label}"]
                     else:
-                        user_parts = [f"Latest message to answer from {user_name}: {latest_label}"]
+                        user_parts = [f"[RESPOND TO THIS] Latest message to answer from {user_name}: {latest_label}"]
                     if tg_media:
                         user_parts.append(
                             "Media available to inspect in the multimodal payload."
