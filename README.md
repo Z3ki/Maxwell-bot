@@ -37,59 +37,150 @@ python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
+# edit .env — DISCORD_TOKEN is the only required value
 ```
 
-YouTube transcript and frame extraction uses `yt-dlp`, `yt-dlp-ejs`, a JavaScript runtime, and `ffmpeg`. The Python packages are included in `requirements.txt`; install `node` or `deno`, and install `ffmpeg` with your system package manager if they are not already available. Maxwell explicitly uses Node for yt-dlp's YouTube JS challenge handling when `node` is on `PATH`. For videos that trigger YouTube bot checks, export Netscape-format cookies to `data/youtube_cookies.txt` or set `YOUTUBE_COOKIES_FILE=/path/to/cookies.txt`. Never commit that file.
+### System packages
 
-Edit `.env` with your values, then run:
+`pip install -r requirements.txt` covers the Python side. These system
+packages are required for the features listed:
+
+| Package | Needed for | Optional? |
+|---|---|---|
+| `ffmpeg` | TTS playback, video frame extraction, audio conversion | only required if `ENABLE_VIDEO_INPUT=true` or you use TTS |
+| `libopus0` / `libopus-dev` | voice receive (live VC listening) | only required if `ENABLE_VC=true` |
+| `libsodium` / `libsodium-dev` | PyNaCl (voice crypto) | only required if `ENABLE_VC=true` |
+| `espeak-ng` | local TTS engine (default) | only required if `TTS_ENGINE=local` or `auto` without NVIDIA key |
+| `node` or `deno` | yt-dlp YouTube JS challenge solver | only required if `ENABLE_YOUTUBE=true` |
+| `postfix` + `dovecot-imapd` | email tools | only required if `ENABLE_EMAIL_TOOLS=true` |
+| `docker` | opencode subagent (default backend) | only required if `ENABLE_SUBAGENT=true` and `OPENCODE_SUBAGENT_DOCKER=true` |
+
+Debian/Ubuntu one-liner for everything except Postfix/Dovecot:
 
 ```bash
+sudo apt install ffmpeg libopus0 libsodium-dev espeak-ng nodejs
+```
+
+For the YouTube tool, set `YOUTUBE_COOKIES_FILE=/path/to/cookies.txt` in
+`.env` for videos that trigger YouTube bot checks. Never commit that file.
+
+### Run it
+
+```bash
+# two terminals, or background each
 python bot.py
 python api/api_server.py
 ```
 
-Or with PM2:
+Or with PM2 (recommended for production):
 
 ```bash
 pm2 start ecosystem.config.js
+pm2 logs maxwell-bot maxwell-api
 ```
 
 ## Environment Variables
 
-See `.env.example` for a full template. Key variables:
+See `.env.example` for the full template with comments. The most
+important ones:
 
-| Variable | Required | Description |
-|---|---|---|
-| `DISCORD_TOKEN` | Yes | Discord user token |
-| `TELEGRAM_TOKEN` | No | Telegram bot token for optional Telegram long-polling support |
-| `OLLAMA_BASE_URL` | No | OpenAI-compatible API base URL (default: `http://localhost:11434`) |
-| `OLLAMA_API_KEY` | No | Bearer token for the LLM API (falls back to `OPENAI_COMPAT_API_KEY`) |
-| `OLLAMA_MODEL` | No | Model name (default: `gemma4:31b-cloud`) |
-| `OLLAMA_REM_MODEL` | No | Optional REM dreamer model (defaults to `OLLAMA_MODEL`) |
-| `OLLAMA_MAX_TOKENS` | No | Max tokens (default: 200000) |
-| `OLLAMA_TEMPERATURE` | No | Temperature (default: 1.0) |
-| `OLLAMA_FALLBACK_BASE_URL` | No | Optional secondary OpenAI-compatible API base URL. Attempts rotate primary/fallback when set. |
-| `OLLAMA_FALLBACK_API_KEY` | No | Bearer token for the fallback LLM API. |
-| `OLLAMA_FALLBACK_MODEL` | No | Model name for the fallback provider. |
-| `OLLAMA_FALLBACK_DISABLE_REASONING` | No | Add OpenRouter-compatible reasoning exclusion on fallback calls (default: `true`). |
-| `OLLAMA_RETRY_ATTEMPTS` | No | Total provider attempts per request (default: `3`; with fallback: primary, fallback, primary). |
-| `ENABLE_AUDIO_INPUT` | No | Enable sending audio (voice clips, attachments, extracted video audio) to the LLM for "omni" audio models (default: `false`). Set `true` to enable audio input for models that support it. |
-| `NVIDIA_API_KEY` | No | NVIDIA NIM API key for HD image generation |
-| `GPT_IMAGE_URL` | No | GPT-compatible image generation endpoint |
-| `GPT_IMAGE_API_KEY` | No | API key for GPT image endpoint |
-| `DATA_DIR` | No | Data storage directory (default: `data`) |
-| `MAXWELL_ADMIN_USER` | Yes | Admin username for dashboard API |
-| `MAXWELL_ADMIN_PASSWORD` | Yes | Admin password for dashboard API |
-| `MAXWELL_SITE_DIR` | No | Directory for generated bot sites (default: `public/bot`) |
-| `MAXWELL_PUBLIC_BASE_URL` | No | Public URL for generated sites |
-| `MAXWELL_API_HOST` | No | API bind address (default: `127.0.0.1`) |
-| `MAXWELL_API_PORT` | No | API port (default: `8765`) |
-| `MAXWELL_CORS_ORIGIN` | No | Allowed CORS origin (default: same as `MAXWELL_PUBLIC_BASE_URL`) |
-| `REM_ENABLED` | No | Enable background REM dreaming (default: `false`) |
-| `REM_INTERVAL_SECONDS` | No | REM interval in seconds (default: `600`) |
-| `REM_MAX_TURNS` | No | Maximum REM tool-call rounds (default: `3`) |
-| `REM_EVENT_BUFFER_MAX` | No | Global visible event buffer cap (default: `500`) |
-| `REM_RUN_HISTORY` | No | REM audit history length (default: `50`) |
+### Required to start
+
+| Variable | Description |
+|---|---|
+| `DISCORD_TOKEN` | Discord user token (self-bot — may violate Discord ToS) |
+| `MAXWELL_ADMIN_USER` / `MAXWELL_ADMIN_PASSWORD` | Dashboard / API Basic auth. Empty password = 503 on every request. |
+| `MAXWELL_OWNER_IDS` | Comma-separated Discord user IDs allowed to run admin commands |
+
+### LLM provider
+
+| Variable | Description |
+|---|---|
+| `OLLAMA_BASE_URL` | OpenAI-compatible API base URL (default: `http://localhost:11434`) |
+| `OLLAMA_API_KEY` | Bearer token (falls back to `OPENAI_COMPAT_API_KEY`) |
+| `OLLAMA_MODEL` | Model name (default: `gemma4:31b-cloud`) |
+| `OLLAMA_REM_MODEL` | REM dreamer model (defaults to `OLLAMA_MODEL`) |
+| `OLLAMA_MAX_TOKENS` | Max output tokens per completion (default: `8192`) |
+| `OLLAMA_TEMPERATURE` | Temperature (default: `1.0`) |
+| `OLLAMA_FALLBACK_*` | Optional secondary endpoint, rotates with primary |
+| `OLLAMA_RETRY_ATTEMPTS` | Total attempts per request (default: `3`) |
+| `AUTONOMY_BASE_URL` / `AUTONOMY_API_KEY` / `AUTONOMY_MODEL` | Override the autonomy engine endpoint; blank = use main |
+
+### Feature kill switches
+
+All default to `true` (matches legacy behaviour). Set any of these to
+`false` to skip registering the tool, importing the heavy dep, or
+auto-starting the background loop. Restart the bot to apply.
+
+| Variable | Disables |
+|---|---|
+| `ENABLE_IMAGE_INPUT` | Forwarding images to the LLM (also controlled via `process_images` in dashboard) |
+| `ENABLE_VIDEO_INPUT` | ffmpeg video frame extraction for `video/*` attachments |
+| `ENABLE_AUDIO_INPUT` | Forwarding audio to "omni" audio-capable models (default `false`) |
+| `ENABLE_IMAGE_GEN` | `image_generator` + `hd_image` tools (NVIDIA NIM key required otherwise) |
+| `ENABLE_TTS` | The `tts` tool |
+| `ENABLE_TTS_VC` | VC TTS playback paths |
+| `ENABLE_EMAIL_TOOLS` | `email_send` / `email_read_inbox` / `email_get_message` / `email_search` |
+| `ENABLE_VC` | `voice_recv` import + `,vc` commands (needs `discord-ext-voice-recv`) |
+| `ENABLE_YOUTUBE` | `youtube` tool (needs `yt-dlp`) |
+| `ENABLE_WEB_SEARCH` | `web_search` tool (needs `ddgs`) |
+| `ENABLE_FETCH_URL` | `fetch_url` tool |
+| `ENABLE_SUBAGENT` | `sub_agent` tool (needs `opencode` binary) |
+| `ENABLE_CREATE_SITE` | `create_site` / `list_sites` tools |
+| `ENABLE_AVATAR` | `change_avatar` tool |
+| `ENABLE_SHELL` | `shell` tool (host access — only enable if you trust the model) |
+| `ENABLE_TELEGRAM` | Auto-start Telegram polling/webhook when `TELEGRAM_TOKEN` is set |
+| `ENABLE_AUTONOMY` | Autonomy engine (also controlled via dashboard) |
+| `ENABLE_REM` | Background REM dreaming pass |
+
+### TTS engine (only used if `ENABLE_TTS=true`)
+
+| Variable | Description |
+|---|---|
+| `TTS_ENGINE` | `local` (espeak, no key) / `riva` (NVIDIA, paid) / `gtts` / `auto` |
+| `TTS_RIVA_*` | Riva TTS function ID, voice, language |
+| `NVIDIA_API_KEY` | Required for `riva`; also required for `hd_image` |
+
+### Image generation
+
+| Variable | Description |
+|---|---|
+| `POLLINATIONS_MODEL` | Free image generator model (default: `flux`) |
+| `NVIDIA_API_KEY` | NVIDIA NIM key for `hd_image` |
+| `NVIDIA_IMAGE_URL` | NVIDIA NIM endpoint |
+| `GPT_IMAGE_URL` / `GPT_IMAGE_API_KEY` | Optional GPT-Image-1 compatible endpoint |
+
+### Admin API / dashboard
+
+| Variable | Description |
+|---|---|
+| `MAXWELL_API_HOST` / `MAXWELL_API_PORT` | API bind address (default: `127.0.0.1:8765`) |
+| `MAXWELL_PUBLIC_BASE_URL` | Public URL where generated sites are served |
+| `MAXWELL_CORS_ORIGIN` | Allowed CORS origin |
+| `MAXWELL_SITE_DIR` | Where generated sites are written (default: `public/bot`) |
+| `MAXWELL_TRUST_PROXY` | Trust `X-Forwarded-For` from reverse proxy (default `false`) |
+| `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | Discord OAuth on dashboard (optional, both blank = Basic only) |
+
+### Email (only used if `ENABLE_EMAIL_TOOLS=true`)
+
+| Variable | Description |
+|---|---|
+| `MAXWELL_SMTP_HOST` / `MAXWELL_SMTP_PORT` | Postfix for outbound (default `127.0.0.1:25`) |
+| `MAXWELL_IMAP_HOST` / `MAXWELL_IMAP_PORT` | Dovecot for inbound (default `127.0.0.1:993`) |
+| `MAXWELL_EMAIL_USER` / `MAXWELL_EMAIL_PASSWORD` | SASL credentials |
+| `MAXWELL_EMAIL_FROM` / `MAXWELL_EMAIL_FROM_NAME` | `From:` header |
+
+### OpenCode sub-agent (only used if `ENABLE_SUBAGENT=true`)
+
+| Variable | Description |
+|---|---|
+| `OPENCODE_BIN` | Path to `opencode` binary |
+| `OPENCODE_SUBAGENT_BASE_DIR` | Workdir for sub-agent tasks (default `subagents/`, gitignored) |
+| `OPENCODE_SUBAGENT_MODEL` | Default model (default `ollama-cloud/minimax-m3`) |
+| `OPENCODE_SUBAGENT_TIMEOUT_MINUTES` | Per-task timeout (default `30`) |
+| `OPENCODE_SUBAGENT_DOCKER` | Run in Docker (default `true`) |
+| `OPENCODE_SUBAGENT_MEMORY` / `OPENCODE_SUBAGENT_CPUS` | Container resource limits |
+| `OPENCODE_SUBAGENT_NETWORK` | `bridge` (default) or `none` |
 
 ### Temporary Free Model
 
@@ -119,11 +210,6 @@ All commands use the `,` prefix. Admin commands require the user to be in the ad
 | `,autonomy interval <seconds>` | Yes | Set autonomy check interval |
 | `,autonomy blacklist channel|server <id>` | Yes | Add to autonomy blacklist (channels or servers/guilds) |
 | `,autonomy unblacklist channel|server <id>` | Yes | Remove from autonomy blacklist |
-| `,intel` | Yes | Show status of the background tech/AI news & model intel gatherer |
-| `,intel now` | Yes | Force an immediate news/intel gathering pass into long-term memory |
-| `,intel on` / `,intel off` | Yes | Enable/disable the hourly intel gatherer |
-| `,intel interval <seconds>` | Yes | Set intel gather interval (default 3600) |
-| `,intel log` | Yes | Show recent intel run audits |
 | `,drug [minutes]` | No | Temporary "fried" personality override |
 | `,drug off` | No | Turn off drug mode |
 | `,blacklist [user]` | Yes | Add/view/clear blacklisted users |
@@ -189,11 +275,12 @@ This is a **rolling release** project.
 
 If you're running via PM2 (recommended), a push to main followed by a restart gives you the latest rolling update immediately.
 
-Autonomy (and normal chat) now benefits from the **Intel engine** (`intel.py`): a background sub-process that wakes ~hourly, uses web_search + fetch to pull the latest AI model releases, LLM news, benchmarks, etc., then uses the *exact same model/provider* configured for autonomy/REM to curate facts and writes them into long_term_memory. This is how the main bot stays aware of "the new AI model that just dropped" instead of saying it doesn't know.
-
-`,intel now` forces a pass. It is enabled by default with a 1-hour interval.
-
-It **receives** directly from general AI/tech outlet feeds (RSS) instead of searching: defaults include Hugging Face, MarkTechPost (strong on model releases), TLDR AI, arXiv (cs.AI/cs.LG), Simon Willison, VentureBeat AI, TechCrunch, The Verge AI. This covers broad model releases across companies + general tech news. Customize via `intel_feed_urls` in control or `data/intel_control.json` (`{"feed_urls": [...]}`). Run `,intel feeds` to list active sources.
+> The Intel engine was removed in commit `d455e4b`. The `,intel` commands
+> and the `intel_enabled` / `intel_interval_seconds` keys are stripped
+> from `bot_control.json` at load. If you want a self-updating news
+> roller back, see the `context_cleanup` background loop and the
+> `autonomy` engine — both already write fresh facts into long-term
+> memory on their own cadences.
 
 ## Dashboard / API
 

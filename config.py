@@ -82,6 +82,43 @@ class Config:
     # Default is now OFF. Set to true in .env to allow audio input for models that support it.
     ENABLE_AUDIO_INPUT = _bool_env("ENABLE_AUDIO_INPUT", False)
 
+    # -------------------------------------------------------------------------
+    # Feature kill switches (default true unless noted — matches legacy
+    # behaviour). All read once at import time; restart the bot to change.
+    # -------------------------------------------------------------------------
+    ENABLE_IMAGE_INPUT = _bool_env("ENABLE_IMAGE_INPUT", True)
+    ENABLE_VIDEO_INPUT = _bool_env("ENABLE_VIDEO_INPUT", True)
+    ENABLE_IMAGE_GEN = _bool_env("ENABLE_IMAGE_GEN", True)
+    ENABLE_TTS = _bool_env("ENABLE_TTS", True)
+    ENABLE_TTS_VC = _bool_env("ENABLE_TTS_VC", True)
+    ENABLE_EMAIL_TOOLS = _bool_env("ENABLE_EMAIL_TOOLS", True)
+    ENABLE_VC = _bool_env("ENABLE_VC", True)
+    ENABLE_YOUTUBE = _bool_env("ENABLE_YOUTUBE", True)
+    ENABLE_WEB_SEARCH = _bool_env("ENABLE_WEB_SEARCH", True)
+    ENABLE_FETCH_URL = _bool_env("ENABLE_FETCH_URL", True)
+    ENABLE_SUBAGENT = _bool_env("ENABLE_SUBAGENT", True)
+    ENABLE_CREATE_SITE = _bool_env("ENABLE_CREATE_SITE", True)
+    ENABLE_AVATAR = _bool_env("ENABLE_AVATAR", True)
+    ENABLE_SHELL = _bool_env("ENABLE_SHELL", True)
+    ENABLE_TELEGRAM = _bool_env("ENABLE_TELEGRAM", True)
+    ENABLE_AUTONOMY = _bool_env("ENABLE_AUTONOMY", True)
+
+    # When false (default), shell and sub_agent refuse to run on a turn
+    # that read untrusted fetched content (URLs, web search) without an
+    # out-of-band `,confirm` from an admin. This blocks indirect prompt
+    # injection from turning a fetched page into a shell command.
+    # Set to true to skip the gate entirely — the model can call shell
+    # after fetch_url/web_search without confirmation. Only do this if
+    # you trust the model fully (single-user homelab install).
+    DISABLE_TAINT_GATE = _bool_env("DISABLE_TAINT_GATE", False)
+
+    # TTS engine selection. local / riva / gtts / auto. Undocumented before
+    # 2026-07-21 — used to fall through a chain in bot._synthesize_tts_wav.
+    TTS_ENGINE = os.getenv("TTS_ENGINE", "auto").strip().lower()
+
+    # Optional secondary auth fallback for the primary LLM endpoint.
+    OPENAI_COMPAT_API_KEY = os.getenv("OPENAI_COMPAT_API_KEY", "").strip()
+
     AUTONOMY_BASE_URL = os.getenv("AUTONOMY_BASE_URL", "").strip()
     AUTONOMY_API_KEY = os.getenv(
         "AUTONOMY_API_KEY", os.getenv("OPENAI_COMPAT_API_KEY", "")
@@ -159,11 +196,62 @@ class Config:
     MAXWELL_EMAIL_FROM = os.getenv("MAXWELL_EMAIL_FROM", "maxwell@z3ki.dev").strip()
     MAXWELL_EMAIL_FROM_NAME = os.getenv("MAXWELL_EMAIL_FROM_NAME", "Maxwell").strip()
 
+    # Admin / owner allowlists. Re-exported here so Config is the single
+    # source of truth; bot_tools.refresh_owner_ids() still does a runtime
+    # reload but the initial parse lives here.
+    MAXWELL_ADMIN_USER = os.getenv("MAXWELL_ADMIN_USER", "admin").strip()
+    MAXWELL_ADMIN_PASSWORD = os.getenv("MAXWELL_ADMIN_PASSWORD", "").strip()
+    MAXWELL_OWNER_IDS = {
+        item.strip()
+        for item in os.getenv("MAXWELL_OWNER_IDS", "").split(",")
+        if item.strip()
+    }
+
     @classmethod
     def validate(cls):
         if not cls.DISCORD_TOKEN:
-            raise ValueError("DISCORD_TOKEN is required")
+            raise ValueError(
+                "DISCORD_TOKEN is required. Set it in .env before starting the bot."
+            )
         if not cls.OLLAMA_BASE_URL:
             raise ValueError("OLLAMA_BASE_URL is required")
         if cls.OLLAMA_MAX_TOKENS < 1:
             raise ValueError("OLLAMA_MAX_TOKENS must be >= 1")
+
+        # Soft warnings — these don't block startup but they WILL cause
+        # runtime errors the first time someone hits the feature, which is
+        # confusing without a hint. Log via the standard logging facility
+        # so pm2 captures it.
+        import logging
+        _log = logging.getLogger("maxwell.config")
+
+        if not cls.MAXWELL_ADMIN_PASSWORD:
+            _log.warning(
+                "MAXWELL_ADMIN_PASSWORD is empty — the admin API will return "
+                "503 on every request. Set a real password in .env."
+            )
+        if not cls.MAXWELL_OWNER_IDS:
+            _log.warning(
+                "MAXWELL_OWNER_IDS is empty — admin commands (`,prompt`, "
+                "`,clearmem`, `,autonomy`, `,rem`, etc.) will be denied to "
+                "everyone. Set your Discord user ID in .env."
+            )
+        if cls.ENABLE_EMAIL_TOOLS and not cls.MAXWELL_EMAIL_PASSWORD:
+            _log.warning(
+                "ENABLE_EMAIL_TOOLS=true but MAXWELL_EMAIL_PASSWORD is empty — "
+                "the email tools will return a 'not configured' error on every "
+                "call. Either set MAXWELL_EMAIL_PASSWORD or set "
+                "ENABLE_EMAIL_TOOLS=false."
+            )
+        if cls.ENABLE_TELEGRAM and cls.TELEGRAM_TOKEN:
+            _log.info(
+                "TELEGRAM_TOKEN is set — Telegram polling will auto-start. "
+                "Set ENABLE_TELEGRAM=false to suppress without removing the token."
+            )
+        # TTS engine sanity check
+        if cls.TTS_ENGINE not in {"auto", "local", "riva", "gtts"}:
+            _log.warning(
+                "TTS_ENGINE=%r is not one of auto/local/riva/gtts — falling "
+                "back to 'auto' behaviour.",
+                cls.TTS_ENGINE,
+            )

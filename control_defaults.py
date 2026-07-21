@@ -156,6 +156,13 @@ DEAD_CONTROL_KEYS = frozenset(
         "auto_recent_window_minutes",
         "auto_inactivity_minutes",
         "auto_decider_prompt",
+        # Intel engine was removed in d455e4b. These keys can linger in
+        # persisted bot_control.json from older installs; strip them so
+        # the dashboard's stale-key warning list stays clean.
+        "intel_enabled",
+        "intel_interval_seconds",
+        "intel_feed_urls",
+        "intel_run_history",
     }
 )
 

@@ -33,7 +33,12 @@ from urllib.parse import parse_qs, urlparse
 
 from discord import Message, File, Activity, Status
 from tools import Tool
-from ddgs import DDGS as _DDGS
+try:
+    from ddgs import DDGS as _DDGS
+    _DDGS_AVAILABLE = True
+except ImportError:
+    _DDGS = None
+    _DDGS_AVAILABLE = False
 from utils import (  # single source of truth, fd-safe
     FileLock,
     _atomic_json_write_sync,
@@ -2156,6 +2161,12 @@ class WebSearchTool(Tool):
     ) -> str:
         if not query:
             return "Error: query is required"
+        if not _DDGS_AVAILABLE:
+            return (
+                "Error: web_search is not available in this install — the "
+                "`ddgs` Python package is missing. Run `pip install ddgs` "
+                "or set ENABLE_WEB_SEARCH=false in .env to silence this."
+            )
 
         try:
             limit = max(1, min(int(max_results), 10))

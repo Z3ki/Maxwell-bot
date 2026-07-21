@@ -320,6 +320,20 @@ async def run_subagent_task(
     Returns the immediate string shown to the LLM so the main bot can keep
     responding to chat while the sub-agent works.
     """
+    # Honour ENABLE_SUBAGENT=false. Defence-in-depth: the tool is also
+    # not registered in this case (see bot._setup_tools), but a future
+    # caller might invoke us directly, so guard here too.
+    if os.environ.get("ENABLE_SUBAGENT", "true").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return (
+            "Error: the sub_agent tool is disabled in this install "
+            "(ENABLE_SUBAGENT=false in .env). Set it to true to enable."
+        )
+
     base = subagent_base_dir()
     base.mkdir(parents=True, exist_ok=True)
     # Owner-writable only (avoid world-writable 0o777).

@@ -1,171 +1,109 @@
-# Email: <maxwell@z3ki.dev>
+# Email tools (local Postfix + Dovecot)
 
-Outbound is sent through Mailgun (HTTP API, no SMTP server). Inbound is
-caught by Cloudflare Email Routing and forwarded to the Gmail below;
-the bot reads Gmail back over the Gmail REST API.
+The four email tools in `bot_tools.py` — `email_send`, `email_read_inbox`,
+`email_get_message`, `email_search` — talk to a **local Postfix + Dovecot
+mail server** on `127.0.0.1` by default. They do **not** use Mailgun, Gmail,
+or any other third-party service. There is nothing to sign up for.
 
-No IMAP server, no port 25. Works on a Contabo box that blocks inbound
-25 by default. Concretely:
+This file is the install guide. The legacy Mailgun/Gmail flow and the
+`setup_dns.py` Cloudflare script in this directory are **archived** —
+see [`LEGACY_MAILGUN.md`](LEGACY_MAILGUN.md) if you want the old design
+back. They are not wired into the bot.
+
+## How it works
 
 ```
-   bot.py  --HTTP-->  Mailgun          --SMTP-->  recipient
-   bot.py  <--HTTPS-- Gmail API  <--forwarded--  CF Email Routing
-                                               <--SMTP--  sender
+   bot.py  --SMTP/25-->  Postfix   --SMTP/25-->  recipient MX
+   bot.py  <--IMAPS/993--  Dovecot  <--delivered--  Postfix local
 ```
 
-## What the bot can do
+- **Outbound**: bot connects to `127.0.0.1:25`, `STARTTLS`, `SASL PLAIN`,
+  `MAIL FROM`/`RCPT TO`/`DATA`. Postfix handles all DNS, queueing, retry.
+  We never talk to recipient MXes directly.
+- **Inbound**: bot connects to `127.0.0.1:993` (IMAPS), `SELECT INBOX`,
+  `FETCH`. Postfix's `virtual(5)` transport delivers local mail to
+  `/var/mail/vmail/<your-domain>/<mailbox>/Maildir`; Dovecot serves it
+  over IMAP.
 
-The four new tools in `bot_tools.py`:
+The blocking I/O (`smtplib`, `imaplib`) runs through `asyncio.to_thread`
+so the bot's event loop isn't held up by a 30-second SMTP timeout.
 
-- `email_send` — POST a message to Mailgun. Subject, body, to/cc/bcc.
-- `email_read_inbox` — list recent messages forwarded from `maxwell@z3ki.dev`.
-- `email_get_message` — fetch a single message body by Gmail id.
-- `email_search` — full Gmail search (e.g. `from:github subject:security`).
+## What you need to install
 
-Send is `is_destructive=True`, so on a tainted turn (one that just
-read a fetched URL / web result) the model has to ask the user to
-`,confirm` before it goes out. Same gate as `shell` and `sub_agent`.
+A local Postfix + Dovecot with virtual mailboxes. Any setup that exposes
+SMTP on port 25 and IMAPS on port 993 will work — the bot only cares
+about the host/port/user/password. The defaults match a typical
+`postfix` + `dovecot-core` + `dovecot-imapd` install on Debian/Ubuntu.
 
-## One-time setup
-
-### 1. Cloudflare API token with DNS write access
-
-The token you handed over first had read-only access. The DNS records
-below need **write**. Make a new one:
-
-1. <https://dash.cloudflare.com/profile/api-tokens>
-2. Create Token → Custom token
-3. Permissions:
-   - Zone / DNS / Edit
-   - Zone / Email Routing / Edit
-4. Zone Resources: Include → Specific zone → `z3ki.dev`
-5. Create → copy the token. Pass it to `setup_dns.py` with `--token` or
-   export it as `CF_API_TOKEN`.
-
-### 2. Mailgun sending domain
-
-1. <https://app.mailgun.com> → Sending → Domains → Add `z3ki.dev`
-2. Mailgun shows you three DNS records: SPF (TXT), DKIM (TXT at
-   `mg._domainkey.z3ki.dev`), and one CNAME for tracking. We set
-   the first two; the CNAME is optional (turn it off if you don't
-   want opens).
-3. After the dashboard accepts the records, copy:
-   - The **API key** (top right, "API keys" or "Account settings")
-   - The **sending domain** (Mailgun shows this — usually `mg.z3ki.dev`
-     or `sandboxXXXX.mailgun.org` for the sandbox tier)
-
-### 3. Gmail OAuth (for reading)
-
-This is the awkward part. Gmail needs a refresh token with
-`gmail.readonly` scope, and Google only hands those out to interactive
-flows. From your laptop (not the server):
+Quick-and-dirty Debian/Ubuntu install (NOT a hardened setup — read the
+Postfix/Dovecot docs before exposing this to the internet):
 
 ```bash
-# Install: pip install google-auth-oauthlib
-python3 -c "
-from google_auth_oauthlib.flow import InstalledAppFlow
-import json
-
-flow = InstalledAppFlow.from_client_secrets_file(
-    'client_secret.json',                 # from console.cloud.google.com
-    scopes=['https://www.googleapis.com/auth/gmail.readonly'],
-)
-creds = flow.run_local_server(port=0)
-print('CLIENT_ID:', creds.client_id)
-print('CLIENT_SECRET:', creds.client_secret)
-print('REFRESH_TOKEN:', creds.refresh_token)
-"
+sudo apt install postfix dovecot-core dovecot-imapd dovecot-lmtpd
+# pick "Internet Site" or "Local only" during the postfix install
 ```
 
-The `client_secret.json` is the OAuth "Desktop app" client from
-<https://console.cloud.google.com/apis/credentials> (project: any; enable
-the Gmail API first).
+Then:
 
-### 4. Run the DNS script
+1. Configure Postfix for virtual mailboxes under `/var/mail/vmail/<domain>/`.
+   Add your domain to `virtual_mailbox_domains`, set `virtual_mailbox_maps`
+   to a file mapping `user@domain` → `vmail/domain/user/`, and turn on
+   SASL auth via Dovecot.
+2. Configure Dovecot with the same `vmail` UID/GID, IMAPS on 993, and a
+   self-signed cert (or a real one). Set `auth_mechanisms = plain login`
+   and point `auth-passwd-file` at `/etc/dovecot/users` with one line
+   per mailbox: `user@domain:{PLAIN}password:5000:5000::/var/mail/vmail/domain/user::user@domain`.
+3. Make sure port 25 is open outbound — many VPS providers (Contabo,
+   Hetzner, etc.) block it by default. If your provider blocks port 25,
+   you'll need a smart-host relay.
+4. Set the SPF and DKIM TXT records for your domain in DNS. Without
+   them, mail you send to Gmail/Outlook/Yahoo will land in spam or get
+   rejected outright (Google returns 550 5.7.26 "your email has been
+   blocked because the sender is unauthenticated" when neither is
+   present). The `LEGACY_MAILGUN.md` file has DKIM setup notes you can
+   adapt for any DKIM signer (OpenDKIM, Rspamd, etc.).
 
-```bash
-cd /root/maxwell/email_integration
-python3 setup_dns.py \
-  --token cfat_...your_new_write_token... \
-  --mailgun-spf "include:mailgun.org" \
-  --dkim "k=rsa; p=MIGfMA0GCSq..."
+## Bot config
+
+Put the following in `.env`:
+
+```ini
+ENABLE_EMAIL_TOOLS=true
+
+MAXWELL_SMTP_HOST=127.0.0.1
+MAXWELL_SMTP_PORT=25
+MAXWELL_IMAP_HOST=127.0.0.1
+MAXWELL_IMAP_PORT=993
+MAXWELL_EMAIL_USER=bot@yourdomain.example
+MAXWELL_EMAIL_PASSWORD=replace-with-dovecot-password
+MAXWELL_EMAIL_FROM=bot@yourdomain.example
+MAXWELL_EMAIL_FROM_NAME=Maxwell
 ```
 
-It drops:
+If `MAXWELL_EMAIL_PASSWORD` is empty, the four email tools return
+"local mail is not configured" at call time without crashing the bot.
 
-- MX `z3ki.dev` → `route1.mx.cloudflare.net` (priority 10)
-- TXT `z3ki.dev` SPF (extends if one already exists)
-- TXT `_dmarc.z3ki.dev` DMARC (p=none, reporting to your gmail)
-- TXT `mg._domainkey.z3ki.dev` DKIM (if you pass `--dkim`)
+## To disable entirely
 
-Idempotent. Re-run with different flags any time.
-
-### 5. CF Email Routing destination (manual)
-
-Cloudflare dashboard → Email → Email Routing → Custom Addresses.
-
-Add: `maxwell@z3ki.dev` → `z3kilol77@gmail.com`
-
-CF emails `z3kilol77@gmail.com` a verification link. Click it. This is
-intentionally a manual step — it's a spam-canary check. If a malicious
-actor got hold of the zone and added their own forwarding rule, the
-verification email would land in your inbox and you'd notice.
-
-### 6. Put the creds in `.env`
-
-Append to `/root/maxwell/.env`:
-
-```
-MAILGUN_API_KEY=key-...
-MAILGUN_DOMAIN=mg.z3ki.dev
-MAILGUN_REGION=us
-MAILGUN_FROM_ADDRESS=maxwell@z3ki.dev
-MAILGUN_FROM_NAME=Maxwell
-
-GMAIL_CLIENT_ID=...apps.googleusercontent.com
-GMAIL_CLIENT_SECRET=GOCSPX-...
-GMAIL_REFRESH_TOKEN=1//0g...
-GMAIL_USER=z3kilol77@gmail.com
-```
-
-Restart `bot.py` and the new tools are live.
-
-## Verifying it works
-
-Send:
-
-- In Discord: `email test from the bot` and ask the bot to send a
-  message to `z3kilol77@gmail.com`. Mailgun will queue it; it should
-  land in ~30s.
-
-Receive:
-
-- Email `maxwell@z3ki.dev` from any external address.
-- CF forwards to `z3kilol77@gmail.com`; the bot reads it back via the
-  Gmail API when you ask for `email_read_inbox`.
-
-## What happens if Mailgun flags the bot
-
-Mailgun is strict about domain reputation. The first 100 emails are on
-the free tier; if the bot sends a burst, expect a throttling email from
-Mailgun. Mitigation: keep the bot from sending the same content to many
-recipients in a tight loop. The prompt-injection guard on `email_send`
-already prevents a single compromised turn from spamming, but you can
-also add a per-hour counter to `bot_tools.EmailSendTool.execute` if
-you want belt-and-braces. Not enabled by default.
+Set `ENABLE_EMAIL_TOOLS=false` in `.env` and the four tools are not
+registered with the model. No Postfix/Dovecot required.
 
 ## What this is NOT
 
 - Not a full mail server. There's no POP/IMAP for arbitrary clients
-  (Thunderbird, Apple Mail). If you want that, run Stalwart or
-  Mailcow on a host with inbound port 25.
-- Not encrypted at rest. Mailgun and Gmail store mail forever; if you
-  need E2E, use PGP inline (not implemented).
-- Not migrated from existing mail. If `maxwell@z3ki.dev` was on
-  another provider, forward from there into Gmail and let the bot see
-  the same stream.
+  (Thunderbird, Apple Mail) out of the box. You can add it by
+  configuring Dovecot to publish the same mailbox over POP3, but that's
+  outside this README.
+- Not encrypted at rest. Mail sits in `Maildir` on disk unencrypted; if
+  you need E2E, use PGP inline (not implemented).
+- Not migrated from existing mail. If `bot@yourdomain.example` was on
+  another provider, forward from there into your local mailbox.
 
 ## Files
 
-- `setup_dns.py` — DNS drop script (idempotent, see top of file for usage)
-- This README
+- `LEGACY_MAILGUN.md` — the old Mailgun + Gmail + Cloudflare design.
+  Archived. The bot doesn't use any of it; keep it only as a reference
+  for DKIM/SPF setup notes.
+- `setup_dns.py` — the legacy Cloudflare DNS script. Also archived.
+  Hardcoded for the `z3ki.dev` zone and not generic.
+- This README — the current install guide.

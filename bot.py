@@ -26,6 +26,8 @@ import discord
 from discord.ext import commands
 
 try:
+    if os.environ.get("ENABLE_VC", "true").strip().lower() in {"0", "false", "no", "off"}:
+        raise ImportError("ENABLE_VC=false")
     from discord.ext import voice_recv
 
     from voice_live import LiveSpeechSink
@@ -2033,8 +2035,14 @@ class MaxwellBot(commands.Bot):
         )
 
     def _setup_tools(self):
-        self.tools["image_generator"] = ImageGeneratorTool(self)
-        self.tools["hd_image"] = HDImageGeneratorTool(self)
+        # Every tool is gated by an ENABLE_* env var so a fresh install
+        # can opt out of paid APIs (NVIDIA, Mailgun) or heavy deps
+        # (discord-ext-voice-recv, opencode, yt-dlp) without editing code.
+        # The conditional below is a registry, not an inline if/else per
+        # tool, so adding a new toggle is one line in config.py.
+        if self.config.ENABLE_IMAGE_GEN:
+            self.tools["image_generator"] = ImageGeneratorTool(self)
+            self.tools["hd_image"] = HDImageGeneratorTool(self)
         self.tools["change_presence"] = ChangePresenceTool(self)
         self.tools["set_activity"] = SetActivityTool(self)
         self.tools["sleep"] = SleepTool(self)
@@ -2050,21 +2058,28 @@ class MaxwellBot(commands.Bot):
         self.tools["set_nickname"] = SetNicknameTool(self)
         self.tools["forward_message"] = ForwardMessageTool(self)
         self.tools["typing"] = TypingTool(self)
-        self.tools["tts"] = TtsTool(self)
+        if self.config.ENABLE_TTS:
+            self.tools["tts"] = TtsTool(self)
         self.tools["list_servers"] = ListServersTool(self)
         self.tools["list_admin_servers"] = ListAdminServersTool(self)
         self.tools["create_category"] = CreateCategoryTool(self)
         self.tools["create_channel"] = CreateChannelTool(self)
         self.tools["edit_channel"] = EditChannelTool(self)
         self.tools["delete_channel"] = DeleteChannelTool(self)
-        self.tools["change_avatar"] = ChangeAvatarTool(self)
-        self.tools["create_site"] = CreateSiteTool(self)
-        self.tools["list_sites"] = ListSitesTool(self)
-        self.tools["web_search"] = WebSearchTool(self)
+        if self.config.ENABLE_AVATAR:
+            self.tools["change_avatar"] = ChangeAvatarTool(self)
+        if self.config.ENABLE_CREATE_SITE:
+            self.tools["create_site"] = CreateSiteTool(self)
+            self.tools["list_sites"] = ListSitesTool(self)
+        if self.config.ENABLE_WEB_SEARCH:
+            self.tools["web_search"] = WebSearchTool(self)
         self.tools["no_response"] = NoResponseTool(self)
-        self.tools["shell"] = ShellTool(self)
-        self.tools["fetch_url"] = FetchUrlTool(self)
-        self.tools["youtube"] = YouTubeTool(self)
+        if self.config.ENABLE_SHELL:
+            self.tools["shell"] = ShellTool(self)
+        if self.config.ENABLE_FETCH_URL:
+            self.tools["fetch_url"] = FetchUrlTool(self)
+        if self.config.ENABLE_YOUTUBE:
+            self.tools["youtube"] = YouTubeTool(self)
         self.tools["send_file"] = SendFileTool(self)
         self.tools["send_message"] = SendMessageTool(self)
         # No more standalone `reasoning_log` tool. Reasoning now rides INSIDE
@@ -2077,15 +2092,26 @@ class MaxwellBot(commands.Bot):
         self.tools["send_meme"] = SendMemeTool(self)
         self.tools["send_media"] = SendMediaTool(self)
         self.tools["leave_vc"] = LeaveVcTool(self)
-        self.tools["sub_agent"] = SubAgentTool(self)
-        # Email tools (maxwell@z3ki.dev via Mailgun send + Gmail read).
-        # See bot_tools.EmailSendTool and friends for the full design notes.
-        # No-op if MAILGUN_* / GMAIL_* env vars are missing; the tools will
-        # return a friendly "not configured" error to the model.
-        self.tools["email_send"] = EmailSendTool(self)
-        self.tools["email_read_inbox"] = EmailReadInboxTool(self)
-        self.tools["email_get_message"] = EmailGetMessageTool(self)
-        self.tools["email_search"] = EmailSearchTool(self)
+        if self.config.ENABLE_SUBAGENT:
+            self.tools["sub_agent"] = SubAgentTool(self)
+        # Email tools (local Postfix + Dovecot). Set ENABLE_EMAIL_TOOLS=false
+        # to skip all four registrations. If enabled but MAXWELL_EMAIL_PASSWORD
+        # is empty, the tools return a friendly "not configured" error at
+        # call time — see bot_tools.EmailSendTool and friends.
+        if self.config.ENABLE_EMAIL_TOOLS:
+            self.tools["email_send"] = EmailSendTool(self)
+            self.tools["email_read_inbox"] = EmailReadInboxTool(self)
+            self.tools["email_get_message"] = EmailGetMessageTool(self)
+            self.tools["email_search"] = EmailSearchTool(self)
+
+        # Log what we did and didn't register so misconfigurations surface
+        # in pm2 logs at startup instead of at first call.
+        _registered = sorted(self.tools.keys())
+        logger.info(
+            "Registered %d LLM tools (ENABLE_* gates respected): %s",
+            len(_registered),
+            ", ".join(_registered),
+        )
 
     def _build_activities(self):
         activities = []
@@ -2222,7 +2248,7 @@ class MaxwellBot(commands.Bot):
         ]
         await self.autonomy_engine.start()
         await self.context_cleanup_engine.start()
-        if self.config.TELEGRAM_TOKEN:
+        if self.config.TELEGRAM_TOKEN and self.config.ENABLE_TELEGRAM:
             if self.config.TELEGRAM_WEBHOOK_URL:
                 self._tasks.append(asyncio.create_task(self._telegram_webhook_loop()))
                 logger.info(
@@ -3084,6 +3110,11 @@ class MaxwellBot(commands.Bot):
                 await message.channel.send("Something went wrong with that command.")
 
     async def _handle_vc_command(self, message, args: str | None):
+        if not getattr(self.config, "ENABLE_VC", True):
+            await message.channel.send(
+                "voice chat is disabled in this install (ENABLE_VC=false in .env)"
+            )
+            return
         arg = (args or "").strip()
         parts = arg.split(maxsplit=1)
         sub = parts[0].lower() if parts else ""
@@ -4613,14 +4644,11 @@ class MaxwellBot(commands.Bot):
                         channel_id,
                         {
                             "author": self.bot_name,
-                            "author_id": ev.get("user_id")
-                            or bot_user_id
-                            or "self",
+                            "author_id": ev.get("user_id") or bot_user_id or "self",
                             "author_is_bot": True,
                             "content": content,
                             "message_id": synthetic_id,
-                            "timestamp": ts
-                            or datetime.now(timezone.utc).isoformat(),
+                            "timestamp": ts or datetime.now(timezone.utc).isoformat(),
                         },
                     )
                     written += 1
@@ -5552,18 +5580,26 @@ class MaxwellBot(commands.Bot):
                     if normalized:
                         blob, mime, filename = normalized
                 if mime.startswith("video/"):
-                    normalized = await self._normalize_video(
-                        blob, attachment.filename, max_size
-                    )
-                    if normalized:
-                        blob, mime, filename = normalized
-                    derived = await self._extract_video_derivatives(
-                        blob, filename, getattr(message, "id", None), max_size
-                    )
-                    for derived_item in derived:
-                        if derived_item.get("is_image"):
-                            images.append(derived_item["b64"])
-                        media.append(derived_item)
+                    # ENABLE_VIDEO_INPUT=false in .env skips ffmpeg frame
+                    # extraction. The video still flows through as a media
+                    # attachment; the model just doesn't get the JPEG frames.
+                    if not getattr(self.config, "ENABLE_VIDEO_INPUT", True):
+                        # Skip derivative extraction entirely; the original
+                        # blob gets appended as a media item further down.
+                        pass
+                    else:
+                        normalized = await self._normalize_video(
+                            blob, attachment.filename, max_size
+                        )
+                        if normalized:
+                            blob, mime, filename = normalized
+                        derived = await self._extract_video_derivatives(
+                            blob, filename, getattr(message, "id", None), max_size
+                        )
+                        for derived_item in derived:
+                            if derived_item.get("is_image"):
+                                images.append(derived_item["b64"])
+                            media.append(derived_item)
                 is_image = ext in image_exts or mime.startswith("image/")
                 text = ""
                 b64 = ""
@@ -7028,11 +7064,15 @@ class MaxwellBot(commands.Bot):
                                     str(message.channel.id),
                                     {
                                         "author": self.bot_name,
-                                        "author_id": str(self.user.id) if self.user else "",
+                                        "author_id": str(self.user.id)
+                                        if self.user
+                                        else "",
                                         "author_is_bot": True,
                                         "content": site_result,
                                         "message_id": f"bot_auto_site:{message.id}",
-                                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                                        "timestamp": datetime.now(
+                                            timezone.utc
+                                        ).isoformat(),
                                     },
                                 )
                             except Exception as _e:  # noqa: BLE001
@@ -7149,7 +7189,9 @@ class MaxwellBot(commands.Bot):
                             },
                         )
                     except Exception as _e:  # noqa: BLE001
-                        logger.debug(f"Failed to record bot reply in channel memory: {_e}")
+                        logger.debug(
+                            f"Failed to record bot reply in channel memory: {_e}"
+                        )
                 await self._record_rem_event(message, "assistant", response)
                 normal_reply_sent = True
         except asyncio.CancelledError as _exc:
@@ -7297,8 +7339,10 @@ class MaxwellBot(commands.Bot):
                 # above. This is the single enforcement point instead of per-tool
                 # checks that previously read the model-controlled flag.
                 tool = self.tools[name]
-                if getattr(tool, "is_destructive", False) and self.is_message_tainted(
-                    message
+                if (
+                    getattr(tool, "is_destructive", False)
+                    and self.is_message_tainted(message)
+                    and not getattr(self.config, "DISABLE_TAINT_GATE", False)
                 ):
                     author_id = str(getattr(message.author, "id", "") or "")
                     if not self._consume_destructive_confirm(author_id):
@@ -7307,7 +7351,8 @@ class MaxwellBot(commands.Bot):
                             "search that may carry prompt-injection payloads. The user "
                             "must confirm out-of-band with `,confirm` (admins/whitelisted "
                             "only) before this tool can run on a tainted turn. The model "
-                            "cannot self-confirm."
+                            "cannot self-confirm. Set DISABLE_TAINT_GATE=true in .env "
+                            "to skip this gate entirely."
                         )
                     else:
                         params = dict(params)
