@@ -8197,16 +8197,6 @@ class MaxwellBot(commands.Bot):
                             50,
                         ),
                     ),
-                    budget=max(
-                        1000,
-                        min(
-                            _safe_int(
-                                self._control.get("cross_context_budget", 5000) or 5000,
-                                5000,
-                            ),
-                            20000,
-                        ),
-                    ),
                 )
                 if facts:
                     lines = []
@@ -8795,7 +8785,6 @@ class MaxwellBot(commands.Bot):
                     is_dm=True,
                     is_admin=self._is_admin(user_id),
                     max_items=10,
-                    budget=5000,
                 )
                 if facts:
                     lines = []
@@ -9233,7 +9222,6 @@ class MaxwellBot(commands.Bot):
                                 is_dm=True,
                                 is_admin=self._is_admin(user_id),
                                 max_items=10,
-                                budget=5000,
                             )
                             if facts:
                                 lines = []

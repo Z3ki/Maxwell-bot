@@ -31,7 +31,6 @@ DEFAULT_CONTROL = {
     "cross_context_enabled": True,
     "cross_context_extract_enabled": True,
     "cross_context_max_items": 10,
-    "cross_context_budget": 5000,
     "cross_context_min_importance": 5,
     "cross_context_dm_to_global_admin_only": True,
     "emoji_context_enabled": True,

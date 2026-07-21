@@ -546,9 +546,6 @@ def _sanitize_control(control):
     out["cross_context_max_items"] = max(
         1, min(_safe_int(out.get("cross_context_max_items"), 10), 50)
     )
-    out["cross_context_budget"] = max(
-        1000, min(_safe_int(out.get("cross_context_budget"), 5000), 20000)
-    )
     out["cross_context_min_importance"] = max(
         1, min(_safe_int(out.get("cross_context_min_importance"), 5), 10)
     )

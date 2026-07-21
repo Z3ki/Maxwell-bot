@@ -596,7 +596,6 @@ class MemoryManager:
         is_dm: bool = False,
         is_admin: bool = False,
         max_items: int = 10,
-        budget: int = 5000,
     ) -> list:
         user_id = str(user_id or "")
         guild_id = str(guild_id or "")
@@ -657,10 +656,11 @@ class MemoryManager:
         used = 0
         for entry in candidates:
             line_len = len(entry.get("content", "")) + len(entry.get("scope", "")) + 20
-            if selected and used + line_len > max(
-                1000, min(int(budget or 5000), 20000)
-            ):
-                break
+            # 2026-07-21: budget parameter removed — max_items is the
+            # sole cap now. With the model's 1M context window, the
+            # old 5000-char budget was unnecessarily tight and silently
+            # dropped high-importance facts. Callers that need a tighter
+            # window can pass a smaller max_items.
             selected.append(entry)
             used += line_len
             if len(selected) >= max(1, min(int(max_items or 10), 50)):
