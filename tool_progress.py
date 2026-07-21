@@ -57,16 +57,26 @@ _GRACE_BEFORE_FIRST_POST = 0.15
 
 # Per-token ticks fire on EVERY streamed delta. Most providers chunk
 # into ~50-200 char deltas. We MUST coalesce or we'd 429 us into silence.
-_TOKEN_TICK_INTERVAL = 3.0
+# 2026-07-21: was 3.0s, user said "show a bit of thinking every 2 secs".
+_TOKEN_TICK_INTERVAL = 2.0
 
 # Total visible budget. The last N characters of the streaming buffer
-# are what the user sees. Long enough to show real thought, short
-# enough to fit a Discord message and not overflow.
-_VISIBLE_BUDGET = 200
+# are what the user sees. Long enough to show a real sentence fragment,
+# short enough to fit a Discord message and not overflow.
+# 2026-07-21: was 200 chars, cut to 120 for cleaner reads.
+_VISIBLE_BUDGET = 120
 
 # Hard-cap the internal buffer so a 50k-char reasoning run doesn't
 # accumulate forever.
 _HARD_FALLBACK_CHARS = 4000
+
+# Characters that look ugly in a short status preview (raw JSON
+# artefacts, escape sequences). We strip these from the visible text
+# so the user sees readable prose, not {"arguments": {"body": "…}.
+# 2026-07-21: the previous design showed raw mid-JSON previews like
+# "create_site: :center;background :linear -gradient( 90deg ,red"
+# which the user correctly flagged as "weird and bad".
+_VISIBLE_STRIP_CHARS = set("{}[\\]\"`:")
 
 # Fast-tool fix. start() is called before generation / tool dispatch and
 # posts a 'working on it…' message. For fast paths the progress message
@@ -301,7 +311,7 @@ class ToolProgress:
             and not first_tick
             and now - self._last_edit < _TOKEN_TICK_INTERVAL
         ):
-            return  # coalesce
+            return  # coalesce (~2s between edits)
 
         content = self._render()
         if content == self._last_content:
@@ -316,11 +326,6 @@ class ToolProgress:
             now = time.monotonic()
             first_flush = self._edits_made == 0 or not self._first_tick_done
             if not first_flush and now - self._last_edit < _TOKEN_TICK_INTERVAL:
-                logger.debug(
-                    "[PROGRESS] flush coalesced under lock: elapsed=%.3fs threshold=%.3fs",
-                    now - self._last_edit,
-                    _TOKEN_TICK_INTERVAL,
-                )
                 return
             try:
                 await self._posted.edit(content=content)
@@ -328,37 +333,63 @@ class ToolProgress:
                 self._last_content = content
                 self._edits_made += 1
                 self._first_tick_done = True
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
+                # 2026-07-21: a Discord 429 (TOO MANY REQUESTS) used
+                # to kill the entire progress UI for the rest of the
+                # turn — the broad `except Exception: self._posted =
+                # None` blanket was the same response for a real
+                # network error and a rate-limit, so a single 429
+                # would silently freeze the spinner. Detect 429s
+                # explicitly, back off, and keep the post alive so the
+                # next interval can try again.
+                msg = str(e).lower()
+                is_429 = "429" in msg or "too many requests" in msg or "rate" in msg
+                if is_429:
+                    # Push _last_edit forward to force a full
+                    # _TOKEN_TICK_INTERVAL wait before the next
+                    # attempt. Without this, a tight edit loop would
+                    # keep hammering and getting 429'd.
+                    self._last_edit = time.monotonic()
+                    logger.debug(
+                        "[PROGRESS] edit 429, backing off %ss",
+                        _TOKEN_TICK_INTERVAL,
+                    )
+                    return
                 logger.debug("Progress edit failed (%s) — disabling further edits", e)
                 self._posted = None
 
     def _render(self) -> str:
-        """Render the rolling tail of the buffer as the user sees it.
+        """Render the progress line. Three states, one per line:
 
-        The visible line is just the last ``_VISIBLE_BUDGET`` chars of
-        the streaming buffer, with a 'thinking: ' prefix when no tool
-        has been announced yet. Once a tool name arrives it gets
-        prepended ('shell: …') and stays there.
+        1. No tool yet, no reasoning yet -> ``working on it…``
+        2. Tool announced, no reasoning yet -> ``using <tool>…``
+        3. Reasoning streaming -> ``thinking: <last 120 chars>``
+
+        The 120 chars are stripped of JSON artefacts ({, }, \\, ", `, :)
+        and cut on a whitespace boundary so the line is always readable.
         """
-        tail = self._reasoning_buffer
+        tail = self._reasoning_buffer.strip()
         if not tail:
+            # No reasoning yet. If a tool name was announced, say so
+            # plainly so the user knows what the model committed to.
+            if self._current_tool:
+                return f"using {self._current_tool}…"
             return "working on it…"
-        # Trim to a word boundary so we don't cut a word in half.
+        # Strip JSON / code artefacts that show up when the model is
+        # mid-tool-call (custom protocol emits a bare-JSON object in
+        # the text stream; the custom buffer keeps it in pending tail
+        # but the raw deltas still flow into on_token). Without this
+        # the user sees things like "create_site: :center;background
+        # :linear -gradient( 90deg ,red" which is unreadable.
+        tail = "".join(c for c in tail if c not in _VISIBLE_STRIP_CHARS)
+        tail = " ".join(tail.split())  # collapse whitespace
         if len(tail) > _VISIBLE_BUDGET:
             head = tail[-_VISIBLE_BUDGET:]
+            # Cut on whitespace so we don't show a half-word.
             last_ws = head.find(" ")
             if 0 < last_ws < len(head) - 1:
                 head = head[last_ws + 1 :]
             tail = head
-        # Note: streaming tokens often have BPE-artifact splits
-        # ("carn" + " iv" + " orous" -> "carnivorous", "affection" +
-        # " ate" -> "affectionate"). Trying to detokenize inline was
-        # too clever: the regex kept either missing cases or eating
-        # real text. The final reply is clean (post-processed), so the
-        # user sees the weird split in the progress preview for ~1s
-        # and then the corrected text. Acceptable.
-        if self._current_tool:
-            return f"{self._current_tool}: {tail}"
         return f"thinking: {tail}"
 
     def _schedule_deferred_flush(self) -> None:
