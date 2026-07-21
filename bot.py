@@ -8386,7 +8386,24 @@ class MaxwellBot(commands.Bot):
                         autonomy_tag += f"; reason: {reason[:200]}"
                     autonomy_tag += "]"
                 header = f"[{stamp}] " if stamp else ""
-                line = f"{author_label}{relation}{autonomy_tag}: {str(msg.get('content', ''))[:12000]}"
+                content_str = str(msg.get('content', ''))[:12000]
+                # 2026-07-21: assistant turns get NO 'You/Maxwell(id):'
+                # author prefix — the role already says it's the bot,
+                # and putting that string inside the assistant content
+                # makes the model continue the prefix verbatim in its
+                # reply (parrot bug). User turns DO get a 'Name(id):'
+                # prefix so the model knows who is speaking across many
+                # users in a long transcript. We still keep the
+                # reply/mentions/autonomy metadata on assistant turns
+                # because it's diagnostic, not identity.
+                if is_self:
+                    meta = f"{relation}{autonomy_tag}".strip()
+                    if meta:
+                        line = f"{header}{content_str} {meta}"
+                    else:
+                        line = f"{header}{content_str}"
+                else:
+                    line = f"{header}{author_label}{relation}{autonomy_tag}: {content_str}"
                 if current_turn is None or current_turn.get("role") != role:
                     _new_turn(role, header)
                 else:
@@ -8809,7 +8826,10 @@ class MaxwellBot(commands.Bot):
                     == (self.user.display_name if self.user else self.bot_name)
                 )
                 role = "assistant" if is_self else "user"
-                content = f"{author}: {m.get('content', '')[:4000]}"
+                text = m.get("content", "")[:4000]
+                # 2026-07-21: assistant turns get NO author prefix to
+                # avoid the parrot bug (model continues 'You/Maxwell:').
+                content = text if is_self else f"{author}: {text}"
                 if cur is not None and cur["role"] == role:
                     cur["content"] += "\n" + content
                 else:
@@ -9253,7 +9273,10 @@ class MaxwellBot(commands.Bot):
                                 == (self.user.display_name if self.user else self.bot_name)
                             )
                             role = "assistant" if is_self else "user"
-                            content = f"{author}: {m.get('content', '')[:4000]}"
+                            text = m.get("content", "")[:4000]
+                            # 2026-07-21: no author prefix on assistant
+                            # turns (parrot bug).
+                            content = text if is_self else f"{author}: {text}"
                             if cur is not None and cur["role"] == role:
                                 cur["content"] += "\n" + content
                             else:
