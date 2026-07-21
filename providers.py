@@ -517,6 +517,21 @@ async def _read_sse_response(
     custom_buffer: _CustomToolCallBuffer | None = (
         _CustomToolCallBuffer(
             on_partial_name=lambda nm: (
+                # 2026-07-21: fire BOTH callbacks when the JSON
+                # opener is seen mid-stream. The old code only fired
+                # on_token (so the progress UI could switch its
+                # 'thinking:' → 'using <tool>…' transition) but
+                # skipped on_tool_call_name. That meant the bot's
+                # _on_tool_call_name callback (which sets
+                # _current_tool on the progress and triggers
+                # progress.update() with the tool's reasoning once
+                # run_one() dispatches) was never invoked — and the
+                # progress buffer kept the raw streaming JSON
+                # content instead of the natural-language reasoning
+                # the model wrote. Now both fire on opener, so the
+                # progress UI immediately shows the tool name AND
+                # the subsequent update() replaces the buffer with
+                # the actual reasoning sentence.
                 on_token({"content": "", "reasoning": "", "tool_name": nm})
                 if on_token is not None
                 else None
@@ -525,6 +540,23 @@ async def _read_sse_response(
         if custom_tool_calls
         else None
     )
+
+    # Bridge: the custom protocol's on_partial_name callback can't
+    # directly invoke the bot's async on_tool_call_name (it's sync
+    # from inside the brace-balancer). Wire it through a fire-and-
+    # forget task so the bot's _on_tool_call_name fires as soon as
+    # the tool name is parsed, not only when run_one() reaches it.
+    if custom_tool_calls and on_tool_call_name is not None:
+        # Patch the on_partial_name to also schedule on_tool_call_name
+        original = custom_buffer._on_partial_name
+        def _bridge(nm, _orig=original, _cb=on_tool_call_name):
+            if _orig is not None:
+                _orig(nm)
+            try:
+                asyncio.create_task(_safe_call(_cb, nm, ""))
+            except RuntimeError:
+                pass
+        custom_buffer._on_partial_name = _bridge
 
     buf = b""
     async for raw_chunk in resp.content.iter_any():
@@ -617,20 +649,27 @@ async def _read_sse_response(
                         if rv:
                             tok_reason = rv
                             break
-                    # If the custom buffer swallowed the entire delta
-                    # into a pending JSON tool call, surface a short
-                    # preview of the raw content so the progress UI
-                    # still shows motion. Trim to 60 chars to keep the
-                    # status line readable; the next delta's preview
-                    # overwrites it.
-                    if not tok_content and not tok_reason:
-                        raw = delta.get("content") or ""
-                        if raw and custom_buffer is not None and custom_buffer.has_pending_json:
-                            # Mid-JSON: surface a short raw preview so
-                            # the progress UI shows the model is still
-                            # writing. 60 chars keeps the status line
-                            # readable; tick() rate-limits at 3s.
-                            tok_content = raw[:60]
+                    # 2026-07-21: when the custom buffer is mid-JSON
+                    # (model is emitting a bare-JSON tool call), DON'T
+                    # surface the raw content as a progress preview.
+                    # The raw text is JSON like 'name create_site ,
+                    # arguments reason ing ...' which fills the
+                    # progress buffer with unreadable fragments. The
+                    # bot's _on_tool_call_name callback (bridged from
+                    # on_partial_name) sets the tool name so the line
+                    # shows 'using <tool>…' until run_one() lands with
+                    # the actual natural-language reasoning via
+                    # progress.update(name, tool_reasoning).
+                    if (
+                        not tok_content
+                        and not tok_reason
+                        and custom_buffer is not None
+                        and custom_buffer.has_pending_json
+                    ):
+                        # Skip the callback entirely — the JSON is
+                        # being held in _pending_tail and will surface
+                        # via run_one()'s update() once parsed.
+                        continue
                     if tok_content or tok_reason:
                         try:
                             on_token(

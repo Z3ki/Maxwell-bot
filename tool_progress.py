@@ -91,6 +91,23 @@ _DEFERRED_POST_WINDOW = 0.8
 _GENERATING_PLACEHOLDER = "generating…"
 
 
+def _first_sentence(text: str) -> str:
+    """Return text up to and including the first sentence terminator
+    ('.', '!', '?'). Returns "" if no terminator is found.
+
+    2026-07-21: the user wants ONE complete sentence on the progress
+    line, not a rolling tail of the streaming buffer. The first
+    sentence is the most representative — it tells the user what
+    the model is doing without filling the line with mid-thought
+    fragments. Returns the empty string when no terminator exists
+    so the caller can decide what to do (e.g. show a partial
+    preview while waiting for the first period to arrive)."""
+    for i, ch in enumerate(text):
+        if ch in ".!?":
+            return text[: i + 1].strip()
+    return ""
+
+
 class ToolProgress:
     """One-per-channel ephemeral "working on it…" status message.
 
@@ -363,23 +380,24 @@ class ToolProgress:
 
         1. No tool yet, no reasoning yet -> ``working on it…``
         2. Tool announced, no reasoning yet -> ``using <tool>…``
-        3. Tool + reasoning -> ``<reasoning> → <tool>``
+        3. Tool + reasoning -> ``thinking: <one sentence> → <tool>``
 
-        2026-07-21: every tool call carries a 'reasoning' argument
-        that the model wrote as the "why I'm calling this tool".
-        That reasoning is the useful content for the user — it
-        explains what the model is about to do in its own words.
-        So reasoning goes FIRST, tool name goes as a small trailing
-        tag with an arrow. Format: "I'll send a friendly reply →
-        send_message". When reasoning is short enough, both fit on
-        one line; when long, the tail wins and the tool tag may
-        wrap off the visible window.
+        2026-07-21: the model's reasoning is the useful content for
+        the user — it explains what the model is about to do in its
+        own words. We extract ONE complete sentence from the
+        streaming buffer (everything from the start to the first
+        '.', '!', or '?') and show that. Format: 'thinking: I'll
+        send a friendly reply. → send_message'. Reasoning is the
+        primary content; the tool name is a small trailing tag
+        with an arrow.
 
-        The 120 chars are stripped of JSON artefacts ({, }, \\, ", `, :)
-        and cut on a whitespace boundary so the line is always readable.
+        The buffer is stripped of JSON artefacts ({, }, \\, ", `, :)
+        so mid-tool-call previews don't leak raw JSON. When the
+        buffer has no terminator yet, we fall back to showing the
+        first _VISIBLE_BUDGET chars of what's there.
         """
-        tail = self._reasoning_buffer.strip()
-        if not tail:
+        raw = self._reasoning_buffer.strip()
+        if not raw:
             # No reasoning yet. If a tool name was announced, say so
             # plainly so the user knows what the model committed to.
             if self._current_tool:
@@ -391,22 +409,23 @@ class ToolProgress:
         # but the raw deltas still flow into on_token). Without this
         # the user sees things like "create_site: :center;background
         # :linear -gradient( 90deg ,red" which is unreadable.
-        tail = "".join(c for c in tail if c not in _VISIBLE_STRIP_CHARS)
-        tail = " ".join(tail.split())  # collapse whitespace
-        # Reserve a few chars for the trailing tool tag so we don't
-        # cut mid-reasoning and leave the tag dangling off the end.
+        cleaned = "".join(c for c in raw if c not in _VISIBLE_STRIP_CHARS)
+        cleaned = " ".join(cleaned.split())
+        # Extract ONE complete sentence: from buffer start to the
+        # first '.', '!', or '?'. If no terminator, show the first
+        # _VISIBLE_BUDGET chars (the user's first sight of a partial
+        # sentence is still useful as a 'coming in' preview).
+        sentence = _first_sentence(cleaned)
+        if not sentence:
+            sentence = cleaned[:_VISIBLE_BUDGET]
+        if len(sentence) > _VISIBLE_BUDGET:
+            head = sentence[:_VISIBLE_BUDGET]
+            last_ws = head.rfind(" ")
+            if last_ws > _VISIBLE_BUDGET // 2:
+                head = head[:last_ws]
+            sentence = head
         tag = f" → {self._current_tool}" if self._current_tool else ""
-        # The visible budget is for the REASONING only — the tag is
-        # appended on top of the truncated tail.
-        reasoning_budget = max(0, _VISIBLE_BUDGET - len(tag))
-        if len(tail) > reasoning_budget:
-            head = tail[-reasoning_budget:]
-            # Cut on whitespace so we don't show a half-word.
-            last_ws = head.find(" ")
-            if 0 < last_ws < len(head) - 1:
-                head = head[last_ws + 1 :]
-            tail = head
-        return f"{tail}{tag}"
+        return f"thinking: {sentence}{tag}"
 
     def _schedule_deferred_flush(self) -> None:
         if self._stopped:

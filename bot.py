@@ -6624,6 +6624,19 @@ class MaxwellBot(commands.Bot):
             )
             if gen_progress is not None:
                 with contextlib.suppress(Exception):
+                    # 2026-07-21: when the JSON opener is seen mid-
+                    # stream, the buffer is full of raw JSON content
+                    # from the tick() deltas (e.g. "name create_site,
+                    # arguments ..."). Clear it now so the visible
+                    # line switches to 'using <tool>…' and the
+                    # subsequent run_one() update() with the real
+                    # reasoning will land clean. The bot's prompt
+                    # already told the model to put its natural-
+                    # language reasoning in the tool's 'reasoning'
+                    # field; that will arrive via the update() call
+                    # in run_one() at line 7534.
+                    if hasattr(gen_progress, "_reasoning_buffer"):
+                        gen_progress._reasoning_buffer = ""
                     await gen_progress.update(tool_name, reasoning or "generating…")
                     logger.debug(
                         f"[PROGRESS] update() returned, last_content={gen_progress._last_content!r} posted={gen_progress.posted}"
@@ -7531,6 +7544,12 @@ class MaxwellBot(commands.Bot):
                 import contextlib
 
                 with contextlib.suppress(Exception):
+                    # 2026-07-21: clear the buffer before replacing it
+                    # with the tool's natural-language reasoning, so
+                    # any leftover raw JSON from the tick() deltas
+                    # doesn't bleed into the visible line.
+                    if hasattr(progress, "_reasoning_buffer"):
+                        progress._reasoning_buffer = ""
                     await progress.update(name, tool_reasoning)
             # Stash the progress on the bot so the tool can call
             # notify_streaming() if it's about to post its own output
