@@ -2453,6 +2453,16 @@ class MaxwellBot(commands.Bot):
                     self._update_recent_users(channel_id, self.user)
                 except Exception as e:
                     logger.warning(f"Self-message memory write failed: {e}")
+            # 2026-07-21: even with reply_to_bots on, never generate a
+            # reply to a self-message. Once the bot starts replying to
+            # its own posts the channel turns into a self-monologue
+            # (transcript grows unbounded, every turn sees N-1 assistant
+            # turns, model degrades to single-character outputs like
+            # '.' or '?' because there's no real human content to react
+            # to). The bot's reply is already on the wire; the user
+            # doesn't need a second one. The bot-self branch above
+            # already records the message so the next human message
+            # sees it as context.
             return
 
         if not has_content and not has_attachment and not has_embed:
