@@ -1168,23 +1168,6 @@ def strip_tool_payload_leaks(text: str) -> str:
         r":[ \t]*[^\n]*\n+"
     )
     cleaned = user_header_re.sub("", cleaned, count=1).strip()
-    # Also strip the prompt-internal "Mentioned users in latest
-    # message:" / "Latest message is a reply to:" / "Current time:" /
-    # "Working directory:" / "Workspace root folder:" headers the
-    # LLM leaks when it copies the <environment_details> block into
-    # its visible reply. These are LITERAL copies of context the
-    # model sees; a real reply never opens with them.
-    env_block_re = re.compile(
-        r"^(?:"
-        r"(?:Mentioned users in latest message:[^\n]*\n)"
-        r"|(?:Latest message is a reply to:[^\n]*\n)"
-        r"|(?:Current time:[^\n]*\n)"
-        r"|(?:Working directory:[^\n]*\n)"
-        r"|(?:Workspace root folder:[^\n]*\n)"
-        r")+",
-        re.IGNORECASE,
-    )
-    cleaned = env_block_re.sub("", cleaned).strip()
     if len(cleaned) < len(original) * 0.95 and logger.isEnabledFor(logging.DEBUG):
         # Significant sanitization happened; helps debug persistent leak issues without always logging.
         logger.debug(
