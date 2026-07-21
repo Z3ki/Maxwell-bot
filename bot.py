@@ -1144,6 +1144,47 @@ def strip_tool_payload_leaks(text: str) -> str:
         except Exception:
             pass
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    # 2026-07-21: the LLM (minimax-m3) sometimes echoes a Discord
+    # user-message header into its visible reply, then continues
+    # with the actual answer — or stops right there, in which case
+    # the bot ends up sending the previous user message as its own
+    # reply. Patterns observed:
+    #   - "DisplayName (@handle)(id): text"
+    #   - "DisplayName (@handle) (id): text"
+    #   - "DisplayName (id): text"
+    #   - "@DisplayName (id): text"
+    # Strip the leading line if it matches this format. The
+    # heuristic is "looks like a Discord mention-prefixed line" —
+    # a real reply never starts with a paren-id group. Only fires
+    # at the start of the reply so a model that wants to @mention
+    # a user mid-reply isn't impacted.
+    user_header_re = re.compile(
+        r"^\s*"
+        r"@?[A-Za-z0-9_.\-]{1,32}"                          # name or @handle (no spaces)
+        r"(?:\s*\(\s*@?[A-Za-z0-9_.\-]{1,32}\s*\))?"        # optional (@handle) group
+        r"\s*"
+        r"\(\d{17,20}\)\s*"                                  # required (id)
+        r"(?:\(\d{17,20}\)\s*)?"                             # optional 2nd (id) (e.g. log-format duplicates)
+        r":[ \t]*[^\n]*\n+"
+    )
+    cleaned = user_header_re.sub("", cleaned, count=1).strip()
+    # Also strip the prompt-internal "Mentioned users in latest
+    # message:" / "Latest message is a reply to:" / "Current time:" /
+    # "Working directory:" / "Workspace root folder:" headers the
+    # LLM leaks when it copies the <environment_details> block into
+    # its visible reply. These are LITERAL copies of context the
+    # model sees; a real reply never opens with them.
+    env_block_re = re.compile(
+        r"^(?:"
+        r"(?:Mentioned users in latest message:[^\n]*\n)"
+        r"|(?:Latest message is a reply to:[^\n]*\n)"
+        r"|(?:Current time:[^\n]*\n)"
+        r"|(?:Working directory:[^\n]*\n)"
+        r"|(?:Workspace root folder:[^\n]*\n)"
+        r")+",
+        re.IGNORECASE,
+    )
+    cleaned = env_block_re.sub("", cleaned).strip()
     if len(cleaned) < len(original) * 0.95 and logger.isEnabledFor(logging.DEBUG):
         # Significant sanitization happened; helps debug persistent leak issues without always logging.
         logger.debug(
