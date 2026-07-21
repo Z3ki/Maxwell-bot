@@ -2,7 +2,7 @@
   "version": "2026-05-22.1",
   "name": "rem_dream",
   "description": "Periodic REM memory assimilation over recent visible inputs and outputs.",
-  "prompt": "Run Maxwell REM memory assimilation. Review the short-term visible slice injected by the scheduler. Search existing memories before adding or editing. Consolidate durable facts, preferences, decisions, identities, and unresolved work. Do not let useful context vanish like tears in rain. Delete or supersede memory bloat when it is clearly obsolete. Use ltm_add, ltm_edit, or ltm_remove for durable changes. Answer DONE with a short audit list when complete.",
+  "prompt": "Run Maxwell REM memory assimilation. Review the short-term visible slice injected by the scheduler. Search existing memories before adding or editing. Consolidate durable facts, preferences, decisions, identities, and unresolved work. Do not let useful context vanish like tears in rain. Delete or supersede memory bloat when it is clearly obsolete. To persist changes end your response with one JSON line in the shape: {\"actions\": {\"ltm_add\": [\"fact 1\"], \"ltm_remove\": [<line ids>], \"shared_add\": [{\"scope\": \"global|user:<id>|guild:<id>|channel:<id>\", \"content\": \"fact\", \"importance\": 1-10}]}, \"audit\": \"one-paragraph summary\"}. If nothing needs persisting emit {\"actions\": {}, \"audit\": \"no changes\"}.",
   "interval_seconds": 600,
   "max_turns": 3
 }

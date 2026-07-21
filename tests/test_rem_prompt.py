@@ -10,8 +10,14 @@ def test_rem_system_prompt_shape():
     # REM is a single pass (no multi-turn loop), so the prompt must not
     # advertise a remaining turn count that the runner never honors.
     assert "REM turn(s)" not in prompt
-    assert "single pass" in prompt
-    assert "DONE" in prompt
+    # 2026-07-21: REM now ends with a JSON actions block (ltm_add / shared_add
+    # / etc) and the runner parses it. The prompt must instruct the model
+    # to emit that JSON and to provide an audit field, but must NOT
+    # advertise "DONE" as the response — that was the old bypass-tools
+    # contract.
+    assert "JSON" in prompt
+    assert "actions" in prompt
+    assert "DONE" not in prompt
 
 
 def test_short_term_slice_prompt_serializes_stably():

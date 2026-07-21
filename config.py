@@ -159,7 +159,7 @@ class Config:
     MEMORY_MESSAGE_LIMIT = _int_env(
         "MEMORY_MESSAGE_LIMIT", 2000, min_value=1, max_value=10000
     )
-    REM_ENABLED = _bool_env("REM_ENABLED", False)
+    REM_ENABLED = _bool_env("REM_ENABLED", True)
     REM_INTERVAL_SECONDS = _int_env("REM_INTERVAL_SECONDS", 600, min_value=10)
     REM_MAX_TURNS = _int_env("REM_MAX_TURNS", 3, min_value=0, max_value=10)
     REM_EVENT_BUFFER_MAX = _int_env(

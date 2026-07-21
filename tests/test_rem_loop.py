@@ -43,11 +43,41 @@ def test_rem_loop_bypasses_tool_calls_and_records_run(tmp_path):
             {"role": "assistant", "content": "DONE\n- reviewed visible slice\n- no memory edits"},
         ])
         rem_run = await run_rem_once(memory_manager=mem, rem_log=log, provider=provider, data_dir=str(tmp_path), model="rem", max_turns=3)
+        # 2026-07-21: REM no longer bypasses — it parses a trailing JSON
+        # actions block and applies ltm/shared writes itself. A response
+        # with no JSON block is a no-op (no edits), but tool_counts is now
+        # a real action summary, not an empty dict.
         assert mem.items == []
-        assert rem_run["tool_counts"] == {}
+        assert rem_run["tool_counts"] == {
+            "ltm_added": 0,
+            "ltm_removed": 0,
+            "shared_added": 0,
+        }
         assert rem_run["audit"].startswith("DONE")
         assert provider.calls == 1
         assert len(await RemStore(str(tmp_path)).load_runs()) == 1
+    asyncio.run(run())
+
+
+def test_rem_loop_applies_actions_from_audit(tmp_path):
+    async def run():
+        log = RemEventLog(str(tmp_path), max_events=10)
+        await log.record({"role": "user", "channel_id": "c", "user_id": "u", "user_name": "u", "content": "remember cats", "auto_mode": False})
+        mem = FakeMemory()
+        provider = FakeProvider([
+            {
+                "role": "assistant",
+                "content": (
+                    "noticed the user keeps mentioning cats\n"
+                    '{"actions": {"ltm_add": ["user likes cats"]}, '
+                    '"audit": "added the cats fact"}'
+                ),
+            },
+        ])
+        rem_run = await run_rem_once(memory_manager=mem, rem_log=log, provider=provider, data_dir=str(tmp_path), model="rem", max_turns=1)
+        assert mem.items == ["user likes cats"]
+        assert rem_run["tool_counts"] == {"ltm_added": 1, "ltm_removed": 0, "shared_added": 0}
+        assert "ltm+1" in rem_run["audit"]
     asyncio.run(run())
 
 

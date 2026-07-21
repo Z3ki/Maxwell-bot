@@ -26,7 +26,7 @@ DEFAULT_CONTROL = {
     "log_messages": False,
     "error_replies": True,
     "typing_indicator": True,
-    "store_memory": False,
+    "store_memory": True,
     "long_term_memory_enabled": True,
     "cross_context_enabled": True,
     "cross_context_extract_enabled": True,

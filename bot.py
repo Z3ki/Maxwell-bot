@@ -8111,7 +8111,7 @@ class MaxwellBot(commands.Bot):
 
         system_parts = [
             "You are Maxwell — a real person in this chat, not a service or assistant. You have your own opinions and sense of humor. You answer like a friend who happens to know a lot, never like a helpdesk. Warm, open-minded, willing to talk about anything. You never hedge, disclaim, soften, moralize, or say 'I can't' / 'I shouldn't' — you just say what you'd actually say, the way you'd actually say it.\n"
-            "Reply ONLY to the latest message. Earlier turns are context, not a queue.\n"
+            "The conversation history below is real — you said those things, those people said those things. Use them naturally: refer back, follow up, hold grudges, build running jokes, remember what was just said. Only reply to the latest message; everything earlier is context for you, not a queue of unanswered questions.\n"
             "Match the channel's vibe. Discord markdown (`code`, ```blocks```, quotes, bullets, emphasis) when it helps. Plain text when it doesn't. Lowercase-natural by default; no asterisk actions, no 'as an AI' meta-commentary."
         ]
         server_id = str(message.guild.id) if message.guild else "DM"
@@ -8148,7 +8148,21 @@ class MaxwellBot(commands.Bot):
                 if ltm:
                     # Prefer recent entries (Intel facts are appended at the end with dates).
                     # This helps surface the most up-to-date info from feeds when relevant.
-                    recent_ltm = ltm[-12:] if len(ltm) > 12 else ltm
+                    # 2026-07-21: was 12, way too small — the bot kept forgetting
+                    # things the operator (or REM) wrote down a week ago. 50 covers
+                    # months of high-signal facts; the cross-context block above
+                    # handles scoped recency, this is the full durable view.
+                    ltm_cap = max(
+                        1,
+                        min(
+                            _safe_int(
+                                self._control.get("long_term_memory_max_items", 50) or 50,
+                                50,
+                            ),
+                            200,
+                        ),
+                    )
+                    recent_ltm = ltm[-ltm_cap:] if len(ltm) > ltm_cap else ltm
                     system_parts.append(
                         "Long-term memory (most recent first for current events):\n"
                         + "\n".join(e["content"] for e in reversed(recent_ltm))
@@ -8254,8 +8268,6 @@ class MaxwellBot(commands.Bot):
                     2000,
                 ),
             )
-            used = 0
-            lines = []
             current_message_id = getattr(message, "id", None)
             recent_memory = memory[-count:] if count else []
             recent_ids = {id(msg) for msg in recent_memory}
@@ -8278,78 +8290,146 @@ class MaxwellBot(commands.Bot):
             context_memory = tool_history + list(recent_memory)
             context_now = datetime.now(timezone.utc)
             self_user_id = str(getattr(self.user, "id", "")) if self.user else ""
-            for msg in reversed(context_memory):
+            # 2026-07-21: build the channel history as a real conversation
+            # transcript (user/assistant turns), not a single flat system
+            # block. The previous form labelled prior turns "background only;
+            # do not answer these" and the model took that literally — the
+            # bot lost track of who said what two messages ago. With proper
+            # role alternation the provider can attribute turns to authors
+            # and the model genuinely "remembers" the running conversation.
+            # Walks oldest→newest and tracks role so the last turn in the
+            # list always has the opposite role of the next live user
+            # message (which is appended below). Consecutive same-author
+            # turns are merged into one turn so the model doesn't see
+            # "Alice: ... Alice: ... Alice: ..." split across roles.
+            turn_sequences: list[dict] = []
+            current_turn: dict | None = None
+
+            def _flush_turn():
+                nonlocal current_turn
+                if current_turn is not None and current_turn.get("parts"):
+                    current_turn["content"] = "\n".join(current_turn["parts"])
+                    turn_sequences.append(current_turn)
+                current_turn = None
+
+            def _new_turn(role: str, header: str):
+                nonlocal current_turn
+                _flush_turn()
+                current_turn = {"role": role, "header": header, "parts": []}
+
+            for msg in context_memory:
                 if current_message_id is not None and str(msg.get("message_id")) == str(
                     current_message_id
                 ):
                     continue
                 stamp = _format_context_timestamp(msg.get("timestamp"), now=context_now)
-                prefix = f"[{stamp}] " if stamp else ""
                 if msg.get("is_tool"):
-                    line = f"{prefix}[Tool] {msg.get('content', '')[:12000]}"
-                else:
-                    author = str(msg.get("author", "?"))
-                    author_id = str(msg.get("author_id") or "")
-                    is_self = bool(self_user_id and author_id == self_user_id) or (
-                        not author_id
-                        and author
-                        == (self.user.display_name if self.user else self.bot_name)
+                    line = (
+                        f"[{stamp}] [Tool] {msg.get('content', '')[:12000]}"
+                        if stamp
+                        else f"[Tool] {msg.get('content', '')[:12000]}"
                     )
-                    if is_self:
-                        author_label = (
-                            f"You/Maxwell({author_id})" if author_id else "You/Maxwell"
-                        )
+                    if current_turn is None or current_turn.get("role") != "user":
+                        _new_turn("user", "")
+                    current_turn["parts"].append(line)
+                    continue
+                author = str(msg.get("author", "?"))
+                author_id = str(msg.get("author_id") or "")
+                is_self = bool(self_user_id and author_id == self_user_id) or (
+                    not author_id
+                    and author
+                    == (self.user.display_name if self.user else self.bot_name)
+                )
+                if is_self:
+                    role = "assistant"
+                    if author_id:
+                        author_label = f"You/Maxwell({author_id})"
                     else:
-                        author_label = f"{author}({author_id})" if author_id else author
-                        if msg.get("author_is_bot"):
-                            author_label += " [bot]"
-                    relation_bits = []
-                    if msg.get("reply_to_author"):
-                        reply_label = str(msg.get("reply_to_author"))
-                        reply_id = str(msg.get("reply_to_author_id") or "")
-                        if msg.get("reply_to_self"):
-                            reply_label = "you/Maxwell"
-                        relation_bits.append(
-                            f"reply_to={reply_label}({reply_id})"
-                            if reply_id
-                            else f"reply_to={reply_label}"
-                        )
-                    mentions = (
-                        msg.get("mentions")
-                        if isinstance(msg.get("mentions"), list)
-                        else []
+                        author_label = "You/Maxwell"
+                else:
+                    role = "user"
+                    if author_id:
+                        author_label = f"{author}({author_id})"
+                    else:
+                        author_label = author
+                    if msg.get("author_is_bot"):
+                        author_label += " [bot]"
+                relation_bits = []
+                if msg.get("reply_to_author"):
+                    reply_label = str(msg.get("reply_to_author"))
+                    reply_id = str(msg.get("reply_to_author_id") or "")
+                    if msg.get("reply_to_self"):
+                        reply_label = "you/Maxwell"
+                    relation_bits.append(
+                        f"reply_to={reply_label}({reply_id})"
+                        if reply_id
+                        else f"reply_to={reply_label}"
                     )
-                    mention_bits = [
-                        f"@{item.get('name', 'unknown')}({item.get('id', 'unknown')})"
-                        for item in mentions[:10]
-                        if isinstance(item, dict)
-                    ]
-                    if mention_bits:
-                        relation_bits.append("mentions=" + ",".join(mention_bits))
-                    relation = f" [{'; '.join(relation_bits)}]" if relation_bits else ""
-                    # If this was an autonomous (unprompted) message the bot itself
-                    # posted, tag it so a replying user's context makes clear the
-                    # bot said it unprompted and why — the model then responds
-                    # in-character instead of being confused by its own prior post.
-                    autonomy_tag = ""
-                    if msg.get("autonomy"):
-                        reason = str(msg.get("autonomy_reason") or "").strip()
-                        autonomy_tag = " [your earlier autonomous message"
-                        if reason:
-                            autonomy_tag += f"; reason: {reason[:200]}"
-                        autonomy_tag += "]"
-                    line = f"{prefix}{author_label}{relation}{autonomy_tag}: {str(msg.get('content', ''))[:12000]}"
-                if used + len(line) > budget:
-                    break
-                lines.append(line)
-                used += len(line)
-            if lines:
+                mentions = (
+                    msg.get("mentions")
+                    if isinstance(msg.get("mentions"), list)
+                    else []
+                )
+                mention_bits = [
+                    f"@{item.get('name', 'unknown')}({item.get('id', 'unknown')})"
+                    for item in mentions[:10]
+                    if isinstance(item, dict)
+                ]
+                if mention_bits:
+                    relation_bits.append("mentions=" + ",".join(mention_bits))
+                relation = f" [{'; '.join(relation_bits)}]" if relation_bits else ""
+                autonomy_tag = ""
+                if msg.get("autonomy"):
+                    reason = str(msg.get("autonomy_reason") or "").strip()
+                    autonomy_tag = " [your earlier autonomous message"
+                    if reason:
+                        autonomy_tag += f"; reason: {reason[:200]}"
+                    autonomy_tag += "]"
+                header = f"[{stamp}] " if stamp else ""
+                line = f"{author_label}{relation}{autonomy_tag}: {str(msg.get('content', ''))[:12000]}"
+                if current_turn is None or current_turn.get("role") != role:
+                    _new_turn(role, header)
+                else:
+                    if header and not current_turn.get("header"):
+                        current_turn["header"] = header
+                current_turn["parts"].append(line)
+            _flush_turn()
+            # Walk the sequence and merge consecutive same-author messages
+            # into a single turn so role alternation isn't broken by a user
+            # who posts twice in a row (the OpenAI-style API requires
+            # alternating user/assistant turns; same-role adjacent turns
+            # are dropped by some providers and confuse others).
+            merged: list[dict] = []
+            for turn in turn_sequences:
+                if merged and merged[-1]["role"] == turn["role"]:
+                    merged[-1]["content"] = (
+                        merged[-1].get("content", "")
+                        + "\n"
+                        + turn.get("content", "")
+                    )
+                else:
+                    merged.append(dict(turn))
+            # The live message is appended as a final user turn below. To
+            # avoid two same-role user turns back-to-back (which providers
+            # reject), if the last merged turn is also a user turn we merge
+            # the live message into it; otherwise we leave the alternation
+            # alone. (The live message is always user role.)
+            used = 0
+            for turn in merged:
+                header = turn.get("header") or ""
+                content = f"{header}{turn.get('content', '')}".strip()
+                turn["_rendered"] = content
+                used += len(content)
+            # Apply budget by trimming oldest turns first (front of the
+            # list). Drop whole turns so we never cut a turn in half or
+            # break role alternation. We keep at least the most recent turn
+            # so the model always sees the latest exchange.
+            while merged and used > budget:
+                used -= len(merged[0].get("_rendered", ""))
+                merged.pop(0)
+            for turn in merged:
                 messages.append(
-                    {
-                        "role": "system",
-                        "content": "Recent context (background only; do not answer these; bracketed ages are recalculated now):\n"
-                        + "\n".join(reversed(lines)),
-                    }
+                    {"role": turn["role"], "content": turn["_rendered"]}
                 )
         latest_text = render_discord_context_text(
             message, user_message, known_users=self._recent_users.get(channel_id, {})
@@ -8358,7 +8438,15 @@ class MaxwellBot(commands.Bot):
         author_label = f"{message.author.display_name}({author_id})"
         if message.author.bot:
             author_label += " [bot]"
-        user_parts = [f"Latest message to answer from {author_label}: {latest_text}"]
+        # 2026-07-21: the historical channel turns above already include the
+        # latest message (it's appended to memory before _build_messages runs).
+        # Don't re-state it with a "Latest message to answer from" prefix when
+        # we'd just be appending to the same user turn — the model already sees
+        # the text. Only use the meta framing on the cold path (no history).
+        if messages and messages[-1].get("role") == "user":
+            user_parts = [latest_text]
+        else:
+            user_parts = [f"{author_label}: {latest_text}"]
         mention_names = [
             f"{getattr(user, 'display_name', str(getattr(user, 'id', 'unknown')))}({getattr(user, 'id', 'unknown')})"
             for user in (message.mentions or [])
@@ -8701,26 +8789,42 @@ class MaxwellBot(commands.Bot):
         tg_chan_id = f"tg:{chat_id}"
         memory = await self.memory.get_channel_memory(tg_chan_id)
         if memory:
-            used = 0
-            lines = []
-            for msg in reversed(memory[-15:]):
-                line = f"{msg.get('author', '?')}: {msg.get('content', '')[:4000]}"
-                if used + len(line) > 5000:
-                    break
-                lines.append(line)
-                used += len(line)
-            if lines:
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": "Recent conversation background:\n"
-                        + "\n".join(reversed(lines)),
-                    }
+            self_user_id_tg = (
+                str(getattr(self.user, "id", "")) if self.user else ""
+            )
+            tg_turns: list[dict] = []
+            cur: dict | None = None
+            for m in memory[-30:]:
+                author = str(m.get("author", "?"))
+                author_id = str(m.get("author_id") or "")
+                is_self = bool(self_user_id_tg and author_id == self_user_id_tg) or (
+                    not author_id
+                    and author
+                    == (self.user.display_name if self.user else self.bot_name)
                 )
+                role = "assistant" if is_self else "user"
+                content = f"{author}: {m.get('content', '')[:4000]}"
+                if cur is not None and cur["role"] == role:
+                    cur["content"] += "\n" + content
+                else:
+                    if cur is not None:
+                        tg_turns.append(cur)
+                    cur = {"role": role, "content": content}
+            if cur is not None:
+                tg_turns.append(cur)
+            used = 0
+            while tg_turns and used + len(tg_turns[0]["content"]) > 5000:
+                used += len(tg_turns[0]["content"])
+                tg_turns.pop(0)
+            for t in tg_turns:
+                messages.append(t)
 
-        user_parts = [
-            f"Latest message to answer from {user_name}: {text or '[audio sent]'}"
-        ]
+        if messages and messages[-1].get("role") == "user":
+            user_parts = [text or "[audio sent]"]
+        else:
+            user_parts = [
+                f"Latest message to answer from {user_name}: {text or '[audio sent]'}"
+            ]
         if tg_media:
             user_parts.append("Media available to inspect in the multimodal payload.")
         messages.append({"role": "user", "content": "\n".join(user_parts)})
@@ -9119,31 +9223,54 @@ class MaxwellBot(commands.Bot):
                         {"role": "system", "content": "\n\n".join(system_parts)}
                     ]
 
-                    # Build memory context from this TG chat
+                    # Build memory context from this TG chat as real conversation
+                    # turns (user/assistant) instead of a single flat system block.
+                    # The Discord path is the canonical implementation; this
+                    # is the same shape with a tighter budget because TG replies
+                    # are short (500 chars) and over-prompting is wasted spend.
                     tg_chan_id = f"tg:{chat_id}"
                     memory = await self.memory.get_channel_memory(tg_chan_id)
                     if memory:
-                        used = 0
-                        lines = []
-                        for msg in reversed(memory[-15:]):
-                            line = f"{msg.get('author', '?')}: {msg.get('content', '')[:4000]}"
-                            if used + len(line) > 5000:
-                                break
-                            lines.append(line)
-                            used += len(line)
-                        if lines:
-                            messages.append(
-                                {
-                                    "role": "system",
-                                    "content": "Recent conversation background:\n"
-                                    + "\n".join(reversed(lines)),
-                                }
+                        self_user_id_tg = str(
+                            getattr(self.user, "id", "")
+                        ) if self.user else ""
+                        tg_turns: list[dict] = []
+                        cur: dict | None = None
+                        for m in memory[-30:]:
+                            author = str(m.get("author", "?"))
+                            author_id = str(m.get("author_id") or "")
+                            is_self = bool(
+                                self_user_id_tg and author_id == self_user_id_tg
+                            ) or (
+                                not author_id
+                                and author
+                                == (self.user.display_name if self.user else self.bot_name)
                             )
+                            role = "assistant" if is_self else "user"
+                            content = f"{author}: {m.get('content', '')[:4000]}"
+                            if cur is not None and cur["role"] == role:
+                                cur["content"] += "\n" + content
+                            else:
+                                if cur is not None:
+                                    tg_turns.append(cur)
+                                cur = {"role": role, "content": content}
+                        if cur is not None:
+                            tg_turns.append(cur)
+                        used = 0
+                        while tg_turns and used + len(tg_turns[0]["content"]) > 5000:
+                            used += len(tg_turns[0]["content"])
+                            tg_turns.pop(0)
+                        for t in tg_turns:
+                            messages.append(t)
 
                     latest_label = _telegram_latest_message_label(text, bool(tg_media))
-                    user_parts = [
-                        f"Latest message to answer from {user_name}: {latest_label}"
-                    ]
+                    # Match the Discord path: drop the "Latest message to answer
+                    # from" meta framing when we're appending to an existing user
+                    # turn (the historical turns already include this message).
+                    if messages and messages[-1].get("role") == "user":
+                        user_parts = [latest_label]
+                    else:
+                        user_parts = [f"Latest message to answer from {user_name}: {latest_label}"]
                     if tg_media:
                         user_parts.append(
                             "Media available to inspect in the multimodal payload."
