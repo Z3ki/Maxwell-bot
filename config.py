@@ -96,14 +96,13 @@ class Config:
     ENABLE_YOUTUBE = _bool_env("ENABLE_YOUTUBE", True)
     ENABLE_WEB_SEARCH = _bool_env("ENABLE_WEB_SEARCH", True)
     ENABLE_FETCH_URL = _bool_env("ENABLE_FETCH_URL", True)
-    ENABLE_SUBAGENT = _bool_env("ENABLE_SUBAGENT", True)
     ENABLE_CREATE_SITE = _bool_env("ENABLE_CREATE_SITE", True)
     ENABLE_AVATAR = _bool_env("ENABLE_AVATAR", True)
     ENABLE_SHELL = _bool_env("ENABLE_SHELL", True)
     ENABLE_TELEGRAM = _bool_env("ENABLE_TELEGRAM", True)
     ENABLE_AUTONOMY = _bool_env("ENABLE_AUTONOMY", True)
 
-    # When false (default), shell and sub_agent refuse to run on a turn
+    # When false (default), shell refuses to run on a turn
     # that read untrusted fetched content (URLs, web search) without an
     # out-of-band `,confirm` from an admin. This blocks indirect prompt
     # injection from turning a fetched page into a shell command.

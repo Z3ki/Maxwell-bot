@@ -223,7 +223,6 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     ShellTool,
     SleepTool,
     ClearSleepTool,
-    SubAgentTool,
     TtsTool,
     TypingTool,
     WebSearchTool,
@@ -766,7 +765,6 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset(
         "no_response",
         "send_media",
         "send_meme",
-        "sub_agent",
         "typing",
         "leave_vc",
     }
@@ -2093,8 +2091,6 @@ class MaxwellBot(commands.Bot):
         self.tools["send_meme"] = SendMemeTool(self)
         self.tools["send_media"] = SendMediaTool(self)
         self.tools["leave_vc"] = LeaveVcTool(self)
-        if self.config.ENABLE_SUBAGENT:
-            self.tools["sub_agent"] = SubAgentTool(self)
         # Email tools (local Postfix + Dovecot). Set ENABLE_EMAIL_TOOLS=false
         # to skip all four registrations. If enabled but MAXWELL_EMAIL_PASSWORD
         # is empty, the tools return a friendly "not configured" error at
@@ -9709,23 +9705,15 @@ async def main():
             await asyncio.gather(*list(bot._context_tasks), return_exceptions=True)
             bot._context_tasks.clear()
 
-        # Additional tracked tasks from reviews (subagents, VC utterances, active requests)
-        # to prevent leaks on shutdown / PM2 restart. _subagent_tasks values are
-        # dicts ({"task": ..., "workdir": ..., "prompt": ...}), not bare Tasks, so
-        # the previous isinstance(t, asyncio.Task) check never matched them and
-        # orphaned running opencode subprocesses on restart.
+        # Additional tracked tasks from reviews (VC utterances, active requests)
+        # to prevent leaks on shutdown / PM2 restart.
         def _iter_tasks(task_dict):
             for v in list(task_dict.values()):
                 if isinstance(v, asyncio.Task):
                     yield v
-                elif isinstance(v, dict):
-                    t = v.get("task")
-                    if isinstance(t, asyncio.Task):
-                        yield t
 
         for task_dict in (
             getattr(bot, "_vc_active_tasks", {}) or {},
-            getattr(bot, "_subagent_tasks", {}) or {},
             getattr(bot, "_active_requests", {}) or {},
         ):
             for t in _iter_tasks(task_dict):

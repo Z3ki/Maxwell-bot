@@ -43,7 +43,6 @@ from utils import (  # single source of truth, fd-safe
     FileLock,
     _atomic_json_write_sync,
 )
-from subagent_runner import run_subagent_task
 
 logger = logging.getLogger(__name__)
 
@@ -2425,8 +2424,6 @@ class SendFileTool(Tool):
             site_path = getattr(site_dir, "MAXWELL_SITE_DIR", "")
             if site_path:
                 bases.append(os.path.abspath(site_path))
-        subagent_base = os.environ.get("OPENCODE_SUBAGENT_BASE_DIR", "subagents")
-        bases.append(os.path.abspath(subagent_base))
         # Shell tool working dir (volume mounted into container as /home/maxwell).
         shell_host = os.path.join(os.path.dirname(__file__), "shelldocker")
         bases.append(os.path.abspath(shell_host))
@@ -4218,111 +4215,6 @@ class LeaveVcTool(Tool):
             return "Successfully disconnected from the voice channel."
         except Exception as e:
             return f"Error leaving voice channel: {e}"
-
-
-class SubAgentTool(Tool):
-    """Spawn a background OpenCode sub-agent to handle long tasks."""
-
-    # Sub-agent can execute arbitrary code in a container, fetch the web,
-    # and (per its own prompt) run shell. Taint-gate it like ShellTool.
-    is_destructive = True
-
-    def get_description(self):
-        return (
-            "Launch an OpenCode sub-agent to work on a long or complex task in the background. "
-            "The main bot can keep chatting while the sub-agent runs. "
-            "Params: task (required, full prompt for the sub-agent), slug (optional short name), "
-            "timeout_minutes (optional, default 30, max 120), files (optional JSON array of file paths to attach). "
-            "The sub-agent works in its own directory under the Maxwell project. "
-            "It uses Ollama Cloud with the minimax-m3 model by default. "
-            "I'll post the result to the channel when the sub-agent finishes."
-        )
-
-    async def execute(
-        self,
-        message: Message,
-        task: str | None = None,
-        slug: str | None = None,
-        timeout_minutes: str = "30",
-        files: str | None = None,
-        **kwargs,
-    ) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: sub_agent is admin-only"
-        if not task or not str(task).strip():
-            return "Error: task prompt is required"
-
-        # Indirect-prompt-injection defense. Same logic as ShellTool: a sub-
-        # agent can run arbitrary code in a container, so refuse to spawn one
-        # from a tainted turn unless the caller explicitly opts in.
-        tainted = bool(
-            self.bot is not None
-            and getattr(self.bot, "is_message_tainted", None)
-            and self.bot.is_message_tainted(message)
-        )
-        if tainted and not kwargs.get("_confirmed", False):
-            preview = str(task)[:200] + ("..." if len(str(task)) > 200 else "")
-            return (
-                "Error: sub_agent refused: this turn read content from a fetched "
-                "URL/web search that may carry prompt-injection payloads. "
-                "The user must confirm out-of-band with `,confirm` "
-                "(admins only) before this can run.\n"
-                f"Task preview: {preview}"
-            )
-
-        try:
-            minutes = max(1, min(int(timeout_minutes), 120))
-        except (TypeError, ValueError):
-            minutes = 30
-
-        extra_files: list[str] = []
-        if files:
-            try:
-                parsed = json.loads(files)
-                if isinstance(parsed, list):
-                    extra_files = [str(f).strip() for f in parsed if str(f).strip()]
-                elif isinstance(parsed, str):
-                    extra_files = [parsed.strip()] if parsed.strip() else []
-            except json.JSONDecodeError:
-                extra_files = [f.strip() for f in str(files).split(",") if f.strip()]
-
-        # Allowlist extra files to project-safe trees only (never .env / data secrets).
-        allowed_bases = [
-            os.path.abspath("subagents"),
-            os.path.abspath(os.environ.get("OPENCODE_SUBAGENT_BASE_DIR", "subagents")),
-            os.path.abspath(os.path.join(os.path.dirname(__file__), "shelldocker")),
-        ]
-        site_dir = getattr(getattr(self.bot, "config", None), "MAXWELL_SITE_DIR", "")
-        if site_dir:
-            allowed_bases.append(os.path.abspath(site_dir))
-        safe_files: list[str] = []
-        for fpath in extra_files[:20]:
-            try:
-                resolved = str(Path(fpath).expanduser().resolve())
-            except Exception:
-                continue
-            if any(_is_path_allowed(resolved, base) for base in allowed_bases):
-                safe_files.append(resolved)
-            else:
-                logger.warning(
-                    "sub_agent rejected extra file outside allowlist: %s", fpath
-                )
-        extra_files = safe_files
-
-        try:
-            model = os.environ.get("OPENCODE_SUBAGENT_MODEL", "ollama-cloud/minimax-m3")
-            return await run_subagent_task(
-                self.bot,
-                message,
-                task,
-                slug=slug or "task",
-                model=model,
-                timeout_minutes=minutes,
-                extra_files=extra_files,
-            )
-        except Exception as e:
-            logger.exception("Failed to start sub-agent")
-            return f"Error starting sub-agent: {e}"
 
 
 # =============================================================================

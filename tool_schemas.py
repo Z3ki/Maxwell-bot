@@ -237,17 +237,6 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         ["text"],
     ),
     "leave_vc": _obj({}),
-    "sub_agent": _obj(
-        {
-            "task": _str("Task description for the background sub-agent"),
-            "slug": _str("Optional short slug for the sub-agent workdir"),
-            "timeout_minutes": _int("Optional timeout"),
-            "files": _str(
-                "Optional JSON list of local file paths to expose to the sub-agent"
-            ),
-        },
-        ["task"],
-    ),
     # maxwell@z3ki.dev email — local MTA. Bot talks to local Postfix
     # (127.0.0.1:25, SMTP+STARTTLS+SASL) and local Dovecot (127.0.0.1:993,
     # IMAPS+SASL). No third-party relay. See bot_tools.py and

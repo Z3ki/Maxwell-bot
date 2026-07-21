@@ -108,29 +108,49 @@ _DEFERRED_POST_WINDOW = 0.8
 _GENERATING_PLACEHOLDER = "generating…"
 
 
-def _visible_tail(text: str, budget: int) -> str:
-    """Return the last ``budget`` chars of ``text``, trimmed to a
-    word boundary when possible.
+def _latest_complete_sentence(text: str) -> str:
+    """Return the LATEST complete sentence in ``text``.
 
-    2026-07-21: the user reported the progress line was "waiting for
-    an update" and "the text never rolled by". Previous design pinned
-    the visible line to the FIRST complete sentence of the buffer —
-    for a long generation that meant the same sentence sat on screen
-    for 30+ seconds while the model thought. New design: the visible
-    line is a rolling tail of the buffer, so the user actually
-    watches the model's words scroll by in real time, just like a
-    live stream. Word-boundary trim keeps it readable.
+    2026-07-21: user wants the progress line to update per sentence
+    — when the model finishes a sentence, show THAT sentence; when
+    it finishes the next one, show the new one. Not a rolling tail
+    (which scrolls mid-sentence fragments), not pinned to the first
+    sentence (which freezes). The user watches the model think in
+    coherent sentence units.
+
+    A "complete sentence" is one that ends with a '.', '!', or '?'
+    FOLLOWED BY a space or end-of-string. The latest one is the
+    substring from the start of the most recent sentence boundary
+    (one space after a previous '.', '!', or '?') to the current
+    terminator. If no terminator exists yet, return "" (caller
+    decides fallback).
     """
-    if not text:
+    last_end = -1
+    for i, ch in enumerate(text):
+        if ch in ".!?":
+            # Only count as a sentence end if it's followed by a
+            # space or end of string (not "1.5" or "Dr." mid-sentence).
+            if i + 1 >= len(text) or text[i + 1] == " ":
+                last_end = i
+    if last_end < 0:
         return ""
-    if len(text) <= budget:
-        return text.strip()
-    tail = text[-budget:]
-    # Try to land on a word boundary in the first half of the slice.
-    first_space = tail.find(" ")
-    if first_space != -1 and first_space < budget // 2:
-        return tail[first_space + 1 :].strip()
-    return tail.strip()
+    # The latest sentence starts after the previous terminator.
+    # Walk backwards from last_end to find the start of this sentence.
+    # Look for a '.', '!', or '?' followed by a space BEFORE last_end.
+    start = 0
+    for j in range(last_end - 1, -1, -1):
+        ch = text[j]
+        if ch in ".!?":
+            # Check if this terminator is followed by a space
+            # (i.e. it ends a complete sentence, not mid-thought).
+            if j + 1 < len(text) and text[j + 1] == " ":
+                start = j + 2  # skip the terminator and the space
+                break
+            elif j + 1 >= len(text):
+                # Trailing terminator: this is the previous sentence's end.
+                start = j + 1
+                break
+    return text[start : last_end + 1].strip()
 
 
 class ToolProgress:
@@ -472,13 +492,33 @@ class ToolProgress:
             # :linear -gradient( 90deg ,red" which is unreadable.
             cleaned = "".join(c for c in raw if c not in _VISIBLE_STRIP_CHARS)
             cleaned = " ".join(cleaned.split())
-            # 2026-07-21: rolling tail of the buffer. The user wants to
-            # watch the words scroll by in real time, not stare at a
-            # pinned first sentence. The tail is trimmed to a word
-            # boundary when possible so the line stays readable.
-            tail = _visible_tail(cleaned, _VISIBLE_BUDGET)
+            # 2026-07-21: show the LATEST COMPLETE SENTENCE, not a
+            # rolling tail. The user wants the progress line to update
+            # each time the model finishes a new sentence — coherent
+            # sentence units, not mid-thought fragments. The visible
+            # line therefore advances by sentence, not by char.
+            sentence = _latest_complete_sentence(cleaned)
+            if not sentence:
+                # No terminator yet — fall back to a partial preview
+                # so the user sees liveness while the model is still
+                # composing the first sentence. Trim to fit budget.
+                partial = cleaned[:_VISIBLE_BUDGET]
+                if len(cleaned) > _VISIBLE_BUDGET:
+                    # Land on a word boundary.
+                    last_ws = partial.rfind(" ")
+                    if last_ws > _VISIBLE_BUDGET // 2:
+                        partial = partial[:last_ws]
+                sentence = partial
+            elif len(sentence) > _VISIBLE_BUDGET:
+                # Long sentence — keep the tail (most recent words)
+                # trimmed to a word boundary.
+                head2 = sentence[-_VISIBLE_BUDGET:]
+                first_ws = head2.find(" ")
+                if first_ws != -1 and first_ws < _VISIBLE_BUDGET // 2:
+                    head2 = head2[first_ws + 1 :]
+                sentence = head2.strip()
             tag = f" → {self._current_tool}" if self._current_tool else ""
-            head = f"thinking: {tail}{tag}"
+            head = f"thinking: {sentence}{tag}"
         if self._snippet_buffer:
             return f"{head}\n⤷ {self._snippet_buffer}"
         return head

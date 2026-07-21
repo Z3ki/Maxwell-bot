@@ -363,7 +363,6 @@ AUTONOMY_DISABLED_TOOLS = frozenset(
     {
         "shell",
         "create_site",
-        "sub_agent",
         "list_admin_servers",
         "create_category",
         "create_channel",

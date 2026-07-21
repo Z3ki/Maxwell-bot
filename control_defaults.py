@@ -71,9 +71,6 @@ DEFAULT_CONTROL = {
     # native tool_calls (or the endpoint rejects tools=).
     "native_tool_calls": True,
     "tools_enabled": False,
-    "subagent_docker": True,
-    "subagent_max_concurrent_per_user": 2,
-    "subagent_max_timeout_minutes": 60,
     "create_site_quota_per_user": 50,
     "disabled_tools": [],
     "ignore_users": [],
@@ -202,7 +199,6 @@ KNOWN_TOOLS = [
     "send_meme",
     "send_media",
     "leave_vc",
-    "sub_agent",
     "sleep",
     "clear_sleep",
 ]
