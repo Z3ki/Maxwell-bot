@@ -154,13 +154,22 @@ class RemEventLog:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        self._save_task = loop.call_later(5, self._do_save)
+        # 2026-07-21: async path so _do_save can take asyncio.Lock.
+        async def _debounced():
+            try:
+                await asyncio.sleep(5)
+                await self._do_save()
+            except asyncio.CancelledError:
+                pass
+        self._save_task = loop.create_task(_debounced())
 
-    def _do_save(self):
+    async def _do_save(self):
         self._save_task = None
         if self._dirty:
-            self._dirty = False
-            snapshot = json.loads(json.dumps(self.events, ensure_ascii=False))
+            # 2026-07-21: lock the snapshot — same race fix as MemoryManager.
+            async with self._lock:
+                self._dirty = False
+                snapshot = json.loads(json.dumps(self.events, ensure_ascii=False))
             self._pending_save = asyncio.ensure_future(self._atomic_save(snapshot))
 
     async def record(self, event: dict):
@@ -201,8 +210,10 @@ class RemEventLog:
             await self._pending_save
             self._pending_save = None
         if self._dirty:
-            self._dirty = False
-            snapshot = json.loads(json.dumps(self.events, ensure_ascii=False))
+            # 2026-07-21: lock the snapshot, same race fix as MemoryManager.
+            async with self._lock:
+                self._dirty = False
+                snapshot = json.loads(json.dumps(self.events, ensure_ascii=False))
             await self._atomic_save(snapshot)
 
 
@@ -299,9 +310,22 @@ class MemoryManager:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        self._save_task = loop.call_later(5, self._do_save)
+        # 2026-07-21: use ensure_future (async path) instead of
+        # call_later so the save can take the asyncio.Lock. The old
+        # call_later(path) made _do_save a sync callback which cannot
+        # ``with self._lock`` — asyncio.Lock requires ``async with``.
+        # We use a tiny wrapper with asyncio.sleep for debounce so we
+        # can use the async lock; cancellation still works because
+        # asyncio.sleep raises CancelledError on task.cancel().
+        async def _debounced():
+            try:
+                await asyncio.sleep(5)
+                await self._do_save()
+            except asyncio.CancelledError:
+                pass
+        self._save_task = loop.create_task(_debounced())
 
-    def _do_save(self):
+    async def _do_save(self):
         """Actually save if dirty — snapshot data so we don't race mutations."""
         self._save_task = None
         if self._dirty:
@@ -313,7 +337,7 @@ class MemoryManager:
             # _atomic_save's broad except, so the on-disk file fell
             # behind self.memory indefinitely — silent data loss
             # under any sustained load.
-            with self._lock:
+            async with self._lock:
                 self._dirty = False
                 snapshot = json.loads(json.dumps(self.memory, ensure_ascii=False))
             # Track the save task so flush() can wait for it
@@ -339,8 +363,11 @@ class MemoryManager:
             self._pending_save = None
         # If a timer was cancelled before _do_save ran, we still have dirty data.
         if self._dirty:
-            self._dirty = False
-            snapshot = json.loads(json.dumps(self.memory, ensure_ascii=False))
+            # 2026-07-21: take the lock here too, same race that
+            # motivated the _do_save fix.
+            async with self._lock:
+                self._dirty = False
+                snapshot = json.loads(json.dumps(self.memory, ensure_ascii=False))
             await self._atomic_save(self.memory_file, snapshot)
             logger.info("Memory flushed to disk")
 
