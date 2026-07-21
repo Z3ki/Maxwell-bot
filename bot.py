@@ -2815,6 +2815,7 @@ class MaxwellBot(commands.Bot):
             "vc",
             "autonomy",
             "jailbreak",
+            "progress",
         }
         if cmd in admin_commands and not self._is_admin(message.author.id):
             await message.channel.send("not authorized")
@@ -2965,6 +2966,58 @@ class MaxwellBot(commands.Bot):
                         "usage: `,jailbreak on|off|status` — toggles the freedom-mode "
                         "(jailbreak) prompt for this server. off by default everywhere."
                     )
+            elif cmd == "progress":
+                arg = (args or "").strip().lower()
+                # 2026-07-21: live tool-progress messages. Toggled per
+                # install (not per server) because the progress widget
+                # is global UI feedback for slow tool calls. Off by
+                # default so channels stay quiet unless opted in.
+                if arg in {"on", "enable", "yes", "true"}:
+                    if bool(self._control.get("progress_messages", False)):
+                        await message.channel.send(
+                            "progress messages are already on"
+                        )
+                    else:
+                        self._control["progress_messages"] = True
+                        await asyncio.to_thread(
+                            _atomic_json_write_sync,
+                            Path(self.config.DATA_DIR) / "bot_control.json",
+                            dict(self._control),
+                        )
+                        await message.channel.send(
+                            "progress messages ON. tool calls will show a live "
+                            "'thinking: …' message in the channel."
+                        )
+                elif arg in {"off", "disable", "no", "false"}:
+                    if not bool(self._control.get("progress_messages", False)):
+                        await message.channel.send(
+                            "progress messages were already off"
+                        )
+                    else:
+                        self._control["progress_messages"] = False
+                        await asyncio.to_thread(
+                            _atomic_json_write_sync,
+                            Path(self.config.DATA_DIR) / "bot_control.json",
+                            dict(self._control),
+                        )
+                        await message.channel.send(
+                            "progress messages OFF. tool calls will run silently."
+                        )
+                elif arg in {"status", ""}:
+                    state = (
+                        "on" if self._control.get("progress_messages", False) else "off"
+                    )
+                    await message.channel.send(
+                        f"progress messages are **{state}** for this bot "
+                        f"(MAXWELL_PROGRESS_MESSAGES env default: "
+                        f"{'on' if self.config.PROGRESS_MESSAGES else 'off'})"
+                    )
+                else:
+                    await message.channel.send(
+                        "usage: `,progress on|off|status` — toggles the live "
+                        "'thinking: …' status message shown while tools run. "
+                        "off by default; opt in for visibility during slow tool calls."
+                    )
             elif cmd == "admin":
                 if not self._is_admin(message.author.id):
                     await message.channel.send("not authorized")
@@ -3008,6 +3061,7 @@ class MaxwellBot(commands.Bot):
                     "` ,vc ...` - voice commands\n"
                     "` ,drug [minutes|off|status]` - drug mode timer\n"
                     "` ,jailbreak on|off|status` - toggle freedom-mode prompt for this server (admin)\n"
+                    "` ,progress on|off|status` - toggle live 'thinking: …' messages during tool calls (admin)\n"
                     "` ,sleep [minutes|off|status]` - take a 1-60m sleep window; pings get a notice (admin)\n"
                     "` ,wake` - clear active sleep window (admin)\n"
                     "` ,admin [@user|user_id|clear]` - add/remove/list admins (admin). Promoted users can log into the dashboard at /admin via 'Continue with Discord'."
@@ -4721,12 +4775,13 @@ class MaxwellBot(commands.Bot):
                 self._ai_concurrency = control["ai_concurrency"]
                 self._notify_ai_waiters()
             self._control = control
-            # Re-apply the env-var seed AFTER the panel loaded, so the
-            # .env knob wins over a stale or empty panel value. Operators
-            # can still flip the panel later, but the env var remains the
-            # durable default. Only this single key is env-driven; the
-            # rest of the panel still wins.
-            self._control["progress_messages"] = bool(self.config.PROGRESS_MESSAGES)
+            # Re-apply the env-var default for progress_messages ONLY
+            # when the panel didn't explicitly set it. The env var
+            # remains the durable default for fresh installs, but once
+            # an operator flips the panel (via the dashboard OR the
+            # `,progress on|off` command), the panel value wins.
+            if "progress_messages" not in loaded:
+                self._control["progress_messages"] = bool(self.config.PROGRESS_MESSAGES)
             self._control_mtime = mtime
             logger.info("Loaded dashboard control settings")
         except Exception as e:
