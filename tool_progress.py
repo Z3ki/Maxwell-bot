@@ -363,10 +363,19 @@ class ToolProgress:
 
         1. No tool yet, no reasoning yet -> ``working on it…``
         2. Tool announced, no reasoning yet -> ``using <tool>…``
-        3. Reasoning streaming -> ``thinking: <last 120 chars>``
+        3. Tool + reasoning -> ``using <tool>: <last 120 chars>``
 
         The 120 chars are stripped of JSON artefacts ({, }, \\, ", `, :)
         and cut on a whitespace boundary so the line is always readable.
+
+        2026-07-21: user feedback that every tool carries its own
+        reasoning (the model's "reasoning" argument on the tool call).
+        The visible line should show that reasoning, not the model's
+        pre-tool streaming chatter. Since update() REPLACES the buffer
+        with the tool's reasoning when the tool is dispatched, the
+        reasoning you see is the tool's own — and the tool name is
+        what makes it useful. Hence the "using <tool>:" prefix when
+        both are present, not the bare "thinking:" prefix.
         """
         tail = self._reasoning_buffer.strip()
         if not tail:
@@ -390,6 +399,8 @@ class ToolProgress:
             if 0 < last_ws < len(head) - 1:
                 head = head[last_ws + 1 :]
             tail = head
+        if self._current_tool:
+            return f"using {self._current_tool}: {tail}"
         return f"thinking: {tail}"
 
     def _schedule_deferred_flush(self) -> None:

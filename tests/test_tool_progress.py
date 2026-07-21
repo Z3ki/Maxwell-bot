@@ -97,10 +97,12 @@ def test_initial_post_uses_channel_send_not_reply():
 
 
 def test_half_sentence_reasoning_shows_partial_tail():
-    """2026-07-21 rewrite: the visible line is always 'thinking: <tail>'
-    (or 'working on it…' / 'using <tool>…' when no reasoning yet). A
-    partial buffer (no terminator) is shown as-is. The user watches
-    the words scroll by in real time, no waiting for a period."""
+    """2026-07-21 rewrite: the visible line is always 'using <tool>: <tail>'
+    when a tool is announced with reasoning, 'thinking: <tail>' when
+    no tool was announced, or 'working on it…' / 'using <tool>…' when
+    no reasoning has arrived yet. A partial buffer (no terminator) is
+    shown as-is. The user watches the words scroll by in real time,
+    no waiting for a period."""
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
@@ -110,8 +112,8 @@ def test_half_sentence_reasoning_shows_partial_tail():
     # Set a tool but the reasoning buffer has no terminator yet.
     prog._last_edit = 0
     asyncio.run(prog.update("shell", "the user wants me to look at"))
-    # Partial buffer -> partial text under 'thinking:' prefix.
-    assert msg_obj.content == "thinking: the user wants me to look at"
+    # Partial buffer with tool -> "using <tool>: <tail>".
+    assert msg_obj.content == "using shell: the user wants me to look at"
     # More reasoning — visible line scrolls forward with it.
     prog._last_edit = 0
     asyncio.run(
@@ -124,7 +126,7 @@ def test_half_sentence_reasoning_shows_partial_tail():
     # chars), so the visible line is the full reasoning. The rolling
     # tail design shows up only when the buffer overflows 120 chars.
     assert msg_obj.content == (
-        "thinking: the user wants me to look at the disk and report back. "
+        "using shell: the user wants me to look at the disk and report back. "
         "They asked about space."
     )
 
@@ -138,24 +140,24 @@ def test_update_replaces_in_place():
     # First update — tool name + reasoning appended to buffer.
     prog._last_edit = 0
     asyncio.run(prog.update("shell", "checking disk usage."))
-    assert msg_obj.content == "thinking: checking disk usage."
+    assert msg_obj.content == "using shell: checking disk usage."
     # New tool — buffer resets to the new reasoning (new tool = new line).
     prog._last_edit = 0
     asyncio.run(prog.update("web_search", "searching the docs."))
-    assert msg_obj.content == "thinking: searching the docs."
+    assert msg_obj.content == "using web_search: searching the docs."
     asyncio.run(prog.stop())
 
 
 def test_update_uses_models_own_words():
     """The reason field IS the message — no decoration, no backticks, no emoji.
-    Format: 'thinking: <reasoning>'."""
+    Format: 'using <tool>: <reasoning>'."""
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
     msg_obj = msg.channel.sent[0]
     prog._last_edit = 0
     asyncio.run(prog.update("shell", "verifying apt sources are sane."))
-    assert msg_obj.content == "thinking: verifying apt sources are sane."
+    assert msg_obj.content == "using shell: verifying apt sources are sane."
     # No emoji, no backticks
     assert "⏳" not in msg_obj.content
     assert "`" not in msg_obj.content
@@ -187,7 +189,7 @@ def test_rate_limit_coalesces_rapid_updates():
     # treats the post-start window as already-elapsed).
     prog._last_edit = 0
     asyncio.run(prog.update("shell", "doing thing one."))
-    assert msg_obj.content == "thinking: doing thing one."
+    assert msg_obj.content == "using shell: doing thing one."
     # Second update immediately — should be cached but NOT edited
     edits_before = len(msg.channel.edited)
     asyncio.run(prog.update("shell", "doing thing two."))
@@ -279,10 +281,10 @@ def test_long_reasoning_truncated_to_visible_budget():
     content = msg_obj.content
     # Newlines collapsed to spaces.
     assert "\n" not in content
-    # Format is "thinking: <tail>" with the JSON-stripped tail.
-    assert content.startswith("thinking: ")
-    # The visible line is at most _VISIBLE_BUDGET + the "thinking: " prefix.
-    assert len(content) <= tool_progress._VISIBLE_BUDGET + len("thinking: ")
+    # Format is "using <tool>: <tail>" with the JSON-stripped tail.
+    assert content.startswith("using shell: ")
+    # The visible line is at most _VISIBLE_BUDGET + the prefix length.
+    assert len(content) <= tool_progress._VISIBLE_BUDGET + len("using shell: ")
     # The leading part of the reasoning isn't in the visible tail
     # (we kept only the last _VISIBLE_BUDGET chars).
     assert "checking disk usage and memory now." not in content
@@ -421,16 +423,15 @@ def test_tick_accumulates_reasoning_text():
 
 
 def test_tick_tool_name_shows_tool_prefix():
-    """When the model commits to a tool BEFORE any reasoning text has
-    arrived, the visible line is 'using <tool>…' so the user
-    immediately knows what the model is doing.
+    """When the model commits to a tool, the tool name appears on
+    the visible line along with whatever reasoning the model attached
+    to the tool call. The reasoning IS the message — the tool name
+    is just a tag.
 
-    2026-07-21 contract change: the tool name is no longer inlined into
-    the 'thinking:' line. The visible line is one of three states:
-    'working on it…' / 'using <tool>…' / 'thinking: <tail>'. Once
-    any reasoning is in the buffer, the tool name drops out of the
-    visible line (the model's words are more useful than the tool tag
-    when both exist)."""
+    2026-07-21 contract: the visible line is one of three states:
+    'working on it…' / 'using <tool>…' / 'using <tool>: <tail>'.
+    Once the tool is announced AND reasoning has arrived, the line
+    shows the tool's reasoning prefixed by 'using <tool>:'."""
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
@@ -439,24 +440,18 @@ def test_tick_tool_name_shows_tool_prefix():
     prog._last_edit = 0
     asyncio.run(prog.tick(reasoning_delta="Let me check that user."))
     assert msg_obj.content == "thinking: Let me check that user."
-    # Now the model commits to a tool — but reasoning already exists,
-    # so the tool name does NOT replace the thinking line. It just
-    # gets stashed on _current_tool (used by the next 'using <tool>…'
-    # branch if reasoning clears).
+    # Now the model commits to a tool. The reasoning stays (the
+    # tool name is added as a prefix on the next render).
     prog._last_edit = 0
     asyncio.run(prog.tick(reasoning_delta="", tool_name="lookup_user"))
-    # Reasoning still drives the visible line.
-    assert msg_obj.content == "thinking: Let me check that user."
-    assert msg_obj._reasoning_buffer if hasattr(msg_obj, "_reasoning_buffer") else True
-    # The tool name IS recorded for later use.
-    assert prog._current_tool == "lookup_user"
+    assert msg_obj.content == "using lookup_user: Let me check that user."
     asyncio.run(prog.stop())
 
 
 def test_tick_tool_name_only_shows_using_when_no_reasoning():
     """The 'using <tool>…' state fires when the tool is announced
     but no reasoning has arrived yet. Once reasoning arrives, the
-    line transitions to 'thinking: …'."""
+    line transitions to 'using <tool>: <tail>'."""
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
@@ -465,10 +460,10 @@ def test_tick_tool_name_only_shows_using_when_no_reasoning():
     prog._last_edit = 0
     asyncio.run(prog.tick(reasoning_delta="", tool_name="lookup_user"))
     assert msg_obj.content == "using lookup_user…"
-    # Reasoning arrives, transitions to thinking.
+    # Reasoning arrives, transitions to 'using <tool>: <tail>'.
     prog._last_edit = 0
     asyncio.run(prog.tick(reasoning_delta="looking that up."))
-    assert msg_obj.content == "thinking: looking that up."
+    assert msg_obj.content == "using lookup_user: looking that up."
     asyncio.run(prog.stop())
 
 
