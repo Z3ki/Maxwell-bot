@@ -1729,6 +1729,11 @@ class MaxwellBot(commands.Bot):
         # this to avoid re-engaging a conversation the bot already answered (the
         # "bot sees its own 15-min-old reply and posts again" loop).
         self._last_bot_reply: dict[str, float] = {}
+        # Channel id -> monotonic timestamp of the bot's most recent successful
+        # send (or reply). The slowmode handler uses this to compute how long
+        # to wait before posting so we don't race Discord's per-channel
+        # slowmode timer and get rate-limited (429) on a busy channel.
+        self._last_bot_send: dict[str, float] = {}
         self._ai_concurrency = 2
         self._ai_active = 0
         self._ai_user_waiter_count = 0  # user-priority calls waiting for a slot
@@ -5574,6 +5579,113 @@ class MaxwellBot(commands.Bot):
             fixed.append(out)
         return fixed
 
+    async def _respect_slowmode(self, channel) -> None:
+        """Sleep if the channel's slowmode would block our next send.
+
+        2026-07-21: Discord's per-channel slowmode (set on the channel by
+        server admins) limits how often ANY user — including bots — can
+        post. If the bot's last send in this channel was less than
+        ``slowmode_delay`` seconds ago, the next POST would 429 and
+        Discord's auto-retry would queue the reply for 2-12s. The user
+        experience is "the bot is frozen" or "the bot is slowmoded even
+        though it shouldn't be" (channel members don't realize admins
+        set a slowmode that hits bots too).
+
+        Fix: read ``channel.slowmode_delay`` (0 means no slowmode), check
+        ``self._last_bot_send[channel_id]``, and sleep the delta so the
+        POST lands inside the slowmode window. Capped at the slowmode
+        itself so a 0s slowmode is free, a 10s slowmode waits at most
+        10s, and a 1h slowmode waits at most 1h. Clamped to a 30s
+        ceiling so a misconfigured 6h slowmode doesn't make the bot
+        vanish from a channel — we just send and accept the 429.
+
+        The ``_last_bot_send`` map is populated in ``_send_with_slowmode``
+        after every successful send (so a failed 429 also re-arms the
+        timer when it eventually succeeds).
+        """
+        try:
+            slowmode = int(getattr(channel, "slowmode_delay", 0) or 0)
+        except (TypeError, ValueError):
+            slowmode = 0
+        if slowmode <= 0:
+            return
+        # Don't make the bot vanish for 6h if a server admin sets an
+        # absurd slowmode by mistake. The channel owner can disable it
+        # with `,slowmode 0` (or via the channel settings).
+        effective_cap = min(slowmode, 30)
+        channel_id = str(getattr(channel, "id", ""))
+        if not channel_id:
+            return
+        now = time.monotonic()
+        last = self._last_bot_send.get(channel_id, 0.0)
+        elapsed = now - last
+        if elapsed >= effective_cap:
+            return
+        wait_s = effective_cap - elapsed
+        logger.debug(
+            "[SLOWMODE] channel=%s slowmode=%ss waiting %.2fs before send",
+            channel_id,
+            slowmode,
+            wait_s,
+        )
+        await asyncio.sleep(wait_s)
+
+    def _mark_bot_sent(self, channel) -> None:
+        channel_id = str(getattr(channel, "id", "") or "")
+        if not channel_id:
+            return
+        self._last_bot_send[channel_id] = time.monotonic()
+
+    async def _send_with_slowmode(
+        self,
+        channel,
+        content: str | None = None,
+        *,
+        reply_to=None,
+        file=None,
+        **kwargs,
+    ):
+        """channel.send() / message.reply() wrapper that respects slowmode.
+
+        Slowmode is a per-channel timer on POSTs, not on message contents,
+        so it applies to BOTH the first chunk (often a ``reply()``) and
+        follow-up chunks (always ``channel.send()``). Each call to this
+        helper waits the channel's slowmode window, then dispatches.
+
+        Returns the sent message on success, ``None`` on swallowable
+        failure (Forbidden / NotFound on a plain channel.send). When
+        ``reply_to`` is set and the reply hits NotFound (the parent
+        message was deleted), the exception is re-raised so the caller
+        can fall back to ``channel.send``. Other exceptions propagate.
+        """
+        await self._respect_slowmode(channel)
+        if reply_to is not None:
+            # Let NotFound propagate so the caller can decide whether to
+            # fall back to a plain channel.send. Forbidden is fatal — we
+            # have no way to recover and the caller doesn't want to keep
+            # retrying into the same wall.
+            try:
+                sent = await reply_to.reply(content=content, file=file, **kwargs)
+            except discord.Forbidden:
+                logger.warning(
+                    "reply failed (forbidden) in channel %s",
+                    getattr(channel, "id", "?"),
+                )
+                return None
+            self._mark_bot_sent(channel)
+            return sent
+        try:
+            sent = await channel.send(content=content, file=file, **kwargs)
+        except (discord.Forbidden, discord.NotFound) as exc:
+            logger.warning(
+                "send failed (%s) in channel %s",
+                exc.__class__.__name__,
+                getattr(channel, "id", "?"),
+            )
+            return None
+        self._mark_bot_sent(channel)
+        return sent
+
     async def _extract_media(self, message) -> tuple[list[str], list[dict]]:
         proc_img = bool(self._control.get("process_images", True))
         proc_aud = bool(self._control.get("process_audio", False))
@@ -7193,18 +7305,16 @@ class MaxwellBot(commands.Bot):
                         # Progress message is now the reply; no second
                         # message needed. Fall through to chunks 2+ if any.
                         if len(chunks) > 1:
-                            try:
-                                await message.channel.send(chunk)
-                            except (discord.Forbidden, discord.NotFound) as send_exc:
-                                logger.warning(
-                                    "follow-up chunk send failed (%s) in channel %s",
-                                    send_exc.__class__.__name__,
-                                    getattr(message.channel, "id", "?"),
-                                )
+                            sent = await self._send_with_slowmode(
+                                message.channel, content=chunk
+                            )
+                            if sent is None:
                                 break
                     elif i == 0:
                         try:
-                            await message.reply(chunk)
+                            sent = await self._send_with_slowmode(
+                                message.channel, content=chunk, reply_to=message
+                            )
                         except discord.NotFound:
                             # Referenced message was deleted between read and reply;
                             # fall back to a plain channel send so the user still sees it.
@@ -7212,26 +7322,17 @@ class MaxwellBot(commands.Bot):
                                 "message.reply hit 404 (deleted parent), falling back to channel.send in channel %s",
                                 getattr(message.channel, "id", "?"),
                             )
-                            await message.channel.send(chunk)
-                        except discord.Forbidden:
-                            # No permission to send here; don't blow up the whole turn.
-                            logger.warning(
-                                "message.reply hit 403 (missing permissions) in channel %s",
-                                getattr(message.channel, "id", "?"),
+                            sent = await self._send_with_slowmode(
+                                message.channel, content=chunk
                             )
+                        if sent is None:
                             break
                     else:
-                        try:
-                            await message.channel.send(chunk)
-                        except (discord.Forbidden, discord.NotFound) as send_exc:
-                            logger.warning(
-                                "follow-up chunk send failed (%s) in channel %s",
-                                send_exc.__class__.__name__,
-                                getattr(message.channel, "id", "?"),
-                            )
+                        sent = await self._send_with_slowmode(
+                            message.channel, content=chunk
+                        )
+                        if sent is None:
                             break
-                    if len(chunks) > 1:
-                        await asyncio.sleep(0.3)
                 # Write the bot's own reply to channel memory. Without
                 # this the next turn sees the user's "Explain X" question
                 # but NOT the bot's answer — the user comes back and
