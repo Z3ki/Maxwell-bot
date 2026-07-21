@@ -376,8 +376,16 @@ class ToolProgress:
         # egregiously as an empty string. Both are announcements, not
         # thoughts; the tick() path owns the buffer.
         if reasoning and reasoning != _GENERATING_PLACEHOLDER:
+            # 2026-07-21: same inter-delta spacing fix as tick() above —
+            # if the existing buffer doesn't end in whitespace and the
+            # new reasoning doesn't start with whitespace, insert a
+            # space so _format_thinking can find sentence boundaries.
+            prev = self._reasoning_buffer
+            if prev and not prev[-1].isspace() and not reasoning[0].isspace():
+                self._reasoning_buffer = (prev + " " + reasoning).strip()
+            else:
+                self._reasoning_buffer = (prev + reasoning).strip()
             self._current_reason = reasoning
-            self._reasoning_buffer = reasoning
         if prev_tool and prev_tool != tool_name:
             self._last_tool_name_announced = False
 
@@ -418,7 +426,25 @@ class ToolProgress:
             self._last_tool_name_announced = True
 
         if reasoning_delta:
-            tail = (self._reasoning_buffer + reasoning_delta).strip()
+            # 2026-07-21: insert a space between deltas when neither
+            # side has a boundary. Providers stream tokens glued with
+            # no whitespace ("hello world" then "The user wants me to
+            # look at" arrive as two chunks with no separator, so
+            # concatenating them gives "hello worldThe user wants me
+            # to look at" — a single 40-char run that _format_thinking
+            # then sees as ONE sentence and renders verbatim). Insert
+            # a space if the join point is between two non-space
+            # characters so each delta stays readable.
+            prev = self._reasoning_buffer
+            if prev and reasoning_delta:
+                last_ch = prev[-1]
+                first_ch = reasoning_delta[0]
+                if not last_ch.isspace() and not first_ch.isspace():
+                    tail = (prev + " " + reasoning_delta).strip()
+                else:
+                    tail = (prev + reasoning_delta).strip()
+            else:
+                tail = (prev + reasoning_delta).strip()
             # Bound growth so 10k-char reasoning doesn't accumulate.
             if len(tail) > _HARD_FALLBACK_CHARS * 4:
                 tail = tail[-_HARD_FALLBACK_CHARS * 4 :]

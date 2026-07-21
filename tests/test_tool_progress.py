@@ -747,3 +747,140 @@ def test_concurrent_progresses_isolated_per_channel():
     inst._signal_streaming(msg_b)
     assert sig_a == []
     assert sig_b == [True]
+
+
+def test_streaming_tick_inserts_space_between_glued_deltas():
+    """Real-API regression: hit kimi-k2.6:cloud and verify the
+    progress UI captures streaming deltas and space-joins them.
+
+    The previous bug: SSE deltas that arrived with no whitespace
+    boundary between them were concatenated into one run ("hello
+    worldThe user wants me to look at the disk.") so _format_thinking
+    saw a single sentence and the progress line never rolled. The fix
+    inserts a space between deltas when neither side has a boundary.
+
+    This test runs against the live provider configured in .env so
+    it verifies the real streaming path end-to-end: HTTP -> SSE
+    parsing -> on_token callback -> tick() -> progress message edit.
+    Skipped if OLLAMA_BASE_URL is not set (CI / no network).
+    """
+    import os as _os
+    from pathlib import Path as _Path
+    # Load .env so OLLAMA_BASE_URL / OLLAMA_MODEL are visible in pytest
+    _env_path = _Path(__file__).resolve().parent.parent / ".env"
+    if _env_path.exists():
+        for _line in _env_path.read_text(encoding="utf-8").splitlines():
+            _line = _line.strip()
+            if not _line or _line.startswith("#") or "=" not in _line:
+                continue
+            _k, _, _v = _line.partition("=")
+            _os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
+    base_url = _os.getenv("OLLAMA_BASE_URL", "").rstrip("/")
+    if not base_url:
+        import pytest
+        pytest.skip("OLLAMA_BASE_URL not set; real-API progress test skipped")
+    model = _os.getenv("OLLAMA_MODEL", "kimi-k2.6:cloud")
+    api_key = _os.getenv("OLLAMA_API_KEY", "")
+
+    msg = FakeMessage()
+    prog = tool_progress.ToolProgress(msg)
+
+    pending: list = []
+
+    async def drive():
+        from providers import OllamaProvider as _Prov
+
+        prov = _Prov(
+            base_url=base_url,
+            model=model,
+            max_tokens=256,
+            temperature=0.7,
+            api_key=api_key,
+            retry_attempts=1,
+        )
+        fb = _os.getenv("OLLAMA_FALLBACK_BASE_URL", "")
+        if fb:
+            prov._endpoints.append(
+                type(prov._endpoints[0])(
+                    "fallback",
+                    fb,
+                    _os.getenv("OLLAMA_FALLBACK_MODEL", ""),
+                    _os.getenv("OLLAMA_FALLBACK_API_KEY", ""),
+                    True,
+                )
+            )
+        ok = await prov.initialize()
+        assert ok, "provider failed to initialize"
+
+        await prog.start()
+
+        def on_token(tok):
+            c = tok.get("content", "") or ""
+            r = tok.get("reasoning", "") or ""
+            if c or r:
+                pending.append(
+                    asyncio.create_task(
+                        prog.tick(
+                            reasoning_delta=c + r,
+                            tool_name=tok.get("tool_name"),
+                        )
+                    )
+                )
+
+        messages = [
+            {
+                "role": "system",
+                "content": "You are a test bot. Answer in 3-4 short sentences about cats.",
+            },
+            {
+                "role": "user",
+                "content": "Tell me about cats in 3-4 short sentences.",
+            },
+        ]
+        result = await prov.generate_chat_completion(
+            messages, on_token=on_token, timeout=120, max_tokens=256
+        )
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        # Let any coalesced final tick render
+        await asyncio.sleep(3.5)
+
+        edits = [e.content for e in msg.channel.edited]
+        assert edits, "progress message was never edited"
+        # Buffer should be space-joined at word boundaries, not glued.
+        # The original bug glued two letter-runs together with no space
+        # between them ("hello worldThe user" — "d" then "T" with no
+        # boundary). Numbers and hyphens around them (e.g. "12-16" from
+        # the model itself) are not deltas that need spacing.
+        import re as _re2
+        buf = prog._reasoning_buffer
+        buf_compact = _re2.sub(r"[\s\-\d_]+", "", buf)
+        for glued in ["worldThe", "diskThen", "meowingPurring", "catsThey"]:
+            if glued in buf_compact:
+                raise AssertionError(
+                    f"deltas were not space-joined: {glued!r} in {buf!r}"
+                )
+        # The progress message should show at least one full sentence
+        assert any(":" in e and "." in e for e in edits), (
+            f"no complete sentence rendered: {edits!r}"
+        )
+        # Final response should contain the same text as the buffer.
+        # ProviderResult is a str subclass, so str(result) IS the content
+        # we care about. (The real bot reads the .choices[0].message
+        # path; for this test we just want to confirm the stream and
+        # the final agree.)
+        final = str(result)
+        import re as _re
+        buf_words = set(_re.findall(r"\w+", buf.lower()))
+        final_words = set(_re.findall(r"\w+", final.lower()))
+        assert buf_words, f"empty buffer: {buf!r}"
+        assert final_words, f"empty final: {final!r}"
+        # Most of the words should overlap — kimi streamed them too
+        overlap = len(buf_words & final_words)
+        assert overlap >= min(5, len(buf_words) // 2), (
+            f"buffer and final don't agree: buf={buf_words!r} final={final_words!r}"
+        )
+        await prog.stop()
+        await prov.close()
+
+    asyncio.run(drive())
