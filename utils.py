@@ -26,6 +26,14 @@ def _atomic_json_write_sync(path: Path, data):
 
     Correctly handles fd ownership: os.fdopen takes ownership of the fd,
     so we set fd = -1 afterward to prevent double-close in the finally block.
+
+    2026-07-21: also fsync the parent directory after os.replace. On
+    Linux, after a crash between os.replace and the next sync, the
+    directory entry for `path` may not be persisted even though the
+    inode is on disk. On reboot, the file is "gone" from the
+    directory listing — load_from_disk quietly returns {}. That was
+    a silent memory-wipe trigger. fsync'ing the parent dir closes
+    the gap.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
@@ -36,18 +44,21 @@ def _atomic_json_write_sync(path: Path, data):
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
+        _fsync_dir(path.parent)
     finally:
         if fd >= 0:
             with contextlib.suppress(OSError):
                 os.close(fd)
         if os.path.exists(tmp):
-            os.unlink(tmp)
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
 
 
 def _atomic_text_write_sync(path: Path, text: str):
     """Atomic text write: temp file -> fsync -> rename.
 
-    Same fd ownership handling as _atomic_json_write_sync.
+    Same fd ownership handling as _atomic_json_write_sync. 2026-07-21:
+    also fsync the parent directory (see _atomic_json_write_sync).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
@@ -58,12 +69,29 @@ def _atomic_text_write_sync(path: Path, text: str):
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
+        _fsync_dir(path.parent)
     finally:
         if fd >= 0:
             with contextlib.suppress(OSError):
                 os.close(fd)
         if os.path.exists(tmp):
-            os.unlink(tmp)
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+
+
+def _fsync_dir(dir_path: Path) -> None:
+    """fsync a directory. Best-effort; not all filesystems support it."""
+    try:
+        dfd = os.open(str(dir_path), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dfd)
+    except OSError:
+        pass
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(dfd)
 
 
 def _coerce_utc_datetime(value) -> datetime | None:

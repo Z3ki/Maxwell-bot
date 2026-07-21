@@ -60,11 +60,13 @@ _GRACE_BEFORE_FIRST_POST = 0.15
 # 2026-07-21: lowered to 1.0s per user request "every 1 sec".
 _TOKEN_TICK_INTERVAL = 1.0
 
-# Total visible budget. The last N characters of the streaming buffer
-# are what the user sees. Long enough to show a real sentence fragment,
-# short enough to fit a Discord message and not overflow.
-# 2026-07-21: was 200 chars, cut to 120 for cleaner reads.
-_VISIBLE_BUDGET = 120
+# Total visible budget for the buffer tail (the model's words).
+# The "thinking: " prefix (~9 chars) and the " → <tool>" tag are
+# added on top, so the FINAL message is longer than this. We budget
+# for the content only — the head + tag are negligible vs the
+# Discord 2000-char limit.
+# 2026-07-21: was 120, raised to 160 so a long phrase fits.
+_VISIBLE_BUDGET = 160
 
 # Hard-cap the internal buffer so a 50k-char reasoning run doesn't
 # accumulate forever.
@@ -106,21 +108,29 @@ _DEFERRED_POST_WINDOW = 0.8
 _GENERATING_PLACEHOLDER = "generating…"
 
 
-def _first_sentence(text: str) -> str:
-    """Return text up to and including the first sentence terminator
-    ('.', '!', '?'). Returns "" if no terminator is found.
+def _visible_tail(text: str, budget: int) -> str:
+    """Return the last ``budget`` chars of ``text``, trimmed to a
+    word boundary when possible.
 
-    2026-07-21: the user wants ONE complete sentence on the progress
-    line, not a rolling tail of the streaming buffer. The first
-    sentence is the most representative — it tells the user what
-    the model is doing without filling the line with mid-thought
-    fragments. Returns the empty string when no terminator exists
-    so the caller can decide what to do (e.g. show a partial
-    preview while waiting for the first period to arrive)."""
-    for i, ch in enumerate(text):
-        if ch in ".!?":
-            return text[: i + 1].strip()
-    return ""
+    2026-07-21: the user reported the progress line was "waiting for
+    an update" and "the text never rolled by". Previous design pinned
+    the visible line to the FIRST complete sentence of the buffer —
+    for a long generation that meant the same sentence sat on screen
+    for 30+ seconds while the model thought. New design: the visible
+    line is a rolling tail of the buffer, so the user actually
+    watches the model's words scroll by in real time, just like a
+    live stream. Word-boundary trim keeps it readable.
+    """
+    if not text:
+        return ""
+    if len(text) <= budget:
+        return text.strip()
+    tail = text[-budget:]
+    # Try to land on a word boundary in the first half of the slice.
+    first_space = tail.find(" ")
+    if first_space != -1 and first_space < budget // 2:
+        return tail[first_space + 1 :].strip()
+    return tail.strip()
 
 
 class ToolProgress:
@@ -462,21 +472,13 @@ class ToolProgress:
             # :linear -gradient( 90deg ,red" which is unreadable.
             cleaned = "".join(c for c in raw if c not in _VISIBLE_STRIP_CHARS)
             cleaned = " ".join(cleaned.split())
-            # Extract ONE complete sentence: from buffer start to the
-            # first '.', '!', or '?'. If no terminator, show the first
-            # _VISIBLE_BUDGET chars (the user's first sight of a partial
-            # sentence is still useful as a 'coming in' preview).
-            sentence = _first_sentence(cleaned)
-            if not sentence:
-                sentence = cleaned[:_VISIBLE_BUDGET]
-            if len(sentence) > _VISIBLE_BUDGET:
-                head2 = sentence[:_VISIBLE_BUDGET]
-                last_ws = head2.rfind(" ")
-                if last_ws > _VISIBLE_BUDGET // 2:
-                    head2 = head2[:last_ws]
-                sentence = head2
+            # 2026-07-21: rolling tail of the buffer. The user wants to
+            # watch the words scroll by in real time, not stare at a
+            # pinned first sentence. The tail is trimmed to a word
+            # boundary when possible so the line stays readable.
+            tail = _visible_tail(cleaned, _VISIBLE_BUDGET)
             tag = f" → {self._current_tool}" if self._current_tool else ""
-            head = f"thinking: {sentence}{tag}"
+            head = f"thinking: {tail}{tag}"
         if self._snippet_buffer:
             return f"{head}\n⤷ {self._snippet_buffer}"
         return head
@@ -513,34 +515,85 @@ class ToolProgress:
             self._deferred_task.cancel()
 
     async def stop(self) -> None:
+        """Delete the progress message IMMEDIATELY — no drain edit.
+
+        2026-07-21: user reported the progress message was sitting
+        there "waiting for an update" instead of vanishing the moment
+        the bot's response was ready. The previous design did a final
+        best-effort ``edit()`` before the ``delete()``; that edit
+        awaited a network round-trip (and could be rate-limited / 404 /
+        take 200-500ms) so the user saw a stale "thinking…" message
+        sitting next to the now-arrived reply for a beat.
+
+        New contract: the instant the response is ready, the progress
+        message must be gone. We fire the delete (and any final
+        best-effort edit) as a background task so the caller can move
+        on to posting the reply without waiting on Discord.
+
+        The final edit is still attempted — just not awaited. If the
+        edit and the delete race, Discord handles it gracefully (the
+        user sees a fresh message either way; if the edit lands first
+        they see the latest reasoning for ~50ms, if not the delete
+        wins and they just see the reply). The user is NEVER left
+        waiting on progress.
+        """
         if self._stopped:
             return
         self._stopped = True
         if self._post_task and not self._post_task.done():
             self._post_task.cancel()
+            self._post_task = None
         if self._deferred_task and not self._deferred_task.done():
             self._deferred_task.cancel()
+            self._deferred_task = None
         if not self._posted:
             return
         if self._platform != "discord":
             self._posted = None
             return
-        # Final drain so the user sees the model's last words before
-        # the message disappears. Best-effort.
+        # Capture the posted message locally and clear our reference
+        # immediately so a follow-up call (e.g. transition_to_final
+        # racing with stop) sees ``_posted is None`` and bails. This
+        # is what makes stop() actually "immediate" from the caller's
+        # perspective: the moment stop() returns, the UI is gone.
+        posted = self._posted
+        self._posted = None
+        # Schedule the final drain + delete in the background. We do
+        # NOT await either — the user has their reply on the way, we
+        # should not make them wait on a Discord round-trip.
+        try:
+            asyncio.create_task(self._background_drain_and_delete(posted))
+        except RuntimeError:
+            # No running loop (e.g. test teardown). Fall back to a
+            # best-effort synchronous-ish path: just delete, skip
+            # the final edit. Better than leaking the message.
+            with contextlib.suppress(Exception):
+                asyncio.get_event_loop().create_task(posted.delete())
+
+    async def _background_drain_and_delete(self, posted: Any) -> None:
+        """Best-effort final edit + delete. Never awaited by the caller.
+
+        The final edit shows the model's last words before the message
+        disappears (a nice-to-have), then the delete removes the
+        message entirely. Both are best-effort — Discord failures are
+        logged at debug level and swallowed. This task is fire-and-
+        forget; the bot's reply is already on its way and the user
+        must not wait on us.
+        """
         try:
             content = self._render()
             if content and content != self._last_content:
                 with contextlib.suppress(Exception):
-                    await self._posted.edit(content=content)
-                    self._last_content = content
+                    await posted.edit(content=content)
         except Exception as e:  # noqa: BLE001
             logger.debug("Final progress drain edit failed: %s", e)
         try:
-            await self._posted.delete()
+            await posted.delete()
         except Exception as e:  # noqa: BLE001
             logger.debug("Progress delete failed: %s", e)
-        finally:
-            self._posted = None
+
+
+
 
     async def transition_to_final(self, content: str) -> bool:
         """Replace the live progress message with the final reply.
@@ -548,25 +601,42 @@ class ToolProgress:
         When a tool batch completes with a final reply in hand, edit
         the existing progress message in place instead of deleting
         + reposting. Avoids the delete-then-fresh-post flicker.
+
+        2026-07-21: was ``await self._posted.edit()`` which made the
+        caller wait on a Discord round-trip before posting the reply.
+        Now fire-and-forget so the reply is not blocked on Discord
+        latency. Returns synchronously based on whether we have a
+        posted message to edit; the actual edit happens in the
+        background. If the bot is also racing a stop() (e.g. the
+        tool's finally block already scheduled a delete), we still
+        return True here and the background task will either land
+        the edit or fall through to delete — either way the user
+        sees one message.
         """
         if self._stopped or self._platform != "discord" or not self._posted:
             return False
         if not content:
             return False
+        posted = self._posted
+        self._stopped = True
+        self._posted = None
+        self._last_content = content
+        if self._deferred_task and not self._deferred_task.done():
+            self._deferred_task.cancel()
+            self._deferred_task = None
         try:
-            async with self._lock:
-                if self._stopped or not self._posted:
-                    return False
-                await self._posted.edit(content=content)
-                self._stopped = True
-                self._last_content = content
-                if self._deferred_task and not self._deferred_task.done():
-                    self._deferred_task.cancel()
-                return True
+            asyncio.create_task(self._background_transition(posted, content))
+        except RuntimeError:
+            with contextlib.suppress(Exception):
+                await posted.edit(content=content)
+        return True
+
+    async def _background_transition(self, posted: Any, content: str) -> None:
+        """Edit the message in place to the final reply. Fire-and-forget."""
+        try:
+            await posted.edit(content=content)
         except Exception as e:  # noqa: BLE001
             logger.debug("Progress transition-to-final edit failed: %s", e)
-            self._posted = None
-            return False
 
 
 def make_progress(message: Any) -> ToolProgress:

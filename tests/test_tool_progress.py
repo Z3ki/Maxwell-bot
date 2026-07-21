@@ -97,12 +97,11 @@ def test_initial_post_uses_channel_send_not_reply():
 
 
 def test_half_sentence_reasoning_shows_partial_tail():
-    """2026-07-21 rewrite: the visible line is always 'using <tool>: <tail>'
-    when a tool is announced with reasoning, 'thinking: <tail>' when
-    no tool was announced, or 'working on it…' / 'using <tool>…' when
-    no reasoning has arrived yet. A partial buffer (no terminator) is
-    shown as-is. The user watches the words scroll by in real time,
-    no waiting for a period."""
+    """2026-07-21 rewrite: the visible line is a ROLLING TAIL of the
+    streaming buffer (last _VISIBLE_BUDGET chars, word-trimmed). No
+    sentence extraction. The user watches the words scroll by in
+    real time. The visible line is 'thinking: <tail> → <tool>' once
+    a tool is announced, 'thinking: <tail>' otherwise."""
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
@@ -114,7 +113,9 @@ def test_half_sentence_reasoning_shows_partial_tail():
     asyncio.run(prog.update("shell", "the user wants me to look at"))
     # Partial buffer with tool -> "<reasoning> → <tool>".
     assert msg_obj.content == "thinking: the user wants me to look at → shell"
-    # More reasoning — visible line scrolls forward with it.
+    # More reasoning — the tail scrolls forward. New design: the LAST
+    # _VISIBLE_BUDGET chars of the buffer (with the second sentence
+    # now included — the user sees it scroll by).
     prog._last_edit = 0
     asyncio.run(
         prog.update(
@@ -122,11 +123,11 @@ def test_half_sentence_reasoning_shows_partial_tail():
             "the user wants me to look at the disk and report back. They asked about space.",
         )
     )
-    # The first sentence in the buffer is extracted. "They asked
-    # about space." is the second sentence and is NOT shown — the
-    # design pins the visible line to the first complete sentence.
+    # The full string is short enough (<_VISIBLE_BUDGET) so the entire
+    # buffer is shown, both sentences included. The user sees the
+    # text roll forward in real time as the buffer grows.
     assert msg_obj.content == (
-        "thinking: the user wants me to look at the disk and report back. → shell"
+        "thinking: the user wants me to look at the disk and report back. They asked about space. → shell"
     )
 
 
@@ -269,7 +270,9 @@ def test_start_is_idempotent():
 def test_long_reasoning_truncated_to_visible_budget():
     """A 500-char reasoning run is shown as the last _VISIBLE_BUDGET
     chars of the buffer (trimmed to a word boundary) so the line
-    fits in a Discord message and doesn't overflow."""
+    fits in a Discord message and doesn't overflow. 2026-07-21:
+    rolling-tail design — the visible line is the LAST chunk, not
+    the first sentence, so the 'x' filler past the period IS visible."""
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
@@ -280,15 +283,16 @@ def test_long_reasoning_truncated_to_visible_budget():
     content = msg_obj.content
     # Newlines collapsed to spaces.
     assert "\n" not in content
-    # Format is "thinking: <first sentence> → <tool>" with the JSON-
-    # stripped tail. The first sentence is the bit up to the first
-    # '.', '!', or '?'. The 'x' filler past the period doesn't show.
-    assert content.startswith("thinking: checking disk usage and memory now.")
+    # The visible line is the rolling tail of the buffer. For a long
+    # input the head ('checking disk usage...') is NOT shown; the tail
+    # of the 'x' filler IS. This is the new contract: scrolling.
     assert content.endswith(" → shell")
-    # The filler after the first period is NOT shown.
-    assert "x" * 100 not in content
-    # The visible line is at most _VISIBLE_BUDGET total (tag included).
-    assert len(content) <= tool_progress._VISIBLE_BUDGET
+    # The 'x' filler near the end is visible (last 120 chars are x's).
+    assert "x" * 50 in content
+    # The visible line is at most _VISIBLE_BUDGET chars of content +
+    # the small "thinking: " prefix + " → <tool>" tag, all of which
+    # fits in a Discord message (2000-char limit).
+    assert len(content) <= tool_progress._VISIBLE_BUDGET + 30
     asyncio.run(prog.stop())
 
 
@@ -401,26 +405,25 @@ def test_tick_shows_thinking_before_tool_name():
 
 
 def test_tick_accumulates_reasoning_text():
-    """Multiple reasoning deltas accumulate in the buffer, but the
-    visible line is always the FIRST complete sentence (not a rolling
-    tail of the whole buffer). Subsequent deltas after the first
-    sentence terminator don't change what's displayed — the user
-    always sees one coherent sentence."""
+    """Multiple reasoning deltas accumulate in the buffer, and the
+    visible line scrolls with the TAIL of the buffer (not pinned to
+    the first sentence anymore). 2026-07-21: the user wants to watch
+    the words roll by, not stare at a fixed sentence."""
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
     msg_obj = msg.channel.sent[0]
-    # First tick with a complete sentence -> that's what's shown.
+    # First tick with a partial sentence — entire buffer is shown.
     prog._last_edit = 0
     asyncio.run(prog.tick(reasoning_delta="First bit. "))
     assert msg_obj.content == "thinking: First bit."
-    # Second tick appends more text past the first period; the first
-    # sentence is still "First bit." so the visible line doesn't change.
+    # Second tick appends more text. The buffer grows and the tail
+    # is now "First bit. Then more thinking." — both visible.
     prog._last_edit = 0
     asyncio.run(prog.tick(reasoning_delta="Then more thinking. "))
-    assert msg_obj.content == "thinking: First bit."
-    # The buffer does hold the new text — the visible line is just
-    # pinned to the first sentence.
+    assert msg_obj.content == "thinking: First bit. Then more thinking."
+    # The buffer does hold the new text — the visible line just
+    # tracks the tail as it scrolls.
     assert "Then more thinking." in prog._reasoning_buffer
     asyncio.run(prog.stop())
 
@@ -473,45 +476,36 @@ def test_tick_tool_name_only_shows_using_when_no_reasoning():
 def test_tick_rate_limits_to_avoid_429():
     """Rapid ticks within _TOKEN_TICK_INTERVAL coalesce; only the latest
     content survives. The Discord edit limit is 5/5s; a 10s long reasoning
-    burst can produce 30+ deltas."""
+    burst can produce 30+ deltas. 2026-07-21: with the rolling-tail
+    design, the visible line DOES change as the buffer grows (unlike
+    the first-sentence-pinned design), so a new edit fires when the
+    rendered content differs from the last one."""
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
     msg_obj = msg.channel.sent[0]
-    # First tick — goes through (first-tick exemption + buffer has
-    # enough substance to clear the meaningful-reasoning gate).
+    # First tick — goes through (first-tick exemption).
     prog._last_edit = 0
     asyncio.run(prog.tick(reasoning_delta="First reasoning fragment."))
     edits_after_first = len(msg.channel.edited)
     # Two rapid ticks inside the window — must coalesce. The buffer
-    # keeps accumulating after the first period, so the visible line
-    # (pinned to the first sentence) doesn't change yet.
+    # keeps accumulating so the rolling tail changes, BUT the rate
+    # limit blocks the edit. Buffer is what the future tick reads.
     asyncio.run(prog.tick(reasoning_delta=" More after."))
     asyncio.run(prog.tick(reasoning_delta=" And more."))
-    # Still only the first edit landed (rate-limited), but the buffer
-    # accumulated so a future tick picks it up.
+    # Still only the first edit landed (rate-limited).
     assert len(msg.channel.edited) == edits_after_first
     assert "And more." in prog._reasoning_buffer
-    # Next tick past the window. The buffer now ENDS with new
-    # content past the original first sentence. With the new
-    # 'pin to first sentence' design the visible line DOESN'T
-    # change (the first sentence is unchanged), so the rate
-    # limit is a no-op here. To trigger a new edit we'd need
-    # to clear the buffer first or have the model start over.
+    # Next tick past the rate-limit window. The buffer grew so the
+    # rolling-tail content is now NEW — a new edit fires.
     prog._last_edit = 0
     asyncio.run(prog.tick(reasoning_delta=" Even more reasoning here."))
-    # The new content is appended but the visible line is still
-    # the first sentence, so NO new edit fires.
-    assert len(msg.channel.edited) == edits_after_first
-    assert "Even more" in prog._reasoning_buffer
-    # A new tick with NEW content that includes a fresh first
-    # sentence DOES render (the old buffer is overwritten by the
-    # reasoning_delta's first sentence if we clear first). Here
-    # we simulate that by replacing the reasoning.
-    prog._reasoning_buffer = ""
-    prog._last_edit = 0
-    asyncio.run(prog.tick(reasoning_delta="Brand new sentence here."))
     assert len(msg.channel.edited) > edits_after_first
+    assert "Even more" in prog._reasoning_buffer
+    # A new tick with NEW content that adds even more tail still fires.
+    prog._last_edit = 0
+    asyncio.run(prog.tick(reasoning_delta=" Brand new sentence here."))
+    assert len(msg.channel.edited) > edits_after_first + 1
     assert "Brand new" in msg_obj.content
     asyncio.run(prog.stop())
 

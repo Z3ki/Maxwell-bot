@@ -26,12 +26,22 @@ function loadEnvFile(filePath) {
 
 const appRoot = process.env.MAXWELL_APP_ROOT || __dirname;
 const fileEnv = loadEnvFile(process.env.MAXWELL_ENV_FILE || path.join(appRoot, '.env'));
-const baseEnv = {
-  ...fileEnv,       // .env as fallback
-  ...process.env,   // real environment takes precedence
-  NODE_ENV: 'production',
-  PYTHONUNBUFFERED: '1'
-};
+
+// 2026-07-21: precedence fix. The .env file is the SOURCE OF TRUTH —
+// editing OLLAMA_MODEL in .env should change the live model. Previously
+// `...process.env` came last and won, so a stale `OLLAMA_MODEL=kimi-k2.6:cloud`
+// exported in the pm2 user's shell would silently override the .env
+// change. New: .env wins, process.env is the fallback (so you can
+// still set MAXWELL_* and other dev-machine vars in your shell).
+//
+// Escape hatch: MAXWELL_ENV_FILE_PRECEDENCE=process (or any value other
+// than 'file') restores the old behaviour. Useful for local dev where
+// you want your shell env to override .env.
+const fileWins =
+  (process.env.MAXWELL_ENV_FILE_PRECEDENCE || 'file').toLowerCase() !== 'process';
+const baseEnv = fileWins
+  ? { ...process.env, ...fileEnv, NODE_ENV: 'production', PYTHONUNBUFFERED: '1' }
+  : { ...fileEnv, ...process.env, NODE_ENV: 'production', PYTHONUNBUFFERED: '1' };
 
 module.exports = {
   apps: [

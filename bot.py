@@ -7667,8 +7667,37 @@ class MaxwellBot(commands.Bot):
         async def run_all():
             nonlocal tool_results
             if non_terminal:
-                gathered = await asyncio.gather(*[run_one(c) for c in non_terminal])
-                tool_results.extend(gathered)
+                # 2026-07-21: use return_exceptions=True so a single
+                # failing sibling doesn't abort the whole batch.
+                # Without this, a raise from run_one(c2) cancels the
+                # in-flight c1/c3 and the user sees the side effects
+                # from the tools that DID run plus a generic "Sorry,
+                # please try again." Worse, the LLM never gets the
+                # success of the completed tools, so on the next turn
+                # it re-runs them (duplicate sends/files/shell cmds).
+                # With return_exceptions, the failing tool's error is
+                # appended to tool_results as a "Tool {name}: Error - {exc}"
+                # line (mirroring the single-tool path), and the LLM
+                # gets a coherent result it can act on.
+                gathered = await asyncio.gather(
+                    *[run_one(c) for c in non_terminal],
+                    return_exceptions=True,
+                )
+                for call, res in zip(non_terminal, gathered):
+                    if isinstance(res, BaseException):
+                        # Surface the exception to the LLM context as
+                        # a tool error (NOT a "Sorry" abort).
+                        name = call.get("name", "unknown")
+                        err_line = f"Tool {name}: Error - {type(res).__name__}: {res}"
+                        try:
+                            await MaxwellBot._remember_tool_call(
+                                self, message, name, call.get("arguments") or {}, err_line
+                            )
+                        except Exception:
+                            pass
+                        tool_results.append(err_line)
+                    else:
+                        tool_results.append(res)
             terminal_seen = False
             for call in terminal:
                 if terminal_seen:
@@ -7732,6 +7761,33 @@ class MaxwellBot(commands.Bot):
                 with contextlib.suppress(Exception):
                     await progress.stop()
 
+        # 2026-07-21: extract embedded base64 images from tool_results
+        # BEFORE building follow-up messages. Previously the LLM on
+        # the next turn received the full base64 string in the tool
+        # message AND got the image attached separately — a 10MB
+        # string + 10MB vision attachment per image, which OOMed the
+        # provider. Now: strip base64 from the LLM-facing content,
+        # only attach the decoded image as vision. Also cap each
+        # tool result at 32KB to keep context size bounded.
+        _IMG_RE = re.compile(r"__IMAGE_B64__([A-Za-z0-9+/=\s]+)__END_IMAGE_B64__")
+        _MAX_TOOL_RESULT_CHARS = 32_000
+        for tr in tool_results:
+            for m in _IMG_RE.finditer(tr):
+                raw = m.group(1).replace("\n", "").replace(" ", "")
+                if len(raw) < 5_000_000:
+                    tool_images.append(raw)
+        tool_results = [_IMG_RE.sub("", tr).strip() for tr in tool_results]
+        # Cap each tool result before sending it to the LLM.
+        truncated_results = []
+        for tr in tool_results:
+            if len(tr) > _MAX_TOOL_RESULT_CHARS:
+                half = _MAX_TOOL_RESULT_CHARS // 2
+                truncated_results.append(
+                    f"{tr[:half]}\n\n[...truncated {len(tr) - _MAX_TOOL_RESULT_CHARS} chars...]\n\n{tr[-half:]}"
+                )
+            else:
+                truncated_results.append(tr)
+
         # Build OpenAI tool-role follow-up messages (assistant + tool results)
         assistant_msg: dict[str, Any] = {
             "role": "assistant",
@@ -7739,9 +7795,10 @@ class MaxwellBot(commands.Bot):
             "tool_calls": history_tool_calls,
         }
         followup_msgs: list[dict] = [assistant_msg]
-        for call in calls:
-            line = result_by_id.get(call["id"], f"Tool {call['name']}: (no result)")
-            # Strip Tool name: prefix for the model-facing tool content when long? Keep full for continuity.
+        for i, call in enumerate(calls):
+            line = truncated_results[i] if i < len(truncated_results) else (
+                result_by_id.get(call["id"], f"Tool {call['name']}: (no result)")
+            )
             followup_msgs.append(
                 {
                     "role": "tool",
@@ -7750,13 +7807,10 @@ class MaxwellBot(commands.Bot):
                 }
             )
         self._last_native_followup_messages = followup_msgs
-
-        _IMG_RE = re.compile(r"__IMAGE_B64__([A-Za-z0-9+/=\s]+)__END_IMAGE_B64__")
-        for tr in tool_results:
-            for m in _IMG_RE.finditer(tr):
-                raw = m.group(1).replace("\n", "").replace(" ", "")
-                tool_images.append(raw)
-        tool_results = [_IMG_RE.sub("", tr).strip() for tr in tool_results]
+        # Use the truncated results in the return value too, so the
+        # rest of the pipeline (memory writes, dashboard view) sees
+        # the same bounded content the LLM saw.
+        tool_results = truncated_results
         return (
             (cleaned, tool_results, tool_images)
             if include_images

@@ -2734,9 +2734,17 @@ class ShellTool(Tool):
             return await asyncio.wait_for(
                 proc.communicate(), timeout=timeout
             ), proc.returncode
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            # 2026-07-21: also catch CancelledError. If the parent
+            # task is cancelled (channel lock timeout, bot shutdown,
+            # ,cancel command), proc.communicate() raises CancelledError
+            # and the old `except TimeoutError` did not match — the
+            # subprocess was left running, eventually filling the
+            # stdout/stderr pipes and wedging the container.
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
             raise
 
     async def _ensure_container(self):

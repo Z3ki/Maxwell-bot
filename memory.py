@@ -305,8 +305,17 @@ class MemoryManager:
         """Actually save if dirty — snapshot data so we don't race mutations."""
         self._save_task = None
         if self._dirty:
-            self._dirty = False
-            snapshot = json.loads(json.dumps(self.memory, ensure_ascii=False))
+            # 2026-07-21: take the in-process lock while snapshotting.
+            # Previously the snapshot was taken WITHOUT the lock, so
+            # any concurrent mutation of self.memory raised
+            # ``RuntimeError: dictionary changed size during iteration``
+            # inside json.dumps. The exception was swallowed by
+            # _atomic_save's broad except, so the on-disk file fell
+            # behind self.memory indefinitely — silent data loss
+            # under any sustained load.
+            with self._lock:
+                self._dirty = False
+                snapshot = json.loads(json.dumps(self.memory, ensure_ascii=False))
             # Track the save task so flush() can wait for it
             self._pending_save = asyncio.ensure_future(
                 self._atomic_save(self.memory_file, snapshot)
