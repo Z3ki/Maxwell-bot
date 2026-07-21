@@ -549,6 +549,15 @@ def _sanitize_control(control):
     out["cross_context_min_importance"] = max(
         1, min(_safe_int(out.get("cross_context_min_importance"), 5), 10)
     )
+    out["cross_context_extract_timeout_seconds"] = max(
+        5,
+        min(
+            _safe_int(
+                out.get("cross_context_extract_timeout_seconds"), 60
+            ),
+            600,
+        ),
+    )
     out["max_tool_iterations"] = max(0, min(out["max_tool_iterations"], 100))
     out["max_response_chars"] = max(80, min(out["max_response_chars"], 8000))
     out["vc_rms_threshold"] = max(

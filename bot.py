@@ -5092,7 +5092,25 @@ class MaxwellBot(commands.Bot):
                 f"Message:\n{text[:2500]}{attachment_note}{embed_note}\n\n"
                 'Extract a fact or return {"should_store": false}.'
             )
-            await self._acquire_ai_slot(timeout=20)
+            # Both the AI-slot acquisition and the provider call share one
+            # configurable timeout. 20s was too tight for cold-start
+            # 1M-context models — the call would time out, retry, fall
+            # back to a smaller model, and flood the provider log. Operators
+            # who want a stricter cap can lower it via dashboard.
+            extract_timeout = max(
+                5,
+                min(
+                    _safe_int(
+                        self._control.get(
+                            "cross_context_extract_timeout_seconds", 60
+                        )
+                        or 60,
+                        60,
+                    ),
+                    600,
+                ),
+            )
+            await self._acquire_ai_slot(timeout=extract_timeout)
             try:
                 # Context watcher shares the autonomy/REM brain — same provider,
                 # base_url, api key, and model as autonomy and REM. Falls back to
@@ -5113,7 +5131,7 @@ class MaxwellBot(commands.Bot):
                         {"role": "system", "content": prompt},
                         {"role": "user", "content": user},
                     ],
-                    timeout=20,
+                    timeout=extract_timeout,
                     model=context_model,
                 )
             finally:

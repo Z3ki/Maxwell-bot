@@ -33,6 +33,14 @@ DEFAULT_CONTROL = {
     "cross_context_max_items": 10,
     "cross_context_min_importance": 5,
     "cross_context_dm_to_global_admin_only": True,
+    # Per-call timeout for the background context-extraction LLM call
+    # (the one that asks the model to summarize a message into a
+    # durable shared-context fact). 20s was way too tight for cold-start
+    # 1M-context models — the call would time out, retry, fall back to
+    # a smaller model, and flood the provider log. 60s is generous enough
+    # for a cold start and still short enough that one stuck call can't
+    # back up the rest of the context-extract queue.
+    "cross_context_extract_timeout_seconds": 60,
     "emoji_context_enabled": True,
     "music_context_enabled": True,
     "reply_dms": False,
