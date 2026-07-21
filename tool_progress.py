@@ -350,6 +350,13 @@ class ToolProgress:
             if 0 < last_ws < len(head) - 1:
                 head = head[last_ws + 1 :]
             tail = head
+        # Note: streaming tokens often have BPE-artifact splits
+        # ("carn" + " iv" + " orous" -> "carnivorous", "affection" +
+        # " ate" -> "affectionate"). Trying to detokenize inline was
+        # too clever: the regex kept either missing cases or eating
+        # real text. The final reply is clean (post-processed), so the
+        # user sees the weird split in the progress preview for ~1s
+        # and then the corrected text. Acceptable.
         if self._current_tool:
             return f"{self._current_tool}: {tail}"
         return f"thinking: {tail}"
