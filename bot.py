@@ -8447,8 +8447,15 @@ class MaxwellBot(commands.Bot):
             self._drugged_until.pop(channel_id, None)
         local_now = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=-4)))
         user_kind = "bot" if message.author.bot else "human"
+        channel_name = getattr(message.channel, "name", None) or (
+            "DM" if isinstance(message.channel, discord.DMChannel) else "unknown"
+        )
+        channel_kind = (
+            "DM" if isinstance(message.channel, discord.DMChannel)
+            else ("group" if isinstance(message.channel, discord.GroupChannel) else "guild")
+        )
         system_parts.append(
-            f"User: {message.author.display_name} ({message.author.id}, {user_kind}) | {local_now.strftime('%a %b %d %I:%M %p')} AST"
+            f"User: {message.author.display_name} ({message.author.id}, {user_kind}) | {local_now.strftime('%a %b %d %I:%M %p')} AST | Channel: #{channel_name} ({channel_id}, {channel_kind})"
         )
         if self._control.get("long_term_memory_enabled", True):
             try:
@@ -8537,6 +8544,24 @@ class MaxwellBot(commands.Bot):
             system_parts.append(
                 "Multimodal input: recent images and current audio/video are in the payload. Inspect them directly; multiple images are ordered oldest→newest. Do not claim you can't see/hear media unless none was provided."
             )
+        # 2026-07-21: explicit memory-scope reminder. Short-term (the
+        # user/assistant turns that follow the system message) is
+        # scoped to THIS channel only — you do NOT share per-channel
+        # context with other channels. Long-term memory and
+        # cross-context facts above ARE global. If a user references
+        # something from a different channel, treat it as something
+        # THEY remember, not something you remember.
+        scope_channel_label = (
+            f"DM with {message.author.display_name}"
+            if isinstance(message.channel, discord.DMChannel)
+            else f"#{channel_name}"
+        )
+        system_parts.append(
+            f"Memory scope: the short-term conversation transcript below is "
+            f"scoped to channel {scope_channel_label} (id {channel_id}) ONLY. "
+            f"Do not assume turns from other channels are in this transcript; "
+            f"long-term memory and cross-context facts above are global."
+        )
         messages = [{"role": "system", "content": "\n\n".join(system_parts)}]
         memory = await self.memory.get_channel_memory(channel_id)
         if memory:
