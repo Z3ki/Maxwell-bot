@@ -19,6 +19,10 @@ from aiohttp import web
 logger = logging.getLogger("maxwell_api")
 logging.basicConfig(level=logging.INFO)
 
+import sys as _sys  # noqa: E402
+
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from api.storage import (  # noqa: E402
     APP_ROOT,
     _autonomy_goals_path,
@@ -40,10 +44,6 @@ from api.storage import (  # noqa: E402
     atomic_text_write,
 )
 
-# Add parent dir to path so we can import shared modules
-import sys as _sys  # noqa: E402
-
-_sys.path.insert(0, str(APP_ROOT))
 from control_defaults import (  # noqa: E402
     DEFAULT_CONTROL,
 )
