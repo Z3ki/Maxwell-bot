@@ -70,6 +70,21 @@ class TestShellToolValidation:
         tool = ShellTool(None)  # type: ignore[arg-type]
         assert tool._validate_command("ls\nrm -rf /") is not None
 
+    def test_allows_heredoc_with_newlines_inside(self):
+        # Heredoc bodies are the one place newlines are legitimate. The
+        # validator strips the heredoc block first, so internal newlines
+        # must not cause a rejection.
+        tool = ShellTool(None)  # type: ignore[arg-type]
+        cmd = "python3 - <<'PY'\nprint('hi')\nPY"
+        assert tool._validate_command(cmd) is None
+
+    def test_rejects_heredoc_opener_followed_by_injected_command(self):
+        # Opening a heredoc but injecting a second command AFTER the closing
+        # delimiter must still be rejected.
+        tool = ShellTool(None)  # type: ignore[arg-type]
+        cmd = "cat <<'EOF'\nhello\nEOF\nrm -rf /"
+        assert tool._validate_command(cmd) is not None
+
     def test_rejects_control_chars(self):
         tool = ShellTool(None)  # type: ignore[arg-type]
         assert tool._validate_command("ls\x00") is not None

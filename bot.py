@@ -6817,7 +6817,6 @@ class MaxwellBot(commands.Bot):
         active_progresses: list[Any] = []
         if gen_progress is not None:
             active_progresses.append(gen_progress)
-        gen_progress_owned = gen_progress
 
         # Callback fired by the SSE stream reader the moment a tool_call name
         # arrives mid-generation. Updates the progress message from
@@ -8173,19 +8172,44 @@ class MaxwellBot(commands.Bot):
         ]
         if not descriptions:
             return ""
-        # Native function-calling only — the XML text-tag branch is gone.
+        header = "## Available tools (use only when they clearly help)\n" + "\n".join(
+            descriptions
+        )
+        if self._control.get("native_tool_calls", False):
+            return (
+                header
+                + "\n\n## How to call\n"
+                "Use the provider's native function/tool calling API (OpenAI-style tool_call). "
+                "Do NOT put tool markup in your visible text. "
+                "Do not invent XML tags like <tool:name> or <function_calls>. The provider handles format.\n\n"
+                "## Reasoning\n"
+                "EVERY tool call MUST include a `reasoning` parameter — NO exceptions, not even for react / no_response / sleep / trivial calls. The user sees your reasoning as the live 'thinking: <reasoning>' progress line. A tool call without reasoning means the user sees nothing while you work and the call may be rejected. Put your real plain-English reasoning there BEFORE the action — why you're calling it, what you expect, assumptions and risks. Reasoning lives INSIDE the tool call, not in chat. Plain text only, no XML, no JSON, no tags, no nested <thoughts>. One short sentence for trivial calls (react, sleep), one to two for routine, three to six for complex (create_site with custom HTML, image_generator, shell debugging).\n\n"
+                "## Rules\n"
+                "- Put user-facing chat text in send_message's `content`. Every reply goes through send_message.\n"
+                "- A tool turn must end with exactly one terminal action: send_message (deliver a reply) or no_response (stay silent). Anything else keeps the turn open. Both terminal actions ALSO require a `reasoning` field.\n"
+                "- `reasoning` is the FIRST key in the tool's arguments JSON, before the tool's real parameters. NEVER put it second. NEVER omit it.\n"
+                "- Call helper tools (web_search, shell, image_generator, ...) when they help; each carries its own `reasoning`.\n\n"
+                "## Common tool-specific notes\n"
+                "- `create_site`: the full HTML document goes in the `body` argument, never in chat. When the user says 'make a site' / 'build a page' / 'make me a website' / 'create a landing page' / 'code a webpage' / 'make a portfolio' or any equivalent, call create_site with the complete HTML in `body`. NEVER paste HTML/CSS/JS into your visible reply — that spams raw markup in the channel and the user gets no working site. If your visible text starts with `<!DOCTYPE`, `:root{`, or `<html`, you failed — call create_site instead.\n"
+                '- `send_file` with large code/HTML: set `encoding="base64"` and base64-encode the content.\n'
+                "- `set_activity` and `change_presence`: only call when the user asks or there's a real state change. Don't spam status updates on every turn.\n"
+            )
         return (
-            "## Available tools (use only when they clearly help)\n"
-            + "\n".join(descriptions)
+            header
             + "\n\n## How to call\n"
-            "Use the provider's native function/tool-calling API. Do NOT put tool markup in your visible text. "
-            "Do not invent XML tags like <tool:name> or <function_calls>. The provider handles format.\n\n"
+            "XML text tags only. To call a tool, emit exactly one of these forms per turn, with one tag per tool call:\n"
+            "```\n"
+            "<tool:name>\n"
+            "<param>value</param>\n"
+            "</tool:name>\n"
+            "```\n"
+            "Do not invent XML tags beyond the per-tool schema. Reasoning lives INSIDE the tool call as a `reasoning` param — plain text only, no nested <thoughts>.\n\n"
             "## Reasoning\n"
             "EVERY tool call MUST include a `reasoning` parameter — NO exceptions, not even for react / no_response / sleep / trivial calls. The user sees your reasoning as the live 'thinking: <reasoning>' progress line. A tool call without reasoning means the user sees nothing while you work and the call may be rejected. Put your real plain-English reasoning there BEFORE the action — why you're calling it, what you expect, assumptions and risks. Reasoning lives INSIDE the tool call, not in chat. Plain text only, no XML, no JSON, no tags, no nested <thoughts>. One short sentence for trivial calls (react, sleep), one to two for routine, three to six for complex (create_site with custom HTML, image_generator, shell debugging).\n\n"
             "## Rules\n"
             "- Put user-facing chat text in send_message's `content`. Every reply goes through send_message.\n"
             "- A tool turn must end with exactly one terminal action: send_message (deliver a reply) or no_response (stay silent). Anything else keeps the turn open. Both terminal actions ALSO require a `reasoning` field.\n"
-            "- `reasoning` is the FIRST key in the tool's arguments JSON, before the tool's real parameters. NEVER put it second. NEVER omit it.\n"
+            "- `reasoning` is the FIRST key inside the tool tag, before the tool's real parameters. NEVER put it second. NEVER omit it.\n"
             "- Call helper tools (web_search, shell, image_generator, ...) when they help; each carries its own `reasoning`.\n\n"
             "## Common tool-specific notes\n"
             "- `create_site`: the full HTML document goes in the `body` argument, never in chat. When the user says 'make a site' / 'build a page' / 'make me a website' / 'create a landing page' / 'code a webpage' / 'make a portfolio' or any equivalent, call create_site with the complete HTML in `body`. NEVER paste HTML/CSS/JS into your visible reply — that spams raw markup in the channel and the user gets no working site. If your visible text starts with `<!DOCTYPE`, `:root{`, or `<html`, you failed — call create_site instead.\n"

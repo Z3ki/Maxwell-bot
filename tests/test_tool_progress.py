@@ -275,7 +275,6 @@ def test_long_reasoning_truncated_to_visible_budget():
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
-    msg_obj = msg.channel.sent[0]
     prog._last_edit = 0
     long = "checking disk usage and memory now.\n" + "x" * 500
     asyncio.run(prog.update("shell", long))

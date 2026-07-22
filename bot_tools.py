@@ -292,6 +292,11 @@ def _strip_heredoc_blocks(command: str) -> str:
             m = re.match(r"^(['\"]?)([A-Za-z0-9_]+)\1\s*$", stripped)
             if m:
                 delimiter = m.group(2)
+                # Keep the opener line so callers see the full line structure
+                # (a missing opener would let a post-heredoc injected command
+                # look like part of the body). The body lines themselves are
+                # the only place newlines are legitimate.
+                out.append(line)
                 i += 1
                 # Skip until we hit the closing delimiter on its own line.
                 while i < len(lines) and lines[i].strip() != delimiter:
@@ -2869,18 +2874,19 @@ class ShellTool(Tool):
         max_len = self._max_command_length()
         if max_len and len(command) > max_len:
             return f"command too long (max {max_len} chars; set MAXWELL_SHELL_MAX_COMMAND_LENGTH=0 to disable)"
-        # Newlines are allowed everywhere. The model writes multi-line scripts
-        # (python via heredoc, multi-step bash pipelines, ffmpeg chains) and the
-        # old heredoc-only newline restriction rejected valid commands
-        # constantly — shell was nearly unusable. The Docker sandbox is the
-        # real security boundary (no host FS/net/sock by default); the
-        # taint-check gate (in execute) + the blocked patterns below defend
-        # against prompt-injection command chaining. We still strip heredoc
-        # bodies before the blocked-pattern scan so literal heredoc content
-        # fed to an interpreter isn't false-flagged as a shell-level chain.
+        # Newlines are only allowed inside heredoc bodies. Bare newlines would
+        # let the LLM chain a second top-level command (e.g. "ls\nrm -rf /")
+        # which is classic command injection. We strip heredoc bodies first,
+        # so anything still on its own line in `non_heredoc` is a real second
+        # command. The Docker sandbox is the real security boundary (no host
+        # FS/net/sock by default); the taint-check gate (in execute) + the
+        # blocked patterns below defend against prompt-injection chains that
+        # fit on a single line.
         non_heredoc = _strip_heredoc_blocks(command)
         if any(ord(c) < 32 and c not in ("\t", "\n", "\r") for c in non_heredoc):
             return "control characters are not allowed in shell commands"
+        if "\n" in non_heredoc:
+            return "newlines are only allowed inside heredoc bodies"
         for pattern in _SHELL_BLOCKED_PATTERNS:
             if re.search(pattern, non_heredoc, re.IGNORECASE):
                 return "blocked dangerous shell pattern"

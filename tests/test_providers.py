@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import json
 
 import pytest
 
@@ -10,8 +11,43 @@ from providers import (
 )
 
 
+class _FakeAsyncStream:
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
+
+    async def iter_any(self):
+        for chunk in self._chunks:
+            yield chunk
+
+
+def _sse_chunks_for(body):
+    if not isinstance(body, dict):
+        return []
+    choices = body.get("choices") or []
+    if not choices:
+        return []
+    message = choices[0].get("message") or {}
+    delta = {"role": message.get("role", "assistant")}
+    if "content" in message:
+        delta["content"] = message.get("content") or ""
+    if message.get("tool_calls"):
+        delta["tool_calls"] = [
+            {"index": i, **tc} for i, tc in enumerate(message["tool_calls"])
+        ]
+    frame = {"choices": [{"index": 0, "delta": delta, "finish_reason": "stop"}]}
+    return [
+        f"data: {json.dumps(frame)}\n\ndata: [DONE]\n\n".encode("utf-8")
+    ]
+
+
 class FakeResponse:
     status = 200
+
+    def __init__(self):
+        self.content = _FakeAsyncStream(_sse_chunks_for(self._json_body()))
+
+    def _json_body(self):
+        return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
 
     async def __aenter__(self):
         return self
@@ -20,7 +56,7 @@ class FakeResponse:
         return False
 
     async def json(self):
-        return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+        return self._json_body()
 
     async def text(self):
         return ""
@@ -29,12 +65,12 @@ class FakeResponse:
 class FakeNoneJsonResponse(FakeResponse):
     """Returns None from json() — simulates a malformed/empty 200 response."""
 
-    async def json(self):
+    def _json_body(self):
         return None
 
 
 class FakeToolCallResponse(FakeResponse):
-    async def json(self):
+    def _json_body(self):
         return {
             "choices": [
                 {
@@ -52,6 +88,7 @@ class FakeErrorResponse(FakeResponse):
     def __init__(self, status, text):
         self.status = status
         self._text = text
+        self.content = _FakeAsyncStream([])
 
     async def text(self):
         return self._text
@@ -170,7 +207,7 @@ def test_generate_chat_completion_falls_back_to_secondary_provider():
         session.payloads[0]["max_tokens"] == 10
     )  # configured max_tokens always included
     assert session.payloads[2]["max_tokens"] == 10
-    assert session.payloads[2]["reasoning"] == {"exclude": True}
+    assert session.payloads[2]["reasoning"] == {"effort": "none"}
 
 
 def test_generate_chat_completion_retries_primary_before_fallback():
@@ -270,7 +307,8 @@ def test_generate_response_returns_native_tool_calls():
         content = await provider.generate_response([{"role": "user", "content": "hi"}])
         # Content may be empty when the model only emits tool_calls
         assert content == ""
-        assert provider._last_tool_calls == [{"id": "1"}]
+        assert len(provider._last_tool_calls) == 1
+        assert provider._last_tool_calls[0]["id"] == "1"
 
     asyncio.run(run())
 
