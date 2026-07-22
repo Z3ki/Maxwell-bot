@@ -40,7 +40,7 @@ class Tool(ABC):
         streams.
 
         No-op when:
-          - The control flag progress_messages is off (no progress object)
+          - Progress messages are off for this server (no progress object)
           - A sibling tool in the same batch is still running and the
             progress message is shared — the deletion only happens if this
             is the sole non-terminal tool in the batch. Either way the

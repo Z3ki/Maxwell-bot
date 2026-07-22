@@ -67,7 +67,7 @@ DEFAULT_CONTROL = {
     "enable_sleep": True,
     "ai_timeout_seconds": 3600,
     "ai_concurrency": 2,
-    "memory_history_messages": 500,
+    "memory_history_messages": 800,
     "memory_context_budget": 200000,
     "tool_history_messages": 20,
     "prompt_context_budget": 240000,

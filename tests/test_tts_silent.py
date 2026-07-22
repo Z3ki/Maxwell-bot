@@ -87,6 +87,9 @@ def _native_bot(tools, **control):
     bot.is_message_tainted = lambda _message: False
     bot._consume_destructive_confirm = lambda _author_id: False
     bot._render_custom_emojis = lambda text, _guild: text
+    # 2026-07-22: _dispatch_tool_calls now resolves progress per-server via
+    # _progress_enabled; tests don't exercise the progress UI so always off.
+    bot._progress_enabled = lambda _server_id: False
 
     async def _record_llm_trace(message, payload):
         bot.traces.append(payload)

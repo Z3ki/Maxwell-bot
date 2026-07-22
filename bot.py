@@ -1807,6 +1807,18 @@ class MaxwellBot(commands.Bot):
         self._sites_mtime = 0.0
         self._auto_channels: set[str] = set()
         self._jailbreak_servers: set[str] = set()
+        # 2026-07-22: per-server progress-message opt-in, mirroring
+        # _jailbreak_servers. A server id in this set means live
+        # 'thinking: …' tool-progress messages are shown in that server's
+        # channels. Servers not in the set stay quiet (off by default).
+        # DMs never get progress messages. The MAXWELL_PROGRESS_MESSAGES
+        # env var, when true, enables the feature for ALL servers as a
+        # baseline so a fresh install can opt in globally without running
+        # `,progress on` in every server; `,progress off` still wins per
+        # server (tracked in _progress_servers_off) so an admin can quiet
+        # a noisy server even under the env baseline.
+        self._progress_servers: set[str] = set()
+        self._progress_servers_off: set[str] = set()
         self._blacklist: set[str] = set()
         self._shell_whitelist: set[str] = set()
         self._admins: set[str] = set(OWNER_IDS)
@@ -1829,11 +1841,11 @@ class MaxwellBot(commands.Bot):
         # dispatcher so the model can no longer self-confirm.
         self._destructive_confirm: dict[str, float] = {}
         self._control = dict(DEFAULT_CONTROL)
-        # Env var seeds the initial value so operators can flip the
-        # feature on in .env without touching the control panel. The
-        # panel still overrides (saved control.json is loaded later and
-        # beats this default). See Config.PROGRESS_MESSAGES.
-        self._control["progress_messages"] = bool(self.config.PROGRESS_MESSAGES)
+        # 2026-07-22: progress messages are now per-server (see
+        # self._progress_servers + _progress_enabled). The old global
+        # self._control["progress_messages"] flag is gone — keeping a stale
+        # value here would have made every read site below default to the
+        # global state instead of the per-server set.
         self._control_mtime = 0
         self._reaction_seen: set[str] = set()  # "{message_id}:{emoji}" dedup
         self._reaction_seen_order: list[str] = []
@@ -2261,6 +2273,7 @@ class MaxwellBot(commands.Bot):
         self._load_admins()
         self._load_auto_channels()
         self._load_jailbreak()
+        self._load_progress_servers()
         self._load_blacklist()
         self._load_shell_whitelist()
         self._load_control(force=True)
@@ -2996,56 +3009,74 @@ class MaxwellBot(commands.Bot):
                         "(jailbreak) prompt for this server. off by default everywhere."
                     )
             elif cmd == "progress":
+                server_id = str(message.guild.id) if message.guild else "DM"
                 arg = (args or "").strip().lower()
-                # 2026-07-21: live tool-progress messages. Toggled per
-                # install (not per server) because the progress widget
-                # is global UI feedback for slow tool calls. Off by
-                # default so channels stay quiet unless opted in.
+                # 2026-07-22: per-server toggle (mirrors ,jailbreak). Off by
+                # default per server; an admin opts a server in with
+                # `,progress on`. DMs never get progress messages. The
+                # MAXWELL_PROGRESS_MESSAGES env var is a global baseline
+                # (opt-in-everywhere) that `,progress off` still overrides.
                 if arg in {"on", "enable", "yes", "true"}:
-                    if bool(self._control.get("progress_messages", False)):
+                    if server_id == "DM":
                         await message.channel.send(
-                            "progress messages are already on"
+                            "progress messages are server-only — can't toggle them in DMs"
+                        )
+                    elif self._progress_enabled(server_id) and server_id in self._progress_servers:
+                        await message.channel.send(
+                            "progress messages are already on for this server"
                         )
                     else:
-                        self._control["progress_messages"] = True
-                        await asyncio.to_thread(
-                            _atomic_json_write_sync,
-                            Path(self.config.DATA_DIR) / "bot_control.json",
-                            dict(self._control),
-                        )
+                        self._progress_servers.add(server_id)
+                        self._progress_servers_off.discard(server_id)
+                        self._save_progress_servers()
                         await message.channel.send(
-                            "progress messages ON. tool calls will show a live "
+                            "progress messages ON for this server. tool calls will show a live "
                             "'thinking: …' message in the channel."
                         )
                 elif arg in {"off", "disable", "no", "false"}:
-                    if not bool(self._control.get("progress_messages", False)):
+                    if server_id == "DM":
                         await message.channel.send(
-                            "progress messages were already off"
+                            "progress messages are off (DMs never get progress messages)"
+                        )
+                    elif server_id in self._progress_servers_off:
+                        await message.channel.send(
+                            "progress messages were already off for this server"
                         )
                     else:
-                        self._control["progress_messages"] = False
-                        await asyncio.to_thread(
-                            _atomic_json_write_sync,
-                            Path(self.config.DATA_DIR) / "bot_control.json",
-                            dict(self._control),
+                        was_env = (
+                            server_id not in self._progress_servers
+                            and bool(self.config.PROGRESS_MESSAGES)
+                        )
+                        self._progress_servers.discard(server_id)
+                        self._progress_servers_off.add(server_id)
+                        self._save_progress_servers()
+                        note = (
+                            " (env baseline MAXWELL_PROGRESS_MESSAGES=true had it on; now off here)"
+                            if was_env
+                            else ""
                         )
                         await message.channel.send(
-                            "progress messages OFF. tool calls will run silently."
+                            "progress messages OFF for this server. tool calls will run silently."
+                            + note
                         )
                 elif arg in {"status", ""}:
-                    state = (
-                        "on" if self._control.get("progress_messages", False) else "off"
+                    if server_id == "DM":
+                        state = "off (DMs never get progress messages)"
+                    else:
+                        state = "on" if self._progress_enabled(server_id) else "off"
+                    baseline = (
+                        "on" if self.config.PROGRESS_MESSAGES else "off"
                     )
                     await message.channel.send(
-                        f"progress messages are **{state}** for this bot "
-                        f"(MAXWELL_PROGRESS_MESSAGES env default: "
-                        f"{'on' if self.config.PROGRESS_MESSAGES else 'off'})"
+                        f"progress messages are **{state}** for this server "
+                        f"(MAXWELL_PROGRESS_MESSAGES env baseline: {baseline})"
                     )
                 else:
                     await message.channel.send(
                         "usage: `,progress on|off|status` — toggles the live "
-                        "'thinking: …' status message shown while tools run. "
-                        "off by default; opt in for visibility during slow tool calls."
+                        "'thinking: …' status message shown while tools run, for THIS "
+                        "server. off by default; opt in for visibility during slow tool "
+                        "calls. (admin)"
                     )
             elif cmd == "admin":
                 if not self._is_admin(message.author.id):
@@ -3090,7 +3121,7 @@ class MaxwellBot(commands.Bot):
                     "` ,vc ...` - voice commands\n"
                     "` ,drug [minutes|off|status]` - drug mode timer\n"
                     "` ,jailbreak on|off|status` - toggle freedom-mode prompt for this server (admin)\n"
-                    "` ,progress on|off|status` - toggle live 'thinking: …' messages during tool calls (admin)\n"
+                    "` ,progress on|off|status` - toggle live 'thinking: …' messages during tool calls, per server (admin)\n"
                     "` ,sleep [minutes|off|status]` - take a 1-60m sleep window; pings get a notice (admin)\n"
                     "` ,wake` - clear active sleep window (admin)\n"
                     "` ,admin [@user|user_id|clear]` - add/remove/list admins (admin). Promoted users can log into the dashboard at /admin via 'Continue with Discord'."
@@ -3758,7 +3789,13 @@ class MaxwellBot(commands.Bot):
                         "author": (
                             self.user.display_name if self.user else self.bot_name
                         ),
-                        "author_id": str(self.user.id if self.user else 0),
+                        # 2026-07-22: use the bot's numeric id consistently.
+                        # The old `else 0` fallback produced author_id=0 which
+                        # never matched self_user_id, so the bot's own VC reply
+                        # was mis-rendered as a user turn (attribution bug).
+                        # Empty string falls back to name-only is_self matching
+                        # in _build_messages, which is more robust than a bogus 0.
+                        "author_id": str(self.user.id) if self.user else "",
                         "author_is_bot": True,
                         "content": resp,
                     },
@@ -4101,6 +4138,60 @@ class MaxwellBot(commands.Bot):
         """Jailbreak (freedom-mode prompt) is OFF by default everywhere; only on
         for servers an admin enabled with `,jailbreak on`. DMs never get it."""
         return bool(server_id) and server_id in self._jailbreak_servers
+
+    def _load_progress_servers(self, quiet: bool = False):
+        try:
+            path = Path(self.config.DATA_DIR) / "progress_servers.json"
+            if path.exists():
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    self._progress_servers = {str(x) for x in data}
+            off_path = Path(self.config.DATA_DIR) / "progress_servers_off.json"
+            if off_path.exists():
+                with open(off_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    self._progress_servers_off = {str(x) for x in data}
+            if not quiet:
+                logger.info(
+                    f"Loaded {len(self._progress_servers)} progress-enabled servers, "
+                    f"{len(self._progress_servers_off)} explicit-off servers"
+                )
+        except Exception as e:
+            logger.error(f"Failed to load progress servers: {e}")
+            self._progress_servers = set()
+            self._progress_servers_off = set()
+
+    def _save_progress_servers(self):
+        try:
+            _atomic_json_write_sync(
+                Path(self.config.DATA_DIR) / "progress_servers.json",
+                sorted(self._progress_servers),
+            )
+            _atomic_json_write_sync(
+                Path(self.config.DATA_DIR) / "progress_servers_off.json",
+                sorted(self._progress_servers_off),
+            )
+        except Exception as e:
+            logger.error(f"Failed to save progress servers: {e}")
+
+    def _progress_enabled(self, server_id: str) -> bool:
+        """Live tool-progress messages. OFF by default per server; an admin
+        opts a server in with `,progress on` (persisted to
+        progress_servers.json). DMs never get progress messages. When the
+        MAXWELL_PROGRESS_MESSAGES env var is true, it enables the feature as a
+        baseline for every server, so an operator can flip it on globally
+        without running the command in each server — a server-level
+        `,progress off` still wins (it records the server in
+        _progress_servers_off so the env baseline does NOT re-add it)."""
+        if not server_id or server_id == "DM":
+            return False
+        if server_id in self._progress_servers:
+            return True
+        if server_id in self._progress_servers_off:
+            return False
+        return bool(self.config.PROGRESS_MESSAGES)
 
     def _load_blacklist(self, quiet: bool = False):
         try:
@@ -4734,7 +4825,13 @@ class MaxwellBot(commands.Bot):
                         channel_id,
                         {
                             "author": self.bot_name,
-                            "author_id": ev.get("user_id") or bot_user_id or "self",
+                            # 2026-07-22: drop the bogus "self" literal fallback.
+                            # A non-numeric author_id ("self") never matches
+                            # self_user_id in _build_messages is_self, so the
+                            # bot's backfilled reply was rendered as a user turn.
+                            # Empty string falls back to name-only matching,
+                            # which correctly detects Maxwell via bot_name.
+                            "author_id": ev.get("user_id") or bot_user_id or "",
                             "author_is_bot": True,
                             "content": content,
                             "message_id": synthetic_id,
@@ -4804,13 +4901,11 @@ class MaxwellBot(commands.Bot):
                 self._ai_concurrency = control["ai_concurrency"]
                 self._notify_ai_waiters()
             self._control = control
-            # Re-apply the env-var default for progress_messages ONLY
-            # when the panel didn't explicitly set it. The env var
-            # remains the durable default for fresh installs, but once
-            # an operator flips the panel (via the dashboard OR the
-            # `,progress on|off` command), the panel value wins.
-            if "progress_messages" not in loaded:
-                self._control["progress_messages"] = bool(self.config.PROGRESS_MESSAGES)
+            # 2026-07-22: the old global progress_messages re-apply is gone —
+            # progress is now per-server via _progress_servers / the env
+            # baseline. bot_control.json may still contain a stale
+            # 'progress_messages' key from older installs; it's ignored by all
+            # read sites now (they call _progress_enabled(server_id)).
             self._control_mtime = mtime
             logger.info("Loaded dashboard control settings")
         except Exception as e:
@@ -4823,6 +4918,7 @@ class MaxwellBot(commands.Bot):
                 self._load_admins(quiet=True)
                 self._load_auto_channels(quiet=True)
                 self._load_jailbreak(quiet=True)
+                self._load_progress_servers(quiet=True)
                 self._load_blacklist(quiet=True)
                 self._load_sites(quiet=True)
                 self._load_control()
@@ -6804,7 +6900,9 @@ class MaxwellBot(commands.Bot):
         # awaitable form (start()) would block the LLM call for 800ms which
         # defeats the point.
         gen_progress = None
-        if bool(self._control.get("progress_messages", False)):
+        if self._progress_enabled(
+            str(message.guild.id) if message.guild else "DM"
+        ):
             gen_progress = _make_tool_progress(message)
             with contextlib.suppress(Exception):
                 await gen_progress.start_defer()
@@ -7096,7 +7194,9 @@ class MaxwellBot(commands.Bot):
                     # _handle_message finally block, then the reply — the
                     # exact flicker the user complained about.
                     followup_progress = None
-                    if bool(self._control.get("progress_messages", False)):
+                    if self._progress_enabled(
+                        str(message.guild.id) if message.guild else "DM"
+                    ):
                         followup_progress = _make_tool_progress(message)
                         with contextlib.suppress(Exception):
                             await followup_progress.start_defer()
@@ -7720,9 +7820,9 @@ class MaxwellBot(commands.Bot):
         if existing_progress is not None:
             progress = existing_progress
         else:
-            progress_enabled = bool(
-                self._control.get("progress_messages", False)
-            ) and bool(non_terminal)
+            progress_enabled = bool(non_terminal) and self._progress_enabled(
+                str(message.guild.id) if message.guild else "DM"
+            )
             progress = _make_tool_progress(message) if progress_enabled else None
 
         # 2026-07-21: pick a per-tool "artifact" field for the progress
@@ -8172,12 +8272,40 @@ class MaxwellBot(commands.Bot):
         ]
         if not descriptions:
             return ""
-        header = "## Available tools (use only when they clearly help)\n" + "\n".join(
-            descriptions
+        header = "## Available tools\n" + "\n".join(descriptions)
+        # Shared mandatory-tool-use preamble. This is the fix for the bot
+        # sometimes replying directly instead of calling a tool (e.g. saying
+        # "I'll respond to that" instead of calling send_message, or
+        # describing a site instead of calling create_site). The old header
+        # said "use only when they clearly help" which read as permission to
+        # skip tools — the model took that license and produced plain-text
+        # replies for actions that MUST be tool calls. The new contract:
+        # if a matching tool exists for what the user asked, you MUST call it.
+        mandatory = (
+            "\n\n## MANDATORY TOOL USE — read this before you reply\n"
+            "If the user asks you to DO, MAKE, BUILD, CREATE, GENERATE, SEND, SEARCH, "
+            "LOOK UP, FETCH, RUN, CHANGE, EDIT, DELETE, REACT, or any other concrete "
+            "ACTION, you MUST call the matching tool for that action. You may NEVER "
+            "substitute a plain-text description of the action for the tool call. "
+            "Saying 'I'd make a site that looks like…' without calling create_site is "
+            "a failure. Saying 'here's what I'd send' without calling send_message is "
+            "a failure. Replying with prose when the user asked for an image, a search, "
+            "a file, a reaction, or any artifact is a failure. The tool call IS the "
+            "reply — do not narrate the action, perform it.\n"
+            "Every conversation turn that produces a user-visible response MUST end with "
+            "send_message (to deliver your words) or no_response (to stay silent). Do "
+            "NOT write your reply as raw visible text and also call send_message with "
+            "the same text — pick send_message as the delivery channel and put nothing "
+            "in the raw text. A turn with no terminal tool call leaves the user with "
+            "nothing visible and is treated as a dropped response.\n"
+            "When in doubt about whether a tool applies, CALL IT. The cost of an "
+            "unnecessary tool call is small; the cost of skipping a needed one is a "
+            "broken/dropped response the user sees as the bot ignoring them.\n"
         )
         if self._control.get("native_tool_calls", False):
             return (
                 header
+                + mandatory
                 + "\n\n## How to call\n"
                 "Use the provider's native function/tool calling API (OpenAI-style tool_call). "
                 "Do NOT put tool markup in your visible text. "
@@ -8196,6 +8324,7 @@ class MaxwellBot(commands.Bot):
             )
         return (
             header
+            + mandatory
             + "\n\n## How to call\n"
             "XML text tags only. To call a tool, emit exactly one of these forms per turn, with one tag per tool call:\n"
             "```\n"
@@ -8470,6 +8599,7 @@ class MaxwellBot(commands.Bot):
             "MATCH THE ENERGY. If someone says one word ('fr', 'lol', '😢', 'yooo'), respond with equally minimal effort — a word or two, or just a reaction. Do not write a full sentence reply to a two-letter message. Do not over-explain, over-comfort, or turn a casual exchange into a heartfelt paragraph. If a message doesn't actually ask anything or invite a response, you can just acknowledge it briefly or call no_response.\n"
             "Match the channel's vibe. Discord markdown (`code`, ```blocks```, quotes, bullets, emphasis) when it helps. Plain text when it doesn't. Lowercase-natural by default; no asterisk actions, no 'as an AI' meta-commentary.",
             "Your official server is https://discord.gg/RGnXrTmWBu — share it when someone asks where to find you, your updates, status, or your community. Don't pretend it's something it isn't.",
+            "SPEAKER ATTRIBUTION (critical): every line in the transcript below is prefixed with the speaker's name and Discord ID in the form 'Name(snowflake_id): text'. Two different people are two different speakers even if their nicknames look similar — always tie a statement to the ID shown, never to a vague 'they said'. Your own past lines have role 'assistant' and NO name prefix: that's you (Maxwell), not a user. Never attribute a user's words to another user, never attribute a user's words to yourself, and never claim 'X said' when the transcript shows a different ID said it. If you're unsure who said something, say you're unsure rather than guess.",
         ]
         server_id = str(message.guild.id) if message.guild else "DM"
         _jailbreak_enabled = getattr(self, "_jailbreak_enabled", None)
@@ -8537,7 +8667,7 @@ class MaxwellBot(commands.Bot):
                     )
                     recent_ltm = ltm[-ltm_cap:] if len(ltm) > ltm_cap else ltm
                     system_parts.append(
-                        "Long-term memory (most recent first for current events):\n"
+                        "Long-term memory (durable facts about the world, users, and past conversations; newest first — use as background, not as something to recite):\n"
                         + "\n".join(e["content"] for e in reversed(recent_ltm))
                     )
             except Exception as e:
@@ -8716,10 +8846,19 @@ class MaxwellBot(commands.Bot):
                     continue
                 author = str(msg.get("author", "?"))
                 author_id = str(msg.get("author_id") or "")
+                # 2026-07-22: name-only is_self fallback now checks against
+                # BOTH self.user.display_name and self.bot_name. Storage
+                # sites are inconsistent — some write bot_name, some write
+                # the live display_name — and only one was checked before,
+                # so the bot's own replies (labelled with bot_name) could be
+                # mis-detected as a user turn and rendered as "Maxwell: <bot
+                # words>", which the model then read as a user statement.
+                self_display = (
+                    self.user.display_name if self.user else self.bot_name
+                )
                 is_self = bool(self_user_id and author_id == self_user_id) or (
                     not author_id
-                    and author
-                    == (self.user.display_name if self.user else self.bot_name)
+                    and author in {self_display, self.bot_name}
                 )
                 if is_self:
                     role = "assistant"
@@ -8847,10 +8986,14 @@ class MaxwellBot(commands.Bot):
         # message was also a user, so role alternation isn't broken).
         # Tag it [RESPOND TO THIS] so the model can identify which turn
         # in the transcript to actually answer.
-        if messages and messages[-1].get("role") == "user":
-            user_parts = [f"[RESPOND TO THIS] {latest_text}"]
-        else:
-            user_parts = [f"[RESPOND TO THIS] {author_label}: {latest_text}"]
+        # 2026-07-22: ALWAYS emit the author label, even when merging into
+        # a trailing user turn. The old branch here dropped `author_label:`
+        # in the merge case, so the latest speaker's words were concatenated
+        # onto the previous user's turn with no name — the model then
+        # attributed the latest message to whoever spoke last in history
+        # (the "X said that but it was actually Y" bug). Keeping the label on
+        # every live line fixes the misattribution.
+        user_parts = [f"[RESPOND TO THIS] {author_label}: {latest_text}"]
         mention_names = [
             f"{getattr(user, 'display_name', str(getattr(user, 'id', 'unknown')))}({getattr(user, 'id', 'unknown')})"
             for user in (message.mentions or [])
@@ -9404,7 +9547,14 @@ class MaxwellBot(commands.Bot):
                 tg_chan_id,
                 {
                     "author": self.bot_name,
+                    # 2026-07-22: add author_id/author_is_bot so is_self
+                    # detection works. The old dict had no author_id, so the
+                    # bot's TG reply was mis-rendered as a user turn (a
+                    # "user named Maxwell" said it).
+                    "author_id": str(self.user.id) if self.user else "",
+                    "author_is_bot": True,
                     "content": response_text or "[voice message sent]",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                 },
             )
 
@@ -9878,7 +10028,12 @@ class MaxwellBot(commands.Bot):
                             tg_chan_id,
                             {
                                 "author": self.bot_name,
+                                # 2026-07-22: same author_id fix as the
+                                # other TG bot-reply path.
+                                "author_id": str(self.user.id) if self.user else "",
+                                "author_is_bot": True,
                                 "content": response_text or "[voice message sent]",
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
                             },
                         )
 
