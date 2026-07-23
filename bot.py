@@ -1879,6 +1879,10 @@ class MaxwellBot(commands.Bot):
         self.autonomy_engine: Any = None  # initialized after tools
         self.autonomy_provider: Any = None
         self._autonomy_provider_sig: str = ""
+        # Auxiliary background agents (REM, context-cleanup, context-watcher)
+        # share this provider/model, separate from the autonomy tick loop.
+        self.aux_provider: Any = None
+        self._aux_provider_sig: str = ""
         self._tool_breaker = ToolCircuitBreaker(
             failure_threshold=5, recovery_seconds=30
         )
@@ -2072,6 +2076,132 @@ class MaxwellBot(commands.Bot):
         except Exception as e:
             logger.warning(f"_get_autonomy_provider failed, falling back to main: {e}")
             return self.ai_provider
+
+    async def _get_aux_provider(self):
+        """Return a provider for the auxiliary background agents (REM,
+        context-cleanup, context-watcher).
+
+        Resolution order: aux_* control keys -> AUX_* env -> autonomy_*
+        control keys -> AUTONOMY_* env -> main ai_provider. This lets an
+        operator run the context-manager brains on a different (e.g.
+        cheaper/faster) model than the autonomy tick loop, while a fresh
+        install with no AUX_* config behaves exactly as before (all
+        background agents shared the autonomy endpoint).
+
+        Like ``_get_autonomy_provider``: build+cache a dedicated
+        OllamaProvider keyed on the resolved (base_url, api_key, model,
+        disable_reasoning) signature so config churn doesn't leak
+        ClientSessions; re-probe initialize() when the cached provider is
+        unavailable so a transient failure self-heals; never raise (a
+        background tick must not crash over provider resolution).
+        """
+        try:
+            control = self._control or {}
+            base_url = (
+                str(control.get("aux_base_url", "") or "").strip()
+                or self.config.AUX_BASE_URL
+            )
+            api_key = (
+                str(control.get("aux_api_key", "") or "").strip()
+                or self.config.AUX_API_KEY
+            )
+            model = (
+                str(control.get("aux_model", "") or "").strip()
+                or self.config.AUX_MODEL
+            )
+            if "aux_disable_reasoning" in control:
+                disable_reasoning = bool(control.get("aux_disable_reasoning", True))
+            else:
+                disable_reasoning = bool(self.config.AUX_DISABLE_REASONING)
+            # No dedicated aux endpoint configured -> resolve down to the
+            # autonomy provider (which itself falls back to the main
+            # provider). This preserves the pre-separation behaviour where
+            # REM/context-cleanup/context-watcher all shared autonomy's
+            # endpoint, and a per-call model override is still passed at
+            # call time below.
+            if not base_url:
+                old = self.aux_provider
+                if old is not None and hasattr(old, "close"):
+                    try:
+                        task = asyncio.create_task(old.close())
+                        self._track_task(task)
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to schedule old aux provider close: {e}"
+                        )
+                self.aux_provider = None
+                self._aux_provider_sig = ""
+                # Fall through to autonomy so the model/base_url cascade is
+                # consistent for every caller without duplicating it here.
+                return await self._get_autonomy_provider()
+            sig = f"{base_url}|{api_key}|{model}|dr={_safe_int(disable_reasoning, 0)}"
+            cached = self.aux_provider if sig == self._aux_provider_sig else None
+            if cached is not None and getattr(cached, "available", False):
+                return cached
+            # Aux agents produce short JSON plans/audits — cap conservatively
+            # so we don't exceed the model's output limit.
+            aux_max_tokens = min(
+                _safe_int(self.config.OLLAMA_MAX_TOKENS or 200000, 200000), 8192
+            )
+            if cached is None:
+                old = self.aux_provider
+                if old is not None and hasattr(old, "close"):
+                    try:
+                        task = asyncio.create_task(old.close())
+                        self._track_task(task)
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to schedule old aux provider close: {e}"
+                        )
+                provider = OllamaProvider(
+                    base_url=base_url,
+                    model=model or self.config.OLLAMA_MODEL,
+                    max_tokens=aux_max_tokens,
+                    temperature=self.config.OLLAMA_TEMPERATURE,
+                    api_key=api_key,
+                    disable_reasoning=disable_reasoning,
+                    fallback_base_url=self.config.OLLAMA_FALLBACK_BASE_URL,
+                    fallback_model=self.config.OLLAMA_FALLBACK_MODEL,
+                    fallback_api_key=self.config.OLLAMA_FALLBACK_API_KEY,
+                    fallback_disable_reasoning=self.config.OLLAMA_FALLBACK_DISABLE_REASONING,
+                    retry_attempts=self.config.OLLAMA_RETRY_ATTEMPTS,
+                    enable_audio_input=self.config.ENABLE_AUDIO_INPUT,
+                )
+            else:
+                provider = cached
+            try:
+                await provider.initialize()
+            except Exception as e:
+                logger.warning(f"Aux provider initialize() failed: {e}")
+            self.aux_provider = provider
+            self._aux_provider_sig = sig
+            if not getattr(provider, "available", False):
+                logger.warning(
+                    "Aux provider unavailable, falling back to main ai_provider for this tick"
+                )
+                return self.ai_provider
+            return provider
+        except Exception as e:
+            logger.warning(f"_get_aux_provider failed, falling back to main: {e}")
+            return self.ai_provider
+
+    def _get_aux_model(self) -> str | None:
+        """Resolve the per-call model override for aux background agents.
+
+        Order: aux_model control key -> AUX_MODEL env -> autonomy_model
+        control key -> AUTONOMY_MODEL env -> None (use the resolved
+        provider's own model). Returning None lets a caller that fell
+        back to the main ai_provider still pass model=None and use the
+        provider default.
+        """
+        control = self._control or {}
+        return (
+            str(control.get("aux_model", "") or "").strip()
+            or self.config.AUX_MODEL
+            or str(control.get("autonomy_model", "") or "").strip()
+            or self.config.AUTONOMY_MODEL
+            or None
+        )
 
     def _setup_memory(self):
         self.memory = MemoryManager(
@@ -4371,19 +4501,19 @@ class MaxwellBot(commands.Bot):
             )
             await self._acquire_ai_slot(timeout=timeout)
             try:
-                # REM uses the same provider/model as autonomy so the two
-                # background brains share one endpoint/model config.
-                rem_provider = await self._get_autonomy_provider()
+                # REM uses the aux provider/model (the context-manager brain),
+                # which falls back to the autonomy provider then the main
+                # provider. This keeps REM on a separate model from the
+                # autonomy tick loop when AUX_* is configured, and behaves
+                # exactly as before (shared autonomy endpoint) when it isn't.
+                rem_provider = await self._get_aux_provider()
                 if not callable(
                     getattr(rem_provider, "generate_response", None)
                 ) and not callable(
                     getattr(rem_provider, "generate_chat_completion", None)
                 ):
                     rem_provider = self.ai_provider
-                rem_model = (
-                    str((self._control or {}).get("autonomy_model", "") or "")
-                    or self.config.OLLAMA_REM_MODEL
-                )
+                rem_model = self._get_aux_model() or self.config.OLLAMA_REM_MODEL
                 run = await run_rem_once(
                     memory_manager=self.memory,
                     rem_log=self.rem_log,
@@ -5218,20 +5348,19 @@ class MaxwellBot(commands.Bot):
             )
             await self._acquire_ai_slot(timeout=extract_timeout)
             try:
-                # Context watcher shares the autonomy/REM brain — same provider,
-                # base_url, api key, and model as autonomy and REM. Falls back to
-                # the main provider if the autonomy provider isn't configured or
-                # init failed. Never raises out of provider resolution.
-                context_provider = await self._get_autonomy_provider()
+                # Context watcher uses the aux provider/model (the
+                # context-manager brain), separate from the autonomy tick
+                # loop. Falls back to the autonomy provider then the main
+                # provider if aux isn't configured. Never raises out of
+                # provider resolution.
+                context_provider = await self._get_aux_provider()
                 if not callable(
                     getattr(context_provider, "generate_response", None)
                 ) and not callable(
                     getattr(context_provider, "generate_chat_completion", None)
                 ):
                     context_provider = self.ai_provider
-                context_model = (
-                    str((self._control or {}).get("autonomy_model", "") or "") or None
-                )
+                context_model = self._get_aux_model()
                 raw = await context_provider.generate_response(
                     [
                         {"role": "system", "content": prompt},
@@ -7294,7 +7423,7 @@ class MaxwellBot(commands.Bot):
                 )
                 # The send_message tool path's _remember_tool_call writes
                 # a Tool entry which DOES contain the sent content, but
-                # it's rendered as "[Tool] Called send_message with … ->
+                # it's rendered as "Called send_message with {…} ->
                 # __MESSAGE_SENT__\n<content>" which is noisy and easy
                 # for the model to miss when recalling "what did I just
                 # say?". The user reported "I asked for an explanation
@@ -7311,9 +7440,9 @@ class MaxwellBot(commands.Bot):
                     and getattr(self, "memory", None) is not None
                 ):
                     # Pull the actual sent content out of the tool
-                    # result. The result is the string returned by
-                    # send_message.execute(); the format is
-                    # "__MESSAGE_SENT__\n<content>".
+                    # result. The result returned by send_message.execute()
+                    # is "__MESSAGE_SENT__\n<content>" — everything after
+                    # the marker newline is the text that was sent.
                     sent_content = ""
                     for tr in all_tool_results:
                         if "__MESSAGE_SENT__" in tr:
@@ -10184,6 +10313,14 @@ async def main():
                 await ap.close()
         except Exception as e:
             logger.error(f"Failed to close autonomy provider: {e}")
+        # Close the separately-built aux provider too (it owns its own
+        # aiohttp session). Guarded so a missing/never-built provider is fine.
+        try:
+            xp = getattr(bot, "aux_provider", None)
+            if xp is not None and hasattr(xp, "close") and xp is not bot.ai_provider:
+                await xp.close()
+        except Exception as e:
+            logger.error(f"Failed to close aux provider: {e}")
         try:
             await close_shared_session()
         except Exception as e:

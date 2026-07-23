@@ -18,9 +18,11 @@ Design notes:
   update_shared_context / add_shared_context. It never writes the file
   directly — every mutation goes through the locked memory API so it stays
   consistent with the on-add sanitization (re-dedup, eviction, mtime tracking).
-- Shares the autonomy/REM provider + model. If the autonomy provider isn't
-  configured it transparently falls back to the main bot provider via
-  bot._get_autonomy_provider().
+- Uses the aux background-agent provider + model (the context-manager brain),
+  shared with REM and the context watcher. The aux provider falls back to the
+  autonomy provider, then the main bot provider via bot._get_aux_provider() /
+  bot._get_aux_model(), so a config without AUX_* keys behaves as before
+  (all background agents shared the autonomy endpoint).
 - No approval queue. Like autonomy/REM, it just runs. The audit log + last
   actions are surfaced in the dashboard so a human can see what it did and
   undo deletions if needed.
@@ -544,7 +546,7 @@ class ContextCleanupEngine:
         )
 
         try:
-            provider = await self.bot._get_autonomy_provider()
+            provider = await self.bot._get_aux_provider()
             # We only ever call generate_response; drop the misleading
             # generate_chat_completion check (it was never dispatched to). If the
             # resolved provider lacks generate_response, fall back to the main
@@ -556,19 +558,11 @@ class ContextCleanupEngine:
             if provider is None:
                 return [], "DONE - no provider available"
             # Provider-unavailable soft skip: don't burn an AI slot or count this
-            # as a failure — _get_autonomy_provider re-probes init next tick.
+            # as a failure — _get_aux_provider re-probes init next tick.
             if getattr(provider, "available", None) == False:  # noqa: E712
                 logger.info("ContextCleanup: provider not available, soft skip")
                 return [], "DONE - provider not available"
-            model = (
-                str(
-                    (getattr(self.bot, "_control", None) or {}).get(
-                        "autonomy_model", ""
-                    )
-                    or ""
-                )
-                or None
-            )
+            model = getattr(self.bot, "_get_aux_model", lambda: None)()
             timeout = max(
                 30,
                 min(
@@ -834,7 +828,7 @@ class ContextCleanupEngine:
             f"newest {len(tail)}):\n{snapshot}\n\nReturn the cleanup plan JSON."
         )
         try:
-            provider = await self.bot._get_autonomy_provider()
+            provider = await self.bot._get_aux_provider()
             if provider is None or not callable(
                 getattr(provider, "generate_response", None)
             ):
@@ -844,15 +838,7 @@ class ContextCleanupEngine:
             if getattr(provider, "available", None) == False:  # noqa: E712
                 logger.info("ContextCleanup: provider not available for LTM, soft skip")
                 return [], "ltm: provider not available"
-            model = (
-                str(
-                    (getattr(self.bot, "_control", None) or {}).get(
-                        "autonomy_model", ""
-                    )
-                    or ""
-                )
-                or None
-            )
+            model = getattr(self.bot, "_get_aux_model", lambda: None)()
             timeout = max(
                 30,
                 min(

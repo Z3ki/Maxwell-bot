@@ -2254,7 +2254,14 @@ class SendMessageTool(Tool):
                     await message.channel.send(chunk)
                 if len(chunks) > 1:
                     await asyncio.sleep(0.2)
-            return f"__MESSAGE_SENT__ Sent {len(text)} chars in {len(chunks)} chunk(s)"
+            # Return the marker followed by the actual sent content. The
+            # content is what the bot said, so recalling it in memory is
+            # correct. We intentionally do NOT include leakable debug prose
+            # like "Sent N chars in M chunk(s)": that prose reads as natural
+            # language and the model echoed it into visible replies
+            # ("20 chars in 1 chunk(s)" appeared in chat). Downstream detects
+            # send_message via " __MESSAGE_SENT__" in the result string.
+            return f"__MESSAGE_SENT__\n{text}"
         except discord.Forbidden:
             return "Error: missing permissions to send message"
         except Exception as e:

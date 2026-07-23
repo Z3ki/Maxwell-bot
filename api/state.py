@@ -185,6 +185,9 @@ def _sanitize_control(control):
     out["autonomy_base_url"] = str(out.get("autonomy_base_url", "") or "")[:512]
     out["autonomy_api_key"] = str(out.get("autonomy_api_key", "") or "")[:512]
     out["autonomy_model"] = str(out.get("autonomy_model", "") or "")[:200]
+    out["aux_base_url"] = str(out.get("aux_base_url", "") or "")[:512]
+    out["aux_api_key"] = str(out.get("aux_api_key", "") or "")[:512]
+    out["aux_model"] = str(out.get("aux_model", "") or "")[:200]
     out["memory_history_messages"] = max(0, min(out["memory_history_messages"], 100))
     out["memory_context_budget"] = max(1000, min(out["memory_context_budget"], 500000))
     out["tool_history_messages"] = max(

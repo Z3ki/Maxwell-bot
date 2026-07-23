@@ -125,6 +125,20 @@ class Config:
     AUTONOMY_MODEL = os.getenv("AUTONOMY_MODEL", "").strip()
     AUTONOMY_DISABLE_REASONING = _bool_env("AUTONOMY_DISABLE_REASONING", False)
 
+    # Auxiliary background agents (REM, context-cleanup, context-watcher).
+    # These are the "context manager" brains — separate from the autonomy
+    # tick loop so they can run on a different (e.g. cheaper/faster) model
+    # than autonomy. Defaults fall back to the autonomy config, which in
+    # turn falls back to the main OLLAMA_* provider, so a fresh install
+    # with no AUX_* vars behaves exactly as before (all background agents
+    # shared one endpoint).
+    AUX_BASE_URL = os.getenv("AUX_BASE_URL", "").strip()
+    AUX_API_KEY = os.getenv(
+        "AUX_API_KEY", os.getenv("OPENAI_COMPAT_API_KEY", "")
+    ).strip()
+    AUX_MODEL = os.getenv("AUX_MODEL", "").strip()
+    AUX_DISABLE_REASONING = _bool_env("AUX_DISABLE_REASONING", True)
+
     # Live tool progress messages. OFF by default; set MAXWELL_PROGRESS_MESSAGES=true
     # in .env to enable for every server. The feature is also per-server: an
     # admin can turn it on for one server with `,progress on` (stored in

@@ -629,6 +629,9 @@ async def autonomy_status(request):
             "recent_reply_block_seconds": control.get(
                 "autonomy_recent_reply_block_seconds", 0
             ),
+            "aux_model": control.get("aux_model", ""),
+            "aux_base_url": control.get("aux_base_url", ""),
+            "aux_disable_reasoning": control.get("aux_disable_reasoning", True),
             "last_tick": state.get("last_tick"),
             "last_tick_duration": state.get("last_tick_duration"),
             "actions_executed_total": state.get("actions_executed_total", 0),

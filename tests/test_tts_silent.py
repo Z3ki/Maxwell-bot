@@ -368,8 +368,8 @@ def test_dispatch_native_rejects_platform_incompatible_tool():
 
 
 def test_dispatch_native_skips_duplicate_terminal_tools():
-    first = FakeTool("__MESSAGE_SENT__ Sent 1 chars")
-    second = FakeTool("__MESSAGE_SENT__ Sent 2 chars")
+    first = FakeTool("__MESSAGE_SENT__\nfirst body")
+    second = FakeTool("__MESSAGE_SENT__\nsecond body")
     bot = _native_bot({"send_message": first, "no_response": second})
     message = SimpleNamespace(guild=None, channel=SimpleNamespace(id=123))
     raw = [
@@ -511,7 +511,7 @@ def test_ensure_reasoning_trace_skips_when_tools_ran():
         await MaxwellBot._ensure_reasoning_trace(
             bot,
             message,
-            ["Tool send_message: __MESSAGE_SENT__ Sent 2 chars"],
+            ["Tool send_message: __MESSAGE_SENT__\nsent"],
             "hi",
             "send_message",
         )
@@ -638,7 +638,7 @@ def test_reasoning_log_with_send_message_does_not_trigger_followup():
     assert not _tool_results_need_followup(
         [
             "Tool reasoning_log: __REASONING_RECORDED__",
-            "Tool send_message: __MESSAGE_SENT__ Sent 10 chars",
+            "Tool send_message: __MESSAGE_SENT__\nsent",
         ]
     )
 

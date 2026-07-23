@@ -128,6 +128,15 @@ DEFAULT_CONTROL = {
     "autonomy_api_key": "",  # "" = use main provider's key
     "autonomy_model": "",  # "" = use main provider's model
     "autonomy_disable_reasoning": True,  # False for endpoints that reject the reasoning param (e.g. NVIDIA)
+    # Auxiliary background agents (REM, context-cleanup, context-watcher).
+    # "" = fall back to the autonomy config, then the main provider, so a
+    # control.json without aux overrides keeps the old shared-endpoint
+    # behaviour. Set these to route the context-manager brains to a
+    # separate model/endpoint from the autonomy tick loop.
+    "aux_base_url": "",  # "" = use autonomy (then main) base_url
+    "aux_api_key": "",  # "" = use autonomy (then main) key
+    "aux_model": "",  # "" = use autonomy (then main) model
+    "aux_disable_reasoning": True,  # False for endpoints that reject the reasoning param
     "autonomy_min_post_gap_seconds": 0,  # deprecated — no longer enforced, kept for compat
     "autonomy_recent_reply_block_seconds": 0,  # skip autonomy post if bot replied in-channel within this window (0=off)
     "context_cleanup_enabled": True,  # background context janitor (dedupe/merge/remove weird shared-context facts)

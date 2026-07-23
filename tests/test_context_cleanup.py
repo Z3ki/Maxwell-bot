@@ -53,8 +53,11 @@ class FakeBot:
         self.ai_provider = provider
         self._control = {"autonomy_model": "", "ai_timeout_seconds": 120}
 
-    async def _get_autonomy_provider(self):
+    async def _get_aux_provider(self):
         return self.ai_provider
+
+    def _get_aux_model(self):
+        return None
 
     async def _acquire_ai_slot(self, timeout=30):
         pass

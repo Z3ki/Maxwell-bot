@@ -30,7 +30,8 @@ def test_send_message_tool_splits_long_replies():
         result = await tool.execute(message, content=text)
 
         assert "__MESSAGE_SENT__" in result
-        assert "3 chunk" in result
+        assert "3 chunk" not in result
+        assert text in result
         assert len(message.replies) == 1
         assert len(message.channel.sent) == 2
         assert all(len(chunk) <= 1900 for chunk in message.replies + message.channel.sent)
