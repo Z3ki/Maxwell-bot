@@ -555,23 +555,19 @@ class ToolProgress:
             self._deferred_task.cancel()
 
     async def stop(self) -> None:
-        """Delete the progress message immediately — awaited, no edit.
+        """Delete the progress message ASAP — no edit, no waiting.
 
-        2026-07-22: the previous design scheduled the delete as a
-        background task (fire-and-forget) so the caller wouldn't wait on
-        a Discord round-trip. But the caller then posted the reply as an
-        AWAITED send, which ran first — so the user saw the stale
-        "working on it…" sit next to the reply for a beat before the
-        background delete caught up ("too slow to delete"). Earlier
-        versions also did a final drain edit() before the delete, which
-        made the message visibly change content then vanish ("reappears
-        then disappears").
+        2026-07-22: the delete is fired as a background task (fire-and-
+        forget) so the caller can proceed to post the reply immediately
+        without waiting on a Discord round-trip. The reply send and the
+        delete race; the delete is a lighter request so it almost always
+        wins, and even if it doesn't the user just sees the placeholder
+        for a beat longer — never a stale edit flicker.
 
-        New contract: stop() AWAITS the delete. Yes, the caller waits
-        ~100-300ms on one Discord round-trip, but that's the price of
-        guaranteeing the message is gone BEFORE the reply posts — no
-        race, no flicker, no stale placeholder. No final edit; the reply
-        is the real content.
+        No final drain edit: a previous version edited the message to
+        the latest reasoning before deleting, which made it visibly
+        change content then vanish ("reappears then disappears"). The
+        reply is the real content; the placeholder just needs to go.
         """
         if self._stopped:
             return
@@ -589,6 +585,13 @@ class ToolProgress:
             return
         posted = self._posted
         self._posted = None
+        try:
+            asyncio.create_task(self._bg_delete(posted))
+        except RuntimeError:
+            with contextlib.suppress(Exception):
+                asyncio.get_event_loop().create_task(posted.delete())
+
+    async def _bg_delete(self, posted: Any) -> None:
         try:
             await posted.delete()
         except Exception as e:  # noqa: BLE001

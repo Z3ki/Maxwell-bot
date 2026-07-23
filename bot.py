@@ -7093,9 +7093,8 @@ class MaxwellBot(commands.Bot):
             # to the tool dispatch so the same Discord message transitions from
             # "working on it…" to "tool_name: reasoning" and gets deleted when
             # tools finish. If no tool calls (plain text reply), stop the
-            # progress now so it's gone before the reply is sent. stop()
-            # awaits the Discord delete, so the message is removed before the
-            # reply posts — no lingering "working on it…" next to the reply.
+            # progress now (fire-and-forget delete) so the caller can post the
+            # reply immediately without waiting on a Discord round-trip.
             first_dispatch_progress = gen_progress if native_calls else None
             if gen_progress is not None and not native_calls:
                 with contextlib.suppress(Exception):
