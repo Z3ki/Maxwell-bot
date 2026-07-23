@@ -555,27 +555,23 @@ class ToolProgress:
             self._deferred_task.cancel()
 
     async def stop(self) -> None:
-        """Delete the progress message IMMEDIATELY — no drain edit.
+        """Delete the progress message immediately — awaited, no edit.
 
-        2026-07-21: user reported the progress message was sitting
-        there "waiting for an update" instead of vanishing the moment
-        the bot's response was ready. The previous design did a final
-        best-effort ``edit()`` before the ``delete()``; that edit
-        awaited a network round-trip (and could be rate-limited / 404 /
-        take 200-500ms) so the user saw a stale "thinking…" message
-        sitting next to the now-arrived reply for a beat.
+        2026-07-22: the previous design scheduled the delete as a
+        background task (fire-and-forget) so the caller wouldn't wait on
+        a Discord round-trip. But the caller then posted the reply as an
+        AWAITED send, which ran first — so the user saw the stale
+        "working on it…" sit next to the reply for a beat before the
+        background delete caught up ("too slow to delete"). Earlier
+        versions also did a final drain edit() before the delete, which
+        made the message visibly change content then vanish ("reappears
+        then disappears").
 
-        New contract: the instant the response is ready, the progress
-        message must be gone. We fire the delete (and any final
-        best-effort edit) as a background task so the caller can move
-        on to posting the reply without waiting on Discord.
-
-        The final edit is still attempted — just not awaited. If the
-        edit and the delete race, Discord handles it gracefully (the
-        user sees a fresh message either way; if the edit lands first
-        they see the latest reasoning for ~50ms, if not the delete
-        wins and they just see the reply). The user is NEVER left
-        waiting on progress.
+        New contract: stop() AWAITS the delete. Yes, the caller waits
+        ~100-300ms on one Discord round-trip, but that's the price of
+        guaranteeing the message is gone BEFORE the reply posts — no
+        race, no flicker, no stale placeholder. No final edit; the reply
+        is the real content.
         """
         if self._stopped:
             return
@@ -591,46 +587,12 @@ class ToolProgress:
         if self._platform != "discord":
             self._posted = None
             return
-        # Capture the posted message locally and clear our reference
-        # immediately so a follow-up call (e.g. transition_to_final
-        # racing with stop) sees ``_posted is None`` and bails. This
-        # is what makes stop() actually "immediate" from the caller's
-        # perspective: the moment stop() returns, the UI is gone.
         posted = self._posted
         self._posted = None
-        # Schedule the final drain + delete in the background. We do
-        # NOT await either — the user has their reply on the way, we
-        # should not make them wait on a Discord round-trip.
-        try:
-            asyncio.create_task(self._background_drain_and_delete(posted))
-        except RuntimeError:
-            # No running loop (e.g. test teardown). Fall back to a
-            # best-effort synchronous-ish path: just delete, skip
-            # the final edit. Better than leaking the message.
-            with contextlib.suppress(Exception):
-                asyncio.get_event_loop().create_task(posted.delete())
-
-    async def _background_drain_and_delete(self, posted: Any) -> None:
-        """Delete the progress message immediately. Never awaited by the caller.
-
-        2026-07-22: the previous design did a final ``edit()`` here to
-        show the model's "last words" before the delete. That final edit
-        was fire-and-forget and ran AFTER stop() returned, so it raced
-        with the bot's newly-posted reply: the user saw the stale
-        "working on it…"/"thinking: …" message visibly CHANGE content
-        (the drain edit landed) and then vanish a beat later — reported
-        as "the progress message reappears then disappears after the
-        reply is sent". The final edit was only ever a cosmetic nice-
-        to-have; the reply itself is the real content. Skip it and just
-        delete so the message is gone the instant stop() fires.
-        """
         try:
             await posted.delete()
         except Exception as e:  # noqa: BLE001
             logger.debug("Progress delete failed: %s", e)
-
-
-
 
     async def transition_to_final(self, content: str) -> bool:
         """Replace the live progress message with the final reply.

@@ -8,7 +8,7 @@ Maxwell is a Discord self-bot backed by any OpenAI-compatible API. It reads text
 
 - Multimodal input: images, audio, video, text files, and Discord embeds are forwarded to the model with normalized video, extracted frames, and extracted audio.
 - Visual memory: recent images persist across messages per channel (configurable depth).
-- Tool system: image generation (Pollinations, NVIDIA NIM, GPT-compatible), web search, URL fetch, YouTube transcript/frame extraction, arbitrary file sending, meme/media sending, shell execution, polls, invites, site generation, avatar/presence/nickname changes, message editing/forwarding/deletion, and more.
+- Tool system: image generation (NVIDIA NIM, GPT-compatible), web search, URL fetch, YouTube transcript/frame extraction, arbitrary file sending, meme/media sending, shell execution, polls, invites, site generation, avatar/presence/nickname changes, message editing/forwarding/deletion, live tool-call progress messages, and more.
 - Autonomy: periodic self-directed checks where Maxwell reviews context/goals and decides whether to act without running a decider on every few messages.
 - Per-server custom prompts, long-term memory, and scoped cross-context facts across DMs, servers, groups, and channels.
 - Opt-in REM "dreaming" pass that periodically consolidates recent visible traffic into long-term memory.
@@ -145,10 +145,9 @@ auto-starting the background loop. Restart the bot to apply.
 
 | Variable | Description |
 |---|---|
-| `POLLINATIONS_MODEL` | Free image generator model (default: `flux`) |
-| `NVIDIA_API_KEY` | NVIDIA NIM key for `hd_image` |
+| `NVIDIA_API_KEY` | NVIDIA NIM key for `image_generator` (Flux) and `hd_image` |
 | `NVIDIA_IMAGE_URL` | NVIDIA NIM endpoint |
-| `GPT_IMAGE_URL` / `GPT_IMAGE_API_KEY` | Optional GPT-Image-1 compatible endpoint |
+| `GPT_IMAGE_URL` / `GPT_IMAGE_API_KEY` | Optional GPT-Image-2 compatible endpoint for `hd_image` |
 
 ### Admin API / dashboard
 
@@ -220,6 +219,7 @@ All commands use the `,` prefix. Admin commands require the user to be in the ad
 | `,context forget <id>` | Yes | Delete a shared context fact |
 | `,context private <id>` | Yes | Mark a shared context fact private |
 | `,context global <id>` | Yes | Promote a fact to global shared context |
+| `,progress on` / `,progress off` / `,progress status` | Yes | Toggle live "thinking: …" progress messages during tool calls, per server (off by default; DMs never get them) |
 | `,rem` | Yes | Show REM status and last audit preview |
 | `,rem now` | Yes | Trigger one REM dream pass immediately |
 | `,rem on` / `,rem off` | Yes | Enable or disable REM for this process |

@@ -7092,19 +7092,15 @@ class MaxwellBot(commands.Bot):
             # If the model returned tool calls, hand the generation progress off
             # to the tool dispatch so the same Discord message transitions from
             # "working on it…" to "tool_name: reasoning" and gets deleted when
-            # tools finish.  If no tool calls (plain text reply), KEEP the
-            # generation progress alive so the reply path below can
-            # transition_to_final() it in place — editing "working on it…"
-            # into the actual reply, no delete + fresh post, no flicker.
-            # 2026-07-22: previously this called gen_progress.stop() here for
-            # the no-tool case, which fired a background delete while the
-            # reply posted underneath. The delete task raced the reply send
-            # (fire-and-forget vs an awaited send), so the user saw the stale
-            # "working on it…" linger next to the reply for a beat before
-            # vanishing — reported as "the progress message is too slow to
-            # delete / reappears then disappears". Letting it live and
-            # transition in place removes the race entirely.
+            # tools finish. If no tool calls (plain text reply), stop the
+            # progress now so it's gone before the reply is sent. stop()
+            # awaits the Discord delete, so the message is removed before the
+            # reply posts — no lingering "working on it…" next to the reply.
             first_dispatch_progress = gen_progress if native_calls else None
+            if gen_progress is not None and not native_calls:
+                with contextlib.suppress(Exception):
+                    await gen_progress.stop()
+                gen_progress = None
             # Track token usage from provider
             usage = self._usage_from(response)
             if usage:
