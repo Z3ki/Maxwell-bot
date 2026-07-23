@@ -2965,6 +2965,99 @@
           ]),
         ]);
 
+        // Aux model config card — background context-manager brains
+        // (REM, context-cleanup, context-watcher). Separate from the
+        // autonomy tick loop so they can run on a different model.
+        const auxCard = el("div", { class: "card" }, [
+          el("h3", {}, "Aux model (context manager)"),
+          el(
+            "p",
+            { class: "subtle" },
+            "Background agents: REM, context-cleanup, and the context watcher. Leave blank to fall back to the autonomy model, then the main model.",
+          ),
+          el("div", { class: "stack" }, [
+            el("div", {}, [
+              el("label", { class: "label" }, "Base URL"),
+              el("input", {
+                class: "field",
+                id: "auxBaseUrl",
+                value: c.aux_base_url || "",
+                placeholder: "blank = autonomy → main",
+              }),
+            ]),
+            el("div", { class: "row" }, [
+              el("div", { class: "grow" }, [
+                el("label", { class: "label" }, "API key"),
+                el("input", {
+                  class: "field",
+                  id: "auxApiKey",
+                  type: "password",
+                  value: c.aux_api_key || "",
+                  placeholder: "blank = autonomy → main",
+                }),
+              ]),
+              el(
+                "button",
+                {
+                  class: "btn sm",
+                  onClick: () => {
+                    const e = $("#auxApiKey");
+                    e.type = e.type === "password" ? "text" : "password";
+                  },
+                },
+                "show",
+              ),
+            ]),
+            el("div", {}, [
+              el("label", { class: "label" }, "Model name"),
+              el("input", {
+                class: "field",
+                id: "auxModel",
+                value: c.aux_model || "",
+                placeholder: "blank = autonomy → main",
+              }),
+            ]),
+            el("div", { class: "switch-line", style: { padding: "6px 0" } }, [
+              el("div", { class: "text" }, [
+                el("b", {}, "Disable reasoning"),
+                el(
+                  "small",
+                  {},
+                  "For endpoints that reject reasoning (e.g. NVIDIA)",
+                ),
+              ]),
+              switchToggle(
+                c.aux_disable_reasoning !== false,
+                (v) => null,
+                { id: "auxDisableReasoning" },
+              ),
+            ]),
+            el(
+              "button",
+              {
+                class: "btn primary",
+                onClick: async () => {
+                  const body = {
+                    aux_base_url: $("#auxBaseUrl").value,
+                    aux_api_key: $("#auxApiKey").value,
+                    aux_model: $("#auxModel").value,
+                    aux_disable_reasoning: $("#auxDisableReasoning")
+                      .checked,
+                  };
+                  await api("/api/control", {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body),
+                  });
+                  toast("Saved", "ok");
+                  loadAll();
+                },
+              },
+              "Save aux config",
+            ),
+          ]),
+        ]);
+
         // Last thought card
         const thoughtCard = el("div", { class: "card" }, [
           el("h3", {}, "Last thought"),
@@ -2994,6 +3087,7 @@
           el("div", { class: "grid g-2" }, [
             engine,
             modelCard,
+            auxCard,
             thoughtCard,
             renderAutonomyBlacklist(c),
           ]),
