@@ -357,8 +357,18 @@ USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
 CHANNEL_MENTION_RE = re.compile(r"<#(\d+)>")
 ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
 TOOL_LINE_RE = re.compile(r"(?im)^\s*(?:TOOL|CALL)\s+([A-Za-z_]\w*)\s*[:\-]?\s*")
+# Memory-trace lines written by _remember_tool_call have the shape
+#   "Called <name> with {<json>} -> <result>"
+# where <result> is "Tool <name>: <text>", a "__MARKER__ ...", or plain
+# text (e.g. "Reacted with 👍"). These are internal channel-memory
+# entries; when the model echoes one as its visible reply it is a leak.
+# The previous regex required "-> __MARKER__" and so missed the common
+# react / send_message traces that read "-> Tool react: Reacted with 👍"
+# or "-> Tool send_message: __MESSAGE_SENT__ …", which then got posted
+# to the channel verbatim (user-reported: bot posting its own tool
+# trace). Match the full memory-trace line shape instead.
 TOOL_TRACE_LINE_RE = re.compile(
-    r"(?im)^\s*Called\s+[A-Za-z_]\w*\s+with\s+\{.*?\}\s*->\s*__\w+__.*$"
+    r"(?im)^\s*Called\s+[A-Za-z_]\w*\s+with\s+\{.*?\}\s*->\s*.+$"
 )
 TEXT_ATTACHMENT_MAX_BYTES = 512 * 1024
 TEXT_ATTACHMENT_MAX_CHARS = 50_000
