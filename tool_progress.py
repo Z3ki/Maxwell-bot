@@ -611,22 +611,19 @@ class ToolProgress:
                 asyncio.get_event_loop().create_task(posted.delete())
 
     async def _background_drain_and_delete(self, posted: Any) -> None:
-        """Best-effort final edit + delete. Never awaited by the caller.
+        """Delete the progress message immediately. Never awaited by the caller.
 
-        The final edit shows the model's last words before the message
-        disappears (a nice-to-have), then the delete removes the
-        message entirely. Both are best-effort — Discord failures are
-        logged at debug level and swallowed. This task is fire-and-
-        forget; the bot's reply is already on its way and the user
-        must not wait on us.
+        2026-07-22: the previous design did a final ``edit()`` here to
+        show the model's "last words" before the delete. That final edit
+        was fire-and-forget and ran AFTER stop() returned, so it raced
+        with the bot's newly-posted reply: the user saw the stale
+        "working on it…"/"thinking: …" message visibly CHANGE content
+        (the drain edit landed) and then vanish a beat later — reported
+        as "the progress message reappears then disappears after the
+        reply is sent". The final edit was only ever a cosmetic nice-
+        to-have; the reply itself is the real content. Skip it and just
+        delete so the message is gone the instant stop() fires.
         """
-        try:
-            content = self._render()
-            if content and content != self._last_content:
-                with contextlib.suppress(Exception):
-                    await posted.edit(content=content)
-        except Exception as e:  # noqa: BLE001
-            logger.debug("Final progress drain edit failed: %s", e)
         try:
             await posted.delete()
         except Exception as e:  # noqa: BLE001

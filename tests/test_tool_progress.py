@@ -504,12 +504,18 @@ def test_tick_is_noop_after_stop():
     assert len(msg.channel.edited) == edits_before
 
 
-def test_stop_drains_final_tick_before_delete():
-    """A tick that fired <_TOKEN_TICK_INTERVAL before stop() gets its
-    content cached in the buffer but never rendered — without a drain
-    in stop(), the user stares at the second-to-last update while the
-    tool runs. stop() must do a final best-effort edit so the message
-    reflects the latest model state when it disappears."""
+def test_stop_deletes_without_final_edit():
+    """stop() must delete the progress message WITHOUT a final drain edit.
+
+    2026-07-22: the previous design did a final edit() in stop() to show
+    the model's "last words" before the delete. That edit was fire-and-
+    forget and ran AFTER stop() returned, racing the bot's reply send —
+    the user saw the stale progress message visibly change content then
+    vanish a beat later (reported as "reappears then disappears"). The
+    fix: stop() just deletes. A tick that fired right before stop() may
+    leave its text unrendered in the buffer, but the reply itself is the
+    real content, so losing the final progress update is the correct
+    trade-off for a clean, flicker-free delete."""
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
@@ -522,13 +528,11 @@ def test_stop_drains_final_tick_before_delete():
     asyncio.run(prog.tick(reasoning_delta="Final thought before tool runs."))
     # The buffer accumulated, but the rate-limit blocked the edit.
     assert "Final thought" in prog._reasoning_buffer
-    # Now stop() — must do one last edit so the user sees the final
-    # reasoning before the message disappears.
+    # stop() must NOT do a final edit (that races the reply and flickers).
     edits_before_stop = len(msg.channel.edited)
     asyncio.run(prog.stop())
-    assert len(msg.channel.edited) > edits_before_stop
-    assert "Final thought" in msg_obj.content
-    # And then the message was deleted.
+    assert len(msg.channel.edited) == edits_before_stop
+    # And the message was deleted.
     assert msg_obj in msg.channel.deleted
 
 
