@@ -916,6 +916,17 @@ LEAKED_CONTEXT_MARKER_RE = re.compile(
     r")\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
+# 2026-07-25: the model (minimax-m3) sometimes uses the transcript's
+# `Name(snowflake_id)` speaker-attribution format to mention users instead
+# of the proper Discord `<@snowflake_id>` ping. Convert any `@Name(id)` or
+# `Name(id)` followed by a 17-20 digit snowflake into a real Discord mention.
+# Also fix `<<url>>` (double-wrapped) and `<url>` (single-wrapped) — the
+# model shouldn't be doing Discord no-preview formatting at all.
+TRANSCRIPT_MENTION_RE = re.compile(
+    r"@?[A-Za-z0-9_.\- ]{1,32}?\((\d{17,20})\)"
+)
+DOUBLE_WRAPPED_URL_RE = re.compile(r"<<(https?://[^>]+)>>")
+WRAPPED_URL_RE = re.compile(r"<(https?://[^>\s]+)>")
 # Aggressive remover for pipe-style special tokens (these are not full XML blocks with bodies).
 # Full XML tool blocks (even malformed <tool_send_xxx>) are handled via _iter range removal in strip_tool_payload_leaks.
 TOKEN_ARTIFACT_RE = re.compile(
@@ -1210,6 +1221,12 @@ def strip_tool_payload_leaks(text: str) -> str:
     # media-manifest lines, [RESPOND TO THIS] tags) the model echoed back.
     # These are code-generated and never valid visible output.
     cleaned = LEAKED_CONTEXT_MARKER_RE.sub("", cleaned)
+    # 2026-07-25: convert transcript-format mentions (@Name(snowflake_id) or
+    # Name(snowflake_id)) to proper Discord pings (<@snowflake_id>), and fix
+    # double/single-wrapped URLs the model emits (<<url>> → url, <url> → url).
+    cleaned = DOUBLE_WRAPPED_URL_RE.sub(r"\1", cleaned)
+    cleaned = WRAPPED_URL_RE.sub(r"\1", cleaned)
+    cleaned = TRANSCRIPT_MENTION_RE.sub(r"<@\1>", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     if len(cleaned) < len(original) * 0.95 and logger.isEnabledFor(logging.DEBUG):
         # Significant sanitization happened; helps debug persistent leak issues without always logging.
@@ -7847,13 +7864,18 @@ class MaxwellBot(commands.Bot):
         try:
             if (
                 name == "send_message"
-                and getattr(message, "guild", None)
                 and isinstance(params.get("content"), str)
             ):
                 params = dict(params)
-                params["content"] = self._render_custom_emojis(
-                    params.get("content", ""), message.guild
-                )
+                content = params.get("content", "")
+                # 2026-07-25: apply the same leak/mention/URL sanitization
+                # to send_message content as the raw-text reply path.
+                # The model puts @Name(snowflake_id) mentions and <<url>>
+                # double-wrapped URLs into send_message content too.
+                content = strip_tool_payload_leaks(content)
+                if getattr(message, "guild", None):
+                    content = self._render_custom_emojis(content, message.guild)
+                params["content"] = content
             if name in disabled:
                 result_text = "Error - tool is disabled"
             elif name not in compatible:
@@ -8808,17 +8830,13 @@ class MaxwellBot(commands.Bot):
 
         system_parts = [
             MAXWELL_CORE_RULES
-            + "\n\nThe conversation history below is real — you said those things, those "
-            "people said those things. Use it as background context (running jokes, "
-            "follow-ups, what was just said), but only RESPOND to the latest message. "
-            "Everything earlier is context for you, not a queue of unanswered questions — "
-            "never answer multiple turns, never address prior speakers who didn't ping you, "
-            "never re-summarise the thread.\n"
+            + "\n\nThe conversation history is wrapped in <previous_conversation> tags below. It is CONTEXT for you to READ, NOT content to repeat. NEVER echo, replay, quote, or paraphrase messages from the history — your reply must be NEW content responding only to the latest message marked [RESPOND TO THIS]. If you catch yourself copying a line from the history, stop: that is a bug, not a reply. Use the history for background (running jokes, follow-ups, what was just said), but only RESPOND to the latest message. Everything earlier is context, not a queue of unanswered questions — never answer multiple turns, never address prior speakers who didn't ping you, never re-summarise the thread.\n"
+            "To ping a user, output EXACTLY the raw token <@USER_ID> with nothing else around it — no backticks, no code blocks, no markdown, no @Name(ID) format.\n"
             "Match the channel's vibe. Discord markdown (`code`, ```blocks```, quotes, "
             "bullets, emphasis) when it helps. Plain text when it doesn't. Lowercase-natural "
             "by default; no asterisk actions, no 'as an AI' meta-commentary.",
             "Your official server is https://discord.gg/RGnXrTmWBu — share it when someone asks where to find you, your updates, status, or your community. Don't pretend it's something it isn't.",
-            "SPEAKER ATTRIBUTION (critical): every line in the transcript below is prefixed with the speaker's name and Discord ID in the form 'Name(snowflake_id): text'. Two different people are two different speakers even if their nicknames look similar — always tie a statement to the ID shown, never to a vague 'they said'. Your own past lines have role 'assistant' and NO name prefix: that's you (Maxwell), not a user. Never attribute a user's words to another user, never attribute a user's words to yourself, and never claim 'X said' when the transcript shows a different ID said it. If you're unsure who said something, say you're unsure rather than guess.",
+            "SPEAKER ATTRIBUTION (critical): inside <previous_conversation>, user lines are prefixed 'Name(snowflake_id): text' and your own past lines are prefixed '[Maxwell] text'. Two different people are two different speakers even if their nicknames look similar — always tie a statement to the ID shown, never to a vague 'they said'. Never attribute a user's words to another user, never attribute a user's words to yourself, and never claim 'X said' when the transcript shows a different ID said it. If you're unsure who said something, say you're unsure rather than guess.",
         ]
         server_id = str(message.guild.id) if message.guild else "DM"
         _jailbreak_enabled = getattr(self, "_jailbreak_enabled", None)
@@ -9186,8 +9204,32 @@ class MaxwellBot(commands.Bot):
             while merged and used > budget:
                 used -= len(merged[0].get("_rendered", ""))
                 merged.pop(0)
-            for turn in merged:
-                messages.append({"role": turn["role"], "content": turn["_rendered"]})
+            # 2026-07-25: wrap ALL conversation history in a single user
+            # message with <previous_conversation> delimiters. The old code
+            # appended each turn as a separate user/assistant message with
+            # `Name(snowflake_id): text` format — the model (minimax-m3)
+            # couldn't tell "history I read" from "content I produce" and
+            # just parroted the transcript back verbatim, including its own
+            # previous replies and the internal metadata block. Wrapping
+            # everything in one delimited block makes the model treat it as
+            # CONTEXT to read, not content to echo. Bot's own lines get a
+            # [Maxwell] prefix since we lose the role=assistant signal.
+            if merged:
+                history_lines = []
+                for turn in merged:
+                    content = turn.get("_rendered", "")
+                    if turn["role"] == "assistant":
+                        history_lines.append(f"[Maxwell] {content}")
+                    else:
+                        history_lines.append(content)
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "<previous_conversation>\n"
+                        + "\n".join(history_lines)
+                        + "\n</previous_conversation>",
+                    }
+                )
         # The live message is appended as a final user turn below. The
         # historical channel turns above give the model full context of
         # who-said-what, but per the persona rules the bot only RESPONDS
