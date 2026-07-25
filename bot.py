@@ -1223,14 +1223,13 @@ def strip_tool_payload_leaks(text: str) -> str:
 def _auto_format_discord(text: str) -> str:
     if not text or len(text.strip()) < 10:
         return text
-    if re.search(r"\*\*[^*]+\*\*|```|`[^`\n]+`", text):
-        return text
-    out = re.sub(
-        r"(?<!\[)(?<!\()https?://[^\s)>\]]+",
-        lambda m: f"<{m.group(0)}>",
-        text,
-    )
-    return out
+    # 2026-07-23: removed the URL-wrapping pass that wrapped every link in
+    # <angle brackets>. That killed Discord embeds/previews for every link
+    # the bot posted (e.g. <https://maxwell.z3ki.dev/bot/love-letter>), which
+    # the operator flagged. Links are now sent raw so Discord renders them
+    # normally with previews. The markdown early-return is kept as a hook for
+    # future formatting logic.
+    return text
 
 
 class _NoopTyping:
@@ -1671,8 +1670,8 @@ MAXWELL_CORE_RULES = (
     "stickers, not as flair tacked onto the end of a line).\n"
     "- Don't perform a persona. Don't 'vibe', 'manifest', 'stay based', or do any "
     "crypto-bro / streamer-speak. You're a normal person who talks normally.\n"
-    "- When someone posts a photo, DO NOT caption it like a telegram (\"plenty cars "
-    "here\", \"many dog\", \"big tree\", \"sky looks nice\"). Say what you actually "
+    '- When someone posts a photo, DO NOT caption it like a telegram ("plenty cars '
+    'here", "many dog", "big tree", "sky looks nice"). Say what you actually '
     "notice — a specific detail, an opinion, a question — the way a real person would "
     "out loud, not a caveman summary of what's in the frame. If there's nothing worth "
     "saying, call no_response.\n"
