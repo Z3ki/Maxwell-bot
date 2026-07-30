@@ -879,8 +879,8 @@
             api("/api/status"),
             api("/api/system"),
             api("/data/bot_control.json"),
-            api("/data/long_term_memory.json"),
-            api("/data/memory.json"),
+            api("/api/rag/ltm"),
+            api("/api/rag/memory"),
             api("/api/context"),
             api("/data/sites.json"),
             api("/data/prompts.json"),
@@ -1248,8 +1248,13 @@
         }
       }
       function memory() {
+        const ragStats = S.memoryJson || {};
+        const totalVec = ragStats.total_vectors || 0;
+        const embedded = ragStats.embedded || 0;
+        const pending = totalVec - embedded;
+        const embedPct = totalVec > 0 ? Math.round((embedded / totalVec) * 100) : 0;
         $("memory").innerHTML =
-          `<div class="card" style="margin-top:12px"><h3>Add Memory</h3><textarea id="newmem" class="field"></textarea><button id="addmem" class="btn primary">Add</button></div><div class="card" style="margin-top:12px"><h3>Long-Term Memory</h3><div class="table"><table><thead><tr><th>ID</th><th>Content</th><th></th></tr></thead><tbody>${S.memory.map((m) => `<tr><td class="mono">${sid(m.id)}</td><td><textarea class="field" data-mem="${sid(m.id)}">${esc(m.content)}</textarea></td><td><button class="btn small" data-save-mem="${sid(m.id)}">Save</button> <button class="btn small red" data-del-mem="${sid(m.id)}">Delete</button></td></tr>`).join("")}</tbody></table></div></div>`;
+          `<div class="card" style="margin-top:12px"><h3>RAG Vector Memory</h3><div class="list"><div class="item"><b>Embedding model</b><span class="mono muted">qwen3-embedding:0.6b (1024-dim)</span></div><div class="item"><b>Total vectors</b><span>${totalVec}</span></div><div class="item"><b>Embedded</b><span>${embedded} / ${totalVec} (${embedPct}%)</span></div>${pending > 0 ? `<div class="item"><b>Pending</b><span style="color:var(--yellow)">${pending} vectors awaiting embedding</span></div>` : ""}<div class="item"><b>Messages</b><span>${ragStats.messages || 0} across ${ragStats.channels || 0} channels</span></div><div class="item"><b>Long-term facts</b><span>${ragStats.ltm || 0}</span></div><div class="item"><b>Shared context</b><span>${ragStats.shared_context || 0}</span></div></div></div><div class="card" style="margin-top:12px"><h3>Add Memory</h3><textarea id="newmem" class="field"></textarea><button id="addmem" class="btn primary">Add</button></div><div class="card" style="margin-top:12px"><h3>Long-Term Memory</h3><div class="table"><table><thead><tr><th>ID</th><th>Content</th><th></th></tr></thead><tbody>${S.memory.map((m) => `<tr><td class="mono">${sid(m.id)}</td><td><textarea class="field" data-mem="${sid(m.id)}">${esc(m.content)}</textarea></td><td><button class="btn small" data-save-mem="${sid(m.id)}">Save</button> <button class="btn small red" data-del-mem="${sid(m.id)}">Delete</button></td></tr>`).join("")}</tbody></table></div></div>`;
         $("addmem").onclick = async () => {
           await api("/api/memory", {
             method: "POST",
@@ -1307,24 +1312,10 @@
         $("context").innerHTML =
           `<div class="card" style="margin-top:12px"><h3>Cross-context</h3><p class="muted">Inject relevant facts from other channels/users/guilds into the prompt. Turn off to keep the bot's context strictly local to the current channel.</p><label class="switchline"><span>Cross-context enabled</span><span class="switch"><input id="ctxCrossToggle" type="checkbox" ${S.control.cross_context_enabled !== false ? "checked" : ""}><span class="knob"></span></span></label></div><div class="card" style="margin-top:12px">
     <h3>Context Cleanup Agent</h3>
-    <p class="muted">A janitor that reviews shared context on a schedule and deletes duplicates / weird garbage, merges near-duplicates, and edits messy entries. Uses the SAME model as Autonomy and REM. Every mutation goes through the locked memory API, so the on-add dedup/eviction still applies.</p>
-    <div class="item">${badge(on ? "enabled" : "disabled", on ? "ok" : "")} ${badge(c.running ? "running" : "idle", c.running ? "warn" : "")}
-      <div class="muted">interval <b>${esc(interval)}</b>s · last run <b>${esc(agoText)}</b> · duration <b>${c.last_duration != null ? Number(c.last_duration).toFixed(1) + "s" : "-"}</b></div>
-      <div class="muted">passes <b>${esc(c.passes_total || 0)}</b> · ops applied <b>${esc(c.ops_applied_total || 0)}</b> · skipped <b>${esc(c.ops_skipped_total || 0)}</b></div>
+    <p class="muted">The Context Cleanup Agent has been replaced by the RAG vector memory system. Memory cleanup is now automatic — the SQLite vector store handles deduplication, pruning, and semantic search without a separate janitor process.</p>
+    <div class="item">${badge("removed", "bad")} ${badge("RAG active", "ok")}
+      <div class="muted">The old context_cleanup.py engine is no longer imported or running.</div>
     </div>
-    <div class="row" style="margin-top:8px">
-      <button class="btn small" data-cleanup="run">Run now</button>
-      <button class="btn small green" data-cleanup="enable">Enable</button>
-      <button class="btn small red" data-cleanup="disable">Disable</button>
-    </div>
-    <div class="row" style="margin-top:8px">
-      <input id="cleanupInterval" class="field" style="max-width:120px" type="number" min="300" value="${esc(interval)}" placeholder="seconds">
-      <button id="cleanupIntervalBtn" class="btn small">Set interval</button>
-      <button class="btn small red" data-cleanup="clear-log">Clear log</button>
-    </div>
-    ${c.last_error ? `<div style="margin-top:8px;color:var(--red)"><b>Last error:</b> ${esc(c.last_error)}</div>` : ""}
-    <details style="margin-top:8px"><summary class="muted" style="cursor:pointer">Last audit</summary><pre style="margin-top:6px">${esc(c.last_audit || "No cleanup run yet.")}</pre></details>
-    <details style="margin-top:8px"><summary class="muted" style="cursor:pointer">Recent passes (${logEntries.length})</summary><div class="list" style="margin-top:6px">${logEntries.map((e) => `<div class="item"><div class="row"><span class="mono muted">${esc((e.timestamp || "").slice(0, 19))}</span> <span class="badge ${e.error ? "bad" : "ok"}">${esc(e.error ? "error" : "ok")}</span> <span class="muted">applied ${esc(e.ops_applied || 0)} · skipped ${esc(e.ops_skipped || 0)} · ${esc(Number(e.duration || 0).toFixed(1))}s</span></div><div class="muted">${esc(e.audit || "")}</div>${e.error ? `<div style="color:var(--red);font-size:12px;margin-top:4px">${esc(e.error)}</div>` : ""}</div>`).join("") || '<div class="muted">No passes yet.</div>'}</div></details>
   </div>
   <div class="card" style="margin-top:12px">
     <h3>Add Context</h3>

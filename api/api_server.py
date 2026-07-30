@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import time
 import uuid as _uuid
 from pathlib import Path
@@ -53,6 +54,59 @@ from utils import (  # noqa: E402 - fd-safe atomic writes
 )
 
 DATA_DIR = Path(os.getenv("DATA_DIR", APP_ROOT / "data"))
+
+# RAG vector memory SQLite DB (managed by rag_memory.RAGMemoryManager in the bot
+# process). The API server opens it read/write for stats + LTM admin edits. We
+# use a fresh connection per request with check_same_thread=False so we never
+# share a cursor across the aiohttp event-loop's thread pool.
+RAG_DB_PATH = DATA_DIR / "maxwell_rag.db"
+RAG_EMBED_MODEL = "qwen3-embedding:0.6b"
+
+
+def _rag_db() -> sqlite3.Connection:
+    """Open a short-lived SQLite connection to the RAG vector DB.
+
+    Caller is responsible for closing it (or use the `_rag_query`/`_rag_exec`
+    helpers which close automatically). WAL mode means concurrent readers +
+    one writer from the bot process coexist safely.
+    """
+    conn = sqlite3.connect(str(RAG_DB_PATH), check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _rag_query(sql: str, params: tuple = ()) -> list:
+    """Run a SELECT and return all rows, closing the connection after."""
+    conn = _rag_db()
+    try:
+        return conn.execute(sql, params).fetchall()
+    finally:
+        conn.close()
+
+
+def _rag_query_one(sql: str, params: tuple = ()):
+    """Run a SELECT and return one row (or None), closing after."""
+    conn = _rag_db()
+    try:
+        return conn.execute(sql, params).fetchone()
+    finally:
+        conn.close()
+
+
+def _rag_exec(sql: str, params: tuple = ()) -> sqlite3.Cursor:
+    """Run an INSERT/UPDATE/DELETE (autocommit), closing after.
+
+    Returns the cursor so the caller can read .rowcount / .lastrowid before
+    the connection is closed.
+    """
+    conn = _rag_db()
+    try:
+        cur = conn.execute(sql, params)
+        conn.commit()
+        return cur
+    finally:
+        conn.close()
+
 
 from api.config import (  # noqa: E402
     API_HOST,
@@ -111,12 +165,11 @@ async def data_file(request):
     file = request.match_info.get("file", "")
     if ".." in file or "/" in file or not file.endswith(".json"):
         return _json_response({"error": "bad file"}, 403)
-    # All data files require auth
+    # All data files require auth. memory.json / long_term_memory.json removed —
+    # memory now lives in the RAG SQLite DB, served via /api/rag/* endpoints.
     ALLOWED_FILES = {
         "sites.json",
         "prompts.json",
-        "memory.json",
-        "long_term_memory.json",
         "blacklist.json",
         "auto_channels.json",
         "bot_control.json",
@@ -133,6 +186,85 @@ async def data_file(request):
     if isinstance(data, list):
         return _json_response(data[:500])
     return _json_response(data)
+
+
+# ---------- RAG vector memory (replaces memory.json / long_term_memory.json) ----------
+async def rag_memory_stats(request):
+    """Per-channel message counts + overall RAG memory stats from SQLite.
+
+    Replaces the old /data/memory.json fetch for the admin dashboard.
+    """
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
+    try:
+        channels = _rag_query(
+            "SELECT channel_id, COUNT(*) as c, "
+            "MAX(timestamp) as last "
+            "FROM vectors WHERE kind='message' GROUP BY channel_id"
+        )
+        total_vectors = _rag_query_one("SELECT COUNT(*) as c FROM vectors")
+        embedded = _rag_query_one(
+            "SELECT COUNT(*) as c FROM vectors WHERE embedding IS NOT NULL"
+        )
+        messages = _rag_query_one(
+            "SELECT COUNT(*) as c FROM vectors WHERE kind='message'"
+        )
+        context = _rag_query_one(
+            "SELECT COUNT(*) as c FROM vectors WHERE kind='shared_context'"
+        )
+        ltm = _rag_query_one("SELECT COUNT(*) as c FROM vectors WHERE kind='ltm'")
+        chan_list = [
+            {
+                "id": row["channel_id"],
+                "messages": row["c"],
+                "last": row["last"] or "",
+            }
+            for row in channels
+        ]
+        chan_list.sort(key=lambda x: x["messages"], reverse=True)
+        return _json_response(
+            {
+                "channels": chan_list,
+                "channel_count": len(chan_list),
+                "messages": messages["c"] if messages else 0,
+                "context": context["c"] if context else 0,
+                "ltm": ltm["c"] if ltm else 0,
+                "total_vectors": total_vectors["c"] if total_vectors else 0,
+                "embedded": embedded["c"] if embedded else 0,
+                "pending_embeddings": (total_vectors["c"] if total_vectors else 0)
+                - (embedded["c"] if embedded else 0),
+                "embed_model": RAG_EMBED_MODEL,
+            }
+        )
+    except sqlite3.Error as e:
+        return _json_response({"error": f"rag db: {e}"}, 500)
+
+
+async def rag_ltm_list(request):
+    """Return all long-term-memory entries from the RAG SQLite DB.
+
+    Replaces the old /data/long_term_memory.json fetch. Each entry has a
+    UUID id, content, and timestamp.
+    """
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
+    try:
+        rows = _rag_query(
+            "SELECT id, content, timestamp FROM vectors "
+            "WHERE kind='ltm' ORDER BY created_at ASC"
+        )
+        return _json_response(
+            [
+                {
+                    "id": row["id"],
+                    "content": row["content"],
+                    "timestamp": row["timestamp"],
+                }
+                for row in rows
+            ]
+        )
+    except sqlite3.Error as e:
+        return _json_response({"error": f"rag db: {e}"}, 500)
 
 
 async def context_get(request):
@@ -824,86 +956,40 @@ async def autonomy_log_clear(request):
     return _json_response({"ok": True})
 
 
-# ---------- Context cleanup agent ----------
+# ---------- Context cleanup agent (removed — RAG memory active) ----------
+# The old ContextCleanupEngine (context_cleanup.py) has been replaced by the
+# RAG vector memory system (rag_memory.py). These endpoints are kept as no-op
+# stubs so the admin dashboard and any external callers don't 404; they all
+# report that the engine has been removed.
+_CC_REMOVED = "context cleanup engine removed (RAG memory active)"
+
+
 async def context_cleanup_status(request):
     if not _has_admin_auth(request):
         return _json_response({"error": "unauthorized"}, 401)
-    return _json_response(_load_context_cleanup_status())
+    return _json_response({"enabled": False, "running": False, "removed": True})
 
 
 async def context_cleanup_run(request):
-    cmd_id, err = await _queue_command("context_cleanup_run")
-    if err:
-        return _json_response({"error": err}, 409)
-    return _json_response({"ok": True, "started": True, "id": cmd_id})
-
-
-async def _set_context_cleanup_enabled(enabled: bool, cmd_type: str):
-    async with _file_lock:
-        try:
-            control = _load_context_cleanup_control()
-            cmds = _load_commands_for_write()
-        except ValueError as exc:
-            return "", str(exc)
-        control["enabled"] = enabled
-        await atomic_json_write(_context_cleanup_control_path(), control)
-        cmd_id = str(_uuid.uuid4())[:8]
-        cmds.append(
-            {
-                "id": cmd_id,
-                "type": cmd_type,
-                "status": "pending",
-                "result": "",
-                "created_at": time.time(),
-            }
-        )
-        if len(cmds) > MAX_COMMANDS:
-            cmds = cmds[-MAX_COMMANDS:]
-        await atomic_json_write(_commands_path(), cmds)
-        return cmd_id, ""
+    return _json_response({"ok": True, "message": _CC_REMOVED})
 
 
 async def context_cleanup_enable(request):
-    cmd_id, err = await _set_context_cleanup_enabled(True, "context_cleanup_enable")
-    if err:
-        return _json_response({"error": err}, 409)
-    return _json_response({"ok": True, "enabled": True, "id": cmd_id})
+    return _json_response({"ok": True, "message": _CC_REMOVED})
 
 
 async def context_cleanup_disable(request):
-    cmd_id, err = await _set_context_cleanup_enabled(False, "context_cleanup_disable")
-    if err:
-        return _json_response({"error": err}, 409)
-    return _json_response({"ok": True, "enabled": False, "id": cmd_id})
+    return _json_response({"ok": True, "message": _CC_REMOVED})
 
 
 async def context_cleanup_interval(request):
-    try:
-        body = await request.json()
-    except Exception:
-        return _json_response({"error": "invalid json"}, 400)
-    try:
-        new_interval = max(300, int(body.get("interval_seconds", 1800)))
-    except (TypeError, ValueError):
-        return _json_response({"error": "interval_seconds must be >= 300"}, 400)
-    cmd_id, err = await _queue_command(
-        "context_cleanup_interval", {"interval_seconds": new_interval}
-    )
-    if err:
-        return _json_response({"error": err}, 409)
-    # Persist immediately so the dashboard reflects it before the bot picks up the command
-    async with _file_lock:
-        control = _load_context_cleanup_control()
-        control["interval_seconds"] = new_interval
-        await atomic_json_write(_context_cleanup_control_path(), control)
-    return _json_response({"ok": True, "interval_seconds": new_interval, "id": cmd_id})
+    return _json_response({"ok": True, "message": _CC_REMOVED})
 
 
 async def context_cleanup_log_clear(request):
     if not _has_admin_auth(request):
         return _json_response({"error": "unauthorized"}, 401)
-    await atomic_json_write(_context_cleanup_log_path(), {"entries": []})
-    return _json_response({"ok": True})
+    return _json_response({"ok": True, "message": _CC_REMOVED})
 
 
 # ---------- Command queue ----------
@@ -1160,18 +1246,18 @@ async def pm2_restart(request):
 async def channel_list(request):
     if not _has_admin_auth(request):
         return _json_response({"error": "unauthorized"}, 401)
-    mem = _safe_object(_load(DATA_DIR / "memory.json"))
-    out = []
-    for cid, msgs in mem.items():
-        out.append(
-            {
-                "id": str(cid),
-                "messages": len(msgs) if isinstance(msgs, list) else 0,
-                "last": msgs[-1].get("timestamp", "")
-                if isinstance(msgs, list) and msgs
-                else "",
-            }
+    # Read channel message counts directly from the RAG SQLite DB.
+    try:
+        rows = _rag_query(
+            "SELECT channel_id, COUNT(*) as c, MAX(timestamp) as last "
+            "FROM vectors WHERE kind='message' GROUP BY channel_id"
         )
+    except sqlite3.Error as e:
+        return _json_response({"error": f"rag db: {e}"}, 500)
+    out = [
+        {"id": row["channel_id"], "messages": row["c"], "last": row["last"] or ""}
+        for row in rows
+    ]
     out.sort(key=lambda x: x["messages"], reverse=True)
     return _json_response(out)
 
@@ -1182,19 +1268,82 @@ async def chat_history(request):
     cid = request.query.get("channel_id", "")
     if not cid:
         return _json_response({"error": "channel_id required"}, 400)
-    mem = _safe_object(_load(DATA_DIR / "memory.json"))
-    msgs = mem.get(cid, [])
-    return _json_response(msgs[-100:])
+    # Pull the last 100 messages for this channel from the RAG DB, oldest-first
+    # to match the old memory.json shape.
+    try:
+        rows = _rag_query(
+            "SELECT id, author, author_id, content, timestamp, metadata "
+            "FROM vectors WHERE kind='message' AND channel_id=? "
+            "ORDER BY created_at DESC LIMIT 100",
+            (str(cid),),
+        )
+    except sqlite3.Error as e:
+        return _json_response({"error": f"rag db: {e}"}, 500)
+    msgs = []
+    for row in reversed(rows):
+        entry = {
+            "author": row["author"],
+            "author_id": row["author_id"],
+            "content": row["content"],
+            "message_id": row["id"],
+            "timestamp": row["timestamp"],
+        }
+        try:
+            meta = json.loads(row["metadata"] or "{}")
+            if isinstance(meta, dict):
+                entry.update(meta)
+        except Exception:
+            pass
+        msgs.append(entry)
+    return _json_response(msgs)
 
 
 async def bot_status(request):
     if not _has_admin_auth(request):
         return _json_response({"error": "unauthorized"}, 401)
     control = _load_control()
-    mem = _safe_object(_load(DATA_DIR / "memory.json"))
     pm2 = await _pm2_json()
     bot_proc = next((p for p in pm2 if p.get("name") == "maxwell-bot"), None)
     api_proc = next((p for p in pm2 if p.get("name") == "maxwell-api"), None)
+    # RAG memory stats — read directly from the SQLite vector DB. Fall back to
+    # zeros if the DB is unavailable (e.g. first run before the bot creates it).
+    try:
+        chan_row = _rag_query_one(
+            "SELECT COUNT(DISTINCT channel_id) as c FROM vectors WHERE kind='message'"
+        )
+        msg_row = _rag_query_one(
+            "SELECT COUNT(*) as c FROM vectors WHERE kind='message'"
+        )
+        ctx_row = _rag_query_one(
+            "SELECT COUNT(*) as c FROM vectors WHERE kind='shared_context'"
+        )
+        ltm_row = _rag_query_one("SELECT COUNT(*) as c FROM vectors WHERE kind='ltm'")
+        total_row = _rag_query_one("SELECT COUNT(*) as c FROM vectors")
+        emb_row = _rag_query_one(
+            "SELECT COUNT(*) as c FROM vectors WHERE embedding IS NOT NULL"
+        )
+        rag_stats = {
+            "channels": chan_row["c"] if chan_row else 0,
+            "messages": msg_row["c"] if msg_row else 0,
+            "context": ctx_row["c"] if ctx_row else 0,
+            "ltm": ltm_row["c"] if ltm_row else 0,
+            "total_vectors": total_row["c"] if total_row else 0,
+            "embedded": emb_row["c"] if emb_row else 0,
+            "pending_embeddings": (total_row["c"] if total_row else 0)
+            - (emb_row["c"] if emb_row else 0),
+            "embed_model": RAG_EMBED_MODEL,
+        }
+    except sqlite3.Error:
+        rag_stats = {
+            "channels": 0,
+            "messages": 0,
+            "context": 0,
+            "ltm": 0,
+            "total_vectors": 0,
+            "embedded": 0,
+            "pending_embeddings": 0,
+            "embed_model": RAG_EMBED_MODEL,
+        }
     return _json_response(
         {
             "online": bool(
@@ -1213,11 +1362,7 @@ async def bot_status(request):
                     "cross_context_extract_enabled",
                 ]
             },
-            "stats": {
-                "channels": len(mem),
-                "messages": sum(len(v) for v in mem.values() if isinstance(v, list)),
-                "context": len(_load_context_entries()),
-            },
+            "stats": rag_stats,
             "pm2": {
                 "bot": {
                     "status": bot_proc.get("pm2_env", {}).get("status")
@@ -1472,30 +1617,14 @@ async def _options_handler(request):
     )
 
 
-# ---------- Long-term memory (one editable text file, line = one entry) ----------
-# Format is shared with the bot process (memory.add_long_term_memory et al.):
-# one non-empty line per entry, ids are positional 1..N, file is the source of
-# truth. We don't try to keep an in-memory cache here — the API process can
-# restart any time and the bot rewrites the file under its own lock.
-async def _read_memory_lines() -> list[str]:
-    path = _memory_text_path()
-    try:
-        raw = await asyncio.to_thread(path.read_text, "utf-8")
-    except OSError:
-        return []
-    return [_normalize_memory_line(line) for line in raw.splitlines() if line.strip()][
-        :MAX_LTM_LINES
-    ]
-
-
-async def _write_memory_lines(lines: list[str]) -> None:
-    cleaned = [_normalize_memory_line(line) for line in lines if line and line.strip()][
-        :MAX_LTM_LINES
-    ]
-    text = "\n".join(cleaned)
-    if text:
-        text += "\n"
-    await atomic_text_write(_memory_text_path(), text)
+# ---------- Long-term memory (RAG SQLite vector DB) ----------
+# The old file-based long_term_memory.txt is gone. LTM entries now live as rows
+# in the `vectors` table with kind='ltm'. IDs are UUIDs (uuid.uuid4().hex), not
+# positional integers. The bot's RAGMemoryManager owns embedding generation; the
+# API server just inserts/updates/deletes rows and leaves embedding NULL (the
+# bot will embed lazily on next search, or a background _embed_pending pass will
+# pick it up).
+_LTM_REMOVED_MSG = "context cleanup engine removed (RAG memory active)"
 
 
 async def memory_add(request):
@@ -1506,13 +1635,18 @@ async def memory_add(request):
     content = _normalize_memory_line(body.get("content", ""))
     if not content:
         return _json_response({"error": "empty"}, 400)
-    async with _file_lock:
-        lines = await _read_memory_lines()
-        if len(lines) >= MAX_LTM_LINES:
-            return _json_response({"error": "memory full"}, 409)
-        lines.append(content)
-        await _write_memory_lines(lines)
-    new_id = len(lines)
+    new_id = _uuid.uuid4().hex
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    try:
+        _rag_exec(
+            "INSERT INTO vectors "
+            "(id, kind, channel_id, author, author_id, content, embedding, "
+            "metadata, scope, importance, timestamp, created_at) "
+            "VALUES (?, 'ltm', '', '', '', ?, NULL, '{}', 'global', 5, ?, ?)",
+            (content, ts, time.time()),
+        )
+    except sqlite3.Error as e:
+        return _json_response({"error": f"rag db: {e}"}, 500)
     return _json_response(
         {"ok": True, "id": new_id, "entry": {"id": new_id, "content": content}}
     )
@@ -1523,36 +1657,47 @@ async def memory_update(request):
         body = await request.json()
     except Exception:
         return _json_response({"error": "invalid json"}, 400)
-    try:
-        target_id = int(body.get("id"))
-    except (TypeError, ValueError):
+    target_id = str(body.get("id") or "").strip()
+    if not target_id:
         return _json_response({"error": "id required"}, 400)
     content = _normalize_memory_line(body.get("content", ""))
-    async with _file_lock:
-        lines = await _read_memory_lines()
-        if target_id < 1 or target_id > len(lines):
+    if not content:
+        # An edit that empties the content is treated as a delete.
+        try:
+            cur = _rag_exec(
+                "DELETE FROM vectors WHERE id=? AND kind='ltm'", (target_id,)
+            )
+        except sqlite3.Error as e:
+            return _json_response({"error": f"rag db: {e}"}, 500)
+        if cur.rowcount == 0:
             return _json_response({"error": "not found"}, 404)
-        # An edit that empties the line is treated as a delete.
-        if not content:
-            del lines[target_id - 1]
-        else:
-            lines[target_id - 1] = content
-        await _write_memory_lines(lines)
+        return _json_response({"ok": True})
+    try:
+        cur = _rag_exec(
+            "UPDATE vectors SET content=?, embedding=NULL "
+            "WHERE id=? AND kind='ltm'",
+            (content, target_id),
+        )
+    except sqlite3.Error as e:
+        return _json_response({"error": f"rag db: {e}"}, 500)
+    if cur.rowcount == 0:
+        return _json_response({"error": "not found"}, 404)
     return _json_response({"ok": True})
 
 
 async def memory_delete(request):
     raw_id = request.query.get("id", "")
-    try:
-        target_id = int(raw_id)
-    except (TypeError, ValueError):
+    target_id = str(raw_id).strip()
+    if not target_id:
         return _json_response({"error": "id required"}, 400)
-    async with _file_lock:
-        lines = await _read_memory_lines()
-        if target_id < 1 or target_id > len(lines):
-            return _json_response({"error": "not found"}, 404)
-        del lines[target_id - 1]
-        await _write_memory_lines(lines)
+    try:
+        cur = _rag_exec(
+            "DELETE FROM vectors WHERE id=? AND kind='ltm'", (target_id,)
+        )
+    except sqlite3.Error as e:
+        return _json_response({"error": f"rag db: {e}"}, 500)
+    if cur.rowcount == 0:
+        return _json_response({"error": "not found"}, 404)
     return _json_response({"ok": True})
 
 
@@ -1564,6 +1709,8 @@ app.router.add_options(
     "/data/{file}",
     _options_handler,
 )
+app.router.add_get("/api/rag/memory", rag_memory_stats)
+app.router.add_get("/api/rag/ltm", rag_ltm_list)
 app.router.add_post("/api/memory", memory_add)
 app.router.add_put("/api/memory", memory_update)
 app.router.add_delete("/api/memory", memory_delete)
