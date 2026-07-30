@@ -1,6 +1,6 @@
 import asyncio
 
-from memory import RemEventLog
+from rag_memory import RemEventLog
 
 
 def test_rem_event_log_record_drain_cap_and_strip_reasoning(tmp_path):

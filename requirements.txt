@@ -10,3 +10,4 @@ yt-dlp>=2026.7.4
 yt-dlp-ejs>=0.8.0
 discord-ext-voice-recv==0.5.2a179
 gTTS>=2.5.0
+numpy>=1.26.0

@@ -1,6 +1,6 @@
 import asyncio
 
-from memory import RemEventLog
+from rag_memory import RemEventLog
 from rem import RemStore, run_rem_once
 
 

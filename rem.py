@@ -8,7 +8,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-from memory import _atomic_json_write_sync
+from utils import _atomic_json_write_sync
 
 logger = logging.getLogger(__name__)
 

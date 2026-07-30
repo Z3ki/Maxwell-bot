@@ -1,142 +1,149 @@
+"""Tests for RAGMemoryManager (replaces old MemoryManager tests)."""
 import asyncio
 
-from memory import MemoryManager
+from rag_memory import RAGMemoryManager
 
 
-def test_long_term_memory_reloads_external_file_edits(tmp_path):
+def _run(coro):
+    """Run an async coroutine in a fresh event loop."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def test_long_term_memory_add_and_get(tmp_path):
     async def run():
-        mgr = MemoryManager(str(tmp_path))
-        mgr.load_from_disk()
-        await mgr.add_long_term_memory("bot fact")
+        mgr = RAGMemoryManager(str(tmp_path))
+        mid = await mgr.add_long_term_memory("bot fact")
+        ltm = mgr.get_long_term_memory()
+        assert len(ltm) == 1
+        assert ltm[0]["content"] == "bot fact"
+        assert ltm[0]["id"] == mid
 
-        (tmp_path / "long_term_memory.txt").write_text("dashboard fact\n", encoding="utf-8")
-
-        assert mgr.get_long_term_memory() == [{"id": 1, "content": "dashboard fact"}]
-        await mgr.add_long_term_memory("bot fact 2")
-        assert (tmp_path / "long_term_memory.txt").read_text(encoding="utf-8").splitlines() == [
-            "dashboard fact",
-            "bot fact 2",
-        ]
-
-    asyncio.run(run())
+    _run(run())
 
 
-def test_long_term_memory_reloads_external_file_deletion(tmp_path):
+def test_long_term_memory_edit(tmp_path):
     async def run():
-        mgr = MemoryManager(str(tmp_path))
-        mgr.load_from_disk()
-        await mgr.add_long_term_memory("old fact")
+        mgr = RAGMemoryManager(str(tmp_path))
+        mid = await mgr.add_long_term_memory("original fact")
+        ok = await mgr.edit_long_term_memory(mid, "edited fact")
+        assert ok
+        ltm = mgr.get_long_term_memory()
+        assert ltm[0]["content"] == "edited fact"
 
-        (tmp_path / "long_term_memory.txt").unlink()
-
-        await mgr.add_long_term_memory("new fact")
-        assert (tmp_path / "long_term_memory.txt").read_text(encoding="utf-8").splitlines() == ["new fact"]
-
-    asyncio.run(run())
+    _run(run())
 
 
-def test_shared_context_reloads_external_file_edits_before_bot_write(tmp_path):
+def test_long_term_memory_remove(tmp_path):
     async def run():
-        mgr = MemoryManager(str(tmp_path))
-        mgr.load_from_disk()
-        await mgr.add_shared_context({"scope": "global", "content": "bot fact"})
+        mgr = RAGMemoryManager(str(tmp_path))
+        mid = await mgr.add_long_term_memory("doomed fact")
+        ok = await mgr.remove_long_term_memory(mid)
+        assert ok
+        assert len(mgr.get_long_term_memory()) == 0
 
-        (tmp_path / "shared_context.json").write_text(
-            '[{"id":"dash","scope":"global","visibility":"shared","importance":5,"content":"dashboard fact"}]',
-            encoding="utf-8",
-        )
-
-        await mgr.add_shared_context({"scope": "global", "content": "bot fact 2"})
-        contents = [entry["content"] for entry in await mgr.list_shared_context()]
-        assert "dashboard fact" in contents
-        assert "bot fact 2" in contents
-        assert "bot fact" not in contents
-
-    asyncio.run(run())
+    _run(run())
 
 
-def test_shared_context_reloads_external_file_deletion(tmp_path):
+def test_channel_memory_add_and_get(tmp_path):
     async def run():
-        mgr = MemoryManager(str(tmp_path))
-        mgr.load_from_disk()
-        await mgr.add_shared_context({"scope": "global", "content": "old fact"})
+        mgr = RAGMemoryManager(str(tmp_path))
+        await mgr.add_to_channel_memory("chan1", {
+            "message_id": "m1",
+            "author": "Alice",
+            "author_id": "123",
+            "content": "hello world",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+        })
+        mem = await mgr.get_channel_memory("chan1")
+        assert len(mem) == 1
+        assert mem[0]["author"] == "Alice"
+        assert mem[0]["content"] == "hello world"
 
-        (tmp_path / "shared_context.json").unlink()
-
-        await mgr.add_shared_context({"scope": "global", "content": "new fact"})
-        contents = [entry["content"] for entry in await mgr.list_shared_context()]
-        assert contents == ["new fact"]
-
-    asyncio.run(run())
+    _run(run())
 
 
-def test_channel_memory_dedupes_by_message_id(tmp_path):
+def test_channel_memory_clear(tmp_path):
     async def run():
-        mgr = MemoryManager(str(tmp_path))
-        mgr.load_from_disk()
+        mgr = RAGMemoryManager(str(tmp_path))
+        await mgr.add_to_channel_memory("chan1", {
+            "message_id": "m1",
+            "author": "Alice",
+            "author_id": "123",
+            "content": "hello",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+        })
+        await mgr.clear_channel_memory("chan1")
+        assert len(await mgr.get_channel_memory("chan1")) == 0
 
-        await mgr.add_to_channel_memory(
-            "100",
-            {
-                "author": "Maxwell",
-                "author_id": "42",
-                "author_is_bot": True,
-                "content": "autonomy said this",
-                "message_id": "777",
-            },
-        )
-        await mgr.add_to_channel_memory(
-            "100",
-            {
-                "author": "Maxwell",
-                "author_id": "42",
-                "author_is_bot": True,
-                "content": "autonomy said this",
-                "message_id": "777",
-            },
-        )
-
-        memory = await mgr.get_channel_memory("100")
-        assert len(memory) == 1
-        assert memory[0]["content"] == "autonomy said this"
-
-    asyncio.run(run())
+    _run(run())
 
 
-def test_channel_memory_duplicate_merges_self_attribution_and_reply_metadata(tmp_path):
+def test_server_prompt(tmp_path):
+    mgr = RAGMemoryManager(str(tmp_path))
+    assert mgr.get_server_prompt("123") is None
+    mgr.set_server_prompt("123", "be casual")
+    assert mgr.get_server_prompt("123") == "be casual"
+    mgr.clear_server_prompt("123")
+    assert mgr.get_server_prompt("123") is None
+
+
+def test_shared_context(tmp_path):
     async def run():
-        mgr = MemoryManager(str(tmp_path))
-        mgr.load_from_disk()
+        mgr = RAGMemoryManager(str(tmp_path))
+        sid = await mgr.add_shared_context({
+            "content": "test fact",
+            "scope": "global",
+            "importance": 5,
+        })
+        sc = await mgr.list_shared_context()
+        assert len(sc) == 1
+        assert sc[0]["content"] == "test fact"
+        ok = await mgr.remove_shared_context(sid)
+        assert ok
+        assert len(await mgr.list_shared_context()) == 0
 
-        await mgr.add_to_channel_memory(
-            "100",
-            {
-                "author": "Some stale label",
-                "content": "autonomy replied",
-                "message_id": "777",
-            },
-        )
-        await mgr.add_to_channel_memory(
-            "100",
-            {
-                "author": "Maxwell",
-                "author_id": "42",
-                "author_is_bot": True,
-                "content": "autonomy replied",
-                "message_id": "777",
-                "reply_to_message_id": "555",
-                "reply_to_author": "alice",
-                "reply_to_author_id": "99",
-                "reply_to_self": False,
-            },
-        )
+    _run(run())
 
-        memory = await mgr.get_channel_memory("100")
-        assert len(memory) == 1
-        assert memory[0]["author"] == "Maxwell"
-        assert memory[0]["author_id"] == "42"
-        assert memory[0]["author_is_bot"] is True
-        assert memory[0]["reply_to_message_id"] == "555"
-        assert memory[0]["reply_to_author_id"] == "99"
 
-    asyncio.run(run())
+def test_ltm_batch(tmp_path):
+    async def run():
+        mgr = RAGMemoryManager(str(tmp_path))
+        result = await mgr.apply_ltm_batch([
+            {"kind": "add", "content": "fact 1"},
+            {"kind": "add", "content": "fact 2"},
+            {"kind": "add", "content": "fact 3"},
+        ])
+        assert result["added"] == 3
+        assert len(mgr.get_long_term_memory()) == 3
+
+    _run(run())
+
+
+def test_message_dedup(tmp_path):
+    """Adding a message with the same ID should replace, not duplicate."""
+    async def run():
+        mgr = RAGMemoryManager(str(tmp_path))
+        await mgr.add_to_channel_memory("chan1", {
+            "message_id": "m1",
+            "author": "Alice",
+            "author_id": "123",
+            "content": "original",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+        })
+        await mgr.add_to_channel_memory("chan1", {
+            "message_id": "m1",
+            "author": "Alice",
+            "author_id": "123",
+            "content": "updated",
+            "timestamp": "2026-01-01T00:00:01+00:00",
+        })
+        mem = await mgr.get_channel_memory("chan1")
+        assert len(mem) == 1
+        assert mem[0]["content"] == "updated"
+
+    _run(run())

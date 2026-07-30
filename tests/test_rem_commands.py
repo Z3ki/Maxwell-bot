@@ -6,7 +6,7 @@ import pytest
 discord = pytest.importorskip("discord")
 
 from bot import MaxwellBot  # noqa: E402
-from memory import RemEventLog  # noqa: E402
+from rag_memory import RemEventLog  # noqa: E402
 from rem import RemStore  # noqa: E402
 
 
