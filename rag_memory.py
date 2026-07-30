@@ -1607,6 +1607,7 @@ class RAGMemoryManager:
         top_k: int = 10,
         min_similarity: float = SIM_THRESHOLD,
         apply_recency: bool = True,
+        recency_tau_days: float | None = None,  # override global RECENCY_TAU_SECONDS
         exclude_negatives: bool = True,
         over_fetch: int = 3,
     ) -> list[dict]:
@@ -1623,6 +1624,10 @@ class RAGMemoryManager:
             top_k: max results to RETURN (after scoring)
             min_similarity: cosine similarity cutoff
             apply_recency: NEW — multiply score by recency decay
+            recency_tau_days: NEW — override the default 14-day recency τ.
+                        Pass 3.0 for "give me recent chat", 0.5 for
+                        "today's conversation only", 30.0 for "month
+                        of context". None = use module default.
             exclude_negatives: NEW — exclude rows similar to anything in
                                 kind='negative'
             over_fetch: NEW — internally pull top_k*over_fetch candidates
@@ -1636,6 +1641,27 @@ class RAGMemoryManager:
         query_vec = await self._embed(query)
         if query_vec is None:
             return []
+
+        # Per-call override of recency tau. Caller passes recency_tau_days;
+        # we expose `_score_with_recency_tau` so the multiplier uses the
+        # caller's value rather than the module-level constant.
+        if recency_tau_days is not None:
+            _tau_seconds = float(recency_tau_days) * 86400.0
+            # Re-bind locally so the score function uses this tau
+            import math
+
+            def _decay(ts_str):
+                if not ts_str:
+                    return 1.0
+                dt = _parse_iso(ts_str)
+                if dt is None:
+                    return 1.0
+                age = max(0.0, _utcnow().timestamp() - dt.timestamp())
+                decay = math.exp(-age / max(1.0, _tau_seconds))
+                return 0.25 + 0.75 * decay
+        else:
+            def _decay(ts_str):
+                return _score_with_recency(1.0, ts_str)  # just the multiplier
 
         # ─── build SQL ───────────────────────────────────────────────
         where_parts = ["embedding IS NOT NULL"]
@@ -1685,11 +1711,14 @@ class RAGMemoryManager:
                 # Downvoted rows are pulled in scoring but pulled down.
                 if row["downvotes"]:
                     sim *= max(0.05, 1.0 - 0.2 * row["downvotes"])
-                score = (
-                    _score_with_recency(sim, row["timestamp"])
-                    if apply_recency and row["kind"] in ("message", "bot_output")
-                    else sim
-                )
+                if apply_recency and row["kind"] in ("message", "bot_output"):
+                    if recency_tau_days is not None:
+                        # _decay(ts) returns the multiplier (0.25..1.0).
+                        score = sim * _decay(row["timestamp"])
+                    else:
+                        score = _score_with_recency(sim, row["timestamp"])
+                else:
+                    score = sim
                 entry = {
                     "id": row["id"],
                     "kind": row["kind"],

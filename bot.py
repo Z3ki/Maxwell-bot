@@ -243,7 +243,7 @@ from control_defaults import (  # noqa: E402
     DEFAULT_CONTROL,
     parse_bool,
 )
-from rag_memory import RAGMemoryManager, RemEventLog  # noqa: E402
+from rag_memory import RAGMemoryManager, RemEventLog, _parse_iso  # noqa: E402
 from providers import (  # noqa: E402
     MIME_MAP,
     OllamaProvider,
@@ -9174,13 +9174,15 @@ class MaxwellBot(commands.Bot):
                 # aren't ready yet (cold start).
                 ltm = self.memory.get_long_term_memory()
                 rag_context = []
+                rag_recent = []
                 if hasattr(self.memory, "rag_search"):
-                    # Semantic search across LTM and shared_context
+                    # LTM + shared_context for durable facts (don't decay).
                     rag_results = await self.memory.rag_search(
                         user_message,
                         kinds=["ltm", "shared_context"],
                         guild_id=str(getattr(message.guild, "id", "") or ""),
-                        apply_recency=False,  # LTM/shared_context don't decay
+                        channel_id=str(getattr(message.channel, "id", "") or ""),
+                        apply_recency=False,
                         top_k=max(
                             5,
                             min(
@@ -9196,19 +9198,66 @@ class MaxwellBot(commands.Bot):
                     rag_context = [
                         r for r in rag_results if r.get("similarity", 0) >= 0.35
                     ]
-                if rag_context:
-                    # Build RAG-augmented memory block
-                    rag_lines = []
-                    for r in rag_context:
-                        kind_label = "fact" if r["kind"] == "ltm" else "context"
-                        sim_pct = int(r.get("similarity", 0) * 100)
-                        rag_lines.append(
-                            f"- [{kind_label}, {sim_pct}% match] {r['content']}"
-                        )
-                    system_parts.append(
-                        "Relevant memories (RAG-retrieved facts and context; use as background, not as something to recite):\\n"
-                        + "\\n".join(rag_lines)
+                    # Recent user messages from this guild/channel pair —
+                    # this is what was missing before. Past conversations
+                    # were invisible to the prompt. We pull them from the
+                    # same channel first (high relevance) then fall back
+                    # to whole-guild.
+                    recent_results = await self.memory.rag_search(
+                        user_message,
+                        kinds=["message"],
+                        source="user",
+                        guild_id=str(getattr(message.guild, "id", "") or ""),
+                        channel_id=str(getattr(message.channel, "id", "") or ""),
+                        apply_recency=True,
+                        recency_tau_days=3.0,  # tight tau — recent chat
+                        top_k=8,
                     )
+                    rag_recent = [
+                        r for r in recent_results if r.get("similarity", 0) >= 0.40
+                    ][:5]  # cap to 5 recent messages
+                if rag_context or rag_recent:
+                    # Build RAG-augmented memory block. Durable facts first
+                    # (LTM/shared_context — they don't decay), then recent
+                    # user messages from the same channel/guild. The bot
+                    # sees both: the curated truths and the live context.
+                    if rag_context:
+                        rag_lines = []
+                        for r in rag_context:
+                            kind_label = "fact" if r["kind"] == "ltm" else "context"
+                            sim_pct = int(r.get("similarity", 0) * 100)
+                            rag_lines.append(
+                                f"- [{kind_label}, {sim_pct}% match] {r['content']}"
+                            )
+                        system_parts.append(
+                            "Relevant memories (RAG-retrieved facts and context; "
+                            "use as background, not as something to recite):\n"
+                            + "\n".join(rag_lines)
+                        )
+                    if rag_recent:
+                        rec_lines = []
+                        for r in rag_recent:
+                            when = r.get("timestamp", "")
+                            stamp = ""
+                            if when:
+                                try:
+                                    stamp = (
+                                        f" [~{(datetime.now(timezone.utc) - _parse_iso(when)).days}d ago]"
+                                        if (datetime.now(timezone.utc) - _parse_iso(when)).days >= 1
+                                        else f" [today]"
+                                    )
+                                except Exception:
+                                    stamp = ""
+                            who = r.get("author", "anon")
+                            sim_pct = int(r.get("similarity", 0) * 100)
+                            rec_lines.append(
+                                f"- [{who}{stamp}, {sim_pct}% match] {str(r['content'])[:300]}"
+                            )
+                        system_parts.append(
+                            "Recent relevant messages from this server/channel "
+                            "(background only — what's been talked about):\n"
+                            + "\n".join(rec_lines)
+                        )
                 elif ltm:
                     # Fallback: no embeddings yet, use recent LTM
                     ltm_cap = max(
@@ -9910,10 +9959,25 @@ class MaxwellBot(commands.Bot):
         # RAG: semantic memory retrieval for Telegram
         if self._control.get("long_term_memory_enabled", True) and hasattr(self.memory, "rag_search"):
             try:
+                # LTM + shared_context for durable facts
                 rag_results = await self.memory.rag_search(
-                    text, kinds=["ltm", "shared_context"], top_k=20
+                    text,
+                    kinds=["ltm", "shared_context"],
+                    guild_id=str(chat_id or ""),
+                    top_k=20,
                 )
                 rag_context = [r for r in rag_results if r.get("similarity", 0) >= 0.35]
+                # Recent user messages — same channel/guild as the chat
+                rec_results = await self.memory.rag_search(
+                    text,
+                    kinds=["message"],
+                    source="user",
+                    guild_id=str(chat_id or ""),
+                    apply_recency=True,
+                    recency_tau_days=3.0,
+                    top_k=8,
+                )
+                rag_recent = [r for r in rec_results if r.get("similarity", 0) >= 0.40][:5]
                 if rag_context:
                     rag_lines = []
                     for r in rag_context:
@@ -9921,8 +9985,20 @@ class MaxwellBot(commands.Bot):
                         sim_pct = int(r.get("similarity", 0) * 100)
                         rag_lines.append(f"- [{kind_label}, {sim_pct}% match] {r['content']}")
                     system_parts.append(
-                        "Relevant memories (RAG-retrieved; use as background):\n"
+                        "Relevant memories (RAG-retrieved facts; use as background):\n"
                         + "\n".join(rag_lines)
+                    )
+                if rag_recent:
+                    rec_lines = []
+                    for r in rag_recent:
+                        who = r.get("author", "anon")
+                        sim_pct = int(r.get("similarity", 0) * 100)
+                        rec_lines.append(
+                            f"- [{who}, {sim_pct}% match] {str(r['content'])[:300]}"
+                        )
+                    system_parts.append(
+                        "Recent relevant messages (background):\n"
+                        + "\n".join(rec_lines)
                     )
             except Exception as e:
                 logger.warning(f"Telegram RAG retrieval failed: {e}")
@@ -10377,9 +10453,22 @@ class MaxwellBot(commands.Bot):
                     if self._control.get("long_term_memory_enabled", True) and hasattr(self.memory, "rag_search"):
                         try:
                             rag_results = await self.memory.rag_search(
-                                text, kinds=["ltm", "shared_context"], top_k=20
+                                text,
+                                kinds=["ltm", "shared_context"],
+                                guild_id=str(chat_id or ""),
+                                top_k=20,
                             )
                             rag_context = [r for r in rag_results if r.get("similarity", 0) >= 0.35]
+                            rec_results = await self.memory.rag_search(
+                                text,
+                                kinds=["message"],
+                                source="user",
+                                guild_id=str(chat_id or ""),
+                                apply_recency=True,
+                                recency_tau_days=3.0,
+                                top_k=8,
+                            )
+                            rag_recent = [r for r in rec_results if r.get("similarity", 0) >= 0.40][:5]
                             if rag_context:
                                 rag_lines = []
                                 for r in rag_context:
@@ -10387,8 +10476,20 @@ class MaxwellBot(commands.Bot):
                                     sim_pct = int(r.get("similarity", 0) * 100)
                                     rag_lines.append(f"- [{kind_label}, {sim_pct}% match] {r['content']}")
                                 system_parts.append(
-                                    "Relevant memories (RAG-retrieved; use as background):\n"
+                                    "Relevant memories (RAG-retrieved facts; use as background):\n"
                                     + "\n".join(rag_lines)
+                                )
+                            if rag_recent:
+                                rec_lines = []
+                                for r in rag_recent:
+                                    who = r.get("author", "anon")
+                                    sim_pct = int(r.get("similarity", 0) * 100)
+                                    rec_lines.append(
+                                        f"- [{who}, {sim_pct}% match] {str(r['content'])[:300]}"
+                                    )
+                                system_parts.append(
+                                    "Recent relevant messages (background):\n"
+                                    + "\n".join(rec_lines)
                                 )
                         except Exception as e:
                             logger.warning(f"Telegram RAG retrieval failed: {e}")
