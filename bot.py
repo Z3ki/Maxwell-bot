@@ -5900,9 +5900,42 @@ class MaxwellBot(commands.Bot):
                 logger.error(f"Command queue error: {e}")
 
     async def _memory_cleanup_loop(self):
-        # On first run, trigger background embedding migration
+        # Trigger background embedding migration on boot (idempotent).
         if hasattr(self.memory, "_embed_pending_all"):
             asyncio.create_task(self.memory._embed_pending_all())
+        # Bootstrap summary 5 minutes after boot — give the bot time
+        # to settle so we accumulate real chat first.
+        async def _boot_summarize():
+            try:
+                await asyncio.sleep(300)
+                n = await self.memory.summarize_recent_to_ltm(hours=24)
+                if n:
+                    logger.info(f"Boot summarizer wrote {n} LTM facts")
+            except Exception as e:
+                logger.warning(f"Boot summarizer failed: {e}")
+        asyncio.create_task(_boot_summarize())
+
+        # Daily LTM summarizer at 04:00 local. Computes seconds-until-
+        # next-04:00 on each loop start; if the start-of-day window is
+        # missed it fires on the next loop tick.
+        async def _daily_summarizer_loop():
+            while True:
+                try:
+                    now = datetime.now()
+                    target = now.replace(hour=4, minute=0, second=0, microsecond=0)
+                    if target <= now:
+                        target = target + timedelta(days=1)
+                    wait_s = (target - now).total_seconds()
+                    await asyncio.sleep(wait_s)
+                    n = await self.memory.summarize_recent_to_ltm(hours=24)
+                    if n:
+                        logger.info(f"Daily LTM summarizer wrote {n} facts")
+                except Exception as e:
+                    logger.error(f"Daily summarizer error: {e}")
+                    await asyncio.sleep(3600)  # backoff on failure
+        asyncio.create_task(_daily_summarizer_loop())
+
+        # Active cleanup of stale channel rows on a 10-minute cadence.
         while True:
             await asyncio.sleep(600)
             try:

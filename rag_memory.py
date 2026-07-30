@@ -34,27 +34,21 @@ logger = logging.getLogger(__name__)
 
 # ─── constants ────────────────────────────────────────────────────────
 
-# Embedding model. bge-m3 (BAAI) is 1024-dim, multilingual, ~568M params,
-# instruction-aware — meaningfully better semantic recall than
-# qwen3-embedding:0.6b for conversational memory at modest cost.
-# ollama pull bge-m3
-EMBED_MODEL = "bge-m3"
+# Embedding model. qwen3-embedding:0.6b wins on context length (32k
+# tokens ≈ 128k chars, vs bge-m3's 8k). For memory use case — whole
+# conversations, not single sentences — the long context is the
+# deciding factor; we can skip a chunking pipeline entirely. 1024-dim
+# output. ollama pull qwen3-embedding:0.6b
+EMBED_MODEL = "qwen3-embedding:0.6b"
 EMBED_DIM = 1024
 OLLAMA_EMBED_URL = "http://localhost:11434/api/embed"
 
-# Cross-encoder reranker (sentence-transformers-style, served by ollama as
-# a generation model with a logprobs-based scoring trick). Disabled until
-# someone wires it because pure cosine is fine for now.
-RERANK_MODEL = ""
-
-# Recency decay (seconds). 14 days ≈ 1.21e6 s. Score multiplied by
-# exp(-age_seconds / tau). Lower τ = steeper penalty for old memories.
+# Recency decay (seconds). 14 days. Score multiplied by exp(-age/tau).
 RECENCY_TAU_SECONDS = 14 * 86400.0
 
 MAX_CHANNELS = 25
 MAX_MEMORY_CHARS = 1000
 MAX_LTM_LINES = 999
-MAX_CHUNK_CHARS = 1500  # for smart chunking of long content
 DEFAULT_REM_EVENT_BUFFER_MAX = 500
 
 # Cosine similarity threshold for RAG retrieval. Below this, results are
@@ -196,7 +190,6 @@ def _is_system_event_content(content: str, message_type: str | None = None) -> b
     s = str(content or "").strip()
     if not s:
         return True
-    # No real content, just metadata wrappers
     if s.startswith("[embeds:") and s.endswith("]"):
         return True
     if s.startswith("[Message deleted in"):
@@ -226,44 +219,6 @@ def _detect_source(message: dict) -> str:
     if _is_system_event_content(content, message.get("message_type")):
         return "system"
     return "user"
-
-
-def _chunk_long_text(text: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
-    """Split very long content into overlapping sentence-boundary chunks.
-
-    Returns the original wrapped in a list if it fits, otherwise a list of
-    chunks each at most `max_chars` chars. Chunks are stored as separate
-    rows with `parent_id` linking back to the original message id, so
-    retrieval can expand a hit back to its source.
-    """
-    s = str(text or "")
-    if len(s) <= max_chars:
-        return [s]
-    import re
-
-    # Split on sentence boundaries, then greedily pack into max_chars chunks.
-    sentences = re.split(r"(?<=[.!?\n])\s+", s)
-    chunks: list[str] = []
-    buf = ""
-    for sent in sentences:
-        if not sent:
-            continue
-        # Hard cap: a single sentence longer than max_chars gets sliced.
-        while len(sent) > max_chars:
-            if buf:
-                chunks.append(buf.strip())
-                buf = ""
-            chunks.append(sent[:max_chars].strip())
-            sent = sent[max_chars:]
-        if len(buf) + len(sent) + 1 > max_chars:
-            if buf:
-                chunks.append(buf.strip())
-            buf = sent
-        else:
-            buf = (buf + " " + sent).strip() if buf else sent
-    if buf:
-        chunks.append(buf.strip())
-    return chunks or [s[:max_chars]]
 
 
 def _score_with_recency(
@@ -903,18 +858,13 @@ class RAGMemoryManager:
     async def add_to_channel_memory(self, channel_id: str, message: dict):
         """Add a message to channel memory with embedding.
 
-        Tier-1 rewrite: this is now where we filter noise, dedupe at
-        insert, split bot-vs-user sources, and chunk long content.
-
         Behavior:
           - if source='system' → SKIP entirely (don't store, don't embed)
-          - if source='bot'   → store as kind='bot_output', lower priority
+          - if source='bot'   → store as kind='bot_output'
           - if source='user'  → store as kind='message', full embedding
           - if content stripped of URLs/mentions/emoji is < 4 chars,
             store the row but do NOT request an embedding (cheap skip)
           - dedupe by (channel_id, content_hash) — silent ignore on collision
-          - if content > MAX_CHUNK_CHARS, also create chunk rows with
-            parent_id pointing here
         """
         channel_id = str(channel_id)
         msg_id = str(message.get("message_id") or uuid.uuid4().hex)
@@ -1038,47 +988,9 @@ class RAGMemoryManager:
                     (row["channel_id"],),
                 )
 
-        # Smart chunking for very long content. Emit one row per chunk
-        # with parent_id so retrieval can walk back. Only for kind='message'
-        # (user text) — bot_output chunks would just multiply noise.
-        if kind == "message" and len(content) > MAX_CHUNK_CHARS:
-            chunks = _chunk_long_text(content, MAX_CHUNK_CHARS)
-            for idx, chunk in enumerate(chunks):
-                if not chunk.strip():
-                    continue
-                chunk_id = f"{msg_id}:c{idx}"
-                chunk_norm = _strip_for_embedding(chunk)
-                chunk_hash = _hashlib.sha256(
-                    chunk_norm.encode("utf-8")
-                ).hexdigest()
-                try:
-                    self._db.execute(
-                        "INSERT INTO vectors "
-                        "(id, kind, channel_id, guild_id, author, author_id, source, "
-                        " content, content_hash, embedding, metadata, scope, importance, "
-                        " parent_id, chunk_index, downvotes, timestamp, created_at) "
-                        "VALUES (?, 'message', ?, ?, ?, ?, 'user', ?, ?, NULL, '{}',"
-                        " '', 0, ?, ?, 0, ?, ?)",
-                        (
-                            chunk_id,
-                            channel_id,
-                            guild_id,
-                            author,
-                            author_id,
-                            chunk[:8000],
-                            chunk_hash,
-                            msg_id,
-                            idx,
-                            ts,
-                            time.time(),
-                        ),
-                    )
-                    if should_embed and chunk_norm:
-                        asyncio.ensure_future(self._embed_and_store(chunk_id, chunk))
-                except Exception:
-                    pass  # unique-index collision on chunk is fine
-
-        # Embed in background (non-blocking). Skip if content too short.
+        # Embed the whole message in background. qwen3-embedding:0.6b's
+        # 32k-token context absorbs any Discord message — no chunking.
+        # Skip if content too short to be worth embedding.
         if should_embed:
             asyncio.ensure_future(self._embed_and_store(msg_id, content))
 
@@ -1634,7 +1546,6 @@ class RAGMemoryManager:
                     "timestamp": row["timestamp"],
                     "similarity": sim,
                     "score": score,
-                    "parent_id": row["parent_id"],
                     "downvotes": row["downvotes"],
                 }
                 try:
@@ -1697,39 +1608,7 @@ class RAGMemoryManager:
             except Exception as e:
                 logger.debug(f"negative exclusion skipped: {e}")
 
-        # ─── expand chunks to parent for context ────────────────────
-        # If a chunk hits but its parent isn't in the result set, swap in
-        # the parent (the full original message).
-        chunk_parents: dict[str, dict] = {}
-        for c in candidates:
-            pid = c.get("parent_id") or ""
-            if pid and pid not in {x["id"] for x in candidates}:
-                prow = self._db.execute(
-                    "SELECT id, kind, channel_id, guild_id, author, author_id, "
-                    "source, content, metadata, scope, importance, timestamp "
-                    "FROM vectors WHERE id=?",
-                    (pid,),
-                ).fetchone()
-                if prow:
-                    chunk_parents[pid] = {
-                        "id": prow["id"],
-                        "kind": prow["kind"],
-                        "channel_id": prow["channel_id"],
-                        "guild_id": prow["guild_id"],
-                        "author": prow["author"],
-                        "author_id": prow["author_id"],
-                        "source": prow["source"],
-                        "content": prow["content"],
-                        "scope": prow["scope"],
-                        "importance": prow["importance"],
-                        "timestamp": prow["timestamp"],
-                        "similarity": c["similarity"],
-                        "score": c["score"] * 0.9,  # slight penalty for distance
-                        "expanded_from_chunk": c["id"],
-                    }
-        candidates.extend(chunk_parents.values())
-
-        # Re-sort and trim.
+        # ─── done ────────────────────────────────────────────────────
         candidates.sort(key=lambda x: x.get("score", 0.0), reverse=True)
         return candidates[:top_k]  # type: ignore[index]  # always len > 0 here
 
