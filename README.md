@@ -10,7 +10,8 @@ Maxwell is a Discord self-bot backed by any OpenAI-compatible API. It reads text
 - Visual memory: recent images persist across messages per channel (configurable depth).
 - Tool system: image generation (NVIDIA NIM, GPT-compatible), web search, URL fetch, YouTube transcript/frame extraction, arbitrary file sending, meme/media sending, shell execution, polls, invites, site generation, avatar/presence/nickname changes, message editing/forwarding/deletion, live tool-call progress messages, and more.
 - Autonomy: periodic self-directed checks where Maxwell reviews context/goals and decides whether to act without running a decider on every few messages.
-- Per-server custom prompts, long-term memory, and scoped cross-context facts across DMs, servers, groups, and channels.
+- Per-server custom prompts, RAG vector memory, and scoped cross-context facts across DMs, servers, groups, and channels.
+- RAG vector memory: all messages, long-term facts, and shared context entries are embedded via `qwen3-embedding:0.6b` (ollama) and stored in a SQLite vector database. Semantic search retrieves the most relevant memories for each conversation — global across all channels and servers.
 - Opt-in REM "dreaming" pass that periodically consolidates recent visible traffic into long-term memory.
 - Web dashboard/admin API protected by HTTP Basic auth.
 - Temporary site hosting: generates HTML sites served under a configurable public URL.
@@ -22,7 +23,7 @@ bot.py              Main bot entry point
 bot_tools.py        Tool implementations
 providers.py        OpenAI-compatible provider wrapper
 config.py           Environment-backed configuration
-memory.py           Channel/server memory manager
+rag_memory.py       RAG vector memory (SQLite + numpy + ollama embeddings)
 api/api_server.py   Dashboard and admin API server
 web/                Static dashboard files (index.html, admin/)
 examples/           Caddyfile and PM2 config examples
@@ -211,6 +212,7 @@ All commands use the `,` prefix. Admin commands require the user to be in the ad
 | `,autonomy unblacklist channel|server <id>` | Yes | Remove from autonomy blacklist |
 | `,drug [minutes]` | No | Temporary "fried" personality override |
 | `,drug off` | No | Turn off drug mode |
+| `,jailbreak on` / `,jailbreak off` | Yes | Toggle freedom-mode prompt for this server (Discord only; Telegram always on) |
 | `,blacklist [user]` | Yes | Add/view/clear blacklisted users |
 | `,unblacklist [user]` | Yes | Remove a user from the blacklist |
 | `,context` | Yes | Show relevant scoped cross-context facts |
@@ -238,9 +240,26 @@ Live VC replies require `discord-ext-voice-recv`, `PyNaCl`, `ffmpeg`, and an aud
 
 When tools are enabled, Maxwell can use `web_search` for recent/searchable info, `fetch_url` to read a specific web page, and `youtube` for YouTube videos. The YouTube tool returns title/channel/duration, transcript or auto-captions when available, using YouTube timedtext first and `yt-dlp` as fallback. Cookie-backed caption fetching uses `yt-dlp --ignore-no-formats-error --write-subs --write-auto-subs`, which can fetch captions even when playable formats are blocked. Requested timestamp frames use yt-dlp's `web_embedded` YouTube client to avoid raw Googlevideo 403s, then attach back to the model for visual inspection before Maxwell answers. Timestamps can be written like `0:10` or `1:23,2:45`.
 
-## Memory and REM
+## Memory and RAG
 
-Maxwell keeps its existing memory surfaces: `memory.json` for per-channel short-term chat history, `long_term_memory.txt` / long-term memory APIs for durable facts, and scoped shared context for cross-channel facts. REM adds a separate visible-only ring at `data/rem_events.json` and, when enabled, periodically reviews events since the previous run.
+Maxwell uses a **RAG (Retrieval-Augmented Generation) vector memory system** backed by SQLite and numpy. All channel messages, long-term facts, and shared context entries are stored as vectors in `data/maxwell_rag.db`, embedded via `qwen3-embedding:0.6b` through a local ollama instance.
+
+**How it works:**
+- Every message stored in the bot is embedded (1024-dim float32 vector) and saved to the SQLite vector store.
+- When the bot is pinged, the user's message is embedded and cosine-similarity search retrieves the most relevant memories across **all channels, servers, LTM, and shared context** — not just the current channel's recent history.
+- Per-query latency: ~150ms (query embedding) + ~1ms (cosine search) = negligible compared to LLM generation time.
+- New messages are embedded in the background (non-blocking).
+- On startup, any vectors without embeddings are batch-embedded in the background.
+- The old `memory.py` (flat JSON) and `context_cleanup.py` (LLM janitor) have been removed. The RAG system handles dedup, pruning, and retrieval automatically.
+
+**Embedding model setup:**
+```bash
+ollama pull qwen3-embedding:0.6b
+```
+
+The SQLite database lives at `data/maxwell_rag.db` (gitignored). Channel memory, LTM, and shared context are all in one `vectors` table distinguished by `kind` (`message`, `ltm`, `shared_context`).
+
+REM adds a separate visible-only ring at `data/rem_events.json` and, when enabled, periodically reviews events since the previous run.
 
 The REM pass is not a live chat response and never posts to Discord. Current code sends a bounded short-term slice plus a long-term memory snapshot to the configured OpenAI-compatible provider and stores an audit row in `data/rem_runs.json`. It does **not** currently run memory-edit tools despite the name; treat it as review/audit unless that loop gets rebuilt.
 
@@ -277,10 +296,10 @@ If you're running via PM2 (recommended), a push to main followed by a restart gi
 
 > The Intel engine was removed in commit `d455e4b`. The `,intel` commands
 > and the `intel_enabled` / `intel_interval_seconds` keys are stripped
-> from `bot_control.json` at load. If you want a self-updating news
-> roller back, see the `context_cleanup` background loop and the
-> `autonomy` engine — both already write fresh facts into long-term
-> memory on their own cadences.
+> from `bot_control.json` at load. The `context_cleanup` background loop
+> and `context_cleanup.py` have also been removed — the RAG vector memory
+> system handles cleanup automatically. The `autonomy` engine still
+> writes fresh facts into long-term memory on its own cadence.
 
 ## Dashboard / API
 
