@@ -2333,6 +2333,57 @@ class MaxwellBot(commands.Bot):
         self.memory = RAGMemoryManager(
             data_dir=self.config.DATA_DIR, max_messages=self.config.MEMORY_MESSAGE_LIMIT
         )
+        # Wire the LTM auto-summarizer's LLM hook to the live ai_provider
+        # (ollama-backed). The summarizer passes a transcript to the LLM
+        # and expects a list of durable facts back.
+        async def _ltm_summarizer_fn(transcript: str, max_facts: int = 20) -> list:
+            try:
+                prompt = (
+                    "Extract durable facts from this transcript. A fact is a "
+                    "preference, identity detail, technical fact, ongoing "
+                    "task, or project status. Skip trivial greetings, "
+                    "reactions, or ephemeral chatter. Be terse — one fact "
+                    "per line, complete sentences. Return at most "
+                    f"{max_facts} facts. If nothing durable is present, "
+                    "return an empty list.\n\n"
+                    "TRANSCRIPT:\n" + transcript + "\n\n"
+                    "Return JSON: {\"facts\": [\"fact 1\", \"fact 2\", ...]}"
+                )
+                # generate_response is async + streaming-friendly; pass
+                # max_tokens=1200 to bound the summary length.
+                resp = await self.ai_provider.generate_response(
+                    [{"role": "user", "content": prompt}],
+                    max_tokens=1200, temperature=0.2
+                )
+                text = str(resp) if resp else ""
+                import json as _json, re as _re
+                # Strip ```json ``` markdown fence if present.
+                fence_match = _re.search(
+                    r"```(?:json)?\s*(\{.*?\})\s*```",
+                    text,
+                    _re.DOTALL,
+                )
+                if fence_match:
+                    text = fence_match.group(1)
+                try:
+                    data = _json.loads(text)
+                    if isinstance(data, dict):
+                        return list(data.get("facts", []))
+                except Exception:
+                    pass
+                # Sometimes the model returns raw lines, not JSON.
+                lines = [
+                    ln.strip().lstrip("-•* ").strip()
+                    for ln in (str(resp) if resp else "").splitlines()
+                    if ln.strip() and not ln.strip().startswith("{")
+                    and not ln.strip().startswith("}")
+                    and not ln.strip().startswith("```")
+                ]
+                return lines[:max_facts] if lines else []  # type: ignore[index]  # always len > 0
+            except Exception as e:
+                logger.warning(f"LTM summarizer LLM call failed: {e}")
+                return []
+        self.memory._ltm_summarizer_fn = _ltm_summarizer_fn
         self.rem_log = RemEventLog(
             data_dir=self.config.DATA_DIR, max_events=self.config.REM_EVENT_BUFFER_MAX
         )
@@ -3130,6 +3181,9 @@ class MaxwellBot(commands.Bot):
             "autonomy",
             "jailbreak",
             "progress",
+            "downvote",
+            "neg",
+            "summarize",
         }
         if cmd in admin_commands and not self._is_admin(message.author.id):
             await message.channel.send("not authorized")
@@ -3172,6 +3226,81 @@ class MaxwellBot(commands.Bot):
                 self._reaction_seen.clear()
                 await message.channel.send(
                     "Memory, media context, and channel state cleared."
+                )
+            elif cmd == "downvote":
+                # Mark a recent message as a bad RAG hit. Pass a row id
+                # (hex) or — if omitted — the message this command was
+                # replying to.
+                target_id = ""
+                if args:
+                    target_id = args.strip().split()[0]
+                elif message.reference and message.reference.message_id:
+                    target_id = str(message.reference.message_id)
+                if not target_id:
+                    await message.channel.send(
+                        "Usage: `,downvote <msg_id_or_chunks_id>`  "
+                        "(or reply to the message you want to mark)"
+                    )
+                    return
+                ok = await self.memory.downvote_recent(target_id, amount=1)
+                await message.channel.send(
+                    f"✓ downvotes on `{target_id}` +1 (total: ?)"
+                    if ok else f"✗ no row with id `{target_id}`"
+                )
+            elif cmd == "neg":
+                # ,neg add <text>  →  persist a 'don't retrieve this' example
+                # ,neg list            →  show all negatives
+                # ,neg del <id>        →  remove one
+                sub = (args or "").strip().split(maxsplit=1)
+                op = sub[0].lower() if sub else ""
+                rest = sub[1] if len(sub) > 1 else ""
+                if op in ("list", ""):
+                    negs = await self.memory.list_negatives(20)
+                    if not negs:
+                        await message.channel.send("No negatives stored yet.")
+                    else:
+                        lines = [
+                            f"`{n['id']}` — {n['content'][:120]}  ({n['timestamp'][:16]})"
+                            for n in negs
+                        ]
+                        await message.channel.send(
+                            "**Negatives (won't retrieve):**\n" + "\n".join(lines)
+                        )
+                elif op == "add":
+                    if not rest:
+                        await message.channel.send("Usage: `,neg add <text>`")
+                        return
+                    nid = await self.memory.add_negative(rest, reason="manual")
+                    await message.channel.send(f"✓ negative `{nid}` added.")
+                elif op in ("del", "rm", "delete"):
+                    if not rest:
+                        await message.channel.send("Usage: `,neg del <id>`")
+                        return
+                    ok = await self.memory.remove_negative(rest.strip())
+                    await message.channel.send(
+                        f"✓ removed `{rest.strip()}`" if ok
+                        else f"✗ no negative with id `{rest.strip()}`"
+                    )
+                else:
+                    await message.channel.send(
+                        "Usage: `,neg add <text>` · `,neg list` · `,neg del <id>`"
+                    )
+            elif cmd == "summarize":
+                # Manually trigger the LTM auto-summarizer over the
+                # last N hours of user messages.
+                hours = 24
+                if args:
+                    try:
+                        hours = max(1, min(168, int(args.strip())))
+                    except ValueError:
+                        pass
+                await message.channel.send(
+                    f"⏳ summarizing last {hours}h of messages…"
+                )
+                added = await self.memory.summarize_recent_to_ltm(hours=hours)
+                await message.channel.send(
+                    f"✓ wrote {added} new LTM facts from the last {hours}h."
+                    if added else "nothing new worth remembering."
                 )
             elif cmd == "context":
                 await self._handle_context_command(message, args)
