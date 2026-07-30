@@ -2493,10 +2493,47 @@ class MaxwellBot(commands.Bot):
             base = re.sub(r"\nYou are currently \d+ days old\..*", age_line, base)
         return base
 
+    async def add_message_to_memory(self, channel_id: str, message_dict: dict, message=None) -> None:
+        """Bot-side convenience that wraps memory.add_to_channel_memory
+        and forwards `guild_id` + `message_type` from a discord.Message.
+
+        Use this instead of calling self.memory.add_to_channel_memory
+        directly in any code path that has the originating discord.Message
+        in scope. Old direct call sites are being phased out.
+
+        The audit on 2026-07-30 found 13 direct call sites, only 2 of
+        which carried guild_id. This wrapper is the single point of
+        truth now.
+        """
+        enriched = dict(message_dict)
+        enriched.update(self._mem_kwargs(message))
+        await self.memory.add_to_channel_memory(channel_id, enriched)
+
     def _get_channel_lock(self, channel_id: str) -> asyncio.Lock:
         if channel_id not in self._channel_locks:
             self._channel_locks[channel_id] = asyncio.Lock()
         return self._channel_locks[channel_id]
+
+    def _mem_kwargs(self, message) -> dict:
+        """Build the standard kwargs for add_to_channel_memory from a
+        discord.Message. Centralizes guild_id + message_type so every
+        caller site that records a message stops forgetting them.
+
+        Audit on 2026-07-30: 13 call sites, only 2 carried guild_id.
+        """
+        if message is None:
+            return {}
+        guild = getattr(message, "guild", None)
+        channel = getattr(message, "channel", None)
+        return {
+            "guild_id": str(getattr(guild, "id", "") or ""),
+            "guild_name": str(getattr(guild, "name", "") or ""),
+            "channel_name": str(getattr(channel, "name", "") or ""),
+            "message_type": str(
+                getattr(getattr(message, "type", None), "name", "default")
+                or "default"
+            ),
+        }
 
     def _message_addresses_self(self, message) -> bool:
         """True if this message is directed at Maxwell (DM, mention, or reply to him).
@@ -2793,7 +2830,7 @@ class MaxwellBot(commands.Bot):
                 # so an autonomy-force-recorded post (same message_id) only merges
                 # metadata here — its autonomy tag/reason are preserved.
                 try:
-                    await self.memory.add_to_channel_memory(
+                    await self.add_message_to_memory(
                         channel_id,
                         {
                             "author": self.bot_name,
@@ -2806,9 +2843,8 @@ class MaxwellBot(commands.Bot):
                             ),
                             "message_id": str(message.id),
                             "timestamp": _message_created_at_iso(message),
-                            "guild_id": str(getattr(message.guild, "id", "") or ""),
-                            "message_type": str(getattr(message.type, "name", "default") or "default"),
                         },
+                        message,
                     )
                     self._update_recent_users(channel_id, self.user)
                 except Exception as e:
@@ -2916,8 +2952,6 @@ class MaxwellBot(commands.Bot):
                     ),
                     "message_id": str(message.id),
                     "timestamp": _message_created_at_iso(message),
-                    "guild_id": str(getattr(message.guild, "id", "") or ""),
-                    "message_type": str(getattr(message.type, "name", "default") or "default"),
                 }
                 self._update_recent_users(channel_id, message.author)
                 for u in getattr(message, "mentions", []) or []:
@@ -2949,7 +2983,7 @@ class MaxwellBot(commands.Bot):
                         }
                     )
                 try:
-                    await self.memory.add_to_channel_memory(channel_id, memory_item)
+                    await self.add_message_to_memory(channel_id, memory_item, message)
                     if self.rem_log:
                         await self._record_rem_event(message, "user", memory_content)
                 except Exception as e:
@@ -4183,6 +4217,9 @@ class MaxwellBot(commands.Bot):
                     (time.perf_counter() - t_total) * 1000,
                 )
             if self._control.get("store_memory", False):
+                mem_kwargs = {}
+                if guild:
+                    mem_kwargs["guild_id"] = str(getattr(guild, "id", "") or "")
                 await self.memory.add_to_channel_memory(
                     channel_id,
                     {
@@ -4190,6 +4227,7 @@ class MaxwellBot(commands.Bot):
                         "author_id": str(user.id),
                         "author_is_bot": bool(getattr(user, "bot", False)),
                         "content": f"[voice message, {duration:.1f}s]",
+                        **mem_kwargs,
                     },
                 )
                 await self.memory.add_to_channel_memory(
@@ -4207,6 +4245,7 @@ class MaxwellBot(commands.Bot):
                         "author_id": str(self.user.id) if self.user else "",
                         "author_is_bot": True,
                         "content": resp,
+                        **mem_kwargs,
                     },
                 )
         except Exception as e:
@@ -7786,7 +7825,7 @@ class MaxwellBot(commands.Bot):
                                 break
                     if sent_content:
                         try:
-                            await self.memory.add_to_channel_memory(
+                            await self.add_message_to_memory(
                                 str(message.channel.id),
                                 {
                                     "author": self.bot_name,
@@ -7796,6 +7835,7 @@ class MaxwellBot(commands.Bot):
                                     "message_id": f"bot_send_message:{message.id}",
                                     "timestamp": datetime.now(timezone.utc).isoformat(),
                                 },
+                                message,
                             )
                         except Exception as _e:  # noqa: BLE001
                             logger.debug(
@@ -7861,7 +7901,7 @@ class MaxwellBot(commands.Bot):
                             and getattr(self, "memory", None) is not None
                         ):
                             try:
-                                await self.memory.add_to_channel_memory(
+                                await self.add_message_to_memory(
                                     str(message.channel.id),
                                     {
                                         "author": self.bot_name,
@@ -7875,6 +7915,7 @@ class MaxwellBot(commands.Bot):
                                             timezone.utc
                                         ).isoformat(),
                                     },
+                                    message,
                                 )
                             except Exception as _e:  # noqa: BLE001
                                 logger.debug(
@@ -7967,7 +8008,7 @@ class MaxwellBot(commands.Bot):
                     and getattr(self, "memory", None) is not None
                 ):
                     try:
-                        await self.memory.add_to_channel_memory(
+                        await self.add_message_to_memory(
                             str(message.channel.id),
                             {
                                 "author": self.bot_name,
@@ -7977,6 +8018,7 @@ class MaxwellBot(commands.Bot):
                                 "message_id": f"bot_reply:{message.id}",
                                 "timestamp": datetime.now(timezone.utc).isoformat(),
                             },
+                            message,
                         )
                     except Exception as _e:  # noqa: BLE001
                         logger.debug(

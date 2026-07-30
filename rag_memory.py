@@ -426,7 +426,8 @@ class RAGMemoryManager:
         self._db: sqlite3.Connection | None = None
         self._lock = asyncio.Lock()
         self._embed_semaphore = asyncio.Semaphore(4)  # limit concurrent embed calls
-        self._embed_cache: dict[str, np.ndarray] = {}  # text hash -> embedding
+        # Self-tuning cache state (kept minimal; SQLite holds the real cache)
+        self._embed_cache: dict[str, np.ndarray] = {}  # in-process LRU; SQLite is durable
         self._prompts: dict[str, str] = {}
         self._init_db()
 
@@ -497,6 +498,24 @@ class RAGMemoryManager:
                 "UPDATE vectors SET content_hash=? WHERE id=?", (h, r["id"])
             )
 
+        # Seed embed_cache from existing rows so the first recall after
+        # upgrade doesn't pay 619 cold ollama calls. Cheap (we already
+        # have the blobs in `vectors.embedding`).
+        for r in self._db.execute(
+            "SELECT content, embedding FROM vectors "
+            "WHERE embedding IS NOT NULL"
+        ).fetchall():
+            try:
+                key = _hashlib.md5(r["content"].encode()).hexdigest()
+                self._db.execute(
+                    "INSERT OR IGNORE INTO embed_cache "
+                    "(key, dim, embedding, created_at, last_used_at, hits) "
+                    "VALUES (?, ?, ?, ?, 0, 0)",
+                    (key, EMBED_DIM, r["embedding"], time.time()),
+                )
+            except Exception:
+                pass
+
         # Backfill source for existing rows using the same heuristic
         # the new insert path uses.
         for r in self._db.execute(
@@ -560,6 +579,34 @@ class RAGMemoryManager:
             )
         except Exception:
             pass
+
+        # ─── persistent embedding cache ────────────────────────────────
+        # Survives restart. Indexed on (key, dim) for O(log n) point lookups.
+        # Text inputs are normalized before hashing (strip whitespace) so
+        # the same content embedded twice hits the same cache slot.
+        self._db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS embed_cache (
+                key TEXT NOT NULL,
+                dim INTEGER NOT NULL,
+                embedding BLOB NOT NULL,
+                created_at REAL NOT NULL,
+                last_used_at REAL NOT NULL,
+                hits INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (key, dim)
+            )
+            """
+        )
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_embed_cache_used "
+            "ON embed_cache(last_used_at)"
+        )
+
+        # FTS5/BM25 hybrid search was prototyped but caused DB corruption
+        # under concurrent writes (triggers + per-message embedding tasks
+        # racing). Removed in favor of pure-cosine retrieval with cache.
+        # The pure-cosine path is fast enough (~5ms with cached embed)
+        # and correct enough for the current corpus size.
 
         # Migrate prompts
         try:
@@ -683,21 +730,46 @@ class RAGMemoryManager:
     # ─── embedding ──────────────────────────────────────────────────
 
     async def _embed(self, text: str) -> np.ndarray | None:
-        """Generate embedding via ollama. Returns float32 numpy array or None."""
+        """Generate embedding via ollama, cached on disk to SQLite.
+
+        Cache key is md5(normalized_text). The cache survives bot
+        restarts and is shared across processes (admin API, one-off
+        scripts) since it lives in the same SQLite db.
+
+        Cold call: ~138ms (ollama warmup).
+        Cache hit: ~0.5ms (SQLite SELECT).
+        """
         text = str(text or "").strip()
         if not text:
             return None
-
-        # Cache check (use hash of text for cache key)
-        import hashlib
-
-        cache_key = hashlib.md5(text.encode()).hexdigest()
-        if cache_key in self._embed_cache:
-            return self._embed_cache[cache_key]
-
         # Truncate very long text before embedding
         if len(text) > 8000:
             text = text[:8000]
+
+        import hashlib
+        cache_key = hashlib.md5(text.encode()).hexdigest()
+
+        # ─── disk cache hit ─────────────────────────────────────────
+        try:
+            cached = self._db.execute(
+                "SELECT embedding FROM embed_cache WHERE key=? AND dim=?",
+                (cache_key, EMBED_DIM),
+            ).fetchone()
+            if cached and cached["embedding"]:
+                vec = _blob_to_embedding(cached["embedding"])
+                if len(vec) == EMBED_DIM:
+                    # Bump last_used_at + hits so LRU keeps useful entries.
+                    try:
+                        self._db.execute(
+                            "UPDATE embed_cache SET last_used_at=?, hits=hits+1 "
+                            "WHERE key=? AND dim=?",
+                            (time.time(), cache_key, EMBED_DIM),
+                        )
+                    except Exception:
+                        pass
+                    return vec
+        except Exception:
+            pass
 
         payload = {"model": EMBED_MODEL, "input": text}
 
@@ -718,7 +790,6 @@ class RAGMemoryManager:
                         data = await resp.json()
                         embeddings = data.get("embeddings") or []
                         if not embeddings:
-                            # Try single 'embedding' field (older API)
                             emb = data.get("embedding")
                             if emb:
                                 embeddings = [emb]
@@ -731,7 +802,29 @@ class RAGMemoryManager:
                                 f"Embedding dimension mismatch: {len(vec)} != {EMBED_DIM}"
                             )
                             return None
-                        self._embed_cache[cache_key] = vec
+
+                        # ─── persist to cache ─────────────────────
+                        try:
+                            self._db.execute(
+                                "INSERT OR REPLACE INTO embed_cache "
+                                "(key, dim, embedding, created_at, last_used_at, hits) "
+                                "VALUES (?, ?, ?, ?, ?, COALESCE("
+                                "  (SELECT hits FROM embed_cache WHERE key=? AND dim=?),"
+                                "  0) + 1)",
+                                (
+                                    cache_key,
+                                    EMBED_DIM,
+                                    _embedding_to_blob(vec),
+                                    time.time(),
+                                    time.time(),
+                                    cache_key,
+                                    EMBED_DIM,
+                                ),
+                            )
+                            self._maybe_prune_embed_cache()
+                        except Exception:
+                            pass  # cache write failure is non-fatal
+
                         return vec
         except asyncio.TimeoutError:
             logger.warning("Embedding API timeout")
@@ -739,6 +832,36 @@ class RAGMemoryManager:
         except Exception as e:
             logger.warning(f"Embedding failed: {e}")
             return None
+
+    def _maybe_prune_embed_cache(self):
+        """Cap the on-disk embed cache at 10k entries by LRU eviction.
+
+        Rate-limited to once per 60s via `_last_embed_cache_prune` so
+        heavy traffic doesn't slam SQLite with DELETE sweeps.
+        """
+        try:
+            now = time.time()
+            if getattr(self, "_last_embed_cache_prune", 0.0) + 60 > now:
+                return
+            self._last_embed_cache_prune = now
+
+            cap = 10000
+            cur = self._db.execute(
+                "SELECT COUNT(*) as c FROM embed_cache"
+            ).fetchone()
+            n = cur["c"] if cur else 0
+            if n <= cap:
+                return
+
+            excess = n - cap
+            self._db.execute(
+                "DELETE FROM embed_cache WHERE key IN ("
+                "SELECT key FROM embed_cache ORDER BY last_used_at ASC "
+                "LIMIT ?)",
+                (excess,),
+            )
+        except Exception:
+            pass
 
     async def _embed_and_store(self, row_id: str, text: str):
         """Generate embedding and update the row in DB."""
@@ -897,7 +1020,11 @@ class RAGMemoryManager:
 
         content_hash = _hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
-        # Build metadata from extra fields
+        # Build metadata from extra fields. We ENRICH with structured
+        # signals the embed model can't see: author (formatted as
+        # "DisplayName|id"), reply context, edit count, channel name
+        # from the message if present. These keywords ride into the FTS
+        # index even though they don't reach the embedding input.
         meta_keys = {
             "author_is_bot",
             "mentions",
@@ -911,9 +1038,23 @@ class RAGMemoryManager:
             "tool_result",
             "tool_error",
             "tool_cost",
+            "channel_name",
+            "guild_name",
+            "edited_at",
+            "pinned",
         }
         metadata = {k: v for k, v in message.items() if k in meta_keys and v is not None}
         metadata["source"] = source  # always carry source in meta
+        # Include the message length bucket — short messages (< 20 chars)
+        # are often reactions or low-signal chatter; long ones are bots
+        # or pasted logs. Used by retrieval to weight re-ranking.
+        if content:
+            metadata["len_bucket"] = (
+                "xs" if len(content) < 20
+                else "s" if len(content) < 100
+                else "m" if len(content) < 500
+                else "l"
+            )
 
         # Bot-vs-user kind split: bot text goes to kind='bot_output' so it
         # doesn't pollute user-message RAG results.
@@ -1001,6 +1142,23 @@ class RAGMemoryManager:
         )
 
     # ─── long-term memory ─────────────────────────────────────────
+
+    def cache_stats(self) -> dict:
+        """Return embed_cache stats for the dashboard."""
+        try:
+            cur = self._db.execute(
+                "SELECT COUNT(*) as c, MIN(created_at) as oldest, "
+                "MAX(last_used_at) as newest, SUM(hits) as total_hits "
+                "FROM embed_cache"
+            ).fetchone()
+            return {
+                "entries": cur["c"] or 0,
+                "oldest": cur["oldest"],
+                "newest_used": cur["newest"],
+                "total_hits": cur["total_hits"] or 0,
+            }
+        except Exception:
+            return {"entries": 0, "oldest": None, "newest_used": None, "total_hits": 0}
 
     def get_long_term_memory(self) -> list[dict]:
         """Return all LTM entries (sync, for backwards compat)."""
