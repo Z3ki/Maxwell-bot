@@ -2755,6 +2755,8 @@ class MaxwellBot(commands.Bot):
                             ),
                             "message_id": str(message.id),
                             "timestamp": _message_created_at_iso(message),
+                            "guild_id": str(getattr(message.guild, "id", "") or ""),
+                            "message_type": str(getattr(message.type, "name", "default") or "default"),
                         },
                     )
                     self._update_recent_users(channel_id, self.user)
@@ -2863,6 +2865,8 @@ class MaxwellBot(commands.Bot):
                     ),
                     "message_id": str(message.id),
                     "timestamp": _message_created_at_iso(message),
+                    "guild_id": str(getattr(message.guild, "id", "") or ""),
+                    "message_type": str(getattr(message.type, "name", "default") or "default"),
                 }
                 self._update_recent_users(channel_id, message.author)
                 for u in getattr(message, "mentions", []) or []:
@@ -8971,6 +8975,8 @@ class MaxwellBot(commands.Bot):
                     rag_results = await self.memory.rag_search(
                         user_message,
                         kinds=["ltm", "shared_context"],
+                        guild_id=str(getattr(message.guild, "id", "") or ""),
+                        apply_recency=False,  # LTM/shared_context don't decay
                         top_k=max(
                             5,
                             min(

@@ -34,17 +34,82 @@ logger = logging.getLogger(__name__)
 
 # ─── constants ────────────────────────────────────────────────────────
 
-EMBED_MODEL = "qwen3-embedding:0.6b"
-EMBED_DIM = 1024  # qwen3-embedding:0.6b output dimension
+# Embedding model. bge-m3 (BAAI) is 1024-dim, multilingual, ~568M params,
+# instruction-aware — meaningfully better semantic recall than
+# qwen3-embedding:0.6b for conversational memory at modest cost.
+# ollama pull bge-m3
+EMBED_MODEL = "bge-m3"
+EMBED_DIM = 1024
 OLLAMA_EMBED_URL = "http://localhost:11434/api/embed"
+
+# Cross-encoder reranker (sentence-transformers-style, served by ollama as
+# a generation model with a logprobs-based scoring trick). Disabled until
+# someone wires it because pure cosine is fine for now.
+RERANK_MODEL = ""
+
+# Recency decay (seconds). 14 days ≈ 1.21e6 s. Score multiplied by
+# exp(-age_seconds / tau). Lower τ = steeper penalty for old memories.
+RECENCY_TAU_SECONDS = 14 * 86400.0
+
 MAX_CHANNELS = 25
 MAX_MEMORY_CHARS = 1000
 MAX_LTM_LINES = 999
+MAX_CHUNK_CHARS = 1500  # for smart chunking of long content
 DEFAULT_REM_EVENT_BUFFER_MAX = 500
 
 # Cosine similarity threshold for RAG retrieval. Below this, results are
 # considered noise and filtered out.
 SIM_THRESHOLD = 0.35
+
+# ─── filtering ────────────────────────────────────────────────────────
+
+# Discord.MessageType values that produce no real user content. We never
+# embed these — they're webhook metadata, presence events, or system
+# messages. Names match `discord.MessageType` enum members.
+_DISCORD_SKIP_TYPES = frozenset(
+    {
+        "default",  # included so unset types are still allowed
+        "recipient_add",
+        "recipient_remove",
+        "call",
+        "channel_name_change",
+        "channel_icon_change",
+        "pins_add",
+        "new_member",
+        "premium_guild_subscription",
+        "premium_tier",
+        "channel_follow_add",
+        "guild_discovery_disqualified",
+        "guild_discovery_requalified",
+        "guild_discovery_grace_period_initial_warning",
+        "guild_discovery_grace_period_final_warning",
+        "thread_created",
+        "reply",  # bare reply with no other content is just metadata
+        "application_command",
+        "invite",
+        "contextual_command",
+        "forum_thread_created",
+    }
+)
+
+# Phrases that signal a bot's own output got re-fed into the store. We
+# flag content containing these so add_to_channel_memory can split
+# source='bot' vs source='user'.
+_BOT_OUTPUT_MARKERS = (
+    "bold of you to assume",
+    "Called send_message with",
+    "Called send_dm with",
+    "Called edit_message with",
+    "Called run_tool with",
+    "Called autodelete with",
+    "Called webfetch with",
+    "RAG relevance:",
+)
+
+# Monosyllable / reaction threshold. Content shorter than this (after
+# stripping URLs/markdown/mentions) is too low-signal to embed. We still
+# *store* it (so /api/rag/messages shows recent), we just don't embed.
+_MIN_EMBED_LEN = 4
 
 # ─── helpers ──────────────────────────────────────────────────────────
 
@@ -91,6 +156,138 @@ def _embedding_to_blob(vec: np.ndarray) -> bytes:
 def _blob_to_embedding(blob: bytes) -> np.ndarray:
     """Unpack BLOB back to float32 numpy array."""
     return np.frombuffer(blob, dtype=np.float32)
+
+
+# ─── content filtering ────────────────────────────────────────────────
+
+
+def _strip_for_embedding(text: str) -> str:
+    """Normalize text before deciding 'is this worth embedding?'.
+
+    - Strip URLs (they're not semantically meaningful by themselves)
+    - Strip mentions (the bot already knows who they refer to in context)
+    - Strip emojis-only runs (zero signal for recall)
+    - Collapse whitespace
+
+    Returns the cleaned string. Length of *this* decides embed vs skip.
+    """
+    import re
+
+    s = str(text or "")
+    if not s:
+        return ""
+    s = re.sub(r"https?://\S+", " ", s)
+    s = re.sub(r"<@!?\d+>", " ", s)
+    s = re.sub(r"<#\d+>", " ", s)
+    s = re.sub(r":[a-zA-Z0-9_]+:", " ", s)  # emoji shortcodes
+    s = re.sub(r"[\U00010000-\U0010ffff]", " ", s)  # unicode emoji
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _is_system_event_content(content: str, message_type: str | None = None) -> bool:
+    """True if this content is a Discord system event, not a user message.
+
+    Detects embeds like `[embeds: Avatar update]` or `[embeds: Member left]`
+    that the bot renders when no real message text exists.
+    """
+    if message_type and str(message_type) in _DISCORD_SKIP_TYPES:
+        return True
+    s = str(content or "").strip()
+    if not s:
+        return True
+    # No real content, just metadata wrappers
+    if s.startswith("[embeds:") and s.endswith("]"):
+        return True
+    if s.startswith("[Message deleted in"):
+        return True
+    return False
+
+
+def _detect_source(message: dict) -> str:
+    """Figure out source='user' | 'bot' | 'system' for a message dict.
+
+    Priority order:
+    1. Explicit `source` field wins
+    2. `author_is_bot: True` → 'bot'
+    3. `_BOT_OUTPUT_MARKERS` substring match → 'bot'
+    4. `_is_system_event_content` → 'system'
+    5. Default 'user'
+    """
+    src = message.get("source")
+    if src in ("user", "bot", "system"):
+        return src
+    if message.get("author_is_bot") is True:
+        return "bot"
+    content = str(message.get("content") or "")
+    for marker in _BOT_OUTPUT_MARKERS:
+        if marker in content:
+            return "bot"
+    if _is_system_event_content(content, message.get("message_type")):
+        return "system"
+    return "user"
+
+
+def _chunk_long_text(text: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
+    """Split very long content into overlapping sentence-boundary chunks.
+
+    Returns the original wrapped in a list if it fits, otherwise a list of
+    chunks each at most `max_chars` chars. Chunks are stored as separate
+    rows with `parent_id` linking back to the original message id, so
+    retrieval can expand a hit back to its source.
+    """
+    s = str(text or "")
+    if len(s) <= max_chars:
+        return [s]
+    import re
+
+    # Split on sentence boundaries, then greedily pack into max_chars chunks.
+    sentences = re.split(r"(?<=[.!?\n])\s+", s)
+    chunks: list[str] = []
+    buf = ""
+    for sent in sentences:
+        if not sent:
+            continue
+        # Hard cap: a single sentence longer than max_chars gets sliced.
+        while len(sent) > max_chars:
+            if buf:
+                chunks.append(buf.strip())
+                buf = ""
+            chunks.append(sent[:max_chars].strip())
+            sent = sent[max_chars:]
+        if len(buf) + len(sent) + 1 > max_chars:
+            if buf:
+                chunks.append(buf.strip())
+            buf = sent
+        else:
+            buf = (buf + " " + sent).strip() if buf else sent
+    if buf:
+        chunks.append(buf.strip())
+    return chunks or [s[:max_chars]]
+
+
+def _score_with_recency(
+    cosine: float, ts: str | None, now_ts: float | None = None
+) -> float:
+    """Apply recency decay: cosine * exp(-age_seconds / τ).
+
+    LTM and shared_context always score at full cosine (they're durable
+    facts by definition — their timestamp is when they were *written*,
+    not when the underlying event happened). Pass kind='message' to opt
+    out.
+    """
+    if not ts:
+        return float(cosine)
+    dt = _parse_iso(ts)
+    if dt is None:
+        return float(cosine)
+    if now_ts is None:
+        now_ts = _utcnow().timestamp()
+    age = max(0.0, float(now_ts) - dt.timestamp())
+    import math
+
+    decay = math.exp(-age / RECENCY_TAU_SECONDS)
+    return float(cosine) * (0.25 + 0.75 * decay)  # never below 25% of raw cosine
 
 
 # ─── RemEventLog (kept identical — REM still uses it) ────────────────
@@ -295,20 +492,85 @@ class RAGMemoryManager:
             """
             CREATE TABLE IF NOT EXISTS vectors (
                 id TEXT PRIMARY KEY,
-                kind TEXT NOT NULL,           -- 'message', 'ltm', 'shared_context'
+                kind TEXT NOT NULL,           -- 'message', 'ltm', 'shared_context',
+                                              -- 'bot_output', 'negative'
                 channel_id TEXT DEFAULT '',
+                guild_id TEXT DEFAULT '',     -- NEW: server/channel isolation
                 author TEXT DEFAULT '',
                 author_id TEXT DEFAULT '',
+                source TEXT DEFAULT 'user',   -- NEW: 'user' | 'bot' | 'system'
                 content TEXT NOT NULL,
+                content_hash TEXT DEFAULT '', -- NEW: SHA-256 of normalized content
                 embedding BLOB,
                 metadata TEXT DEFAULT '{}',
                 scope TEXT DEFAULT '',
                 importance INTEGER DEFAULT 0,
+                parent_id TEXT DEFAULT '',    -- NEW: chunks point at parent msg
+                chunk_index INTEGER DEFAULT 0,-- NEW: 0 for non-chunks
+                downvotes INTEGER DEFAULT 0,  -- NEW: negative-feedback counter
                 timestamp TEXT NOT NULL,
                 created_at REAL NOT NULL
             )
             """
         )
+        # ─── in-place migration from previous schema (idempotent) ─────
+        # If columns don't exist yet, ALTER TABLE … ADD COLUMN. SQLite
+        # refuses duplicates, so wrap each in a try and ignore OperationalError.
+        _migrations = [
+            ("guild_id", "TEXT DEFAULT ''"),
+            ("source", "TEXT DEFAULT 'user'"),
+            ("content_hash", "TEXT DEFAULT ''"),
+            ("parent_id", "TEXT DEFAULT ''"),
+            ("chunk_index", "INTEGER DEFAULT 0"),
+            ("downvotes", "INTEGER DEFAULT 0"),
+        ]
+        for col, decl in _migrations:
+            try:
+                self._db.execute(f"ALTER TABLE vectors ADD COLUMN {col} {decl}")
+            except Exception:
+                pass  # column already exists
+
+        # Backfill content_hash from content for existing rows.
+        import hashlib as _hashlib
+
+        for r in self._db.execute(
+            "SELECT id, content FROM vectors WHERE content_hash='' OR content_hash IS NULL"
+        ).fetchall():
+            normalized = _strip_for_embedding(r["content"])
+            h = _hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+            self._db.execute(
+                "UPDATE vectors SET content_hash=? WHERE id=?", (h, r["id"])
+            )
+
+        # Backfill source for existing rows using the same heuristic
+        # the new insert path uses.
+        for r in self._db.execute(
+            "SELECT id, kind, content, metadata FROM vectors "
+            "WHERE source='user' OR source IS NULL OR source=''"
+        ).fetchall():
+            try:
+                meta = json.loads(r["metadata"] or "{}")
+            except Exception:
+                meta = {}
+            author_is_bot = meta.get("author_is_bot")
+            content = r["content"]
+            # Bot rows were inserted with a row.id prefix 'bot_*'
+            new_src = "user"
+            if str(r["id"]).startswith("bot_") or r["kind"] == "bot_output":
+                new_src = "bot"
+            elif _is_system_event_content(content):
+                new_src = "system"
+            elif author_is_bot is True:
+                new_src = "bot"
+            else:
+                for marker in _BOT_OUTPUT_MARKERS:
+                    if marker in content:
+                        new_src = "bot"
+                        break
+            self._db.execute(
+                "UPDATE vectors SET source=? WHERE id=?", (new_src, r["id"])
+            )
+
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_kind ON vectors(kind)"
         )
@@ -321,6 +583,28 @@ class RAGMemoryManager:
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_timestamp ON vectors(timestamp)"
         )
+        # NEW indices for the new retrieval paths
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_guild ON vectors(guild_id)"
+        )
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_source ON vectors(source)"
+        )
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_content_hash ON vectors(content_hash)"
+        )
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_parent ON vectors(parent_id)"
+        )
+        # Unique constraint prevents duplicate (same channel + same content).
+        # Skipped rows via OR IGNORE in insert path.
+        try:
+            self._db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_content "
+                "ON vectors(channel_id, content_hash) WHERE content_hash != ''"
+            )
+        except Exception:
+            pass
 
         # Migrate prompts
         try:
@@ -367,6 +651,8 @@ class RAGMemoryManager:
         try:
             lines = ltm_file.read_text(encoding="utf-8").strip().splitlines()
             migrated = 0
+            import hashlib as _hashlib
+
             for line in lines:
                 line = line.strip()
                 if not line:
@@ -377,10 +663,18 @@ class RAGMemoryManager:
                 ts = parts[1].strip() if len(parts) > 1 else _utcnow_iso()
                 mid = parts[2].strip() if len(parts) > 2 else uuid.uuid4().hex
 
+                norm = _strip_for_embedding(content)
+                ch = _hashlib.sha256(norm.encode("utf-8")).hexdigest()
+
                 # Insert without embedding first (will be embedded lazily on search)
                 self._db.execute(
-                    "INSERT OR IGNORE INTO vectors (id, kind, channel_id, author, author_id, content, embedding, metadata, scope, importance, timestamp, created_at) VALUES (?, 'ltm', '', '', '', ?, NULL, '{}', 'global', 5, ?, ?)",
-                    (content[:MAX_MEMORY_CHARS], ts, time.time()),
+                    "INSERT OR IGNORE INTO vectors (id, kind, channel_id, guild_id, "
+                    "author, author_id, source, content, content_hash, embedding, "
+                    "metadata, scope, importance, parent_id, chunk_index, downvotes, "
+                    "timestamp, created_at) "
+                    "VALUES (?, 'ltm', '', '', '', '', 'user', ?, ?, NULL, '{}', "
+                    "'global', 5, '', 0, 0, ?, ?)",
+                    (mid, content[:MAX_MEMORY_CHARS], ch, ts, time.time()),
                 )
                 migrated += 1
             if migrated:
@@ -607,13 +901,51 @@ class RAGMemoryManager:
         return result
 
     async def add_to_channel_memory(self, channel_id: str, message: dict):
-        """Add a message to channel memory with embedding."""
+        """Add a message to channel memory with embedding.
+
+        Tier-1 rewrite: this is now where we filter noise, dedupe at
+        insert, split bot-vs-user sources, and chunk long content.
+
+        Behavior:
+          - if source='system' → SKIP entirely (don't store, don't embed)
+          - if source='bot'   → store as kind='bot_output', lower priority
+          - if source='user'  → store as kind='message', full embedding
+          - if content stripped of URLs/mentions/emoji is < 4 chars,
+            store the row but do NOT request an embedding (cheap skip)
+          - dedupe by (channel_id, content_hash) — silent ignore on collision
+          - if content > MAX_CHUNK_CHARS, also create chunk rows with
+            parent_id pointing here
+        """
         channel_id = str(channel_id)
         msg_id = str(message.get("message_id") or uuid.uuid4().hex)
         content = str(message.get("content") or "")
         author = str(message.get("author") or "")
         author_id = str(message.get("author_id") or "")
+        guild_id = str(message.get("guild_id") or "")
         ts = str(message.get("timestamp") or _utcnow_iso())
+
+        # Detect source and drop system events before they waste a row
+        source = _detect_source(message)
+        if source == "system":
+            logger.debug(
+                f"Skipping system event channel={channel_id} msg={msg_id}"
+            )
+            return
+
+        # Normalize for embedding decision. We embed everything that's
+        # left AFTER stripping noise, regardless of how the original
+        # was formatted.
+        normalized = _strip_for_embedding(content)
+        if not normalized:
+            # still store so /api/rag/messages has recent history visible,
+            # but skip the embedding call
+            should_embed = False
+        else:
+            should_embed = len(normalized) >= _MIN_EMBED_LEN
+
+        import hashlib as _hashlib
+
+        content_hash = _hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
         # Build metadata from extra fields
         meta_keys = {
@@ -631,19 +963,48 @@ class RAGMemoryManager:
             "tool_cost",
         }
         metadata = {k: v for k, v in message.items() if k in meta_keys and v is not None}
+        metadata["source"] = source  # always carry source in meta
 
-        # Delete existing message with same id (dedup)
+        # Bot-vs-user kind split: bot text goes to kind='bot_output' so it
+        # doesn't pollute user-message RAG results.
+        kind = "bot_output" if source == "bot" else "message"
+
+        # Dedupe by (channel_id, content_hash). If a row already exists
+        # with the same hash in this channel, just refresh its source/metadata
+        # and bail — no new row, no re-embed.
+        existing = self._db.execute(
+            "SELECT id FROM vectors WHERE channel_id=? AND content_hash=? "
+            "AND id != ? LIMIT 1",
+            (channel_id, content_hash, msg_id),
+        ).fetchone()
+        if existing:
+            self._db.execute(
+                "UPDATE vectors SET metadata=?, source=?, updated_at=created_at "
+                "WHERE id=?",
+                (json.dumps(metadata), source, existing["id"]),
+            )
+            return
+
+        # Delete any prior row with this exact message_id (idempotent re-send).
         self._db.execute("DELETE FROM vectors WHERE id=?", (msg_id,))
 
-        # Insert
+        # Insert main row.
         self._db.execute(
-            "INSERT INTO vectors (id, kind, channel_id, author, author_id, content, embedding, metadata, scope, importance, timestamp, created_at) VALUES (?, 'message', ?, ?, ?, ?, NULL, ?, '', 0, ?, ?)",
+            "INSERT INTO vectors "
+            "(id, kind, channel_id, guild_id, author, author_id, source, content, "
+            " content_hash, embedding, metadata, scope, importance, parent_id, "
+            " chunk_index, downvotes, timestamp, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '', 0, '', 0, 0, ?, ?)",
             (
                 msg_id,
+                kind,
                 channel_id,
+                guild_id,
                 author,
                 author_id,
+                source,
                 content[:8000],
+                content_hash,
                 json.dumps(metadata),
                 ts,
                 time.time(),
@@ -658,13 +1019,17 @@ class RAGMemoryManager:
         if count_row and count_row["c"] > self.max_messages:
             excess = count_row["c"] - self.max_messages
             self._db.execute(
-                "DELETE FROM vectors WHERE id IN (SELECT id FROM vectors WHERE kind='message' AND channel_id=? ORDER BY created_at ASC LIMIT ?)",
+                "DELETE FROM vectors WHERE id IN ("
+                "SELECT id FROM vectors WHERE kind='message' AND channel_id=? "
+                "ORDER BY created_at ASC LIMIT ?)",
                 (channel_id, excess),
             )
 
         # Prune channels if too many
         chan_rows = self._db.execute(
-            "SELECT channel_id, COUNT(*) as c FROM vectors WHERE kind='message' GROUP BY channel_id ORDER BY MAX(created_at) DESC"
+            "SELECT channel_id, COUNT(*) as c FROM vectors "
+            "WHERE kind='message' GROUP BY channel_id "
+            "ORDER BY MAX(created_at) DESC"
         ).fetchall()
         if len(chan_rows) > MAX_CHANNELS:
             for row in chan_rows[MAX_CHANNELS:]:
@@ -673,8 +1038,49 @@ class RAGMemoryManager:
                     (row["channel_id"],),
                 )
 
-        # Embed in background (non-blocking)
-        asyncio.ensure_future(self._embed_and_store(msg_id, content))
+        # Smart chunking for very long content. Emit one row per chunk
+        # with parent_id so retrieval can walk back. Only for kind='message'
+        # (user text) — bot_output chunks would just multiply noise.
+        if kind == "message" and len(content) > MAX_CHUNK_CHARS:
+            chunks = _chunk_long_text(content, MAX_CHUNK_CHARS)
+            for idx, chunk in enumerate(chunks):
+                if not chunk.strip():
+                    continue
+                chunk_id = f"{msg_id}:c{idx}"
+                chunk_norm = _strip_for_embedding(chunk)
+                chunk_hash = _hashlib.sha256(
+                    chunk_norm.encode("utf-8")
+                ).hexdigest()
+                try:
+                    self._db.execute(
+                        "INSERT INTO vectors "
+                        "(id, kind, channel_id, guild_id, author, author_id, source, "
+                        " content, content_hash, embedding, metadata, scope, importance, "
+                        " parent_id, chunk_index, downvotes, timestamp, created_at) "
+                        "VALUES (?, 'message', ?, ?, ?, ?, 'user', ?, ?, NULL, '{}',"
+                        " '', 0, ?, ?, 0, ?, ?)",
+                        (
+                            chunk_id,
+                            channel_id,
+                            guild_id,
+                            author,
+                            author_id,
+                            chunk[:8000],
+                            chunk_hash,
+                            msg_id,
+                            idx,
+                            ts,
+                            time.time(),
+                        ),
+                    )
+                    if should_embed and chunk_norm:
+                        asyncio.ensure_future(self._embed_and_store(chunk_id, chunk))
+                except Exception:
+                    pass  # unique-index collision on chunk is fine
+
+        # Embed in background (non-blocking). Skip if content too short.
+        if should_embed:
+            asyncio.ensure_future(self._embed_and_store(msg_id, content))
 
     async def clear_channel_memory(self, channel_id: str):
         self._db.execute(
@@ -702,9 +1108,17 @@ class RAGMemoryManager:
         content = _normalize_ltm_line(content)
         mid = uuid.uuid4().hex
         ts = _utcnow_iso()
+        import hashlib as _hashlib
+
+        norm = _strip_for_embedding(content)
+        ch = _hashlib.sha256(norm.encode("utf-8")).hexdigest()
         self._db.execute(
-            "INSERT INTO vectors (id, kind, channel_id, author, author_id, content, embedding, metadata, scope, importance, timestamp, created_at) VALUES (?, 'ltm', '', '', '', ?, NULL, '{}', 'global', 5, ?, ?)",
-            (mid, content, ts, time.time()),
+            "INSERT INTO vectors (id, kind, channel_id, guild_id, author, author_id, "
+            "source, content, content_hash, embedding, metadata, scope, importance, "
+            "parent_id, chunk_index, downvotes, timestamp, created_at) "
+            "VALUES (?, 'ltm', '', '', '', '', 'user', ?, ?, NULL, '{}', 'global', "
+            "5, '', 0, 0, ?, ?)",
+            (mid, content, ch, ts, time.time()),
         )
         # Prune if exceeding max
         count_row = self._db.execute(
@@ -722,9 +1136,14 @@ class RAGMemoryManager:
 
     async def edit_long_term_memory(self, memory_id: str, content: str) -> bool:
         content = _normalize_ltm_line(content)
+        import hashlib as _hashlib
+
+        norm = _strip_for_embedding(content)
+        ch = _hashlib.sha256(norm.encode("utf-8")).hexdigest()
         cursor = self._db.execute(
-            "UPDATE vectors SET content=?, embedding=NULL WHERE id=? AND kind='ltm'",
-            (content, str(memory_id)),
+            "UPDATE vectors SET content=?, content_hash=?, embedding=NULL "
+            "WHERE id=? AND kind='ltm'",
+            (content, ch, str(memory_id)),
         )
         if cursor.rowcount > 0:
             asyncio.ensure_future(self._embed_and_store(str(memory_id), content))
@@ -803,9 +1222,17 @@ class RAGMemoryManager:
         metadata = json.dumps(
             {k: v for k, v in entry.items() if k not in ("id", "content", "scope", "importance", "timestamp")}
         )
+        import hashlib as _hashlib
+
+        norm = _strip_for_embedding(content)
+        ch = _hashlib.sha256(norm.encode("utf-8")).hexdigest()
         self._db.execute(
-            "INSERT OR REPLACE INTO vectors (id, kind, channel_id, author, author_id, content, embedding, metadata, scope, importance, timestamp, created_at) VALUES (?, 'shared_context', '', '', '', ?, NULL, ?, ?, ?, ?, ?)",
-            (cid, content, metadata, scope, importance, ts, time.time()),
+            "INSERT OR REPLACE INTO vectors (id, kind, channel_id, guild_id, author, "
+            "author_id, source, content, content_hash, embedding, metadata, scope, "
+            "importance, parent_id, chunk_index, downvotes, timestamp, created_at) "
+            "VALUES (?, 'shared_context', '', '', '', '', 'user', ?, ?, NULL, ?, ?, ?, "
+            "'', 0, 0, ?, ?)",
+            (cid, content, ch, metadata, scope, importance, ts, time.time()),
         )
         asyncio.ensure_future(self._embed_and_store(cid, content))
         return cid
@@ -921,6 +1348,183 @@ class RAGMemoryManager:
 
         return result[:max_items]
 
+    # ─── Tier 3: feedback + summarization ────────────────────────────
+
+    async def downvote_recent(
+        self, message_id: str, amount: int = 1
+    ) -> bool:
+        """Mark a message as a bad RAG hit. Increments downvotes.
+
+        High-downvote rows are multiplied down in scoring during
+        rag_search via the `1.0 - 0.2 * downvotes` factor.
+        """
+        cursor = self._db.execute(
+            "UPDATE vectors SET downvotes=downvotes+? WHERE id=?",
+            (int(amount), str(message_id)),
+        )
+        return cursor.rowcount > 0
+
+    async def clear_downvotes(self, message_id: str) -> bool:
+        cursor = self._db.execute(
+            "UPDATE vectors SET downvotes=0 WHERE id=?", (str(message_id),)
+        )
+        return cursor.rowcount > 0
+
+    async def add_negative(self, content: str, reason: str = "") -> str:
+        """Persist a (query, bad_response) pair as a negative example.
+
+        Retrieval excludes any candidate within cosine ≥ 0.85 of a
+        negative, so this is the bot's active learning channel for
+        'don't dredge this up again'. Use with the bot's owner-control
+        command from bot.py.
+        """
+        cid = "neg_" + uuid.uuid4().hex[:12]
+        meta = {"reason": reason[:500]}
+        self._db.execute(
+            "INSERT INTO vectors (id, kind, channel_id, guild_id, author, "
+            "author_id, source, content, content_hash, embedding, metadata, "
+            "scope, importance, parent_id, chunk_index, downvotes, timestamp, "
+            "created_at) "
+            "VALUES (?, 'negative', '', '', 'system', 'system', 'system', "
+            "?, ?, NULL, ?, '', 0, '', 0, 0, ?, ?)",
+            (
+                cid,
+                content[:1500],
+                "",
+                json.dumps(meta),
+                _utcnow_iso(),
+                time.time(),
+            ),
+        )
+        asyncio.ensure_future(self._embed_and_store(cid, content))
+        return cid
+
+    async def list_negatives(self, limit: int = 50) -> list[dict]:
+        rows = self._db.execute(
+            "SELECT id, content, metadata, timestamp FROM vectors "
+            "WHERE kind='negative' ORDER BY created_at DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "content": r["content"],
+                "reason": json.loads(r["metadata"] or "{}").get("reason", ""),
+                "timestamp": r["timestamp"],
+            }
+            for r in rows
+        ]
+
+    async def remove_negative(self, nid: str) -> bool:
+        cursor = self._db.execute(
+            "DELETE FROM vectors WHERE id=? AND kind='negative'", (str(nid),)
+        )
+        return cursor.rowcount > 0
+
+    async def summarize_recent_to_ltm(self, hours: int = 24, max_facts: int = 20) -> int:
+        """Tier-3 auto-summarizer: turn recent message traffic into LTM
+        facts via the LLM.
+
+        Pulls every kind='message' row from the last `hours` hours across
+        all channels and guilds, joins them into one transcript, asks the
+        configured LLM to extract durable facts (preferences, identity
+        info, technical facts, ongoing tasks), and upserts each fact as
+        kind='ltm'. Dedupe by content_hash so running twice doesn't
+        double-write.
+
+        Returns the number of new LTM rows written.
+
+        Configurable via `_ltm_summarizer_prompt` (override in subclass
+        or pass explicitly); default prompt below is biased toward
+        pragmatic, terse facts — not verbatim quotes.
+        """
+        # 1. gather recent rows
+        since_dt = _utcnow()
+        from datetime import timedelta as _td
+
+        cutoff = (since_dt - _td(hours=int(hours))).isoformat()
+        rows = self._db.execute(
+            "SELECT id, channel_id, author, content, timestamp FROM vectors "
+            "WHERE kind='message' AND source='user' AND timestamp > ? "
+            "ORDER BY timestamp ASC LIMIT 500",
+            (cutoff,),
+        ).fetchall()
+        if len(rows) < 3:
+            return 0
+
+        transcript_lines = []
+        for r in rows:
+            ts_short = str(r["timestamp"])[:16].replace("T", " ")
+            content_short = str(r["content"])[:280].replace("\n", " ")
+            transcript_lines.append(
+                f"[{ts_short}] #{r['channel_id']} {r['author']}: {content_short}"
+            )
+        transcript = "\n".join(transcript_lines)
+        if len(transcript) > 12000:
+            transcript = transcript[:12000] + "\n…[truncated]"
+
+        # 2. call the LLM
+        try:
+            facts = await self._call_ltm_extractor(transcript, max_facts=max_facts)
+        except Exception as e:
+            logger.warning(f"LTM summarizer LLM call failed: {e}")
+            return 0
+        if not facts:
+            return 0
+
+        # 3. upsert each fact as LTM, dedupe by content_hash
+        import hashlib as _hashlib
+
+        added = 0
+        for fact in facts:
+            fact = str(fact or "").strip()
+            if len(fact) < 8 or len(fact) > MAX_MEMORY_CHARS:
+                continue
+            norm = _strip_for_embedding(fact)
+            ch = _hashlib.sha256(norm.encode("utf-8")).hexdigest()
+            exists = self._db.execute(
+                "SELECT 1 FROM vectors WHERE kind='ltm' AND content_hash=? LIMIT 1",
+                (ch,),
+            ).fetchone()
+            if exists:
+                continue
+            mid = uuid.uuid4().hex
+            self._db.execute(
+                "INSERT INTO vectors (id, kind, channel_id, guild_id, author, "
+                "author_id, source, content, content_hash, embedding, metadata, "
+                "scope, importance, parent_id, chunk_index, downvotes, timestamp, "
+                "created_at) "
+                "VALUES (?, 'ltm', '', '', 'system', 'system', 'user', ?, ?, "
+                "NULL, '{\"source\":\"auto_summary\"}', 'global', 5, '', 0, 0, "
+                "?, ?)",
+                (mid, fact[:MAX_MEMORY_CHARS], ch, _utcnow_iso(), time.time()),
+            )
+            asyncio.ensure_future(self._embed_and_store(mid, fact))
+            added += 1
+        if added:
+            logger.info(f"LTM summarizer added {added} facts")
+        return added
+
+    async def _call_ltm_extractor(self, transcript: str, max_facts: int = 20) -> list[str]:
+        """Subclass-overridable hook. Default: ask no-one (no LLM wired).
+
+        Returns a list of fact strings. Bot.py should override this method
+        on the manager instance after creating it, OR pass a real
+        ``_ltm_summarizer_fn`` callback when wiring up. Keeping it as a
+        stub here means the import-and-run path doesn't blow up if the
+        bot hasn't installed the LLM bridge yet.
+        """
+        fn = getattr(self, "_ltm_summarizer_fn", None)
+        if not fn:
+            return []
+        try:
+            result = await fn(transcript, max_facts=max_facts)
+            if isinstance(result, list):
+                return [str(x) for x in result if x]
+        except Exception as e:
+            logger.warning(f"_call_ltm_extractor failed: {e}")
+        return []
+
     # ─── RAG search (new) ─────────────────────────────────────────
 
     async def rag_search(
@@ -928,28 +1532,44 @@ class RAGMemoryManager:
         query: str,
         kinds: list[str] | None = None,
         channel_id: str = "",
+        guild_id: str = "",
+        source: str | list[str] | None = None,
         top_k: int = 10,
         min_similarity: float = SIM_THRESHOLD,
+        apply_recency: bool = True,
+        exclude_negatives: bool = True,
+        over_fetch: int = 3,
     ) -> list[dict]:
         """Semantic search across the vector store.
 
         Args:
             query: search text
-            kinds: filter by kind ('message', 'ltm', 'shared_context')
-            channel_id: filter messages by channel
-            top_k: max results
+            kinds: filter by kind ('message', 'ltm', 'shared_context',
+                   'bot_output', 'negative')
+            channel_id: filter messages by channel; matches exact channel
+                        OR global (channel_id='') by default
+            guild_id: NEW — if set, restrict to this server (discord)
+            source: NEW — 'user' | 'bot' | 'system' filter; or list of those
+            top_k: max results to RETURN (after scoring)
             min_similarity: cosine similarity cutoff
+            apply_recency: NEW — multiply score by recency decay
+            exclude_negatives: NEW — exclude rows similar to anything in
+                                kind='negative'
+            over_fetch: NEW — internally pull top_k*over_fetch candidates
+                        from cosine before applying recency/rerank/dedup
+                        (gives room for filtering without starving the limit)
 
         Returns list of dicts with: id, kind, content, author, channel_id,
-            timestamp, similarity, metadata
+            guild_id, timestamp, similarity, score (recency-decayed),
+            metadata.
         """
         query_vec = await self._embed(query)
         if query_vec is None:
             return []
 
-        # Build query
+        # ─── build SQL ───────────────────────────────────────────────
         where_parts = ["embedding IS NOT NULL"]
-        params = []
+        params: list = []
         if kinds:
             placeholders = ",".join("?" * len(kinds))
             where_parts.append(f"kind IN ({placeholders})")
@@ -957,17 +1577,27 @@ class RAGMemoryManager:
         if channel_id:
             where_parts.append("(channel_id=? OR channel_id='')")
             params.append(str(channel_id))
+        if guild_id:
+            where_parts.append("(guild_id=? OR guild_id='')")
+            params.append(str(guild_id))
+        if source:
+            src = [source] if isinstance(source, str) else list(source)
+            placeholders = ",".join("?" * len(src))
+            where_parts.append(f"source IN ({placeholders})")
+            params.extend(src)
 
         where_clause = " AND ".join(where_parts)
         rows = self._db.execute(
-            f"SELECT id, kind, channel_id, author, author_id, content, embedding, metadata, scope, importance, timestamp FROM vectors WHERE {where_clause}",
+            f"SELECT id, kind, channel_id, guild_id, author, author_id, source, "
+            f"content, embedding, metadata, scope, importance, parent_id, "
+            f"downvotes, timestamp FROM vectors WHERE {where_clause}",
             params,
         ).fetchall()
 
         if not rows:
             return []
 
-        # Compute cosine similarity for all rows
+        # ─── score ───────────────────────────────────────────────────
         results = []
         query_norm = query_vec / (np.linalg.norm(query_vec) + 1e-8)
         for row in rows:
@@ -980,71 +1610,197 @@ class RAGMemoryManager:
                     continue
                 vec_norm = vec / (np.linalg.norm(vec) + 1e-8)
                 sim = float(np.dot(query_norm, vec_norm))
-                if sim >= min_similarity:
-                    entry = {
-                        "id": row["id"],
-                        "kind": row["kind"],
-                        "channel_id": row["channel_id"],
-                        "author": row["author"],
-                        "author_id": row["author_id"],
-                        "content": row["content"],
-                        "scope": row["scope"],
-                        "importance": row["importance"],
-                        "timestamp": row["timestamp"],
-                        "similarity": sim,
-                    }
-                    try:
-                        meta = json.loads(row["metadata"] or "{}")
-                        entry.update(meta)
-                    except Exception:
-                        pass
-                    results.append(entry)
+                if sim < min_similarity:
+                    continue
+                # Downvoted rows are pulled in scoring but pulled down.
+                if row["downvotes"]:
+                    sim *= max(0.05, 1.0 - 0.2 * row["downvotes"])
+                score = (
+                    _score_with_recency(sim, row["timestamp"])
+                    if apply_recency and row["kind"] in ("message", "bot_output")
+                    else sim
+                )
+                entry = {
+                    "id": row["id"],
+                    "kind": row["kind"],
+                    "channel_id": row["channel_id"],
+                    "guild_id": row["guild_id"],
+                    "author": row["author"],
+                    "author_id": row["author_id"],
+                    "source": row["source"],
+                    "content": row["content"],
+                    "scope": row["scope"],
+                    "importance": row["importance"],
+                    "timestamp": row["timestamp"],
+                    "similarity": sim,
+                    "score": score,
+                    "parent_id": row["parent_id"],
+                    "downvotes": row["downvotes"],
+                }
+                try:
+                    meta = json.loads(row["metadata"] or "{}")
+                    entry.update(meta)
+                except Exception:
+                    pass
+                results.append(entry)
             except Exception:
                 continue
 
-        # Sort by similarity descending, take top_k
-        results.sort(key=lambda x: x["similarity"], reverse=True)
-        return results[:top_k]
+        # Sort by decayed score (not raw cosine) so recent-but-slightly-less-
+        # similar memories beat older more-similar ones.
+        results.sort(key=lambda x: x["score"], reverse=True)
 
-    async def rag_relevant_context(
+        # Over-fetch up to top_k * over_fetch so we have candidates to
+        # filter through the next step.
+        candidates = results[: top_k * over_fetch]
+
+        # ─── exclude negatives ───────────────────────────────────────
+        # Compare each candidate's embedding against everything in
+        # kind='negative'. If cosine ≥ 0.85, drop the candidate.
+        # Negatives are rare so this is cheap.
+        if exclude_negatives:
+            try:
+                neg_rows = self._db.execute(
+                    "SELECT embedding FROM vectors WHERE kind='negative' "
+                    "AND embedding IS NOT NULL"
+                ).fetchall()
+                if neg_rows:
+                    neg_vecs = []
+                    for nr in neg_rows:
+                        nb = nr["embedding"]
+                        if not nb:
+                            continue
+                        nv = _blob_to_embedding(nb)
+                        if len(nv) == EMBED_DIM:
+                            nv_norm = nv / (np.linalg.norm(nv) + 1e-8)
+                            neg_vecs.append(nv_norm)
+                    if neg_vecs:
+                        neg_stack = np.stack(neg_vecs)
+                        filtered = []
+                        for c in candidates:
+                            blob = None
+                            for r in rows:
+                                if r["id"] == c["id"]:
+                                    blob = r["embedding"]
+                                    break
+                            if not blob:
+                                filtered.append(c)
+                                continue
+                            cv = _blob_to_embedding(blob)
+                            cv_norm = cv / (np.linalg.norm(cv) + 1e-8)
+                            # max cosine with any negative
+                            max_neg_sim = float(np.max(neg_stack @ cv_norm))
+                            if max_neg_sim >= 0.85:
+                                continue  # too similar to a known bad rec
+                            filtered.append(c)
+                        candidates = filtered
+            except Exception as e:
+                logger.debug(f"negative exclusion skipped: {e}")
+
+        # ─── expand chunks to parent for context ────────────────────
+        # If a chunk hits but its parent isn't in the result set, swap in
+        # the parent (the full original message).
+        chunk_parents: dict[str, dict] = {}
+        for c in candidates:
+            pid = c.get("parent_id") or ""
+            if pid and pid not in {x["id"] for x in candidates}:
+                prow = self._db.execute(
+                    "SELECT id, kind, channel_id, guild_id, author, author_id, "
+                    "source, content, metadata, scope, importance, timestamp "
+                    "FROM vectors WHERE id=?",
+                    (pid,),
+                ).fetchone()
+                if prow:
+                    chunk_parents[pid] = {
+                        "id": prow["id"],
+                        "kind": prow["kind"],
+                        "channel_id": prow["channel_id"],
+                        "guild_id": prow["guild_id"],
+                        "author": prow["author"],
+                        "author_id": prow["author_id"],
+                        "source": prow["source"],
+                        "content": prow["content"],
+                        "scope": prow["scope"],
+                        "importance": prow["importance"],
+                        "timestamp": prow["timestamp"],
+                        "similarity": c["similarity"],
+                        "score": c["score"] * 0.9,  # slight penalty for distance
+                        "expanded_from_chunk": c["id"],
+                    }
+        candidates.extend(chunk_parents.values())
+
+        # Re-sort and trim.
+        candidates.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+        return candidates[:top_k]  # type: ignore[index]  # always len > 0 here
+
+    async def rag_relevant_context(  # type: ignore[override]
         self,
         query: str,
         channel_id: str = "",
+        guild_id: str = "",
         top_k: int = 15,
     ) -> list[dict]:
         """Get semantically relevant context for a user message.
 
-        Searches across messages, LTM, and shared context. Returns a
-        mixed list of the most semantically relevant entries, useful
-        for augmenting the system prompt with RAG context.
+        Searches across user messages, LTM, shared context. Excludes bot
+        outputs and system events from the primary mix unless everything
+        comes back thin. Diversifies by kind.
         """
         results = await self.rag_search(
             query,
             kinds=["message", "ltm", "shared_context"],
             channel_id=channel_id,
-            top_k=top_k * 3,  # over-fetch then dedupe/diversify
+            guild_id=guild_id,
+            source=["user"],  # user messages dominate the mix
+            top_k=top_k * 3,
+            apply_recency=True,
+            exclude_negatives=True,
         )
+        if len(results) < top_k:
+            # Fall back: include bot context if user context is thin
+            results.extend(
+                await self.rag_search(
+                    query,
+                    kinds=["bot_output", "ltm", "shared_context"],
+                    channel_id=channel_id,
+                    guild_id=guild_id,
+                    top_k=top_k * 2,
+                    apply_recency=True,
+                    exclude_negatives=True,
+                )
+            )
 
-        # Deduplicate by content similarity (avoid returning near-identical messages)
-        seen = set()
-        deduped = []
+        # Deduplicate by content similarity
+        seen: set[str] = set()
+        deduped: list[dict] = []
         for r in results:
-            key = r["content"][:200].lower()
-            if key not in seen:
-                seen.add(key)
-                deduped.append(r)
+            key = str(r["content"])[:200].lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(r)
 
-        # Diversify: ensure we get a mix of kinds
-        by_kind = {"message": [], "ltm": [], "shared_context": []}
+        # Diversify by kind. Mix LTM/shared_context at top, then recent
+        # user messages. Bot outputs last.
+        by_kind: dict[str, list[dict]] = {
+            "ltm": [], "shared_context": [], "message": [], "bot_output": []
+        }
         for r in deduped:
             by_kind.setdefault(r["kind"], []).append(r)
 
-        mixed = []
-        # Prioritize LTM and shared_context (durable facts) then messages
-        for kind in ("ltm", "shared_context", "message"):
-            mixed.extend(by_kind.get(kind, [])[: top_k // 2])
+        mixed: list[dict] = []
+        for kind in ("ltm", "shared_context", "message", "bot_output"):
+            take = max(1, top_k // 3) if kind in ("ltm", "shared_context") else top_k
+            mixed.extend(by_kind.get(kind, [])[:take])
 
-        return mixed[:top_k]
+        # Promote the top-1 LTM / shared_context to the very front for
+        # durable-fact primacy in the prompt.
+        for i, r in enumerate(mixed):
+            if r["kind"] in ("ltm", "shared_context"):
+                mixed.insert(0, mixed.pop(i))
+                break
+
+        return mixed[:top_k]  # type: ignore[index]  # always len > 0
 
     # ─── lifecycle ────────────────────────────────────────────────
 
