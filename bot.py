@@ -6089,10 +6089,13 @@ class MaxwellBot(commands.Bot):
         """
         await self._respect_slowmode(channel)
         if reply_to is not None:
-            # Let NotFound propagate so the caller can decide whether to
-            # fall back to a plain channel.send. Forbidden is fatal — we
-            # have no way to recover and the caller doesn't want to keep
-            # retrying into the same wall.
+            # Catch both Forbidden (no perms) and NotFound (parent message
+            # was deleted between read and reply). For NotFound, fall back
+            # to a plain channel.send so the user still sees the response.
+            # The old code only caught Forbidden and let NotFound propagate,
+            # which caused unhandled exceptions when replying to deleted
+            # messages (discord error 50035 "Invalid Form Body: Unknown
+            # message in message_reference").
             try:
                 sent = await reply_to.reply(content=content, file=file, **kwargs)
             except discord.Forbidden:
@@ -6101,6 +6104,20 @@ class MaxwellBot(commands.Bot):
                     getattr(channel, "id", "?"),
                 )
                 return None
+            except discord.NotFound:
+                logger.warning(
+                    "reply hit 404 (deleted parent), falling back to channel.send in channel %s",
+                    getattr(channel, "id", "?"),
+                )
+                try:
+                    sent = await channel.send(content=content, file=file, **kwargs)
+                except (discord.Forbidden, discord.NotFound) as exc:
+                    logger.warning(
+                        "fallback send failed (%s) in channel %s",
+                        exc.__class__.__name__,
+                        getattr(channel, "id", "?"),
+                    )
+                    return None
             self._mark_bot_sent(channel)
             return sent
         try:
