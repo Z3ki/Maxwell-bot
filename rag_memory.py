@@ -484,6 +484,13 @@ class RAGMemoryManager:
         # ─── in-place migration from previous schema (idempotent) ─────
         # If columns don't exist yet, ALTER TABLE … ADD COLUMN. SQLite
         # refuses duplicates, so wrap each in a try and ignore OperationalError.
+        # 2026-07-31: added updated_at here. The dedup-path UPDATE at line 1085
+        # does ``UPDATE vectors SET metadata=?, source=?, updated_at=created_at``
+        # which references this column. Without the migration the dedup branch
+        # raised ``no such column: updated_at``, the surrounding try/except in
+        # bot.on_message swallowed it, and the bot silently lost every
+        # repeat-content message — leaving get_channel_memory() returning
+        # ~empty, so the LLM had no channel history to read.
         _migrations = [
             ("guild_id", "TEXT DEFAULT ''"),
             ("source", "TEXT DEFAULT 'user'"),
@@ -491,7 +498,8 @@ class RAGMemoryManager:
             ("parent_id", "TEXT DEFAULT ''"),
             ("chunk_index", "INTEGER DEFAULT 0"),
             ("downvotes", "INTEGER DEFAULT 0"),
-        ]
+            ("updated_at", "REAL DEFAULT 0"),
+        ]  
         for col, decl in _migrations:
             try:
                 self._db.execute(f"ALTER TABLE vectors ADD COLUMN {col} {decl}")
@@ -1092,12 +1100,13 @@ class RAGMemoryManager:
         self._db.execute("DELETE FROM vectors WHERE id=?", (msg_id,))
 
         # Insert main row.
+        _now = time.time()
         self._db.execute(
             "INSERT INTO vectors "
             "(id, kind, channel_id, guild_id, author, author_id, source, content, "
             " content_hash, embedding, metadata, scope, importance, parent_id, "
-            " chunk_index, downvotes, timestamp, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '', 0, '', 0, 0, ?, ?)",
+            " chunk_index, downvotes, timestamp, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '', 0, '', 0, 0, ?, ?, ?)",
             (
                 msg_id,
                 kind,
@@ -1110,7 +1119,8 @@ class RAGMemoryManager:
                 content_hash,
                 json.dumps(metadata),
                 ts,
-                time.time(),
+                _now,
+                _now,
             ),
         )
 
