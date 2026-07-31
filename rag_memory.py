@@ -61,7 +61,10 @@ SIM_THRESHOLD = 0.35
 # messages. Names match `discord.MessageType` enum members.
 _DISCORD_SKIP_TYPES = frozenset(
     {
-        "default",  # included so unset types are still allowed
+        # NOTE: "default" must NOT be in this set — normal user messages have
+        # message_type="default", and _is_system_event_content checks
+        # membership here. Including "default" caused every real user message
+        # to be classified as source="system" and silently dropped.
         "recipient_add",
         "recipient_remove",
         "call",
@@ -187,9 +190,17 @@ def _is_system_event_content(content: str, message_type: str | None = None) -> b
     Detects embeds like `[embeds: Avatar update]` or `[embeds: Member left]`
     that the bot renders when no real message text exists.
     """
+    s = str(content or "").strip()
+    # If there IS real text content, it's a user message regardless of
+    # message_type. Discord sets message_type="reply" on any message that
+    # is a reply, even ones with substantial text content. Previously this
+    # function returned True for ALL reply-typed messages, causing
+    # _detect_source to classify them as "system" and silently drop them
+    # from RAG storage — the root cause of "no context for outside messages".
+    if s and not s.startswith("[embeds:") and not s.startswith("[Message deleted"):
+        return False
     if message_type and str(message_type) in _DISCORD_SKIP_TYPES:
         return True
-    s = str(content or "").strip()
     if not s:
         return True
     if s.startswith("[embeds:") and s.endswith("]"):
