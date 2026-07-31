@@ -7,8 +7,11 @@ from dotenv.main import load_dotenv
 
 APP_ROOT = Path(__file__).resolve().parent
 ENV_FILE = Path(os.getenv("MAXWELL_ENV_FILE", APP_ROOT / ".env"))
-# Don't override real environment - .env is fallback only
-load_dotenv(ENV_FILE, override=False)
+# .env is the SOURCE OF TRUTH — always override whatever PM2/the shell
+# injected. PM2 caches the env from first start and `--update-env` does
+# NOT re-read the .env file, so without override=True every restart kept
+# stale values (e.g. the old OLLAMA_FALLBACK_MODEL) forever.
+load_dotenv(ENV_FILE, override=True)
 
 
 def _int_env(
