@@ -7490,7 +7490,7 @@ class MaxwellBot(commands.Bot):
                         f"[PROGRESS] update() returned, last_content={gen_progress._last_content!r} posted={gen_progress.posted}"
                     )
             else:
-                logger.warning("[PROGRESS] callback fired but gen_progress is None!")
+                logger.debug("[PROGRESS] callback fired but gen_progress is None (gen already finalized)")
 
         # Per-token callback. Fires on EVERY reasoning/content delta so the
         # progress message can show the model's own thoughts streaming by.
