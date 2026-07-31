@@ -222,7 +222,7 @@ def _detect_source(message: dict) -> str:
     src = message.get("source")
     if src in ("user", "bot", "system"):
         return src
-    if message.get("author_is_bot") is True:
+    if message.get("author_is_bot"):
         return "bot"
     content = str(message.get("content") or "")
     for marker in _BOT_OUTPUT_MARKERS:
@@ -512,7 +512,7 @@ class RAGMemoryManager:
             ("chunk_index", "INTEGER DEFAULT 0"),
             ("downvotes", "INTEGER DEFAULT 0"),
             ("updated_at", "REAL DEFAULT 0"),
-        ]  
+        ]
         for col, decl in _migrations:
             try:
                 self._db.execute(f"ALTER TABLE vectors ADD COLUMN {col} {decl}")
@@ -566,7 +566,7 @@ class RAGMemoryManager:
                 new_src = "bot"
             elif _is_system_event_content(content):
                 new_src = "system"
-            elif author_is_bot is True:
+            elif author_is_bot:
                 new_src = "bot"
             else:
                 for marker in _BOT_OUTPUT_MARKERS:
@@ -777,7 +777,7 @@ class RAGMemoryManager:
 
         import hashlib
 
-        cache_key = hashlib.md5(text.encode()).hexdigest()
+        cache_key = hashlib.sha256(text.encode()).hexdigest()
 
         # ─── disk cache hit ─────────────────────────────────────────
         try:
