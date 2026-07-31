@@ -426,7 +426,9 @@ class RAGMemoryManager:
         self._lock = asyncio.Lock()
         self._embed_semaphore = asyncio.Semaphore(4)  # limit concurrent embed calls
         # Self-tuning cache state (kept minimal; SQLite holds the real cache)
-        self._embed_cache: dict[str, np.ndarray] = {}  # in-process LRU; SQLite is durable
+        self._embed_cache: dict[
+            str, np.ndarray
+        ] = {}  # in-process LRU; SQLite is durable
         self._prompts: dict[str, str] = {}
         # Track background embed tasks so shutdown can await them (otherwise
         # in-flight embeds are silently dropped and rows stay embedding=NULL)
@@ -512,8 +514,7 @@ class RAGMemoryManager:
         # upgrade doesn't pay 619 cold ollama calls. Cheap (we already
         # have the blobs in `vectors.embedding`).
         for r in self._db.execute(
-            "SELECT content, embedding FROM vectors "
-            "WHERE embedding IS NOT NULL"
+            "SELECT content, embedding FROM vectors WHERE embedding IS NOT NULL"
         ).fetchall():
             try:
                 key = _hashlib.md5(r["content"].encode()).hexdigest()
@@ -555,9 +556,7 @@ class RAGMemoryManager:
                 "UPDATE vectors SET source=? WHERE id=?", (new_src, r["id"])
             )
 
-        self._db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_kind ON vectors(kind)"
-        )
+        self._db.execute("CREATE INDEX IF NOT EXISTS idx_kind ON vectors(kind)")
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_channel ON vectors(channel_id)"
         )
@@ -568,18 +567,12 @@ class RAGMemoryManager:
             "CREATE INDEX IF NOT EXISTS idx_timestamp ON vectors(timestamp)"
         )
         # NEW indices for the new retrieval paths
-        self._db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_guild ON vectors(guild_id)"
-        )
-        self._db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_source ON vectors(source)"
-        )
+        self._db.execute("CREATE INDEX IF NOT EXISTS idx_guild ON vectors(guild_id)")
+        self._db.execute("CREATE INDEX IF NOT EXISTS idx_source ON vectors(source)")
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_content_hash ON vectors(content_hash)"
         )
-        self._db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_parent ON vectors(parent_id)"
-        )
+        self._db.execute("CREATE INDEX IF NOT EXISTS idx_parent ON vectors(parent_id)")
         # Unique constraint prevents duplicate (same channel + same content).
         # Skipped rows via OR IGNORE in insert path.
         try:
@@ -724,7 +717,12 @@ class RAGMemoryManager:
                 importance = int(entry.get("importance") or 5)
                 ts = str(entry.get("timestamp") or _utcnow_iso())
                 metadata = json.dumps(
-                    {k: v for k, v in entry.items() if k not in ("id", "content", "scope", "importance", "timestamp")}
+                    {
+                        k: v
+                        for k, v in entry.items()
+                        if k
+                        not in ("id", "content", "scope", "importance", "timestamp")
+                    }
                 )
                 self._db.execute(
                     "INSERT OR IGNORE INTO vectors (id, kind, channel_id, author, author_id, content, embedding, metadata, scope, importance, timestamp, created_at) VALUES (?, 'shared_context', '', '', '', ?, NULL, ?, ?, ?, ?, ?)",
@@ -757,6 +755,7 @@ class RAGMemoryManager:
             text = text[:8000]
 
         import hashlib
+
         cache_key = hashlib.md5(text.encode()).hexdigest()
 
         # ─── disk cache hit ─────────────────────────────────────────
@@ -856,9 +855,7 @@ class RAGMemoryManager:
             self._last_embed_cache_prune = now
 
             cap = 10000
-            cur = self._db.execute(
-                "SELECT COUNT(*) as c FROM embed_cache"
-            ).fetchone()
+            cur = self._db.execute("SELECT COUNT(*) as c FROM embed_cache").fetchone()
             n = cur["c"] if cur else 0
             if n <= cap:
                 return
@@ -899,7 +896,7 @@ class RAGMemoryManager:
 
     async def _embed_pending_all(self, batch_size: int = 50):
         """Embed ALL rows without embeddings, in batches. Used for migration.
-        
+
         Uses ollama's batch embed API to speed up — sends multiple texts
         in a single request instead of one-at-a-time.
         """
@@ -932,7 +929,9 @@ class RAGMemoryManager:
                                     )
                                     # Fall back to one-by-one
                                     for row in rows:
-                                        await self._embed_and_store(row["id"], row["content"])
+                                        await self._embed_and_store(
+                                            row["id"], row["content"]
+                                        )
                                         total_embedded += 1
                                     continue
                                 data = await resp.json()
@@ -1010,9 +1009,7 @@ class RAGMemoryManager:
         # Detect source and drop system events before they waste a row
         source = _detect_source(message)
         if source == "system":
-            logger.debug(
-                f"Skipping system event channel={channel_id} msg={msg_id}"
-            )
+            logger.debug(f"Skipping system event channel={channel_id} msg={msg_id}")
             return
 
         # Normalize for embedding decision. We embed everything that's
@@ -1053,16 +1050,21 @@ class RAGMemoryManager:
             "edited_at",
             "pinned",
         }
-        metadata = {k: v for k, v in message.items() if k in meta_keys and v is not None}
+        metadata = {
+            k: v for k, v in message.items() if k in meta_keys and v is not None
+        }
         metadata["source"] = source  # always carry source in meta
         # Include the message length bucket — short messages (< 20 chars)
         # are often reactions or low-signal chatter; long ones are bots
         # or pasted logs. Used by retrieval to weight re-ranking.
         if content:
             metadata["len_bucket"] = (
-                "xs" if len(content) < 20
-                else "s" if len(content) < 100
-                else "m" if len(content) < 500
+                "xs"
+                if len(content) < 20
+                else "s"
+                if len(content) < 100
+                else "m"
+                if len(content) < 500
                 else "l"
             )
 
@@ -1300,7 +1302,11 @@ class RAGMemoryManager:
         importance = int(entry.get("importance") or 5)
         ts = str(entry.get("timestamp") or _utcnow_iso())
         metadata = json.dumps(
-            {k: v for k, v in entry.items() if k not in ("id", "content", "scope", "importance", "timestamp")}
+            {
+                k: v
+                for k, v in entry.items()
+                if k not in ("id", "content", "scope", "importance", "timestamp")
+            }
         )
         import hashlib as _hashlib
 
@@ -1430,9 +1436,7 @@ class RAGMemoryManager:
 
     # ─── Tier 3: feedback + summarization ────────────────────────────
 
-    async def downvote_recent(
-        self, message_id: str, amount: int = 1
-    ) -> bool:
+    async def downvote_recent(self, message_id: str, amount: int = 1) -> bool:
         """Mark a message as a bad RAG hit. Increments downvotes.
 
         High-downvote rows are multiplied down in scoring during
@@ -1501,7 +1505,9 @@ class RAGMemoryManager:
         )
         return cursor.rowcount > 0
 
-    async def summarize_recent_to_ltm(self, hours: int = 24, max_facts: int = 20) -> int:
+    async def summarize_recent_to_ltm(
+        self, hours: int = 24, max_facts: int = 20
+    ) -> int:
         """Tier-3 auto-summarizer: turn recent message traffic into LTM
         facts via the LLM.
 
@@ -1585,7 +1591,9 @@ class RAGMemoryManager:
             logger.info(f"LTM summarizer added {added} facts")
         return added
 
-    async def _call_ltm_extractor(self, transcript: str, max_facts: int = 20) -> list[str]:
+    async def _call_ltm_extractor(
+        self, transcript: str, max_facts: int = 20
+    ) -> list[str]:
         """Subclass-overridable hook. Default: ask no-one (no LLM wired).
 
         Returns a list of fact strings. Bot.py should override this method
@@ -1670,6 +1678,7 @@ class RAGMemoryManager:
                 decay = math.exp(-age / max(1.0, _tau_seconds))
                 return 0.25 + 0.75 * decay
         else:
+
             def _decay(ts_str):
                 return _score_with_recency(1.0, ts_str)  # just the multiplier
 
@@ -1859,7 +1868,10 @@ class RAGMemoryManager:
         # Diversify by kind. Mix LTM/shared_context at top, then recent
         # user messages. Bot outputs last.
         by_kind: dict[str, list[dict]] = {
-            "ltm": [], "shared_context": [], "message": [], "bot_output": []
+            "ltm": [],
+            "shared_context": [],
+            "message": [],
+            "bot_output": [],
         }
         for r in deduped:
             by_kind.setdefault(r["kind"], []).append(r)

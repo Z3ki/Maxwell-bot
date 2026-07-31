@@ -2334,6 +2334,7 @@ class MaxwellBot(commands.Bot):
         self.memory = RAGMemoryManager(
             data_dir=self.config.DATA_DIR, max_messages=self.config.MEMORY_MESSAGE_LIMIT
         )
+
         # Wire the LTM auto-summarizer's LLM hook to the live ai_provider
         # (ollama-backed). The summarizer passes a transcript to the LLM
         # and expects a list of durable facts back.
@@ -2348,17 +2349,19 @@ class MaxwellBot(commands.Bot):
                     f"{max_facts} facts. If nothing durable is present, "
                     "return an empty list.\n\n"
                     "TRANSCRIPT:\n" + transcript + "\n\n"
-                    "Return JSON: {\"facts\": [\"fact 1\", \"fact 2\", ...]}"
+                    'Return JSON: {"facts": ["fact 1", "fact 2", ...]}'
                 )
                 # generate_response is async + streaming-friendly; pass
                 # max_tokens=1200 to bound the summary length.
                 resp = await self.ai_provider.generate_response(
                     [{"role": "user", "content": prompt}],
-                    max_tokens=1200, temperature=0.2
+                    max_tokens=1200,
+                    temperature=0.2,
                 )
                 text = str(resp) if resp else ""
                 import json as _json
                 import re as _re
+
                 # Strip ```json ``` markdown fence if present.
                 fence_match = _re.search(
                     r"```(?:json)?\s*(\{.*?\})\s*```",
@@ -2377,7 +2380,8 @@ class MaxwellBot(commands.Bot):
                 lines = [
                     ln.strip().lstrip("-•* ").strip()
                     for ln in (str(resp) if resp else "").splitlines()
-                    if ln.strip() and not ln.strip().startswith("{")
+                    if ln.strip()
+                    and not ln.strip().startswith("{")
                     and not ln.strip().startswith("}")
                     and not ln.strip().startswith("```")
                 ]
@@ -2385,6 +2389,7 @@ class MaxwellBot(commands.Bot):
             except Exception as e:
                 logger.warning(f"LTM summarizer LLM call failed: {e}")
                 return []
+
         self.memory._ltm_summarizer_fn = _ltm_summarizer_fn
         self.rem_log = RemEventLog(
             data_dir=self.config.DATA_DIR, max_events=self.config.REM_EVENT_BUFFER_MAX
@@ -2495,7 +2500,9 @@ class MaxwellBot(commands.Bot):
             base = re.sub(r"\nYou are currently \d+ days old\..*", age_line, base)
         return base
 
-    async def add_message_to_memory(self, channel_id: str, message_dict: dict, message=None) -> None:
+    async def add_message_to_memory(
+        self, channel_id: str, message_dict: dict, message=None
+    ) -> None:
         """Bot-side convenience that wraps memory.add_to_channel_memory
         and forwards `guild_id` + `message_type` from a discord.Message.
 
@@ -2532,8 +2539,7 @@ class MaxwellBot(commands.Bot):
             "guild_name": str(getattr(guild, "name", "") or ""),
             "channel_name": str(getattr(channel, "name", "") or ""),
             "message_type": str(
-                getattr(getattr(message, "type", None), "name", "default")
-                or "default"
+                getattr(getattr(message, "type", None), "name", "default") or "default"
             ),
         }
 
@@ -3283,7 +3289,8 @@ class MaxwellBot(commands.Bot):
                 ok = await self.memory.downvote_recent(target_id, amount=1)
                 await message.channel.send(
                     f"✓ downvotes on `{target_id}` +1 (total: ?)"
-                    if ok else f"✗ no row with id `{target_id}`"
+                    if ok
+                    else f"✗ no row with id `{target_id}`"
                 )
             elif cmd == "neg":
                 # ,neg add <text>  →  persist a 'don't retrieve this' example
@@ -3316,7 +3323,8 @@ class MaxwellBot(commands.Bot):
                         return
                     ok = await self.memory.remove_negative(rest.strip())
                     await message.channel.send(
-                        f"✓ removed `{rest.strip()}`" if ok
+                        f"✓ removed `{rest.strip()}`"
+                        if ok
                         else f"✗ no negative with id `{rest.strip()}`"
                     )
                 else:
@@ -3330,13 +3338,12 @@ class MaxwellBot(commands.Bot):
                 if args:
                     with contextlib.suppress(ValueError):
                         hours = max(1, min(168, int(args.strip())))
-                await message.channel.send(
-                    f"⏳ summarizing last {hours}h of messages…"
-                )
+                await message.channel.send(f"⏳ summarizing last {hours}h of messages…")
                 added = await self.memory.summarize_recent_to_ltm(hours=hours)
                 await message.channel.send(
                     f"✓ wrote {added} new LTM facts from the last {hours}h."
-                    if added else "nothing new worth remembering."
+                    if added
+                    else "nothing new worth remembering."
                 )
             elif cmd == "context":
                 await self._handle_context_command(message, args)
@@ -5882,9 +5889,17 @@ class MaxwellBot(commands.Bot):
                                 result = await self.context_cleanup_engine.run_once()
                                 cmd["result"] = f"context cleanup: {result}"
                             else:
-                                cmd["result"] = "context cleanup engine removed (RAG memory active)"
-                        elif typ in ("context_cleanup_enable", "context_cleanup_disable", "context_cleanup_interval"):
-                            cmd["result"] = "context cleanup engine removed (RAG memory active)"
+                                cmd["result"] = (
+                                    "context cleanup engine removed (RAG memory active)"
+                                )
+                        elif typ in (
+                            "context_cleanup_enable",
+                            "context_cleanup_disable",
+                            "context_cleanup_interval",
+                        ):
+                            cmd["result"] = (
+                                "context cleanup engine removed (RAG memory active)"
+                            )
                         else:
                             cmd["result"] = "unknown command"
                     except Exception as e:
@@ -5940,6 +5955,7 @@ class MaxwellBot(commands.Bot):
         # Trigger background embedding migration on boot (idempotent).
         if hasattr(self.memory, "_embed_pending_all"):
             asyncio.create_task(self.memory._embed_pending_all())
+
         # Bootstrap summary 5 minutes after boot — give the bot time
         # to settle so we accumulate real chat first.
         async def _boot_summarize():
@@ -5950,6 +5966,7 @@ class MaxwellBot(commands.Bot):
                     logger.info(f"Boot summarizer wrote {n} LTM facts")
             except Exception as e:
                 logger.warning(f"Boot summarizer failed: {e}")
+
         asyncio.create_task(_boot_summarize())
 
         # Daily LTM summarizer at 04:00 local. Computes seconds-until-
@@ -5970,6 +5987,7 @@ class MaxwellBot(commands.Bot):
                 except Exception as e:
                     logger.error(f"Daily summarizer error: {e}")
                     await asyncio.sleep(3600)  # backoff on failure
+
         asyncio.create_task(_daily_summarizer_loop())
 
         # Active cleanup of stale channel rows on a 10-minute cadence.
@@ -9987,7 +10005,9 @@ class MaxwellBot(commands.Bot):
                 logger.warning("Telegram context fetching error: %s", e)
 
         # RAG: semantic memory retrieval for Telegram
-        if self._control.get("long_term_memory_enabled", True) and hasattr(self.memory, "rag_search"):
+        if self._control.get("long_term_memory_enabled", True) and hasattr(
+            self.memory, "rag_search"
+        ):
             try:
                 # LTM + shared_context for durable facts
                 rag_results = await self.memory.rag_search(
@@ -10007,7 +10027,9 @@ class MaxwellBot(commands.Bot):
                     recency_tau_days=3.0,
                     top_k=8,
                 )
-                rag_recent = [r for r in rec_results if r.get("similarity", 0) >= 0.40][:5]
+                rag_recent = [r for r in rec_results if r.get("similarity", 0) >= 0.40][
+                    :5
+                ]
                 if rag_context:
                     rag_lines = []
                     for r in rag_context:
@@ -10519,7 +10541,9 @@ class MaxwellBot(commands.Bot):
                             logger.warning(f"Telegram context fetching error: {e}")
 
                     # RAG: semantic memory retrieval for Telegram
-                    if self._control.get("long_term_memory_enabled", True) and hasattr(self.memory, "rag_search"):
+                    if self._control.get("long_term_memory_enabled", True) and hasattr(
+                        self.memory, "rag_search"
+                    ):
                         try:
                             rag_results = await self.memory.rag_search(
                                 text,
@@ -10527,7 +10551,9 @@ class MaxwellBot(commands.Bot):
                                 guild_id=str(chat_id or ""),
                                 top_k=20,
                             )
-                            rag_context = [r for r in rag_results if r.get("similarity", 0) >= 0.35]
+                            rag_context = [
+                                r for r in rag_results if r.get("similarity", 0) >= 0.35
+                            ]
                             rec_results = await self.memory.rag_search(
                                 text,
                                 kinds=["message"],
@@ -10537,11 +10563,15 @@ class MaxwellBot(commands.Bot):
                                 recency_tau_days=3.0,
                                 top_k=8,
                             )
-                            rag_recent = [r for r in rec_results if r.get("similarity", 0) >= 0.40][:5]
+                            rag_recent = [
+                                r for r in rec_results if r.get("similarity", 0) >= 0.40
+                            ][:5]
                             if rag_context:
                                 rag_lines = []
                                 for r in rag_context:
-                                    kind_label = "fact" if r["kind"] == "ltm" else "context"
+                                    kind_label = (
+                                        "fact" if r["kind"] == "ltm" else "context"
+                                    )
                                     sim_pct = int(r.get("similarity", 0) * 100)
                                     rag_lines.append(f"- [{kind_label}, {sim_pct}% match] {r['content']}")
                                 dynamic_parts.append(
