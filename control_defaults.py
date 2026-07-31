@@ -179,7 +179,6 @@ KNOWN_TOOLS = [
     "hd_image",
     "change_presence",
     "set_activity",
-    "memory_edit",
     "react",
     "edit_message",
     "delete_message",

@@ -214,7 +214,6 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     ListServersTool,
     ListSitesTool,
     LookupUserTool,
-    MemoryTool,
     NoResponseTool,
     ReactTool,
     ReasoningLogTool,
@@ -787,7 +786,6 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset(
         "list_servers",
         "list_sites",
         "lookup_user",
-        "memory_edit",
         "no_response",
         "send_media",
         "send_meme",
@@ -1613,7 +1611,6 @@ FOLLOWUP_TOOL_NAMES = {
 TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "image_generator",
     "hd_image",
-    "memory_edit",
     "typing",
     "tts",
     "create_site",
@@ -2423,7 +2420,6 @@ class MaxwellBot(commands.Bot):
         self.tools["set_activity"] = SetActivityTool(self)
         self.tools["sleep"] = SleepTool(self)
         self.tools["clear_sleep"] = ClearSleepTool(self)
-        self.tools["memory_edit"] = MemoryTool(self)
         self.tools["react"] = ReactTool(self)
         self.tools["edit_message"] = EditMessageTool(self)
         self.tools["delete_message"] = DeleteMessageTool(self)

@@ -54,14 +54,6 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         {"prompt": _str("HD image generation prompt")},
         ["prompt"],
     ),
-    "memory_edit": _obj(
-        {
-            "action": _str("add | edit | remove"),
-            "content": _str("Memory text (required for add and edit)"),
-            "memory_id": _str("Memory id (required for edit and remove)"),
-        },
-        ["action"],
-    ),
     "react": _obj({"emoji": _str("Emoji or custom emoji name")}, ["emoji"]),
     "edit_message": _obj(
         {

@@ -702,57 +702,6 @@ class HDImageGeneratorTool(Tool):
         return result
 
 
-class MemoryTool(Tool):
-    """Manage long-term persistent memories"""
-
-    def get_description(self):
-        return (
-            "Manage long-term memories (persist across all conversations). "
-            "Only store important facts/preferences/context — no logs or trivia. "
-            "Actions: add (content), edit (memory_id, content), remove (memory_id)."
-        )
-
-    async def execute(
-        self,
-        message: Message,
-        action: str | None = None,
-        content: str | None = None,
-        memory_id: str | None = None,
-        **kwargs,
-    ) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: memory_edit is admin-only"
-        if not action:
-            return "Error: action is required (add/edit/remove)"
-
-        action = action.lower()
-
-        if action == "add":
-            if not content:
-                return "Error: content is required for add"
-            new_id = await self.bot.memory.add_long_term_memory(content)
-            logger.info(f"Added long-term memory #{new_id}")
-            return f"Memory #{new_id} saved successfully"
-
-        elif action == "edit":
-            if not memory_id or not content:
-                return "Error: memory_id and content are required for edit"
-            found = await self.bot.memory.edit_long_term_memory(memory_id, content)
-            if found:
-                return f"Memory #{memory_id} updated successfully"
-            return f"Error: Memory #{memory_id} not found"
-
-        elif action == "remove":
-            if not memory_id:
-                return "Error: memory_id is required for remove"
-            found = await self.bot.memory.remove_long_term_memory(memory_id)
-            if found:
-                return f"Memory #{memory_id} removed successfully"
-            return f"Error: Memory #{memory_id} not found"
-
-        return f"Error: Unknown action '{action}'. Use add/edit/remove"
-
-
 class ReactTool(Tool):
     """React to a message with an emoji"""
 

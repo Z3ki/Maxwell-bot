@@ -96,6 +96,9 @@ _BOT_OUTPUT_MARKERS = (
     "Called run_tool with",
     "Called autodelete with",
     "Called webfetch with",
+    "Called memory_edit with",
+    "Called search_messages with",
+    "Called react with",
     "RAG relevance:",
 )
 
