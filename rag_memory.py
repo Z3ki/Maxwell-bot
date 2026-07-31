@@ -985,9 +985,19 @@ class RAGMemoryManager:
     # ─── channel memory (short-term) ──────────────────────────────
 
     async def get_channel_memory(self, channel_id: str) -> list[dict]:
-        """Return recent messages for a channel, oldest first."""
+        """Return recent messages for a channel, oldest first.
+
+        Includes BOTH user messages (kind='message') and the bot's own
+        replies (kind='bot_output') so the conversation transcript the
+        model sees has proper user/assistant turn alternation. Before this
+        fix, bot_output rows were excluded here — the bot's own replies
+        never appeared in context, consecutive user turns collapsed into
+        one merged block, and the model lost the turn boundary (e.g. it
+        kept obeying an earlier "just say ok" instruction for a later
+        "what did i say" question).
+        """
         rows = self._db.execute(
-            "SELECT id, author, author_id, content, timestamp, metadata FROM vectors WHERE kind='message' AND channel_id=? ORDER BY created_at DESC LIMIT ?",
+            "SELECT id, author, author_id, content, timestamp, metadata FROM vectors WHERE kind IN ('message', 'bot_output') AND channel_id=? ORDER BY created_at DESC LIMIT ?",
             (str(channel_id), self.max_messages),
         ).fetchall()
         # Reverse to oldest-first, and build dict entries matching old format
@@ -1119,10 +1129,15 @@ class RAGMemoryManager:
             (channel_id, content_hash, msg_id),
         ).fetchone()
         if existing:
+            # Refresh the row in place — but bump created_at so repeated
+            # identical messages (e.g. the bot saying "ok" twice) stay at
+            # the correct position in the transcript instead of pinning the
+            # original timestamp forever. Without this, get_channel_memory
+            # returns a stale ordering and the turn boundary is wrong.
             self._db.execute(
-                "UPDATE vectors SET metadata=?, source=?, updated_at=created_at "
+                "UPDATE vectors SET metadata=?, source=?, created_at=?, updated_at=? "
                 "WHERE id=?",
-                (json.dumps(metadata), source, existing["id"]),
+                (json.dumps(metadata), source, time.time(), time.time(), existing["id"]),
             )
             return
 
