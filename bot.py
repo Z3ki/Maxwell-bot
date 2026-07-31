@@ -1994,6 +1994,7 @@ class MaxwellBot(commands.Bot):
         self._vc_voice_channels: dict[int, Any] = {}
         self._vc_reply_locks: dict[int, asyncio.Lock] = {}
         self._vc_active_tasks: dict[int, asyncio.Task] = {}
+        self._vc_restart_tasks: dict[Any, asyncio.Task] = {}  # VC receive restarts
         self._vc_gen_counter: dict[int, int] = {}
         self._vc_ai_semaphore = asyncio.Semaphore(2)
         self._vc_playback_until: dict[int, float] = {}
@@ -2356,7 +2357,8 @@ class MaxwellBot(commands.Bot):
                     max_tokens=1200, temperature=0.2
                 )
                 text = str(resp) if resp else ""
-                import json as _json, re as _re
+                import json as _json
+                import re as _re
                 # Strip ```json ``` markdown fence if present.
                 fence_match = _re.search(
                     r"```(?:json)?\s*(\{.*?\})\s*```",
@@ -3181,7 +3183,9 @@ class MaxwellBot(commands.Bot):
             async def fake_reply(reply_content=None, **kwargs):
                 if hasattr(message, "reply"):
                     return await message.reply(reply_content, **kwargs)
-                return await channel.send(reply_content, **kwargs)
+                if channel is not None:
+                    return await channel.send(reply_content, **kwargs)
+                return None
 
             fake_message.reply = fake_reply
 
@@ -3324,10 +3328,8 @@ class MaxwellBot(commands.Bot):
                 # last N hours of user messages.
                 hours = 24
                 if args:
-                    try:
+                    with contextlib.suppress(ValueError):
                         hours = max(1, min(168, int(args.strip())))
-                    except ValueError:
-                        pass
                 await message.channel.send(
                     f"⏳ summarizing last {hours}h of messages…"
                 )
@@ -5881,11 +5883,7 @@ class MaxwellBot(commands.Bot):
                                 cmd["result"] = f"context cleanup: {result}"
                             else:
                                 cmd["result"] = "context cleanup engine removed (RAG memory active)"
-                        elif typ == "context_cleanup_enable":
-                            cmd["result"] = "context cleanup engine removed (RAG memory active)"
-                        elif typ == "context_cleanup_disable":
-                            cmd["result"] = "context cleanup engine removed (RAG memory active)"
-                        elif typ == "context_cleanup_interval":
+                        elif typ in ("context_cleanup_enable", "context_cleanup_disable", "context_cleanup_interval"):
                             cmd["result"] = "context cleanup engine removed (RAG memory active)"
                         else:
                             cmd["result"] = "unknown command"
@@ -6108,12 +6106,12 @@ class MaxwellBot(commands.Bot):
         low = content.lower().strip()
         if low in {"site", "website", "webpage", "page", "landing"}:
             return True
-        if re.match(
-            r"^(make|build|create|code|design)\s+me\s+a\s+(site|website|page|landing)",
-            low,
-        ):
-            return True
-        return False
+        return bool(
+            re.match(
+                r"^(make|build|create|code|design)\s+me\s+a\s+(site|website|page|landing)",
+                low,
+            )
+        )
 
     _HTML_DOC_HINTS = (
         "<!doctype html",
@@ -7770,9 +7768,8 @@ class MaxwellBot(commands.Bot):
                     # code called stop() here which deleted the progress and
                     # then a fresh reply posted underneath — the exact flicker
                     # the user reported.
-                    if followup_progress is not None:
-                        if pending_native:
-                            first_dispatch_progress = followup_progress
+                    if followup_progress is not None and pending_native:
+                        first_dispatch_progress = followup_progress
                         # else: leave it alive for the transition below
                     if (followup and str(followup).strip()) or pending_native:
                         response = followup or ""
@@ -8493,13 +8490,13 @@ class MaxwellBot(commands.Bot):
                     *[run_one(c) for c in non_terminal],
                     return_exceptions=True,
                 )
-                for call, res in zip(non_terminal, gathered):
+                for call, res in zip(non_terminal, gathered, strict=True):
                     if isinstance(res, BaseException):
                         # Surface the exception to the LLM context as
                         # a tool error (NOT a "Sorry" abort).
                         name = call.get("name", "unknown")
                         err_line = f"Tool {name}: Error - {type(res).__name__}: {res}"
-                        try:
+                        with contextlib.suppress(Exception):
                             await MaxwellBot._remember_tool_call(
                                 self,
                                 message,
@@ -8507,8 +8504,6 @@ class MaxwellBot(commands.Bot):
                                 call.get("arguments") or {},
                                 err_line,
                             )
-                        except Exception:
-                            pass
                         tool_results.append(err_line)
                     else:
                         tool_results.append(res)
@@ -9241,11 +9236,16 @@ class MaxwellBot(commands.Bot):
                             stamp = ""
                             if when:
                                 try:
-                                    stamp = (
-                                        f" [~{(datetime.now(timezone.utc) - _parse_iso(when)).days}d ago]"
-                                        if (datetime.now(timezone.utc) - _parse_iso(when)).days >= 1
-                                        else f" [today]"
-                                    )
+                                    dt = _parse_iso(when)
+                                    if dt is not None:
+                                        age_days = (
+                                            datetime.now(timezone.utc) - dt
+                                        ).days
+                                        stamp = (
+                                            f" [~{age_days}d ago]"
+                                            if age_days >= 1
+                                            else " [today]"
+                                        )
                                 except Exception:
                                     stamp = ""
                             who = r.get("author", "anon")
@@ -9738,6 +9738,11 @@ class MaxwellBot(commands.Bot):
 
             chat = message.get("chat", {})
             chat_id = chat.get("id")
+            if not chat_id:
+                # Malformed update with no chat id — skip rather than letting
+                # memory key on a shared "tg:None" bucket.
+                logger.warning("Telegram webhook update missing chat id; skipping")
+                return web.Response(status=200)
             text = message.get("text", "").strip()
             user = message.get("from", {})
             user_name = user.get("first_name", "Telegram User")
@@ -10013,8 +10018,11 @@ class MaxwellBot(commands.Bot):
 
         messages = [{"role": "system", "content": "\n\n".join(system_parts)}]
 
-        tg_chan_id = f"tg:{chat_id}"
-        memory = await self.memory.get_channel_memory(tg_chan_id)
+        # chat_id is guaranteed truthy by callers, but guard anyway: a
+        # None here would key memory on a shared "tg:None" bucket and
+        # cross-contaminate every malformed Telegram message.
+        tg_chan_id = f"tg:{chat_id}" if chat_id else ""
+        memory = await self.memory.get_channel_memory(tg_chan_id) if chat_id else None
         if memory:
             self_user_id_tg = str(getattr(self.user, "id", "")) if self.user else ""
             tg_turns: list[dict] = []
@@ -10285,6 +10293,19 @@ class MaxwellBot(commands.Bot):
                     logger.warning("Telegram long-poll timed out; retrying")
                     await asyncio.sleep(1)
                     continue
+                except (aiohttp.ClientError, ConnectionError, OSError) as _exc:
+                    # Transient network reset / DNS failure on the long-poll
+                    # (e.g. aiohttp ClientConnectorError wrapping a
+                    # ConnectionResetError from api.telegram.org). Previously
+                    # this bubbled to the loop-level handler, dumping a full
+                    # traceback and sending the user a bogus error reply for a
+                    # blip that needs no user-visible handling. Catch, back
+                    # off briefly, retry.
+                    logger.warning(
+                        "Telegram long-poll connection error: %s; retrying", _exc
+                    )
+                    await asyncio.sleep(5)
+                    continue
 
                 if not data.get("ok"):
                     logger.warning(f"Telegram getUpdates returned error: {data}")
@@ -10293,13 +10314,26 @@ class MaxwellBot(commands.Bot):
 
                 updates = data.get("result", [])
                 for update in updates:
-                    offset = max(offset, update.get("update_id", 0) + 1)
+                    # `update_id` can be present-but-null from a malformed
+                    # middlebox; dict.get(key, 0) only defaults on a MISSING
+                    # key, so None + 1 used to raise TypeError and the loop
+                    # re-fetched the same broken batch forever.
+                    offset = max(offset, (update.get("update_id") or 0) + 1)
                     message = update.get("message")
                     if not message:
                         continue
 
                     chat = message.get("chat", {})
                     chat_id = chat.get("id")
+                    if not chat_id:
+                        # Malformed update with no chat id — can't route the
+                        # reply, and keying memory on it would cross-contaminate
+                        # a shared "tg:None" bucket. Skip it.
+                        logger.warning(
+                            "Telegram update missing chat id; skipping "
+                            f"update {update.get('update_id')}"
+                        )
+                        continue
                     text = message.get("text", "").strip()
                     user = message.get("from", {})
                     user_name = user.get("first_name", "Telegram User")
@@ -10511,8 +10545,14 @@ class MaxwellBot(commands.Bot):
                     # The Discord path is the canonical implementation; this
                     # is the same shape with a tighter budget because TG replies
                     # are short (500 chars) and over-prompting is wasted spend.
-                    tg_chan_id = f"tg:{chat_id}"
-                    memory = await self.memory.get_channel_memory(tg_chan_id)
+                    # chat_id is guaranteed truthy by the loop guard above,
+                    # but stay defensive: never key memory on "tg:None".
+                    tg_chan_id = f"tg:{chat_id}" if chat_id else ""
+                    memory = (
+                        await self.memory.get_channel_memory(tg_chan_id)
+                        if chat_id
+                        else None
+                    )
                     if memory:
                         self_user_id_tg = (
                             str(getattr(self.user, "id", "")) if self.user else ""

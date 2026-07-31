@@ -132,3 +132,4 @@ subagents/*/tmp/
 #*#
 *.orig
 *.rej
+.pi-subagents/

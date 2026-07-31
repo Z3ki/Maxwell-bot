@@ -21,7 +21,6 @@ import asyncio
 import json
 import logging
 import sqlite3
-import struct
 import time
 import uuid
 from datetime import datetime, timezone
@@ -429,7 +428,18 @@ class RAGMemoryManager:
         # Self-tuning cache state (kept minimal; SQLite holds the real cache)
         self._embed_cache: dict[str, np.ndarray] = {}  # in-process LRU; SQLite is durable
         self._prompts: dict[str, str] = {}
+        # Track background embed tasks so shutdown can await them (otherwise
+        # in-flight embeds are silently dropped and rows stay embedding=NULL)
+        # and so tests don't spam "coroutine ignored GeneratorExit".
+        self._embed_tasks: set[asyncio.Task] = set()
         self._init_db()
+
+    def _spawn(self, coro) -> asyncio.Task:
+        """Create a tracked background task for embed work."""
+        task = asyncio.ensure_future(coro)
+        self._embed_tasks.add(task)
+        task.add_done_callback(self._embed_tasks.discard)
+        return task
 
     def _init_db(self):
         """Create SQLite DB and tables."""
@@ -682,7 +692,7 @@ class RAGMemoryManager:
             if migrated:
                 logger.info(f"Migrated {migrated} LTM lines from long_term_memory.txt")
                 # Embed them in background
-                asyncio.ensure_future(self._embed_pending("ltm"))
+                self._spawn(self._embed_pending("ltm"))
         except Exception as e:
             logger.warning(f"LTM migration failed: {e}")
 
@@ -723,7 +733,7 @@ class RAGMemoryManager:
                 migrated += 1
             if migrated:
                 logger.info(f"Migrated {migrated} shared context entries")
-                asyncio.ensure_future(self._embed_pending("shared_context"))
+                self._spawn(self._embed_pending("shared_context"))
         except Exception as e:
             logger.warning(f"Shared context migration failed: {e}")
 
@@ -1133,7 +1143,7 @@ class RAGMemoryManager:
         # 32k-token context absorbs any Discord message — no chunking.
         # Skip if content too short to be worth embedding.
         if should_embed:
-            asyncio.ensure_future(self._embed_and_store(msg_id, content))
+            self._spawn(self._embed_and_store(msg_id, content))
 
     async def clear_channel_memory(self, channel_id: str):
         self._db.execute(
@@ -1201,7 +1211,7 @@ class RAGMemoryManager:
                 (excess,),
             )
         # Embed in background
-        asyncio.ensure_future(self._embed_and_store(mid, content))
+        self._spawn(self._embed_and_store(mid, content))
         return mid
 
     async def edit_long_term_memory(self, memory_id: str, content: str) -> bool:
@@ -1216,7 +1226,7 @@ class RAGMemoryManager:
             (content, ch, str(memory_id)),
         )
         if cursor.rowcount > 0:
-            asyncio.ensure_future(self._embed_and_store(str(memory_id), content))
+            self._spawn(self._embed_and_store(str(memory_id), content))
             return True
         return False
 
@@ -1304,7 +1314,7 @@ class RAGMemoryManager:
             "'', 0, 0, ?, ?)",
             (cid, content, ch, metadata, scope, importance, ts, time.time()),
         )
-        asyncio.ensure_future(self._embed_and_store(cid, content))
+        self._spawn(self._embed_and_store(cid, content))
         return cid
 
     async def remove_shared_context(self, context_id: str) -> bool:
@@ -1331,7 +1341,7 @@ class RAGMemoryManager:
         )
         if cursor.rowcount > 0:
             if "content" in updates:
-                asyncio.ensure_future(
+                self._spawn(
                     self._embed_and_store(str(context_id), str(updates["content"]))
                 )
             return True
@@ -1466,7 +1476,7 @@ class RAGMemoryManager:
                 time.time(),
             ),
         )
-        asyncio.ensure_future(self._embed_and_store(cid, content))
+        self._spawn(self._embed_and_store(cid, content))
         return cid
 
     async def list_negatives(self, limit: int = 50) -> list[dict]:
@@ -1569,7 +1579,7 @@ class RAGMemoryManager:
                 "?, ?)",
                 (mid, fact[:MAX_MEMORY_CHARS], ch, _utcnow_iso(), time.time()),
             )
-            asyncio.ensure_future(self._embed_and_store(mid, fact))
+            self._spawn(self._embed_and_store(mid, fact))
             added += 1
         if added:
             logger.info(f"LTM summarizer added {added} facts")
@@ -1871,8 +1881,21 @@ class RAGMemoryManager:
     # ─── lifecycle ────────────────────────────────────────────────
 
     async def flush(self):
-        """No-op — SQLite is autocommit. Kept for interface compat."""
-        pass
+        """Await in-flight embed tasks so shutdown doesn't drop rows.
+
+        SQLite writes are autocommit; the only pending state is background
+        embedding. Previously these were fire-and-forget tasks: on PM2
+        restart / bot shutdown the loop closed mid-embed, rows stayed with
+        embedding=NULL, and tests spammed "coroutine ignored GeneratorExit"
+        and "Event loop is closed" warnings.
+        """
+        if self._embed_tasks:
+            pending = list(self._embed_tasks)
+            try:
+                await asyncio.gather(*pending, return_exceptions=True)
+            except Exception as e:
+                logger.warning(f"Error awaiting embed tasks during flush: {e}")
+        self._embed_tasks.clear()
 
     def load_from_disk(self):
         """No-op — DB is loaded in __init__. Kept for interface compat."""
