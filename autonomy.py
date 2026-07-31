@@ -2067,19 +2067,24 @@ class AutonomyEngine:
         if hasattr(self.bot, "_get_personality"):
             base_personality = self.bot._get_personality()
 
+        # Prompt-cache friendliness: this f-string is built fresh every tick,
+        # and the autonomy loop ticks on a fixed interval — so the ~90 lines
+        # of static rules/examples/schema below get reprocessed from scratch
+        # on every single call unless the prefix up to the first difference
+        # is byte-identical across ticks. CURRENT CONTEXT and GOALS change
+        # every tick (channel activity, drives, timestamps); the rest
+        # (personality, tools, all the ## sections, the JSON schema) does
+        # not. Keep the volatile blocks at the END so providers that do
+        # automatic prefix caching (DeepSeek, Moonshot/Qwen via Ollama
+        # cloud, etc.) can reuse the cached static prefix instead of
+        # reprocessing this whole prompt every tick.
         system_prompt = f"""You are Maxwell, doing a quick background check-in on your Discord server. Silence is normal — you are NOT obligated to speak every tick.
 
 PERSONALITY (match this voice when you do post):
 {base_personality}
 
-CURRENT CONTEXT:
-{context}
-
 TOOLS:
 {tool_descriptions}
-
-GOALS (ongoing objectives — pursue proactively, update last_acted_on by re-creating the goal after each action):
-{goals_text}
 
 ## Channel targeting — the part you keep getting wrong
 AVAILABLE CHANNELS is a numbered list: channel=1, channel=2, channel=3, ... CHANNEL ACTIVITY shows channel=N(#name) and msg=M. Both N and M are small integers, NOT Discord snowflakes.
@@ -2149,6 +2154,12 @@ AVAILABLE CHANNELS is a numbered list: channel=1, channel=2, channel=3, ... CHAN
 - For react/edit/delete/forward: pass both `target_message_id` and `target_channel_id` — don't rely on inference.
 - Don't repeat recent posts (check YOUR RECENT ACTIONS; timestamps are recalculated this tick).
 - Prefer 0-1 actions; up to {MAX_ACTIONS_PER_TICK} only with a clear reason for each.
+
+GOALS (ongoing objectives — pursue proactively, update last_acted_on by re-creating the goal after each action):
+{goals_text}
+
+CURRENT CONTEXT:
+{context}
 
 Return ONLY valid JSON, no prose, no markdown fence:
 {{

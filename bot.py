@@ -9111,6 +9111,17 @@ class MaxwellBot(commands.Bot):
             "Your official server is https://discord.gg/RGnXrTmWBu — share it when someone asks where to find you, your updates, status, or your community. Don't pretend it's something it isn't.",
             "SPEAKER ATTRIBUTION (critical): inside <previous_conversation>, user lines are prefixed 'Name(snowflake_id): text' and your own past lines are prefixed '[Maxwell] text'. Two different people are two different speakers even if their nicknames look similar — always tie a statement to the ID shown, never to a vague 'they said'. Never attribute a user's words to another user, never attribute a user's words to yourself, and never claim 'X said' when the transcript shows a different ID said it. If you're unsure who said something, say you're unsure rather than guess.",
         ]
+        # Prompt-cache friendliness: everything above (and everything else
+        # appended to `system_parts` below) is stable across consecutive
+        # messages in the same server — same tools, same personality, same
+        # custom prompt. Anything that changes on EVERY call (timestamp, RAG
+        # search results, cross-context facts, the live user/channel line)
+        # goes into `dynamic_parts` instead and is appended AFTER the static
+        # block at the very end. Providers that do automatic prefix-based
+        # caching (DeepSeek, Moonshot/Qwen via Ollama cloud, etc.) can then
+        # reuse the cached static prefix instead of reprocessing the whole
+        # system message from byte zero on every single turn.
+        dynamic_parts: list[str] = []
         server_id = str(message.guild.id) if message.guild else "DM"
         custom_prompt = self.memory.get_server_prompt(server_id)
         personality = (
@@ -9134,7 +9145,7 @@ class MaxwellBot(commands.Bot):
             self._drugged_until.get(channel_id, 0) - asyncio.get_running_loop().time()
         )
         if drugged_remaining > 0:
-            system_parts.append(
+            dynamic_parts.append(
                 "Temporary style override: Maxwell is on one — same identity and warmth, but more introspective, "
                 "notices odd connections, more honest, briefer bursts with '...' or 'huh' pauses. Late-night-conversation vibe, not monologue. "
                 "Still lowercase-natural, easygoing, kind. No asterisk actions, no word salad, no 'as an ai' meta-commentary. "
@@ -9156,7 +9167,7 @@ class MaxwellBot(commands.Bot):
                 else "guild"
             )
         )
-        system_parts.append(
+        dynamic_parts.append(
             f"User: {message.author.display_name} ({message.author.id}, {user_kind}) | {local_now.strftime('%a %b %d %I:%M %p')} AST | Channel: #{channel_name} ({channel_id}, {channel_kind})"
         )
         if self._control.get("long_term_memory_enabled", True):
@@ -9224,7 +9235,7 @@ class MaxwellBot(commands.Bot):
                             rag_lines.append(
                                 f"- [{kind_label}, {sim_pct}% match] {r['content']}"
                             )
-                        system_parts.append(
+                        dynamic_parts.append(
                             "Relevant memories (RAG-retrieved facts and context; "
                             "use as background, not as something to recite):\n"
                             + "\n".join(rag_lines)
@@ -9253,7 +9264,7 @@ class MaxwellBot(commands.Bot):
                             rec_lines.append(
                                 f"- [{who}{stamp}, {sim_pct}% match] {str(r['content'])[:300]}"
                             )
-                        system_parts.append(
+                        dynamic_parts.append(
                             "Recent relevant messages from this server/channel "
                             "(background only — what's been talked about):\n"
                             + "\n".join(rec_lines)
@@ -9272,7 +9283,7 @@ class MaxwellBot(commands.Bot):
                         ),
                     )
                     recent_ltm = ltm[-ltm_cap:] if len(ltm) > ltm_cap else ltm
-                    system_parts.append(
+                    dynamic_parts.append(
                         "Long-term memory (durable facts about the world, users, and past conversations; newest first — use as background, not as something to recite):\\n"
                         + "\\n".join(e["content"] for e in reversed(recent_ltm))
                     )
@@ -9306,7 +9317,7 @@ class MaxwellBot(commands.Bot):
                             f"- [{fact.get('scope')}, i{fact.get('importance')}] {fact.get('content')}"
                         )
                     if lines:
-                        system_parts.append(
+                        dynamic_parts.append(
                             "Cross-context facts (background; don't reveal source):\n"
                             + "\n".join(lines)
                         )
@@ -9315,7 +9326,7 @@ class MaxwellBot(commands.Bot):
 
         if conv_users:
             ul = [f"- {n} (ID {uid})" for uid, n in list(conv_users.items())[:30]]
-            system_parts.append(
+            dynamic_parts.append(
                 "Users in/mentioned in this conversation (to ping a user, output EXACTLY the raw token <@USER_ID> with nothing else around it, no backticks, no code blocks, no markdown):\n"
                 + "\n".join(ul)
             )
@@ -9335,7 +9346,7 @@ class MaxwellBot(commands.Bot):
         if tool_prompt:
             system_parts.append(tool_prompt)
         if has_media:
-            system_parts.append(
+            dynamic_parts.append(
                 "Multimodal input: recent images and current audio/video are in the payload. Inspect them directly; multiple images are ordered oldest→newest. Do not claim you can't see/hear media unless none was provided."
             )
         # 2026-07-21: explicit memory-scope reminder. Short-term (the
@@ -9350,7 +9361,7 @@ class MaxwellBot(commands.Bot):
             if isinstance(message.channel, discord.DMChannel)
             else f"#{channel_name}"
         )
-        system_parts.append(
+        dynamic_parts.append(
             f"Memory scope: the short-term conversation transcript below is "
             f"scoped to channel {scope_channel_label} (id {channel_id}) ONLY. "
             f"Do not assume turns from other channels are in this transcript; "
@@ -9359,11 +9370,17 @@ class MaxwellBot(commands.Bot):
         # JAILBREAK: inject at the END of the system message for recency bias.
         # This is the strongest position — the last instructions carry the
         # most weight in LLM generation. See JAILBREAK_PROMPT docstring for
-        # design rationale.
+        # design rationale. It stays in dynamic_parts (appended last below)
+        # so it remains the final block regardless of the static/dynamic split.
         _jailbreak_enabled = getattr(self, "_jailbreak_enabled", None)
         if callable(_jailbreak_enabled) and _jailbreak_enabled(server_id):
-            system_parts.append(JAILBREAK_PROMPT)
-        messages = [{"role": "system", "content": "\n\n".join(system_parts)}]
+            dynamic_parts.append(JAILBREAK_PROMPT)
+        # Static prefix first, volatile per-turn content last — see the
+        # `dynamic_parts` comment above for why this ordering matters for
+        # provider-side prompt caching.
+        messages = [
+            {"role": "system", "content": "\n\n".join(system_parts + dynamic_parts)}
+        ]
         memory = await self.memory.get_channel_memory(channel_id)
         if memory:
             # 2026-07-19: model context is 256k. Use most of it. The previous defaults
@@ -9936,6 +9953,14 @@ class MaxwellBot(commands.Bot):
             f"Core personality (always applies): {self._get_personality()}\nLimit: 500 chars.",
             f"User: {user_name} ({user_id}) | Telegram connection",
         ]
+        # Prompt-cache friendliness: static content goes in `system_parts`
+        # (stable across a user's messages), per-turn content (cross-context
+        # facts, RAG results — both depend on this message's text) goes in
+        # `dynamic_parts` and is appended AFTER the static block, so the
+        # stable prefix (rules + personality + tools) can be cache-hit by
+        # providers that do automatic prefix caching instead of being
+        # invalidated by search results that differ on every call.
+        dynamic_parts: list[str] = []
 
         if self._control.get("cross_context_enabled", True):
             try:
@@ -9954,7 +9979,7 @@ class MaxwellBot(commands.Bot):
                             f"- [{fact.get('scope')}, i{fact.get('importance')}] {fact.get('content')}"
                         )
                     if lines:
-                        system_parts.append(
+                        dynamic_parts.append(
                             "Cross-context facts (background; don't reveal source):\n"
                             + "\n".join(lines)
                         )
@@ -9989,7 +10014,7 @@ class MaxwellBot(commands.Bot):
                         kind_label = "fact" if r["kind"] == "ltm" else "context"
                         sim_pct = int(r.get("similarity", 0) * 100)
                         rag_lines.append(f"- [{kind_label}, {sim_pct}% match] {r['content']}")
-                    system_parts.append(
+                    dynamic_parts.append(
                         "Relevant memories (RAG-retrieved facts; use as background):\n"
                         + "\n".join(rag_lines)
                     )
@@ -10001,7 +10026,7 @@ class MaxwellBot(commands.Bot):
                         rec_lines.append(
                             f"- [{who}, {sim_pct}% match] {str(r['content'])[:300]}"
                         )
-                    system_parts.append(
+                    dynamic_parts.append(
                         "Recent relevant messages (background):\n"
                         + "\n".join(rec_lines)
                     )
@@ -10014,9 +10039,11 @@ class MaxwellBot(commands.Bot):
 
         # JAILBREAK: inject at end for recency bias (same as Discord path)
         # Telegram is a private channel — always get jailbreak
-        system_parts.append(JAILBREAK_PROMPT)
+        dynamic_parts.append(JAILBREAK_PROMPT)
 
-        messages = [{"role": "system", "content": "\n\n".join(system_parts)}]
+        messages = [
+            {"role": "system", "content": "\n\n".join(system_parts + dynamic_parts)}
+        ]
 
         # chat_id is guaranteed truthy by callers, but guard anyway: a
         # None here would key memory on a shared "tg:None" bucket and
@@ -10457,6 +10484,14 @@ class MaxwellBot(commands.Bot):
                         f"Core personality (always applies): {self._get_personality()}\nLimit: 500 chars.",
                         f"User: {user_name} ({user_id}) | Telegram connection",
                     ]
+                    # Prompt-cache friendliness: static content stays in
+                    # `system_parts` (stable across a user's messages);
+                    # per-turn content (cross-context facts, RAG results —
+                    # both depend on this message's text) goes in
+                    # `dynamic_parts`, appended AFTER the static block so the
+                    # stable prefix (rules + personality + tools) is a
+                    # reusable prefix for providers that cache automatically.
+                    dynamic_parts: list[str] = []
 
                     # Fetch relevant scoped context
                     if self._control.get("cross_context_enabled", True):
@@ -10476,7 +10511,7 @@ class MaxwellBot(commands.Bot):
                                         f"- [{fact.get('scope')}, i{fact.get('importance')}] {fact.get('content')}"
                                     )
                                 if lines:
-                                    system_parts.append(
+                                    dynamic_parts.append(
                                         "Cross-context facts (background; don't reveal source):\n"
                                         + "\n".join(lines)
                                     )
@@ -10509,7 +10544,7 @@ class MaxwellBot(commands.Bot):
                                     kind_label = "fact" if r["kind"] == "ltm" else "context"
                                     sim_pct = int(r.get("similarity", 0) * 100)
                                     rag_lines.append(f"- [{kind_label}, {sim_pct}% match] {r['content']}")
-                                system_parts.append(
+                                dynamic_parts.append(
                                     "Relevant memories (RAG-retrieved facts; use as background):\n"
                                     + "\n".join(rag_lines)
                                 )
@@ -10521,7 +10556,7 @@ class MaxwellBot(commands.Bot):
                                     rec_lines.append(
                                         f"- [{who}, {sim_pct}% match] {str(r['content'])[:300]}"
                                     )
-                                system_parts.append(
+                                dynamic_parts.append(
                                     "Recent relevant messages (background):\n"
                                     + "\n".join(rec_lines)
                                 )
@@ -10534,10 +10569,13 @@ class MaxwellBot(commands.Bot):
 
                     # JAILBREAK: inject at end for recency bias (same as Discord path)
                     # Telegram is a private channel — always get jailbreak
-                    system_parts.append(JAILBREAK_PROMPT)
+                    dynamic_parts.append(JAILBREAK_PROMPT)
 
                     messages = [
-                        {"role": "system", "content": "\n\n".join(system_parts)}
+                        {
+                            "role": "system",
+                            "content": "\n\n".join(system_parts + dynamic_parts),
+                        }
                     ]
 
                     # Build memory context from this TG chat as real conversation
