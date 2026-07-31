@@ -336,6 +336,18 @@ def _message_created_at_iso(message) -> str:
     return (dt or datetime.now(timezone.utc)).isoformat()
 
 
+async def _await_task_done(task: asyncio.Task) -> None:
+    """Wait for an asyncio.Task to finish (whether cancelled, failed, or succeeded).
+
+    Used by on_message's same-user interrupt so we know the prior task has
+    fully released the channel lock before we try to acquire it.
+    """
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
 def _format_context_timestamp(value, *, now: datetime | None = None) -> str:
     dt = _coerce_utc_datetime(value)
     if dt is None:
@@ -2916,6 +2928,19 @@ class MaxwellBot(commands.Bot):
                     f"{channel_id}"
                 )
                 active.cancel()
+                # 2026-07-31: previously we cancelled without awaiting, so the
+                # cancelled coroutine could still hold the per-channel `_lock`
+                # when THIS on_message tried to acquire it. Result: 120-second
+                # wait_for() timeout, then silent return at the channel-lock
+                # guard, add_message_to_memory never called. Wait for the
+                # cancel to actually finish so the channel lock is released.
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(_await_task_done(active)),
+                        timeout=5.0,
+                    )
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
 
         _lock = self._get_channel_lock(channel_id)
         _lock_acquired = False
@@ -3001,6 +3026,18 @@ class MaxwellBot(commands.Bot):
                     await self.add_message_to_memory(channel_id, memory_item, message)
                     if self.rem_log:
                         await self._record_rem_event(message, "user", memory_content)
+                except asyncio.CancelledError:
+                    # 2026-07-31: CancelledError is BaseException, not Exception.
+                    # The previous `except Exception` block silently dropped the
+                    # write on same-user-interrupt cancels — the channel-lock
+                    # releaser in the `finally` raced the await and killed the
+                    # coroutine mid-INSERT. Log it explicitly so silent message
+                    # drops become visible.
+                    logger.warning(
+                        f"Memory/REM write cancelled in on_message "
+                        f"(msg_id={memory_item.get('message_id')} channel={channel_id})"
+                    )
+                    raise  # surface cancellation up to the caller
                 except Exception as e:
                     logger.warning(f"Memory/REM write failed in on_message: {e}")
             self._maybe_schedule_context_extraction(message)
