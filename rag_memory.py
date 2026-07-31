@@ -1006,6 +1006,23 @@ class RAGMemoryManager:
             store the row but do NOT request an embedding (cheap skip)
           - dedupe by (channel_id, content_hash) — silent ignore on collision
         """
+        # 2026-07-31: the multi-statement write sequence (SELECT dedup →
+        # UPDATE/INSERT → DELETE → INSERT → SELECT count → DELETE excess)
+        # is wrapped in self._lock so concurrent calls for different
+        # channels don't interleave on the same SQLite connection.
+        # Previously the Lock was created but never acquired; the bot.py
+        # channel lock serialized same-channel writes but cross-channel
+        # writes raced, producing IntegrityError on the unique content-hash
+        # index that was silently swallowed by bot.py:2997.
+        async with self._lock:
+            await self._add_to_channel_memory_locked(channel_id, message)
+
+    async def _add_to_channel_memory_locked(
+        self, channel_id: str, message: dict
+    ) -> None:
+        # NOTE: body of the original add_to_channel_memory, kept under
+        # the caller's _lock to make the (SELECT existing, INSERT,
+        # DELETE excess) sequence atomic across writers.
         channel_id = str(channel_id)
         msg_id = str(message.get("message_id") or uuid.uuid4().hex)
         content = str(message.get("content") or "")

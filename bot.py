@@ -2820,8 +2820,15 @@ class MaxwellBot(commands.Bot):
 
         cooldown = float(self._control.get("per_user_cooldown_seconds", 1.5) or 0)
         last = self._cooldowns.get(str(message.author.id), 0)
-        if cooldown > 0 and now - last < cooldown and not (has_attachment or has_embed):
-            return
+        # 2026-07-31: the original gate returned EARLY here for the second
+        # of two rapid messages from the same user, never reaching
+        # add_message_to_memory. That made the bot blind to ~2/3 of channel
+        # traffic — "no context for outside messages" complaint. Cooldown
+        # now only applies to the REPLY path (provider call downstream); the
+        # STORAGE path always runs so RAG sees every message.
+        cooldown_for_reply = cooldown > 0 and now - last < cooldown and not (
+            has_attachment or has_embed
+        )
         self._cooldowns[str(message.author.id)] = now
         if len(self._cooldowns) > 1000:
             cutoff = now - 60
@@ -3015,6 +3022,17 @@ class MaxwellBot(commands.Bot):
                     logger.warning(f"Background media cache failed: {e}")
 
             if message.author.bot and not self._control.get("reply_to_bots", True):
+                return
+
+            # 2026-07-31: per-user cooldown was previously an early-return at
+            # bot.py:2823 that ate ~2/3 of channel traffic before it could
+            # reach memory. Now it's applied here, AFTER storage but BEFORE
+            # an LLM turn — so RAG keeps every message but the bot doesn't
+            # burn provider calls replying to every rapid-fire text.
+            if cooldown_for_reply and not message.author.bot:
+                logger.info(
+                    f"Cooldown skip reply for user {message.author.id} in {channel_id} (still stored to memory)"
+                )
                 return
 
             if isinstance(message.channel, discord.DMChannel):
@@ -4225,7 +4243,7 @@ class MaxwellBot(commands.Bot):
                     (time.perf_counter() - t_play) * 1000,
                     (time.perf_counter() - t_total) * 1000,
                 )
-            if self._control.get("store_memory", False):
+            if self._control.get("store_memory", True):
                 mem_kwargs = {}
                 if guild:
                     mem_kwargs["guild_id"] = str(getattr(guild, "id", "") or "")
