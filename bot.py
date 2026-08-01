@@ -1572,6 +1572,11 @@ FOLLOWUP_TOOL_NAMES = {
     "create_poll",
     "forward_message",
     "edit_message",
+    # change_avatar returns a bare success ack ("Avatar changed successfully").
+    # Without follow-up, a model that calls this as its only tool leaves the
+    # turn silent — the user sees the avatar change but no text response.
+    # Adding it here forces a second turn so the model can confirm / react.
+    "change_avatar",
     "list_servers",
     "create_site",
     "list_sites",
@@ -1918,7 +1923,6 @@ class MaxwellBot(commands.Bot):
         self._recent_users: dict[
             str, dict[str, str]
         ] = {}  # channel_id -> {user_id: name}
-        self._last_avatar_change: float = 0
         self._custom_status = None
         self._current_game = None
         self._cooldowns: dict[str, float] = {}

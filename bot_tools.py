@@ -1639,7 +1639,11 @@ class ChangeAvatarTool(Tool):
     """Change the bot's own profile picture"""
 
     def get_description(self):
-        return "Change your profile picture. Params: url (required, direct image URL jpg/png/gif/webp). Local cooldown is disabled by default (AVATAR_COOLDOWN_SECONDS env); Discord's own rate limit still applies."
+        return (
+            "Change your profile picture. Params: url (required, direct image URL jpg/png/gif/webp). "
+            "No local cooldown — call as often as you want. Discord's own API rate limit "
+            "still applies (you'll get a 429 if you spam)."
+        )
 
     async def execute(self, message: Message, url: str | None = None, **kwargs) -> str:
         if self.bot and not self.bot._is_admin(message.author.id):
@@ -1650,21 +1654,10 @@ class ChangeAvatarTool(Tool):
         if not _is_safe_url(url):
             return "Error: Cannot fetch from private/internal URLs"
 
-        # Cooldown is env-driven so we can disable it (Discord's own API
-        # rate limit still applies — you'll get a 429 from Discord instead
-        # of a friendly local error if you spam it). Default 0 = off.
-        try:
-            cooldown = int(os.environ.get("AVATAR_COOLDOWN_SECONDS", "0"))
-        except ValueError:
-            cooldown = 0
-
-        if cooldown > 0 and self.bot._last_avatar_change:
-            elapsed = (
-                datetime.now(timezone.utc).timestamp() - self.bot._last_avatar_change
-            )
-            if elapsed < cooldown:
-                remaining = int(cooldown - elapsed)
-                return f"Error: Avatar on cooldown. Wait {remaining} more seconds."
+        # Local cooldown fully removed — was previously env-driven
+        # (AVATAR_COOLDOWN_SECONDS, default 0). Discord's own API rate limit
+        # is the only throttle left; the bot will get a 429 from Discord if
+        # it spams, which is fine.
 
         try:
             session = await _get_shared_session()
@@ -1679,7 +1672,6 @@ class ChangeAvatarTool(Tool):
                 image_bytes = await _read_response_limited(resp, 10 * 1024 * 1024)
 
             await self.bot.user.edit(avatar=image_bytes)
-            self.bot._last_avatar_change = datetime.now(timezone.utc).timestamp()
             return "Avatar changed successfully"
         except discord.HTTPException as e:
             return f"Error changing avatar: {e}"
@@ -2658,6 +2650,8 @@ class ShellTool(Tool):
                 "paths to attach to the reply). To send an artifact the command produced, pass its "
                 "path under /home/maxwell in `files` — e.g. files='[\"out.png\"]' or files='out.png, "
                 "data.zip'. The file will be docker-cp'd out and uploaded to the channel. "
+                "You can call shell again in a follow-up turn to chain more commands; "
+                "the container keeps its working dir, env, and any files you wrote across calls. "
                 "Examples:\n"
                 '  command="echo hi"                       -> stdout only\n'
                 "  command=\"python3 make.py\", files='out.png' -> runs script + attaches out.png\n"
@@ -2672,7 +2666,11 @@ class ShellTool(Tool):
             "paths under /home/maxwell to attach to the reply). When your command produces an "
             "artifact (image, video, audio, archive, pdf, csv, html, anything the user wants), "
             "list its path in `files` and it will be docker-cp'd out of the container and uploaded "
-            "to the channel automatically. Examples:\n"
+            "to the channel automatically. "
+            "You can call shell again in a follow-up turn to chain more commands; "
+            "the container keeps its working dir, env, and any files you wrote across calls "
+            "(use this to inspect output, run a tool, then post-process in one turn). "
+            "Examples:\n"
             '  command="echo hi"                              -> stdout only\n'
             "  command=\"python3 make.py\", files='out.png'     -> runs script + attaches out.png\n"
             "  command=\"ffmpeg -i in.mp4 out.mp4\", files='out.mp4' -> transcodes + attaches result\n"
