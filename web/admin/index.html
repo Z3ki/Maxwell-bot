@@ -808,6 +808,9 @@
         }
       }
       function logout(clear = true) {
+        // Capture the token BEFORE clearing state so the server-side revoke
+        // actually sends it (otherwise it always fires without the header).
+        const revokeToken = S.discordToken;
         S.auth = null;
         S.discordToken = null;
         S.discordUser = null;
@@ -819,9 +822,7 @@
           try {
             fetch("/api/auth/discord/logout", {
               method: "POST",
-              headers: S.discordToken
-                ? { "X-Discord-Token": S.discordToken }
-                : {},
+              headers: revokeToken ? { "X-Discord-Token": revokeToken } : {},
             });
           } catch (e) {}
         }
@@ -1032,7 +1033,7 @@
       }
       function commands() {
         $("commands").innerHTML =
-          `<div class="grid two" style="margin-top:12px"><div class="card"><h3>Send Server/Channel Message</h3><div class="stack"><input id="chan" class="field" placeholder="Channel ID"><textarea id="msg" class="field" placeholder="Message"></textarea><button id="send" class="btn primary">Queue send</button></div></div><div class="card"><h3>Send DM</h3><div class="stack"><input id="dmuser" class="field" placeholder="Discord user ID"><textarea id="dmmsg" class="field" placeholder="DM message"></textarea><button id="senddm" class="btn primary">Queue DM</button></div></div><div class="card"><h3>Shell Command</h3><div class="stack"><textarea id="shell" class="field" placeholder="Command"></textarea><button id="runshell" class="btn red">Queue shell</button></div></div><div class="card"><h3>Safe Commands</h3><div class="row"><button class="btn small" onclick="queue('reload_controls')">Reload controls</button><button class="btn small" onclick="queue('rem_run')">Run REM</button></div><p class="muted">Forced client-close command removed. Use PM2 restart in Overview if you need a restart.</p></div></div><div class="card" style="margin-top:12px"><h3>Command History</h3><div class="list">${
+          `<div class="grid two" style="margin-top:12px"><div class="card"><h3>Send Server/Channel Message</h3><div class="stack"><input id="chan" class="field" placeholder="Channel ID"><textarea id="msg" class="field" placeholder="Message"></textarea><button id="send" class="btn primary">Queue send</button></div></div><div class="card"><h3>Send DM</h3><div class="stack"><input id="dmuser" class="field" placeholder="Discord user ID"><textarea id="dmmsg" class="field" placeholder="DM message"></textarea><button id="senddm" class="btn primary">Queue DM</button></div></div><div class="card"><h3>Safe Commands</h3><div class="row"><button class="btn small" onclick="queue('reload_controls')">Reload controls</button><button class="btn small" onclick="queue('rem_run')">Run REM</button></div><p class="muted">Shell commands are disabled via the web API for security. Use the bot's Discord shell tool or SSH. Forced client-close command removed — use PM2 restart in Overview if you need a restart.</p></div></div><div class="card" style="margin-top:12px"><h3>Command History</h3><div class="list">${
             S.commands
               .slice(-40)
               .reverse()
@@ -1052,8 +1053,6 @@
             user_id: $("dmuser").value,
             content: $("dmmsg").value,
           });
-        $("runshell").onclick = () =>
-          queue("shell", { command: $("shell").value });
       }
 
       function discord() {
@@ -1254,7 +1253,7 @@
         const pending = totalVec - embedded;
         const embedPct = totalVec > 0 ? Math.round((embedded / totalVec) * 100) : 0;
         $("memory").innerHTML =
-          `<div class="card" style="margin-top:12px"><h3>RAG Vector Memory</h3><div class="list"><div class="item"><b>Embedding model</b><span class="mono muted">qwen3-embedding:0.6b (1024-dim)</span></div><div class="item"><b>Total vectors</b><span>${totalVec}</span></div><div class="item"><b>Embedded</b><span>${embedded} / ${totalVec} (${embedPct}%)</span></div>${pending > 0 ? `<div class="item"><b>Pending</b><span style="color:var(--yellow)">${pending} vectors awaiting embedding</span></div>` : ""}<div class="item"><b>Messages</b><span>${ragStats.messages || 0} across ${ragStats.channel_count || 0} channels</span></div><div class="item"><b>Long-term facts</b><span>${ragStats.ltm || 0}</span></div><div class="item"><b>Shared context</b><span>${ragStats.shared_context || 0}</span></div></div></div><div class="card" style="margin-top:12px"><h3>Add Memory</h3><textarea id="newmem" class="field"></textarea><button id="addmem" class="btn primary">Add</button></div><div class="card" style="margin-top:12px"><h3>Long-Term Memory</h3><div class="table"><table><thead><tr><th>ID</th><th>Content</th><th></th></tr></thead><tbody>${S.memory.map((m) => `<tr><td class="mono">${sid(m.id)}</td><td><textarea class="field" data-mem="${sid(m.id)}">${esc(m.content)}</textarea></td><td><button class="btn small" data-save-mem="${sid(m.id)}">Save</button> <button class="btn small red" data-del-mem="${sid(m.id)}">Delete</button></td></tr>`).join("")}</tbody></table></div></div>`;
+          `<div class="card" style="margin-top:12px"><h3>RAG Vector Memory</h3><div class="list"><div class="item"><b>Embedding model</b><span class="mono muted">qwen3-embedding:0.6b (1024-dim)</span></div><div class="item"><b>Total vectors</b><span>${totalVec}</span></div><div class="item"><b>Embedded</b><span>${embedded} / ${totalVec} (${embedPct}%)</span></div>${pending > 0 ? `<div class="item"><b>Pending</b><span style="color:var(--yellow)">${pending} vectors awaiting embedding</span></div>` : ""}<div class="item"><b>Messages</b><span>${ragStats.messages || 0} across ${ragStats.channel_count || 0} channels</span></div><div class="item"><b>Long-term facts</b><span>${ragStats.ltm || 0}</span></div><div class="item"><b>Shared context</b><span>${ragStats.context || 0}</span></div></div></div><div class="card" style="margin-top:12px"><h3>Add Memory</h3><textarea id="newmem" class="field"></textarea><button id="addmem" class="btn primary">Add</button></div><div class="card" style="margin-top:12px"><h3>Long-Term Memory</h3><div class="table"><table><thead><tr><th>ID</th><th>Content</th><th></th></tr></thead><tbody>${S.memory.map((m) => `<tr><td class="mono">${sid(m.id)}</td><td><textarea class="field" data-mem="${sid(m.id)}">${esc(m.content)}</textarea></td><td><button class="btn small" data-save-mem="${sid(m.id)}">Save</button> <button class="btn small red" data-del-mem="${sid(m.id)}">Delete</button></td></tr>`).join("")}</tbody></table></div></div>`;
         $("addmem").onclick = async () => {
           await api("/api/memory", {
             method: "POST",

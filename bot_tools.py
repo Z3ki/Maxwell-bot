@@ -6,43 +6,43 @@ generate a natural response. Only success outputs (images, DMs) are
 sent directly to their target.
 """
 
+import contextlib
+import html
 import ipaddress
 import json
+import logging
 import os
+import random
 import re
 import shutil
 import socket
+import ssl
 import tempfile
+import wave
+from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path
 from typing import Any, cast
-import contextlib
-import html
-import ssl
-import wave
+from urllib.parse import parse_qs, urlparse
 
+import aiofiles
+import aiohttp
 import asyncio
 import base64
 import discord
-import aiohttp
-import aiofiles
-import logging
-import random
-from datetime import datetime, timezone, timedelta
-from io import BytesIO
-from urllib.parse import parse_qs, urlparse
-
-from discord import Message, File, Activity, Status
+from discord import Activity, File, Message, Status
 from tools import Tool
+from utils import (  # single source of truth, fd-safe
+    FileLock,
+    _atomic_json_write_sync,
+)
+
 try:
     from ddgs import DDGS as _DDGS
     _DDGS_AVAILABLE = True
 except ImportError:
     _DDGS = None
     _DDGS_AVAILABLE = False
-from utils import (  # single source of truth, fd-safe
-    FileLock,
-    _atomic_json_write_sync,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +141,7 @@ def _is_safe_ip(value: str) -> bool:
     except ValueError:
         return False
     # Unwrap IPv4-mapped IPv6 (::ffff:127.0.0.1) so loopback/private checks apply.
-    if getattr(ip, "ipv4_mapped", None) is not None:
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
     return not (
         ip.is_private
@@ -190,10 +190,8 @@ async def _recreate_shared_session():
     global _SHARED_SESSION
     async with _SESSION_LOCK:
         if _SHARED_SESSION is not None and not _SHARED_SESSION.closed:
-            try:
+            with contextlib.suppress(Exception):
                 await _SHARED_SESSION.close()
-            except Exception:
-                pass
         connector = aiohttp.TCPConnector(
             resolver=cast(Any, _SafeResolver()),
             limit=30,
@@ -208,10 +206,8 @@ async def close_shared_session():
     global _SHARED_SESSION
     async with _SESSION_LOCK:
         if _SHARED_SESSION is not None and not _SHARED_SESSION.closed:
-            try:
+            with contextlib.suppress(Exception):
                 await _SHARED_SESSION.close()
-            except Exception:
-                pass
         _SHARED_SESSION = None
 
 
@@ -1955,9 +1951,11 @@ class CreateSiteTool(Tool):
                 )
             except Exception as e:
                 # Best-effort cleanup of the orphaned live HTML we just published.
+                # NB: do NOT `import shutil` here — shutil is already imported at
+                # module level, and a local import inside this method would make
+                # the name function-local, breaking the earlier `shutil.copy2`
+                # call in the image-copy loop with UnboundLocalError.
                 with contextlib.suppress(Exception):
-                    import shutil
-
                     shutil.rmtree(site_dir, ignore_errors=True)
                 logger.error(f"Failed to commit site metadata for {slug}: {e}")
                 return f"Error creating site: {e}"
@@ -1965,8 +1963,6 @@ class CreateSiteTool(Tool):
                 # Overwrite disallowed by a concurrent owner change / quota hit
                 # discovered under the lock; clean up the HTML we wrote.
                 with contextlib.suppress(Exception):
-                    import shutil
-
                     shutil.rmtree(site_dir, ignore_errors=True)
                 return (
                     f"Error: site slug '{slug}' could not be committed "
@@ -2035,10 +2031,8 @@ class CreateSiteTool(Tool):
             _atomic_json_write_sync(path, sites)
             # Keep the in-memory map + mtime in sync for this process.
             self.bot._sites = sites
-            try:
+            with contextlib.suppress(OSError):
                 self.bot._sites_mtime = path.stat().st_mtime
-            except OSError:
-                pass
             return True
 
     async def _save_sites(self):
@@ -2120,6 +2114,12 @@ class WebSearchTool(Tool):
                 "`ddgs` Python package is missing. Run `pip install ddgs` "
                 "or set ENABLE_WEB_SEARCH=false in .env to silence this."
             )
+        # _DDGS is guaranteed non-None when _DDGS_AVAILABLE is True, but pyright
+        # can't see the correlation across the lambda below. Bind a local
+        # non-None reference so a None can never be called at runtime.
+        if _DDGS is None:
+            return "Error: web_search is not available (ddgs import failed)"
+        ddgs_cls: Any = _DDGS
 
         try:
             limit = max(1, min(int(max_results), 10))
@@ -2140,7 +2140,7 @@ class WebSearchTool(Tool):
             # default-executor thread indefinitely.
             results = await asyncio.wait_for(
                 loop.run_in_executor(
-                    None, lambda: list(_DDGS().text(query, max_results=limit))
+                    None, lambda: list(ddgs_cls().text(query, max_results=limit))
                 ),
                 timeout=30,
             )
@@ -3949,7 +3949,9 @@ class TtsTool(Tool):
                 out_f.setnchannels(1)
                 out_f.setsampwidth(2)
                 out_f.setframerate(44100)
-                out_f.writeframesraw(resp.audio)
+                # cast: the riva client returns an untyped stub object; the
+                # synthesized audio bytes live on `.audio` at runtime.
+                out_f.writeframesraw(cast(Any, resp).audio)
 
         except Exception as e:
             logger.warning(f"Riva TTS synthesis failed: {e}. Falling back to gTTS.")
@@ -4420,10 +4422,15 @@ def _imap_list_recent_sync(
             )
         return f"Found {len(lines)} message(s):\n\n" + "\n\n".join(lines)
     finally:
-        contextlib.suppress(Exception)
-        M.close()
-        contextlib.suppress(Exception)
-        M.logout()
+        # Bare `contextlib.suppress(Exception)` statements are no-ops — they
+        # only suppress when used as `with` blocks. M.close()/M.logout() can
+        # raise IMAP4.error (server dropped the connection), and an exception
+        # here would mask the real result or the real error above. Wrap them
+        # properly so cleanup failures are swallowed instead of propagated.
+        with contextlib.suppress(Exception):
+            M.close()
+        with contextlib.suppress(Exception):
+            M.logout()
 
 
 def _imap_extract_envelope_field(envelope_str: str, field_name: str) -> str:
@@ -4606,11 +4613,16 @@ def _imap_get_message_sync(
         typ, data = M.fetch(message_id, "(RFC822)")
         if typ != "OK" or not data or not data[0]:
             return f"Error: IMAP fetch failed for message {message_id}"
-        raw = data[0][1]
+        # Response shape varies by server: Dovecot collapses into a single
+        # (bytes, bytes) tuple; older servers may return a bare bytes blob.
+        # Handle both, mirroring _imap_list_recent_sync.
+        raw = data[0]
+        if isinstance(raw, tuple) and len(raw) >= 2:
+            raw = raw[1]
         if isinstance(raw, bytes):
             raw_bytes = raw
         else:
-            raw_bytes = raw.encode("utf-8", errors="replace")
+            raw_bytes = str(raw).encode("utf-8", errors="replace")
 
         from email import policy
         from email.parser import BytesParser
@@ -4637,10 +4649,12 @@ def _imap_get_message_sync(
         ]
         return "\n".join(out_lines)
     finally:
-        contextlib.suppress(Exception)
-        M.close()
-        contextlib.suppress(Exception)
-        M.logout()
+        # See _imap_list_recent_sync — bare suppress() is a no-op; close/logout
+        # can raise and would mask the real result/exception.
+        with contextlib.suppress(Exception):
+            M.close()
+        with contextlib.suppress(Exception):
+            M.logout()
 
 
 def _extract_text_body(msg) -> str:
@@ -4749,10 +4763,12 @@ def _imap_search_sync(
             )
         return "\n\n".join(lines)
     finally:
-        contextlib.suppress(Exception)
-        M.close()
-        contextlib.suppress(Exception)
-        M.logout()
+        # See _imap_list_recent_sync — bare suppress() is a no-op; close/logout
+        # can raise and would mask the real result/exception.
+        with contextlib.suppress(Exception):
+            M.close()
+        with contextlib.suppress(Exception):
+            M.logout()
 
 
 class EmailSendTool(Tool):

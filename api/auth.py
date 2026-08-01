@@ -83,7 +83,6 @@ def _discord_token_authed(request) -> bool:
     info = _DISCORD_TOKENS.get(token)
     return bool(info and info.get("expires", 0) >= time.time())
 
-
 def _json_response(data, status=200):
     return web.json_response(
         data,
@@ -229,7 +228,18 @@ async def _auth_middleware_unless_login(request, handler):
     return resp
 
 
+def _prune_discord_tokens():
+    """Drop expired bearer tokens so the in-memory table can't grow forever."""
+    now = time.time()
+    expired = [
+        t for t, info in _DISCORD_TOKENS.items() if info.get("expires", 0) < now
+    ]
+    for t in expired:
+        _DISCORD_TOKENS.pop(t, None)
+
+
 def _set_discord_token(token: str, user_info: dict) -> None:
     info = dict(user_info)
     info["expires"] = time.time() + DISCORD_TOKEN_TTL
     _DISCORD_TOKENS[token] = info
+    _prune_discord_tokens()

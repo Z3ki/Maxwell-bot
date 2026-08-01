@@ -30,19 +30,15 @@ from api.storage import (  # noqa: E402
     _autonomy_log_path,
     _clean_id,
     _commands_path,
-    _context_cleanup_control_path,
-    _context_cleanup_log_path,
     _control_path,
     _int_env_safe,
     _llm_traces_path,
     _load,
     _load_for_write,
-    _memory_text_path,
     _rem_runs_path,
     _safe_list,
     _safe_object,
     atomic_json_write,
-    atomic_text_write,
 )
 
 from control_defaults import (  # noqa: E402
@@ -68,10 +64,19 @@ def _rag_db() -> sqlite3.Connection:
 
     Caller is responsible for closing it (or use the `_rag_query`/`_rag_exec`
     helpers which close automatically). WAL mode means concurrent readers +
-    one writer from the bot process coexist safely.
+    one writer from the bot process coexist safely; busy_timeout prevents
+    "database is locked" errors when the bot holds a write lock.
     """
-    conn = sqlite3.connect(str(RAG_DB_PATH), check_same_thread=False)
+    conn = sqlite3.connect(
+        str(RAG_DB_PATH), check_same_thread=False, timeout=10.0
+    )
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.Error:
+        pass
     return conn
 
 
@@ -118,7 +123,6 @@ from api.config import (  # noqa: E402
     DISCORD_TOKEN_TTL,
     MAX_AUTONOMY_GOALS,
     MAX_COMMANDS,
-    MAX_LTM_LINES,
     MAX_PROMPT_CHARS,
 )
 from api.auth import (  # noqa: E402
@@ -145,8 +149,6 @@ from api.state import (  # noqa: E402
     _load_autonomy_state,
     _load_commands,
     _load_commands_for_write,
-    _load_context_cleanup_control,
-    _load_context_cleanup_status,
     _load_context_entries,
     _load_context_entries_for_write,
     _load_control,
@@ -446,7 +448,8 @@ async def auto_channel_post(request):
         body = await request.json()
     except Exception:
         return _json_response({"error": "invalid json"}, 400)
-    cid = _clean_id(body.get("id", ""))
+    # Accept both `id` (older clients) and `channel_id` (admin dashboard).
+    cid = _clean_id(body.get("id") or body.get("channel_id") or "")
     if not cid:
         return _json_response({"error": "empty"}, 400)
     path = DATA_DIR / "auto_channels.json"
@@ -462,7 +465,8 @@ async def auto_channel_post(request):
 
 
 async def auto_channel_del(request):
-    cid = _clean_id(request.query.get("id", ""))
+    # Accept both `id` (older clients) and `channel_id` (admin dashboard).
+    cid = _clean_id(request.query.get("id") or request.query.get("channel_id") or "")
     path = DATA_DIR / "auto_channels.json"
     async with _file_lock:
         try:
@@ -1429,13 +1433,30 @@ def _discord_redirect_base(request) -> str:
 async def discord_auth_state(request):
     import secrets as _secrets
 
+    # This endpoint is unauthenticated (OAuth entry point), so bound the
+    # in-memory state table: drop expired states (TTL matches the callback's
+    # 600s check) and cap the table so a spammer can't balloon memory.
+    _DISCORD_STATE_TTL = 600
+    _DISCORD_STATE_MAX = 200
+    now = time.time()
+    expired = [
+        s for s, issued in _DISCORD_STATES.items() if now - issued > _DISCORD_STATE_TTL
+    ]
+    for s in expired:
+        _DISCORD_STATES.pop(s, None)
+    while len(_DISCORD_STATES) >= _DISCORD_STATE_MAX:
+        # Evict an arbitrary (oldest-insertion) entry to cap table size.
+        _DISCORD_STATES.pop(next(iter(_DISCORD_STATES)), None)
+
     state = _secrets.token_urlsafe(24)
-    _DISCORD_STATES[state] = time.time()
+    _DISCORD_STATES[state] = now
     redirect = (
         os.getenv("DISCORD_REDIRECT_URI")
         or f"{_discord_redirect_base(request)}/api/auth/discord/callback"
     )
     client_id = DISCORD_CLIENT_ID
+    from urllib.parse import quote as _url_quote
+
     return _json_response(
         {
             "client_id": client_id,
@@ -1443,11 +1464,11 @@ async def discord_auth_state(request):
             "state": state,
             "authorize_url": (
                 "https://discord.com/api/oauth2/authorize"
-                f"?client_id={client_id}"
+                f"?client_id={_url_quote(client_id, safe='')}"
                 "&response_type=code"
-                f"&redirect_uri={redirect}"
+                f"&redirect_uri={_url_quote(redirect, safe='')}"
                 "&scope=identify"
-                f"&state={state}"
+                f"&state={_url_quote(state, safe='')}"
             )
             if client_id
             else "",
@@ -1537,9 +1558,10 @@ async def discord_auth_callback(request):
 
 
 async def discord_auth_verify(request):
-    token = request.headers.get("X-Discord-Token", "") or (
-        request.query.get("token") or ""
-    )
+    # Token via query string removed: bearer tokens in URLs leak into access
+    # logs, browser history, and Referer headers. The dashboard always sends
+    # the X-Discord-Token header.
+    token = request.headers.get("X-Discord-Token", "")
     info = _DISCORD_TOKENS.get(token)
     if not info or info.get("expires", 0) < time.time():
         return _json_response({"ok": False}, 401)
@@ -1554,9 +1576,8 @@ async def discord_auth_verify(request):
 
 
 async def discord_auth_logout(request):
-    token = request.headers.get("X-Discord-Token", "") or (
-        request.query.get("token") or ""
-    )
+    # See discord_auth_verify: no token-in-query-string fallback.
+    token = request.headers.get("X-Discord-Token", "")
     _DISCORD_TOKENS.pop(token, None)
     return _json_response({"ok": True})
 

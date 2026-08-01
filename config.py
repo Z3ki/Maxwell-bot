@@ -241,6 +241,7 @@ class Config:
         # confusing without a hint. Log via the standard logging facility
         # so pm2 captures it.
         import logging
+
         _log = logging.getLogger("maxwell.config")
 
         if not cls.MAXWELL_ADMIN_PASSWORD:

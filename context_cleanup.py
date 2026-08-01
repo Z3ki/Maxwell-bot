@@ -1026,8 +1026,17 @@ class ContextCleanupEngine:
             except Exception as e:
                 logger.warning(f"ContextCleanup LTM op {kind} parse failed: {e}")
                 skipped += 1
+        # RAGMemoryManager.apply_ltm_batch takes a list of ops dicts
+        # (kind/id/content), NOT edits=/deletes= kwargs. The old call raised
+        # TypeError, the except swallowed it, and LTM cleanup silently
+        # never applied a single edit/delete.
+        ops: list[dict] = []
+        for mid, content in edit_map.items():
+            ops.append({"kind": "edit", "id": mid, "content": content})
+        for did in sorted(delete_ids):
+            ops.append({"kind": "delete", "id": did})
         try:
-            await memory.apply_ltm_batch(edits=edit_map, deletes=delete_ids)
+            await memory.apply_ltm_batch(ops)
         except Exception as e:
             logger.warning(f"ContextCleanup LTM batch apply failed: {e}")
             return 0, applied + skipped
