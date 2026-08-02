@@ -200,11 +200,10 @@ class _CustomToolCallBuffer:
                 self._announced_names.add(opener_name)
                 with contextlib.suppress(Exception):
                     self._on_partial_name(str(opener_name))
-            # We have a balanced-brace candidate. Validate by parsing.
-            candidate = text[m.start() : end]
-            try:
-                obj = json.loads(candidate)
-            except (json.JSONDecodeError, ValueError):
+            # Validate by parsing.
+            candidate = self._buf[m.start():end]
+            obj = self._safe_parse_tool_call_candidate(candidate)
+            if obj is None:
                 # Balanced braces but not actually valid JSON — this
                 # opener was a substring inside a string field, not a real
                 # tool call. Skip past it so a *later* real tool call
@@ -212,9 +211,12 @@ class _CustomToolCallBuffer:
                 # region as text and stopped hunting (line ``i = end``,
                 # ``continue``), which is why any opener failure silently
                 # disabled extraction for the rest of the response.
-                i = m.start() + 1
+                self._released_len = m.start() + 1
                 continue
-            # Looks like a real tool call. Strip from text and stash.
+            if not isinstance(obj, dict) or not obj.get("name"):
+                # Not a tool-call shape. Advance past the opener.
+                self._released_len = m.start() + 1
+                continue
             tool_name = obj.get("name", "")
             args = obj.get("arguments", {})
             if not isinstance(args, dict):
@@ -404,6 +406,175 @@ def _find_balanced_json_end(text: str, start: int) -> int | None:
                     return i + 1
         i += 1
     return None
+
+
+# Failure recovery for tool-call candidates whose ``body`` field
+# contains unescaped ``"`` characters from HTML attribute syntax
+# (e.g. ``target="_blank"``, ``href="..."``). Without the repair
+# pass, ``json.loads`` raises ``JSONDecodeError`` because the
+# balancer thinks the body string terminated early; the parser then
+# ships the entire malformed JSON blob as raw visible text to the
+# channel instead of executing the tool. See Z3ki's 2026-08-02
+# "old-cartographers" create_site in #boing — the LLM emitted
+# ~14 KB of partially-quoted HTML, the parser walked to EOF looking
+# for a balanced close, the tool call never ran, and the user got a
+# wall of broken text in 4 chunked Discord messages instead of a
+# working site.
+
+def _repair_unescaped_html_quotes(candidate: str) -> str | None:
+    """Repair tool-call candidate JSON whose ``body`` field contains
+    unescaped ``"`` characters from HTML attribute syntax (e.g.
+    ``target="_blank"``, ``href="..."``).
+
+    Returns the repaired candidate string, or ``None`` if no repair
+    was applicable.
+
+    Strategy:
+      1. Locate the ``"body": "`` opener.
+      2. Walk forward, tracking JSON escape state, until we hit an
+         UNESCAPED ``"`` followed by ``}}`` — that's the body string
+         terminator followed by the close of the ``arguments`` object
+         and the close of the outer object. (LLMs that emit malformed
+         HTML bodies almost always structure the close this way.)
+      3. Re-encode the raw body slice with ``json.dumps`` (which
+         properly escapes ``"`` and ``\\``), strip the outer quotes,
+         and splice it back into the candidate.
+
+    This is intentionally narrow — it only fires when a raw
+    ``json.loads(candidate)`` already failed AND a ``"body": "`` field
+    exists in the candidate. Clean JSON never reaches this path.
+    """
+    m = re.search(r'"body"\s*:\s*"', candidate)
+    if not m:
+        return None
+    body_value_start = m.end()
+    # Walk forward tracking escape state to find the body string's
+    # closing quote. The closing quote is an unescaped `"` immediately
+    # followed by `}}` (end of arguments object + end of outer object).
+    i = body_value_start
+    escape = False
+    body_value_end: int | None = None
+    while i < len(candidate):
+        ch = candidate[i]
+        if escape:
+            escape = False
+            i += 1
+            continue
+        if ch == "\\":
+            escape = True
+            i += 1
+            continue
+        if ch == '"':
+            # Look ahead for the closing pattern: `"}}`
+            if candidate[i + 1 : i + 3] == "}}":
+                body_value_end = i
+                break
+            # Not the close — it's an unescaped quote inside the body.
+            i += 1
+            continue
+        i += 1
+    if body_value_end is None:
+        return None
+    # The body has a mix of already JSON-escaped sequences (`\"`, `\\`,
+    # `\n`) and bare `"` from HTML attributes that the LLM forgot to
+    # escape. Some bodies also contain bare newlines (the LLM emitted
+    # real `\n` chars instead of `\n` escape sequences), which JSON
+    # forbids inside string literals. Walk the slice and:
+    #   - preserve only sequences `\X` where X is a real JSON escape
+    #     char (`"`, `\`, `/`, `b`, `f`, `n`, `r`, `t`, `u`) — these
+    #     are the LLM's correct JSON escape attempts,
+    #   - escape bare `"`,
+    #   - escape bare `\` that is NOT followed by a JSON escape char
+    #     (the LLM typo'd `</div>` as `</div\` etc.),
+    #   - escape bare control characters (literal newline, tab, CR).
+    body_chars: list[str] = []
+    repaired_any = False
+    i = body_value_start
+    JSON_ESCAPE_CHARS = set('"\\/bfnrtu')
+    while i < body_value_end:
+        ch = candidate[i]
+        if ch == "\\" and i + 1 < body_value_end:
+            nxt = candidate[i + 1]
+            if nxt in JSON_ESCAPE_CHARS:
+                # Already-escaped JSON sequence; pass through as-is.
+                body_chars.append(ch)
+                body_chars.append(nxt)
+                i += 2
+                continue
+            # Literal backslash not followed by a valid JSON escape char.
+            # Escape it so the reparsed JSON keeps the backslash.
+            body_chars.append("\\\\")
+            repaired_any = True
+            i += 1
+            continue
+        if ch == '"':
+            body_chars.append('\\"')
+            repaired_any = True
+            i += 1
+            continue
+        if ch == "\n":
+            body_chars.append("\\n")
+            repaired_any = True
+            i += 1
+            continue
+        if ch == "\r":
+            body_chars.append("\\r")
+            repaired_any = True
+            i += 1
+            continue
+        if ch == "\t":
+            body_chars.append("\\t")
+            repaired_any = True
+            i += 1
+            continue
+        body_chars.append(ch)
+        i += 1
+    if not repaired_any:
+        return None
+    body_escaped = "".join(body_chars)
+    return (
+        candidate[:body_value_start]
+        + body_escaped
+        + candidate[body_value_end:]
+    )
+
+
+def _safe_parse_tool_call_candidate(candidate: str):
+    """Parse a candidate tool-call JSON, with one repair pass for the
+    common failure mode of unescaped ``"`` characters in embedded HTML
+    (``create_site`` body fields with ``target="_blank"``, ``href="..."``,
+    etc).
+
+    Returns the parsed dict on success, ``None`` if it cannot be parsed
+    even after the repair attempt. Caller treats ``None`` as a
+    false-positive opener and keeps searching.
+
+    Three attempts:
+      1. ``json.loads`` — clean JSON.
+      2. ``json.JSONDecoder().raw_decode`` — tolerates trailing garbage
+         (the LLM sometimes appends a hallucinated ``<parameter>`` tag
+         after the JSON close, which we should ignore).
+      3. ``_repair_unescaped_html_quotes`` + ``raw_decode`` — escapes
+         unescaped ``"``, bare newlines, and bare backslashes inside
+         a ``"body": "..."`` field, then parses.
+    """
+    try:
+        return json.loads(candidate)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    try:
+        obj, _end = json.JSONDecoder().raw_decode(candidate)
+        return obj
+    except (json.JSONDecodeError, ValueError):
+        pass
+    repaired = _repair_unescaped_html_quotes(candidate)
+    if repaired is None:
+        return None
+    try:
+        obj, _end = json.JSONDecoder().raw_decode(repaired)
+        return obj
+    except (json.JSONDecodeError, ValueError):
+        return None
 
 
 async def _safe_call(cb, *args, **kwargs):
