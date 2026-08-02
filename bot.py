@@ -3118,11 +3118,16 @@ class MaxwellBot(commands.Bot):
                     if mentioned and self.user
                     else message.content
                 )
-                if not clean and not message.attachments and not has_embed:
-                    return
+                # 2026-08-02 (Z3ki): allow Maxwell to respond to bare pings
+                # with no message attached. Previously a `return` here
+                # silently swallowed `<@Maxwell>` with no text, attachments,
+                # or embeds. Now fall through to _handle_message so the bot
+                # produces a reply (and the user gets a reaction / ack /
+                # whatever the model decides is appropriate for an empty
+                # user message).
                 await self._handle_message(
                     message,
-                    (clean or "look at this") + self._get_reply_context(message),
+                    clean + self._get_reply_context(message),
                 )
         finally:
             if _lock_acquired:
