@@ -7703,6 +7703,17 @@ class MaxwellBot(commands.Bot):
             # are not discarded on the next follow-up turn.
             conversation_tail: list[dict] = []
             pending_native = native_calls
+            # Set when the model produced a SECOND-turn response after a
+            # send_message already published a placeholder. We use it
+            # below to skip the "send_message is terminal, no plain-text
+            # reply" early-return when the LLM reconsidered its first
+            # "checking…" placeholder and emitted a real answer on the
+            # followup turn. Without this, the placeholder (e.g. "checking…")
+            # is the only thing the user ever sees — the substantive 300+
+            # char answer is silently dropped. Z3ki observed this in
+            # #maxwell-the-bot 2026-08-02 with "Mat Dickie" / "you a fan"
+            # — see PM2 out.log 01:25:17→28 for the canonical reproduction.
+            followup_turn_ran = False
             for _iteration in range(max_iters):
                 if time.monotonic() > tool_deadline:
                     logger.info("Tool iteration time budget exceeded, breaking")
@@ -7846,6 +7857,7 @@ class MaxwellBot(commands.Bot):
                         # else: leave it alive for the transition below
                     if (followup and str(followup).strip()) or pending_native:
                         response = followup or ""
+                        followup_turn_ran = True
                     else:
                         break
                 finally:
@@ -7859,7 +7871,16 @@ class MaxwellBot(commands.Bot):
                     message, all_tool_results, response, "no_response"
                 )
                 return
-            if any("__MESSAGE_SENT__" in tr for tr in all_tool_results):
+            # If send_message was called AND the model produced a follow-up
+            # reply after seeing the tool results (or its own placeholder),
+            # we still want to post that follow-up — the placeholder is
+            # just a stale artifact and dropping the substantive answer
+            # leaves the user with "checking…" or similar. Only the
+            # pure-terminal case (one-shot send_message, no followup) gets
+            # the early-return.
+            if any("__MESSAGE_SENT__" in tr for tr in all_tool_results) and not (
+                followup_turn_ran and (response or "").strip()
+            ):
                 await self._ensure_reasoning_trace(
                     message, all_tool_results, response, "send_message"
                 )
