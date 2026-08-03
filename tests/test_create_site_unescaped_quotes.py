@@ -1,4 +1,4 @@
-"""Regression tests for the create_site unescaped-quote parser bug.
+r"""Regression tests for the create_site unescaped-quote parser bug.
 
 2026-08-02: Z3ki's "Mat Dickie" cartographer page in #boing — the
 model emitted a 14 KB ``create_site`` tool call with the HTML body
@@ -137,6 +137,117 @@ def test_repair_trailing_garbage_tolerated():
     assert obj is not None
     assert obj["name"] == "create_site"
     assert obj["arguments"]["body"] == "<p>hi</p>"
+
+
+def test_repair_preserves_keys_after_body():
+    """``body`` is not always the last key in ``arguments``.
+
+    The terminator scan used to look only for an unescaped ``"``
+    followed by ``}}`` — true only when ``body`` is last. With a key
+    after it, the scan ran past the real terminator to the end of the
+    object and swallowed every trailing key into the body string, so
+    ``title`` silently vanished and the body was corrupted.
+    """
+    body = '<a href="https://x.example/" target="_blank">link</a>'
+    candidate = (
+        '{"name": "create_site", "arguments": '
+        '{"body": "' + body + '", "title": "T", "name": "old"}}'
+    )
+    obj = _safe_parse_tool_call_candidate(candidate)
+    assert obj is not None
+    args = obj["arguments"]
+    assert args["body"] == body
+    assert args["title"] == "T", "key after body must survive the repair"
+    assert args["name"] == "old"
+
+
+def test_repair_handles_quote_comma_inside_body():
+    """A body containing a literal ``",`` produces a false terminator
+    candidate. The repair must reject it (it does not reparse) and keep
+    scanning for the real one.
+    """
+    body = '<p>He said "hello", then left</p>'
+    candidate = (
+        '{"name": "create_site", "arguments": '
+        '{"body": "' + body + '", "title": "T"}}'
+    )
+    obj = _safe_parse_tool_call_candidate(candidate)
+    assert obj is not None
+    assert obj["arguments"]["body"] == body
+    assert obj["arguments"]["title"] == "T"
+
+
+def test_streaming_feed_applies_unescaped_quote_repair():
+    """The live path regression.
+
+    ``_CustomToolCallBuffer.feed`` used bare ``json.loads`` to validate a
+    balanced candidate, so the repair pass above — reachable only from a
+    dead method — never ran on real streamed output. A ``create_site``
+    with ``href="..."`` in the body was treated as a false-positive
+    opener and shipped to the channel as raw visible text while the tool
+    never ran. Parsing the candidate in isolation passed, which is why
+    the unit tests above did not catch it; this one drives ``feed``.
+    """
+    from providers import _CustomToolCallBuffer
+
+    body = '<a href="https://x.example/" target="_blank">link</a>'
+    payload = (
+        'Sure! {"name": "create_site", "arguments": '
+        '{"body": "' + body + '", "title": "T"}}'
+    )
+    buf = _CustomToolCallBuffer()
+    buf.feed(payload)
+    buf.drain()
+
+    assert len(buf.completed) == 1, "tool call must be extracted, not leaked as text"
+    call = buf.completed[0]
+    assert call["function"]["name"] == "create_site"
+    args = json.loads(call["function"]["arguments"])
+    assert args["body"] == body
+    assert args["title"] == "T"
+    # The malformed JSON must NOT reach the channel as visible text.
+    visible = "".join(buf.text_parts)
+    assert visible == "Sure! "
+    assert "create_site" not in visible
+
+
+def test_streaming_feed_repair_across_chunk_boundaries():
+    """Same as above but split mid-attribute, since deltas arrive in
+    arbitrary chunks and the opener/close can straddle them.
+    """
+    from providers import _CustomToolCallBuffer
+
+    chunks = [
+        'Sure! {"name": "create_s',
+        'ite", "arguments": {"body": "<a href=',
+        '"x">hi</a>", "title": "T"}}',
+    ]
+    buf = _CustomToolCallBuffer()
+    for chunk in chunks:
+        buf.feed(chunk)
+    buf.drain()
+
+    assert len(buf.completed) == 1
+    args = json.loads(buf.completed[0]["function"]["arguments"])
+    assert args["body"] == '<a href="x">hi</a>'
+    assert args["title"] == "T"
+
+
+def test_streaming_feed_leaves_plain_text_alone():
+    """Regression guard: routing feed through the repair path must not
+    change behaviour for ordinary prose, including text with braces.
+    """
+    from providers import _CustomToolCallBuffer
+
+    for text in (
+        "just a normal reply, no json here",
+        "here is some css: {color: red} ok",
+    ):
+        buf = _CustomToolCallBuffer()
+        buf.feed(text)
+        buf.drain()
+        assert buf.completed == []
+        assert "".join(buf.text_parts) == text
 
 
 def test_repair_full_z3ki_cartographer_repro():

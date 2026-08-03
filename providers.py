@@ -134,107 +134,6 @@ class _CustomToolCallBuffer:
         """
         return self._buf.rfind("{") > self._buf.rfind("}")
 
-    def _strip_completed(self, text: str) -> str:
-        """Remove any tool-call JSON objects we already extracted from `text`
-        so the visible assistant content doesn't show raw JSON.
-
-        Returns the visible portion (text before/after/between tool-call
-        JSON objects). Any matched JSON that isn't yet balanced is left in
-        ``self._pending_tail`` for the next feed.
-
-        Failure recovery (added 2026-07-18): a `{"name": "<x>", "arguments":
-        {"body": "<huge HTML with embedded '{' / '}' and stray '"' in
-        CSS>"}}` opener can fool the brace counter for tens of thousands
-        of chars (body's content holds the balancer in ``in_str=True``
-        until a stray CSS quote strands the string-state counter). The
-        previous behaviour was to set ``_pending_tail = text[m.start():]``
-        and *wait for the close*. The close never came, so the entire
-        response was buffered permanently, parsed by ``drain()`` to no
-        effect, and shipped as ``content_chars=N tool_calls=0`` with raw
-        JSON fragments leaking into the channel as separate Maxwell
-        messages. We now: (1) give up on the bad opener if it's grown
-        past ``_GIVE_UP_BYTES`` without resolving, advancing one char so
-        the next opener search retries; (2) on a parse-failing candidate
-        JSON, skip past the bad opener for the same recovery reason.
-        """
-        out = []
-        i = 0
-        while i < len(text):
-            m = _CUSTOM_TOOL_OPEN_RE.search(text, i)
-            if not m:
-                # No more openers: keep the rest as visible text.
-                out.append(text[i:])
-                break
-            # Preserve everything BEFORE this opener as visible text.
-            out.append(text[i : m.start()])
-            # Try to extract a balanced JSON object starting at m.start().
-            end = _find_balanced_json_end(text, m.start())
-            if end is None:
-                # Haven't reached the closing brace yet. If the buffer
-                # has grown unreasonably without resolving, abandon this
-                # opener and search for the next one — otherwise a single
-                # mismatched opener (think a giant HTML body field that
-                # fools the brace balancer) silently disables extraction
-                # for the rest of the stream and the entire response
-                # bubbles up as raw JSON in content_parts.
-                if (len(text) - m.start()) > _GIVE_UP_BYTES:
-                    # Advance just past the opener's first char so the
-                    # next iteration searches fresh — the false opener
-                    # might be a substring of a string field, and the
-                    # *next* opener after it is the real tool call.
-                    i = m.start() + 1
-                    continue
-                # Still early in the stream: keep buffering and try again
-                # on the next feed. This is the protocol's normal "more
-                # chars arriving" case.
-                self._pending_tail = text[m.start() :]
-                return "".join(out)
-            # Fire the partial-name callback the moment we see the opener,
-            # even though the args may still be streaming — this lets the
-            # progress message switch to "<tool>: …" early in the stream.
-            opener_name = m.group(1)
-            if (
-                self._on_partial_name is not None
-                and opener_name not in self._announced_names
-            ):
-                self._announced_names.add(opener_name)
-                with contextlib.suppress(Exception):
-                    self._on_partial_name(str(opener_name))
-            # Validate by parsing.
-            candidate = self._buf[m.start():end]
-            obj = self._safe_parse_tool_call_candidate(candidate)
-            if obj is None:
-                # Balanced braces but not actually valid JSON — this
-                # opener was a substring inside a string field, not a real
-                # tool call. Skip past it so a *later* real tool call
-                # still gets extracted. Old behaviour re-emitted the bad
-                # region as text and stopped hunting (line ``i = end``,
-                # ``continue``), which is why any opener failure silently
-                # disabled extraction for the rest of the response.
-                self._released_len = m.start() + 1
-                continue
-            if not isinstance(obj, dict) or not obj.get("name"):
-                # Not a tool-call shape. Advance past the opener.
-                self._released_len = m.start() + 1
-                continue
-            tool_name = obj.get("name", "")
-            args = obj.get("arguments", {})
-            if not isinstance(args, dict):
-                args = {}
-            if tool_name:
-                self.completed.append(
-                    {
-                        "id": f"call_custom_{len(self.completed) + 1}",
-                        "type": "function",
-                        "function": {
-                            "name": str(tool_name),
-                            "arguments": json.dumps(args, ensure_ascii=False),
-                        },
-                    }
-                )
-            i = end
-        return "".join(out)
-
     def feed(self, delta: str) -> str:
         """Accumulate a new text delta. Extracts any complete bare-JSON
         tool calls and returns the newly-revealed VISIBLE text for this
@@ -320,13 +219,22 @@ class _CustomToolCallBuffer:
             if end is None:
                 # Opener mid-JSON. Hold; wait for more deltas.
                 break
-            # Validate by parsing.
+            # Validate by parsing. Must go through
+            # _safe_parse_tool_call_candidate, NOT bare json.loads: that
+            # is where the unescaped-HTML-quote repair lives. With plain
+            # json.loads here, a create_site whose body contains
+            # `href="..."` failed to parse, the opener was skipped as a
+            # "false positive", and the whole malformed blob shipped to
+            # the channel as raw visible text while the tool never ran —
+            # the exact 2026-08-02 incident the repair pass was written
+            # for. The repair was only ever reachable from a dead code
+            # path, so the live streaming path never benefited from it.
             candidate = self._buf[m.start():end]
-            try:
-                obj = json.loads(candidate)
-            except (json.JSONDecodeError, ValueError):
-                # Balanced but not valid JSON — false positive. Skip
-                # past the opener's first char and keep searching.
+            obj = _safe_parse_tool_call_candidate(candidate)
+            if obj is None:
+                # Balanced but not valid JSON even after repair — false
+                # positive. Skip past the opener's first char and keep
+                # searching.
                 self._released_len = m.start() + 1
                 continue
             if not isinstance(obj, dict) or not obj.get("name"):
@@ -448,12 +356,47 @@ def _repair_unescaped_html_quotes(candidate: str) -> str | None:
     if not m:
         return None
     body_value_start = m.end()
-    # Walk forward tracking escape state to find the body string's
-    # closing quote. The closing quote is an unescaped `"` immediately
-    # followed by `}}` (end of arguments object + end of outer object).
+    # Try each plausible terminator, cheapest-first, and keep the first
+    # one that actually reparses into an object.
+    for body_value_end in _body_terminator_candidates(candidate, body_value_start):
+        body_escaped, repaired_any = _escape_body_slice(
+            candidate, body_value_start, body_value_end
+        )
+        if not repaired_any:
+            continue
+        repaired = (
+            candidate[:body_value_start] + body_escaped + candidate[body_value_end:]
+        )
+        try:
+            obj, _end = json.JSONDecoder().raw_decode(repaired)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(obj, dict):
+            return repaired
+    return None
+
+
+def _body_terminator_candidates(candidate: str, body_value_start: int) -> list[int]:
+    """Positions of every unescaped ``"`` in the body that could be the
+    string's closing quote — i.e. one followed (modulo whitespace) by
+    ``,`` or ``}``.
+
+    The old code hardcoded a single terminator: an unescaped ``"``
+    immediately followed by ``}}``. That only holds when ``body`` is the
+    LAST key in ``arguments``. With ``{"body": "...", "title": "T"}`` the
+    scan blew straight past the real terminator to the ``"}}`` at the end
+    of the object, so ``title`` (and every other trailing key) was
+    swallowed into the body string and silently lost.
+
+    Quotes inside HTML attributes (``href="x"``) are followed by ``>``,
+    ``/``, letters, etc. — never ``,`` or ``}`` — so they are not
+    candidates. A body containing a literal ``",`` (e.g. ``said "hi",``)
+    can still produce a false candidate, which is why the caller
+    validates each one by reparsing and moves on if it does not hold.
+    """
+    out: list[int] = []
     i = body_value_start
     escape = False
-    body_value_end: int | None = None
     while i < len(candidate):
         ch = candidate[i]
         if escape:
@@ -465,28 +408,33 @@ def _repair_unescaped_html_quotes(candidate: str) -> str | None:
             i += 1
             continue
         if ch == '"':
-            # Look ahead for the closing pattern: `"}}`
-            if candidate[i + 1 : i + 3] == "}}":
-                body_value_end = i
-                break
-            # Not the close — it's an unescaped quote inside the body.
-            i += 1
-            continue
+            j = i + 1
+            while j < len(candidate) and candidate[j] in " \t\r\n":
+                j += 1
+            if j < len(candidate) and candidate[j] in ",}":
+                out.append(i)
         i += 1
-    if body_value_end is None:
-        return None
-    # The body has a mix of already JSON-escaped sequences (`\"`, `\\`,
-    # `\n`) and bare `"` from HTML attributes that the LLM forgot to
-    # escape. Some bodies also contain bare newlines (the LLM emitted
-    # real `\n` chars instead of `\n` escape sequences), which JSON
-    # forbids inside string literals. Walk the slice and:
-    #   - preserve only sequences `\X` where X is a real JSON escape
-    #     char (`"`, `\`, `/`, `b`, `f`, `n`, `r`, `t`, `u`) — these
-    #     are the LLM's correct JSON escape attempts,
-    #   - escape bare `"`,
-    #   - escape bare `\` that is NOT followed by a JSON escape char
-    #     (the LLM typo'd `</div>` as `</div\` etc.),
-    #   - escape bare control characters (literal newline, tab, CR).
+    return out
+
+
+def _escape_body_slice(
+    candidate: str, body_value_start: int, body_value_end: int
+) -> tuple[str, bool]:
+    r"""Re-escape the raw body slice. Returns ``(escaped, repaired_any)``.
+
+    The body has a mix of already JSON-escaped sequences (``\\"``,
+    ``\\\\``, ``\\n``) and bare ``"`` from HTML attributes that the LLM
+    forgot to escape. Some bodies also contain bare newlines (the LLM
+    emitted real newline chars instead of ``\\n`` escape sequences),
+    which JSON forbids inside string literals. Walk the slice and:
+      - preserve only sequences ``\\X`` where X is a real JSON escape
+        char (``"``, ``\\``, ``/``, ``b``, ``f``, ``n``, ``r``, ``t``,
+        ``u``) — these are the LLM's correct JSON escape attempts,
+      - escape bare ``"``,
+      - escape bare ``\\`` that is NOT followed by a JSON escape char
+        (the LLM typo'd ``</div>`` as ``</div\\`` etc.),
+      - escape bare control characters (literal newline, tab, CR).
+    """
     body_chars: list[str] = []
     repaired_any = False
     i = body_value_start
@@ -503,6 +451,14 @@ def _repair_unescaped_html_quotes(candidate: str) -> str | None:
                 continue
             # Literal backslash not followed by a valid JSON escape char.
             # Escape it so the reparsed JSON keeps the backslash.
+            body_chars.append("\\\\")
+            repaired_any = True
+            i += 1
+            continue
+        if ch == "\\":
+            # Lone trailing backslash immediately before the terminator.
+            # Left bare it would escape the closing quote and break the
+            # reparse, so escape it too.
             body_chars.append("\\\\")
             repaired_any = True
             i += 1
@@ -529,14 +485,7 @@ def _repair_unescaped_html_quotes(candidate: str) -> str | None:
             continue
         body_chars.append(ch)
         i += 1
-    if not repaired_any:
-        return None
-    body_escaped = "".join(body_chars)
-    return (
-        candidate[:body_value_start]
-        + body_escaped
-        + candidate[body_value_end:]
-    )
+    return "".join(body_chars), repaired_any
 
 
 def _safe_parse_tool_call_candidate(candidate: str):
@@ -838,8 +787,8 @@ async def _read_sse_response(
                         and custom_buffer.has_pending_json
                     ):
                         # Skip the callback entirely — the JSON is
-                        # being held in _pending_tail and will surface
-                        # via run_one()'s update() once parsed.
+                        # being held unreleased in the buffer and will
+                        # surface via run_one()'s update() once parsed.
                         continue
                     if tok_content or tok_reason:
                         try:
