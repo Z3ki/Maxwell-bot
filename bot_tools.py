@@ -1293,8 +1293,9 @@ class ListServersTool(Tool):
         return "List your servers and group chats. No params."
 
     async def execute(self, message: Message, **kwargs) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: list_servers is admin-only"
+        # Not admin-gated: this is a read-only inventory of where the bot is
+        # deployed. No mutation, no privilege to protect — anyone who's
+        # already in the same Discord session can see the bot's presence.
         lines = []
         if self.bot.guilds:
             lines.append(f"Servers ({len(self.bot.guilds)}):")
@@ -2289,7 +2290,8 @@ class SendFileTool(Tool):
             "Params: filename (required when using content), content (required when creating inline), "
             "path (optional: absolute path to an existing file on disk to send), "
             "encoding (optional: text or base64; default text). "
-            "When path is given, the file is read from a safe directory (data, sites, subagents, shell workdir) and sent directly."
+            "When path is given, the file is read from a safe directory (data, sites, subagents, shell workdir) and sent directly. "
+            "Available to any user — this is the model's way of handing you a file, not a privileged action."
         )
 
     async def execute(
@@ -2301,8 +2303,11 @@ class SendFileTool(Tool):
         path: str | None = None,
         **kwargs,
     ) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: send_file is admin-only"
+        # Intentionally NOT admin-gated. send_file is an output channel —
+        # the model already has shell + every other tool to produce content,
+        # and gating the return path on `_is_admin` was just a barrier that
+        # blocked non-admin users from receiving files. The path-mode
+        # allowlist (_allowed_send_file_bases) is the real safety boundary.
         # Path mode: send a file that already exists on disk (or in the shell
         # container — we docker-cp it out as a fallback for container paths).
         if path:

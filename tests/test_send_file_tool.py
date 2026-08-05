@@ -19,7 +19,7 @@ class FakeMessage:
                     self.outer.files.append(file)
         self.channel = FakeChannel(self)
         class FakeAuthor:
-            id = "1325265045600600135"  # Mock admin ID to bypass authorization gate
+            id = "1325265045600600135"
         self.author = FakeAuthor()
 
     async def send(self, content=None, file=None, **kwargs):
@@ -203,3 +203,29 @@ def test_reasoning_log_clamps_long_fields():
     trace = bot.traces[0]
     assert len(trace["thoughts"]) <= 500
     assert len(trace["intent"]) <= 500
+
+
+def test_send_file_works_for_non_admin_user():
+    """Regression: send_file used to require MAXWELL_OWNER_IDS, which blocked
+    any non-admin user from receiving a file back. The tool is an output
+    channel, not a privileged action — it must work for everyone."""
+
+    class NonAdminBot:
+        def _is_admin(self, user_id):
+            return False  # explicitly NOT admin
+
+    tool = SendFileTool(bot=NonAdminBot())
+    message = FakeMessage()
+
+    async def run():
+        result = await tool.execute(
+            message, filename="hello.txt", content="hi from a non-admin"
+        )
+        assert result == "__FILE_SENT__ Sent file: hello.txt (19 bytes)"
+        assert len(message.files) == 1
+        sent = message.files[0]
+        assert sent.filename == "hello.txt"
+        sent.fp.seek(0)
+        assert sent.fp.read() == b"hi from a non-admin"
+
+    asyncio.run(run())
