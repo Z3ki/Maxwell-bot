@@ -135,6 +135,71 @@ def _tts_riva_voice_config(language_key: str) -> tuple[str, str]:
     )
 
 
+async def _synthesize_fish_tts(
+    text: str,
+    output_path: str,
+    *,
+    api_key: str,
+    model: str,
+    reference_id: str,
+    fmt: str = "mp3",
+) -> str | None:
+    """Call Fish Audio's TTS API. Returns output_path on success, None on
+    failure (caller falls through to next provider).
+
+    Fish is preferred over Riva when FISH_API_KEY is set: free tier, no gRPC
+    dependency, supports emotion tags like `[excited]`, `[laughing]` inline.
+
+    Docs: https://docs.fish.audio/api-reference/developer-apis/text-to-speech
+    """
+    if not api_key:
+        return None
+    url = "https://api.fish.audio/v1/tts"
+    payload = {
+        "text": text,
+        "format": fmt,
+    }
+    if reference_id:
+        payload["reference_id"] = reference_id
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "model": model,
+    }
+    try:
+        session = await _get_shared_session()
+        timeout = aiohttp.ClientTimeout(total=45)
+        async with session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                logger.warning(
+                    "Fish TTS API returned %s: %s", resp.status, body[:200]
+                )
+                return None
+            data = await resp.read()
+        if not data or len(data) < 64:
+            logger.warning("Fish TTS returned empty/too-small payload (%d bytes)", len(data))
+            return None
+        # Fish returns MP3 bytes (or whatever fmt requested); write directly.
+        # The downstream `make_voice_ogg` re-encodes via ffmpeg so extension
+        # does not matter — ffmpeg sniffs the format.
+        with open(output_path, "wb") as f:
+            f.write(data)
+        logger.info(
+            "Fish TTS synthesized %d bytes (model=%s, ref=%s)",
+            len(data),
+            model,
+            bool(reference_id),
+        )
+        return output_path
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        logger.warning("Fish TTS request failed: %s", e)
+        return None
+    except Exception as e:
+        logger.warning("Fish TTS unexpected error: %s", e)
+        return None
+
+
 def _is_safe_ip(value: str) -> bool:
     try:
         ip = ipaddress.ip_address(value)
@@ -3894,71 +3959,103 @@ class TtsTool(Tool):
         nvidia_api_key = os.environ.get("NVIDIA_API_KEY", "") or getattr(
             bot_config, "NVIDIA_API_KEY", ""
         )
+        fish_api_key = os.environ.get("FISH_API_KEY", "") or getattr(
+            bot_config, "FISH_API_KEY", ""
+        )
         filename = f"tts_{message.id}.wav"
         voice_filename = f"tts_{message.id}.ogg"
 
-        try:
-            # Try NVIDIA Riva TTS
-            if not nvidia_api_key:
-                raise RuntimeError("NVIDIA_API_KEY is not configured")
+        tts_source = None  # path to synthesized audio; drives fallback chain
 
-            import riva.client
-            from riva.client.proto import riva_audio_pb2
-
-            function_id = os.environ.get(
-                "TTS_RIVA_FUNCTION_ID", "877104f7-e885-42b9-8de8-f6e4c6303969"
+        # Provider order: Fish (best quality, free tier, emotion tags) →
+        # Riva (NVIDIA, paid) → gTTS (free fallback). Each block only sets
+        # `tts_source` on success; failures fall through silently.
+        if not tts_source and fish_api_key:
+            fish_model = os.environ.get("TTS_FISH_MODEL", "s2.1-pro-free")
+            fish_ref = os.environ.get(
+                "TTS_FISH_REFERENCE_ID", "8d21b053e2804e2a890e1cf62f267b6f"
             )
-            auth = riva.client.Auth(
-                use_ssl=True,
-                uri="grpc.nvcf.nvidia.com:443",
-                metadata_args=[
-                    ["function-id", function_id],
-                    ["authorization", f"Bearer {nvidia_api_key}"],
-                ],
-                options=cast(
-                    Any,
-                    [
-                        ("grpc.max_receive_message_length", 64 * 1024 * 1024),
-                        ("grpc.max_send_message_length", 64 * 1024 * 1024),
+            fish_fmt = os.environ.get("TTS_FISH_FORMAT", "mp3")
+            fish_out = await _synthesize_fish_tts(
+                text,
+                filename,
+                api_key=fish_api_key,
+                model=fish_model,
+                reference_id=fish_ref,
+                fmt=fish_fmt,
+            )
+            if fish_out:
+                tts_source = fish_out
+                logger.info("TTS provider: fish (model=%s)", fish_model)
+
+        if not tts_source:
+            try:
+                # Try NVIDIA Riva TTS
+                if not nvidia_api_key:
+                    raise RuntimeError("NVIDIA_API_KEY is not configured")
+
+                import riva.client
+                from riva.client.proto import riva_audio_pb2
+
+                function_id = os.environ.get(
+                    "TTS_RIVA_FUNCTION_ID", "877104f7-e885-42b9-8de8-f6e4c6303969"
+                )
+                auth = riva.client.Auth(
+                    use_ssl=True,
+                    uri="grpc.nvcf.nvidia.com:443",
+                    metadata_args=[
+                        ["function-id", function_id],
+                        ["authorization", f"Bearer {nvidia_api_key}"],
                     ],
-                ),
-            )
-            service = riva.client.SpeechSynthesisService(auth)
+                    options=cast(
+                        Any,
+                        [
+                            ("grpc.max_receive_message_length", 64 * 1024 * 1024),
+                            ("grpc.max_send_message_length", 64 * 1024 * 1024),
+                        ],
+                    ),
+                )
+                service = riva.client.SpeechSynthesisService(auth)
 
-            tts_voice_name, tts_language_code = _tts_riva_voice_config(language_key)
+                tts_voice_name, tts_language_code = _tts_riva_voice_config(language_key)
 
-            # Use gRPC service synchronously (run in executor since it is synchronous gRPC)
-            def run_riva():
-                return service.synthesize(
-                    text=text,
-                    voice_name=tts_voice_name,
-                    language_code=tts_language_code,
-                    sample_rate_hz=44100,
-                    encoding=cast(Any, riva_audio_pb2).AudioEncoding.LINEAR_PCM,
+                # Use gRPC service synchronously (run in executor since it is synchronous gRPC)
+                def run_riva():
+                    return service.synthesize(
+                        text=text,
+                        voice_name=tts_voice_name,
+                        language_code=tts_language_code,
+                        sample_rate_hz=44100,
+                        encoding=cast(Any, riva_audio_pb2).AudioEncoding.LINEAR_PCM,
+                    )
+
+                loop = asyncio.get_running_loop()
+                # Bound the gRPC call: a stalled Riva endpoint would hang this tool
+                # and leak an executor thread otherwise.
+                resp = await asyncio.wait_for(
+                    loop.run_in_executor(None, run_riva), timeout=30
+                )
+                logger.info(
+                    f"Riva TTS synthesized audio with voice={tts_voice_name!r}, language={tts_language_code!r}"
                 )
 
-            loop = asyncio.get_running_loop()
-            # Bound the gRPC call: a stalled Riva endpoint would hang this tool
-            # and leak an executor thread otherwise.
-            resp = await asyncio.wait_for(
-                loop.run_in_executor(None, run_riva), timeout=30
-            )
-            logger.info(
-                f"Riva TTS synthesized audio with voice={tts_voice_name!r}, language={tts_language_code!r}"
-            )
+                # Save the WAV file
+                with wave.open(filename, "wb") as out_f:
+                    out_f.setnchannels(1)
+                    out_f.setsampwidth(2)
+                    out_f.setframerate(44100)
+                    # cast: the riva client returns an untyped stub object; the
+                    # synthesized audio bytes live on `.audio` at runtime.
+                    out_f.writeframesraw(cast(Any, resp).audio)
+                tts_source = filename
+                logger.info("TTS provider: riva")
+            except Exception as e:
+                logger.warning(f"Riva TTS synthesis failed: {e}")
 
-            # Save the WAV file
-            with wave.open(filename, "wb") as out_f:
-                out_f.setnchannels(1)
-                out_f.setsampwidth(2)
-                out_f.setframerate(44100)
-                # cast: the riva client returns an untyped stub object; the
-                # synthesized audio bytes live on `.audio` at runtime.
-                out_f.writeframesraw(cast(Any, resp).audio)
-
-        except Exception as e:
-            logger.warning(f"Riva TTS synthesis failed: {e}. Falling back to gTTS.")
-            # Fallback to local basic gTTS
+        # Last-resort fallback: gTTS. Used when neither Fish nor Riva produced
+        # audio. Kept at the bottom of the provider chain so the comment above
+        # about quality (no voice selection / no emotion tags) still applies.
+        if not tts_source:
             try:
                 from gtts import gTTS
 
@@ -3971,8 +4068,9 @@ class TtsTool(Tool):
                 logger.warning(
                     "TTS used gTTS fallback; voice selection/emotion is unavailable in fallback audio"
                 )
+                tts_source = filename
             except Exception as fallback_err:
-                return f"Error: Riva TTS failed ({e}) and fallback gTTS failed ({fallback_err})"
+                return f"Error: all TTS providers failed (last error: {fallback_err})"
 
         async def make_voice_ogg(source: str) -> str:
             proc = await asyncio.create_subprocess_exec(
