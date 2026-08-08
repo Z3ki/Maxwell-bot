@@ -227,6 +227,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     ShellTool,
     SleepTool,
     ClearSleepTool,
+    WaitTool,
     TtsTool,
     TypingTool,
     WebSearchTool,
@@ -2424,6 +2425,7 @@ class MaxwellBot(commands.Bot):
         self.tools["set_activity"] = SetActivityTool(self)
         self.tools["sleep"] = SleepTool(self)
         self.tools["clear_sleep"] = ClearSleepTool(self)
+        self.tools["wait"] = WaitTool(self)
         self.tools["react"] = ReactTool(self)
         self.tools["edit_message"] = EditMessageTool(self)
         self.tools["delete_message"] = DeleteMessageTool(self)
@@ -8412,11 +8414,33 @@ class MaxwellBot(commands.Bot):
                 )
         history_tool_calls = elide_tool_calls_for_history(raw_for_history)
 
-        # Non-terminal first, terminal last (same as XML path)
+        # Sequencing rules (2026-08-08):
+        # - non_terminal = pure helper tools (web_search, shell, image_gen,
+        #   etc.). They run in PARALLEL via gather because they don't depend
+        #   on each other and don't deliver user-visible output themselves.
+        # - terminal = tools that produce or space user-visible output
+        #   (send_message, no_response, wait). They run SEQUENTIALLY in the
+        #   order the model emitted them, because the model picked that
+        #   order intentionally — e.g. send_message('3') → wait(1) →
+        #   send_message('2') → send_message('1') for a countdown, or
+        #   send_message('starting...') → send_message('done!') for a staged
+        #   reveal.
+        # - no_response is special-cased: at most one per turn, and any
+        #   send_message after it is an error (you can't stay silent and
+        #   also send something). All other terminal calls are allowed to
+        #   repeat — multiple send_messages in declared order is a real
+        #   pattern now.
         non_terminal = [
-            c for c in calls if c["name"] not in {"send_message", "no_response"}
+            c
+            for c in calls
+            if c["name"]
+            not in {"send_message", "no_response", "wait"}
         ]
-        terminal = [c for c in calls if c["name"] in {"send_message", "no_response"}]
+        terminal = [
+            c
+            for c in calls
+            if c["name"] in {"send_message", "no_response", "wait"}
+        ]
 
         result_by_id: dict[str, str] = {}
 
@@ -8606,10 +8630,77 @@ class MaxwellBot(commands.Bot):
                         tool_results.append(err_line)
                     else:
                         tool_results.append(res)
-            terminal_seen = False
+            # Terminal tools run SEQUENTIALLY in declared order. The model's
+            # emission order is the contract — we never reorder or skip
+            # send_message/wait (multi-send + countdown patterns are now
+            # first-class). no_response is the one exception: it's a
+            # "stay silent" intent, so if a send_message already fired
+            # earlier in this batch, no_response is meaningless and gets
+            # dropped with an error the model sees on its next turn.
+            # Likewise a send_message AFTER no_response is contradictory
+            # — keep the no_response, drop the later call.
+            no_response_seen = False
+            send_message_seen = False
             for call in terminal:
-                if terminal_seen:
-                    line = f"Tool {call['name']}: Skipped duplicate terminal tool call"
+                if call["name"] == "no_response":
+                    if no_response_seen:
+                        line = (
+                            "Tool no_response: Skipped duplicate — "
+                            "only one no_response is allowed per turn"
+                        )
+                        result_by_id[call["id"]] = line
+                        tool_results.append(line)
+                        try:
+                            skip_args = {
+                                k: v
+                                for k, v in (call.get("arguments") or {}).items()
+                                if k != "reasoning"
+                            }
+                            await MaxwellBot._remember_tool_call(
+                                self, message, call["name"], skip_args, line
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to record skipped no_response: {e}"
+                            )
+                        continue
+                    if send_message_seen:
+                        line = (
+                            "Tool no_response: Skipped — a send_message "
+                            "already fired in this turn; the user already "
+                            "got a reply, no_response would be silent and "
+                            "contradictory. Drop the no_response if you "
+                            "wanted silence, or drop the send_message if "
+                            "you wanted to stay silent."
+                        )
+                        result_by_id[call["id"]] = line
+                        tool_results.append(line)
+                        try:
+                            skip_args = {
+                                k: v
+                                for k, v in (call.get("arguments") or {}).items()
+                                if k != "reasoning"
+                            }
+                            await MaxwellBot._remember_tool_call(
+                                self, message, call["name"], skip_args, line
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to record skipped no_response after send: {e}"
+                            )
+                        continue
+                    no_response_seen = True
+                    tool_results.append(await run_one(call))
+                    continue
+                if no_response_seen:
+                    # The model emitted no_response first then tried to
+                    # send. Keep the no_response, drop the later call,
+                    # surface the error to the model.
+                    line = (
+                        f"Tool {call['name']}: Skipped — no_response already "
+                        "ended the turn; remove the no_response if you want "
+                        "to send a message"
+                    )
                     result_by_id[call["id"]] = line
                     tool_results.append(line)
                     try:
@@ -8623,11 +8714,16 @@ class MaxwellBot(commands.Bot):
                         )
                     except Exception as e:
                         logger.warning(
-                            f"Failed to record skipped terminal tool {call['name']}: {e}"
+                            f"Failed to record skipped terminal after no_response: {e}"
                         )
                     continue
-                terminal_seen = True
-                tool_results.append(await run_one(call))
+                # send_message, wait, any other terminal tool: run in
+                # declared order. await each one so the model sees the
+                # real result before the next call dispatches.
+                line = await run_one(call)
+                tool_results.append(line)
+                if call["name"] == "send_message":
+                    send_message_seen = True
 
         # Tools must run EXACTLY ONCE. The old `except Exception: await run_all()`
         # re-ran every non-idempotent tool when run_all() raised partway (e.g. a
@@ -8929,9 +9025,14 @@ class MaxwellBot(commands.Bot):
                 "EVERY tool call MUST include a `reasoning` parameter — NO exceptions, not even for react / no_response / sleep / trivial calls. The user sees your reasoning as the live 'thinking: <reasoning>' progress line. A tool call without reasoning means the user sees nothing while you work and the call may be rejected. Put your real plain-English reasoning there BEFORE the action — why you're calling it, what you expect, assumptions and risks. Reasoning lives INSIDE the tool call, not in chat. Plain text only, no XML, no JSON, no tags, no nested <thoughts>. One short sentence for trivial calls (react, sleep), one to two for routine, three to six for complex (create_site with custom HTML, image_generator, shell debugging).\n\n"
                 "## Rules\n"
                 "- Put user-facing chat text in send_message's `content`. Every reply goes through send_message.\n"
-                "- A tool turn must end with exactly one terminal action: send_message (deliver a reply) or no_response (stay silent). Anything else keeps the turn open. Both terminal actions ALSO require a `reasoning` field.\n"
+                "- Terminal actions run in the order you emit them. send_message can be called multiple times in one turn (e.g. staged reveals, countdowns), and you can interleave `wait` between them for spacing. The OLD 'one terminal action per turn' rule is gone — emit as many send_messages + waits as the reply needs, in the exact order they should fire. no_response is the one exception: at most one per turn, and you can't send_message AFTER no_response in the same batch (drop the no_response if you want to send). Both terminal actions ALSO require a `reasoning` field.\n"
                 "- `reasoning` is the FIRST key in the tool's arguments JSON, before the tool's real parameters. NEVER put it second. NEVER omit it.\n"
-                "- Call helper tools (web_search, shell, image_generator, ...) when they help; each carries its own `reasoning`.\n\n"
+                "- Call helper tools (web_search, shell, image_generator, ...) when they help; each carries its own `reasoning`. Helpers run in parallel with each other and FINISH before any terminal action runs — so `send_message('found it: <answer>')` after a web_search sees the search result.\n\n"
+                "## Sequencing recipes\n"
+                "- **Staged reveal**: send_message('starting...') → wait(2) → send_message('done!') — fires first message immediately, pauses 2s, sends the follow-up.\n"
+                "- **Countdown**: send_message('3') → wait(1) → send_message('2') → wait(1) → send_message('1') → wait(1) → send_message('go!') — fires each tick one second apart.\n"
+                "- **Search then reply**: web_search(query='...') → send_message(content='<answer based on results>') — the search runs first, your reply uses its results.\n"
+                "- `wait` is capped at 10 seconds per call. For longer pauses use `sleep` instead (but `sleep` ends dispatch, so the user has to ping you back).\n\n"
                 "## Common tool-specific notes\n"
                 "- `create_site`: the full HTML document goes in the `body` argument, never in chat. When the user says 'make a site' / 'build a page' / 'make me a website' / 'create a landing page' / 'code a webpage' / 'make a portfolio' or any equivalent, call create_site with the complete HTML in `body`. NEVER paste HTML/CSS/JS into your visible reply — that spams raw markup in the channel and the user gets no working site. If your visible text starts with `<!DOCTYPE`, `:root{`, or `<html`, you failed — call create_site instead.\n"
                 '- `send_file` with large code/HTML: set `encoding="base64"` and base64-encode the content.\n'

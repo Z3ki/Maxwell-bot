@@ -367,9 +367,19 @@ def test_dispatch_native_rejects_platform_incompatible_tool():
     assert react.calls == []
 
 
-def test_dispatch_native_skips_duplicate_terminal_tools():
+def test_dispatch_native_skips_no_response_after_send_message():
+    """send_message + no_response is contradictory (we already sent a
+    reply; staying silent is meaningless). The send_message fires; the
+    no_response is dropped with a clear error so the model can correct.
+
+    Note: the contract was rewritten on 2026-08-08. The OLD rule was
+    "duplicate terminal = drop with generic message". The NEW rule is
+    "send_message and no_response are mutually exclusive within one
+    turn; the second one (in declared order) loses". Other terminal
+    calls (a second send_message, a wait, etc.) are now allowed.
+    """
     first = FakeTool("__MESSAGE_SENT__\nfirst body")
-    second = FakeTool("__MESSAGE_SENT__\nsecond body")
+    second = FakeTool("__NO_RESPONSE__")  # the dropped no_response
     bot = _native_bot({"send_message": first, "no_response": second})
     message = SimpleNamespace(guild=None, channel=SimpleNamespace(id=123))
     raw = [
@@ -384,8 +394,11 @@ def test_dispatch_native_skips_duplicate_terminal_tools():
 
     _, tool_results = asyncio.run(run())
     assert first.calls == [{"content": "hi"}]
+    # no_response never invoked — a send_message already fired earlier
+    # in the batch, so no_response is a contradiction, not a duplicate.
     assert second.calls == []
-    assert "Skipped duplicate terminal tool call" in tool_results[-1]
+    assert "send_message already fired" in tool_results[-1]
+    assert "no_response" in tool_results[-1].lower()
 
 
 def test_dispatch_no_native_calls_just_sanitizes_text():

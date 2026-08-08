@@ -1105,6 +1105,57 @@ class ClearSleepTool(Tool):
         return self.bot.clear_sleep()
 
 
+class WaitTool(Tool):
+    """Pause the current tool batch for N seconds before continuing.
+
+    Use this WITHIN a single turn to space out multiple actions — e.g.
+    `send_message('starting...')` → `wait(2)` → `send_message('done!')`
+    for a staged reveal, or `send_message('countdown: 3')` → `wait(1)` →
+    `send_message('2')` → `wait(1)` → `send_message('1')` → `wait(1)` →
+    `send_message('go!')`.
+
+    Distinct from `sleep`: `sleep` turns off the bot for minutes (rest),
+    `wait` is a sub-turn pause that keeps the turn open and lets you
+    follow up with more tool calls.
+
+    Max is 10 seconds — longer pauses should use `sleep` instead. The
+    user-visible progress message updates to 'waiting Ns…' so they
+    know the bot isn't stuck."""
+
+    is_destructive: bool = False
+    streams_output: bool = False
+
+    def get_description(self):
+        return (
+            "Pause the current tool batch for `seconds` (float, default 2.0, "
+            "min 0.0, max 10.0). The turn stays open — call more tools after. "
+            "Use this to space out multiple send_messages within one turn "
+            "(countdowns, staged reveals). Distinct from `sleep`: `sleep` is "
+            "1-60 minutes and ends dispatch; `wait` is a sub-turn pause under "
+            "10 seconds."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        seconds: float | str = 2.0,
+        **kwargs,
+    ) -> str:
+        try:
+            n = float(seconds)
+        except (TypeError, ValueError):
+            n = 2.0
+        if n < 0:
+            n = 0.0
+        if n > 10:
+            # Hard cap. The model can't override this; longer pauses belong
+            # in `sleep`. The error is visible to the model so it can
+            # adjust instead of silently truncating.
+            return "Error: wait duration capped at 10 seconds. Use `sleep` for longer pauses."
+        await asyncio.sleep(n)
+        return f"Waited {n:.1f}s"
+
+
 class CreatePollTool(Tool):
     """Create a poll in the channel"""
 
