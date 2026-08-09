@@ -5145,3 +5145,154 @@ class EmailSearchTool(Tool):
             )
         except Exception as e:
             return f"Error: IMAP search failed: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Self-modification tools. Both admin-gated. These let Maxwell (or any admin
+# using the LLM) rewrite its own base personality + per-server prompts at
+# runtime. The runtime load is hot — _load_control() reads mtime, so a write
+# to bot_control.json is picked up on the next prompt assembly without a
+# restart. server prompts are read on every prompt build, also hot.
+# ---------------------------------------------------------------------------
+
+
+class UpdateBasePersonalityTool(Tool):
+    """Rewrite the global base_personality that ships in every prompt.
+
+    This is what the model reads as its tone / do-don'ts / identity safety
+    section. The MAXWELL_BASE_KNOWLEDGE block (identity, slang, voice, memes)
+    is ALWAYS-ON and lives in code — it is NOT editable through this tool.
+    This tool only rewrites the per-runtime personality paragraph that lives
+    in bot_control.json under `base_personality`.
+
+    Admin only — non-admins get a refused error.
+    """
+
+    is_destructive: bool = True
+
+    def get_description(self) -> str:
+        return (
+            "Rewrite the global base_personality text. This is the tone, "
+            "do/don'ts, and identity-safety paragraph that ships in every "
+            "prompt. The always-on Base Knowledge block (identity / slang / "
+            "voice / meme refs in code) is NOT editable through this tool. "
+            "Params: text (required, the new personality paragraph; 100-2000 "
+            "chars recommended; long enough to set voice and short enough to "
+            "stay in budget). Returns a confirmation with the new char count. "
+            "Admin-only — refused for non-admin callers."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        text: str | None = None,
+        **kwargs,
+    ) -> str:
+        if not self.bot or not self.bot._is_admin(message.author.id):
+            return (
+                "Error: update_base_personality is admin-only. The user who "
+                "triggered this call is not in MAXWELL_OWNER_IDS."
+            )
+        if not text or not str(text).strip():
+            return "Error: 'text' is required and cannot be empty."
+        text = str(text).strip()
+        # Soft cap: personality blocks over 4000 chars are usually a sign
+        # someone pasted a whole essay. Reject and ask for a tighter version.
+        if len(text) > 4000:
+            return (
+                f"Error: text is {len(text)} chars; the soft cap is 4000. "
+                "Tighten the wording — a long personality is a context-killer, "
+                "and the bot doesn't read past the most recent instructions anyway."
+            )
+        if len(text) < 20:
+            return (
+                f"Error: text is {len(text)} chars; too short to be a useful "
+                "personality. Aim for at least 100-300 chars of voice/do-don'ts."
+            )
+
+        try:
+            control = dict(self.bot._control)
+            control["base_personality"] = text
+            self.bot._control = control
+            from pathlib import Path
+            import asyncio
+
+            await asyncio.to_thread(
+                _atomic_json_write_sync,
+                Path(self.bot.config.DATA_DIR) / "bot_control.json",
+                control,
+            )
+        except Exception as e:
+            return f"Error: failed to persist base_personality: {e}"
+        return (
+            f"base_personality updated. {len(text)} chars written to "
+            "bot_control.json. The change is live on the next turn — no "
+            "restart needed. MAXWELL_BASE_KNOWLEDGE (in code) was NOT "
+            "touched; only the per-runtime personality paragraph was rewritten."
+        )
+
+
+class UpdateServerPromptTool(Tool):
+    """Rewrite the per-server custom prompt (same as `,prompt <text>`).
+
+    Same effect as the admin `,prompt <text>` command but invokable from
+    inside an LLM turn — Maxwell can edit its own per-server instructions
+    when it has a reason. Pass server_id (numeric snowflake) or pass 'DM'
+    for the DM default. Pass empty text to clear the per-server prompt.
+
+    Admin only.
+    """
+
+    is_destructive: bool = True
+
+    def get_description(self) -> str:
+        return (
+            "Rewrite or clear the per-server custom prompt that overrides the "
+            "base personality for a specific server. Same effect as the "
+            "`,prompt <text>` admin command but invokable from inside an LLM "
+            "turn. Params: server_id (required, numeric snowflake or 'DM' to "
+            "target direct messages), text (required; empty string or "
+            "`'__CLEAR__'` to clear the per-server prompt). Admin-only."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        server_id: str | None = None,
+        text: str | None = None,
+        **kwargs,
+    ) -> str:
+        if not self.bot or not self.bot._is_admin(message.author.id):
+            return (
+                "Error: update_server_prompt is admin-only. The user who "
+                "triggered this call is not in MAXWELL_OWNER_IDS."
+            )
+        if not server_id or not str(server_id).strip():
+            return "Error: 'server_id' is required (numeric snowflake or 'DM')."
+        server_id = str(server_id).strip()
+        # Soft cap mirrors the personality cap.
+        if text is not None and len(str(text)) > 4000:
+            return (
+                f"Error: text is {len(text)} chars; the soft cap is 4000. "
+                "Per-server prompts over 4000 chars are context-killers."
+            )
+
+        text_str = "" if text is None else str(text)
+        cleared = text_str.strip() in ("", "__CLEAR__")
+
+        try:
+            if cleared:
+                self.bot.memory.clear_server_prompt(server_id)
+                return (
+                    f"Cleared per-server prompt for server_id={server_id}. "
+                    "The bot will fall back to base_personality + "
+                    "MAXWELL_BASE_KNOWLEDGE in that server from now on."
+                )
+            self.bot.memory.set_server_prompt(server_id, text_str)
+        except Exception as e:
+            return f"Error: failed to persist server prompt: {e}"
+        return (
+            f"Server prompt updated for server_id={server_id}. "
+            f"{len(text_str)} chars written. The change is live on the next "
+            f"turn in that server — no restart needed."
+        )
