@@ -9430,6 +9430,37 @@ class MaxwellBot(commands.Bot):
                     rag_recent = [
                         r for r in recent_results if r.get("similarity", 0) >= 0.40
                     ][:5]  # cap to 5 recent messages
+                # ─── web results (operator feature 2026-08-09) ───
+                # Recall any web_result rows from previous searches that
+                # are semantically related to the current message. Only
+                # populated when the bot has actually searched recently;
+                # silently absent otherwise. TTL is enforced inside the
+                # recall helper so stale rows never reach the prompt.
+                rag_web: list[dict] = []
+                if (
+                    hasattr(self.memory, "recall_web_results")
+                    and self._control.get("long_term_memory_enabled", True)
+                    and bool(
+                        getattr(self.config, "RAG_WEB_STORE_ENABLED", True)
+                    )
+                ):
+                    try:
+                        web_rows = await self.memory.recall_web_results(
+                            user_message,
+                            guild_id=str(
+                                getattr(message.guild, "id", "") or ""
+                            ),
+                            top_k=4,
+                            min_similarity=0.40,
+                            max_age_days=7,
+                        )
+                        rag_web = [
+                            r
+                            for r in web_rows
+                            if r.get("similarity", 0) >= 0.40
+                        ]
+                    except Exception as e:
+                        logger.debug(f"recall_web_results skipped: {e}")
                 if rag_context or rag_recent:
                     # Build RAG-augmented memory block. Durable facts first
                     # (LTM/shared_context — they don't decay), then recent
@@ -9476,6 +9507,41 @@ class MaxwellBot(commands.Bot):
                             "Recent relevant messages from this server/channel "
                             "(background only — what's been talked about):\n"
                             + "\n".join(rec_lines)
+                        )
+                    if rag_web:
+                        web_lines = []
+                        for r in rag_web:
+                            url = r.get("url") or "(no url)"
+                            title = r.get("title") or url
+                            sim_pct = int(r.get("similarity", 0) * 100)
+                            when = r.get("timestamp", "")
+                            stamp = ""
+                            if when:
+                                try:
+                                    dt = _parse_iso(when)
+                                    if dt is not None:
+                                        age_days = (
+                                            datetime.now(timezone.utc) - dt
+                                        ).days
+                                        stamp = (
+                                            f" [~{age_days}d ago]"
+                                            if age_days >= 1
+                                            else " [today]"
+                                        )
+                                except Exception:
+                                    stamp = ""
+                            q = r.get("query") or ""
+                            qpart = f" (was searching: {q})" if q else ""
+                            content = str(r.get("content", ""))[:280]
+                            web_lines.append(
+                                f"- [{sim_pct}% match, web{stamp}]{qpart} "
+                                f"{title}\n  {url}\n  {content}"
+                            )
+                        dynamic_parts.append(
+                            "Earlier web search results from this session "
+                            "(background — these were found before, cite "
+                            "the URL if you reuse them):\n"
+                            + "\n".join(web_lines)
                         )
                 elif ltm:
                     # Fallback: no embeddings yet, use recent LTM
@@ -10220,6 +10286,30 @@ class MaxwellBot(commands.Bot):
                 rag_recent = [r for r in rec_results if r.get("similarity", 0) >= 0.40][
                     :5
                 ]
+                # ─── web results (operator feature 2026-08-09) ───
+                rag_web: list[dict] = []
+                if (
+                    hasattr(self.memory, "recall_web_results")
+                    and self._control.get("long_term_memory_enabled", True)
+                    and bool(
+                        getattr(self.config, "RAG_WEB_STORE_ENABLED", True)
+                    )
+                ):
+                    try:
+                        web_rows = await self.memory.recall_web_results(
+                            text,
+                            guild_id=str(chat_id or ""),
+                            top_k=4,
+                            min_similarity=0.40,
+                            max_age_days=7,
+                        )
+                        rag_web = [
+                            r
+                            for r in web_rows
+                            if r.get("similarity", 0) >= 0.40
+                        ]
+                    except Exception as e:
+                        logger.debug(f"tg recall_web_results skipped: {e}")
                 if rag_context:
                     rag_lines = []
                     for r in rag_context:
@@ -10241,6 +10331,24 @@ class MaxwellBot(commands.Bot):
                     dynamic_parts.append(
                         "Recent relevant messages (background):\n"
                         + "\n".join(rec_lines)
+                    )
+                if rag_web:
+                    web_lines = []
+                    for r in rag_web:
+                        url = r.get("url") or "(no url)"
+                        title = r.get("title") or url
+                        sim_pct = int(r.get("similarity", 0) * 100)
+                        q = r.get("query") or ""
+                        qpart = f" (was searching: {q})" if q else ""
+                        content = str(r.get("content", ""))[:280]
+                        web_lines.append(
+                            f"- [{sim_pct}% match, web]{qpart} "
+                            f"{title}\n  {url}\n  {content}"
+                        )
+                    dynamic_parts.append(
+                        "Earlier web search results (background; "
+                        "cite the URL if reused):\n"
+                        + "\n".join(web_lines)
                     )
             except Exception as e:
                 logger.warning(f"Telegram RAG retrieval failed: {e}")

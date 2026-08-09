@@ -98,6 +98,7 @@ class Config:
     ENABLE_VC = _bool_env("ENABLE_VC", True)
     ENABLE_YOUTUBE = _bool_env("ENABLE_YOUTUBE", True)
     ENABLE_WEB_SEARCH = _bool_env("ENABLE_WEB_SEARCH", True)
+    RAG_WEB_STORE_ENABLED = _bool_env("RAG_WEB_STORE_ENABLED", True)
     ENABLE_FETCH_URL = _bool_env("ENABLE_FETCH_URL", True)
     ENABLE_CREATE_SITE = _bool_env("ENABLE_CREATE_SITE", True)
     ENABLE_AVATAR = _bool_env("ENABLE_AVATAR", True)

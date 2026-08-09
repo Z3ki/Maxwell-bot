@@ -55,6 +55,22 @@ DEFAULT_REM_EVENT_BUFFER_MAX = 500
 # considered noise and filtered out.
 SIM_THRESHOLD = 0.35
 
+# ─── web result store (added 2026-08-09) ────────────────────────────────
+# When web_search runs, top results are persisted as kind='web_result' so
+# later turns in the same conversation can recall them without re-searching.
+# Tunables below — env-overridden via MAXWELL_RAG_WEB_* at the call site.
+WEB_RESULT_KIND = "web_result"
+WEB_RESULT_DEFAULT_TTL_DAYS = 7       # prune anything older than this
+WEB_RESULT_DEFAULT_MAX_PER_QUERY = 3  # how many top results to embed per search
+WEB_RESULT_GUILD_SCOPED = False       # default: global (cross-channel)
+# Cap the persistent web_result corpus. LRU eviction by created_at once we
+# hit this. ~5k rows ≈ 5MB embeddings + a few MB of snippets; cheap.
+WEB_RESULT_MAX_ROWS = 5000
+# Truncation cap for embedding web snippets. qwen3-embedding:0.6b has a
+# 32k-token window; 12k chars keeps us well inside while leaving room for
+# any prompt expansion the API does internally.
+WEB_RESULT_EMBED_MAX_CHARS = 12000
+
 # ─── filtering ────────────────────────────────────────────────────────
 
 # Discord.MessageType values that produce no real user content. We never
@@ -774,9 +790,49 @@ class RAGMemoryManager:
         text = str(text or "").strip()
         if not text:
             return None
-        # Truncate very long text before embedding
-        if len(text) > 8000:
-            text = text[:8000]
+        # Long-content handling. qwen3-embedding:0.6b has a 32k-token
+        # context window (≈128k chars). Past ~30000 chars we split into
+        # sentence-boundary chunks, embed each, mean-pool the L2-normalized
+        # vectors and re-normalize. This keeps long rows (pasted logs,
+        # long articles) from being silently truncated by the old
+        # `text[:8000]` cutoff that used to live here — operator's note
+        # 2026-08-09: chunking is the workaround for short-context
+        # embedders, but we still want a safe cap before the embed API
+        # itself refuses the input.
+
+        _MAX_EMBED_CHARS = 30000
+        _CHUNK_OVERLAP = 200
+
+        def _split_chunks(s: str) -> list[str]:
+            if len(s) <= _MAX_EMBED_CHARS:
+                return [s]
+            chunks: list[str] = []
+            cursor = 0
+            n = len(s)
+            while cursor < n:
+                end = min(cursor + _MAX_EMBED_CHARS, n)
+                if end < n:
+                    # Snap to the nearest sentence boundary in the
+                    # last 400 chars of the chunk so we don't shred
+                    # sentences mid-word.
+                    window = s[cursor:end]
+                    boundary = max(
+                        window.rfind(". "),
+                        window.rfind("! "),
+                        window.rfind("? "),
+                        window.rfind("\n"),
+                    )
+                    if boundary > _MAX_EMBED_CHARS - 400:
+                        end = cursor + boundary + 1
+                chunk = s[cursor:end].strip()
+                if chunk:
+                    chunks.append(chunk)
+                if end >= n:
+                    break
+                cursor = max(end - _CHUNK_OVERLAP, cursor + 1)
+            return chunks or [s[:_MAX_EMBED_CHARS]]
+
+        chunks_to_embed = _split_chunks(text)
 
         import hashlib
 
@@ -802,63 +858,94 @@ class RAGMemoryManager:
         except Exception:
             pass
 
-        payload = {"model": EMBED_MODEL, "input": text}
-
+        # ─── embed (single-chunk fast path vs multi-chunk mean-pool) ───
         try:
+            chunk_vecs: list[np.ndarray] = []
             async with (
                 self._embed_semaphore,
                 aiohttp.ClientSession() as session,
-                session.post(
-                    OLLAMA_EMBED_URL,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as resp,
             ):
-                if resp.status != 200:
-                    body = await resp.text()
-                    logger.warning(
-                        f"Embedding API returned {resp.status}: {body[:200]}"
-                    )
-                    return None
-                data = await resp.json()
-                embeddings = data.get("embeddings") or []
-                if not embeddings:
-                    emb = data.get("embedding")
-                    if emb:
-                        embeddings = [emb]
-                if not embeddings:
-                    logger.warning("Embedding API returned no embeddings")
-                    return None
-                vec = np.array(embeddings[0], dtype=np.float32)
-                if len(vec) != EMBED_DIM:
-                    logger.warning(
-                        f"Embedding dimension mismatch: {len(vec)} != {EMBED_DIM}"
-                    )
-                    return None
+                for ci, chunk_text in enumerate(chunks_to_embed):
+                    payload = {"model": EMBED_MODEL, "input": chunk_text}
+                    async with session.post(
+                        OLLAMA_EMBED_URL,
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as resp:
+                        if resp.status != 200:
+                            body = await resp.text()
+                            logger.warning(
+                                f"Embedding API returned {resp.status} "
+                                f"(chunk {ci}/{len(chunks_to_embed)}): "
+                                f"{body[:200]}"
+                            )
+                            return None
+                        data = await resp.json()
+                        embeddings = data.get("embeddings") or []
+                        if not embeddings:
+                            emb = data.get("embedding")
+                            if emb:
+                                embeddings = [emb]
+                        if not embeddings:
+                            logger.warning(
+                                f"Embedding API returned no embeddings "
+                                f"(chunk {ci}/{len(chunks_to_embed)})"
+                            )
+                            return None
+                        cv = np.array(embeddings[0], dtype=np.float32)
+                        if len(cv) != EMBED_DIM:
+                            logger.warning(
+                                f"Embedding dimension mismatch on chunk "
+                                f"{ci}: {len(cv)} != {EMBED_DIM}"
+                            )
+                            return None
+                        # L2-normalize each chunk before pooling so the
+                        # mean isn't dominated by whichever chunk happened
+                        # to land at a larger norm.
+                        n = np.linalg.norm(cv)
+                        if n > 1e-8:
+                            cv = cv / n
+                        chunk_vecs.append(cv)
 
-                # ─── persist to cache ─────────────────────
-                try:
-                    self._db.execute(
-                        "INSERT OR REPLACE INTO embed_cache "
-                        "(key, dim, embedding, created_at, last_used_at, hits) "
-                        "VALUES (?, ?, ?, ?, ?, COALESCE("
-                        "  (SELECT hits FROM embed_cache WHERE key=? AND dim=?),"
-                        "  0) + 1)",
-                        (
-                            cache_key,
-                            EMBED_DIM,
-                            _embedding_to_blob(vec),
-                            time.time(),
-                            time.time(),
-                            cache_key,
-                            EMBED_DIM,
-                        ),
-                    )
-                    self._maybe_prune_embed_cache()
-                except Exception:
-                    pass  # cache write failure is non-fatal
+            if not chunk_vecs:
+                return None
+            if len(chunk_vecs) == 1:
+                vec = chunk_vecs[0]
+            else:
+                # Mean-pool L2-normalized chunk vectors, re-normalize.
+                stacked = np.stack(chunk_vecs)
+                vec = stacked.mean(axis=0)
+                n = np.linalg.norm(vec)
+                if n > 1e-8:
+                    vec = vec / n
+                logger.debug(
+                    f"_embed mean-pooled {len(chunk_vecs)} chunks "
+                    f"(text len={len(text)})"
+                )
 
-                return vec
+            # ─── persist to cache ─────────────────────
+            try:
+                self._db.execute(
+                    "INSERT OR REPLACE INTO embed_cache "
+                    "(key, dim, embedding, created_at, last_used_at, hits) "
+                    "VALUES (?, ?, ?, ?, ?, COALESCE("
+                    "  (SELECT hits FROM embed_cache WHERE key=? AND dim=?),"
+                    "  0) + 1)",
+                    (
+                        cache_key,
+                        EMBED_DIM,
+                        _embedding_to_blob(vec),
+                        time.time(),
+                        time.time(),
+                        cache_key,
+                        EMBED_DIM,
+                    ),
+                )
+                self._maybe_prune_embed_cache()
+            except Exception:
+                pass  # cache write failure is non-fatal
+
+            return vec
         except asyncio.TimeoutError:
             logger.warning("Embedding API timeout")
             return None
@@ -1703,6 +1790,239 @@ class RAGMemoryManager:
         except Exception as e:
             logger.warning(f"_call_ltm_extractor failed: {e}")
         return []
+
+    # ─── web result store (added 2026-08-09) ─────────────────────────
+    # Persist top web search hits as kind='web_result' rows so future
+    # turns in the same convo can recall them without re-searching.
+    # Same embedder as the rest of the corpus (qwen3-embedding:0.6b).
+    # Dedup by URL — re-fetching the same query doesn't double-store.
+    # TTL is enforced at retrieval time, not via scheduled VACUUM.
+
+    def _prune_web_results_locked(self) -> int:
+        """LRU prune the web_result corpus. Caller holds self._lock.
+
+        Returns the number of rows deleted. Two thresholds:
+          1. Older than TTL — anything past WEB_RESULT_DEFAULT_TTL_DAYS is
+             stale news anyway and the LLM doesn't need it.
+          2. Over WEB_RESULT_MAX_ROWS total — keep newest WEB_RESULT_MAX_ROWS
+             by created_at, drop the rest.
+
+        Called inside `store_web_results` and at the start of every RAG
+        search that includes web_result (cheap, 1-2 SQL queries).
+        """
+        try:
+            ttl_cutoff = (
+                datetime.now(timezone.utc).timestamp()
+                - WEB_RESULT_DEFAULT_TTL_DAYS * 86400.0
+            )
+            deleted_ttl = self._db.execute(
+                "DELETE FROM vectors WHERE kind=? AND created_at < ?",
+                (WEB_RESULT_KIND, ttl_cutoff),
+            ).rowcount
+            cap_remaining = (
+                WEB_RESULT_MAX_ROWS
+                - self._db.execute(
+                    "SELECT COUNT(*) AS c FROM vectors WHERE kind=?",
+                    (WEB_RESULT_KIND,),
+                ).fetchone()["c"]
+            )
+            if cap_remaining < 0:
+                # We have more than the cap — keep newest WEB_RESULT_MAX_ROWS.
+                # Use created_at (real wall-clock) rather than timestamp
+                # (which is event-time for messages, but creation-time for
+                # web results — same thing here, but be explicit).
+                deleted_cap = self._db.execute(
+                    "DELETE FROM vectors WHERE kind=? AND id NOT IN ("
+                    "  SELECT id FROM vectors WHERE kind=? "
+                    "  ORDER BY created_at DESC LIMIT ?"
+                    ")",
+                    (WEB_RESULT_KIND, WEB_RESULT_KIND, WEB_RESULT_MAX_ROWS),
+                ).rowcount
+                return int(deleted_ttl) + int(deleted_cap)
+            return int(deleted_ttl)
+        except Exception as e:
+            logger.debug(f"_prune_web_results_locked failed: {e}")
+            return 0
+
+    async def store_web_results(
+        self,
+        query: str,
+        results: list[dict],
+        *,
+        guild_id: str = "",
+        max_per_query: int = WEB_RESULT_DEFAULT_MAX_PER_QUERY,
+        ttl_days: int = WEB_RESULT_DEFAULT_TTL_DAYS,
+        scope_to_guild: bool = WEB_RESULT_GUILD_SCOPED,
+    ) -> int:
+        """Embed + persist web search hits as kind='web_result'.
+
+        Args:
+            query: original search query (stored in metadata for context).
+            results: list of dicts from ddgs: {title, href, body}. Extra
+                keys are tolerated and stored in metadata.
+            guild_id: discord guild ID of the requesting user, used to
+                scope the rows if scope_to_guild=True (default: global,
+                so any future turn in any channel that asks a related
+                question can recall).
+            max_per_query: cap rows stored per call. Defaults to 3.
+            ttl_days: prune rows older than this on the next store/recall.
+            scope_to_guild: True → store rows with the requesting guild_id
+                only (channel-specific recall). False (default) → global.
+
+        Returns:
+            Number of rows newly inserted. Existing URLs are deduped via
+            content_hash; a re-fetch of the same query is a no-op.
+        """
+        if not results:
+            return 0
+        # Truncate to top N before paying the embed cost.
+        top = results[:max_per_query]
+        inserted = 0
+        # Embed INLINE before insert. Fire-and-forget embed on a
+        # background task leaves rows with embedding=NULL for an
+        # unpredictable window, which means the next turn's
+        # `recall_web_results()` would silently miss them. Search calls
+        # already cost 1-3s of ddgs latency — paying another ~140ms per
+        # top result (cold) or ~0.5ms (cache hit) is the right tradeoff.
+        # The whole `store_web_results` call holds no lock during the
+        # embed phase; the INSERT happens inside the lock below.
+        embedded: list[tuple[dict, np.ndarray | None]] = []
+        for r in top:
+            title = str(r.get("title") or "").strip()
+            body = str(r.get("body") or "").strip()
+            if (not title and not body) or not r.get("href"):
+                continue
+            embed_text = f"{title}\n{title}\n{body}".strip()[
+                :WEB_RESULT_EMBED_MAX_CHARS
+            ]
+            vec = await self._embed(embed_text)
+            embedded.append((r, vec))
+        if not embedded:
+            return 0
+        async with self._lock:
+            try:
+                self._db.execute("BEGIN IMMEDIATE")
+                # Prune stale rows first so we don't bloat the index.
+                self._prune_web_results_locked()
+
+                import hashlib
+
+                now_iso = _utcnow_iso()
+                now_ts = time.time()
+                for r, vec in embedded:
+                    if vec is None:
+                        continue
+                    title = str(r.get("title") or "").strip()
+                    href = str(r.get("href") or "").strip()
+                    body = str(r.get("body") or "").strip()
+                    embed_text = f"{title}\n{title}\n{body}".strip()[
+                        :WEB_RESULT_EMBED_MAX_CHARS
+                    ]
+                    content_hash = hashlib.sha256(
+                        href.encode("utf-8")
+                    ).hexdigest()
+                    metadata = {
+                        "url": href,
+                        "title": title,
+                        "query": query,
+                        "fetched_at": now_iso,
+                        "source_engine": "ddgs",
+                    }
+                    try:
+                        self._db.execute(
+                            "INSERT OR IGNORE INTO vectors ("
+                            "  id, kind, channel_id, guild_id, author, "
+                            "  author_id, source, content, content_hash, "
+                            "  metadata, scope, importance, timestamp, "
+                            "  created_at, parent_id, chunk_index, "
+                            "  downvotes, updated_at, embedding"
+                            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                            "  ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                f"web_{content_hash[:16]}",
+                                WEB_RESULT_KIND,
+                                "",  # channel_id — global
+                                guild_id if scope_to_guild else "",
+                                "web_search",
+                                "",
+                                "web",
+                                embed_text,
+                                content_hash,
+                                json.dumps(metadata),
+                                "global" if not scope_to_guild else "guild",
+                                0,
+                                now_iso,
+                                now_ts,
+                                "",
+                                0,
+                                0,
+                                now_ts,
+                                _embedding_to_blob(vec),
+                            ),
+                        )
+                        if self._db.execute(
+                            "SELECT changes() AS c"
+                        ).fetchone()["c"]:
+                            inserted += 1
+                    except Exception as e:
+                        logger.debug(
+                            f"web_result insert skipped ({href[:60]}): {e}"
+                        )
+                        continue
+                self._db.execute("COMMIT")
+            except Exception as e:
+                with contextlib.suppress(Exception):
+                    self._db.execute("ROLLBACK")
+                logger.warning(f"store_web_results failed: {e}")
+                return 0
+        if inserted:
+            logger.info(
+                f"store_web_results: {inserted} new rows for query={query!r}"
+            )
+        return inserted
+
+    async def recall_web_results(
+        self,
+        query: str,
+        *,
+        guild_id: str = "",
+        top_k: int = 5,
+        min_similarity: float = SIM_THRESHOLD,
+        max_age_days: int | None = None,
+    ) -> list[dict]:
+        """Retrieve previously stored web_result rows for a query.
+
+        Same shape as rag_search() but restricted to kind='web_result'
+        and with TTL pruning applied at search time so stale rows never
+        surface.
+        """
+        try:
+            await self._lock.acquire()
+            self._prune_web_results_locked()
+        finally:
+            self._lock.release()
+        results = await self.rag_search(
+            query,
+            kinds=[WEB_RESULT_KIND],
+            guild_id=guild_id,
+            source="web",
+            top_k=top_k,
+            min_similarity=min_similarity,
+            apply_recency=False,  # web results don't decay — TTL handles it
+            over_fetch=1,
+        )
+        if max_age_days is not None and results:
+            cutoff = (
+                datetime.now(timezone.utc).timestamp() - max_age_days * 86400.0
+            )
+            fresh: list[dict] = []
+            for r in results:
+                ts = r.get("timestamp") or ""
+                dt = _parse_iso(ts) if ts else None
+                if dt is None or dt.timestamp() >= cutoff:
+                    fresh.append(r)
+            results = fresh
+        return results
 
     # ─── RAG search (new) ─────────────────────────────────────────
 

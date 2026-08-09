@@ -2257,6 +2257,39 @@ class WebSearchTool(Tool):
             if not results:
                 return f"No results found for '{query}'"
 
+            # ─── persist to RAG (operator feature 2026-08-09) ───
+            # Embed top results as kind='web_result' so future turns in
+            # the same conversation can recall what was just searched.
+            # Off by default in the env var, but defaults ON for new
+            # installs. Skipped silently if RAG is unavailable or
+            # disabled — never fails the search.
+            try:
+                rag_enabled = bool(
+                    getattr(self.bot.config, "RAG_WEB_STORE_ENABLED", True)
+                )
+                memory = getattr(self.bot, "memory", None)
+                if rag_enabled and memory is not None and hasattr(
+                    memory, "store_web_results"
+                ):
+                    guild_id = ""
+                    if message is not None and getattr(
+                        message, "guild", None
+                    ):
+                        guild_id = str(message.guild.id)
+                    n = await memory.store_web_results(
+                        query=query,
+                        results=list(results),
+                        guild_id=guild_id,
+                    )
+                    if n:
+                        logger.info(
+                            f"web_search stored {n} results for query={query!r}"
+                        )
+            except Exception as e:
+                logger.debug(
+                    f"web_search RAG persistence skipped: {e}"
+                )
+
             lines = []
             for i, r in enumerate(results, 1):
                 title = r.get("title", "No title")
