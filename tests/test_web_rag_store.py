@@ -18,9 +18,6 @@ test what matters, mock what's expensive).
 import asyncio
 import hashlib
 import time
-from datetime import datetime, timezone
-from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
 import numpy as np
 
@@ -29,7 +26,6 @@ from rag_memory import (
     RAGMemoryManager,
     WEB_RESULT_DEFAULT_TTL_DAYS,
     WEB_RESULT_KIND,
-    WEB_RESULT_MAX_ROWS,
 )
 
 
@@ -79,10 +75,16 @@ def _stub_embed(monkeypatch):
         # Map each unique token to a fixed random basis vector and sum
         # them; this gives similar documents (shared tokens) similar
         # vectors, while unrelated docs end up near-orthogonal.
-        rng = np.random.default_rng(42)
+        #
+        # The RNG must be seeded PER TOKEN. Drawing from one rng seeded
+        # once meant a token's vector depended on its position in the
+        # iteration, so the same word in two documents got two unrelated
+        # vectors and the "shared tokens ⇒ similar vectors" property this
+        # stub exists to provide silently did not hold.
         basis: dict[str, np.ndarray] = {}
         for tok in toks:
             seed = int(hashlib.sha256(tok.encode()).hexdigest()[:8], 16)
+            rng = np.random.default_rng(seed)
             basis[tok] = rng.standard_normal(EMBED_DIM).astype(np.float32)
             # L2-normalize basis vectors so token counts don't dominate.
             basis[tok] /= np.linalg.norm(basis[tok]) + 1e-8

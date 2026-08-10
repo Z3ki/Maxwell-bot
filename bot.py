@@ -318,6 +318,27 @@ def _safe_int(val, default=0):
         return default
 
 
+def _web_result_snippet(content: str, title: str, limit: int = 280) -> str:
+    """Body-only snippet for a stored web_result row.
+
+    The row `content` leads with the title (and, for rows written before
+    2026-08-10, with the title twice — it used to be stored as the
+    title-weighted embed text). The prompt line already prints the title
+    from metadata, so leaving it in the snippet showed it two or three
+    times and spent the char budget on repetition instead of the body.
+    Drop leading lines that just repeat the title, then truncate.
+    """
+    text = str(content or "")
+    t = str(title or "").strip()
+    if t:
+        lines = text.split("\n")
+        i = 0
+        while i < len(lines) and lines[i].strip() == t:
+            i += 1
+        text = "\n".join(lines[i:])
+    return text.strip()[:limit]
+
+
 def _coerce_utc_datetime(value) -> datetime | None:
     if value is None:
         return None
@@ -9532,7 +9553,9 @@ class MaxwellBot(commands.Bot):
                                     stamp = ""
                             q = r.get("query") or ""
                             qpart = f" (was searching: {q})" if q else ""
-                            content = str(r.get("content", ""))[:280]
+                            content = _web_result_snippet(
+                                r.get("content", ""), r.get("title", "")
+                            )
                             web_lines.append(
                                 f"- [{sim_pct}% match, web{stamp}]{qpart} "
                                 f"{title}\n  {url}\n  {content}"
@@ -10340,7 +10363,9 @@ class MaxwellBot(commands.Bot):
                         sim_pct = int(r.get("similarity", 0) * 100)
                         q = r.get("query") or ""
                         qpart = f" (was searching: {q})" if q else ""
-                        content = str(r.get("content", ""))[:280]
+                        content = _web_result_snippet(
+                            r.get("content", ""), r.get("title", "")
+                        )
                         web_lines.append(
                             f"- [{sim_pct}% match, web]{qpart} "
                             f"{title}\n  {url}\n  {content}"

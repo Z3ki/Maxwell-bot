@@ -9,9 +9,7 @@ silently drops the new answer. These tests pin that down so it can't
 regress.
 """
 
-import asyncio
 import json
-from types import SimpleNamespace
 
 
 def _native_call(name, args, call_id="call_1"):

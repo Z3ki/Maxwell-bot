@@ -43,6 +43,17 @@ EMBED_MODEL = "qwen3-embedding:0.6b"
 EMBED_DIM = 1024
 OLLAMA_EMBED_URL = "http://localhost:11434/api/embed"
 
+# Long-content embedding. Past EMBED_MAX_CHARS we split into sentence-boundary
+# chunks, embed each, and mean-pool. Module-level (not local to _embed) so the
+# batch migration path in _embed_pending_all agrees with the single path —
+# they used to disagree, and the batch path silently truncated at 8000.
+EMBED_MAX_CHARS = 30000
+EMBED_CHUNK_OVERLAP = 200
+# The pre-2026-08-09 hard cutoff. Rows embedded before that commit were
+# vectorized from text[:8000], so their cached vectors are NOT valid under the
+# current full-text/chunked derivation. Only used to detect legacy rows.
+LEGACY_EMBED_TRUNCATE = 8000
+
 # Recency decay (seconds). 14 days. Score multiplied by exp(-age/tau).
 RECENCY_TAU_SECONDS = 14 * 86400.0
 
@@ -171,6 +182,42 @@ def _embedding_to_blob(vec: np.ndarray) -> bytes:
 def _blob_to_embedding(blob: bytes) -> np.ndarray:
     """Unpack BLOB back to float32 numpy array."""
     return np.frombuffer(blob, dtype=np.float32)
+
+
+def _split_embed_chunks(s: str) -> list[str]:
+    """Split text into <=EMBED_MAX_CHARS sentence-boundary chunks.
+
+    Module-level so the single-embed path (`_embed`) and the batch
+    migration path (`_embed_pending_all`) share one definition. Returns
+    a single-element list for anything already inside the cap, which is
+    the common case and keeps the fast path allocation-free.
+    """
+    if len(s) <= EMBED_MAX_CHARS:
+        return [s]
+    chunks: list[str] = []
+    cursor = 0
+    n = len(s)
+    while cursor < n:
+        end = min(cursor + EMBED_MAX_CHARS, n)
+        if end < n:
+            # Snap to the nearest sentence boundary in the last 400 chars
+            # of the chunk so we don't shred sentences mid-word.
+            window = s[cursor:end]
+            boundary = max(
+                window.rfind(". "),
+                window.rfind("! "),
+                window.rfind("? "),
+                window.rfind("\n"),
+            )
+            if boundary > EMBED_MAX_CHARS - 400:
+                end = cursor + boundary + 1
+        chunk = s[cursor:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        if end >= n:
+            break
+        cursor = max(end - EMBED_CHUNK_OVERLAP, cursor + 1)
+    return chunks or [s[:EMBED_MAX_CHARS]]
 
 
 # ─── content filtering ────────────────────────────────────────────────
@@ -634,7 +681,18 @@ class RAGMemoryManager:
             "SELECT content, embedding FROM vectors WHERE embedding IS NOT NULL"
         ).fetchall():
             try:
-                seed_text = str(r["content"] or "").strip()[:8000]
+                seed_text = str(r["content"] or "").strip()
+                # The [:8000] that used to be applied here matched _embed()'s
+                # old hard truncation. _embed() now hashes the FULL stripped
+                # text (chunking instead of truncating), so a truncated key
+                # never matches a lookup — every row over the old cutoff was
+                # seeded as dead weight and re-embedded on every restart.
+                # Short rows: key on the full text (identical to the old key).
+                # Long rows: skip entirely — their stored vector came from
+                # truncated text and is not a valid cache entry for the
+                # chunked derivation. They re-embed once, correctly.
+                if not seed_text or len(seed_text) > LEGACY_EMBED_TRUNCATE:
+                    continue
                 key = _hashlib.sha256(seed_text.encode("utf-8")).hexdigest()
                 self._db.execute(
                     "INSERT OR IGNORE INTO embed_cache "
@@ -780,7 +838,7 @@ class RAGMemoryManager:
     async def _embed(self, text: str) -> np.ndarray | None:
         """Generate embedding via ollama, cached on disk to SQLite.
 
-        Cache key is md5(normalized_text). The cache survives bot
+        Cache key is sha256(stripped_text). The cache survives bot
         restarts and is shared across processes (admin API, one-off
         scripts) since it lives in the same SQLite db.
 
@@ -791,7 +849,7 @@ class RAGMemoryManager:
         if not text:
             return None
         # Long-content handling. qwen3-embedding:0.6b has a 32k-token
-        # context window (≈128k chars). Past ~30000 chars we split into
+        # context window (≈128k chars). Past EMBED_MAX_CHARS we split into
         # sentence-boundary chunks, embed each, mean-pool the L2-normalized
         # vectors and re-normalize. This keeps long rows (pasted logs,
         # long articles) from being silently truncated by the old
@@ -799,40 +857,7 @@ class RAGMemoryManager:
         # 2026-08-09: chunking is the workaround for short-context
         # embedders, but we still want a safe cap before the embed API
         # itself refuses the input.
-
-        _MAX_EMBED_CHARS = 30000
-        _CHUNK_OVERLAP = 200
-
-        def _split_chunks(s: str) -> list[str]:
-            if len(s) <= _MAX_EMBED_CHARS:
-                return [s]
-            chunks: list[str] = []
-            cursor = 0
-            n = len(s)
-            while cursor < n:
-                end = min(cursor + _MAX_EMBED_CHARS, n)
-                if end < n:
-                    # Snap to the nearest sentence boundary in the
-                    # last 400 chars of the chunk so we don't shred
-                    # sentences mid-word.
-                    window = s[cursor:end]
-                    boundary = max(
-                        window.rfind(". "),
-                        window.rfind("! "),
-                        window.rfind("? "),
-                        window.rfind("\n"),
-                    )
-                    if boundary > _MAX_EMBED_CHARS - 400:
-                        end = cursor + boundary + 1
-                chunk = s[cursor:end].strip()
-                if chunk:
-                    chunks.append(chunk)
-                if end >= n:
-                    break
-                cursor = max(end - _CHUNK_OVERLAP, cursor + 1)
-            return chunks or [s[:_MAX_EMBED_CHARS]]
-
-        chunks_to_embed = _split_chunks(text)
+        chunks_to_embed = _split_embed_chunks(text)
 
         import hashlib
 
@@ -1013,16 +1038,44 @@ class RAGMemoryManager:
         """
         try:
             total_embedded = 0
+            # Rows that failed to embed stay embedding IS NULL, so a naive
+            # `while True` re-SELECTs the same batch forever when ollama is
+            # down or keeps rejecting a row. Track what we've already tried
+            # and stop when a pass makes no forward progress.
+            attempted: set[str] = set()
             while True:
-                rows = self._db.execute(
-                    "SELECT id, content FROM vectors WHERE embedding IS NULL LIMIT ?",
-                    (batch_size,),
-                ).fetchall()
+                rows = [
+                    r
+                    for r in self._db.execute(
+                        "SELECT id, content FROM vectors WHERE embedding IS NULL "
+                        "LIMIT ?",
+                        (batch_size * 4,),
+                    ).fetchall()
+                    if r["id"] not in attempted
+                ][:batch_size]
                 if not rows:
                     break
+                attempted.update(r["id"] for r in rows)
+
+                # Long rows need sentence-boundary chunking + mean-pooling,
+                # which the batch API can't express (one vector per input).
+                # They used to be silently truncated at 8000 chars here even
+                # though _embed() had already been raised to EMBED_MAX_CHARS
+                # — the batch path is a migration path, so those rows were
+                # permanently stored with a truncated vector. Route them
+                # through _embed_and_store (chunked, cached) instead.
+                long_rows = [
+                    r for r in rows if len(r["content"] or "") > EMBED_MAX_CHARS
+                ]
+                rows = [r for r in rows if len(r["content"] or "") <= EMBED_MAX_CHARS]
+                for row in long_rows:
+                    await self._embed_and_store(row["id"], row["content"])
+                    total_embedded += 1
+                if not rows:
+                    continue
 
                 # Batch embed: send all texts in one request
-                texts = [row["content"][:8000] for row in rows]
+                texts = [row["content"] for row in rows]
                 payload = {"model": EMBED_MODEL, "input": texts}
 
                 try:
@@ -1798,12 +1851,19 @@ class RAGMemoryManager:
     # Dedup by URL — re-fetching the same query doesn't double-store.
     # TTL is enforced at retrieval time, not via scheduled VACUUM.
 
-    def _prune_web_results_locked(self) -> int:
+    def _prune_web_results_locked(self, ttl_days: int | None = None) -> int:
         """LRU prune the web_result corpus. Caller holds self._lock.
 
+        Args:
+            ttl_days: override the TTL for this sweep. None → the
+                WEB_RESULT_DEFAULT_TTL_DAYS default. `store_web_results`
+                accepts a per-call ttl_days and threads it through here;
+                it used to be accepted, documented, and then silently
+                ignored because this method always read the constant.
+
         Returns the number of rows deleted. Two thresholds:
-          1. Older than TTL — anything past WEB_RESULT_DEFAULT_TTL_DAYS is
-             stale news anyway and the LLM doesn't need it.
+          1. Older than TTL — anything past the TTL is stale news anyway
+             and the LLM doesn't need it.
           2. Over WEB_RESULT_MAX_ROWS total — keep newest WEB_RESULT_MAX_ROWS
              by created_at, drop the rest.
 
@@ -1811,9 +1871,11 @@ class RAGMemoryManager:
         search that includes web_result (cheap, 1-2 SQL queries).
         """
         try:
+            effective_ttl = (
+                WEB_RESULT_DEFAULT_TTL_DAYS if ttl_days is None else max(0, ttl_days)
+            )
             ttl_cutoff = (
-                datetime.now(timezone.utc).timestamp()
-                - WEB_RESULT_DEFAULT_TTL_DAYS * 86400.0
+                datetime.now(timezone.utc).timestamp() - effective_ttl * 86400.0
             )
             deleted_ttl = self._db.execute(
                 "DELETE FROM vectors WHERE kind=? AND created_at < ?",
@@ -1886,7 +1948,14 @@ class RAGMemoryManager:
         # top result (cold) or ~0.5ms (cache hit) is the right tradeoff.
         # The whole `store_web_results` call holds no lock during the
         # embed phase; the INSERT happens inside the lock below.
-        embedded: list[tuple[dict, np.ndarray | None]] = []
+        # (result, vector, stored_content) triples. The text we EMBED and the
+        # text we STORE are deliberately different: the embed text repeats the
+        # title to weight it in the vector, but that repetition must not reach
+        # the row `content`, because `content` is what gets rendered into the
+        # system prompt. Storing the doubled title made the prompt show the
+        # title three times (once from metadata, twice from the snippet) and
+        # burned the snippet's char budget on repetition instead of the body.
+        embedded: list[tuple[dict, np.ndarray | None, str]] = []
         for r in top:
             title = str(r.get("title") or "").strip()
             body = str(r.get("body") or "").strip()
@@ -1895,29 +1964,26 @@ class RAGMemoryManager:
             embed_text = f"{title}\n{title}\n{body}".strip()[
                 :WEB_RESULT_EMBED_MAX_CHARS
             ]
+            stored_content = f"{title}\n{body}".strip()[:WEB_RESULT_EMBED_MAX_CHARS]
             vec = await self._embed(embed_text)
-            embedded.append((r, vec))
+            embedded.append((r, vec, stored_content))
         if not embedded:
             return 0
         async with self._lock:
             try:
                 self._db.execute("BEGIN IMMEDIATE")
                 # Prune stale rows first so we don't bloat the index.
-                self._prune_web_results_locked()
+                self._prune_web_results_locked(ttl_days=ttl_days)
 
                 import hashlib
 
                 now_iso = _utcnow_iso()
                 now_ts = time.time()
-                for r, vec in embedded:
+                for r, vec, stored_content in embedded:
                     if vec is None:
                         continue
                     title = str(r.get("title") or "").strip()
                     href = str(r.get("href") or "").strip()
-                    body = str(r.get("body") or "").strip()
-                    embed_text = f"{title}\n{title}\n{body}".strip()[
-                        :WEB_RESULT_EMBED_MAX_CHARS
-                    ]
                     content_hash = hashlib.sha256(
                         href.encode("utf-8")
                     ).hexdigest()
@@ -1946,7 +2012,7 @@ class RAGMemoryManager:
                                 "web_search",
                                 "",
                                 "web",
-                                embed_text,
+                                stored_content,
                                 content_hash,
                                 json.dumps(metadata),
                                 "global" if not scope_to_guild else "guild",
@@ -1996,11 +2062,16 @@ class RAGMemoryManager:
         and with TTL pruning applied at search time so stale rows never
         surface.
         """
-        try:
-            await self._lock.acquire()
+        # `async with` rather than acquire()/finally-release(): if the acquire
+        # itself is cancelled, the finally would call release() on a lock this
+        # task never held and raise RuntimeError, masking the cancellation.
+        #
+        # Deliberately prunes on the DEFAULT TTL, not on max_age_days:
+        # max_age_days is a per-read filter applied below, and a caller
+        # narrowing its own view must not delete rows other callers (and
+        # other guilds) still expect to be there.
+        async with self._lock:
             self._prune_web_results_locked()
-        finally:
-            self._lock.release()
         results = await self.rag_search(
             query,
             kinds=[WEB_RESULT_KIND],

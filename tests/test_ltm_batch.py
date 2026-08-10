@@ -70,7 +70,8 @@ def test_apply_ltm_batch_edits(tmp_path):
 def test_apply_ltm_batch_mixed(tmp_path):
     async def run():
         mgr = RAGMemoryManager(str(tmp_path))
-        mid1 = await mgr.add_long_term_memory("keep me")
+        # id unused — this entry is asserted by content below.
+        await mgr.add_long_term_memory("keep me")
         mid2 = await mgr.add_long_term_memory("edit me")
         mid3 = await mgr.add_long_term_memory("delete me")
         result = await mgr.apply_ltm_batch([
