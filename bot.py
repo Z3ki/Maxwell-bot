@@ -6956,6 +6956,8 @@ class MaxwellBot(commands.Bot):
             embed_url = getattr(embed, "url", None) or ""
             if _YouTubeTool._is_youtube_url(embed_url):
                 continue
+            embed_has_image = False
+            pending_video = []
             for label, url in self._embed_media_urls(embed):
                 if media_count >= 5:
                     break
@@ -6966,7 +6968,23 @@ class MaxwellBot(commands.Bot):
                 item = await self._download_embed_media(
                     url, filename, max_size, message_id
                 )
-                if item:
+                if not item:
+                    continue
+                mime = str(item.get("mime_type") or "")
+                if mime.startswith("video/"):
+                    pending_video.append(item)
+                    continue
+                media.append(item)
+                media_count += 1
+                if mime.startswith("image/"):
+                    embed_has_image = True
+            # GIF/klipy embeds ship a thumbnail + mp4. OpenCode Go rejects
+            # video_url, so keep the thumbnail and drop the video when we
+            # already have an image from this embed.
+            if not embed_has_image:
+                for item in pending_video:
+                    if media_count >= 5:
+                        break
                     media.append(item)
                     media_count += 1
         if text_blocks:

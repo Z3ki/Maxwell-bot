@@ -30,6 +30,8 @@ def _sse_chunks_for(body):
     delta = {"role": message.get("role", "assistant")}
     if "content" in message:
         delta["content"] = message.get("content") or ""
+    if message.get("reasoning_content"):
+        delta["reasoning_content"] = message["reasoning_content"]
     if message.get("tool_calls"):
         delta["tool_calls"] = [
             {"index": i, **tc} for i, tc in enumerate(message["tool_calls"])
@@ -78,6 +80,21 @@ class FakeToolCallResponse(FakeResponse):
                         "role": "assistant",
                         "content": "",
                         "tool_calls": [{"id": "1"}],
+                    }
+                }
+            ]
+        }
+
+
+class FakeReasoningOnlyResponse(FakeResponse):
+    def _json_body(self):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "reasoning_content": "pong",
                     }
                 }
             ]
@@ -528,3 +545,86 @@ def test_image_unsupported_skips_text_only_primary():
     ]
     assert session.payloads[0]["model"] == "deepseek-v4-flash"
     assert session.payloads[1]["model"] == "fallback-model"
+
+
+def test_reasoning_only_response_is_not_treated_as_empty():
+    provider = OllamaProvider("http://example.test", "deepseek-v4-flash", 10, 0.5)
+    provider.available = True
+    session = FakeSession(FakeReasoningOnlyResponse())
+    provider._session = session
+
+    async def run():
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "hi"}]
+        )
+        assert message["content"] == "pong"
+
+    asyncio.run(run())
+    assert len(session.payloads) == 1
+
+
+def test_403_region_error_skips_to_fallback_without_retry():
+    provider = OllamaProvider(
+        "http://primary.test/v1",
+        "deepseek-v4-flash",
+        10,
+        0.5,
+        fallback_base_url="http://fallback.test/v1",
+        fallback_model="fallback-model",
+        fallback_api_key="fk",
+    )
+    provider.available = True
+    provider._cooldown_seconds = 60
+    session = FakeSequenceSession(
+        [
+            FakeErrorResponse(
+                403,
+                '{"type":"error","error":{"type":"RegionError","message":"China opt in"}}',
+            ),
+            FakeResponse(),
+        ]
+    )
+    provider._session = session
+
+    async def run():
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "hi"}]
+        )
+        assert message["content"] == "ok"
+
+    asyncio.run(run())
+    assert session.urls == [
+        "http://primary.test/v1/chat/completions",
+        "http://fallback.test/v1/chat/completions",
+    ]
+    assert session.payloads[1]["model"] == "fallback-model"
+
+
+def test_video_parts_are_not_attached():
+    provider = OllamaProvider(
+        "http://primary.test/v1",
+        "deepseek-v4-flash",
+        10,
+        0.5,
+        vision_model="mimo-v2.5",
+    )
+    provider.available = True
+    session = FakeSession()
+    provider._session = session
+
+    async def run():
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "look"}],
+            media=[
+                {"b64": "vid", "mime_type": "video/mp4"},
+                {"b64": "img", "mime_type": "image/png"},
+            ],
+        )
+        assert message["content"] == "ok"
+
+    asyncio.run(run())
+    content = session.payloads[0]["messages"][0]["content"]
+    types = [p.get("type") for p in content if isinstance(p, dict)]
+    assert "image_url" in types
+    assert "video_url" not in types
+    assert session.payloads[0]["model"] == "mimo-v2.5"

@@ -786,11 +786,10 @@ async def _read_sse_response(
                         and custom_buffer is not None
                         and custom_buffer.has_pending_json
                     ):
-                        # Skip the callback entirely — the JSON is
-                        # being held unreleased in the buffer and will
-                        # surface via run_one()'s update() once parsed.
-                        continue
-                    if tok_content or tok_reason:
+                        # Skip the on_token callback only — do NOT continue the
+                        # choice loop or we drop native tool_calls on this delta.
+                        pass
+                    elif tok_content or tok_reason:
                         try:
                             on_token(
                                 {
@@ -1543,7 +1542,14 @@ class OllamaProvider:
                             }
                         )
                     elif mime.startswith("video/"):
-                        parts.append({"type": "video_url", "video_url": {"url": uri}})
+                        # OpenCode Go / DeepSeek reject video_url ("unknown
+                        # variant"). Thumbnails and ffmpeg JPEG frames still
+                        # attach as image_url.
+                        logger.info(
+                            "Skipping video_url part (%s); sending image frames/thumbnails only",
+                            mime,
+                        )
+                        continue
                     else:
                         continue
                     attached += 1
@@ -1728,6 +1734,27 @@ class OllamaProvider:
                             raise RuntimeError(
                                 f"Provider {endpoint.name} degraded and no fallback available: {error_text[:200]}"
                             )
+                        # Region / geo blocks (DeepSeek V4 Flash China opt-in)
+                        # are not transient. Don't burn a 2s retry on the same
+                        # endpoint — cool it and fail over immediately.
+                        if resp.status == 403 or "regionerror" in error_text.lower():
+                            self._cool_endpoint(endpoint.name)
+                            logger.warning(
+                                "Provider endpoint %s returned 403/region block; skipping to fallback",
+                                endpoint.name,
+                            )
+                            if await self._retry_after_attempt(
+                                attempt,
+                                endpoint,
+                                f"Provider {endpoint.name} 403",
+                                max_attempts=max_attempts,
+                                fast_fallback=True,
+                                has_media=has_media,
+                            ):
+                                continue
+                            raise RuntimeError(
+                                f"Provider {endpoint.name} 403 and no fallback available: {error_text[:200]}"
+                            )
                         # Auto-clamp max_tokens on context overflow (OpenRouter returns 400)
                         if (
                             resp.status == 400
@@ -1907,7 +1934,25 @@ class OllamaProvider:
                         raise RuntimeError("No response from provider")
 
                     message = choices[0].get("message", {})
-                    content = message.get("content", "")
+                    content = message.get("content") or ""
+                    if isinstance(content, list):
+                        content = "".join(
+                            str(p.get("text") or "")
+                            if isinstance(p, dict)
+                            else (p if isinstance(p, str) else "")
+                            for p in content
+                        )
+                    # DeepSeek / reasoning models often put the visible reply
+                    # in reasoning_content with content=null. Treat that as a
+                    # real answer instead of "empty response" retries.
+                    if not content:
+                        content = (
+                            message.get("reasoning_content")
+                            or message.get("reasoning")
+                            or ""
+                        )
+                        if content:
+                            message["content"] = content
                     if not content and not message.get("tool_calls"):
                         # Some providers return choices with a message but blank content (e.g. refusals, reasoning-only, or bugs).
                         logger.warning(

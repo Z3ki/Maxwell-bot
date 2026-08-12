@@ -109,7 +109,7 @@ def test_rem_event_log_flush_waits_for_in_flight_save(tmp_path):
                 "content": "keep",
             }
         )
-        log._do_save()
+        asyncio.create_task(log._do_save())
         await log.started.wait()
 
         flush_task = asyncio.create_task(log.flush())
