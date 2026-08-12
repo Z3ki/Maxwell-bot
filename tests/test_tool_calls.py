@@ -94,6 +94,26 @@ def test_strip_tool_payload_leaks_catches_leaking_variants():
     assert strip_tool_payload_leaks("normal <div>ok</div>") == "normal <div>ok</div>"
 
 
+def test_strip_tool_payload_leaks_removes_deepseek_dsml_invoke():
+    leaked = (
+        '<｜｜DSML｜｜invoke name="send_message">\n'
+        '<｜｜DSML｜｜parameter name="reasoning" string="true">'
+        "Z3ki is calling me out</｜｜DSML｜｜parameter>\n"
+        '<｜｜DSML｜｜parameter name="content" string="true">'
+        "my bad</｜｜DSML｜｜parameter>\n"
+        "</｜｜DSML｜｜invoke>"
+    )
+    assert strip_tool_payload_leaks(leaked).strip() == ""
+    assert strip_tool_payload_leaks("ok " + leaked).strip() == "ok"
+    ascii_leaked = (
+        '<|DSML|invoke name="send_message">'
+        '<parameter name="content">hi</parameter>'
+        "</invoke>"
+    )
+    assert "hi" not in strip_tool_payload_leaks(ascii_leaked)
+    assert strip_tool_payload_leaks('<invoke name="send_message">secret</invoke> visible').strip() == "visible"
+
+
 # ---- reasoning param injection on every tool schema ----
 
 

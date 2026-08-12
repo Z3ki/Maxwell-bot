@@ -964,6 +964,27 @@ TOKEN_ARTIFACT_RE = re.compile(
     r"<\|/?[^|]*tool[^|]*\|?>",
     re.IGNORECASE,
 )
+# DeepSeek V4 DSML tool markup. Logged leak 2026-08-12 in post-your-slop:
+#   <｜｜DSML｜｜invoke name="send_message">
+#   <｜｜DSML｜｜parameter name="reasoning" string="true">...
+# ASCII <|DSML|> and fullwidth ｜ variants both show up.
+_DSML_INVOKE_BLOCK_RE = re.compile(
+    r"<invoke\b[^>]*>.*?(?:</invoke\s*>|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_DSML_PARAMETER_BLOCK_RE = re.compile(
+    r"<parameter\b[^>]*>.*?(?:</parameter\s*>|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_DSML_WRAPPED_INVOKE_RE = re.compile(
+    r"<[^>]*DSML[^>]*invoke[^>]*>.*?(?:</[^>]*DSML[^>]*invoke[^>]*>|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_DSML_WRAPPED_PARAMETER_RE = re.compile(
+    r"<[^>]*DSML[^>]*parameter[^>]*>.*?(?:</[^>]*DSML[^>]*parameter[^>]*>|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_DSML_TAG_RE = re.compile(r"</?[^>]{0,40}DSML[^>]{0,160}>", re.IGNORECASE)
 
 
 def _strip_leading_reasoning_json(text: str) -> str:
@@ -980,6 +1001,23 @@ def _strip_leading_reasoning_json(text: str) -> str:
     ):
         return text
     return text[end:].lstrip()
+
+
+def _strip_dsml_tool_leaks(text: str) -> str:
+    """Drop DeepSeek DSML invoke/parameter dumps from visible replies."""
+    cleaned = str(text or "")
+    before = cleaned
+    cleaned = _DSML_WRAPPED_INVOKE_RE.sub("", cleaned)
+    cleaned = _DSML_WRAPPED_PARAMETER_RE.sub("", cleaned)
+    cleaned = _DSML_INVOKE_BLOCK_RE.sub("", cleaned)
+    cleaned = _DSML_PARAMETER_BLOCK_RE.sub("", cleaned)
+    cleaned = _DSML_TAG_RE.sub("", cleaned)
+    if cleaned != before:
+        logger.warning(
+            "Stripped DeepSeek DSML tool leak (%d chars)",
+            len(before) - len(cleaned),
+        )
+    return cleaned
 
 
 def strip_model_artifact_leaks(text: str, strip_pipe_markers: bool = True) -> str:
@@ -1123,6 +1161,7 @@ def strip_tool_payload_leaks(text: str) -> str:
     # This must happen before token stripping so that <|tool_foo|>body  removes body too.
     cleaned = str(text or "")
     original = cleaned
+    cleaned = _strip_dsml_tool_leaks(cleaned)
     ranges = [
         (start, end)
         for start, end, *_rest in _iter_top_level_tool_tags(cleaned, KNOWN_TOOL_NAMES)
