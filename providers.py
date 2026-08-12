@@ -1069,6 +1069,21 @@ def _is_usage_exhausted_error(status: int, error_text: str) -> bool:
     return is_quota_marker
 
 
+def _is_media_unsupported_error(status: int, error_text: str) -> bool:
+    """True when the endpoint rejected image/video/audio content parts."""
+    text = (error_text or "").lower()
+    if status == 404 and "support input audio" in text:
+        return True
+    if status in (400, 404) and (
+        "unknown variant `image_url`" in text
+        or "unknown variant `video_url`" in text
+        or "unknown variant `input_audio`" in text
+        or ("expected `text`" in text and "image_url" in text)
+    ):
+        return True
+    return False
+
+
 @dataclass(frozen=True)
 class ProviderEndpoint:
     name: str
@@ -1095,6 +1110,10 @@ class OllamaProvider:
         fallback_disable_reasoning: bool = True,
         retry_attempts: int = 3,
         enable_audio_input: bool = False,
+        vision_base_url: str = "",
+        vision_model: str = "",
+        vision_api_key: str = "",
+        vision_disable_reasoning: bool = True,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -1116,6 +1135,18 @@ class OllamaProvider:
                     fallback_model,
                     fallback_api_key.strip(),
                     fallback_disable_reasoning,
+                )
+            )
+        # Appended last so text routing can keep treating index 1 as fallback.
+        vision_model = (vision_model or "").strip()
+        if vision_model:
+            self._endpoints.append(
+                ProviderEndpoint(
+                    "vision",
+                    (vision_base_url or self.base_url).rstrip("/"),
+                    vision_model,
+                    (vision_api_key or self.api_key).strip(),
+                    vision_disable_reasoning,
                 )
             )
         self._session = None
@@ -1151,22 +1182,62 @@ class OllamaProvider:
             return {}
         return {"Authorization": f"Bearer {api_key}"}
 
+    def _endpoint_named(self, name: str) -> ProviderEndpoint | None:
+        for ep in self._endpoints:
+            if ep.name == name:
+                return ep
+        return None
+
+    def _media_endpoint_order(self) -> list[ProviderEndpoint]:
+        """Vision first, then the rest. Text-only primaries 400 on image_url."""
+        vision = self._endpoint_named("vision")
+        ordered: list[ProviderEndpoint] = []
+        if vision is not None:
+            ordered.append(vision)
+        for ep in self._endpoints:
+            if ep not in ordered:
+                ordered.append(ep)
+        return ordered
+
     def _attempt_endpoint(
-        self, attempt: int, *, fast_fallback: bool = False
+        self,
+        attempt: int,
+        *,
+        fast_fallback: bool = False,
+        has_media: bool = False,
     ) -> ProviderEndpoint:
-        if len(self._endpoints) < 2:
-            return self._endpoints[0]
+        primary = self._endpoint_named("primary") or self._endpoints[0]
+        fallback = self._endpoint_named("fallback")
+        vision = self._endpoint_named("vision")
+
+        if has_media and vision is not None:
+            if fast_fallback:
+                natural = vision if attempt == 1 else (fallback or vision)
+            else:
+                # Attempts 1-2: vision model; 3+: text fallback if configured.
+                natural = vision if attempt <= 2 else (fallback or vision)
+            if self._is_endpoint_cooling(natural.name):
+                for ep in (vision, fallback, primary):
+                    if ep is not None and not self._is_endpoint_cooling(ep.name):
+                        return ep
+            return natural
+
+        if fallback is None:
+            return primary
         if fast_fallback:
-            natural = self._endpoints[0] if attempt == 1 else self._endpoints[1]
+            natural = primary if attempt == 1 else fallback
         else:
             # Attempt 1 and 2: primary (main)
             # Attempt 3 and beyond: fallback (second provider)
-            natural = self._endpoints[0] if attempt <= 2 else self._endpoints[1]
+            natural = primary if attempt <= 2 else fallback
         # If the chosen endpoint is rate-limit cooling and a healthy alternative
         # exists, skip straight to it. This turns a 429 on a shared upstream into
         # an immediate fallback instead of a doomed same-endpoint retry.
+        # Skip the vision endpoint on text turns — it is reserved for media.
         if self._is_endpoint_cooling(natural.name):
             for ep in self._endpoints:
+                if ep.name == "vision":
+                    continue
                 if not self._is_endpoint_cooling(ep.name):
                     return ep
         return natural
@@ -1487,19 +1558,24 @@ class OllamaProvider:
         last_error = None
         last_usage_error = None
         has_media = bool(payload_media)
-        # Endpoints that rejected this call's media (e.g. "No endpoints found that
-        # support input audio"). We steer retries away from them so an audio
-        # request never dies on a text-only fallback model.
-        audio_broken: set[str] = set()
+        # Endpoints that rejected this call's media (text-only models 400 on
+        # image_url; OpenRouter 404s on input audio). Steer retries away so a
+        # GIF never dies on DeepSeek then Ling.
+        media_broken: set[str] = set()
         max_attempts = (
             min(self.retry_attempts, 2)
             if fast_fallback and len(self._endpoints) > 1
             else self.retry_attempts
         )
         for attempt in range(1, max_attempts + 1):
-            endpoint = self._attempt_endpoint(attempt, fast_fallback=fast_fallback)
-            if endpoint.name in audio_broken:
-                usable = [e for e in self._endpoints if e.name not in audio_broken]
+            endpoint = self._attempt_endpoint(
+                attempt, fast_fallback=fast_fallback, has_media=has_media
+            )
+            if endpoint.name in media_broken:
+                order = (
+                    self._media_endpoint_order() if has_media else self._endpoints
+                )
+                usable = [e for e in order if e.name not in media_broken]
                 if usable:
                     endpoint = usable[0]
             data = self._request_payload(
@@ -1555,6 +1631,7 @@ class OllamaProvider:
                             f"Provider {endpoint.name} 503",
                             max_attempts=max_attempts,
                             fast_fallback=fast_fallback,
+                            has_media=has_media,
                         ):
                             continue
                         raise RuntimeError(
@@ -1582,6 +1659,7 @@ class OllamaProvider:
                                 f"Provider {endpoint.name} usage exhausted",
                                 max_attempts=max_attempts,
                                 fast_fallback=fast_fallback,
+                                has_media=has_media,
                             ):
                                 continue
                             raise last_usage_error
@@ -1591,6 +1669,7 @@ class OllamaProvider:
                             f"Provider {endpoint.name} 429 rate limited",
                             max_attempts=max_attempts,
                             fast_fallback=fast_fallback,
+                            has_media=has_media,
                         ):
                             continue
                         raise RuntimeError(
@@ -1605,27 +1684,25 @@ class OllamaProvider:
                             headers_ms,
                             len(error_text),
                         )
-                        # Fallback model can't handle audio input (OpenRouter 404:
-                        # "No endpoints found that support input audio"). Don't die
-                        # here — mark the endpoint broken and retry an audio-capable
-                        # one (typically the primary) instead.
-                        if (
-                            has_media
-                            and resp.status == 404
-                            and "support input audio" in error_text.lower()
+                        # Text-only models 400 on image_url/video_url; some
+                        # fallbacks 404 on input audio. Mark broken and retry a
+                        # media-capable endpoint (typically vision / primary).
+                        if has_media and _is_media_unsupported_error(
+                            resp.status, error_text
                         ):
-                            audio_broken.add(endpoint.name)
+                            media_broken.add(endpoint.name)
+                            order = self._media_endpoint_order()
                             usable = [
-                                e for e in self._endpoints if e.name not in audio_broken
+                                e for e in order if e.name not in media_broken
                             ]
                             if not usable:
                                 raise RuntimeError(
-                                    f"Provider {endpoint.name} audio-unsupported and no alternatives: {error_text[:200]}"
+                                    f"Provider {endpoint.name} media-unsupported and no alternatives: {error_text[:200]}"
                                 )
                             if attempt >= max_attempts:
                                 max_attempts = attempt + len(usable)
                             logger.warning(
-                                "Provider endpoint %s cannot handle audio media; retrying with %s",
+                                "Provider endpoint %s cannot handle media; retrying with %s",
                                 endpoint.name,
                                 usable[0].name,
                             )
@@ -1645,6 +1722,7 @@ class OllamaProvider:
                                 f"Provider {endpoint.name} degraded",
                                 max_attempts=max_attempts,
                                 fast_fallback=fast_fallback,
+                                has_media=has_media,
                             ):
                                 continue
                             raise RuntimeError(
@@ -1693,6 +1771,7 @@ class OllamaProvider:
                                         f"Context overflow, clamped max_tokens to {safe_output}",
                                         max_attempts=max_attempts,
                                         fast_fallback=fast_fallback,
+                                        has_media=has_media,
                                     ):
                                         continue
                         # max_tokens is *output* length, not context. Models like
@@ -1743,6 +1822,7 @@ class OllamaProvider:
                                         f"Output cap, clamped max_tokens to {safe_output}",
                                         max_attempts=max_attempts,
                                         fast_fallback=True,
+                                        has_media=has_media,
                                     ):
                                         continue
                         raise RuntimeError(
@@ -1785,6 +1865,7 @@ class OllamaProvider:
                             f"Provider {endpoint.name} returned non-dict JSON body",
                             max_attempts=max_attempts,
                             fast_fallback=fast_fallback,
+                            has_media=has_media,
                         ):
                             continue
                         raise RuntimeError(
@@ -1843,6 +1924,7 @@ class OllamaProvider:
                             f"Provider {endpoint.name} returned empty response",
                             max_attempts=max_attempts,
                             fast_fallback=fast_fallback,
+                            has_media=has_media,
                         ):
                             continue
                         raise RuntimeError("Empty response from provider")
@@ -1879,6 +1961,7 @@ class OllamaProvider:
                     f"Provider {endpoint.name} timeout",
                     max_attempts=max_attempts,
                     fast_fallback=fast_fallback,
+                    has_media=has_media,
                 ):
                     continue
                 raise RuntimeError(
@@ -1894,6 +1977,7 @@ class OllamaProvider:
                     f"Provider {endpoint.name} error: {e}",
                     max_attempts=max_attempts,
                     fast_fallback=fast_fallback,
+                    has_media=has_media,
                 ):
                     continue
                 raise
@@ -1905,6 +1989,7 @@ class OllamaProvider:
                     f"Provider {endpoint.name} error: {e}",
                     max_attempts=max_attempts,
                     fast_fallback=fast_fallback,
+                    has_media=has_media,
                 ):
                     continue
                 raise RuntimeError(f"Provider call failed: {last_error}") from e
@@ -1920,11 +2005,14 @@ class OllamaProvider:
         *,
         max_attempts: int = None,
         fast_fallback: bool = False,
+        has_media: bool = False,
     ) -> bool:
         max_attempts = max_attempts or self.retry_attempts
         if attempt >= max_attempts:
             return False
-        next_endpoint = self._attempt_endpoint(attempt + 1, fast_fallback=fast_fallback)
+        next_endpoint = self._attempt_endpoint(
+            attempt + 1, fast_fallback=fast_fallback, has_media=has_media
+        )
         if self._should_wait_before_retry(endpoint, next_endpoint):
             wait = attempt * 2
             logger.warning(

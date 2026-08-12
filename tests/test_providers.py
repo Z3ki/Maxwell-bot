@@ -433,3 +433,98 @@ def test_degraded_endpoint_skips_to_fallback_without_retry():
 
     asyncio.run(run2())
     assert session2.urls == ["http://fallback.test/v1/chat/completions"]
+
+
+def test_vision_model_used_for_images():
+    provider = OllamaProvider(
+        "http://primary.test/v1",
+        "deepseek-v4-flash",
+        10,
+        0.5,
+        api_key="pk",
+        fallback_base_url="http://fallback.test/v1",
+        fallback_model="fallback-model",
+        fallback_api_key="fk",
+        vision_model="mimo-v2.5",
+    )
+    provider.available = True
+    session = FakeSession()
+    provider._session = session
+
+    async def run():
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "look"}],
+            media=[{"b64": "abc", "mime_type": "image/png"}],
+            model="deepseek-v4-flash",
+        )
+        assert message["content"] == "ok"
+
+    asyncio.run(run())
+    assert session.urls == ["http://primary.test/v1/chat/completions"]
+    assert session.payloads[0]["model"] == "mimo-v2.5"
+    content = session.payloads[0]["messages"][0]["content"]
+    assert isinstance(content, list)
+    assert any(part.get("type") == "image_url" for part in content)
+
+
+def test_vision_model_not_used_for_text():
+    provider = OllamaProvider(
+        "http://primary.test/v1",
+        "deepseek-v4-flash",
+        10,
+        0.5,
+        fallback_base_url="http://fallback.test/v1",
+        fallback_model="fallback-model",
+        fallback_api_key="fk",
+        vision_model="mimo-v2.5",
+    )
+    provider.available = True
+    session = FakeSession()
+    provider._session = session
+
+    async def run():
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "hi"}]
+        )
+        assert message["content"] == "ok"
+
+    asyncio.run(run())
+    assert session.payloads[0]["model"] == "deepseek-v4-flash"
+
+
+def test_image_unsupported_skips_text_only_primary():
+    provider = OllamaProvider(
+        "http://primary.test/v1",
+        "deepseek-v4-flash",
+        10,
+        0.5,
+        fallback_base_url="http://fallback.test/v1",
+        fallback_model="fallback-model",
+        fallback_api_key="fk",
+    )
+    provider.available = True
+    session = FakeSequenceSession(
+        [
+            FakeErrorResponse(
+                400,
+                '{"error":{"message":"unknown variant `image_url`, expected `text`"}}',
+            ),
+            FakeResponse(),
+        ]
+    )
+    provider._session = session
+
+    async def run():
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "look"}],
+            media=[{"b64": "abc", "mime_type": "image/png"}],
+        )
+        assert message["content"] == "ok"
+
+    asyncio.run(run())
+    assert session.urls == [
+        "http://primary.test/v1/chat/completions",
+        "http://fallback.test/v1/chat/completions",
+    ]
+    assert session.payloads[0]["model"] == "deepseek-v4-flash"
+    assert session.payloads[1]["model"] == "fallback-model"

@@ -77,6 +77,15 @@ class Config:
     OLLAMA_FALLBACK_DISABLE_REASONING = _bool_env(
         "OLLAMA_FALLBACK_DISABLE_REASONING", True
     )
+    # Optional vision/omni model for image/video (and audio, if enabled) turns.
+    # Text-only primaries like deepseek-v4-flash 400 on image_url; when this is
+    # set, media requests go here first. Blank base/key inherit the primary.
+    OLLAMA_VISION_BASE_URL = os.getenv("OLLAMA_VISION_BASE_URL", "").strip()
+    OLLAMA_VISION_API_KEY = os.getenv("OLLAMA_VISION_API_KEY", "").strip()
+    OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "").strip()
+    OLLAMA_VISION_DISABLE_REASONING = _bool_env(
+        "OLLAMA_VISION_DISABLE_REASONING", True
+    )
     OLLAMA_RETRY_ATTEMPTS = _int_env(
         "OLLAMA_RETRY_ATTEMPTS", 3, min_value=1, max_value=10
     )

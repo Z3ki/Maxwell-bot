@@ -2108,6 +2108,10 @@ class MaxwellBot(commands.Bot):
             fallback_disable_reasoning=self.config.OLLAMA_FALLBACK_DISABLE_REASONING,
             retry_attempts=self.config.OLLAMA_RETRY_ATTEMPTS,
             enable_audio_input=self.config.ENABLE_AUDIO_INPUT,
+            vision_base_url=self.config.OLLAMA_VISION_BASE_URL,
+            vision_model=self.config.OLLAMA_VISION_MODEL,
+            vision_api_key=self.config.OLLAMA_VISION_API_KEY,
+            vision_disable_reasoning=self.config.OLLAMA_VISION_DISABLE_REASONING,
         )
 
     async def _get_autonomy_provider(self):
