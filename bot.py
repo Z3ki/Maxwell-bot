@@ -7705,21 +7705,20 @@ class MaxwellBot(commands.Bot):
         try:
             platform = MaxwellBot._message_tool_platform(self, message)
             openai_tools = self._build_openai_tools(platform)
-            # Custom streaming tool-call protocol: when enabled, the model
-            # emits the tool call as a bare JSON object on its own line
-            # ({"name": "...", "arguments": {...}}) instead of via the
-            # native tools= API. We then parse it from the text stream as it
-            # arrives. In this mode we DON'T pass native tools= to the
-            # provider (the model would then emit a proper tool_call which, on
-            # minimax-m3, arrives as one bundled final delta — defeating the
-            # purpose). The system prompt (appended below) explains the
-            # protocol to the model.
-            custom_tool_calls = bool(
-                getattr(self.config, "CUSTOM_TOOL_CALLS", False)
-                and self._control.get("tools_enabled", True)
-                and not (openai_tools is None or len(openai_tools) == 0)
+            # Native OpenAI tools= always wins when native_tool_calls is on.
+            # MAXWELL_CUSTOM_TOOL_CALLS is a workaround for providers that
+            # cannot stream native tool_calls (historically Ollama minimax-m3);
+            # it must not drop the tools= payload on a native-capable endpoint
+            # (OpenCode Zen Go / GLM-5.2).
+            custom_tool_calls, provider_tools = self._select_tool_protocol(
+                openai_tools
             )
-            provider_tools = None if custom_tool_calls else (openai_tools or None)
+            logger.info(
+                "Tool protocol native=%s custom=%s tool_count=%s",
+                bool(provider_tools) and not custom_tool_calls,
+                custom_tool_calls,
+                len(openai_tools or []),
+            )
             # When the custom protocol is on, instruct the model to emit the
             # tool call as a single-line bare JSON object. The provider parses
             # it from the text stream incrementally, so the bot's progress
@@ -9112,6 +9111,26 @@ class MaxwellBot(commands.Bot):
             control.get("tools_enabled", True)
         )
 
+    def _select_tool_protocol(
+        self, openai_tools: list | None
+    ) -> tuple[bool, list | None]:
+        """Pick custom-JSON vs native tools=.
+
+        Returns ``(custom_tool_calls, provider_tools)``. Native ``tools=``
+        wins whenever native function calling is enabled; the custom
+        bare-JSON protocol is only used when native is off.
+        """
+        tools = openai_tools or None
+        native_on = self._native_tools_enabled() and bool(tools)
+        custom = bool(
+            getattr(self.config, "CUSTOM_TOOL_CALLS", False)
+            and self._control.get("tools_enabled", True)
+            and not native_on
+        )
+        if native_on:
+            return False, tools
+        return custom, None
+
     def _build_openai_tools(self, platform: str = "discord") -> list[dict]:
         if not self.tools or not self._native_tools_enabled():
             return []
@@ -9163,7 +9182,7 @@ class MaxwellBot(commands.Bot):
             "unnecessary tool call is small; the cost of skipping a needed one is a "
             "broken/dropped response the user sees as the bot ignoring them.\n"
         )
-        if self._control.get("native_tool_calls", False):
+        if self._control.get("native_tool_calls", True):
             return (
                 header + mandatory + "\n\n## How to call\n"
                 "Use the provider's native function/tool calling API (OpenAI-style tool_call). "

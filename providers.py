@@ -550,6 +550,29 @@ async def _safe_call(cb, *args, **kwargs):
         logger.debug("SSE callback raised: %s", e)
 
 
+def _append_tool_call_arguments(slot: dict, incoming) -> None:
+    """Accumulate streaming tool-call arguments onto ``slot``.
+
+    OpenAI streams ``function.arguments`` as JSON *strings* that must be
+    concatenated. Some OpenAI-compatible providers (GLM-5.x on OpenCode
+    Zen Go) send a finished object in one delta instead — concatenating
+    that with ``""`` raises TypeError and kills the turn.
+    """
+    fn = slot.setdefault("function", {})
+    existing = fn.get("arguments") or ""
+    if isinstance(existing, dict):
+        existing = json.dumps(existing, ensure_ascii=False)
+    if isinstance(incoming, dict):
+        fn["arguments"] = json.dumps(incoming, ensure_ascii=False)
+        return
+    if incoming is None:
+        fn["arguments"] = existing
+        return
+    fn["arguments"] = existing + (
+        incoming if isinstance(incoming, str) else str(incoming)
+    )
+
+
 def _extract_partial_reasoning(arguments: str) -> str:
     """Best-effort pull of the `reasoning` string from a PARTIAL arguments JSON.
 
@@ -560,6 +583,11 @@ def _extract_partial_reasoning(arguments: str) -> str:
     """
     if not arguments:
         return ""
+    if isinstance(arguments, dict):
+        r = arguments.get("reasoning")
+        return r if isinstance(r, str) else ""
+    if not isinstance(arguments, str):
+        arguments = str(arguments)
     # Fast path: the whole arguments object already parses.
     try:
         parsed = json.loads(arguments)
@@ -567,7 +595,7 @@ def _extract_partial_reasoning(arguments: str) -> str:
             r = parsed.get("reasoning")
             if isinstance(r, str):
                 return r
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError, TypeError):
         pass
     # Partial JSON: grab the reasoning value once its closing quote landed.
     m = _PARTIAL_REASONING_RE.search(arguments)
@@ -871,9 +899,7 @@ async def _read_sse_response(
                                 except Exception:
                                     pass
                         if fn.get("arguments"):
-                            slot["function"]["arguments"] = (
-                                slot["function"].get("arguments", "") + fn["arguments"]
-                            )
+                            _append_tool_call_arguments(slot, fn["arguments"])
                             # Surface the model's reasoning mid-stream so the
                             # progress message shows intent (not a static
                             # "generating…") during long argument generation
@@ -1757,7 +1783,7 @@ class OllamaProvider:
                 if isinstance(part, dict) and part.get("type") != "text"
             )
             logger.info(
-                "Provider timing start endpoint=%s model=%s attempt=%s/%s messages=%s media_parts=%s timeout=%s max_tokens=%s reasoning_disabled=%s",
+                "Provider timing start endpoint=%s model=%s attempt=%s/%s messages=%s media_parts=%s timeout=%s max_tokens=%s reasoning_disabled=%s tools=%s",
                 endpoint.name,
                 data.get("model"),
                 attempt,
@@ -1767,6 +1793,7 @@ class OllamaProvider:
                 timeout,
                 data.get("max_tokens"),
                 bool(data.get("reasoning")),
+                len(data.get("tools") or []),
             )
             try:
                 async with session.post(

@@ -10,7 +10,9 @@ sanitizer plus the new reasoning contract:
 - ``_sanitize_reasoning`` strips tag-wrapped thoughts the model sneakily emits.
 """
 
-from bot import strip_tool_payload_leaks
+from types import SimpleNamespace
+
+from bot import MaxwellBot, strip_tool_payload_leaks
 from tool_registry import extract_reasoning, _sanitize_reasoning, record_reasoning
 from tool_schemas import REASONING_PARAM, build_openai_tools
 
@@ -233,6 +235,31 @@ def test_record_reasoning_empty_reasoning_records_a_stub():
 
     asyncio.run(run())
     assert bot.traces[0]["thoughts"] == "(no reasoning provided by the model)"
+
+
+def test_select_tool_protocol_native_wins_over_custom():
+    """CUSTOM_TOOL_CALLS must not drop tools= when native function calling is on."""
+    tools = [{"type": "function", "function": {"name": "send_message"}}]
+    bot = SimpleNamespace(
+        config=SimpleNamespace(CUSTOM_TOOL_CALLS=True),
+        _control={"native_tool_calls": True, "tools_enabled": True},
+    )
+    bot._native_tools_enabled = lambda: True
+    custom, provider_tools = MaxwellBot._select_tool_protocol(bot, tools)
+    assert custom is False
+    assert provider_tools == tools
+
+
+def test_select_tool_protocol_custom_only_when_native_off():
+    tools = [{"type": "function", "function": {"name": "send_message"}}]
+    bot = SimpleNamespace(
+        config=SimpleNamespace(CUSTOM_TOOL_CALLS=True),
+        _control={"native_tool_calls": False, "tools_enabled": True},
+    )
+    bot._native_tools_enabled = lambda: False
+    custom, provider_tools = MaxwellBot._select_tool_protocol(bot, tools)
+    assert custom is True
+    assert provider_tools is None
 
 
 def test_record_reasoning_does_not_raise_on_bot_failure():

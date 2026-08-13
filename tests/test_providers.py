@@ -314,6 +314,78 @@ def test_429_rate_limit_skips_to_fallback_without_doomed_retry():
     assert session2.urls == ["http://fallback.test/v1/chat/completions"]
 
 
+def test_append_tool_call_arguments_accepts_dict():
+    """GLM-style providers send arguments as an object, not a JSON string."""
+    from providers import _append_tool_call_arguments, _extract_partial_reasoning
+
+    slot = {"function": {"name": "send_message", "arguments": ""}}
+    _append_tool_call_arguments(
+        slot,
+        {"reasoning": "replying", "content": "hello"},
+    )
+    args = slot["function"]["arguments"]
+    assert isinstance(args, str)
+    parsed = json.loads(args)
+    assert parsed["content"] == "hello"
+    assert _extract_partial_reasoning(args) == "replying"
+    assert _extract_partial_reasoning(parsed) == "replying"
+
+
+def test_append_tool_call_arguments_concatenates_strings():
+    from providers import _append_tool_call_arguments
+
+    slot = {"function": {"name": "send_message", "arguments": ""}}
+    _append_tool_call_arguments(slot, '{"reasoning": "')
+    _append_tool_call_arguments(slot, 'hi", "content": "yo"}')
+    assert slot["function"]["arguments"] == '{"reasoning": "hi", "content": "yo"}'
+
+
+def test_read_sse_native_tool_call_with_object_arguments():
+    """A single SSE delta with arguments as a dict must not TypeError."""
+    from providers import _read_sse_response
+
+    frame = {
+        "choices": [
+            {
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "send_message",
+                                "arguments": {
+                                    "reasoning": "answering",
+                                    "content": "hi",
+                                },
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ]
+    }
+
+    class Resp:
+        content = _FakeAsyncStream(
+            [f"data: {json.dumps(frame)}\n\ndata: [DONE]\n\n".encode("utf-8")]
+        )
+
+    async def run():
+        return await _read_sse_response(Resp())
+
+    merged = asyncio.run(run())
+    calls = merged["choices"][0]["message"]["tool_calls"]
+    assert len(calls) == 1
+    assert calls[0]["function"]["name"] == "send_message"
+    parsed = json.loads(calls[0]["function"]["arguments"])
+    assert parsed["content"] == "hi"
+
+
 def test_generate_response_returns_native_tool_calls():
     """generate_response now supports native tool_calls instead of rejecting them."""
     provider = OllamaProvider("http://example.test", "base-model", 10, 0.5)
