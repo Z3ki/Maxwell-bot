@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import sqlite3
 import time
 import uuid
@@ -42,6 +43,38 @@ logger = logging.getLogger(__name__)
 EMBED_MODEL = "qwen3-embedding:0.6b"
 EMBED_DIM = 1024
 OLLAMA_EMBED_URL = "http://localhost:11434/api/embed"
+
+
+def _float_env(name: str, default: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+# The local qwen3 embedder is CPU-bound. RAG is optional context, so a query
+# must never wait for the full background-embedding timeout before the actual
+# LLM reply can start. A short cooldown also prevents the three searches in a
+# single prompt from retrying the same unavailable/slow endpoint.
+RAG_QUERY_TIMEOUT_SECONDS = _float_env(
+    "MAXWELL_RAG_QUERY_TIMEOUT_SECONDS", 1.5, 0.25, 10.0
+)
+RAG_QUERY_FAILURE_COOLDOWN_SECONDS = _float_env(
+    "MAXWELL_RAG_QUERY_FAILURE_COOLDOWN_SECONDS", 15.0, 1.0, 120.0
+)
+EMBED_HTTP_TIMEOUT_SECONDS = _float_env(
+    "MAXWELL_EMBED_HTTP_TIMEOUT_SECONDS", 30.0, 2.0, 180.0
+)
+MAX_BACKGROUND_EMBED_TASKS = int(
+    max(
+        1,
+        min(
+            64,
+            _float_env("MAXWELL_MAX_BACKGROUND_EMBED_TASKS", 8.0, 1.0, 64.0),
+        ),
+    )
+)
 
 # Long-content embedding. Past EMBED_MAX_CHARS we split into sentence-boundary
 # chunks, embed each, and mean-pool. Module-level (not local to _embed) so the
@@ -512,10 +545,24 @@ class RAGMemoryManager:
         # in-flight embeds are silently dropped and rows stay embedding=NULL)
         # and so tests don't spam "coroutine ignored GeneratorExit".
         self._embed_tasks: set[asyncio.Task] = set()
+        # If the local embedder is unavailable or too slow, don't retry it for
+        # every RAG search in the same turn (or every concurrent turn).
+        self._query_embed_disabled_until = 0.0
         self._init_db()
 
-    def _spawn(self, coro) -> asyncio.Task:
-        """Create a tracked background task for embed work."""
+    def _spawn(self, coro) -> asyncio.Task | None:
+        """Create a bounded, tracked background task for embed work."""
+        if len(self._embed_tasks) >= MAX_BACKGROUND_EMBED_TASKS:
+            # The row remains embedding=NULL and can be picked up by a later
+            # maintenance pass. Dropping work here is safer than allowing a
+            # message burst to build an unbounded queue behind Ollama.
+            with contextlib.suppress(Exception):
+                coro.close()
+            logger.debug(
+                "Skipping background embed: %s tasks already queued",
+                MAX_BACKGROUND_EMBED_TASKS,
+            )
+            return None
         task = asyncio.ensure_future(coro)
         self._embed_tasks.add(task)
         task.add_done_callback(self._embed_tasks.discard)
@@ -898,7 +945,7 @@ class RAGMemoryManager:
                     async with session.post(
                         OLLAMA_EMBED_URL,
                         json=payload,
-                        timeout=aiohttp.ClientTimeout(total=90),
+                        timeout=aiohttp.ClientTimeout(total=EMBED_HTTP_TIMEOUT_SECONDS),
                     ) as resp:
                         if resp.status != 200:
                             body = await resp.text()
@@ -981,6 +1028,44 @@ class RAGMemoryManager:
             logger.warning(f"Embedding failed: {e}")
             return None
 
+    async def _embed_for_query(self, query: str) -> np.ndarray | None:
+        """Best-effort query embedding with a strict interactive deadline.
+
+        Semantic memory improves a reply but is never worth holding the
+        channel response lock while a CPU-only Ollama request queues behind
+        background work. Once a request times out/fails, briefly open-circuit
+        query embedding so the other RAG searches in the same turn return
+        immediately too.
+        """
+        if not str(query or "").strip():
+            return None
+        now = time.monotonic()
+        if now < self._query_embed_disabled_until:
+            return None
+        try:
+            vec = await asyncio.wait_for(
+                self._embed(query),
+                timeout=RAG_QUERY_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            self._query_embed_disabled_until = (
+                time.monotonic() + RAG_QUERY_FAILURE_COOLDOWN_SECONDS
+            )
+            logger.warning(
+                "RAG query embedding timed out after %.2fs; "
+                "skipping semantic memory for %.0fs",
+                RAG_QUERY_TIMEOUT_SECONDS,
+                RAG_QUERY_FAILURE_COOLDOWN_SECONDS,
+            )
+            return None
+        if vec is None:
+            self._query_embed_disabled_until = (
+                time.monotonic() + RAG_QUERY_FAILURE_COOLDOWN_SECONDS
+            )
+            return None
+        self._query_embed_disabled_until = 0.0
+        return vec
+
     def _maybe_prune_embed_cache(self):
         """Cap the on-disk embed cache at 10k entries by LRU eviction.
 
@@ -1009,7 +1094,7 @@ class RAGMemoryManager:
         except Exception:
             pass
 
-    async def _embed_and_store(self, row_id: str, text: str):
+    async def _embed_and_store(self, row_id: str, text: str) -> bool:
         """Generate embedding and update the row in DB."""
         vec = await self._embed(text)
         if vec is not None:
@@ -1018,6 +1103,8 @@ class RAGMemoryManager:
                 "UPDATE vectors SET embedding=? WHERE id=?",
                 (blob, row_id),
             )
+            return True
+        return False
 
     async def _embed_pending(self, kind: str):
         """Embed all rows of a kind that don't have embeddings yet."""
@@ -1026,10 +1113,12 @@ class RAGMemoryManager:
                 "SELECT id, content FROM vectors WHERE kind=? AND embedding IS NULL",
                 (kind,),
             ).fetchall()
+            embedded = 0
             for row in rows:
-                await self._embed_and_store(row["id"], row["content"])
+                if await self._embed_and_store(row["id"], row["content"]):
+                    embedded += 1
             if rows:
-                logger.info(f"Embedded {len(rows)} pending {kind} vectors")
+                logger.info(f"Embedded {embedded}/{len(rows)} pending {kind} vectors")
         except Exception as e:
             logger.warning(f"Failed to embed pending {kind}: {e}")
 
@@ -1072,8 +1161,8 @@ class RAGMemoryManager:
                 ]
                 rows = [r for r in rows if len(r["content"] or "") <= EMBED_MAX_CHARS]
                 for row in long_rows:
-                    await self._embed_and_store(row["id"], row["content"])
-                    total_embedded += 1
+                    if await self._embed_and_store(row["id"], row["content"]):
+                        total_embedded += 1
                 if not rows:
                     continue
 
@@ -1098,8 +1187,10 @@ class RAGMemoryManager:
                             )
                             # Fall back to one-by-one
                             for row in rows:
-                                await self._embed_and_store(row["id"], row["content"])
-                                total_embedded += 1
+                                if await self._embed_and_store(
+                                    row["id"], row["content"]
+                                ):
+                                    total_embedded += 1
                             continue
                         data = await resp.json()
                         embeddings = data.get("embeddings") or []
@@ -1120,8 +1211,8 @@ class RAGMemoryManager:
                     logger.warning(f"Batch embed failed: {e}")
                     # Fall back to one-by-one for this batch
                     for row in rows:
-                        await self._embed_and_store(row["id"], row["content"])
-                        total_embedded += 1
+                        if await self._embed_and_store(row["id"], row["content"]):
+                            total_embedded += 1
 
             if total_embedded:
                 logger.info(f"Batch-embedded {total_embedded} vectors total")
@@ -2141,7 +2232,7 @@ class RAGMemoryManager:
             guild_id, timestamp, similarity, score (recency-decayed),
             metadata.
         """
-        query_vec = await self._embed(query)
+        query_vec = await self._embed_for_query(query)
         if query_vec is None:
             return []
 
@@ -2378,21 +2469,37 @@ class RAGMemoryManager:
     # ─── lifecycle ────────────────────────────────────────────────
 
     async def flush(self):
-        """Await in-flight embed tasks so shutdown doesn't drop rows.
+        """Give in-flight embed tasks a short shutdown grace period.
 
         SQLite writes are autocommit; the only pending state is background
         embedding. Previously these were fire-and-forget tasks: on PM2
         restart / bot shutdown the loop closed mid-embed, rows stayed with
         embedding=NULL, and tests spammed "coroutine ignored GeneratorExit"
-        and "Event loop is closed" warnings.
+        and "Event loop is closed" warnings. Never let a slow/unavailable
+        Ollama hold PM2 past its graceful-shutdown deadline; unembedded rows
+        remain NULL and are safe to retry later.
         """
         if self._embed_tasks:
             pending = list(self._embed_tasks)
             try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True),
+                    timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Timed out waiting for %s background embed tasks during shutdown; "
+                    "cancelling them",
+                    len(pending),
+                )
+                for task in pending:
+                    if not task.done():
+                        task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
             except Exception as e:
                 logger.warning(f"Error awaiting embed tasks during flush: {e}")
-        self._embed_tasks.clear()
+            finally:
+                self._embed_tasks.clear()
 
     def load_from_disk(self):
         """No-op — DB is loaded in __init__. Kept for interface compat."""

@@ -347,3 +347,25 @@ def test_recall_max_age_days_filters_without_deleting(tmp_path, monkeypatch):
         "SELECT COUNT(*) AS c FROM vectors WHERE kind=?", (WEB_RESULT_KIND,)
     ).fetchone()["c"]
     assert remaining == 1, "a narrow max_age_days read deleted rows from the store"
+
+
+def test_rag_query_timeout_opens_short_circuit(tmp_path, monkeypatch):
+    """A slow embedder must not make the same turn retry three times."""
+    mgr = RAGMemoryManager(str(tmp_path))
+    calls = {"count": 0}
+
+    async def slow_embed(_text):
+        calls["count"] += 1
+        await asyncio.sleep(0.05)
+        return _unit_vec(42)
+
+    monkeypatch.setattr(mgr, "_embed", slow_embed)
+    monkeypatch.setattr(rag_memory, "RAG_QUERY_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(rag_memory, "RAG_QUERY_FAILURE_COOLDOWN_SECONDS", 5.0)
+
+    first = _run(mgr.rag_search("slow query", kinds=["ltm"]))
+    second = _run(mgr.rag_search("slow query", kinds=["message"]))
+
+    assert first == []
+    assert second == []
+    assert calls["count"] == 1
