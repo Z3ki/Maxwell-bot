@@ -628,3 +628,219 @@ def test_video_parts_are_not_attached():
     assert "image_url" in types
     assert "video_url" not in types
     assert session.payloads[0]["model"] == "mimo-v2.5"
+
+
+# ---- deterministic 4xx handling: failover, media fallback, temperature ----
+
+
+def test_openrouter_image_unsupported_routes_to_another_endpoint():
+    """404 'No endpoints found that support image input' must not kill the turn."""
+    provider = OllamaProvider(
+        "http://primary.test/v1",
+        "text-only-model",
+        10,
+        0.5,
+        fallback_base_url="http://fallback.test/v1",
+        fallback_model="fallback-model",
+    )
+    provider.available = True
+    session = FakeSequenceSession(
+        [
+            FakeErrorResponse(
+                404,
+                '{"error":{"message":"No endpoints found that support image input","code":404}}',
+            ),
+            FakeResponse(),
+        ]
+    )
+    provider._session = session
+
+    async def run():
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "look"}],
+            media=[{"b64": "img", "mime_type": "image/png"}],
+        )
+        assert message["content"] == "ok"
+
+    asyncio.run(run())
+    assert len(session.payloads) == 2
+    # Second attempt went to a different endpoint, still carrying the image.
+    assert session.urls[0] != session.urls[1]
+    parts = session.payloads[1]["messages"][0]["content"]
+    assert any(p.get("type") == "image_url" for p in parts if isinstance(p, dict))
+
+
+def test_media_unsupported_everywhere_falls_back_to_text_only():
+    """When no endpoint accepts the image, answer the text instead of failing."""
+    provider = OllamaProvider("http://primary.test/v1", "text-only-model", 10, 0.5)
+    provider.available = True
+    session = FakeSequenceSession(
+        [
+            FakeErrorResponse(
+                404,
+                '{"error":{"message":"No endpoints found that support image input"}}',
+            ),
+            FakeResponse(),
+        ]
+    )
+    provider._session = session
+
+    async def run():
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "what is this"}],
+            media=[{"b64": "img", "mime_type": "image/png"}],
+        )
+        assert message["content"] == "ok"
+
+    asyncio.run(run())
+    assert len(session.payloads) == 2
+    retried = session.payloads[1]["messages"][0]["content"]
+    assert isinstance(retried, str)
+    assert "what is this" in retried
+    assert "attachment(s) omitted" in retried
+
+
+def test_unhandled_4xx_fails_over_instead_of_raising():
+    """404 model-unavailable on primary used to kill the turn outright."""
+    provider = OllamaProvider(
+        "http://primary.test/v1",
+        "dead-slug",
+        10,
+        0.5,
+        fallback_base_url="http://fallback.test/v1",
+        fallback_model="fallback-model",
+    )
+    provider.available = True
+    session = FakeSequenceSession(
+        [
+            FakeErrorResponse(
+                404,
+                '{"error":{"message":"This model is unavailable for free.","code":404}}',
+            ),
+            FakeResponse(),
+        ]
+    )
+    provider._session = session
+
+    async def run():
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "hi"}]
+        )
+        assert message["content"] == "ok"
+
+    asyncio.run(run())
+    assert len(session.payloads) == 2
+    assert session.payloads[1]["model"] == "fallback-model"
+
+
+def test_unhandled_4xx_single_endpoint_still_raises():
+    """With nowhere to fail over to, the error must surface."""
+    provider = OllamaProvider("http://primary.test/v1", "dead-slug", 10, 0.5)
+    provider.available = True
+    session = FakeSession(FakeErrorResponse(404, '{"error":{"message":"gone"}}'))
+    provider._session = session
+
+    async def run():
+        with pytest.raises(RuntimeError, match="Provider API error: 404"):
+            await provider.generate_chat_completion([{"role": "user", "content": "hi"}])
+
+    asyncio.run(run())
+    assert len(session.payloads) == 1
+
+
+def test_temperature_constraint_is_learned_and_resent():
+    """'only 0.6 is allowed' must resend at 0.6, not burn retries."""
+    provider = OllamaProvider("http://primary.test/v1", "picky-model", 10, 0.9)
+    provider.available = True
+    session = FakeSequenceSession(
+        [
+            FakeErrorResponse(
+                400,
+                '{"error":{"message":"Upstream request failed: [invalid_request_error] '
+                'invalid temperature: only 0.6 is allowed for this model"}}',
+            ),
+            FakeResponse(),
+        ]
+    )
+    provider._session = session
+
+    async def run():
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "hi"}]
+        )
+        assert message["content"] == "ok"
+
+    asyncio.run(run())
+    assert session.payloads[0]["temperature"] == 0.9
+    assert session.payloads[1]["temperature"] == 0.6
+    # Learned, so the next call starts at the accepted value.
+    assert provider._endpoint_temperatures["primary"] == 0.6
+
+
+def test_media_incapable_endpoint_is_remembered_across_calls():
+    """A text-only fallback shouldn't be re-offered images on every turn."""
+    provider = OllamaProvider(
+        "http://primary.test/v1",
+        "primary-model",
+        10,
+        0.5,
+        fallback_base_url="http://fallback.test/v1",
+        fallback_model="text-only-fallback",
+        vision_base_url="http://vision.test/v1",
+        vision_model="vision-model",
+    )
+    provider.available = True
+    session = FakeSequenceSession(
+        [
+            FakeErrorResponse(
+                404,
+                '{"error":{"message":"No endpoints found that support image input"}}',
+            ),
+            FakeResponse(),
+        ]
+    )
+    provider._session = session
+    # Pretend the vision endpoint is the one that answered second.
+    provider._media_incapable.add("fallback")
+
+    async def run():
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "look"}],
+            media=[{"b64": "img", "mime_type": "image/png"}],
+        )
+        assert message["content"] == "ok"
+
+    asyncio.run(run())
+    # Never routed the image to the known text-only fallback.
+    assert all("fallback.test" not in url for url in session.urls)
+
+
+def test_media_incapable_is_learned_from_a_404():
+    provider = OllamaProvider(
+        "http://primary.test/v1",
+        "primary-model",
+        10,
+        0.5,
+        fallback_base_url="http://fallback.test/v1",
+        fallback_model="text-only-fallback",
+    )
+    provider.available = True
+    session = FakeSequenceSession(
+        [
+            FakeErrorResponse(
+                404,
+                '{"error":{"message":"No endpoints found that support image input"}}',
+            ),
+            FakeResponse(),
+        ]
+    )
+    provider._session = session
+
+    async def run():
+        await provider.generate_chat_completion(
+            [{"role": "user", "content": "look"}],
+            media=[{"b64": "img", "mime_type": "image/png"}],
+        )
+
+    asyncio.run(run())
+    assert "primary" in provider._media_incapable

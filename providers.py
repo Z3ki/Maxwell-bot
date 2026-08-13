@@ -13,6 +13,20 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
+# asyncio holds only a weak reference to a running task, so a bare
+# `create_task(...)` whose result nobody keeps can be garbage-collected
+# mid-flight and silently cancel the work. Keep a strong ref until it's done.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+def _fire_and_forget(coro) -> asyncio.Task:
+    """Schedule a detached task that can't be GC'd before it finishes."""
+    task = asyncio.create_task(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return task
+
+
 # Matches the `reasoning` string value inside a (possibly partial) tool-call
 # arguments JSON. Models emit reasoning as the FIRST field, well before any
 # huge field like create_site's `body`, so once this regex matches the value's
@@ -528,7 +542,7 @@ def _safe_parse_tool_call_candidate(candidate: str):
 
 async def _safe_call(cb, *args, **kwargs):
     """Await an SSE callback, swallowing any exception. Used for fire-and-forget
-    callbacks (``asyncio.create_task(_safe_call(...))``) so a buggy callback
+    callbacks (``_fire_and_forget(_safe_call(...))``) so a buggy callback
     never crashes the streaming read loop."""
     try:
         await cb(*args, **kwargs)
@@ -673,7 +687,7 @@ async def _read_sse_response(
             if _orig is not None:
                 _orig(nm)
             try:
-                asyncio.create_task(_safe_call(_cb, nm, ""))
+                _fire_and_forget(_safe_call(_cb, nm, ""))
             except RuntimeError:
                 pass
         custom_buffer._on_partial_name = _bridge
@@ -835,7 +849,7 @@ async def _read_sse_response(
                                 cb = on_tool_call_name
                                 args = (slot["function"]["name"], "")
                                 try:
-                                    asyncio.create_task(_safe_call(cb, *args))
+                                    _fire_and_forget(_safe_call(cb, *args))
                                 except RuntimeError:
                                     with contextlib.suppress(Exception):
                                         await cb(*args)
@@ -877,7 +891,7 @@ async def _read_sse_response(
                                     cb = on_tool_call_name
                                     args = (slot["function"]["name"], reason)
                                     try:
-                                        asyncio.create_task(_safe_call(cb, *args))
+                                        _fire_and_forget(_safe_call(cb, *args))
                                     except RuntimeError:
                                         with contextlib.suppress(Exception):
                                             await cb(*args)
@@ -1000,6 +1014,14 @@ class ProviderUsageExhaustedError(RuntimeError):
     user_message = USAGE_EXHAUSTED_MESSAGE
 
 
+class ProviderRequestError(RuntimeError):
+    """A deterministic non-2xx that every available endpoint already rejected.
+
+    Retrying with the same payload reproduces it exactly, so the retry loop
+    re-raises this instead of sleeping through its remaining attempts.
+    """
+
+
 class ProviderResult(str):
     """A ``str`` subclass carrying per-call ``tool_calls`` / ``usage``.
 
@@ -1080,7 +1102,92 @@ def _is_media_unsupported_error(status: int, error_text: str) -> bool:
         or ("expected `text`" in text and "image_url" in text)
     ):
         return True
+    # OpenRouter phrases a text-only routing failure as a bare 404:
+    #   {"error":{"message":"No endpoints found that support image input"}}
+    # This has no `image_url` token in it, so the checks above missed it and
+    # every image turn hard-failed instead of falling back (logged 2026-08-12).
+    if status in (400, 404) and "no endpoints found that support" in text:
+        return True
+    # Generic provider phrasings: "model does not support image input",
+    # "does not support images", "image input is not supported".
+    if status in (400, 404, 415, 422):
+        for media_word in ("image", "images", "audio", "video", "multimodal"):
+            if (
+                f"not support {media_word}" in text
+                or f"{media_word} input is not supported" in text
+                or f"{media_word} input not supported" in text
+            ):
+                return True
     return False
+
+
+# "invalid temperature: only 0.6 is allowed for this model" (Console Go via
+# OpenRouter). Deterministic — retrying the same payload burns every attempt
+# and then falls back for no reason, so parse the demanded value and resend.
+_TEMPERATURE_CONSTRAINT_RE = re.compile(
+    r"temperature[^.]{0,80}?only\s+([0-9]*\.?[0-9]+)\s+is\s+allowed",
+    re.IGNORECASE,
+)
+_TEMPERATURE_RANGE_RE = re.compile(
+    r"temperature[^.]{0,80}?(?:must be|should be)[^.]{0,40}?"
+    r"(?:between|in)\s+\[?\s*([0-9]*\.?[0-9]+)\s*(?:,|and|-)\s*([0-9]*\.?[0-9]+)",
+    re.IGNORECASE,
+)
+
+
+def _required_temperature(status: int, error_text: str) -> float | None:
+    """Extract the temperature an endpoint demands from a 400 body."""
+    if status != 400:
+        return None
+    text = error_text or ""
+    if "temperature" not in text.lower():
+        return None
+    match = _TEMPERATURE_CONSTRAINT_RE.search(text)
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
+    match = _TEMPERATURE_RANGE_RE.search(text)
+    if match:
+        try:
+            low, high = float(match.group(1)), float(match.group(2))
+        except ValueError:
+            return None
+        if low > high:
+            low, high = high, low
+        # Aim at the middle of the accepted band rather than an endpoint,
+        # which providers sometimes treat as exclusive.
+        return round((low + high) / 2, 3)
+    return None
+
+
+def _strip_media_parts(chat_messages: list[dict]) -> bool:
+    """Flatten multimodal content back to plain text. True if anything changed.
+
+    Last resort when every endpoint rejects the attachments: sending the text
+    alone beats dropping the user's message on the floor.
+    """
+    changed = False
+    for msg in chat_messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        texts = [
+            str(part.get("text", ""))
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        dropped = len(content) - len(texts)
+        merged = "\n".join(t for t in texts if t).strip()
+        if dropped > 0:
+            merged = (
+                f"{merged}\n[{dropped} attachment(s) omitted — "
+                "no available model could accept them]"
+            ).strip()
+        msg["content"] = merged
+        changed = True
+    return changed
 
 
 @dataclass(frozen=True)
@@ -1160,6 +1267,16 @@ class OllamaProvider:
         # model's small output cap doesn't cripple other endpoints/concurrent
         # requests that previously got mutated via self.max_tokens.
         self._endpoint_output_caps: dict[str, int] = {}
+        # Same idea for models that accept exactly one temperature (Console Go
+        # rejects anything but 0.6 with a 400). Learned once, applied up front.
+        self._endpoint_temperatures: dict[str, float] = {}
+        # Endpoints that have proven they cannot accept attachments (e.g. a
+        # text-only fallback like inclusionai/ling-3.0-flash 404ing with "No
+        # endpoints found that support image input"). Remembered across calls
+        # so every subsequent image turn skips them instead of re-paying for
+        # the same round-trip. Whether an endpoint's model is multimodal does
+        # not change between requests, so this never needs to expire.
+        self._media_incapable: set[str] = set()
         # Per-endpoint rate-limit cooldown: name -> monotonic expiry. While an
         # endpoint is cooling, _attempt_endpoint steers to an alternative (if
         # any) so a rate-limited upstream isn't retried immediately.
@@ -1196,7 +1313,10 @@ class OllamaProvider:
         for ep in self._endpoints:
             if ep not in ordered:
                 ordered.append(ep)
-        return ordered
+        # Endpoints already known to reject attachments go last rather than
+        # being dropped: if they're all we have left, a doomed try still beats
+        # refusing to send anything.
+        return sorted(ordered, key=lambda ep: ep.name in self._media_incapable)
 
     def _attempt_endpoint(
         self,
@@ -1210,6 +1330,10 @@ class OllamaProvider:
         vision = self._endpoint_named("vision")
 
         if has_media and vision is not None:
+            # A fallback that has already proven text-only is not a media
+            # option; sending it an image_url just buys another 404.
+            if fallback is not None and fallback.name in self._media_incapable:
+                fallback = None
             if fast_fallback:
                 natural = vision if attempt == 1 else (fallback or vision)
             else:
@@ -1285,12 +1409,20 @@ class OllamaProvider:
                 endpoint.name,
                 endpoint.model,
             )
+        effective_temperature = (
+            self.temperature if temperature is None else temperature
+        )
+        # An endpoint that already rejected our temperature gets its demanded
+        # value up front instead of another guaranteed 400.
+        forced_temperature = self._endpoint_temperatures.get(endpoint.name)
+        if forced_temperature is not None:
+            effective_temperature = forced_temperature
         data = {
             "model": (model or endpoint.model)
             if endpoint.name == "primary"
             else endpoint.model,
             "messages": chat_messages,
-            "temperature": self.temperature if temperature is None else temperature,
+            "temperature": effective_temperature,
             "stream": True,
         }
         # Always include max_tokens from config or override
@@ -1568,6 +1700,10 @@ class OllamaProvider:
         # image_url; OpenRouter 404s on input audio). Steer retries away so a
         # GIF never dies on DeepSeek then Ling.
         media_broken: set[str] = set()
+        # Endpoints that returned a deterministic non-2xx (bad model slug,
+        # unsupported params). Retrying them with the same payload just repeats
+        # the error, so they're excluded from the rest of this call.
+        dead: set[str] = set()
         max_attempts = (
             min(self.retry_attempts, 2)
             if fast_fallback and len(self._endpoints) > 1
@@ -1577,11 +1713,15 @@ class OllamaProvider:
             endpoint = self._attempt_endpoint(
                 attempt, fast_fallback=fast_fallback, has_media=has_media
             )
-            if endpoint.name in media_broken:
+            if endpoint.name in media_broken or endpoint.name in dead:
                 order = (
                     self._media_endpoint_order() if has_media else self._endpoints
                 )
-                usable = [e for e in order if e.name not in media_broken]
+                usable = [
+                    e
+                    for e in order
+                    if e.name not in media_broken and e.name not in dead
+                ]
                 if usable:
                     endpoint = usable[0]
             data = self._request_payload(
@@ -1697,11 +1837,28 @@ class OllamaProvider:
                             resp.status, error_text
                         ):
                             media_broken.add(endpoint.name)
+                            # Model capability, not a transient fault — remember
+                            # it so later turns skip this endpoint for media.
+                            self._media_incapable.add(endpoint.name)
                             order = self._media_endpoint_order()
                             usable = [
                                 e for e in order if e.name not in media_broken
                             ]
                             if not usable:
+                                # Every endpoint refused the attachments. Drop
+                                # them and answer the text instead of failing
+                                # the whole turn.
+                                if _strip_media_parts(chat_messages):
+                                    logger.warning(
+                                        "No endpoint accepts this media; retrying text-only: %s",
+                                        error_text[:200],
+                                    )
+                                    has_media = False
+                                    media_broken.clear()
+                                    max_attempts = max(
+                                        max_attempts, attempt + len(self._endpoints)
+                                    )
+                                    continue
                                 raise RuntimeError(
                                     f"Provider {endpoint.name} media-unsupported and no alternatives: {error_text[:200]}"
                                 )
@@ -1852,7 +2009,52 @@ class OllamaProvider:
                                         has_media=has_media,
                                     ):
                                         continue
-                        raise RuntimeError(
+                        # Some models accept exactly one temperature and 400 on
+                        # anything else. Learn it and resend to the SAME endpoint
+                        # rather than burning retries / falling back needlessly.
+                        required_temp = _required_temperature(resp.status, error_text)
+                        if (
+                            required_temp is not None
+                            and self._endpoint_temperatures.get(endpoint.name)
+                            != required_temp
+                        ):
+                            logger.warning(
+                                "Provider endpoint %s requires temperature=%s; resending",
+                                endpoint.name,
+                                required_temp,
+                            )
+                            # Recorded per-endpoint only. Assigning the local
+                            # `temperature` override instead would carry this
+                            # endpoint's constraint onto every other endpoint
+                            # this call later touches.
+                            self._endpoint_temperatures[endpoint.name] = required_temp
+                            if attempt >= max_attempts:
+                                max_attempts = attempt + 1
+                            continue
+                        # Anything else non-2xx used to die right here with no
+                        # failover, so a 404 "model unavailable for free" on the
+                        # primary killed the whole turn while a healthy fallback
+                        # sat unused (logged 2026-08-07). The body is
+                        # deterministic, so hand the call to a *different*
+                        # endpoint — repeating it here would just 404 again.
+                        # No _cool_endpoint(): a 400 from our own payload would
+                        # otherwise park all traffic on the fallback for a full
+                        # minute. Failing over for this call is enough.
+                        dead.add(endpoint.name)
+                        alternatives = [
+                            e for e in self._endpoints if e.name not in dead
+                        ]
+                        if alternatives:
+                            if attempt >= max_attempts:
+                                max_attempts = attempt + len(alternatives)
+                            logger.warning(
+                                "Provider endpoint %s returned %s; failing over to %s",
+                                endpoint.name,
+                                resp.status,
+                                alternatives[0].name,
+                            )
+                            continue
+                        raise ProviderRequestError(
                             f"Provider API error: {resp.status} - {error_text}"
                         )
 
@@ -2013,6 +2215,9 @@ class OllamaProvider:
                     f"Provider request timed out after {timeout}s"
                 ) from asyncio.TimeoutError
             except ProviderUsageExhaustedError:
+                raise
+            except ProviderRequestError:
+                # Deterministic and already failed over everywhere it could.
                 raise
             except RuntimeError as e:
                 last_error = e

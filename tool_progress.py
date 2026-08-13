@@ -46,6 +46,21 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# asyncio keeps only a weak reference to a running task. A detached
+# create_task() whose handle nobody holds can be collected mid-flight, which
+# here means a progress message that never gets edited to its final content or
+# never gets deleted. Hold a strong ref until the task completes.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+def _fire_and_forget(coro) -> asyncio.Task:
+    """Schedule a detached task that can't be GC'd before it finishes."""
+    task = asyncio.create_task(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return task
+
+
 # Minimum seconds between two edits of the same progress message. Discord
 # allows 5 edits / 5s; with 2s between edits we can do ~2-3 during a fast
 # tool call (plenty) and never hit the rate limit on slow ones.
@@ -586,7 +601,7 @@ class ToolProgress:
         posted = self._posted
         self._posted = None
         try:
-            asyncio.create_task(self._bg_delete(posted))
+            _fire_and_forget(self._bg_delete(posted))
         except RuntimeError:
             with contextlib.suppress(Exception):
                 asyncio.get_event_loop().create_task(posted.delete())
@@ -627,7 +642,7 @@ class ToolProgress:
             self._deferred_task.cancel()
             self._deferred_task = None
         try:
-            asyncio.create_task(self._background_transition(posted, content))
+            _fire_and_forget(self._background_transition(posted, content))
         except RuntimeError:
             with contextlib.suppress(Exception):
                 await posted.edit(content=content)
