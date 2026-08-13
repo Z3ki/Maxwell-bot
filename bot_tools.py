@@ -1796,6 +1796,102 @@ class ChangeAvatarTool(Tool):
             return f"Error: {e}"
 
 
+def _find_html_tag_end(text: str, start: int) -> int | None:
+    """Return the end of an HTML tag, respecting quoted attributes."""
+    quote = ""
+    for index in range(start + 1, len(text)):
+        char = text[index]
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in {"\"", "'"}:
+            quote = char
+        elif char == ">":
+            return index
+    return None
+
+
+def _normalize_site_body_text_escapes(body: str) -> str:
+    r"""Turn escaped whitespace into real whitespace in HTML text nodes.
+
+    A native tool call has two layers of JSON escaping. Models sometimes leave
+    the resulting ``\n`` characters in visible HTML text instead of emitting a
+    real line break, so a page displays ``\n`` literally. Normalize only text
+    outside tags, ``<script>``, and ``<style>`` blocks:
+
+    - visible HTML/``<pre>`` text gets real newlines, tabs, and carriage returns;
+    - JavaScript, CSS, JSON script blocks, and attributes stay byte-for-byte
+      intact because ``\n`` is often intentional there.
+
+    Base64 site bodies bypass this helper because base64 is the exact-bytes
+    escape hatch documented by the tool.
+    """
+    if not isinstance(body, str) or not body:
+        return body
+
+    out: list[str] = []
+    i = 0
+    changed = False
+    raw_tag = ""
+    whitespace = {"n": "\n", "r": "\r", "t": "\t"}
+
+    while i < len(body):
+        if raw_tag:
+            close = re.search(rf"</\s*{raw_tag}\s*>", body[i:], re.IGNORECASE)
+            if close is None:
+                out.append(body[i:])
+                break
+            close_end = i + close.end()
+            out.append(body[i:close_end])
+            i = close_end
+            raw_tag = ""
+            continue
+
+        # A literal ``<`` is common in code samples inside <pre>. Only treat
+        # it as markup when the next character can begin a real HTML tag;
+        # otherwise it remains ordinary text and escaped whitespace is still
+        # normalized after it.
+        if body[i] == "<" and (
+            i + 1 < len(body) and body[i + 1].isalpha()
+            or i + 1 < len(body) and body[i + 1] in {"/", "!", "?"}
+        ):
+            tag_end = _find_html_tag_end(body, i)
+            if tag_end is None:
+                # Malformed/truncated markup: don't reinterpret the rest of
+                # the body as text and potentially change code in it.
+                out.append(body[i:])
+                break
+            tag = body[i : tag_end + 1]
+            out.append(tag)
+            raw_open = re.match(r"<\s*(script|style)\b", tag, re.IGNORECASE)
+            if raw_open and not tag.rstrip().endswith("/>"):
+                raw_tag = raw_open.group(1)
+            i = tag_end + 1
+            continue
+
+        if body[i] == "\\":
+            slash_start = i
+            while i < len(body) and body[i] == "\\":
+                i += 1
+            slash_count = i - slash_start
+            if i < len(body) and body[i] in whitespace and slash_count % 2:
+                # Preserve paired backslashes and decode only the final,
+                # unpaired escape: ``\\n`` remains literal ``\n`` while
+                # ``\n`` becomes an actual newline.
+                out.append("\\" * (slash_count - 1))
+                out.append(whitespace[body[i]])
+                i += 1
+                changed = True
+            else:
+                out.append("\\" * slash_count)
+            continue
+
+        out.append(body[i])
+        i += 1
+
+    return "".join(out) if changed else body
+
+
 class CreateSiteTool(Tool):
     """Create a temporary website under the configured public /bot path."""
 
@@ -1816,6 +1912,9 @@ class CreateSiteTool(Tool):
             f"Create a temporary website at {self.base_url}/<name>. Auto-deletes after 24h. "
             "Params: name (short slug), title (headline), body (FULL HTML document — write complete "
             "<!DOCTYPE html> with all CSS/JS inline, written as-is with no template wrapping), "
+            "NEWLINE SAFETY: body is HTML, not JSON. In visible HTML text use real line breaks "
+            "or <br>; do not leave literal backslash-n (\\n) text. Keep \\n only inside "
+            "JavaScript/CSS strings when it is intentional. "
             "encoding (text|base64, default text). Inline <script>/<style> run; external https CDNs "
             "(cdnjs, jsdelivr, unpkg, Google Fonts) load. Use this for full websites, apps, games, "
             "calculators, demos, portfolios — anything interactive. Supports Discord server widgets "
@@ -1859,6 +1958,17 @@ class CreateSiteTool(Tool):
                 return f"Error: could not decode base64 site body: {e}"
         elif mode not in {"text", "utf8", "utf-8"}:
             return "Error: encoding must be text or base64"
+        elif not isinstance(body, str):
+            return "Error: site body must be a string"
+        else:
+            normalized_body = _normalize_site_body_text_escapes(body)
+            if normalized_body != body:
+                logger.info(
+                    "Normalized escaped whitespace in create_site body (%d chars changed)",
+                    sum(a != b for a, b in zip(body, normalized_body))
+                    + abs(len(body) - len(normalized_body)),
+                )
+                body = normalized_body
 
         # Sanitize name
         slug = re.sub(r"[^a-z0-9-]", "-", name.lower().strip())[:30].strip("-")

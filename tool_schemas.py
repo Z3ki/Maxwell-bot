@@ -161,7 +161,9 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "title": _str("Site title / headline"),
             "body": _str(
                 "FULL HTML document (DOCTYPE through closing tags). "
-                "Prefer this over stuffing HTML into chat."
+                "Prefer this over stuffing HTML into chat. In visible HTML text "
+                "use real line breaks or <br>, never literal \\n; keep \\n only "
+                "inside intentional JavaScript/CSS strings."
             ),
             "encoding": _str("text (default) or base64 for exact bytes"),
             "images": _str("Optional JSON list of local image paths to include"),
@@ -345,10 +347,83 @@ def build_openai_tools(
     return out
 
 
-def normalize_native_tool_calls(raw_calls: list | None) -> list[dict[str, Any]]:
-    """Normalize provider tool_calls into {id, name, arguments: dict, raw}."""
+def _decode_tool_arguments(raw_args: Any) -> dict[str, Any]:
+    """Decode the argument shapes used by OpenAI-compatible providers.
+
+    Providers are not consistent here: most send a JSON object string, some
+    send an object directly, and a few double-encode the object or append
+    harmless trailing markup. Keep that tolerance in one place so every
+    native tool call reaches dispatch with the same ``dict`` shape.
+    """
     import json
 
+    if isinstance(raw_args, dict):
+        return dict(raw_args)
+    if not isinstance(raw_args, str):
+        return {}
+
+    text = raw_args.strip().lstrip("\ufeff")
+    if not text:
+        return {}
+
+    # Unwrap at most two layers. This handles both:
+    #   arguments='{"content":"hi"}'
+    #   arguments='"{\\"content\\": \\"hi\\"}"'
+    # and provider wrappers such as {"arguments": {...}}.
+    current: Any = text
+    parsed_json = False
+    for _ in range(3):
+        if isinstance(current, dict):
+            if len(current) == 1:
+                for wrapper in ("arguments", "parameters"):
+                    if wrapper in current and isinstance(
+                        current[wrapper], (dict, str)
+                    ):
+                        current = current[wrapper]
+                        break
+                else:
+                    return dict(current)
+            else:
+                return dict(current)
+            continue
+        if not isinstance(current, str):
+            return {"_": current} if parsed_json else {}
+        candidate = current.strip()
+        try:
+            current = json.loads(candidate)
+            parsed_json = True
+            continue
+        except (json.JSONDecodeError, TypeError, ValueError):
+            # raw_decode accepts a valid JSON object followed by provider
+            # garbage, which has appeared in a few OpenAI-compatible streams.
+            try:
+                current, _end = json.JSONDecoder().raw_decode(candidate)
+                parsed_json = True
+                continue
+            except (json.JSONDecodeError, TypeError, ValueError):
+                break
+
+    if isinstance(current, dict):
+        return dict(current)
+    if parsed_json:
+        # Preserve the previous compatibility shape for valid JSON scalars.
+        return {"_": current}
+
+    # Last-resort compatibility for providers that emit a simple
+    # ``key=value`` string instead of JSON. This is intentionally limited to
+    # the old fallback behavior; it is never used for valid JSON.
+    args: dict[str, Any] = {}
+    for part in text.split():
+        if "=" in part:
+            key, value = part.split("=", 1)
+            args[key.strip()] = value.strip().strip("\"'")
+    if args:
+        return args
+    return {"content": text}
+
+
+def normalize_native_tool_calls(raw_calls: list | None) -> list[dict[str, Any]]:
+    """Normalize provider tool_calls into {id, name, arguments: dict, raw}."""
     normalized: list[dict[str, Any]] = []
     for i, call in enumerate(raw_calls or []):
         if not isinstance(call, dict):
@@ -361,28 +436,7 @@ def normalize_native_tool_calls(raw_calls: list | None) -> list[dict[str, Any]]:
         if name.lower().startswith("tool_"):
             name = name[5:]
         raw_args = fn.get("arguments", call.get("arguments", {}))
-        args: dict[str, Any]
-        if isinstance(raw_args, dict):
-            args = dict(raw_args)
-        elif isinstance(raw_args, str):
-            text = raw_args.strip()
-            if not text:
-                args = {}
-            else:
-                try:
-                    parsed = json.loads(text)
-                    args = dict(parsed) if isinstance(parsed, dict) else {"_": parsed}
-                except json.JSONDecodeError:
-                    # Best-effort key=value fallback
-                    args = {}
-                    for part in text.split():
-                        if "=" in part:
-                            k, v = part.split("=", 1)
-                            args[k.strip()] = v.strip().strip("\"'")
-                    if not args:
-                        args = {"content": text}
-        else:
-            args = {}
+        args = _decode_tool_arguments(raw_args)
         call_id = str(call.get("id") or f"call_{i}_{name}")
         normalized.append(
             {

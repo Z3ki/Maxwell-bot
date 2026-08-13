@@ -18,6 +18,7 @@ from providers import (
     _repair_unescaped_html_quotes,
     _safe_parse_tool_call_candidate,
 )
+from bot_tools import _normalize_site_body_text_escapes
 
 
 def _wrap(arguments_obj: dict) -> str:
@@ -137,6 +138,28 @@ def test_repair_trailing_garbage_tolerated():
     assert obj is not None
     assert obj["name"] == "create_site"
     assert obj["arguments"]["body"] == "<p>hi</p>"
+
+
+def test_site_body_decodes_escaped_whitespace_only_in_html_text():
+    """Literal ``\\n`` from a tool payload must not show up in visible HTML."""
+    body = (
+        r'<pre>line one\nline two\t</pre>'
+        r'<pre>if (left < right)\nnext line</pre>'
+        r'<div data-value="\n">\nvisible line</div>'
+        r'<script>const newline = "\n";</script>'
+        r'<style>.x::before { content: "\n"; }</style>'
+        r'<p>literal \\n stays literal</p>'
+    )
+
+    normalized = _normalize_site_body_text_escapes(body)
+
+    assert "<pre>line one\nline two\t</pre>" in normalized
+    assert "<pre>if (left < right)\nnext line</pre>" in normalized
+    assert r'<div data-value="\n">' in normalized
+    assert "<div data-value=" in normalized and ">\nvisible line</div>" in normalized
+    assert r'<script>const newline = "\n";</script>' in normalized
+    assert r'<style>.x::before { content: "\n"; }</style>' in normalized
+    assert r"<p>literal \\n stays literal</p>" in normalized
 
 
 def test_repair_preserves_keys_after_body():

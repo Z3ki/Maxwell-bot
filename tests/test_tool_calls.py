@@ -10,11 +10,16 @@ sanitizer plus the new reasoning contract:
 - ``_sanitize_reasoning`` strips tag-wrapped thoughts the model sneakily emits.
 """
 
+import json
 from types import SimpleNamespace
 
 from bot import MaxwellBot, strip_tool_payload_leaks
 from tool_registry import extract_reasoning, _sanitize_reasoning, record_reasoning
-from tool_schemas import REASONING_PARAM, build_openai_tools
+from tool_schemas import (
+    REASONING_PARAM,
+    build_openai_tools,
+    normalize_native_tool_calls,
+)
 
 
 class _FakeTool:
@@ -260,6 +265,40 @@ def test_select_tool_protocol_custom_only_when_native_off():
     custom, provider_tools = MaxwellBot._select_tool_protocol(bot, tools)
     assert custom is True
     assert provider_tools is None
+
+
+def test_normalize_native_tool_calls_decodes_provider_argument_shapes():
+    """Native tool arguments arrive as objects, JSON, or nested JSON."""
+    body = r"<pre>line one\nline two</pre>"
+    raw_calls = [
+        {
+            "id": "direct",
+            "function": {"name": "create_site", "arguments": {"body": body}},
+        },
+        {
+            "id": "nested",
+            "function": {
+                "name": "create_site",
+                "arguments": json.dumps(json.dumps({"body": body})),
+            },
+        },
+        {
+            "id": "trailing",
+            "function": {
+                "name": "create_site",
+                "arguments": json.dumps({"body": body}) + "<provider-markup>",
+            },
+        },
+    ]
+
+    normalized = normalize_native_tool_calls(raw_calls)
+
+    assert [call["arguments"]["body"] for call in normalized] == [body] * 3
+
+    scalar = normalize_native_tool_calls(
+        [{"function": {"name": "react", "arguments": "42"}}]
+    )
+    assert scalar[0]["arguments"] == {"_": 42}
 
 
 def test_record_reasoning_does_not_raise_on_bot_failure():
