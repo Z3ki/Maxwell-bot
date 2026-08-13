@@ -6126,8 +6126,15 @@ class MaxwellBot(commands.Bot):
                 logger.error(f"Command queue error: {e}")
 
     async def _memory_cleanup_loop(self):
-        # Trigger background embedding migration on boot (idempotent).
-        if hasattr(self.memory, "_embed_pending_all"):
+        # Do not stampede local Ollama on boot. Pending-row migration used
+        # to POST batches of 50 into /api/embed and stall the whole box.
+        # Catch up lazily on search / new writes instead.
+        if os.getenv("MAXWELL_EMBED_PENDING_ON_BOOT", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        } and hasattr(self.memory, "_embed_pending_all"):
             _spawn_background(self.memory._embed_pending_all())
 
         # Bootstrap summary 5 minutes after boot — give the bot time

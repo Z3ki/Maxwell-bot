@@ -47,7 +47,10 @@ OLLAMA_EMBED_URL = "http://localhost:11434/api/embed"
 # chunks, embed each, and mean-pool. Module-level (not local to _embed) so the
 # batch migration path in _embed_pending_all agrees with the single path —
 # they used to disagree, and the batch path silently truncated at 8000.
-EMBED_MAX_CHARS = 30000
+# Local ollama loads qwen3-embedding:0.6b at num_ctx=4096 (CPU default), so
+# 30k-char chunks overflow the runner and hang until Maxwell's 30s timeout.
+# ~6k chars stays inside that window with room for tokenizer overhead.
+EMBED_MAX_CHARS = 6000
 EMBED_CHUNK_OVERLAP = 200
 # The pre-2026-08-09 hard cutoff. Rows embedded before that commit were
 # vectorized from text[:8000], so their cached vectors are NOT valid under the
@@ -499,7 +502,7 @@ class RAGMemoryManager:
         self.prompts_file = self.data_dir / "prompts.json"
         self._db: sqlite3.Connection  # always set by _init_db() in __init__
         self._lock = asyncio.Lock()
-        self._embed_semaphore = asyncio.Semaphore(4)  # limit concurrent embed calls
+        self._embed_semaphore = asyncio.Semaphore(1)  # ollama NUM_PARALLEL=1; extra in-flight embeds just queue and time out
         # Self-tuning cache state (kept minimal; SQLite holds the real cache)
         self._embed_cache: dict[
             str, np.ndarray
@@ -895,7 +898,7 @@ class RAGMemoryManager:
                     async with session.post(
                         OLLAMA_EMBED_URL,
                         json=payload,
-                        timeout=aiohttp.ClientTimeout(total=30),
+                        timeout=aiohttp.ClientTimeout(total=90),
                     ) as resp:
                         if resp.status != 200:
                             body = await resp.text()
@@ -1030,7 +1033,7 @@ class RAGMemoryManager:
         except Exception as e:
             logger.warning(f"Failed to embed pending {kind}: {e}")
 
-    async def _embed_pending_all(self, batch_size: int = 50):
+    async def _embed_pending_all(self, batch_size: int = 4):
         """Embed ALL rows without embeddings, in batches. Used for migration.
 
         Uses ollama's batch embed API to speed up — sends multiple texts
