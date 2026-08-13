@@ -1480,6 +1480,13 @@ class OllamaProvider:
             # works across Ollama and OpenRouter without branching.
             data["reasoning_effort"] = "none"
             data["reasoning"] = {"effort": "none"}
+        elif "kimi-k2.7" in str(data.get("model") or "").lower():
+            # OpenCode Go's kimi-k2.7-code rejects reasoning_effort=none
+            # ("invalid thinking: only type=enabled is allowed") and, if we
+            # omit the thinking field, streams reasoning until max_tokens
+            # with an empty content delta. Pin thinking on so the visible
+            # reply actually arrives.
+            data["thinking"] = {"type": "enabled"}
         if tools:
             data["tools"] = tools
             data["tool_choice"] = "auto"
@@ -1865,11 +1872,12 @@ class OllamaProvider:
                     if resp.status != 200:
                         error_text = await resp.text()
                         logger.warning(
-                            "Provider timing status endpoint=%s status=%s headers_ms=%.1f body_chars=%s",
+                            "Provider timing status endpoint=%s status=%s headers_ms=%.1f body_chars=%s body=%s",
                             endpoint.name,
                             resp.status,
                             headers_ms,
                             len(error_text),
+                            error_text[:200],
                         )
                         # Text-only models 400 on image_url/video_url; some
                         # fallbacks 404 on input audio. Mark broken and retry a

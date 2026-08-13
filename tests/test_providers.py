@@ -556,6 +556,35 @@ def test_vision_model_used_for_images():
     assert any(part.get("type") == "image_url" for part in content)
 
 
+def test_kimi_k27_vision_enables_thinking():
+    """kimi-k2.7-code rejects reasoning_effort=none and otherwise streams
+    reasoning-only with empty content. Vision must pin thinking=enabled."""
+    provider = OllamaProvider(
+        "http://primary.test/v1",
+        "glm-5.2",
+        10,
+        0.7,
+        vision_model="kimi-k2.7-code",
+        vision_disable_reasoning=False,
+    )
+    provider.available = True
+    session = FakeSession()
+    provider._session = session
+
+    async def run():
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "look"}],
+            media=[{"b64": "abc", "mime_type": "image/png"}],
+        )
+        assert message["content"] == "ok"
+
+    asyncio.run(run())
+    payload = session.payloads[0]
+    assert payload["model"] == "kimi-k2.7-code"
+    assert payload.get("thinking") == {"type": "enabled"}
+    assert "reasoning_effort" not in payload
+
+
 def test_vision_model_not_used_for_text():
     provider = OllamaProvider(
         "http://primary.test/v1",
