@@ -844,3 +844,113 @@ def test_media_incapable_is_learned_from_a_404():
 
     asyncio.run(run())
     assert "primary" in provider._media_incapable
+
+
+def test_failover_extension_survives_the_last_attempt():
+    """A deterministic 4xx on the FINAL attempt must still fail over.
+
+    The retry loop bumps ``max_attempts`` when it decides to hand the call to
+    another endpoint. That bump was written against a ``for attempt in
+    range(1, max_attempts + 1)`` loop, whose bounds are snapshotted at entry —
+    so the extension did nothing and the turn died with "Provider call failed
+    after retries" while a healthy fallback sat idle.
+    """
+    provider = OllamaProvider(
+        "http://primary.test/v1",
+        "primary-model",
+        10,
+        0.5,
+        fallback_base_url="http://fallback.test/v1",
+        fallback_model="fallback-model",
+        retry_attempts=1,  # the failure IS the last attempt
+    )
+    provider.available = True
+    session = FakeSequenceSession(
+        [
+            FakeErrorResponse(
+                404,
+                '{"error":{"message":"This model is unavailable for free."}}',
+            ),
+            FakeResponse(),
+        ]
+    )
+    provider._session = session
+
+    async def run():
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "hi"}]
+        )
+        assert message["content"] == "ok"
+
+    asyncio.run(run())
+    assert len(session.urls) == 2
+    assert "fallback.test" in session.urls[1]
+
+
+def test_media_strip_retry_survives_the_last_attempt():
+    """When every endpoint refuses the attachments on the final attempt,
+    the text-only retry must actually run instead of dropping the turn."""
+    provider = OllamaProvider(
+        "http://primary.test/v1",
+        "primary-model",
+        10,
+        0.5,
+        retry_attempts=1,
+    )
+    provider.available = True
+    session = FakeSequenceSession(
+        [
+            FakeErrorResponse(
+                400,
+                '{"error":{"message":"unknown variant `image_url`, expected `text`"}}',
+            ),
+            FakeResponse(),
+        ]
+    )
+    provider._session = session
+
+    async def run():
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "what is this"}],
+            media=[{"b64": "img", "mime_type": "image/png"}],
+        )
+        assert message["content"] == "ok"
+
+    asyncio.run(run())
+    assert len(session.payloads) == 2
+    # Second attempt carries plain text, no image parts.
+    retried = session.payloads[1]["messages"][-1]["content"]
+    assert isinstance(retried, str)
+    assert "attachment(s) omitted" in retried
+
+
+def test_retry_loop_cannot_spin_forever_on_endless_deterministic_400s():
+    """The while loop must still terminate when every reply is a fresh 400."""
+    provider = OllamaProvider(
+        "http://primary.test/v1",
+        "primary-model",
+        10,
+        0.5,
+        fallback_base_url="http://fallback.test/v1",
+        fallback_model="fallback-model",
+        retry_attempts=3,
+    )
+    provider.available = True
+
+    class EndlessErrorSession(FakeSession):
+        def post(self, url, json=None, timeout=None, headers=None):
+            self.urls.append(url)
+            self.payloads.append(copy.deepcopy(json))
+            return FakeErrorResponse(400, '{"error":{"message":"nope"}}')
+
+    session = EndlessErrorSession()
+    provider._session = session
+
+    async def run():
+        with pytest.raises(Exception):
+            await provider.generate_chat_completion(
+                [{"role": "user", "content": "hi"}]
+            )
+
+    asyncio.run(run())
+    assert len(session.urls) <= 3 + 2 * len(provider._endpoints) + 2

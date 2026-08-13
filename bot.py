@@ -318,6 +318,29 @@ def _safe_int(val, default=0):
         return default
 
 
+# asyncio holds only a WEAK reference to a running task, so a detached
+# create_task() whose handle nobody keeps can be garbage-collected mid-flight.
+# providers.py and tool_progress.py already learned this the hard way (dropped
+# progress edits); the same pattern here silently kills background loops — a
+# collected _daily_summarizer_loop() means LTM summarization just stops until
+# the next restart, with nothing in the logs. Keep a strong ref until done.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn_background(coro) -> asyncio.Task:
+    """Schedule a detached task that cannot be GC'd before it finishes."""
+    try:
+        task = asyncio.get_running_loop().create_task(coro)
+    except RuntimeError:
+        # No running loop (import-time / sync context). The caller's
+        # contextlib.suppress(RuntimeError) sites relied on this raising.
+        coro.close()
+        raise
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return task
+
+
 def _web_result_snippet(content: str, title: str, limit: int = 280) -> str:
     """Body-only snippet for a stored web_result row.
 
@@ -741,6 +764,30 @@ def _discord_display_name(obj: Any) -> str:
 
 def _discord_id(obj: Any) -> str:
     return str(getattr(obj, "id", "unknown"))
+
+
+# Discord error codes that all mean "the message you referenced is gone".
+# 50035 arrives as a *400* ("Invalid Form Body / In message_reference: Unknown
+# message") when the parent of a reply was deleted between our read and our
+# send — NOT as a 404 — so catching discord.NotFound alone never handled it.
+# 10008 (Unknown Message) is the 404 flavour of the same situation.
+_UNKNOWN_REFERENCE_CODES = {50035, 10008}
+
+
+def _is_unknown_reference_error(exc: Exception) -> bool:
+    """True when a reply failed because its parent message no longer exists."""
+    if isinstance(exc, discord.NotFound):
+        return True
+    code = getattr(exc, "code", None)
+    if code in _UNKNOWN_REFERENCE_CODES:
+        # 50035 is the generic "Invalid Form Body" code — it also covers bad
+        # embeds, over-length content, and other payload errors we must NOT
+        # swallow. Only the message_reference variant is recoverable by
+        # re-sending without the reference.
+        if code == 50035:
+            return "message_reference" in str(exc).lower()
+        return True
+    return False
 
 
 def extract_json_object(text: str, start: int = 0) -> tuple[str, int] | None:
@@ -2691,7 +2738,7 @@ class MaxwellBot(commands.Bot):
                 self._ai_cond.notify_all()
 
         with contextlib.suppress(RuntimeError):
-            asyncio.get_running_loop().create_task(notify())
+            _spawn_background(notify())
 
     async def setup_hook(self):
         await self.ai_provider.initialize()
@@ -6081,7 +6128,7 @@ class MaxwellBot(commands.Bot):
     async def _memory_cleanup_loop(self):
         # Trigger background embedding migration on boot (idempotent).
         if hasattr(self.memory, "_embed_pending_all"):
-            asyncio.create_task(self.memory._embed_pending_all())
+            _spawn_background(self.memory._embed_pending_all())
 
         # Bootstrap summary 5 minutes after boot — give the bot time
         # to settle so we accumulate real chat first.
@@ -6094,7 +6141,7 @@ class MaxwellBot(commands.Bot):
             except Exception as e:
                 logger.warning(f"Boot summarizer failed: {e}")
 
-        asyncio.create_task(_boot_summarize())
+        _spawn_background(_boot_summarize())
 
         # Daily LTM summarizer at 04:00 local. Computes seconds-until-
         # next-04:00 on each loop start; if the start-of-day window is
@@ -6115,7 +6162,7 @@ class MaxwellBot(commands.Bot):
                     logger.error(f"Daily summarizer error: {e}")
                     await asyncio.sleep(3600)  # backoff on failure
 
-        asyncio.create_task(_daily_summarizer_loop())
+        _spawn_background(_daily_summarizer_loop())
 
         # Active cleanup of stale channel rows on a 10-minute cadence.
         while True:
@@ -6350,9 +6397,17 @@ class MaxwellBot(commands.Bot):
             out = chunk
             if in_code_block:
                 out = "```\n" + out
-            if out.count("```") % 2 == 1:
-                out = out.rstrip() + "\n```"
+            # Whether we're still inside a fence after this chunk depends on
+            # the fences the MODEL wrote in it, not on the count after our own
+            # re-opener was prepended. Counting `out` conflated the two: a
+            # chunk carrying the block's closing fence became even (re-opener +
+            # closer), so the state was never cleared, the chunk went out
+            # without its re-opener, and the NEXT chunk — ordinary prose — was
+            # wrapped in ``` and rendered as code.
+            if chunk.count("```") % 2 == 1:
                 in_code_block = not in_code_block
+            if in_code_block:
+                out = out.rstrip() + "\n```"
             fixed.append(out)
         return fixed
 
@@ -6431,19 +6486,13 @@ class MaxwellBot(commands.Bot):
 
         Returns the sent message on success, ``None`` on swallowable
         failure (Forbidden / NotFound on a plain channel.send). When
-        ``reply_to`` is set and the reply hits NotFound (the parent
-        message was deleted), the exception is re-raised so the caller
-        can fall back to ``channel.send``. Other exceptions propagate.
+        ``reply_to`` is set and the parent message is gone, the send is
+        retried as a plain ``channel.send`` so the reply still lands.
         """
         await self._respect_slowmode(channel)
         if reply_to is not None:
-            # Catch both Forbidden (no perms) and NotFound (parent message
-            # was deleted between read and reply). For NotFound, fall back
-            # to a plain channel.send so the user still sees the response.
-            # The old code only caught Forbidden and let NotFound propagate,
-            # which caused unhandled exceptions when replying to deleted
-            # messages (discord error 50035 "Invalid Form Body: Unknown
-            # message in message_reference").
+            # Catch Forbidden (no perms) and every flavour of "the parent
+            # message is gone" so the response still reaches the user.
             try:
                 sent = await reply_to.reply(content=content, file=file, **kwargs)
             except discord.Forbidden:
@@ -6452,9 +6501,20 @@ class MaxwellBot(commands.Bot):
                     getattr(channel, "id", "?"),
                 )
                 return None
-            except discord.NotFound:
+            except (discord.NotFound, discord.HTTPException) as exc:
+                # A deleted parent does NOT come back as a 404. Discord
+                # answers the send with 400 "Invalid Form Body / In
+                # message_reference: Unknown message" (error code 50035),
+                # which discord.py raises as a plain HTTPException — so the
+                # old NotFound-only handler never fired and the whole turn
+                # died with an unhandled exception (pm2 bot-error.log
+                # 2026-07-21 12:47 and 2026-07-23 09:24). Anything else keeps
+                # propagating; only the unknown-reference case is swallowed.
+                if not _is_unknown_reference_error(exc):
+                    raise
                 logger.warning(
-                    "reply hit 404 (deleted parent), falling back to channel.send in channel %s",
+                    "reply parent is gone (%s), falling back to channel.send in channel %s",
+                    getattr(exc, "code", None) or exc.__class__.__name__,
                     getattr(channel, "id", "?"),
                 )
                 try:
@@ -7634,7 +7694,7 @@ class MaxwellBot(commands.Bot):
                 # is async because it may need to await a Discord edit, but
                 # the SSE reader must NOT be blocked on a slow edit (it would
                 # back-pressure the upstream provider). Fire-and-forget.
-                asyncio.create_task(
+                _spawn_background(
                     gen_progress.tick(
                         reasoning_delta=tok.get("reasoning", "")
                         or tok.get("content", ""),
@@ -7903,7 +7963,7 @@ class MaxwellBot(commands.Bot):
                         if _p is None:
                             return
                         with contextlib.suppress(RuntimeError):
-                            asyncio.create_task(
+                            _spawn_background(
                                 _p.tick(
                                     reasoning_delta=tok.get("reasoning", "")
                                     or tok.get("content", ""),
@@ -8151,11 +8211,16 @@ class MaxwellBot(commands.Bot):
                             sent = await self._send_with_slowmode(
                                 message.channel, content=chunk, reply_to=message
                             )
-                        except discord.NotFound:
+                        except (discord.NotFound, discord.HTTPException) as _exc:
                             # Referenced message was deleted between read and reply;
                             # fall back to a plain channel send so the user still sees it.
+                            # _send_with_slowmode already handles this, but keep the
+                            # outer net for reply paths that bypass it (fake_message
+                            # reply shims). Non-reference errors keep propagating.
+                            if not _is_unknown_reference_error(_exc):
+                                raise
                             logger.warning(
-                                "message.reply hit 404 (deleted parent), falling back to channel.send in channel %s",
+                                "message.reply parent is gone, falling back to channel.send in channel %s",
                                 getattr(message.channel, "id", "?"),
                             )
                             sent = await self._send_with_slowmode(
@@ -11310,8 +11375,7 @@ async def main():
         _shutdown_called = True
         logger.info(f"Received signal {sig}, initiating graceful shutdown...")
         try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(bot.close())
+            _spawn_background(bot.close())
         except RuntimeError:
             pass
 

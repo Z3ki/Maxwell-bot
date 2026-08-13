@@ -649,11 +649,33 @@ class ToolProgress:
         return True
 
     async def _background_transition(self, posted: Any, content: str) -> None:
-        """Edit the message in place to the final reply. Fire-and-forget."""
+        """Edit the message in place to the final reply. Fire-and-forget.
+
+        The caller treats a True return from ``transition_to_final`` as "the
+        reply has been delivered" and skips sending the first chunk itself.
+        So if this edit fails — the progress message was deleted by a racing
+        stop(), a moderator removed it, the edit 404s — the user's answer is
+        gone with only a debug line to show for it. Fall back to posting the
+        content as a fresh message so a failed edit costs a cosmetic flicker
+        instead of the whole reply.
+        """
         try:
             await posted.edit(content=content)
+            return
         except Exception as e:  # noqa: BLE001
-            logger.debug("Progress transition-to-final edit failed: %s", e)
+            logger.warning(
+                "Progress transition-to-final edit failed (%s); "
+                "posting the reply as a new message instead",
+                e,
+            )
+        channel = getattr(self._msg, "channel", None)
+        if channel is None:
+            logger.error("Transition fallback impossible: no channel; reply dropped")
+            return
+        try:
+            await channel.send(content)
+        except Exception as e:  # noqa: BLE001
+            logger.error("Transition fallback send failed; reply dropped: %s", e)
 
 
 def make_progress(message: Any) -> ToolProgress:

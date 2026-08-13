@@ -1709,7 +1709,21 @@ class OllamaProvider:
             if fast_fallback and len(self._endpoints) > 1
             else self.retry_attempts
         )
-        for attempt in range(1, max_attempts + 1):
+        # NOT a `for attempt in range(1, max_attempts + 1)`: several branches
+        # below extend `max_attempts` mid-flight so a deterministic 4xx can be
+        # handed to another endpoint (media-unsupported re-route, text-only
+        # retry after stripping attachments, learned temperature resend,
+        # generic non-2xx failover). range() snapshots its bounds at loop
+        # entry, so every one of those extensions was a no-op: if the failure
+        # landed on the final attempt the loop just fell out and the turn died
+        # with "Provider call failed after retries" — exactly the failover the
+        # extension was written to perform. A while loop re-reads the bound.
+        # `attempt_ceiling` keeps a pathological provider (one that answers
+        # every payload with a fresh deterministic 400) from looping forever.
+        attempt = 0
+        attempt_ceiling = max_attempts + 2 * len(self._endpoints) + 2
+        while attempt < min(max_attempts, attempt_ceiling):
+            attempt += 1
             endpoint = self._attempt_endpoint(
                 attempt, fast_fallback=fast_fallback, has_media=has_media
             )

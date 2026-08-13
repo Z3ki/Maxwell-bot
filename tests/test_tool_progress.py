@@ -894,3 +894,50 @@ def test_streaming_tick_inserts_space_between_glued_deltas():
         await prov.close()
 
     asyncio.run(drive())
+
+
+def test_transition_to_final_falls_back_to_a_fresh_post_when_the_edit_fails():
+    """A failed in-place edit must not eat the reply.
+
+    The caller reads True from transition_to_final as "delivered" and skips
+    sending the first chunk itself. The edit runs detached, so if it fails
+    (message deleted underneath us, edit 404s) the user's answer used to
+    vanish with only a debug log line. Post it as a new message instead.
+    """
+
+    async def run():
+        msg = FakeMessage()
+        prog = tool_progress.ToolProgress(msg)
+        await prog.start()
+        posted = msg.channel.sent[0]
+
+        async def boom(content=None, **kwargs):
+            raise RuntimeError("message was deleted")
+
+        posted.edit = boom
+
+        ok = await prog.transition_to_final("Disk has 50GB free.")
+        assert ok is True
+        # Let the detached transition task run.
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return msg
+
+    msg = asyncio.run(run())
+    assert [m.content for m in msg.channel.sent[1:]] == ["Disk has 50GB free."]
+
+
+def test_transition_to_final_does_not_double_post_when_the_edit_works():
+    async def run():
+        msg = FakeMessage()
+        prog = tool_progress.ToolProgress(msg)
+        await prog.start()
+        ok = await prog.transition_to_final("Disk has 50GB free.")
+        assert ok is True
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return msg
+
+    msg = asyncio.run(run())
+    assert len(msg.channel.sent) == 1
+    assert msg.channel.sent[0].content == "Disk has 50GB free."
