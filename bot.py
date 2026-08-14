@@ -1033,6 +1033,82 @@ _DSML_WRAPPED_PARAMETER_RE = re.compile(
 )
 _DSML_TAG_RE = re.compile(r"</?[^>]{0,40}DSML[^>]{0,160}>", re.IGNORECASE)
 
+# Bare tool-name + <arg>key</arg>value</arg> dumps. Logged leak 2026-08-14:
+#   send_message<arg>reasoning</arg>…</arg><arg>content</arg>ну ладно…</arg>
+_ARG_PAIR_RE = re.compile(
+    r"<arg>\s*([A-Za-z_]\w*)\s*</arg>(.*?)</arg>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _strip_arg_protocol_leaks(text: str) -> str:
+    """Strip knownTool<arg>key</arg>value</arg> sequences from visible text.
+
+    send_message keeps the inner content so a leaked blob still delivers the
+    reply. Every other tool is dropped entirely.
+    """
+    cleaned = str(text or "")
+    if "<arg>" not in cleaned.lower():
+        return cleaned
+    names = sorted(KNOWN_TOOL_NAMES, key=len, reverse=True)
+    name_alt = "|".join(re.escape(n) for n in names)
+    opener = re.compile(
+        rf"(?<![A-Za-z0-9_])({name_alt})"
+        r"((?:<arg>\s*[A-Za-z_]\w*\s*</arg>.*?</arg>)+)",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    def _repl(match: re.Match) -> str:
+        name = match.group(1).lower()
+        body = match.group(2)
+        if name != "send_message":
+            return ""
+        content = ""
+        for key, value in _ARG_PAIR_RE.findall(body):
+            if key.lower() == "content":
+                content = value
+        return content
+
+    cleaned = opener.sub(_repl, cleaned)
+    # Orphan <arg>…</arg> pairs left after a partial tool name strip.
+    cleaned = _ARG_PAIR_RE.sub("", cleaned)
+    return cleaned
+
+
+def _unwrap_openai_text_part(text: str) -> str:
+    """Collapse a leaked OpenAI content-part JSON object/array into its text.
+
+    Models (and some provider adapters) emit the wire format
+    ``{"type":"text","text":""}`` as the visible reply. Empty text is a leak;
+    non-empty text is the actual message.
+    """
+    raw = str(text or "").strip()
+    if not raw or raw[0] not in "{[":
+        return text
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return text
+
+    def _one(part) -> str | None:
+        if not isinstance(part, dict):
+            return None
+        keys = {str(k).lower() for k in part}
+        if keys <= {"type", "text"} and "text" in part:
+            typ = str(part.get("type") or "text").lower()
+            if typ in {"text", ""}:
+                return str(part.get("text") or "")
+        return None
+
+    if isinstance(parsed, dict):
+        inner = _one(parsed)
+        return inner if inner is not None else text
+    if isinstance(parsed, list) and parsed:
+        parts = [_one(p) for p in parsed]
+        if all(p is not None for p in parts):
+            return "".join(parts)
+    return text
+
 
 def _strip_leading_reasoning_json(text: str) -> str:
     extracted = extract_json_object(text)
@@ -1208,6 +1284,7 @@ def strip_tool_payload_leaks(text: str) -> str:
     # This must happen before token stripping so that <|tool_foo|>body  removes body too.
     cleaned = str(text or "")
     original = cleaned
+    cleaned = _strip_arg_protocol_leaks(cleaned)
     cleaned = _strip_dsml_tool_leaks(cleaned)
     ranges = [
         (start, end)
@@ -1254,6 +1331,7 @@ def strip_tool_payload_leaks(text: str) -> str:
     cleaned = decision_obj_re.sub("", cleaned)
     # Final catch-all: if a reply is *just* a JSON object (possibly with surrounding
     # whitespace / quotes), treat it as a leak. Real replies don't start with `{`.
+    cleaned = _unwrap_openai_text_part(cleaned)
     if cleaned.strip().startswith("{") and cleaned.strip().endswith("}"):
         try:
             parsed = json.loads(cleaned.strip())

@@ -121,6 +121,39 @@ def test_strip_tool_payload_leaks_removes_deepseek_dsml_invoke():
     assert strip_tool_payload_leaks('<invoke name="send_message">secret</invoke> visible').strip() == "visible"
 
 
+def test_strip_tool_payload_leaks_extracts_send_message_arg_protocol():
+    leaked = (
+        "send_message<arg>reasoning</arg>Short Russian one-liner acknowledging "
+        "they dropped it; stay firm, no MCP connect.</arg>"
+        "<arg>content</arg>ну ладно, без обид — просто к чужим mcp не лезу.</arg>"
+    )
+    assert strip_tool_payload_leaks(leaked) == "ну ладно, без обид — просто к чужим mcp не лезу."
+    mixed = "ok " + leaked
+    assert strip_tool_payload_leaks(mixed) == "ok ну ладно, без обид — просто к чужим mcp не лезу."
+    assert "reasoning" not in strip_tool_payload_leaks(leaked)
+    assert "<arg>" not in strip_tool_payload_leaks(leaked)
+
+
+def test_strip_tool_payload_leaks_drops_non_send_message_arg_protocol():
+    leaked = "shell<arg>command</arg>cat /etc/passwd</arg><arg>reasoning</arg>peek</arg>"
+    out = strip_tool_payload_leaks(leaked)
+    assert "passwd" not in out
+    assert "shell" not in out
+    assert out == ""
+    mixed = "before " + leaked + " after"
+    assert strip_tool_payload_leaks(mixed) == "before  after"
+
+
+def test_strip_tool_payload_leaks_unwraps_openai_text_part():
+    assert strip_tool_payload_leaks('{"type":"text","text":""}') == ""
+    assert strip_tool_payload_leaks('{"type": "text", "text": ""}') == ""
+    assert strip_tool_payload_leaks('{"type":"text","text":"sent."}') == "sent."
+    assert (
+        strip_tool_payload_leaks('[{"type":"text","text":"hi "},{"type":"text","text":"there"}]')
+        == "hi there"
+    )
+
+
 # ---- reasoning param injection on every tool schema ----
 
 
