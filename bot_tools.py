@@ -2851,6 +2851,11 @@ class ShellTool(Tool):
     # OOMs us. 0/unlimited is fine if you've tuned your context budget.
     _MAX_OUTPUT_DEFAULT = 100_000
     _MAX_COMMAND_LENGTH_DEFAULT = 65_536
+    # Channel post cap. Captured stdout can be 100k for the model, but posting
+    # that as Discord ```ansi``` chunks floods the chat. Visible dump is ~300
+    # chars (one short codeblock); the LLM still gets the longer capture.
+    _CHANNEL_MAX_CHARS_DEFAULT = 300
+    _CHANNEL_MAX_CHUNKS = 1
 
     # Hard ceiling on shell timeout. The actual timeout is read from env at
     # call time so the operator can raise/lower it, but we never let it
@@ -2883,6 +2888,18 @@ class ShellTool(Tool):
             v = int(raw)
         except ValueError:
             return cls._MAX_COMMAND_LENGTH_DEFAULT
+        return max(0, v)
+
+    @classmethod
+    def _channel_max_chars(cls) -> int:
+        """Max chars posted to the chat for one shell call. 0 = unlimited."""
+        raw = os.environ.get("MAXWELL_SHELL_CHANNEL_MAX_CHARS", "").strip()
+        if not raw:
+            return cls._CHANNEL_MAX_CHARS_DEFAULT
+        try:
+            v = int(raw)
+        except ValueError:
+            return cls._CHANNEL_MAX_CHARS_DEFAULT
         return max(0, v)
 
     @classmethod
@@ -2919,10 +2936,13 @@ class ShellTool(Tool):
         to = self._timeout_seconds()
         max_out_str = "unlimited" if max_out == 0 else f"{max_out:,} chars"
         max_cmd_str = "unlimited" if max_cmd == 0 else f"{max_cmd:,} chars"
+        chan = self._channel_max_chars()
+        chan_str = "unlimited" if chan == 0 else f"{chan} chars"
         limits_note = (
             f"Limits: command <= {max_cmd_str}, captured output <= {max_out_str}, "
-            f"timeout {to}s. Set MAXWELL_SHELL_MAX_OUTPUT=0 / "
-            f"MAXWELL_SHELL_MAX_COMMAND_LENGTH=0 in .env to disable."
+            f"channel preview <= {chan_str}, timeout {to}s. "
+            f"Set MAXWELL_SHELL_MAX_OUTPUT=0 / MAXWELL_SHELL_MAX_COMMAND_LENGTH=0 / "
+            f"MAXWELL_SHELL_CHANNEL_MAX_CHARS=0 in .env to disable."
         )
         if self._full_host_access():
             return (
@@ -3182,7 +3202,7 @@ class ShellTool(Tool):
         past Discord's 2000-char limit once wrapped in a codeblock. Cap the
         echo so the actual error/output — the useful part — always fits.
         """
-        max_echo = 600
+        max_echo = 80
         echo = (
             command
             if len(command) <= max_echo
@@ -3208,6 +3228,11 @@ class ShellTool(Tool):
         wrapper = 13  # len("```ansi\n") + len("\n```")
         headroom = 7  # safety margin for tweaks / stray whitespace
         limit = 2000 - wrapper - headroom
+        max_chars = self._channel_max_chars()
+        if max_chars and len(text) > max_chars:
+            notice = "\n... (truncated for channel)"
+            keep = max(0, max_chars - len(notice))
+            text = text[:keep] + notice
         chunks: list[str] = []
         remaining = text
         while remaining:
@@ -3219,6 +3244,12 @@ class ShellTool(Tool):
                 cut = limit
             chunks.append(remaining[:cut])
             remaining = remaining[cut:].lstrip("\n")
+        if len(chunks) > self._CHANNEL_MAX_CHUNKS:
+            notice = "\n... (truncated for channel)"
+            chunks = chunks[: self._CHANNEL_MAX_CHUNKS]
+            last = chunks[-1]
+            room = max(0, limit - len(notice))
+            chunks[-1] = last[:room] + notice
         for i, chunk in enumerate(chunks):
             await message.channel.send(f"```ansi\n{chunk}\n```")
             if len(chunks) > 1 and i < len(chunks) - 1:

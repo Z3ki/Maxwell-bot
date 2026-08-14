@@ -85,6 +85,34 @@ def test_shell_tool_runs_without_author_gate():
     asyncio.run(run())
 
 
+def test_shell_tool_truncates_channel_preview_to_300_chars():
+    class FakeBot:
+        def _is_admin(self, user_id):
+            return True
+
+    tool = ShellTool(bot=FakeBot())
+    message = FakeMessage()
+    blob = ("line of shell output\n" * 80).encode()
+
+    async def run():
+        async def fake_run_shell(command):
+            return blob, b"", 0
+
+        tool._run_shell_command = fake_run_shell
+        result = await tool.execute(message, command="cat huge.log")
+        assert result.startswith("__SHELL_SENT__\n")
+        assert "line of shell output" in result
+        assert len(result) > 300
+        assert len(message.replies) == 1
+        posted = message.replies[0]
+        assert posted.startswith("```ansi\n")
+        inner = posted[len("```ansi\n") : -len("\n```")]
+        assert len(inner) <= 300
+        assert "truncated for channel" in inner
+
+    asyncio.run(run())
+
+
 def test_reasoning_log_tool_records_verbose_payload():
     class FakeBot:
         def __init__(self):
