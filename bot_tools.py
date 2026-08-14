@@ -2309,6 +2309,22 @@ class ListSitesTool(Tool):
         return "Your active sites:\n" + "\n".join(lines)
 
 
+_WEB_REPLY_CTX_RE = re.compile(
+    r"\[Latest message replies to[^\]]*\]", re.IGNORECASE
+)
+
+
+def _sanitize_web_query(query: str | None) -> str:
+    """Drop Discord reply-context glue so searches stay on the user's words."""
+    q = str(query or "")
+    q = _WEB_REPLY_CTX_RE.sub(" ", q)
+    q = re.split(
+        r"\n?\[Latest message replies to", q, maxsplit=1, flags=re.IGNORECASE
+    )[0]
+    q = re.sub(r"\[RESPOND TO THIS\]\s*", "", q, flags=re.IGNORECASE)
+    return " ".join(q.split()).strip()[:160]
+
+
 class WebSearchTool(Tool):
     """Search the web using DuckDuckGo"""
 
@@ -2325,6 +2341,7 @@ class WebSearchTool(Tool):
         max_results: str = "5",
         **kwargs,
     ) -> str:
+        query = _sanitize_web_query(query)
         if not query:
             return "Error: query is required"
         if not _DDGS_AVAILABLE:

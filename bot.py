@@ -3191,8 +3191,7 @@ class MaxwellBot(commands.Bot):
                 if self._control.get("reply_dms", True):
                     await self._handle_message(
                         message,
-                        (message.content or "look at this")
-                        + self._get_reply_context(message),
+                        message.content or "look at this",
                     )
                 return
 
@@ -3210,8 +3209,7 @@ class MaxwellBot(commands.Bot):
                 if mentioned or reply_to_bot:
                     await self._handle_message(
                         message,
-                        (message.content or "look at this")
-                        + self._get_reply_context(message),
+                        message.content or "look at this",
                     )
                 return
 
@@ -3242,7 +3240,7 @@ class MaxwellBot(commands.Bot):
                 # user message).
                 await self._handle_message(
                     message,
-                    clean + self._get_reply_context(message),
+                    clean,
                 )
         finally:
             if _lock_acquired:
@@ -7536,13 +7534,19 @@ class MaxwellBot(commands.Bot):
             ):
                 try:
                     q = MaxwellBot._extract_search_query(content)
-                    search_res = await self.tools["web_search"].execute(
-                        message, query=q, max_results="5"
-                    )
-                    if search_res and not str(search_res).lower().startswith("error"):
-                        pre_results.append(
-                            f"Web search (auto for up-to-date info on this topic): {search_res}"
+                    if len(MaxwellBot._plain_user_text(content)) < 8:
+                        q = ""
+                    if q:
+                        search_res = await self.tools["web_search"].execute(
+                            message, query=q, max_results="5"
                         )
+                        if search_res and not str(search_res).lower().startswith(
+                            "error"
+                        ):
+                            pre_results.append(
+                                "Web search (auto for up-to-date info on this topic): "
+                                f"{search_res}"
+                            )
                 except Exception as e:
                     logger.warning(f"Auto web_search for current info failed: {e}")
             return pre_results, pre_images
@@ -9284,7 +9288,9 @@ class MaxwellBot(commands.Bot):
         """
         if not text:
             return False
-        t = text.lower()
+        t = MaxwellBot._plain_user_text(text).lower()
+        if not t:
+            return False
         # Strong signals for needing live/recent lookup
         strong = [
             "new model",
@@ -9343,14 +9349,28 @@ class MaxwellBot(commands.Bot):
         )
 
     @staticmethod
+    def _plain_user_text(text: str) -> str:
+        """User words only — strip reply-context blobs glued onto the turn."""
+        t = str(text or "")
+        t = re.sub(
+            r"\[Latest message replies to[^\]]*\]", " ", t, flags=re.IGNORECASE
+        )
+        t = re.split(
+            r"\n?\[Latest message replies to", t, maxsplit=1, flags=re.IGNORECASE
+        )[0]
+        t = re.sub(r"\[RESPOND TO THIS\]\s*", "", t, flags=re.IGNORECASE)
+        return " ".join(t.split()).strip()
+
+    @staticmethod
     def _extract_search_query(text: str) -> str:
         """Turn user question into a good search query for up-to-date info."""
-        t = (text or "").strip()
-        # Keep it focused
+        t = MaxwellBot._plain_user_text(text)
         if len(t) > 120:
-            t = t[:120]
-        # Add recency bias without overdoing
-        if not any(w in t.lower() for w in ["2026", "july", "latest", "new"]):
+            cut = t[:120]
+            t = cut.rsplit(" ", 1)[0] or cut
+        if t and not any(
+            w in t.lower() for w in ["2026", "july", "august", "latest", "new"]
+        ):
             t += " 2026"
         return t
 
@@ -10088,7 +10108,10 @@ class MaxwellBot(commands.Bot):
         # attributed the latest message to whoever spoke last in history
         # (the "X said that but it was actually Y" bug). Keeping the label on
         # every live line fixes the misattribution.
-        user_parts = [f"[RESPOND TO THIS] {author_label}: {latest_text}"]
+        user_parts = [
+            f"You are talking to {author_label}. Answer this person, not other people in the history.",
+            f"[RESPOND TO THIS] {author_label}: {latest_text}",
+        ]
         mention_names = [
             f"{getattr(user, 'display_name', str(getattr(user, 'id', 'unknown')))}({getattr(user, 'id', 'unknown')})"
             for user in (message.mentions or [])
@@ -10117,9 +10140,16 @@ class MaxwellBot(commands.Bot):
                 and getattr(ref.author, "id", None) == self_user_id
                 else getattr(ref.author, "display_name", reply_id)
             )
-            user_parts.append(
-                f"Latest message is a reply to: {reply_target}({reply_id})."
-            )
+            quoted = " ".join(str(getattr(ref, "content", "") or "").split())
+            if quoted:
+                quoted = quoted[:400]
+                user_parts.append(
+                    f"This is a reply to {reply_target}({reply_id}), who said: {quoted}"
+                )
+            else:
+                user_parts.append(
+                    f"This is a reply to {reply_target}({reply_id})."
+                )
         if media_summary:
             user_parts.append(media_summary)
         elif has_media:
