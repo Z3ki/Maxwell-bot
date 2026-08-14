@@ -173,6 +173,34 @@ class Config:
     # behavior; turn on with MAXWELL_CUSTOM_TOOL_CALLS=true in .env.
     CUSTOM_TOOL_CALLS = _bool_env("MAXWELL_CUSTOM_TOOL_CALLS", False)
 
+    # Discord join-captcha handling. Discord sometimes challenges an invite
+    # accept (or other API action) with an hCaptcha — surfaced by the library
+    # as discord.CaptchaRequired. When CAPTCHA_SOLVER_SERVICE+API_KEY are set,
+    # the bot solves the challenge via the external service and auto-retries.
+    # When unset, the challenge details are surfaced in the tool result so the
+    # user sees exactly why the join failed. Supported services: capsolver,
+    # 2captcha.
+    CAPTCHA_SOLVER_SERVICE = os.getenv("CAPTCHA_SOLVER_SERVICE", "").strip().lower()
+    CAPTCHA_SOLVER_API_KEY = os.getenv("CAPTCHA_SOLVER_API_KEY", "").strip()
+    CAPTCHA_SOLVER_TIMEOUT = _int_env(
+        "CAPTCHA_SOLVER_TIMEOUT", 180, min_value=10, max_value=600
+    )
+
+    # Human-in-the-loop captcha solving. When CAPTCHA_SOLVER_SERVICE is unset
+    # (or fails), the bot hosts a one-shot hCaptcha solve page and DMs the
+    # link to the owner (any CAPTCHA hit: joins, DM gates, phone checks).
+    # The token is bound to Discord's sitekey+rqdata, not the solver, so
+    # anyone who opens the link can complete it. CAPTCHA_FALLBACK_USER_ID is
+    # DM'd when no admin is resolvable.
+    CAPTCHA_HUMAN_SOLVE = _bool_env("CAPTCHA_HUMAN_SOLVE", True)
+    CAPTCHA_HUMAN_HOST = os.getenv("CAPTCHA_HUMAN_HOST", "127.0.0.1").strip()
+    CAPTCHA_HUMAN_PORT = _int_env(
+        "CAPTCHA_HUMAN_PORT", 8790, min_value=1, max_value=65535
+    )
+    CAPTCHA_FALLBACK_USER_ID = os.getenv(
+        "CAPTCHA_FALLBACK_USER_ID", "1471821513824014480"
+    ).strip()
+
     POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "flux")
 
     NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")

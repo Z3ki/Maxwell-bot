@@ -92,6 +92,19 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "max_age": _int("Max age in seconds"),
         }
     ),
+    "join_server": _obj(
+        {
+            "invite": _str(
+                "Invite code or link to join (e.g. discord.gg/xyz or "
+                "https://discord.com/invite/xyz)."
+            )
+        },
+        ["invite"],
+    ),
+    "leave_server": _obj(
+        {"server": _str("Server name or numeric ID to leave")},
+        ["server"],
+    ),
     "lookup_user": _obj(
         {"user_id": _str("Numeric user ID or @mention")},
         ["user_id"],

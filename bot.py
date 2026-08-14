@@ -209,6 +209,8 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     ForwardMessageTool,
     HDImageGeneratorTool,
     ImageGeneratorTool,
+    JoinServerTool,
+    LeaveServerTool,
     LeaveVcTool,
     ListAdminServersTool,
     ListServersTool,
@@ -238,6 +240,10 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     _is_safe_url,
     _read_response_limited,
     close_shared_session,
+)
+from captcha_solver import (  # noqa: E402
+    HumanCaptchaServer,
+    build_solver,
 )
 from config import Config  # noqa: E402
 from control_defaults import (  # noqa: E402
@@ -846,6 +852,8 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset(
         "create_category",
         "create_channel",
         "create_invite",
+        "join_server",
+        "leave_server",
         "delete_channel",
         "delete_message",
         "edit_channel",
@@ -1757,6 +1765,8 @@ FOLLOWUP_TOOL_NAMES = {
     "lookup_user",
     "search_messages",
     "create_invite",
+    "join_server",
+    "leave_server",
     "create_poll",
     "forward_message",
     "edit_message",
@@ -2066,10 +2076,21 @@ class MaxwellBot(commands.Bot):
     """AI-powered Discord bot."""
 
     def __init__(self):
-        super().__init__(command_prefix=",", self_bot=True, help_command=None)
+        super().__init__(
+            command_prefix=",",
+            self_bot=True,
+            help_command=None,
+            captcha_handler=self._handle_captcha,
+        )
         self.config = Config()
         self.config.validate()
         self.bot_name = "Bot"
+        self._human_captcha_server: HumanCaptchaServer | None = None
+        self._auto_captcha_solver: Any = build_solver(
+            self.config.CAPTCHA_SOLVER_SERVICE,
+            self.config.CAPTCHA_SOLVER_API_KEY,
+            self.config.CAPTCHA_SOLVER_TIMEOUT,
+        )
         self.ai_provider: Any = None
         self.memory: Any = None
         self.rem_log: Any = None
@@ -2623,6 +2644,8 @@ class MaxwellBot(commands.Bot):
         self.tools["create_poll"] = CreatePollTool(self)
         self.tools["create_invite"] = CreateInviteTool(self)
         self.tools["lookup_user"] = LookupUserTool(self)
+        self.tools["join_server"] = JoinServerTool(self)
+        self.tools["leave_server"] = LeaveServerTool(self)
         self.tools["search_messages"] = SearchMessagesTool(self)
         self.tools["set_nickname"] = SetNicknameTool(self)
         self.tools["forward_message"] = ForwardMessageTool(self)
@@ -4977,6 +5000,204 @@ class MaxwellBot(commands.Bot):
             )
         except Exception as e:
             logger.error(f"Failed to save admins: {e}")
+
+    # ------------------------------------------------------------------
+    # CAPTCHA handling — Discord hits these on invite accepts, DM gates,
+    # phone checks, etc. discord.py-self calls _handle_captcha on every
+    # CaptchaRequired raised anywhere in the HTTP layer, then retries the
+    # original request with the solved token in X-Captcha-Key. Priority:
+    #   1. external solver (CAPTCHA_SOLVER_SERVICE) if configured
+    #   2. human-in-the-loop solve page (CAPTCHA_HUMAN_SOLVE) — host a
+    #      one-shot hCaptcha page, DM the link to admins (fallback
+    #      CAPTCHA_FALLBACK_USER_ID), wait for a browser solve
+    #   3. raise the original challenge so the calling tool can report it
+    # ------------------------------------------------------------------
+    def _captcha_summary(self, exception) -> str:
+        parts = []
+        errors = getattr(exception, "errors", None) or []
+        if errors:
+            parts.append("; ".join(str(x) for x in errors))
+        parts.append(f"service={getattr(exception, 'service', '?')}")
+        parts.append(f"sitekey={getattr(exception, 'sitekey', '?')}")
+        rq = getattr(exception, "rqdata", None)
+        if rq:
+            parts.append(f"rqdata={rq}")
+        invisible = getattr(exception, "should_serve_invisible", False)
+        if invisible:
+            parts.append("invisible=1")
+        return " | ".join(parts)
+
+    def _captcha_recipient_ids(self) -> list[str]:
+        """Admins to DM the solve link; falls back to CAPTCHA_FALLBACK_USER_ID."""
+        admins = sorted(str(x) for x in (self._admins or set()) if x)
+        if admins:
+            return admins
+        fb = (getattr(self.config, "CAPTCHA_FALLBACK_USER_ID", "") or "").strip()
+        return [fb] if fb else []
+
+    async def _human_captcha_ensure(self) -> HumanCaptchaServer:
+        """Start (once) the local HTTP server hosting solve pages."""
+        if self._human_captcha_server is None:
+            cfg = self.config
+            public_base = getattr(
+                cfg, "MAXWELL_PUBLIC_BASE_URL", "http://127.0.0.1"
+            ).rstrip("/")
+            self._human_captcha_server = HumanCaptchaServer(
+                host=getattr(cfg, "CAPTCHA_HUMAN_HOST", "127.0.0.1"),
+                port=getattr(cfg, "CAPTCHA_HUMAN_PORT", 8790),
+                public_base=public_base,
+                timeout=getattr(cfg, "CAPTCHA_SOLVER_TIMEOUT", 180),
+            )
+            await self._human_captcha_server.start()
+        return self._human_captcha_server
+
+    async def _create_captcha_challenge(
+        self, exception, notify=None
+    ) -> str:
+        """Register a pending challenge; returns the public solve URL."""
+        srv = await self._human_captcha_ensure()
+        url = await srv.create_challenge(exception)
+        if notify is not None:
+            try:
+                await notify(url)
+            except Exception as e:  # notification failure must not lose the solve
+                logger.error("captcha notify failed: %s", e)
+        return url
+
+    async def _notify_captcha_link(self, url: str, exception) -> None:
+        """DM the solve link to every admin (fallback user if none)."""
+        summary = self._captcha_summary(exception)
+        msg = (
+            "⚠️ Discord hit a CAPTCHA: "
+            + summary
+            + "\nSolve it here (expires in ~2 min): "
+            + url
+        )
+        for uid in self._captcha_recipient_ids():
+            try:
+                user = self.get_user(int(uid))
+                if user is None:
+                    user = await self.fetch_user(int(uid))
+                if user is None:
+                    continue
+                await user.send(msg)
+            except Exception as e:
+                logger.warning("captcha DM to %s failed: %s", uid, e)
+
+    async def _explain_captcha_dm(self, url: str, exception) -> None:
+        """Fire-and-forget LLM explanation DM for a captcha hit."""
+        recipients = self._captcha_recipient_ids()
+        if not recipients or self.ai_provider is None:
+            return
+        summary = self._captcha_summary(exception)
+        try:
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Maxwell, a Discord self-bot. The operator's "
+                        "Discord session just hit a CAPTCHA challenge from "
+                        "Discord itself. Write a short, plain-English explanation "
+                        "(3-4 sentences max, no markdown headers) of what "
+                        "happened, why Discord challenges accounts, and what "
+                        "the operator needs to do (open the link and solve the "
+                        "captcha quickly since it expires). Do not invent "
+                        "technical details beyond what is given."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Challenge details: {summary}\nSolve link: {url}",
+                },
+            ]
+            text = await self.ai_provider.generate_response(
+                messages,
+                timeout=45,
+                max_tokens=300,
+                temperature=0.6,
+                disable_reasoning=True,
+                fast_fallback=True,
+            )
+            text = (text or "").strip()
+            if not text or text == "__NO_RESPONSE__":
+                return
+            uid = recipients[0]
+            user = self.get_user(int(uid))
+            if user is None:
+                user = await self.fetch_user(int(uid))
+            if user is not None:
+                await user.send(text[:1500])
+        except Exception as e:
+            logger.debug("captcha LLM explanation skipped: %s", e)
+
+    async def _solve_captcha_with_notify(
+        self, exception, notify=None
+    ) -> str:
+        """Create a human-solve challenge (custom notify) and wait for the token."""
+        url = await self._create_captcha_challenge(exception, notify=notify)
+        srv = self._human_captcha_server
+        if srv is None:
+            raise CaptchaSolveError("human captcha server not started")
+        return await srv.wait_for_token(url)
+
+    async def _retry_invite_with_captcha(
+        self, code: str, exception, token: str
+    ):
+        """Re-submit an invite accept with the solved captcha headers."""
+        from discord.http import Route
+        from discord.utils import _generate_session_id
+
+        headers = {"X-Captcha-Key": token}
+        rqtoken = getattr(exception, "rqtoken", None)
+        if rqtoken:
+            headers["X-Captcha-Rqtoken"] = rqtoken
+        session_id = getattr(exception, "session_id", None)
+        if session_id:
+            headers["X-Captcha-Session-Id"] = session_id
+        conn = getattr(self, "_connection", None)
+        sid = getattr(conn, "session_id", None) or _generate_session_id()
+        return await self.http.request(
+            Route("POST", "/invites/{invite_id}", invite_id=code),
+            json={"session_id": sid},
+            headers=headers,
+        )
+
+    async def _handle_captcha(self, exception):
+        """Global captcha handler wired into discord.py-self's HTTP layer."""
+        logger.warning("CAPTCHA challenge: %s", self._captcha_summary(exception))
+        # 1) external solver (fast, unattended)
+        if self._auto_captcha_solver is not None:
+            try:
+                return await self._auto_captcha_solver.solve(
+                    service=getattr(exception, "service", "hcaptcha"),
+                    sitekey=getattr(exception, "sitekey", ""),
+                    rqdata=getattr(exception, "rqdata", None),
+                    invisible=getattr(exception, "should_serve_invisible", False),
+                )
+            except Exception as e:
+                logger.error("auto captcha solve failed: %s", e)
+        # 2) human-in-the-loop solve page + DM notification
+        if getattr(self.config, "CAPTCHA_HUMAN_SOLVE", False):
+            try:
+                url = await self._create_captcha_challenge(
+                    exception, notify=self._notify_captcha_link
+                )
+                srv = self._human_captcha_server
+                if srv is None:
+                    raise CaptchaSolveError("human captcha server not started")
+                # LLM explanation DM in the background — never blocks the solve.
+                try:
+                    asyncio.create_task(
+                        self._explain_captcha_dm(url, exception)
+                    )
+                except Exception:
+                    pass
+                return await srv.wait_for_token(url)
+            except CaptchaSolveError as e:
+                logger.error("human captcha solve failed: %s", e)
+        # 3) surface the original challenge to the caller (tool reports it)
+        raise exception
+
 
     async def _load_rem_control(self):
         try:

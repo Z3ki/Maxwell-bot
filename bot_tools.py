@@ -32,6 +32,7 @@ import base64
 import discord
 from discord import Activity, File, Message, Status
 from tools import Tool
+from captcha_solver import CaptchaSolveError
 from utils import (  # single source of truth, fd-safe
     FileLock,
     _atomic_json_write_sync,
@@ -1239,6 +1240,332 @@ class CreateInviteTool(Tool):
             return "Error: max_uses and max_age must be numbers"
         except Exception as e:
             return f"Error creating invite: {e}"
+
+
+_INVITE_CODE_RE = re.compile(
+    r"(?:discord(?:app)?\.com/invite/|discord\.gg/)?([a-zA-Z0-9_-]{2,32})",
+    re.IGNORECASE,
+)
+
+
+def _extract_invite_code(invite: str) -> str:
+    """Normalize an invite to its bare code.
+
+    Accepts ``discord.gg/xyz``, ``https://discord.com/invite/xyz``,
+    ``discordapp.com/invite/xyz``, or a bare code like ``xyz``.
+    """
+    invite = (invite or "").strip()
+    if not invite:
+        return ""
+    # Bare codes can't contain a slash; anything with a slash must be a URL.
+    if "/" in invite:
+        m = _INVITE_CODE_RE.search(invite)
+        if m:
+            return m.group(1)
+        return ""
+    return invite
+
+
+_VERIFY_CHANNEL_KEYWORDS = (
+    "verify",
+    "captcha",
+    "wick",
+    "gate",
+    "verification",
+    "human",
+    "onboarding",
+)
+
+
+def _solver_status(bot) -> str:
+    """Describe whether a captcha solver is configured (for tool results)."""
+    cfg = getattr(bot, "config", None)
+    if cfg is None:
+        return ""
+    service = getattr(cfg, "CAPTCHA_SOLVER_SERVICE", "") or ""
+    key = getattr(cfg, "CAPTCHA_SOLVER_API_KEY", "") or ""
+    if service and key:
+        return f" (auto-solver {service} is configured)"
+    return " (no captcha solver configured — CAPTCHA_SOLVER_SERVICE/CAPTCHA_SOLVER_API_KEY)"
+
+
+def _format_captcha(e) -> str:
+    """Render a CaptchaRequired exception into a readable, complete report."""
+    parts = []
+    parts.append(f"service={e.service}")
+    parts.append(f"sitekey={e.sitekey}")
+    if e.session_id:
+        parts.append(f"session_id={e.session_id}")
+    if e.rqdata:
+        parts.append(f"rqdata={e.rqdata}")
+    if e.rqtoken:
+        parts.append(f"rqtoken={e.rqtoken}")
+    parts.append(f"invisible={e.should_serve_invisible}")
+    errors = getattr(e, "errors", None) or []
+    if errors:
+        parts.append(f"reason={', '.join(str(x) for x in errors)}")
+    return " | ".join(parts)
+
+
+class JoinServerTool(Tool):
+    """Join a Discord server via invite link or code."""
+
+    def get_description(self):
+        return (
+            "Join a Discord server using an invite code or link "
+            "(e.g. discord.gg/code or https://discord.com/invite/code). "
+            "Reports the server name/members before joining, and reports "
+            "verification gates, pending manual approval, post-join captcha "
+            "channels, and any errors (including CAPTCHA challenges). "
+            "Params: invite (required)."
+        )
+
+    async def execute(self, message: Message, invite: str | None = None, **kwargs) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: join_server is admin-only"
+        code = _extract_invite_code(invite or "")
+        if not code:
+            return (
+                "Error: could not parse an invite code from "
+                f"'{invite}'. Pass a link like discord.gg/xyz or a bare code."
+            )
+        try:
+            inv = await self.bot.fetch_invite(code, with_counts=True)
+        except discord.NotFound:
+            return f"Error: invite '{code}' is invalid or expired"
+        except discord.Forbidden:
+            return (
+                f"Error: blocked from fetching invite '{code}' "
+                "(banned from server or invite disabled)"
+            )
+        except discord.HTTPException as e:
+            return f"Error fetching invite '{code}': HTTP {e.status}: {e.text[:200]}"
+        except Exception as e:
+            return f"Error fetching invite '{code}': {type(e).__name__}: {e}"
+
+        g = inv.guild
+        gname = g.name if g else "unknown server"
+        gid = g.id if g else None
+        members = getattr(inv, "approximate_member_count", None)
+        features = list(g.features) if g else []
+        level = g.verification_level.name if g and g.verification_level else "unknown"
+        lines = [f"Invite ok — {gname} (ID: {gid}) {members or '?'} members, verification={level}"]
+        if features:
+            lines.append(f"  features: {', '.join(features)}")
+
+        if gid and self.bot.get_guild(gid):
+            return "\n".join(lines + [f"Already in {gname} — no join needed."])
+
+        manual_approval = "MEMBER_VERIFICATION_MANUAL_APPROVAL" in features
+        if manual_approval:
+            lines.append(
+                "  NOTE: server uses MANUAL APPROVAL — join will be pending until an admin approves."
+            )
+
+        try:
+            await inv.accept()
+        except discord.CaptchaRequired as e:
+            # The global client captcha handler (bot._handle_captcha) already
+            # tried the auto-solver and/or DM-based human solve. If it raised,
+            # we get here — post the solve link right in this channel so the
+            # person who asked for the join can complete it, then re-submit
+            # the invite accept with the solved token.
+            human = bool(
+                getattr(getattr(self.bot, "config", None), "CAPTCHA_HUMAN_SOLVE", False)
+            )
+            if human:
+                channel = getattr(message, "channel", None)
+
+                async def _notify_in_channel(url: str) -> None:
+                    try:
+                        if channel is not None:
+                            await channel.send(
+                                "⚠️ CAPTCHA required to join "
+                                + gname
+                                + ". Solve here (expires ~2 min): "
+                                + url
+                            )
+                    except Exception as ex:
+                        logger.warning("captcha in-channel notify failed: %s", ex)
+
+                try:
+                    token = await self.bot._solve_captcha_with_notify(
+                        e, notify=_notify_in_channel
+                    )
+                except CaptchaSolveError as se:
+                    return (
+                        "\n".join(lines)
+                        + f"\nCAPTCHA REQUIRED to join {gname}: {_format_captcha(e)}"
+                        + _solver_status(self.bot)
+                        + f"\nHuman solve failed: {se}"
+                    )
+                try:
+                    data = await self.bot._retry_invite_with_captcha(code, e, token)
+                except discord.HTTPException as he:
+                    return (
+                        "\n".join(lines)
+                        + f"\nCAPTCHA solved but join retry failed: HTTP {he.status}: "
+                        + (he.text[:200] if he.text else "")
+                    )
+                except Exception as ex:
+                    return (
+                        "\n".join(lines)
+                        + f"\nCAPTCHA solved but join retry failed: {type(ex).__name__}: {ex}"
+                    )
+                gid2 = None
+                if isinstance(data, dict):
+                    gid2 = (data.get("guild") or {}).get("id")
+                joined_guild = None
+                for _ in range(12):
+                    joined_guild = self.bot.get_guild(gid2 or gid) if (gid2 or gid) else None
+                    if joined_guild is not None:
+                        break
+                    await asyncio.sleep(1)
+                if joined_guild is not None:
+                    return (
+                        "\n".join(lines)
+                        + f"\nJOINED {joined_guild.name} (ID: {joined_guild.id}) — "
+                        + "captcha was solved via the posted link."
+                    )
+                return (
+                    "\n".join(lines)
+                    + "\nCAPTCHA solved and join re-submitted — waiting on the "
+                    + "guild to appear in cache. Check list_servers shortly."
+                )
+            return (
+                "\n".join(lines)
+                + f"\nCAPTCHA REQUIRED to join {gname}: {_format_captcha(e)}"
+                + _solver_status(self.bot)
+                + "\nJoin blocked until the captcha is solved."
+            )
+        except discord.NotFound as e:
+            return (
+                f"Error joining '{code}': invite invalid/expired "
+                f"(HTTP {e.status})"
+            )
+        except discord.Forbidden as e:
+            return (
+                f"Error joining {gname}: forbidden (HTTP {e.status}) — "
+                "likely banned from the server, or the invite was revoked "
+                "between fetch and accept."
+            )
+        except discord.HTTPException as e:
+            detail = e.text[:200] if e.text else ""
+            if e.status == 429:
+                return (
+                    f"Error joining {gname}: rate limited (429). "
+                    "Wait a bit and retry — Discord throttles rapid joins."
+                )
+            return (
+                f"Error joining {gname}: HTTP {e.status}: {detail}"
+            )
+        except Exception as e:
+            return f"Error joining {gname}: {type(e).__name__}: {e}"
+
+        # Wait for the guild to land in the cache (gateway round-trip).
+        joined_guild = None
+        for _ in range(12):
+            joined_guild = self.bot.get_guild(gid) if gid else None
+            if joined_guild is not None:
+                break
+            await asyncio.sleep(1)
+
+        if joined_guild is None:
+            if manual_approval:
+                return (
+                    "\n".join(lines)
+                    + "\nJoin accepted — pending manual approval. "
+                    "The server will show up once an admin approves."
+                )
+            return (
+                "\n".join(lines)
+                + "\nJoin accepted, but the guild hasn't appeared in cache yet "
+                "(gateway lag or pending state). Check list_servers in a few seconds."
+            )
+
+        lines.append(
+            f"JOINED {joined_guild.name} (ID: {joined_guild.id}, "
+            f"members={joined_guild.member_count})"
+        )
+
+        # Post-join verification gates (Wick captcha-on-join, verify channels,
+        # MEE6/Bloxlink-style role gates). These aren't API errors — the join
+        # worked, but the account is usually role-locked until it completes
+        # the gate.
+        gate_channels = [
+            ch.name
+            for ch in joined_guild.channels
+            if any(k in (ch.name or "").lower() for k in _VERIFY_CHANNEL_KEYWORDS)
+        ][:6]
+        if gate_channels:
+            lines.append(
+                f"  NOTE: verification gate channels present: {', '.join(gate_channels)} — "
+                "the account may be role-locked until it completes verification there."
+            )
+        return "\n".join(lines)
+
+
+class LeaveServerTool(Tool):
+    """Leave a Discord server by name or ID."""
+
+    def get_description(self):
+        return (
+            "Leave a Discord server. Pass the server name or numeric ID "
+            "(use list_servers to find them). Matches by ID first, then "
+            "exact name, then partial/unique name. Reports errors clearly. "
+            "Params: server (required)."
+        )
+
+    async def execute(self, message: Message, server: str | None = None, **kwargs) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: leave_server is admin-only"
+        target = (server or "").strip()
+        if not target:
+            return "Error: leave_server requires a server name or ID"
+
+        guilds = list(self.bot.guilds or [])
+        if not guilds:
+            return "Error: not in any servers"
+
+        guild: Any = None
+        # 1) exact ID
+        if target.isdigit():
+            guild = next((g for g in guilds if str(g.id) == target), None)
+        # 2) exact name (case-insensitive)
+        if guild is None:
+            guild = next((g for g in guilds if g.name.lower() == target.lower()), None)
+        # 3) unique partial name (case-insensitive)
+        if guild is None:
+            matches = [g for g in guilds if target.lower() in (g.name or "").lower()]
+            if len(matches) == 1:
+                guild = matches[0]
+            elif len(matches) > 1:
+                return (
+                    f"Error: '{target}' matches {len(matches)} servers "
+                    + ", ".join(f"{g.name} ({g.id})" for g in matches[:8])
+                    + " — use the numeric ID to disambiguate."
+                )
+
+        if guild is None:
+            return (
+                f"Error: not in any server named/matching '{target}'. "
+                "Use list_servers to see current servers."
+            )
+
+        try:
+            await guild.leave()
+            return f"LEFT {guild.name} (ID: {guild.id})"
+        except discord.Forbidden as e:
+            return f"Error leaving {guild.name}: forbidden (HTTP {e.status})"
+        except discord.NotFound as e:
+            return f"Error leaving {guild.name}: guild not found (HTTP {e.status})"
+        except discord.HTTPException as e:
+            return (
+                f"Error leaving {guild.name}: HTTP {e.status}: "
+                + (e.text[:200] if e.text else "")
+            )
+        except Exception as e:
+            return f"Error leaving {guild.name}: {type(e).__name__}: {e}"
 
 
 class LookupUserTool(Tool):
