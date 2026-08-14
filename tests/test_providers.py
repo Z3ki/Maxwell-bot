@@ -664,6 +664,29 @@ def test_reasoning_only_response_is_not_treated_as_empty():
     assert len(session.payloads) == 1
 
 
+def test_reasoning_only_not_promoted_for_non_deepseek_models():
+    # Regression: commit 010b0db promoted reasoning_content->content for ALL
+    # models when content was null. For a cut-off/interrupted reasoning model
+    # (grok, ollama-native, minimax-m3) that sent the chain-of-thought to
+    # Discord as the user-visible reply. Non-deepseek models must NOT have
+    # reasoning promoted — it falls through to the empty-response path instead
+    # (leaking the scratchpad beats no answer at all, never sending it).
+    provider = OllamaProvider("http://example.test", "grok-4.6", 10, 0.5)
+    provider.available = True
+    session = FakeSession(FakeReasoningOnlyResponse())
+    provider._session = session
+    provider.retry_attempts = 1  # no retries: assert the single-shot behavior
+
+    async def run():
+        # Non-deepseek reasoning-only with no tool_calls must NOT be promoted
+        # to content. It falls through to the empty-response path and raises.
+        with pytest.raises(RuntimeError):
+            await provider.generate_chat_completion([{"role": "user", "content": "hi"}])
+
+    asyncio.run(run())
+    assert len(session.payloads) == 1
+
+
 def test_403_region_error_skips_to_fallback_without_retry():
     provider = OllamaProvider(
         "http://primary.test/v1",
