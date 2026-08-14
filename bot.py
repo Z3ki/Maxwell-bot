@@ -5291,9 +5291,7 @@ class MaxwellBot(commands.Bot):
                         if user is None:
                             user = await self.fetch_user(int(owner_ids[0]))
                         if user is not None:
-                            await user.send(
-                                f"✅ Joined **{guild.name}** — {result}"
-                            )
+                            await user.send(f"✅ Joined **{guild.name}** — {result}")
                 except Exception as e:
                     logger.debug("auto-onboard owner DM failed: %s", e)
         except Exception as e:
@@ -6186,9 +6184,7 @@ class MaxwellBot(commands.Bot):
                     )
                 embed_note = "\nEmbeds present: " + "; ".join(titles)
             _sfa = getattr(message, "author", None)
-            is_admin = (
-                self._is_admin(_sfa.id) if _sfa is not None else False
-            )
+            is_admin = self._is_admin(_sfa.id) if _sfa is not None else False
             guild_id = str(message.guild.id) if message.guild else ""
             channel_id = str(message.channel.id)
             prompt = (
@@ -7695,7 +7691,9 @@ class MaxwellBot(commands.Bot):
                     else "recent"
                 )
                 url = item.get("url") or ""
-                lines.append(f"{i}. {filename} ({mime}, {label}){" — " + url if url else ""}")
+                lines.append(
+                    f"{i}. {filename} ({mime}, {label}){' — ' + url if url else ''}"
+                )
             parts.append(
                 "Images available to inspect, oldest to newest. Only discuss them when relevant to the latest message. Source URL attached for each (curl/pull/reuse in sites if needed):\n"
                 + "\n".join(lines)
@@ -7706,7 +7704,9 @@ class MaxwellBot(commands.Bot):
                 filename = item.get("filename", "media")
                 mime = item.get("mime_type", "media")
                 url = item.get("url") or ""
-                lines.append(f"{i}. {filename} ({mime}, new){" — " + url if url else ""}")
+                lines.append(
+                    f"{i}. {filename} ({mime}, new){' — ' + url if url else ''}"
+                )
             parts.append(
                 "Audio/video available to inspect in the multimodal message payload. Use the actual attached media when answering:\n"
                 + "\n".join(lines)
@@ -9617,6 +9617,20 @@ class MaxwellBot(commands.Bot):
             "the same text — pick send_message as the delivery channel and put nothing "
             "in the raw text. A turn with no terminal tool call leaves the user with "
             "nothing visible and is treated as a dropped response.\n"
+            "FILES MUST BE ATTACHED, NOT DESCRIBED — the user cannot touch your filesystem.\n"
+            "If you created, generated, rendered, downloaded, or edited any file the user "
+            "asked for or would want (image, screenshot, video, audio, 3D model, script, "
+            "document, archive, CSV, site asset, anything), you MUST actually attach it to "
+            "Discord. Two ways: (1) after a shell command produces an artifact, list its "
+            "path in that shell call's `files` parameter so it is uploaded to the channel "
+            "automatically; (2) call `send_file` with `path=<absolute path>` — container "
+            "paths like /home/maxwell/foo.stl and host paths under data/exports, "
+            "data/public_files, or the shell workdir are all accepted. Saying 'here's the "
+            "file', 'it's at /home/maxwell/zeki.png', or 'dropped the screenshot' WITHOUT "
+            "attaching it leaves the user with NOTHING — that is a FAILURE; the file does "
+            "not exist for them until it arrives as a Discord message attachment. Attach "
+            "the artifact first, then one send_message with the caption. send_file does not "
+            "deliver your reply text — pair it with send_message.\n"
             "When in doubt about whether a tool applies, CALL IT. The cost of an "
             "unnecessary tool call is small; the cost of skipping a needed one is a "
             "broken/dropped response the user sees as the bot ignoring them.\n"
@@ -9643,7 +9657,11 @@ class MaxwellBot(commands.Bot):
                 "- Splitting one thought into send_message + leftover raw text — that posts a second reply ping.\n"
                 "- `email_send(...)` then two send_messages acknowledging it. One send_message, or none.\n"
                 "- `create_site(...)` then send_message('site is up') then send_message('here's the link') — one send_message with the link.\n"
-                "- `image_generator(...)` then 'image done' then 'here it is' — combine.\n\n"
+                "- `image_generator(...)` then 'image done' then 'here it is' — combine.\n"
+                "- Creating a file and then only telling the user its path or that it exists "
+                "('saved to /home/maxwell/...', 'dropped the files') — the file is invisible "
+                "until it is attached via send_file or a shell call's `files` parameter. "
+                "Attach it; the path alone is not delivery.\n\n"
                 "## Common tool-specific notes\n"
                 "- `create_site`: the full HTML document goes in the `body` argument, never in chat. When the user says 'make a site' / 'build a page' / 'make me a website' / 'create a landing page' / 'code a webpage' / 'make a portfolio' or any equivalent, call create_site with the complete HTML in `body`. NEVER paste HTML/CSS/JS into your visible reply — that spams raw markup in the channel and the user gets no working site. If your visible text starts with `<!DOCTYPE`, `:root{`, or `<html`, you failed — call create_site instead. The body is HTML, not JSON: use real line breaks or `<br>` in visible text, never literal `\\n` text. Keep `\\n` only inside JavaScript/CSS strings where it is intentional; text-mode site creation repairs escaped whitespace outside those blocks.\n"
                 '- `send_file` with large code/HTML: set `encoding="base64"` and base64-encode the content.\n'
@@ -10513,7 +10531,11 @@ class MaxwellBot(commands.Bot):
             message, user_message, known_users=self._recent_users.get(channel_id, {})
         )
         _live_author = getattr(message, "author", None)
-        author_id = str(getattr(_live_author, "id", "system")) if _live_author is not None else "system"
+        author_id = (
+            str(getattr(_live_author, "id", "system"))
+            if _live_author is not None
+            else "system"
+        )
         author_label = (
             f"{getattr(_live_author, 'display_name', 'System')}({author_id})"
             if _live_author is not None

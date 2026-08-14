@@ -371,7 +371,57 @@ def _strip_heredoc_blocks(command: str) -> str:
                 continue
         out.append(line)
         i += 1
-    return "\n".join(out)
+    # A well-formed heredoc frequently ends with a trailing newline after the
+    # closing delimiter ("...EOF\n"). That produces a trailing empty element
+    # here which would otherwise read as a bare newline and fail the validator
+    # with a confusing "newlines only allowed inside heredoc bodies" error on
+    # a perfectly legal command. Trailing blank lines are harmless, so drop
+    # them before joining. Only the LAST of them is stripped; blank lines
+    # between real statements are still caught by the newline check below.
+    return "\n".join(out).rstrip("\n")
+
+
+def _unterminated_heredoc_error(command: str) -> str | None:
+    """Explain a newline violation caused by a malformed heredoc.
+
+    The generic newline error is confusing when the real problem is a heredoc
+    that was never closed, or a second command placed after the closing
+    delimiter. Return a targeted hint for those cases so the model (or a human
+    pasting a command) is told exactly what to fix.
+    """
+    lines = str(command or "").split("\n")
+    opener: str | None = None  # the delimiter token, when inside a heredoc body
+    opener_text = ""
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if opener is None:
+            idx = line.find("<<")
+            if idx >= 0:
+                tail = line[idx + 2 :].strip()
+                m = re.match(r"^(['\"]?)([A-Za-z0-9_]+)\1\s*$", tail)
+                if m:
+                    opener = m.group(2)
+                    opener_text = line.strip()
+        else:
+            if line.strip() == opener:
+                # Closing delimiter found. Anything non-blank after it is a
+                # second top-level command, which the newline guard rejects.
+                rest = [ln for ln in lines[i + 1 :] if ln.strip()]
+                if rest:
+                    return (
+                        f"heredoc `{opener}` closed but more command text follows "
+                        f"({rest[0]!r}) — only the heredoc body may span lines; "
+                        "run the follow-up in a separate shell call"
+                    )
+                return None
+        i += 1
+    if opener is not None:
+        return (
+            f"heredoc opened with `{opener_text}` but never closed — add a final "
+            f"line containing exactly `{opener}` (nothing else, no trailing text)"
+        )
+    return None
 
 
 def _is_path_allowed(path: str, allowed_base: str) -> bool:
@@ -817,9 +867,7 @@ class HDImageGeneratorTool(Tool):
             cdn_url = sent_msg.attachments[0].url
 
         # Persist a permanent public copy (Discord CDN URLs expire ~24h).
-        local_path, perm_url = _persist_public_image(
-            self.bot, image_bytes, prefix="hd"
-        )
+        local_path, perm_url = _persist_public_image(self.bot, image_bytes, prefix="hd")
 
         await self.bot.memory.add_to_channel_memory(
             str(message.channel.id),
@@ -1513,7 +1561,11 @@ class JoinServerTool(Tool):
                     onboard_note = ""
                     try:
                         onboard = await self.bot._auto_onboard(joined_guild)
-                        if onboard and "no onboarding" not in onboard and "failed" not in onboard:
+                        if (
+                            onboard
+                            and "no onboarding" not in onboard
+                            and "failed" not in onboard
+                        ):
                             onboard_note = "\n" + onboard
                     except Exception as ex:
                         logger.debug("auto-onboard (captcha join) failed: %s", ex)
@@ -1565,7 +1617,8 @@ class JoinServerTool(Tool):
         if joined_guild is None:
             if manual_approval:
                 return (
-                    "\n".join(lines) + "\nJOIN REQUEST SUBMITTED — the server uses MANUAL APPROVAL, "
+                    "\n".join(lines)
+                    + "\nJOIN REQUEST SUBMITTED — the server uses MANUAL APPROVAL, "
                     "so membership is pending until an admin approves. "
                     "The bot is NOT inside the server yet."
                 )
@@ -2388,7 +2441,9 @@ class CreateSiteTool(Tool):
         ext = Path(urlparse(url).path).suffix.lower()
         if ext not in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}:
             ext = ".png"
-        filename = str(filename_hint or f"site-image-{int(datetime.now(timezone.utc).timestamp())}")
+        filename = str(
+            filename_hint or f"site-image-{int(datetime.now(timezone.utc).timestamp())}"
+        )
         filename = re.sub(r"[^a-zA-Z0-9._-]", "_", filename).strip(".")
         filename = re.sub(r"^[.\\/-]+", "", filename)
         if not filename or filename in {".", ".."}:
@@ -2396,9 +2451,9 @@ class CreateSiteTool(Tool):
         if not os.path.splitext(filename)[1]:
             filename += ext
         dest = os.path.join(img_dir, filename)
-        if os.path.commonpath([os.path.abspath(dest), os.path.abspath(img_dir)]) != os.path.abspath(
-            img_dir
-        ):
+        if os.path.commonpath(
+            [os.path.abspath(dest), os.path.abspath(img_dir)]
+        ) != os.path.abspath(img_dir):
             return None, "filename escapes images dir"
         try:
             with open(dest, "wb") as f:
@@ -2560,9 +2615,7 @@ class CreateSiteTool(Tool):
                             src_url, img_dir, entry.get("filename")
                         )
                         if dest:
-                            public_url = (
-                                f"{self.base_url}/{slug}/images/{os.path.basename(dest)}"
-                            )
+                            public_url = f"{self.base_url}/{slug}/images/{os.path.basename(dest)}"
                             image_urls.append(public_url)
                             logger.info(f"Downloaded site image {src_url} -> {dest}")
                         else:
@@ -3677,7 +3730,14 @@ class ShellTool(Tool):
         if any(ord(c) < 32 and c not in ("\t", "\n", "\r") for c in non_heredoc):
             return "control characters are not allowed in shell commands"
         if "\n" in non_heredoc:
-            return "newlines are only allowed inside heredoc bodies"
+            hint = _unterminated_heredoc_error(command)
+            if hint:
+                return "newlines are only allowed inside heredoc bodies — " + hint
+            return (
+                "newlines are only allowed inside heredoc bodies — a `<< 'EOF'` ... EOF "
+                "block is the only place bare newlines are permitted; chain any other "
+                "command onto the same line or use a separate shell call"
+            )
         for pattern in _SHELL_BLOCKED_PATTERNS:
             if re.search(pattern, non_heredoc, re.IGNORECASE):
                 return "blocked dangerous shell pattern"
