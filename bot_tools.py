@@ -484,6 +484,53 @@ def _channel_label(channel) -> str:
     return f"#{name} ({getattr(channel, 'id', '?')})"
 
 
+# ── Permanent public image persistence ──────────────────────────────
+# Discord CDN attachment URLs carry an `ex=` signature that expires ~24h
+# after upload. Any site that embeds one silently loses its image within a
+# day. Generated images are therefore ALSO written under the public site
+# dir (_images/) where the host serves them at a stable, never-expiring
+# URL that curl/wget/<img>/websites can use directly.
+
+
+def _public_image_target(bot) -> tuple[str, str]:
+    """Return (local_dir, public_base_url) for permanently served images.
+
+    Files land in <MAXWELL_SITE_DIR>/_images/ and are served at
+    <MAXWELL_PUBLIC_BASE_URL>/bot/_images/<file> — the same origin that
+    serves create_site pages, so nothing expires and no external CDN is
+    involved.
+    """
+    cfg = getattr(bot, "config", None)
+    site_dir = str(getattr(cfg, "MAXWELL_SITE_DIR", "public/bot") or "public/bot")
+    pub = str(
+        getattr(cfg, "MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com")
+        or "https://maxwell.example.com"
+    ).rstrip("/")
+    return os.path.join(site_dir, "_images"), f"{pub}/bot/_images"
+
+
+def _persist_public_image(
+    bot, image_bytes: bytes, ext: str = ".png", prefix: str = "img"
+) -> tuple[str | None, str | None]:
+    """Best-effort write of image bytes to the public _images dir.
+
+    Returns (local_path, public_url) or (None, None) on failure. Callers
+    must keep working without a permanent link if the save fails.
+    """
+    try:
+        img_dir, pub_base = _public_image_target(bot)
+        os.makedirs(img_dir, exist_ok=True)
+        name = f"{prefix}-{int(datetime.now(timezone.utc).timestamp())}-{random.randint(100000, 999999)}{ext}"
+        path = os.path.join(img_dir, name)
+        with open(path, "wb") as f:
+            f.write(image_bytes)
+        logger.info(f"Persisted public image {path}")
+        return path, f"{pub_base}/{name}"
+    except Exception as e:
+        logger.warning(f"Failed to persist public image: {e}")
+        return None, None
+
+
 class ImageGeneratorTool(Tool):
     """Fast image generation using NVIDIA Flux"""
 
@@ -575,6 +622,12 @@ class ImageGeneratorTool(Tool):
                     logger.info(
                         f"NVIDIA image generated successfully, size: {len(image_bytes)} bytes"
                     )
+                    # Persist a permanent public copy — the Discord CDN URL
+                    # expires ~24h, which silently breaks any site that
+                    # embeds it. The stable URL survives and is curl-able.
+                    local_path, perm_url = _persist_public_image(
+                        self.bot, image_bytes, prefix="nvidia"
+                    )
                     # Send to Discord so the model can SEE it in chat
                     file = File(BytesIO(image_bytes), filename="generated_image.png")
                     sent_msg = None
@@ -604,6 +657,17 @@ class ImageGeneratorTool(Tool):
                     result = f"Image sent to chat: {prompt[:100]}"
                     if cdn_url:
                         result += f"\nImage URL: {cdn_url}"
+                    if perm_url:
+                        result += (
+                            f"\nPermanent URL: {perm_url} "
+                            "(never expires — use this in websites, <img> tags, or curl)"
+                        )
+                    if local_path:
+                        result += (
+                            f"\nLocal path: {local_path} "
+                            f'(pass to create_site as images=[{{"path": "{local_path}"}}] '
+                            "to bundle it into a site)"
+                        )
                     result += "\nLook at the image you just posted. If it looks good, mention the URL or use it for the site. "
                     result += "If it looks bad, call image_generator again with an improved prompt. "
                     result += "If you were generating this for a site, call create_site NOW (in your next response) with the URL embedded in the body — do not call create_site before image_generator returns this URL."
@@ -752,6 +816,11 @@ class HDImageGeneratorTool(Tool):
         if sent_msg and sent_msg.attachments:
             cdn_url = sent_msg.attachments[0].url
 
+        # Persist a permanent public copy (Discord CDN URLs expire ~24h).
+        local_path, perm_url = _persist_public_image(
+            self.bot, image_bytes, prefix="hd"
+        )
+
         await self.bot.memory.add_to_channel_memory(
             str(message.channel.id),
             {
@@ -763,7 +832,17 @@ class HDImageGeneratorTool(Tool):
         result = f"HD image generated successfully: {(revised_prompt or prompt)[:100]}"
         if cdn_url:
             result += f"\nImage URL: {cdn_url}"
-            result += "\nUse this URL directly in HTML <img> tags."
+        if perm_url:
+            result += (
+                f"\nPermanent URL: {perm_url} "
+                "(never expires — use this directly in HTML <img> tags or curl)"
+            )
+        if local_path:
+            result += (
+                f"\nLocal path: {local_path} "
+                f'(pass to create_site as images=[{{"path": "{local_path}"}}] '
+                "to bundle it into a site)"
+            )
         return result
 
 
@@ -2274,6 +2353,60 @@ class CreateSiteTool(Tool):
 
     MAX_CONTENT_SIZE = 3000000  # 3MB for big single-file 3D scenes, full movie recreations, complex interactive demos etc. (use base64 encoding in tool call for safety)
 
+    async def _download_site_image(
+        self, url: str, img_dir: str, filename_hint=None
+    ) -> tuple[str | None, str | None]:
+        """Download an image from a URL into img_dir for a site.
+
+        Returns (dest_path, None) on success, (None, error) on failure.
+        Lets create_site consume image URLs directly (Discord CDN, the
+        permanent image URLs from image_generator, external hosts) instead
+        of requiring a local path.
+        """
+        if not _is_safe_url(url):
+            return None, "unsafe URL"
+        try:
+            session = await _get_shared_session()
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=30, connect=10)
+            ) as resp:
+                if resp.status != 200:
+                    return None, f"HTTP {resp.status}"
+                content_type = (
+                    (resp.headers.get("Content-Type") or "")
+                    .split(";", 1)[0]
+                    .strip()
+                    .lower()
+                )
+                if not content_type.startswith("image/"):
+                    return None, f"not an image ({content_type or 'unknown'})"
+                blob = await _read_response_limited(resp, 10 * 1024 * 1024)
+        except Exception as e:
+            return None, str(e)[:120]
+        if not blob:
+            return None, "empty body"
+        ext = Path(urlparse(url).path).suffix.lower()
+        if ext not in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}:
+            ext = ".png"
+        filename = str(filename_hint or f"site-image-{int(datetime.now(timezone.utc).timestamp())}")
+        filename = re.sub(r"[^a-zA-Z0-9._-]", "_", filename).strip(".")
+        filename = re.sub(r"^[.\\/-]+", "", filename)
+        if not filename or filename in {".", ".."}:
+            filename = "image"
+        if not os.path.splitext(filename)[1]:
+            filename += ext
+        dest = os.path.join(img_dir, filename)
+        if os.path.commonpath([os.path.abspath(dest), os.path.abspath(img_dir)]) != os.path.abspath(
+            img_dir
+        ):
+            return None, "filename escapes images dir"
+        try:
+            with open(dest, "wb") as f:
+                f.write(blob)
+        except Exception as e:
+            return None, f"write failed: {e}"
+        return dest, None
+
     def __init__(self, bot):
         super().__init__(bot)
         self.base_dir = getattr(bot.config, "MAXWELL_SITE_DIR", "public/bot")
@@ -2342,7 +2475,7 @@ class CreateSiteTool(Tool):
             if normalized_body != body:
                 logger.info(
                     "Normalized escaped whitespace in create_site body (%d chars changed)",
-                    sum(a != b for a, b in zip(body, normalized_body))
+                    sum(a != b for a, b in zip(body, normalized_body, strict=False))
                     + abs(len(body) - len(normalized_body)),
                 )
                 body = normalized_body
@@ -2417,7 +2550,27 @@ class CreateSiteTool(Tool):
                 for entry in image_list:
                     if isinstance(entry, str):
                         entry = {"path": entry}
+                    src_url = str(entry.get("url") or "").strip()
                     src_path = entry.get("path", "")
+                    if src_url and not src_path:
+                        # URL entries: download the image into the site's
+                        # images/ dir so the site is fully self-hosted and
+                        # never depends on an expiring external link.
+                        dest, err = await self._download_site_image(
+                            src_url, img_dir, entry.get("filename")
+                        )
+                        if dest:
+                            public_url = (
+                                f"{self.base_url}/{slug}/images/{os.path.basename(dest)}"
+                            )
+                            image_urls.append(public_url)
+                            logger.info(f"Downloaded site image {src_url} -> {dest}")
+                        else:
+                            missing_images.append(src_url)
+                            logger.warning(
+                                f"Site image URL failed: {src_url} ({err or 'unknown'})"
+                            )
+                        continue
                     if not src_path or not any(
                         _is_path_allowed(src_path, b) for b in allowed_bases
                     ):
@@ -3146,8 +3299,9 @@ class SendFileTool(Tool):
             return f"Error: file is too large (max {self.MAX_SIZE // 1024 // 1024} MB)"
 
         file = File(BytesIO(blob), filename=safe_name)
+        sent = None
         try:
-            await message.reply(file=file)
+            sent = await message.reply(file=file)
         except discord.Forbidden:
             return "Error: no permission to send files here"
         except discord.HTTPException as e:
@@ -3155,7 +3309,15 @@ class SendFileTool(Tool):
         except Exception as e:
             return f"Error sending file: {e}"
 
-        return f"__FILE_SENT__ Sent file: {safe_name} ({len(blob)} bytes)"
+        # Every piece of media gets its URL attached: the sent Discord
+        # attachment carries a CDN URL the model can curl/pull/reuse.
+        file_url = ""
+        if sent is not None and getattr(sent, "attachments", None):
+            file_url = sent.attachments[0].url
+        result = f"__FILE_SENT__ Sent file: {safe_name} ({len(blob)} bytes)"
+        if file_url:
+            result += f"\nFile URL: {file_url}"
+        return result
 
 
 # Patterns blocked in shell commands (defense-in-depth even in full-access mode).
@@ -4508,14 +4670,24 @@ class SendMediaTool(Tool):
             filename = os.path.splitext(filename)[0] + ".bin"
 
         file = File(BytesIO(media_bytes), filename=filename)
+        sent = None
         try:
-            await message.reply(file=file)
+            sent = await message.reply(file=file)
         except discord.Forbidden:
             return "Error: no permission to send files here"
         except discord.HTTPException as e:
             return f"Error sending media: {e}"
 
-        return f"__MEDIA_SENT__ Sent media: {filename}"
+        # Attach the URL of what was actually sent (source URL + the new
+        # Discord CDN URL) so the model can curl/pull/reuse either one.
+        cdn_url = ""
+        if sent is not None and getattr(sent, "attachments", None):
+            cdn_url = sent.attachments[0].url
+        result = f"__MEDIA_SENT__ Sent media: {filename}"
+        result += f"\nSource URL: {url}"
+        if cdn_url:
+            result += f"\nFile URL: {cdn_url}"
+        return result
 
 
 # KiloTool removed — it was a host-level RCE escape hatch that bypassed
@@ -5779,8 +5951,8 @@ class UpdateBasePersonalityTool(Tool):
             control = dict(self.bot._control)
             control["base_personality"] = text
             self.bot._control = control
-            from pathlib import Path
             import asyncio
+            from pathlib import Path
 
             await asyncio.to_thread(
                 _atomic_json_write_sync,

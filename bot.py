@@ -7030,7 +7030,11 @@ class MaxwellBot(commands.Bot):
                         if normalized:
                             blob, mime, filename = normalized
                         derived = await self._extract_video_derivatives(
-                            blob, filename, getattr(message, "id", None), max_size
+                            blob,
+                            filename,
+                            getattr(message, "id", None),
+                            max_size,
+                            source_url=getattr(attachment, "url", "") or "",
                         )
                         for derived_item in derived:
                             if derived_item.get("is_image"):
@@ -7055,6 +7059,10 @@ class MaxwellBot(commands.Bot):
                     "is_text": bool(text),
                     "text": text,
                     "message_id": getattr(message, "id", None),
+                    # Every piece of media carries its source URL when
+                    # possible so the model can curl/pull/reuse it in
+                    # sites instead of being blind to where it came from.
+                    "url": getattr(attachment, "url", "") or "",
                 }
                 media.append(item)
                 kind = "text" if text else "media"
@@ -7138,7 +7146,12 @@ class MaxwellBot(commands.Bot):
             return None
 
     async def _extract_video_derivatives(
-        self, blob: bytes, filename: str, message_id, max_size: int
+        self,
+        blob: bytes,
+        filename: str,
+        message_id,
+        max_size: int,
+        source_url: str = "",
     ) -> list[dict]:
         """Extract representative frames and audio track from video for reliable model coverage."""
         results = []
@@ -7196,6 +7209,7 @@ class MaxwellBot(commands.Bot):
                                 "text": "",
                                 "message_id": message_id,
                                 "source": "video_frame",
+                                "url": source_url,
                             }
                         )
                 else:
@@ -7258,6 +7272,7 @@ class MaxwellBot(commands.Bot):
                                     "text": "",
                                     "message_id": message_id,
                                     "source": "video_audio",
+                                    "url": source_url,
                                 }
                             )
                     elif proc.returncode != 0:
@@ -7438,6 +7453,9 @@ class MaxwellBot(commands.Bot):
             "text": "",
             "message_id": message_id,
             "source": "embed",
+            # Attach the source URL so the model can curl/reuse the
+            # original instead of only having a base64 copy.
+            "url": url,
         }
 
     async def _extract_embeds(self, message) -> list[dict]:
@@ -7454,8 +7472,14 @@ class MaxwellBot(commands.Bot):
 
         for idx, embed in enumerate(embeds[:5], 1):
             text = self._embed_text(embed)
+            embed_media_urls = self._embed_media_urls(embed)
             if text:
                 text_blocks.append(f"Embed {idx}:\n{text}")
+            if embed_media_urls:
+                text_blocks.append(
+                    f"Embed {idx} media URLs:\n"
+                    + "\n".join(f"  - {u}" for _, u in embed_media_urls)
+                )
             # Skip ALL media for YouTube embeds; the youtube tool fetches
             # thumbnail/frames/transcript itself, and feeding the raw
             # embed thumbnail here lets the model "see" it without ever
@@ -7465,7 +7489,7 @@ class MaxwellBot(commands.Bot):
                 continue
             embed_has_image = False
             pending_video = []
-            for label, url in self._embed_media_urls(embed):
+            for label, url in embed_media_urls:
                 if media_count >= 5:
                     break
                 if _YouTubeTool._is_youtube_url(url):
@@ -7531,6 +7555,9 @@ class MaxwellBot(commands.Bot):
             )
             if item:
                 item["source"] = "gif_link"
+                # The media item already carries url= from
+                # _download_embed_media; keep it explicitly sourced.
+                item["url"] = url
                 media.append(item)
         return media
 
@@ -7560,6 +7587,7 @@ class MaxwellBot(commands.Bot):
                         existing["uses_left"] = MEDIA_CONTEXT_USES
                         existing["b64"] = item["b64"]
                         existing["mime_type"] = item["mime_type"]
+                        existing["url"] = item.get("url", "")
                         replaced = True
                         break
             if not replaced:
@@ -7569,6 +7597,7 @@ class MaxwellBot(commands.Bot):
                         "mime_type": item["mime_type"],
                         "filename": fname,
                         "message_id": mid,
+                        "url": item.get("url", ""),
                         # Decremented after each handled message. Do not "clean this up"
                         # back to a big number unless you enjoy haunted image context.
                         "uses_left": MEDIA_CONTEXT_USES,
@@ -7595,6 +7624,7 @@ class MaxwellBot(commands.Bot):
                     "mime_type": item["mime_type"],
                     "filename": item.get("filename", "attachment"),
                     "message_id": item.get("message_id"),
+                    "url": item.get("url", ""),
                 }
             )
         return active
@@ -7664,9 +7694,10 @@ class MaxwellBot(commands.Bot):
                     )
                     else "recent"
                 )
-                lines.append(f"{i}. {filename} ({mime}, {label})")
+                url = item.get("url") or ""
+                lines.append(f"{i}. {filename} ({mime}, {label}){" — " + url if url else ""}")
             parts.append(
-                "Images available to inspect, oldest to newest. Only discuss them when relevant to the latest message:\n"
+                "Images available to inspect, oldest to newest. Only discuss them when relevant to the latest message. Source URL attached for each (curl/pull/reuse in sites if needed):\n"
                 + "\n".join(lines)
             )
         if active_non_images:
@@ -7674,7 +7705,8 @@ class MaxwellBot(commands.Bot):
             for i, item in enumerate(active_non_images, 1):
                 filename = item.get("filename", "media")
                 mime = item.get("mime_type", "media")
-                lines.append(f"{i}. {filename} ({mime}, new)")
+                url = item.get("url") or ""
+                lines.append(f"{i}. {filename} ({mime}, new){" — " + url if url else ""}")
             parts.append(
                 "Audio/video available to inspect in the multimodal message payload. Use the actual attached media when answering:\n"
                 + "\n".join(lines)
@@ -7688,13 +7720,15 @@ class MaxwellBot(commands.Bot):
             for item in text_items:
                 filename = item.get("filename", "attachment")
                 mime = item.get("mime_type", "text/plain")
+                url = item.get("url") or ""
                 label = (
                     "Embed text"
                     if item.get("source") == "embed"
                     else "Readable attachment"
                 )
+                url_note = f"\nSource URL: {url}" if url else ""
                 parts.append(
-                    f"{label}: {filename} ({mime}). Full contents follow:\n"
+                    f"{label}: {filename} ({mime}). Full contents follow:{url_note}\n"
                     f"```text\n{item.get('text', '')}\n```"
                 )
         return "\n".join(parts)
