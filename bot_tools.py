@@ -1129,8 +1129,8 @@ class WaitTool(Tool):
         return (
             "Pause the current tool batch for `seconds` (float, default 2.0, "
             "min 0.0, max 10.0). The turn stays open — call more tools after. "
-            "Use this to space out multiple send_messages within one turn "
-            "(countdowns, staged reveals). Distinct from `sleep`: `sleep` is "
+            "Optional pause between separate send_messages (countdown / two beats). "
+            "Do not use this to chunk a normal reply. Distinct from `sleep`: `sleep` is "
             "1-60 minutes and ends dispatch; `wait` is a sub-turn pause under "
             "10 seconds."
         )
@@ -2417,7 +2417,8 @@ class SendMessageTool(Tool):
 
     def get_description(self):
         return (
-            "Send a message to the current chat. Prefer this for final user-facing output. "
+            "Send a message to the current chat. Default: one call per turn with the full reply. "
+            "You can call this more than once if you actually want separate Discord messages; do not split a normal reply. "
             "Content supports Discord markdown: **bold**, *italic*, `code`, ```code blocks```, > quotes, bullet lists. "
             "Params: content (required), reply (optional bool, default true)."
         )

@@ -1873,6 +1873,29 @@ def _tool_results_need_followup(tool_results: list[str]) -> bool:
     return False
 
 
+def _should_skip_plaintext_after_send(
+    last_tool_results: list[str],
+    all_tool_results: list[str],
+    followup_turn_ran: bool,
+    response: str,
+) -> bool:
+    """Skip leftover assistant text when send_message already delivered.
+
+    Same-generation leftover (tool_calls + content) must not post as a
+    second Discord reply. A later follow-up turn with real text and no
+    new send_message still posts, so a "checking…" placeholder can be
+    followed by the actual answer.
+    """
+    last = last_tool_results or []
+    if any("__MESSAGE_SENT__" in tr for tr in last):
+        return True
+    if any("__MESSAGE_SENT__" in tr for tr in all_tool_results) and not (
+        followup_turn_ran and (response or "").strip()
+    ):
+        return True
+    return False
+
+
 class ToolCircuitBreaker:
     """Track tool failures and temporarily disable failing tools."""
 
@@ -7848,6 +7871,7 @@ class MaxwellBot(commands.Bot):
             # #maxwell-the-bot 2026-08-02 with "Mat Dickie" / "you a fan"
             # — see PM2 out.log 01:25:17→28 for the canonical reproduction.
             followup_turn_ran = False
+            tool_results: list[str] = []
             for _iteration in range(max_iters):
                 if time.monotonic() > tool_deadline:
                     logger.info("Tool iteration time budget exceeded, breaking")
@@ -8005,15 +8029,12 @@ class MaxwellBot(commands.Bot):
                     message, all_tool_results, response, "no_response"
                 )
                 return
-            # If send_message was called AND the model produced a follow-up
-            # reply after seeing the tool results (or its own placeholder),
-            # we still want to post that follow-up — the placeholder is
-            # just a stale artifact and dropping the substantive answer
-            # leaves the user with "checking…" or similar. Only the
-            # pure-terminal case (one-shot send_message, no followup) gets
-            # the early-return.
-            if any("__MESSAGE_SENT__" in tr for tr in all_tool_results) and not (
-                followup_turn_ran and (response or "").strip()
+            # If this generation already called send_message, leftover
+            # assistant text is not a second reply. A later follow-up
+            # with real text and no new send_message still posts (the
+            # "checking…" placeholder case).
+            if _should_skip_plaintext_after_send(
+                tool_results, all_tool_results, followup_turn_ran, response
             ):
                 await self._ensure_reasoning_trace(
                     message, all_tool_results, response, "send_message"
@@ -9176,20 +9197,20 @@ class MaxwellBot(commands.Bot):
                 "## Reasoning\n"
                 "EVERY tool call MUST include a `reasoning` parameter — NO exceptions, not even for react / no_response / sleep / trivial calls. The user sees your reasoning as the live 'thinking: <reasoning>' progress line. A tool call without reasoning means the user sees nothing while you work and the call may be rejected. Put your real plain-English reasoning there BEFORE the action — why you're calling it, what you expect, assumptions and risks. Reasoning lives INSIDE the tool call, not in chat. Plain text only, no XML, no JSON, no tags, no nested <thoughts>. One short sentence for trivial calls (react, sleep), one to two for routine, three to six for complex (create_site with custom HTML, image_generator, shell debugging).\n\n"
                 "## Rules\n"
-                "- Put user-facing chat text in send_message's `content`. Every reply goes through send_message.\n"
-                "- **Most turns should call send_message EXACTLY ONCE.** The new multi-send capability is for specific spacing patterns (countdowns, staged reveals) — not for narrating the same reply in chunks. If you find yourself emitting a second send_message right after the first, stop: the user is going to see BOTH as their reply and will read it as you being scattered or repeating yourself. Combine them into one send_message instead. Multiple send_messages are only correct when each one is DELIBERATELY a different beat (e.g. \"3\" → \"2\" → \"1\" → \"go!\").\n"
-                "- Terminal actions run in the order you emit them. send_message CAN be called multiple times in one turn (e.g. staged reveals, countdowns), and you can interleave `wait` between them for spacing. The OLD 'one terminal action per turn' rule is gone — emit as many send_messages + waits as the reply needs, in the exact order they should fire. no_response is the one exception: at most one per turn, and you can't send_message AFTER no_response in the same batch (drop the no_response if you want to send). Both terminal actions ALSO require a `reasoning` field.\n"
+                "- Put user-facing chat text in send_message's `content`. Every reply goes through send_message. Do not also write the same text as raw assistant content.\n"
+                "- Default is ONE send_message per turn. You CAN call send_message more than once in a turn if you actually want separate Discord messages. That is allowed, not something to do by default. Do not split a normal answer, list, or research dump into multiple sends.\n"
+                "- Terminal actions run in the order you emit them. You may interleave `wait` between sends. no_response is the exception: at most one per turn, and you can't send_message AFTER no_response in the same batch. Both terminal actions ALSO require a `reasoning` field.\n"
                 "- `reasoning` is the FIRST key in the tool's arguments JSON, before the tool's real parameters. NEVER put it second. NEVER omit it.\n"
                 "- Call helper tools (web_search, shell, image_generator, ...) when they help; each carries its own `reasoning`. Helpers run in parallel with each other and FINISH before any terminal action runs — so `send_message('found it: <answer>')` after a web_search sees the search result.\n\n"
-                "## Sequencing recipes\n"
-                "- **Staged reveal**: send_message('starting...') → wait(2) → send_message('done!') — fires first message immediately, pauses 2s, sends the follow-up.\n"
-                "- **Countdown**: send_message('3') → wait(1) → send_message('2') → wait(1) → send_message('1') → wait(1) → send_message('go!') — fires each tick one second apart.\n"
-                "- **Search then reply**: web_search(query='...') → send_message(content='<answer based on results>') — the search runs first, your reply uses its results.\n"
+                "## Sequencing\n"
+                "- Default: helpers first, then one send_message with the full reply.\n"
+                "- Multiple send_messages plus `wait` exist for rare spacing (a countdown, two genuinely separate beats). Do not use that pattern for ordinary chat.\n"
                 "- `wait` is capped at 10 seconds per call. For longer pauses use `sleep` instead (but `sleep` ends dispatch, so the user has to ping you back).\n\n"
                 "## Anti-pattern: avoid these\n"
-                "- `email_send(...)` then `send_message('email sent')` then `send_message('let me know if it doesn't arrive')` — the user sees three messages. Pick ONE send_message that acknowledges the send, or just trust the tool result.\n"
-                "- `create_site(...)` then `send_message('site is up')` then `send_message('here's the link: ...')` — that's two sends for one reply. Combine into a single send_message that mentions the link.\n"
-                "- `image_generator(...)` then `send_message('image done')` then `send_message('here it is')` — same pattern, combine.\n\n"
+                "- Splitting one thought into send_message + leftover raw text — that posts a second reply ping.\n"
+                "- `email_send(...)` then two send_messages acknowledging it. One send_message, or none.\n"
+                "- `create_site(...)` then send_message('site is up') then send_message('here's the link') — one send_message with the link.\n"
+                "- `image_generator(...)` then 'image done' then 'here it is' — combine.\n\n"
                 "## Common tool-specific notes\n"
                 "- `create_site`: the full HTML document goes in the `body` argument, never in chat. When the user says 'make a site' / 'build a page' / 'make me a website' / 'create a landing page' / 'code a webpage' / 'make a portfolio' or any equivalent, call create_site with the complete HTML in `body`. NEVER paste HTML/CSS/JS into your visible reply — that spams raw markup in the channel and the user gets no working site. If your visible text starts with `<!DOCTYPE`, `:root{`, or `<html`, you failed — call create_site instead. The body is HTML, not JSON: use real line breaks or `<br>` in visible text, never literal `\\n` text. Keep `\\n` only inside JavaScript/CSS strings where it is intentional; text-mode site creation repairs escaped whitespace outside those blocks.\n"
                 '- `send_file` with large code/HTML: set `encoding="base64"` and base64-encode the content.\n'
