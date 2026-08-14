@@ -1474,9 +1474,10 @@ class JoinServerTool(Tool):
         except Exception as e:
             return f"Error joining {gname}: {type(e).__name__}: {e}"
 
-        # Wait for the guild to land in the cache (gateway round-trip).
+        # Wait for the guild to land in the cache (gateway round-trip; large
+        # guilds with member chunking can take a while).
         joined_guild = None
-        for _ in range(12):
+        for _ in range(25):
             joined_guild = self.bot.get_guild(gid) if gid else None
             if joined_guild is not None:
                 break
@@ -1485,13 +1486,35 @@ class JoinServerTool(Tool):
         if joined_guild is None:
             if manual_approval:
                 return (
-                    "\n".join(lines) + "\nJoin accepted — pending manual approval. "
-                    "The server will show up once an admin approves."
+                    "\n".join(lines) + "\nJOIN REQUEST SUBMITTED — the server uses MANUAL APPROVAL, "
+                    "so membership is pending until an admin approves. "
+                    "The bot is NOT inside the server yet."
+                )
+            # Confirm membership from the API before claiming anything — the
+            # gateway cache can lag behind the actual accept.
+            confirmed = False
+            try:
+                from discord.http import Route
+
+                gdata = await self.bot.http.request(
+                    Route("GET", "/guilds/{guild_id}", guild_id=gid),
+                    params={"with_counts": "true"},
+                )
+                confirmed = bool(gdata and gdata.get("id"))
+            except Exception:
+                confirmed = False
+            if confirmed:
+                gname2 = (gdata or {}).get("name") or gname
+                return (
+                    "\n".join(lines)
+                    + f"\nJOINED {gname2} (ID: {gid}) — confirmed via API. "
+                    "The gateway cache is still syncing; list_servers will show it shortly."
                 )
             return (
                 "\n".join(lines)
-                + "\nJoin accepted, but the guild hasn't appeared in cache yet "
-                "(gateway lag or pending state). Check list_servers in a few seconds."
+                + "\nJoin result uncertain — the invite was accepted but the "
+                "guild is not visible yet. Ask the server owner to confirm, "
+                "then check list_servers."
             )
 
         lines.append(
@@ -1522,7 +1545,11 @@ class JoinServerTool(Tool):
                 f"  NOTE: verification gate channels present: {', '.join(gate_channels)} — "
                 "the account may be role-locked until it completes verification there."
             )
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        logger.info(
+            "join_server result for %s: %s", code, result.replace("\n", " | ")[:400]
+        )
+        return result
 
 
 class LeaveServerTool(Tool):
