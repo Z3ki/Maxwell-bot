@@ -242,6 +242,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     close_shared_session,
 )
 from captcha_solver import (  # noqa: E402
+    CaptchaSolveError,
     HumanCaptchaServer,
     build_solver,
 )
@@ -3054,16 +3055,18 @@ class MaxwellBot(commands.Bot):
         # traffic — "no context for outside messages" complaint. Cooldown
         # now only applies to the REPLY path (provider call downstream); the
         # STORAGE path always runs so RAG sees every message.
-        cooldown_for_reply = cooldown > 0 and now - last < cooldown and not (
-            has_attachment or has_embed
+        cooldown_for_reply = (
+            cooldown > 0 and now - last < cooldown and not (has_attachment or has_embed)
         )
         self._cooldowns[str(message.author.id)] = now
         if len(self._cooldowns) > 1000:
             cutoff = now - 60
             self._cooldowns = {k: v for k, v in self._cooldowns.items() if v > cutoff}
 
-        # Update user cache for this conversation early
-        self._update_recent_users(channel_id, message.author)
+        # Update user cache for this conversation early (system messages may
+        # carry no author object — welcome/join events have None).
+        if getattr(message, "author", None) is not None:
+            self._update_recent_users(channel_id, message.author)
         for u in getattr(message, "mentions", []) or []:
             self._update_recent_users(channel_id, u)
 
@@ -3197,10 +3200,17 @@ class MaxwellBot(commands.Bot):
                         embed_titles.append(str(title)[:120])
                     embed_note = "[embeds: " + "; ".join(embed_titles) + "]"
                     memory_content = f"{memory_content} {embed_note}".strip()
+                _ma = getattr(message, "author", None)
                 memory_item = {
-                    "author": message.author.display_name,
-                    "author_id": str(message.author.id),
-                    "author_is_bot": bool(message.author.bot),
+                    "author": getattr(_ma, "display_name", "System")
+                    if _ma is not None
+                    else "System",
+                    "author_id": str(getattr(_ma, "id", "system"))
+                    if _ma is not None
+                    else "system",
+                    "author_is_bot": bool(getattr(_ma, "bot", False))
+                    if _ma is not None
+                    else False,
                     "content": render_discord_context_text(
                         message,
                         memory_content or "[media attached]",
@@ -5051,9 +5061,7 @@ class MaxwellBot(commands.Bot):
             await self._human_captcha_server.start()
         return self._human_captcha_server
 
-    async def _create_captcha_challenge(
-        self, exception, notify=None
-    ) -> str:
+    async def _create_captcha_challenge(self, exception, notify=None) -> str:
         """Register a pending challenge; returns the public solve URL."""
         srv = await self._human_captcha_ensure()
         url = await srv.create_challenge(exception)
@@ -5130,9 +5138,7 @@ class MaxwellBot(commands.Bot):
         except Exception as e:
             logger.debug("captcha LLM explanation skipped: %s", e)
 
-    async def _solve_captcha_with_notify(
-        self, exception, notify=None
-    ) -> str:
+    async def _solve_captcha_with_notify(self, exception, notify=None) -> str:
         """Create a human-solve challenge (custom notify) and wait for the token."""
         url = await self._create_captcha_challenge(exception, notify=notify)
         srv = self._human_captcha_server
@@ -5140,9 +5146,7 @@ class MaxwellBot(commands.Bot):
             raise CaptchaSolveError("human captcha server not started")
         return await srv.wait_for_token(url)
 
-    async def _retry_invite_with_captcha(
-        self, code: str, exception, token: str
-    ):
+    async def _retry_invite_with_captcha(self, code: str, exception, token: str):
         """Re-submit an invite accept with the solved captcha headers."""
         from discord.http import Route
         from discord.utils import _generate_session_id
@@ -5187,9 +5191,7 @@ class MaxwellBot(commands.Bot):
                     raise CaptchaSolveError("human captcha server not started")
                 # LLM explanation DM in the background — never blocks the solve.
                 try:
-                    asyncio.create_task(
-                        self._explain_captcha_dm(url, exception)
-                    )
+                    asyncio.create_task(self._explain_captcha_dm(url, exception))
                 except Exception:
                     pass
                 return await srv.wait_for_token(url)
@@ -5198,6 +5200,104 @@ class MaxwellBot(commands.Bot):
         # 3) surface the original challenge to the caller (tool reports it)
         raise exception
 
+    async def _auto_onboard(self, guild, notify=None) -> str:
+        """Complete Discord's member-onboarding flow automatically.
+
+        Many servers gate their roles behind GUILD_ONBOARDING prompts
+        (role_select / multiple_choice / dropdown). This fetches the
+        member's onboarding status and answers every prompt with its
+        first option, granting the default roles so the account is
+        actually usable in the server. Returns a summary string for
+        tool results / logs; never raises.
+        """
+        try:
+            features = list(getattr(guild, "features", []) or [])
+            if "GUILD_ONBOARDING" not in features:
+                return "no onboarding flow (GUILD_ONBOARDING feature absent)"
+            gid = guild.id
+            from discord.http import Route
+
+            data = await self.http.request(
+                Route("GET", "/guilds/{guild_id}/members/@me/onboarding", guild_id=gid)
+            )
+            prompts = (data or {}).get("prompts") or []
+            if not prompts:
+                return "onboarding: no prompts to complete"
+            responses = []
+            picked = []
+            for p in prompts:
+                try:
+                    pid = p.get("id")
+                    options = p.get("options") or []
+                    if not pid or not options:
+                        continue
+                    first = options[0]
+                    responses.append(
+                        {"prompt_id": pid, "option_ids": [first.get("id")]}
+                    )
+                    picked.append(
+                        f"{str(p.get('title') or '?')[:60]} -> {str(first.get('title') or '?')[:60]}"
+                    )
+                except Exception:
+                    continue
+            if not responses:
+                return "onboarding: no selectable prompts"
+            body: dict = {"onboarding_responses": responses}
+            default_channels = (data or {}).get("default_channel_ids") or []
+            if default_channels:
+                body["default_channel_ids"] = default_channels
+            await self.http.request(
+                Route("PUT", "/guilds/{guild_id}/members/@me/onboarding", guild_id=gid),
+                json=body,
+            )
+            summary = "onboarding completed: " + "; ".join(picked)
+            logger.info("Auto-onboard %s (guild %s): %s", guild.name, gid, summary)
+            if notify is not None:
+                try:
+                    await notify(summary)
+                except Exception as e:
+                    logger.debug("auto-onboard notify failed: %s", e)
+            return summary
+        except discord.NotFound:
+            # 404 = member has no pending onboarding (returning member, or the
+            # server gates via membership screening instead of prompts).
+            return "no onboarding pending"
+        except discord.HTTPException as e:
+            return f"onboarding failed: HTTP {e.status}: {str(e.text)[:160]}"
+        except Exception as e:
+            return f"onboarding failed: {type(e).__name__}: {e}"
+
+    async def on_guild_join(self, guild):
+        """Fire when the account is added to a server (invite accept, tool
+        join, or someone manually inviting the account). Runs auto-onboarding
+        so role-gated servers are usable immediately, and records the join
+        in the log. Failures are logged, never raised."""
+        try:
+            logger.info("Joined guild: %s (id=%s)", guild.name, guild.id)
+        except Exception:
+            pass
+        # Give the gateway a beat to hydrate guild state before onboarding.
+        await asyncio.sleep(2)
+        try:
+            result = await self._auto_onboard(guild)
+            if "no onboarding" in result or "failed" in result:
+                logger.info("Auto-onboard skip/failed for %s: %s", guild.name, result)
+            else:
+                logger.info("Auto-onboard %s: %s", guild.name, result)
+                try:
+                    owner_ids = self._captcha_recipient_ids()
+                    if owner_ids:
+                        user = self.get_user(int(owner_ids[0]))
+                        if user is None:
+                            user = await self.fetch_user(int(owner_ids[0]))
+                        if user is not None:
+                            await user.send(
+                                f"✅ Joined **{guild.name}** — {result}"
+                            )
+                except Exception as e:
+                    logger.debug("auto-onboard owner DM failed: %s", e)
+        except Exception as e:
+            logger.warning("auto-onboard error for %s: %s", guild.name, e)
 
     async def _load_rem_control(self):
         try:
@@ -6085,7 +6185,10 @@ class MaxwellBot(commands.Bot):
                         )[:160]
                     )
                 embed_note = "\nEmbeds present: " + "; ".join(titles)
-            is_admin = self._is_admin(message.author.id)
+            _sfa = getattr(message, "author", None)
+            is_admin = (
+                self._is_admin(_sfa.id) if _sfa is not None else False
+            )
             guild_id = str(message.guild.id) if message.guild else ""
             channel_id = str(message.channel.id)
             prompt = (
@@ -7988,7 +8091,9 @@ class MaxwellBot(commands.Bot):
                         f"[PROGRESS] update() returned, last_content={gen_progress._last_content!r} posted={gen_progress.posted}"
                     )
             else:
-                logger.debug("[PROGRESS] callback fired but gen_progress is None (gen already finalized)")
+                logger.debug(
+                    "[PROGRESS] callback fired but gen_progress is None (gen already finalized)"
+                )
 
         # Per-token callback. Fires on EVERY reasoning/content delta so the
         # progress message can show the model's own thoughts streaming by.
@@ -8021,9 +8126,7 @@ class MaxwellBot(commands.Bot):
             # cannot stream native tool_calls (historically Ollama minimax-m3);
             # it must not drop the tools= payload on a native-capable endpoint
             # (OpenCode Zen Go / GLM-5.2).
-            custom_tool_calls, provider_tools = self._select_tool_protocol(
-                openai_tools
-            )
+            custom_tool_calls, provider_tools = self._select_tool_protocol(openai_tools)
             logger.info(
                 "Tool protocol native=%s custom=%s tool_count=%s",
                 bool(provider_tools) and not custom_tool_calls,
@@ -8887,15 +8990,10 @@ class MaxwellBot(commands.Bot):
         #   repeat — multiple send_messages in declared order is a real
         #   pattern now.
         non_terminal = [
-            c
-            for c in calls
-            if c["name"]
-            not in {"send_message", "no_response", "wait"}
+            c for c in calls if c["name"] not in {"send_message", "no_response", "wait"}
         ]
         terminal = [
-            c
-            for c in calls
-            if c["name"] in {"send_message", "no_response", "wait"}
+            c for c in calls if c["name"] in {"send_message", "no_response", "wait"}
         ]
 
         result_by_id: dict[str, str] = {}
@@ -9116,9 +9214,7 @@ class MaxwellBot(commands.Bot):
                                 self, message, call["name"], skip_args, line
                             )
                         except Exception as e:
-                            logger.warning(
-                                f"Failed to record skipped no_response: {e}"
-                            )
+                            logger.warning(f"Failed to record skipped no_response: {e}")
                         continue
                     if send_message_seen:
                         line = (
@@ -9651,9 +9747,7 @@ class MaxwellBot(commands.Bot):
     def _plain_user_text(text: str) -> str:
         """User words only — strip reply-context blobs glued onto the turn."""
         t = str(text or "")
-        t = re.sub(
-            r"\[Latest message replies to[^\]]*\]", " ", t, flags=re.IGNORECASE
-        )
+        t = re.sub(r"\[Latest message replies to[^\]]*\]", " ", t, flags=re.IGNORECASE)
         t = re.split(
             r"\n?\[Latest message replies to", t, maxsplit=1, flags=re.IGNORECASE
         )[0]
@@ -9931,24 +10025,18 @@ class MaxwellBot(commands.Bot):
                 if (
                     hasattr(self.memory, "recall_web_results")
                     and self._control.get("long_term_memory_enabled", True)
-                    and bool(
-                        getattr(self.config, "RAG_WEB_STORE_ENABLED", True)
-                    )
+                    and bool(getattr(self.config, "RAG_WEB_STORE_ENABLED", True))
                 ):
                     try:
                         web_rows = await self.memory.recall_web_results(
                             user_message,
-                            guild_id=str(
-                                getattr(message.guild, "id", "") or ""
-                            ),
+                            guild_id=str(getattr(message.guild, "id", "") or ""),
                             top_k=4,
                             min_similarity=0.40,
                             max_age_days=7,
                         )
                         rag_web = [
-                            r
-                            for r in web_rows
-                            if r.get("similarity", 0) >= 0.40
+                            r for r in web_rows if r.get("similarity", 0) >= 0.40
                         ]
                     except Exception as e:
                         logger.debug(f"recall_web_results skipped: {e}")
@@ -10033,8 +10121,7 @@ class MaxwellBot(commands.Bot):
                         dynamic_parts.append(
                             "Earlier web search results from this session "
                             "(background — these were found before, cite "
-                            "the URL if you reuse them):\n"
-                            + "\n".join(web_lines)
+                            "the URL if you reuse them):\n" + "\n".join(web_lines)
                         )
                 elif ltm:
                     # Fallback: no embeddings yet, use recent LTM
@@ -10391,9 +10478,14 @@ class MaxwellBot(commands.Bot):
         latest_text = render_discord_context_text(
             message, user_message, known_users=self._recent_users.get(channel_id, {})
         )
-        author_id = str(getattr(message.author, "id", "unknown"))
-        author_label = f"{message.author.display_name}({author_id})"
-        if message.author.bot:
+        _live_author = getattr(message, "author", None)
+        author_id = str(getattr(_live_author, "id", "system")) if _live_author is not None else "system"
+        author_label = (
+            f"{getattr(_live_author, 'display_name', 'System')}({author_id})"
+            if _live_author is not None
+            else f"System({author_id})"
+        )
+        if _live_author is not None and getattr(_live_author, "bot", False):
             author_label += " [bot]"
         # Live message text is always appended as a final user turn
         # (merging into the trailing user turn if the last historical
@@ -10446,9 +10538,7 @@ class MaxwellBot(commands.Bot):
                     f"This is a reply to {reply_target}({reply_id}), who said: {quoted}"
                 )
             else:
-                user_parts.append(
-                    f"This is a reply to {reply_target}({reply_id})."
-                )
+                user_parts.append(f"This is a reply to {reply_target}({reply_id}).")
         if media_summary:
             user_parts.append(media_summary)
         elif has_media:
@@ -10794,9 +10884,7 @@ class MaxwellBot(commands.Bot):
                 if (
                     hasattr(self.memory, "recall_web_results")
                     and self._control.get("long_term_memory_enabled", True)
-                    and bool(
-                        getattr(self.config, "RAG_WEB_STORE_ENABLED", True)
-                    )
+                    and bool(getattr(self.config, "RAG_WEB_STORE_ENABLED", True))
                 ):
                     try:
                         web_rows = await self.memory.recall_web_results(
@@ -10807,9 +10895,7 @@ class MaxwellBot(commands.Bot):
                             max_age_days=7,
                         )
                         rag_web = [
-                            r
-                            for r in web_rows
-                            if r.get("similarity", 0) >= 0.40
+                            r for r in web_rows if r.get("similarity", 0) >= 0.40
                         ]
                     except Exception as e:
                         logger.debug(f"tg recall_web_results skipped: {e}")
@@ -10818,7 +10904,9 @@ class MaxwellBot(commands.Bot):
                     for r in rag_context:
                         kind_label = "fact" if r["kind"] == "ltm" else "context"
                         sim_pct = int(r.get("similarity", 0) * 100)
-                        rag_lines.append(f"- [{kind_label}, {sim_pct}% match] {r['content']}")
+                        rag_lines.append(
+                            f"- [{kind_label}, {sim_pct}% match] {r['content']}"
+                        )
                     dynamic_parts.append(
                         "Relevant memories (RAG-retrieved facts; use as background):\n"
                         + "\n".join(rag_lines)
@@ -10852,8 +10940,7 @@ class MaxwellBot(commands.Bot):
                         )
                     dynamic_parts.append(
                         "Earlier web search results (background; "
-                        "cite the URL if reused):\n"
-                        + "\n".join(web_lines)
+                        "cite the URL if reused):\n" + "\n".join(web_lines)
                     )
             except Exception as e:
                 logger.warning(f"Telegram RAG retrieval failed: {e}")
@@ -11376,7 +11463,9 @@ class MaxwellBot(commands.Bot):
                                         "fact" if r["kind"] == "ltm" else "context"
                                     )
                                     sim_pct = int(r.get("similarity", 0) * 100)
-                                    rag_lines.append(f"- [{kind_label}, {sim_pct}% match] {r['content']}")
+                                    rag_lines.append(
+                                        f"- [{kind_label}, {sim_pct}% match] {r['content']}"
+                                    )
                                 dynamic_parts.append(
                                     "Relevant memories (RAG-retrieved facts; use as background):\n"
                                     + "\n".join(rag_lines)

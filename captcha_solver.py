@@ -51,11 +51,14 @@ class _BaseSolver:
 
     async def _post_json(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
         try:
-            async with aiohttp.ClientSession() as session, session.post(
-                url,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=self.timeout),
-            ) as resp:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(
+                    url,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=self.timeout),
+                ) as resp,
+            ):
                 text = await resp.text()
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             raise CaptchaSolveError(f"{self.service}: request failed: {err}") from err
@@ -160,9 +163,12 @@ class TwoCaptchaSolver(_BaseSolver):
 
     async def _get(self, url: str, params: dict[str, Any]) -> str:
         try:
-            async with aiohttp.ClientSession() as session, session.get(
-                url, params=params, timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(
+                    url, params=params, timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp,
+            ):
                 return await resp.text()
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             raise CaptchaSolveError(f"2captcha: request failed: {err}") from err
@@ -214,7 +220,9 @@ class TwoCaptchaSolver(_BaseSolver):
             try:
                 return json.loads(txt)
             except json.JSONDecodeError as err:
-                raise CaptchaSolveError(f"2captcha res.php non-JSON: {txt[:200]}") from err
+                raise CaptchaSolveError(
+                    f"2captcha res.php non-JSON: {txt[:200]}"
+                ) from err
 
         data = await self._poll(get_result)
         token = data.get("request")
@@ -236,7 +244,9 @@ def build_solver(
         return CapSolverSolver(api_key, timeout)
     if service == "2captcha":
         return TwoCaptchaSolver(api_key, timeout)
-    logger.warning("CAPTCHA_SOLVER_SERVICE=%r not supported (capsolver/2captcha)", service)
+    logger.warning(
+        "CAPTCHA_SOLVER_SERVICE=%r not supported (capsolver/2captcha)", service
+    )
     return None
 
 
@@ -328,7 +338,11 @@ class HumanCaptchaServer:
         cid = request.match_info.get("cid", "")
         entry = self._challenges.get(cid)
         if entry is None:
-            return web.Response(text="<h1>Challenge expired or unknown.</h1>", content_type="text/html", status=404)
+            return web.Response(
+                text="<h1>Challenge expired or unknown.</h1>",
+                content_type="text/html",
+                status=404,
+            )
         exc = entry["exc"]
         sitekey = getattr(exc, "sitekey", "")
         rqdata = getattr(exc, "rqdata", None) or ""
@@ -355,7 +369,9 @@ class HumanCaptchaServer:
             body = {}
         token = (body or {}).get("token") or ""
         if not token:
-            return web.json_response({"ok": False, "error": "missing token"}, status=400)
+            return web.json_response(
+                {"ok": False, "error": "missing token"}, status=400
+            )
         fut = entry["fut"]
         if not fut.done():
             fut.set_result(token)

@@ -8,7 +8,9 @@ Maxwell is a Discord self-bot backed by any OpenAI-compatible API. It reads text
 
 - Multimodal input: images, audio, video, text files, and Discord embeds are forwarded to the model with normalized video, extracted frames, and extracted audio.
 - Visual memory: recent images persist across messages per channel (configurable depth).
-- Tool system: image generation (NVIDIA NIM, GPT-compatible), web search, URL fetch, YouTube transcript/frame extraction, arbitrary file sending, meme/media sending, shell execution, polls, invites, site generation, avatar/presence/nickname changes, message editing/forwarding/deletion, live tool-call progress messages, and more.
+- Tool system: image generation (NVIDIA NIM, GPT-compatible), web search, URL fetch, YouTube transcript/frame extraction, arbitrary file sending, meme/media sending, shell execution, polls, invites, server join/leave (`join_server`, `leave_server`), site generation, avatar/presence/nickname changes, message editing/forwarding/deletion, live tool-call progress messages, and more.
+- Full-message context: every message in context carries its timestamp plus structured annotations for polls, app-command invocations, system/welcome events, embeds (title/description/fields/images), direct media URLs, and attachment names — including messages that never pinged Maxwell (they still reach context via memory/history).
+- CAPTCHA handling: Discord's hCaptcha challenges (invite accepts, DM gates, phone checks) are auto-solved via a configured solver service (`CAPTCHA_SOLVER_SERVICE` — capsolver/2captcha), or handled human-in-the-loop: the bot hosts a one-shot solve page (`/captcha/<id>`, proxied at `MAXWELL_PUBLIC_BASE_URL`), DMs the link to the owner (fallback `CAPTCHA_FALLBACK_USER_ID`), waits for a browser solve, and retries the original request with the solved token. Auto-onboarding completes role-selection prompts when joining a server that uses `GUILD_ONBOARDING`.
 - Autonomy: periodic self-directed checks where Maxwell reviews context/goals and decides whether to act without running a decider on every few messages.
 - Per-server custom prompts, RAG vector memory, and scoped cross-context facts across DMs, servers, groups, and channels.
 - RAG vector memory: all messages, long-term facts, and shared context entries are embedded via `qwen3-embedding:0.6b` (ollama) and stored in a SQLite vector database. Semantic search retrieves the most relevant memories for each conversation — global across all channels and servers.
@@ -134,6 +136,12 @@ auto-starting the background loop. Restart the bot to apply.
 | `ENABLE_TELEGRAM` | Auto-start Telegram polling/webhook when `TELEGRAM_TOKEN` is set |
 | `ENABLE_AUTONOMY` | Autonomy engine (also controlled via dashboard) |
 | `ENABLE_REM` | Background REM dreaming pass |
+| `CAPTCHA_SOLVER_SERVICE` | `capsolver` or `2captcha` — auto-solves Discord captcha challenges (requires `CAPTCHA_SOLVER_API_KEY`) |
+| `CAPTCHA_SOLVER_API_KEY` | API key for the solver service |
+| `CAPTCHA_SOLVER_TIMEOUT` | Max seconds to wait for a captcha solution (default 180) |
+| `CAPTCHA_HUMAN_SOLVE` | `true` (default) — host a human-solve page + DM the link when no auto-solver is configured/fails |
+| `CAPTCHA_HUMAN_PORT` | Local port for the solve-page server (default 8790; Caddy proxies `/captcha/*` to it) |
+| `CAPTCHA_FALLBACK_USER_ID` | Discord user ID to DM captcha solve links when no admin is resolvable (default 1471821513824014480) |
 
 ### TTS engine (only used if `ENABLE_TTS=true`)
 

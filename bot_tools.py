@@ -40,6 +40,7 @@ from utils import (  # single source of truth, fd-safe
 
 try:
     from ddgs import DDGS as _DDGS
+
     _DDGS_AVAILABLE = True
 except ImportError:
     _DDGS = None
@@ -170,16 +171,18 @@ async def _synthesize_fish_tts(
     try:
         session = await _get_shared_session()
         timeout = aiohttp.ClientTimeout(total=45)
-        async with session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
+        async with session.post(
+            url, json=payload, headers=headers, timeout=timeout
+        ) as resp:
             if resp.status != 200:
                 body = await resp.text()
-                logger.warning(
-                    "Fish TTS API returned %s: %s", resp.status, body[:200]
-                )
+                logger.warning("Fish TTS API returned %s: %s", resp.status, body[:200])
                 return None
             data = await resp.read()
         if not data or len(data) < 64:
-            logger.warning("Fish TTS returned empty/too-small payload (%d bytes)", len(data))
+            logger.warning(
+                "Fish TTS returned empty/too-small payload (%d bytes)", len(data)
+            )
             return None
         # Fish returns MP3 bytes (or whatever fmt requested); write directly.
         # The downstream `make_voice_ogg` re-encodes via ffmpeg so extension
@@ -1320,7 +1323,9 @@ class JoinServerTool(Tool):
             "Params: invite (required)."
         )
 
-    async def execute(self, message: Message, invite: str | None = None, **kwargs) -> str:
+    async def execute(
+        self, message: Message, invite: str | None = None, **kwargs
+    ) -> str:
         if self.bot and not self.bot._is_admin(message.author.id):
             return "Error: join_server is admin-only"
         code = _extract_invite_code(invite or "")
@@ -1349,7 +1354,9 @@ class JoinServerTool(Tool):
         members = getattr(inv, "approximate_member_count", None)
         features = list(g.features) if g else []
         level = g.verification_level.name if g and g.verification_level else "unknown"
-        lines = [f"Invite ok — {gname} (ID: {gid}) {members or '?'} members, verification={level}"]
+        lines = [
+            f"Invite ok — {gname} (ID: {gid}) {members or '?'} members, verification={level}"
+        ]
         if features:
             lines.append(f"  features: {', '.join(features)}")
 
@@ -1417,15 +1424,25 @@ class JoinServerTool(Tool):
                     gid2 = (data.get("guild") or {}).get("id")
                 joined_guild = None
                 for _ in range(12):
-                    joined_guild = self.bot.get_guild(gid2 or gid) if (gid2 or gid) else None
+                    joined_guild = (
+                        self.bot.get_guild(gid2 or gid) if (gid2 or gid) else None
+                    )
                     if joined_guild is not None:
                         break
                     await asyncio.sleep(1)
                 if joined_guild is not None:
+                    onboard_note = ""
+                    try:
+                        onboard = await self.bot._auto_onboard(joined_guild)
+                        if onboard and "no onboarding" not in onboard and "failed" not in onboard:
+                            onboard_note = "\n" + onboard
+                    except Exception as ex:
+                        logger.debug("auto-onboard (captcha join) failed: %s", ex)
                     return (
                         "\n".join(lines)
                         + f"\nJOINED {joined_guild.name} (ID: {joined_guild.id}) — "
                         + "captcha was solved via the posted link."
+                        + onboard_note
                     )
                 return (
                     "\n".join(lines)
@@ -1439,10 +1456,7 @@ class JoinServerTool(Tool):
                 + "\nJoin blocked until the captcha is solved."
             )
         except discord.NotFound as e:
-            return (
-                f"Error joining '{code}': invite invalid/expired "
-                f"(HTTP {e.status})"
-            )
+            return f"Error joining '{code}': invite invalid/expired (HTTP {e.status})"
         except discord.Forbidden as e:
             return (
                 f"Error joining {gname}: forbidden (HTTP {e.status}) — "
@@ -1456,9 +1470,7 @@ class JoinServerTool(Tool):
                     f"Error joining {gname}: rate limited (429). "
                     "Wait a bit and retry — Discord throttles rapid joins."
                 )
-            return (
-                f"Error joining {gname}: HTTP {e.status}: {detail}"
-            )
+            return f"Error joining {gname}: HTTP {e.status}: {detail}"
         except Exception as e:
             return f"Error joining {gname}: {type(e).__name__}: {e}"
 
@@ -1473,8 +1485,7 @@ class JoinServerTool(Tool):
         if joined_guild is None:
             if manual_approval:
                 return (
-                    "\n".join(lines)
-                    + "\nJoin accepted — pending manual approval. "
+                    "\n".join(lines) + "\nJoin accepted — pending manual approval. "
                     "The server will show up once an admin approves."
                 )
             return (
@@ -1487,6 +1498,15 @@ class JoinServerTool(Tool):
             f"JOINED {joined_guild.name} (ID: {joined_guild.id}, "
             f"members={joined_guild.member_count})"
         )
+
+        # Auto-complete the server's onboarding flow (role selection prompts)
+        # so role-gated servers are usable right away.
+        try:
+            onboard = await self.bot._auto_onboard(joined_guild)
+            if onboard and "no onboarding" not in onboard and "failed" not in onboard:
+                lines.append(f"  {onboard}")
+        except Exception as ex:
+            logger.debug("auto-onboard via join tool failed: %s", ex)
 
         # Post-join verification gates (Wick captcha-on-join, verify channels,
         # MEE6/Bloxlink-style role gates). These aren't API errors — the join
@@ -1516,7 +1536,9 @@ class LeaveServerTool(Tool):
             "Params: server (required)."
         )
 
-    async def execute(self, message: Message, server: str | None = None, **kwargs) -> str:
+    async def execute(
+        self, message: Message, server: str | None = None, **kwargs
+    ) -> str:
         if self.bot and not self.bot._is_admin(message.author.id):
             return "Error: leave_server is admin-only"
         target = (server or "").strip()
@@ -1560,9 +1582,8 @@ class LeaveServerTool(Tool):
         except discord.NotFound as e:
             return f"Error leaving {guild.name}: guild not found (HTTP {e.status})"
         except discord.HTTPException as e:
-            return (
-                f"Error leaving {guild.name}: HTTP {e.status}: "
-                + (e.text[:200] if e.text else "")
+            return f"Error leaving {guild.name}: HTTP {e.status}: " + (
+                e.text[:200] if e.text else ""
             )
         except Exception as e:
             return f"Error leaving {guild.name}: {type(e).__name__}: {e}"
@@ -2131,7 +2152,7 @@ def _find_html_tag_end(text: str, start: int) -> int | None:
         if quote:
             if char == quote:
                 quote = ""
-        elif char in {"\"", "'"}:
+        elif char in {'"', "'"}:
             quote = char
         elif char == ">":
             return index
@@ -2179,8 +2200,10 @@ def _normalize_site_body_text_escapes(body: str) -> str:
         # otherwise it remains ordinary text and escaped whitespace is still
         # normalized after it.
         if body[i] == "<" and (
-            i + 1 < len(body) and body[i + 1].isalpha()
-            or i + 1 < len(body) and body[i + 1] in {"/", "!", "?"}
+            i + 1 < len(body)
+            and body[i + 1].isalpha()
+            or i + 1 < len(body)
+            and body[i + 1] in {"/", "!", "?"}
         ):
             tag_end = _find_html_tag_end(body, i)
             if tag_end is None:
@@ -2636,18 +2659,16 @@ class ListSitesTool(Tool):
         return "Your active sites:\n" + "\n".join(lines)
 
 
-_WEB_REPLY_CTX_RE = re.compile(
-    r"\[Latest message replies to[^\]]*\]", re.IGNORECASE
-)
+_WEB_REPLY_CTX_RE = re.compile(r"\[Latest message replies to[^\]]*\]", re.IGNORECASE)
 
 
 def _sanitize_web_query(query: str | None) -> str:
     """Drop Discord reply-context glue so searches stay on the user's words."""
     q = str(query or "")
     q = _WEB_REPLY_CTX_RE.sub(" ", q)
-    q = re.split(
-        r"\n?\[Latest message replies to", q, maxsplit=1, flags=re.IGNORECASE
-    )[0]
+    q = re.split(r"\n?\[Latest message replies to", q, maxsplit=1, flags=re.IGNORECASE)[
+        0
+    ]
     q = re.sub(r"\[RESPOND TO THIS\]\s*", "", q, flags=re.IGNORECASE)
     return " ".join(q.split()).strip()[:160]
 
@@ -2722,13 +2743,13 @@ class WebSearchTool(Tool):
                     getattr(self.bot.config, "RAG_WEB_STORE_ENABLED", True)
                 )
                 memory = getattr(self.bot, "memory", None)
-                if rag_enabled and memory is not None and hasattr(
-                    memory, "store_web_results"
+                if (
+                    rag_enabled
+                    and memory is not None
+                    and hasattr(memory, "store_web_results")
                 ):
                     guild_id = ""
-                    if message is not None and getattr(
-                        message, "guild", None
-                    ):
+                    if message is not None and getattr(message, "guild", None):
                         guild_id = str(message.guild.id)
                     n = await memory.store_web_results(
                         query=query,
@@ -2740,9 +2761,7 @@ class WebSearchTool(Tool):
                             f"web_search stored {n} results for query={query!r}"
                         )
             except Exception as e:
-                logger.debug(
-                    f"web_search RAG persistence skipped: {e}"
-                )
+                logger.debug(f"web_search RAG persistence skipped: {e}")
 
             lines = []
             for i, r in enumerate(results, 1):
