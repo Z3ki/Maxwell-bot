@@ -693,7 +693,9 @@ def test_tool_prompt_native_mode_no_xml_instructions():
 
     assert "native function/tool calling" in prompt.lower()
     assert "XML text tags only" not in prompt
-    assert "send_message:" in prompt
+    assert "send_message" in prompt
+    # Native tools= already carries descriptions — don't dump `name: desc`.
+    assert "send_message: fake tool" not in prompt
 
 
 def test_prompt_budget_trims_large_background_blocks():

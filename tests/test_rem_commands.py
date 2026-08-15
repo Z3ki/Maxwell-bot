@@ -87,7 +87,7 @@ def test_rem_command_admin_gating_and_on_off_fix(tmp_path):
         assert bot.rem_enabled is False
         msg = FakeMessage(",rem fix")
         await MaxwellBot._handle_command(bot, msg)
-        assert "tears in rain" in bot.rem_prompt_body
+        assert "Assimilate the short-term slice" in bot.rem_prompt_body
 
     asyncio.run(run())
 

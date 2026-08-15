@@ -13,14 +13,14 @@ from utils import _atomic_json_write_sync
 logger = logging.getLogger(__name__)
 
 DEFAULT_REM_PROMPT_BODY = (
-    "Run Maxwell REM memory assimilation. Review the short-term visible slice injected by the scheduler. "
-    "Search existing memories before adding/editing. Consolidate durable facts, preferences, decisions, identities, and unresolved work. "
-    "Delete/supersede obsolete bloat. To persist changes, end your response with a single JSON object on its own line "
-    "in this exact shape (and nothing else after it):\n"
-    '{"actions": {"ltm_add": ["fact 1", "fact 2"], "ltm_remove": [<existing line numbers to drop>], '
-    '"shared_add": [{"scope": "global|user:<id>|guild:<id>|channel:<id>", "content": "fact", "importance": 1-10}]}, '
-    '"audit": "one-paragraph human summary of what you did and why"}\n'
-    "If nothing needs persisting, emit {\"actions\": {}, \"audit\": \"no changes\"}. The audit field is required."
+    "Assimilate the short-term slice. Search existing memories before adding. "
+    "Keep durable facts, preferences, decisions, identities, unresolved work. "
+    "Drop obsolete bloat. End with one JSON object on its own line:\n"
+    '{"actions": {"ltm_add": ["fact"], "ltm_remove": [<line ids>], '
+    '"shared_add": [{"scope": "global|user:<id>|guild:<id>|channel:<id>", '
+    '"content": "fact", "importance": 1-10}]}, '
+    '"audit": "one-paragraph summary"}\n'
+    'If nothing to persist: {"actions": {}, "audit": "no changes"}. audit is required.'
 )
 
 
@@ -34,19 +34,19 @@ def rem_system_prompt(turns_remaining: int, prompt_body: str | None = None) -> s
     # prompt advertised "N turns left" but the runner never looped, which
     # misled the model. Don't mention turns; just ask for one DONE audit.
     return (
-        "You are Maxwell REM, a periodic memory assimilation process — not answering live chat.\n"
-        "Organize the last slice of visible life into durable memory. Keep it useful, specific, deduplicated, inspectable.\n"
-        "Don't compress away decisions, preferences, unresolved tasks, or identity facts.\n\n"
+        "You are Maxwell REM — periodic memory assimilation, not live chat.\n"
+        "Keep the last slice useful, specific, deduplicated. Don't drop decisions, "
+        "preferences, unresolved tasks, or identity facts.\n\n"
         f"## Task\n{body}\n\n"
-        "## Output\nSingle pass. Reason briefly, then end your response with exactly one JSON object (one line) "
-        "describing actions to take. The JSON's `audit` field is the only thing the dashboard shows; keep it short."
+        "## Output\nSingle pass. Brief reason, then exactly one JSON object "
+        "(one line). `audit` is what the dashboard shows — keep it short."
     )
 
 
 def short_term_slice_prompt(events: list[dict]) -> str:
     return (
-        "Short-term visible memory slice (last interval of inputs/outputs, reasoning excluded). "
-        "Preserve what matters; discard noise:\n"
+        "Short-term visible slice (inputs/outputs, reasoning excluded). "
+        "Keep what matters:\n"
         + json.dumps(events, ensure_ascii=False, sort_keys=True)
     )
 

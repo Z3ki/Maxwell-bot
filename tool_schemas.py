@@ -292,13 +292,9 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
 REASONING_PARAM: dict[str, Any] = {
     "type": "string",
     "description": (
-        "Plain-text reasoning BEFORE the action: why this tool, what you expect, "
-        "assumptions/risks, fallback if it fails. No XML/JSON/tags. Scale length to the task: "
-        "trivial (react, sleep) = 1 short sentence; routine (send_message, fetch_url) = "
-        "1-2 sentences; complex (create_site with custom HTML, image_generator, shell with "
-        "non-obvious commands, multi-step plans, debugging) = 3-6 sentences. The user sees "
-        "this stream live in the channel, so reason like a senior engineer writing a PR "
-        "description: short for trivial, a real paragraph for non-trivial. Capped at 2000 chars."
+        "One plain-English sentence (max ~280 chars) of WHY you are calling "
+        "this tool — not the artifact, body, or output. Plain text only; no "
+        "XML, JSON, or tags. First argument on every call, including send_message."
     ),
 }
 

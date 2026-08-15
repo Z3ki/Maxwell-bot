@@ -40,10 +40,8 @@ logger = logging.getLogger(__name__)
 REASONING_PARAM_SCHEMA: dict[str, Any] = {
     "type": "string",
     "description": (
-        "Your real, plain-English reasoning BEFORE you take this action. Why "
-        "you are calling this tool, what you expect to happen, and any "
-        "assumptions or risks. Plain text only — no XML, no JSON, no tags. "
-        "Fill this in for EVERY tool call including send_message."
+        "One plain-English sentence (max ~280 chars) of WHY you are calling "
+        "this tool — not the artifact. Plain text only; no XML, JSON, or tags."
     ),
 }
 

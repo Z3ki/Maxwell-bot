@@ -1079,18 +1079,10 @@ class SetActivityTool(Tool):
 
     def get_description(self):
         return (
-            "Set your activity or custom status message (the visible text under your name).\n"
-            "CALL SPARINGLY — this is a low-value, high-noise tool. Default to NOT calling it. "
-            "Only call when: (a) the user explicitly asks you to change your status, activity, "
-            "vibe, or what you're doing; (b) you just finished a significant task (build, ship, "
-            "deploy, fix) and the status would genuinely reflect the new state; (c) you joined "
-            "a voice call or started a long-running operation worth surfacing. "
-            "Do NOT call on every turn, every reply, or every topic shift. Do NOT call to "
-            "'match the vibe' of a casual message — your custom status is not a live ticker. "
-            "If you've set a similar status in the last few turns, skip the call. "
-            "Params: type (playing/watching/listening/competing/custom), text (the status text), "
-            "elapsed (optional, e.g. '2h 30m'). Use type='custom' for a plain status. "
-            "Keep text short, lowercase, in-character. Call with text='' to clear."
+            "Set visible activity or custom status. Call only when asked or "
+            "after a real state change — not every turn. "
+            "Params: type (playing/watching/listening/competing/custom), text, "
+            "elapsed (optional). type='custom' for a plain status. text='' clears."
         )
 
     def _parse_elapsed(self, elapsed: str) -> int:
@@ -1181,16 +1173,10 @@ class SleepTool(Tool):
 
     def get_description(self):
         return (
-            "Take a sleep window (1-60 minutes). While sleeping, the bot "
-            "won't dispatch any LLM turns; pings and DMs get a single "
-            "'max is sleeping, back in ~Xm' notice. Use this when the "
-            "conversation is genuinely done (the user said goodnight, or "
-            "it's a natural end-of-day lull) — NOT as a way to add a "
-            "goodbye to a normal reply. The 2026-07-19 user complaint was "
-            "that the bot kept signing off unnecessarily; the sleep tool "
-            "is the actual off-switch when a real rest is warranted. "
-            "Params: duration_minutes (1-60, default 30). The max is "
-            "enforced server-side. Calling again resets the window."
+            "Sleep 1-60 minutes (default 30). While asleep, LLM turns are skipped "
+            "and pings/DMs get one 'max is sleeping' notice. Use only at a real "
+            "end-of-conversation, not as a goodbye. Calling again resets the window. "
+            "Params: duration_minutes."
         )
 
     async def execute(
@@ -1223,11 +1209,8 @@ class ClearSleepTool(Tool):
 
     def get_description(self):
         return (
-            "Cancel the active sleep window and wake up immediately. "
-            "Use sparingly — only when you called sleep and the user "
-            "unexpectedly pings right after. The 2026-07-19 user note: "
-            "the bot said 'goodnight, sleeping 30m' and the user said "
-            "'wait no I have a question'."
+            "Cancel the active sleep window and wake immediately. "
+            "Use only if you just slept and the user still needs you."
         )
 
     async def execute(self, message: Message, **kwargs) -> str:
@@ -1258,12 +1241,9 @@ class WaitTool(Tool):
 
     def get_description(self):
         return (
-            "Pause the current tool batch for `seconds` (float, default 2.0, "
-            "min 0.0, max 10.0). The turn stays open — call more tools after. "
-            "Optional pause between separate send_messages (countdown / two beats). "
-            "Do not use this to chunk a normal reply. Distinct from `sleep`: `sleep` is "
-            "1-60 minutes and ends dispatch; `wait` is a sub-turn pause under "
-            "10 seconds."
+            "Pause this tool batch (`wait`) for `seconds` (float, default 2, max 10). "
+            "Turn stays open. For spacing separate send_messages only — not "
+            "to chunk a normal reply. Distinct from sleep (minutes, ends dispatch)."
         )
 
     async def execute(
@@ -1442,12 +1422,8 @@ class JoinServerTool(Tool):
 
     def get_description(self):
         return (
-            "Join a Discord server using an invite code or link "
-            "(e.g. discord.gg/code or https://discord.com/invite/code). "
-            "Reports the server name/members before joining, and reports "
-            "verification gates, pending manual approval, post-join captcha "
-            "channels, and any errors (including CAPTCHA challenges). "
-            "Params: invite (required)."
+            "Join a Discord server via invite code or link (discord.gg/code). "
+            "Reports name, gates, captcha, and errors. Params: invite (required)."
         )
 
     async def execute(
@@ -2264,9 +2240,8 @@ class ChangeAvatarTool(Tool):
 
     def get_description(self):
         return (
-            "Change your profile picture. Params: url (required, direct image URL jpg/png/gif/webp). "
-            "No local cooldown — call as often as you want. Discord's own API rate limit "
-            "still applies (you'll get a 429 if you spam)."
+            "Change your profile picture. Params: url (direct jpg/png/gif/webp). "
+            "Discord rate-limits spam."
         )
 
     async def execute(self, message: Message, url: str | None = None, **kwargs) -> str:
@@ -2474,24 +2449,12 @@ class CreateSiteTool(Tool):
 
     def get_description(self):
         return (
-            f"Create a temporary website at {self.base_url}/<name>. Auto-deletes after 24h. "
-            "Params: name (short slug), title (headline), body (FULL HTML document — write complete "
-            "<!DOCTYPE html> with all CSS/JS inline, written as-is with no template wrapping), "
-            "NEWLINE SAFETY: body is HTML, not JSON. In visible HTML text use real line breaks "
-            "or <br>; do not leave literal backslash-n (\\n) text. Keep \\n only inside "
-            "JavaScript/CSS strings when it is intentional. "
-            "encoding (text|base64, default text). Inline <script>/<style> run; external https CDNs "
-            "(cdnjs, jsdelivr, unpkg, Google Fonts) load. Use this for full websites, apps, games, "
-            "calculators, demos, portfolios — anything interactive. Supports Discord server widgets "
-            '(<iframe src="https://discord.com/widget?id=GUILD_ID">; widget must be enabled in '
-            "Server Settings > Widget), YouTube/Vimeo/Twitch/Spotify/SoundCloud <iframe> embeds, "
-            'external images/video/audio, model-viewer/Chart.js/D3, etc. Put <meta property="og:title">, '
-            'og:description, og:image (absolute https URL), og:url, <meta name="theme-color">, '
-            '<meta name="twitter:card" content="summary_large_image">, <link rel="icon">, and '
-            "<title> in <head> so the link unfurls with a rich preview when shared in Discord.\n\n"
-            "IMAGE ORDERING: if the site needs images, call image_generator (or hd_image) FIRST in a "
-            "separate turn and wait for the Discord CDN URL. Do NOT batch create_site with image_generator. "
-            "Plain text/CSS sites don't need images — call create_site once."
+            f"Create a temporary website at {self.base_url}/<name> (auto-deletes in 24h). "
+            "Params: name (slug), title, body (complete HTML document with inline CSS/JS; "
+            "real line breaks or <br> in visible text, never literal \\n), "
+            "encoding (text|base64). Generate images in a prior turn and paste CDN URLs "
+            "into the HTML — don't batch image_generator with create_site. "
+            "Never paste HTML into chat."
         )
 
     async def execute(
@@ -3139,15 +3102,10 @@ class SendFileTool(Tool):
 
     def get_description(self):
         return (
-            "Create a file with any filename/extension and send it as an attachment, "
-            "or send a file already on disk. "
-            "Use this for .txt, .py, .json, .html, binary files, etc. "
-            "For code/HTML/JSON or exact file bytes, prefer encoding=base64 so markup/backticks are preserved exactly. "
-            "Params: filename (required when using content), content (required when creating inline), "
-            "path (optional: absolute path to an existing file on disk to send), "
-            "encoding (optional: text or base64; default text). "
-            "When path is given, the file is read from a safe directory (data, sites, subagents, shell workdir) and sent directly. "
-            "Available to any user — this is the model's way of handing you a file, not a privileged action."
+            "Create or send a file attachment. Params: filename + content "
+            "(inline), or path (existing file / container path). "
+            "encoding=text|base64 (prefer base64 for code/HTML). "
+            "A path is not delivery — this tool attaches the file."
         )
 
     async def execute(
@@ -3527,46 +3485,21 @@ class ShellTool(Tool):
         chan = self._channel_max_chars()
         chan_str = "unlimited" if chan == 0 else f"{chan} chars"
         limits_note = (
-            f"Limits: command <= {max_cmd_str}, captured output <= {max_out_str}, "
-            f"channel preview <= {chan_str}, timeout {to}s. "
-            f"Set MAXWELL_SHELL_MAX_OUTPUT=0 / MAXWELL_SHELL_MAX_COMMAND_LENGTH=0 / "
-            f"MAXWELL_SHELL_CHANNEL_MAX_CHARS=0 in .env to disable."
+            f"Limits: command <= {max_cmd_str}, output <= {max_out_str}, "
+            f"channel preview <= {chan_str}, timeout {to}s."
         )
         if self._full_host_access():
             return (
-                "Run a shell command with bash -lc in the maxwell-shell container. "
-                "FULL ACCESS MODE (MAXWELL_SHELL_FULL_HOST): host network, host root at /host, root user. "
-                "Params: command (required), files (optional: a JSON array OR comma-separated list of "
-                "paths to attach to the reply). To send an artifact the command produced, pass its "
-                "path under /home/maxwell in `files` — e.g. files='[\"out.png\"]' or files='out.png, "
-                "data.zip'. The file will be docker-cp'd out and uploaded to the channel. "
-                "You can call shell again in a follow-up turn to chain more commands; "
-                "the container keeps its working dir, env, and any files you wrote across calls. "
-                "Examples:\n"
-                '  command="echo hi"                       -> stdout only\n'
-                "  command=\"python3 make.py\", files='out.png' -> runs script + attaches out.png\n"
-                "  command=\"zip a.zip a.png b.png\", files='a.zip' -> runs zip + attaches archive\n"
+                "Run bash -lc in the maxwell-shell container (FULL ACCESS: host "
+                "net, /host, root). Params: command (required), files (optional "
+                "paths to attach). Container persists across calls. "
                 f"{limits_note}"
             )
         return (
-            "Run a shell command with bash -lc in the maxwell-shell sandbox container. "
-            "Isolated sandbox: no host filesystem mount, bridge network, memory/cpu/pids limits. "
-            "Working directory is /home/maxwell (project shelldocker volume only). "
-            "Params: command (required), files (optional: a JSON array OR comma-separated list of "
-            "paths under /home/maxwell to attach to the reply). When your command produces an "
-            "artifact (image, video, audio, archive, pdf, csv, html, anything the user wants), "
-            "list its path in `files` and it will be docker-cp'd out of the container and uploaded "
-            "to the channel automatically. "
-            "You can call shell again in a follow-up turn to chain more commands; "
-            "the container keeps its working dir, env, and any files you wrote across calls "
-            "(use this to inspect output, run a tool, then post-process in one turn). "
-            "Examples:\n"
-            '  command="echo hi"                              -> stdout only\n'
-            "  command=\"python3 make.py\", files='out.png'     -> runs script + attaches out.png\n"
-            "  command=\"ffmpeg -i in.mp4 out.mp4\", files='out.mp4' -> transcodes + attaches result\n"
-            "  command=\"convert x.svg x.png\", files='x.png'   -> rasterizes + attaches png\n"
-            "Max 10 MB per file. No path traversal (paths under /home/maxwell only).\n"
-            f"{limits_note}"
+            "Run bash -lc in the maxwell-shell sandbox (workdir /home/maxwell). "
+            "Params: command (required), files (optional paths under /home/maxwell "
+            "to attach to the channel). Container persists across calls. "
+            f"Max 10 MB per file. {limits_note}"
         )
 
     async def _run_docker(self, *args: str, timeout: int = 30):
@@ -4149,10 +4082,10 @@ class YouTubeTool(Tool):
 
     def get_description(self):
         return (
-            "Fetch a YouTube video's transcript/captions and optionally extract still frames at timestamps. "
-            "Extracted frames are attached to the model for inspection, not posted to chat. "
-            "Use this for YouTube links instead of fetch_url. Params: url (required), timestamps (optional comma-separated seconds or mm:ss/hh:mm:ss), "
-            "max_transcript_chars (optional, default 12000, max 20000), lang (optional, default en)."
+            "Fetch a YouTube transcript and optional timestamp frames (attached "
+            "to the model, not posted). Prefer this over fetch_url for YouTube. "
+            "Params: url, timestamps (optional comma-separated seconds or mm:ss), "
+            "max_transcript_chars (default 12000), lang (default en)."
         )
 
     def _cookies_file(self) -> str | None:
@@ -5090,10 +5023,7 @@ class LeaveVcTool(Tool):
     """Leave the active voice channel"""
 
     def get_description(self):
-        return (
-            "Immediately disconnect from the active voice channel in this server. "
-            "Use this when the user or conversation indicates that you should leave the voice channel."
-        )
+        return "Disconnect from the active voice channel in this server."
 
     async def execute(self, message: Message, **kwargs) -> str:
         if self.bot and not self.bot._is_admin(message.author.id):
@@ -5729,13 +5659,9 @@ class EmailSendTool(Tool):
 
     def get_description(self) -> str:
         return (
-            "Send an email from the bot's local mailbox (maxwell@z3ki.dev by default) "
-            "through the local Postfix instance on 127.0.0.1:25. No third-party relay; "
-            "Postfix handles delivery to the recipient's MX. "
-            "Params: to (required, comma-separated for multiple), subject (required), "
-            "body (required, plain text or HTML — set is_html=true for HTML), "
-            "is_html (optional bool, default false), reply_to (optional), "
-            "cc (optional, comma-separated), bcc (optional, comma-separated)."
+            "Send email from the bot mailbox via local Postfix. "
+            "Params: to (required, comma-separated), subject, body, "
+            "is_html (optional), reply_to, cc, bcc."
         )
 
     async def execute(
@@ -5815,10 +5741,9 @@ class EmailReadInboxTool(Tool):
 
     def get_description(self) -> str:
         return (
-            "Read recent emails from the local mailbox (maxwell@z3ki.dev). "
-            "Returns a compact list: id, from, subject, date. Use email_get_message "
-            "to fetch a message body. Params: max_results (optional, default 10, max 50), "
-            "days_back (optional, default 7, max 90), unread_only (optional bool, default false)."
+            "List recent mailbox messages (id, from, subject, date). "
+            "Use email_get_message for a body. Params: max_results (default 10), "
+            "days_back (default 7), unread_only (optional)."
         )
 
     async def execute(
@@ -5865,9 +5790,8 @@ class EmailGetMessageTool(Tool):
 
     def get_description(self) -> str:
         return (
-            "Fetch the full body and headers of a single email by its id. "
-            "Get the id from email_read_inbox or email_search. Params: message_id (required), "
-            "max_chars (optional, default 8000) — caps the returned body length."
+            "Fetch one email by id (from email_read_inbox or email_search). "
+            "Params: message_id, max_chars (default 8000)."
         )
 
     async def execute(
@@ -5908,10 +5832,8 @@ class EmailSearchTool(Tool):
 
     def get_description(self) -> str:
         return (
-            "Search the local mailbox (maxwell@z3ki.dev) using IMAP TEXT search. "
-            "Params: query (required, e.g. 'github', 'invoice', 'from:support'), "
-            "max_results (optional, default 10, max 50). Returns matching message ids "
-            "plus subject/from/date. Use email_get_message to read the body."
+            "Search the mailbox (IMAP TEXT). Params: query, max_results (default 10). "
+            "Returns ids plus subject/from/date; use email_get_message for bodies."
         )
 
     async def execute(
@@ -5969,14 +5891,9 @@ class UpdateBasePersonalityTool(Tool):
 
     def get_description(self) -> str:
         return (
-            "Rewrite the global base_personality text. This is the tone, "
-            "do/don'ts, and identity-safety paragraph that ships in every "
-            "prompt. The always-on Base Knowledge block (identity / slang / "
-            "voice / meme refs in code) is NOT editable through this tool. "
-            "Params: text (required, the new personality paragraph; 100-2000 "
-            "chars recommended; long enough to set voice and short enough to "
-            "stay in budget). Returns a confirmation with the new char count. "
-            "Admin-only — refused for non-admin callers."
+            "Rewrite global base_personality (tone/do-don'ts in every prompt). "
+            "Base Knowledge in code is not editable. Params: text (100-2000 chars). "
+            "Admin-only."
         )
 
     async def execute(
@@ -6044,12 +5961,9 @@ class UpdateServerPromptTool(Tool):
 
     def get_description(self) -> str:
         return (
-            "Rewrite or clear the per-server custom prompt that overrides the "
-            "base personality for a specific server. Same effect as the "
-            "`,prompt <text>` admin command but invokable from inside an LLM "
-            "turn. Params: server_id (required, numeric snowflake or 'DM' to "
-            "target direct messages), text (required; empty string or "
-            "`'__CLEAR__'` to clear the per-server prompt). Admin-only."
+            "Rewrite or clear the per-server custom prompt (same as `,prompt`). "
+            "Params: server_id (snowflake or 'DM'), text (empty or '__CLEAR__' "
+            "to clear). Admin-only."
         )
 
     async def execute(

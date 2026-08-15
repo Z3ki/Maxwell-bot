@@ -514,30 +514,21 @@ class ContextCleanupEngine:
         snapshot = _truncate(snapshot, 16000)
 
         system_prompt = (
-            "You are Maxwell's shared-context janitor. Review a list of stored facts and produce cleanup operations: "
-            "delete duplicates/garbage, edit messy entries, merge near-duplicates into one clean entry, or add a missing consolidated fact.\n\n"
-            "## Rules\n"
-            "- DELETE only if: exact/near duplicate of another entry, obviously garbage (truncated, nonsensical, leaked prompt text, raw timestamps), or superseded by a newer entry with the same scope.\n"
-            "- EDIT to clean phrasing, fix scope/visibility/importance, or strip junk appended to an otherwise useful fact. Never change the meaning.\n"
-            "- MERGE two or more near-duplicates into one: provide keep_id + the new content; the others are deleted automatically. Use sparingly.\n"
-            "- ADD only if a genuinely new consolidated fact is missing. Do not re-add something you're also deleting.\n"
-            "- Preserve identity, preference, and operational facts. Never delete secrets handling — just leave them.\n"
-            f"- At most {MAX_OPS_PER_PASS} operations. Prefer edits over deletes when unsure.\n\n"
-            "## Output — strict JSON only, no prose, no markdown fence\n"
-            "{\n"
-            '  "audit": "short summary of what you cleaned and why",\n'
-            '  "ops": [\n'
-            '    {"kind":"delete","id":"<entry id>","reason":"..."},\n'
-            '    {"kind":"edit","id":"<entry id>","content":"...","importance":1-10,'
-            '"scope":"global|user:<id>|guild:<id>|channel:<id>|dm:<id>","visibility":'
-            '"shared|private|admin_only|public_hint","reason":"..."},\n'
-            '    {"kind":"merge","keep_id":"<id>","delete_ids":["<id>","<id>"],'
-            '"content":"...","importance":1-10,"reason":"..."},\n'
-            '    {"kind":"add","content":"...","scope":"...","importance":1-10,'
-            '"visibility":"...","reason":"..."}\n'
-            "  ]\n"
-            "}\n"
-            "Valid kinds: delete, edit, merge, add. Do not invent others."
+            "You are Maxwell's shared-context janitor. Cleanup ops: delete "
+            "duplicates/garbage, edit messy entries, merge near-duplicates, or "
+            "add a missing consolidated fact.\n"
+            f"At most {MAX_OPS_PER_PASS} ops. Prefer edit over delete. Preserve "
+            "identity/preference/ops facts. Never change meaning.\n"
+            "JSON only, no fence:\n"
+            '{"audit":"...","ops":['
+            '{"kind":"delete","id":"...","reason":"..."},'
+            '{"kind":"edit","id":"...","content":"...","importance":1-10,'
+            '"scope":"global|user:<id>|guild:<id>|channel:<id>|dm:<id>",'
+            '"visibility":"shared|private|admin_only|public_hint","reason":"..."},'
+            '{"kind":"merge","keep_id":"...","delete_ids":["..."],"content":"...","importance":1-10,"reason":"..."},'
+            '{"kind":"add","content":"...","scope":"...","importance":1-10,"visibility":"...","reason":"..."}'
+            "]}\n"
+            "Valid kinds: delete, edit, merge, add."
         )
 
         user_prompt = (
@@ -804,24 +795,17 @@ class ContextCleanupEngine:
         snapshot = "\n".join(self._ltm_digest(e) for e in tail)
         snapshot = _truncate(snapshot, budget)
         system_prompt = (
-            "You are Maxwell's long-term-memory janitor. Review a list of stored facts (mostly news/intel entries the bot accumulated) "
-            "and produce cleanup operations: delete duplicates/garbage, edit messy entries, or merge near-duplicates into one clean entry.\n\n"
-            "## Rules\n"
-            "- DELETE only if: exact/near duplicate of another, obviously garbage (truncated, leaked prompt text, raw timestamps), or superseded by a newer entry on the same topic.\n"
-            "- EDIT to clean phrasing, fix typos, normalize dates, or strip leading '[2026-01-01]'-style prefixes that are not useful. Never change the meaning.\n"
-            "- MERGE two or more near-duplicates into one: keep the newest/widest-scoped, provide a single clean merged content, and list the others in delete_ids.\n"
-            f"- At most {MAX_OPS_PER_PASS} operations. Prefer edits over deletes.\n\n"
-            "## Output — strict JSON only, no prose, no markdown fence\n"
-            "{\n"
-            '  "audit": "short summary of what you cleaned and why",\n'
-            '  "ops": [\n'
-            '    {"kind":"delete","id":"<entry id>","reason":"..."},\n'
-            '    {"kind":"edit","id":"<entry id>","content":"...","reason":"..."},\n'
-            '    {"kind":"merge","keep_id":"<id>","delete_ids":["<id>","<id>"],'
-            '"content":"...","reason":"..."}\n'
-            "  ]\n"
-            "}\n"
-            "Valid kinds: delete, edit, merge. Do not add entries — Intel and the bot itself manage additions; cleanup only removes/merges."
+            "You are Maxwell's long-term-memory janitor (mostly news/intel). "
+            "Ops: delete duplicates/garbage, edit messy entries, merge near-duplicates. "
+            "Do not add. Never change meaning.\n"
+            f"At most {MAX_OPS_PER_PASS} ops. Prefer edit over delete.\n"
+            "JSON only, no fence:\n"
+            '{"audit":"...","ops":['
+            '{"kind":"delete","id":"...","reason":"..."},'
+            '{"kind":"edit","id":"...","content":"...","reason":"..."},'
+            '{"kind":"merge","keep_id":"...","delete_ids":["..."],"content":"...","reason":"..."}'
+            "]}\n"
+            "Valid kinds: delete, edit, merge."
         )
         user_prompt = (
             f"Long-term-memory snapshot ({len(entries)} entries total, showing "
