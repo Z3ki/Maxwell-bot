@@ -4377,21 +4377,6 @@ class MaxwellBot(commands.Bot):
                     (t_media - t_asr) * 1000,
                 )
                 return
-            if self._control.get("vc_response_mode", "addressed") == "addressed":
-                wakes = [
-                    str(w).strip().lower()
-                    for w in (self._control.get("vc_wake_words", ["maxwell"]) or [])
-                    if str(w).strip()
-                ] or ["maxwell"]
-                spoken = transcript.lower()
-                if not any(w in spoken for w in wakes):
-                    logger.info(
-                        "VC skip no-wake user=%s asr_ms=%.1f text=%r",
-                        getattr(user, "id", "?"),
-                        (t_media - t_asr) * 1000,
-                        transcript[:120],
-                    )
-                    return
             guild_id = str(guild.id) if guild else ""
             guild_name = getattr(guild, "name", "DM/group call")
             channel_id = str(getattr(text_channel, "id", ""))
@@ -4423,6 +4408,13 @@ class MaxwellBot(commands.Bot):
                 "Reply directly to what they said. No reasoning, no "
                 "chain-of-thought, no meta-commentary, no narrating what you're doing."
             )
+            if self._control.get("vc_response_mode", "always") == "addressed":
+                wakes = self._control.get("vc_wake_words", ["maxwell"]) or ["maxwell"]
+                sys_msg += (
+                    f" Only answer if they are talking to you (Maxwell) or the transcript "
+                    f"contains a wake word from {wakes} (ASR may garble the name). "
+                    "Otherwise output exactly __NO_RESPONSE__."
+                )
             if facts:
                 sys_msg += "\nCross-context facts:\n" + "\n".join(
                     f"- [{f.get('scope')}, i{f.get('importance')}] {f.get('content')}"

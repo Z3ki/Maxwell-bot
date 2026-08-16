@@ -108,7 +108,7 @@ DEFAULT_CONTROL = {
     "vc_max_response_chars": 2000,
     "vc_tts_engine": "local",
     "vc_reply_mode": "voice",
-    "vc_response_mode": "addressed",
+    "vc_response_mode": "always",
     "vc_wake_words": ["maxwell"],
     "vc_interrupt_enabled": True,
     "vc_debug": True,
