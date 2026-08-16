@@ -106,7 +106,10 @@ DEFAULT_CONTROL = {
     "vc_memory_history_messages": 2,
     "vc_cross_context_enabled": False,
     "vc_max_response_chars": 2000,
-    "vc_tts_engine": "local",
+    "vc_tts_engine": "fish",
+    # Named Fish voice for VC replies ("tiktok", "mommy", or "" = default).
+    # Maxwell can override per-reply with a leading [voice=NAME] tag.
+    "vc_tts_voice": "",
     "vc_reply_mode": "voice",
     "vc_response_mode": "always",
     "vc_wake_words": ["maxwell"],

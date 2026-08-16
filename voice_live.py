@@ -71,6 +71,7 @@ class LiveSpeechSink(voice_recv.AudioSink):
         self._ready: list[tuple[object, bytes, float]] = []
         self._lock = threading.RLock()
         self._ignore_until = 0.0
+        self._playback_started_at = 0.0
         self._running = True
         # In-flight utterance-processing tasks, tracked so cleanup() can cancel
         # them instead of letting them touch a torn-down sink (mutating VC state
@@ -84,6 +85,8 @@ class LiveSpeechSink(voice_recv.AudioSink):
     def set_ignore_until(self, monotonic_ts: float):
         with self._lock:
             self._ignore_until = max(self._ignore_until, float(monotonic_ts))
+            if not self._playback_started_at:
+                self._playback_started_at = time.monotonic()
 
     def record_decode_drop(self, user_id: int):
         with self._lock:
@@ -108,10 +111,24 @@ class LiveSpeechSink(voice_recv.AudioSink):
         rms = self._rms16le(frame)
         with self._lock:
             if now < self._ignore_until:
+                grace = _safe_float(
+                    self.control.get("vc_interrupt_grace_seconds", 2.5), 2.5
+                )
+                started = self._playback_started_at or now
+                if (now - started) < grace:
+                    return
                 if rms >= _safe_int(self.control.get("vc_rms_threshold", 500), 500) and self.control.get("vc_interrupt_enabled", True):
                     vc = self.voice_client
                     if vc and vc.is_playing():
                         logger.info("VC playback interrupted by user=%s", uid)
+                        # #region agent log
+                        try:
+                            import json as _json
+                            with open("/root/.cursor/debug-f04133.log", "a", encoding="utf-8") as _df:
+                                _df.write(_json.dumps({"sessionId": "f04133", "hypothesisId": "D", "location": "voice_live.py:write", "message": "playback_interrupted", "data": {"user": uid}, "timestamp": int(time.time() * 1000)}) + "\n")
+                        except Exception:
+                            pass
+                        # #endregion
                         # Schedule stop on the event loop thread, not the audio thread
                         self.loop.call_soon_threadsafe(vc.stop)
                     self._ignore_until = 0.0

@@ -3,7 +3,36 @@ import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
-from bot_tools import TtsTool, _tts_language_key, _tts_riva_voice_config
+from bot_tools import (
+    FISH_REFERENCE_DEFAULT,
+    TtsTool,
+    _fish_reference_id,
+    _tts_language_key,
+    _tts_riva_voice_config,
+)
+
+
+def test_fish_reference_id_resolves_named_voices(monkeypatch):
+    monkeypatch.setenv("TTS_FISH_REFERENCE_ID_TIKTOK", "id-tiktok")
+    monkeypatch.setenv("TTS_FISH_REFERENCE_ID_MOMMY", "id-mommy")
+    monkeypatch.setenv("TTS_FISH_REFERENCE_ID", "id-default")
+
+    assert _fish_reference_id("tiktok") == "id-tiktok"
+    assert _fish_reference_id("TikTok") == "id-tiktok"  # case-insensitive
+    assert _fish_reference_id("mommy") == "id-mommy"
+    # Unknown/empty voice falls back to the legacy default.
+    assert _fish_reference_id("britney") == "id-default"
+    assert _fish_reference_id("") == "id-default"
+    assert _fish_reference_id(None) == "id-default"
+
+
+def test_fish_reference_id_falls_back_to_hardcoded_default(monkeypatch):
+    monkeypatch.delenv("TTS_FISH_REFERENCE_ID_TIKTOK", raising=False)
+    monkeypatch.delenv("TTS_FISH_REFERENCE_ID_MOMMY", raising=False)
+    monkeypatch.delenv("TTS_FISH_REFERENCE_ID", raising=False)
+
+    assert _fish_reference_id("tiktok") == FISH_REFERENCE_DEFAULT
+    assert _fish_reference_id(None) == FISH_REFERENCE_DEFAULT
 
 
 def test_tts_language_key_accepts_spanish_aliases():

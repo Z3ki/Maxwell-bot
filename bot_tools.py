@@ -204,6 +204,34 @@ async def _synthesize_fish_tts(
         return None
 
 
+# Named Fish reference voices. Each name maps to its own env var; the
+# legacy TTS_FISH_REFERENCE_ID stays the backward-compatible default so
+# existing installs keep their current voice unless they opt into a name.
+FISH_REFERENCE_ENV = {
+    "tiktok": "TTS_FISH_REFERENCE_ID_TIKTOK",
+    "mommy": "TTS_FISH_REFERENCE_ID_MOMMY",
+}
+
+# Hardcoded fallback when no TTS_FISH_REFERENCE_ID* env var is set at all.
+FISH_REFERENCE_DEFAULT = "8d21b053e2804e2a890e1cf62f267b6f"
+
+
+def _fish_reference_id(voice: str | None = None) -> str:
+    """Resolve a named Fish voice ("tiktok", "mommy", ...) to a reference id.
+
+    Unknown/empty names fall back to TTS_FISH_REFERENCE_ID (then the
+    hardcoded default), so callers that don't care about voices keep the
+    exact behaviour they had before named voices existed.
+    """
+    if voice:
+        env_key = FISH_REFERENCE_ENV.get(str(voice).strip().lower())
+        if env_key:
+            value = os.environ.get(env_key, "").strip()
+            if value:
+                return value
+    return os.environ.get("TTS_FISH_REFERENCE_ID", FISH_REFERENCE_DEFAULT).strip()
+
+
 def _is_safe_ip(value: str) -> bool:
     try:
         ip = ipaddress.ip_address(value)
@@ -4699,7 +4727,8 @@ class TtsTool(Tool):
     def get_description(self):
         return (
             "Convert a text response into a speech voice message and send it to the triggering channel. "
-            "Params: text (required string), language/lang (optional: english or spanish)."
+            "Params: text (required string), language/lang (optional: english or spanish), "
+            "voice (optional: tiktok or mommy — pick the TTS voice)."
         )
 
     async def execute(
@@ -4708,6 +4737,7 @@ class TtsTool(Tool):
         text: str | None = None,
         language: str | None = None,
         lang: str | None = None,
+        voice: str | None = None,
         **kwargs,
     ) -> str:
         if not text or not text.strip():
@@ -4753,9 +4783,7 @@ class TtsTool(Tool):
         # `tts_source` on success; failures fall through silently.
         if not tts_source and fish_api_key:
             fish_model = os.environ.get("TTS_FISH_MODEL", "s2.1-pro-free")
-            fish_ref = os.environ.get(
-                "TTS_FISH_REFERENCE_ID", "8d21b053e2804e2a890e1cf62f267b6f"
-            )
+            fish_ref = _fish_reference_id(voice)
             fish_fmt = os.environ.get("TTS_FISH_FORMAT", "mp3")
             fish_out = await _synthesize_fish_tts(
                 text,
@@ -4767,7 +4795,9 @@ class TtsTool(Tool):
             )
             if fish_out:
                 tts_source = fish_out
-                logger.info("TTS provider: fish (model=%s)", fish_model)
+                logger.info(
+                    "TTS provider: fish (model=%s, voice=%s)", fish_model, voice
+                )
 
         if not tts_source:
             try:

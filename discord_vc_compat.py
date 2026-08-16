@@ -1,8 +1,15 @@
 """Compatibility shims for discord-ext-voice-recv on discord.py-self 2.2+."""
 
+from typing import Any, Dict, cast
+
 
 def ensure_voice_recv_compat() -> None:
-    """Patch discord.enums so voice_recv can import on discord.py-self 2.2+."""
+    """Patch discord.enums and voice_recv so guild-only code works in DMs."""
+    _ensure_speaking_state()
+    _patch_voice_recv_dm_hook()
+
+
+def _ensure_speaking_state() -> None:
     import discord.enums as enums
 
     if hasattr(enums, "SpeakingState"):
@@ -23,3 +30,159 @@ def ensure_voice_recv_compat() -> None:
             return self.value
 
     enums.SpeakingState = SpeakingState
+
+
+def _vc_self_id(vc) -> int:
+    user = getattr(vc, "user", None) or getattr(
+        getattr(vc, "client", None), "user", None
+    )
+    return int(getattr(user, "id", 0) or 0)
+
+
+def _vc_member(vc, uid: int):
+    uid = int(uid)
+    guild = getattr(getattr(vc, "channel", None), "guild", None)
+    if guild is not None:
+        member = guild.get_member(uid)
+        if member is not None:
+            return member
+    channel = getattr(vc, "channel", None)
+    me = getattr(vc, "user", None) or getattr(
+        getattr(vc, "client", None), "user", None
+    )
+    if me is not None and int(getattr(me, "id", 0) or 0) == uid:
+        return me
+    recipient = getattr(channel, "recipient", None)
+    if recipient is not None and int(getattr(recipient, "id", 0) or 0) == uid:
+        return recipient
+    for user in getattr(channel, "recipients", None) or []:
+        if int(getattr(user, "id", 0) or 0) == uid:
+            return user
+    client = getattr(vc, "client", None)
+    if client is not None:
+        return client.get_user(uid)
+    return None
+
+
+def _patch_voice_recv_dm_hook() -> None:
+    """voice_recv's gateway hook uses vc.guild.me, which is None in DM calls.
+
+    Do not override VoiceRecvClient.guild — VoiceConnectionState needs it
+    to stay None so DM connect uses client.change_voice_state.
+    """
+    try:
+        from discord.enums import SpeakingState, try_enum
+        from discord.ext.voice_recv import gateway as gw
+        from discord.ext.voice_recv.enums import VoiceFlags, VoicePlatform
+        from discord.ext.voice_recv.video import VoiceVideoStreams
+        from discord.ext.voice_recv.voice_client import VoiceRecvClient
+        from discord.voice_state import VoiceConnectionState
+    except Exception:
+        return
+    if getattr(gw.hook, "_maxwell_dm_hook", False):
+        return
+
+    log = gw.log
+    CLIENT_CONNECT = gw.CLIENT_CONNECT
+    VIDEO = gw.VIDEO
+    CLIENT_DISCONNECT = gw.CLIENT_DISCONNECT
+    FLAGS = gw.FLAGS
+    PLATFORM = gw.PLATFORM
+
+    async def hook(self, msg: Dict[str, Any]):
+        op: int = msg["op"]
+        data: Dict[str, Any] = msg.get("d", {})
+        vc = self._connection.voice_client
+
+        if op not in (3, 6):
+            from pprint import pformat
+
+            log.debug("Received op %s: \n%s", op, pformat(data, compact=True))
+            if len(msg.keys()) > 2:
+                extra = msg.copy()
+                extra.pop("op")
+                extra.pop("d")
+                log.info("WS payload has extra keys: %s", extra)
+
+        if op == self.READY:
+            self_id = _vc_self_id(vc)
+            # #region agent log
+            try:
+                import json as _json, time as _time
+                with open("/root/.cursor/debug-f04133.log", "a", encoding="utf-8") as _df:
+                    _df.write(_json.dumps({
+                        "sessionId": "f04133", "hypothesisId": "B",
+                        "location": "discord_vc_compat.py:hook:READY",
+                        "message": "dm_hook_ready",
+                        "data": {
+                            "self_id": self_id,
+                            "guild_is_none": getattr(vc, "guild", "missing") is None,
+                            "guild_type": type(getattr(vc, "guild", None)).__name__,
+                            "ssrc": data.get("ssrc"),
+                            "channel_type": type(getattr(vc, "channel", None)).__name__,
+                        },
+                        "timestamp": int(_time.time() * 1000),
+                    }) + "\n")
+            except Exception:
+                pass
+            # #endregion
+            if self_id:
+                vc._add_ssrc(self_id, data["ssrc"])
+
+        elif op == self.SESSION_DESCRIPTION:
+            if vc._reader:
+                vc._reader.update_secret_key(bytes(self.secret_key))
+
+        elif op == self.SPEAKING:
+            uid = int(data["user_id"])
+            ssrc = data["ssrc"]
+            vc._add_ssrc(uid, ssrc)
+            vc.dispatch(
+                "voice_member_speaking_state",
+                _vc_member(vc, uid),
+                ssrc,
+                try_enum(SpeakingState, data["speaking"]),
+            )
+
+        elif op == CLIENT_CONNECT:
+            for uid in (int(x) for x in data["user_ids"]):
+                vc.dispatch("voice_member_connect", _vc_member(vc, uid))
+
+        elif op == VIDEO:
+            uid = int(data["user_id"])
+            vc._add_ssrc(uid, data["audio_ssrc"])
+            streams = VoiceVideoStreams(data=cast("Any", data), vc=vc)
+            vc.dispatch("voice_member_video", _vc_member(vc, uid), streams)
+
+        elif op == CLIENT_DISCONNECT:
+            uid = int(data["user_id"])
+            ssrc = vc._get_ssrc_from_id(uid)
+            if vc._reader and ssrc is not None:
+                log.debug("Destroying decoder for %s, ssrc=%s", uid, ssrc)
+                vc._reader.packet_router.destroy_decoder(ssrc)
+            vc._remove_ssrc(user_id=uid)
+            vc.dispatch("voice_member_disconnect", _vc_member(vc, uid), ssrc)
+
+        elif op == FLAGS:
+            uid = int(data["user_id"])
+            vc.dispatch(
+                "voice_member_flags",
+                _vc_member(vc, uid),
+                VoiceFlags._from_value(data["flags"] or 0),
+            )
+
+        elif op == PLATFORM:
+            uid = int(data["user_id"])
+            vc.dispatch(
+                "voice_member_platform",
+                _vc_member(vc, uid),
+                try_enum(VoicePlatform, data["platform"])
+                if data["platform"] is not None
+                else None,
+            )
+
+    hook._maxwell_dm_hook = True  # type: ignore[attr-defined]
+    gw.hook = hook
+    VoiceRecvClient.create_connection_state = lambda self: VoiceConnectionState(
+        self, hook=hook
+    )

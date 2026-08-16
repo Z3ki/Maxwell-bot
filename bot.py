@@ -534,7 +534,7 @@ async def _synthesize_local_tts_wav(text: str, output_path: str) -> str | None:
 
 
 async def _synthesize_tts_wav(
-    text: str, output_path: str, *, prefer_local: bool = False
+    text: str, output_path: str, *, prefer_local: bool = False, voice: str | None = None
 ) -> str:
     if prefer_local or os.environ.get("TTS_ENGINE", "").lower() in {
         "local",
@@ -546,6 +546,71 @@ async def _synthesize_tts_wav(
             return local
         if os.environ.get("TTS_ENGINE", "").lower() in {"local", "espeak", "espeak-ng"}:
             logger.warning("Configured local TTS failed; falling back to remote TTS")
+
+    fish_api_key = os.environ.get("FISH_API_KEY", "").strip()
+    if fish_api_key:
+        try:
+            from bot_tools import _fish_reference_id, _synthesize_fish_tts
+
+            fish_model = os.environ.get("TTS_FISH_MODEL", "s2.1-pro-free")
+            fish_ref = _fish_reference_id(voice)
+            fish_fmt = os.environ.get("TTS_FISH_FORMAT", "mp3")
+            mp3_path = output_path + ".fish.mp3"
+            fish_out = await _synthesize_fish_tts(
+                text,
+                mp3_path,
+                api_key=fish_api_key,
+                model=fish_model,
+                reference_id=fish_ref,
+                fmt=fish_fmt,
+            )
+            if fish_out:
+                proc = await asyncio.create_subprocess_exec(
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-i",
+                    fish_out,
+                    "-ar",
+                    "48000",
+                    "-ac",
+                    "2",
+                    "-c:a",
+                    "pcm_s16le",
+                    output_path,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    _stdout, _stderr = await asyncio.wait_for(
+                        proc.communicate(), timeout=30
+                    )
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    raise RuntimeError("Fish TTS ffmpeg conversion timed out") from None
+                try:
+                    os.unlink(mp3_path)
+                except OSError:
+                    pass
+                if proc.returncode == 0 and os.path.exists(output_path):
+                    logger.info(
+                        "Fish VC TTS synthesized audio model=%r ref=%s voice=%s",
+                        fish_model,
+                        bool(fish_ref),
+                        voice,
+                    )
+                    _agent_debug_log(
+                        "D",
+                        "bot.py:_synthesize_tts_wav",
+                        "tts_engine",
+                        {"engine": "fish", "model": fish_model},
+                    )
+                    return output_path
+        except Exception as e:
+            logger.warning("Fish VC TTS failed: %s. Falling back.", e)
 
     nvidia_api_key = os.environ.get("NVIDIA_API_KEY", "")
     function_id = ""
@@ -745,6 +810,30 @@ async def _transcribe_vc_wav(wav_path: str) -> str:
     except Exception as e:
         logger.warning("Riva ASR failed for %s: %s", Path(wav_path).name, e)
         return ""
+
+
+def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: dict | None = None):
+    # #region agent log
+    try:
+        import json as _json
+
+        with open("/root/.cursor/debug-f04133.log", "a", encoding="utf-8") as _df:
+            _df.write(
+                _json.dumps(
+                    {
+                        "sessionId": "f04133",
+                        "hypothesisId": hypothesis_id,
+                        "location": location,
+                        "message": message,
+                        "data": data or {},
+                        "timestamp": int(time.time() * 1000),
+                    }
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+    # #endregion
 
 
 TEXT_ATTACHMENT_EXTS = {
@@ -2270,6 +2359,7 @@ class MaxwellBot(commands.Bot):
         )  # "message_id" dedup for REM events
         self._context_tasks: set[asyncio.Task] = set()
         self._vc_sinks: dict[int, Any] = {}
+        self._incoming_call_seen: set[int] = set()
         self._vc_text_channels: dict[int, discord.abc.Messageable] = {}
         self._vc_voice_channels: dict[int, Any] = {}
         self._vc_reply_locks: dict[int, asyncio.Lock] = {}
@@ -3414,6 +3504,255 @@ class MaxwellBot(commands.Bot):
             if _lock_acquired:
                 _lock.release()
 
+    async def on_call_create(self, call):
+        await self._maybe_handle_incoming_call(call)
+
+    async def on_call_update(self, _before, after):
+        await self._maybe_handle_incoming_call(after)
+
+    async def _maybe_handle_incoming_call(self, call):
+        """Pick up or decline a DM/group call that is ringing Maxwell."""
+        if not getattr(self.config, "ENABLE_VC", True):
+            return
+        if not self.user or not call:
+            return
+        if getattr(call, "unavailable", False) or getattr(call, "_ended", False):
+            return
+        channel = getattr(call, "channel", None)
+        if channel is None:
+            return
+        ringing = list(getattr(call, "ringing", None) or [])
+        me_id = int(self.user.id)
+        if not any(int(getattr(u, "id", 0) or 0) == me_id for u in ringing):
+            return
+        chan_id = int(getattr(channel, "id", 0) or 0)
+        if not chan_id or chan_id in self._incoming_call_seen:
+            return
+        self._incoming_call_seen.add(chan_id)
+        self._track_task(
+            asyncio.create_task(
+                self._decide_incoming_call(call, channel),
+                name=f"incoming-call-{chan_id}",
+            )
+        )
+
+    async def _decide_incoming_call(self, call, channel):
+        chan_id = int(getattr(channel, "id", 0) or 0)
+        caller = (
+            getattr(channel, "recipient", None)
+            or getattr(call, "initiator", None)
+        )
+        caller_id = str(getattr(caller, "id", "") or "")
+        caller_name = getattr(caller, "display_name", None) or getattr(
+            caller, "name", None
+        ) or caller_id or "unknown"
+        try:
+            if caller_id and (
+                caller_id in self._blacklist
+                or caller_id in set(self._control.get("ignore_users", []) or [])
+            ):
+                await self._deny_incoming_call(call, channel, "blacklist")
+                return
+            pickup = False
+            reason = "llm"
+            if caller_id and self._is_admin(caller_id):
+                pickup = True
+                reason = "admin"
+            else:
+                pickup = await self._llm_should_answer_call(
+                    channel, caller_name, caller_id
+                )
+            _agent_debug_log(
+                "E",
+                "bot.py:_decide_incoming_call",
+                "call_decision",
+                {
+                    "channel": str(chan_id),
+                    "caller": caller_id,
+                    "pickup": pickup,
+                    "reason": reason,
+                },
+            )
+            if pickup:
+                await self._answer_incoming_call(call, channel)
+            else:
+                await self._deny_incoming_call(call, channel, reason)
+        except Exception as e:
+            logger.exception("Incoming DM call handling failed")
+            _agent_debug_log(
+                "C",
+                "bot.py:_decide_incoming_call",
+                "call_handling_failed",
+                {
+                    "error_type": type(e).__name__,
+                    "error": str(e)[:400],
+                    "channel": str(chan_id),
+                },
+            )
+            with contextlib.suppress(Exception):
+                await self._deny_incoming_call(call, channel, "error")
+        finally:
+            self._incoming_call_seen.discard(chan_id)
+
+    async def _llm_should_answer_call(
+        self, channel, caller_name: str, caller_id: str
+    ) -> bool:
+        recent = []
+        try:
+            mem = await self.memory.get_channel_memory(str(channel.id))
+            for msg in (mem or [])[-8:]:
+                author = str(msg.get("author") or "user")[:40]
+                text = str(msg.get("content") or "").replace("\n", " ")[:160]
+                if text:
+                    recent.append(f"{author}: {text}")
+        except Exception:
+            recent = []
+        history = "\n".join(recent) if recent else "(no recent DM history)"
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Maxwell deciding whether to pick up a Discord DM voice call. "
+                    "Reply with exactly ANSWER or DENY. "
+                    "ANSWER if you know them or the DM is an active conversation. "
+                    "DENY if they are a stranger, spam, or the chat says you should not talk."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"{caller_name} ({caller_id}) is calling you.\n"
+                    f"Recent DM:\n{history}"
+                ),
+            },
+        ]
+        try:
+            await self._acquire_ai_slot(timeout=8, priority="user")
+            try:
+                resp = await self.ai_provider.generate_response(
+                    messages,
+                    timeout=8,
+                    max_tokens=8,
+                    temperature=0.0,
+                    disable_reasoning=True,
+                    fast_fallback=True,
+                )
+            finally:
+                await self._release_ai_slot()
+            text = (resp or "").strip().upper()
+            logger.info(
+                "DM call decision caller=%s resp=%r", caller_id, (resp or "")[:40]
+            )
+            if text.startswith("DENY") or text.startswith("NO"):
+                return False
+            if text.startswith("ANSWER") or text.startswith("YES") or "ANSWER" in text:
+                return True
+        except Exception:
+            logger.warning("DM call LLM decision failed; defaulting to deny")
+        return bool(recent)
+
+    async def _disconnect_all_voice(self):
+        """User accounts can only be in one voice session. Leave guild VC before a DM call."""
+        left = []
+        for key in list(self._vc_sinks):
+            sink = self._vc_sinks.pop(key, None)
+            if sink:
+                with contextlib.suppress(Exception):
+                    sink.cleanup()
+        self._vc_text_channels.clear()
+        self._vc_voice_channels.clear()
+        for vc in list(self.voice_clients):
+            chan = getattr(vc, "channel", None)
+            left.append(str(getattr(chan, "id", getattr(chan, "name", "?"))))
+            if hasattr(vc, "stop_listening"):
+                with contextlib.suppress(Exception):
+                    vc.stop_listening()
+            with contextlib.suppress(Exception):
+                await vc.disconnect(force=True)
+        _agent_debug_log(
+            "E",
+            "bot.py:_disconnect_all_voice",
+            "left_voice",
+            {"channels": left},
+        )
+        return left
+
+    async def _answer_incoming_call(self, call, channel):
+        logger.info(
+            "Answering DM/group call channel=%s", getattr(channel, "id", "?")
+        )
+        if voice_recv is None:
+            raise RuntimeError(
+                f"voice receive unavailable: {_voice_recv_import_error}"
+            )
+        left = await self._disconnect_all_voice()
+        logger.info("Left existing voice before DM call: %s", left)
+        _agent_debug_log(
+            "A",
+            "bot.py:_answer_incoming_call",
+            "pre_connect",
+            {
+                "channel": str(getattr(channel, "id", "")),
+                "channel_type": type(channel).__name__,
+                "channel_guild_is_none": getattr(channel, "guild", "missing") is None,
+                "left": left,
+            },
+        )
+        try:
+            vc = await call.connect(
+                timeout=30.0, reconnect=True, cls=voice_recv.VoiceRecvClient
+            )
+        except discord.ClientException as e:
+            if "already connected" not in str(e).lower():
+                raise
+            await self._disconnect_all_voice()
+            vc = await call.connect(
+                timeout=30.0, reconnect=True, cls=voice_recv.VoiceRecvClient
+            )
+        _agent_debug_log(
+            "A",
+            "bot.py:_answer_incoming_call",
+            "post_connect",
+            {
+                "vc_guild_is_none": getattr(vc, "guild", "missing") is None,
+                "vc_guild_type": type(getattr(vc, "guild", None)).__name__,
+                "vc_connected": bool(getattr(vc, "is_connected", lambda: False)()),
+            },
+        )
+        listening = await self._vc_start_listening(None, channel, channel)
+        logger.info(
+            "Joined DM call channel=%s listening=%s vc=%s",
+            getattr(channel, "id", "?"),
+            listening,
+            bool(vc),
+        )
+        _agent_debug_log(
+            "E",
+            "bot.py:_answer_incoming_call",
+            "joined_dm_call",
+            {
+                "channel": str(getattr(channel, "id", "")),
+                "listening": bool(listening),
+            },
+        )
+        with contextlib.suppress(Exception):
+            await channel.send("picked up")
+
+    async def _deny_incoming_call(self, call, channel, reason: str):
+        logger.info(
+            "Declining DM/group call channel=%s reason=%s",
+            getattr(channel, "id", "?"),
+            reason,
+        )
+        me = getattr(getattr(channel, "me", None), "id", None) or (
+            self.user.id if self.user else None
+        )
+        if me is not None:
+            with contextlib.suppress(Exception):
+                await self.http.stop_ringing(channel.id, me)
+        with contextlib.suppress(Exception):
+            await call.stop_ringing()
+
     async def on_reaction_add(self, reaction, user):
         """Treat reactions on Maxwell's messages like tiny replies.
 
@@ -4140,10 +4479,13 @@ class MaxwellBot(commands.Bot):
                 with tempfile.TemporaryDirectory(prefix="maxwell-vc-") as tmp:
                     wav_path = str(Path(tmp) / "tts.wav")
                     prefer_local_tts = str(
-                        self._control.get("vc_tts_engine", "local")
+                        self._control.get("vc_tts_engine", "fish")
                     ).lower() in {"local", "espeak", "espeak-ng"}
                     await _synthesize_tts_wav(
-                        rest[:400], wav_path, prefer_local=prefer_local_tts
+                        rest[:400],
+                        wav_path,
+                        prefer_local=prefer_local_tts,
+                        voice=str(self._control.get("vc_tts_voice", "") or ""),
                     )
                     key = self._vc_context_key(
                         message.guild,
@@ -4367,6 +4709,20 @@ class MaxwellBot(commands.Bot):
             t_asr = time.perf_counter()
             transcript = await _transcribe_vc_wav(wav_path)
             t_media = time.perf_counter()
+            _agent_debug_log(
+                "A",
+                "bot.py:_handle_vc_utterance",
+                "asr_result",
+                {
+                    "user": str(getattr(user, "id", "")),
+                    "dur": round(float(duration), 2),
+                    "asr_ms": round((t_media - t_asr) * 1000, 1),
+                    "bytes": wav_bytes,
+                    "mode": str(self._control.get("vc_response_mode", "")),
+                    "has_text": bool(transcript),
+                    "text": (transcript or "")[:160],
+                },
+            )
             if not transcript:
                 logger.info(
                     "VC timing no_transcript user=%s audio_dur=%.2fs file=%s bytes=%s asr_ms=%.1f",
@@ -4407,6 +4763,8 @@ class MaxwellBot(commands.Bot):
                 "or anything that sounds weird read aloud.\n"
                 "Reply directly to what they said. No reasoning, no "
                 "chain-of-thought, no meta-commentary, no narrating what you're doing."
+                "\nOptional: start your reply with [voice=NAME] to pick your TTS voice "
+                "(choices: tiktok, mommy). Defaults to tiktok if you don't specify."
             )
             if self._control.get("vc_response_mode", "always") == "addressed":
                 wakes = self._control.get("vc_wake_words", ["maxwell"]) or ["maxwell"]
@@ -4504,6 +4862,19 @@ class MaxwellBot(commands.Bot):
                 await self._release_ai_slot()
             t_ai_done = time.perf_counter()
             resp = strip_tool_payload_leaks((resp or "").strip())
+            _agent_debug_log(
+                "C",
+                "bot.py:_handle_vc_utterance",
+                "llm_result",
+                {
+                    "user": str(getattr(user, "id", "")),
+                    "ai_ms": round((t_ai_done - t_ai) * 1000, 1),
+                    "empty": not bool(resp),
+                    "no_response": resp == "__NO_RESPONSE__",
+                    "chars": len(resp or ""),
+                    "preview": (resp or "")[:80],
+                },
+            )
             if not resp or resp == "__NO_RESPONSE__":
                 logger.info(
                     "VC timing no_response user=%s ai_ms=%.1f total_ms=%.1f",
@@ -4549,12 +4920,31 @@ class MaxwellBot(commands.Bot):
                 )
             if mode in {"voice", "both"}:
                 t_play = time.perf_counter()
+                _agent_debug_log(
+                    "D",
+                    "bot.py:_handle_vc_utterance",
+                    "play_start",
+                    {
+                        "user": str(getattr(user, "id", "")),
+                        "chars": len(resp),
+                        "mode": mode,
+                    },
+                )
                 await self._play_vc_response(guild, text_channel, resp)
                 logger.info(
                     "VC timing play_done user=%s play_call_ms=%.1f total_ms=%.1f",
                     getattr(user, "id", "?"),
                     (time.perf_counter() - t_play) * 1000,
                     (time.perf_counter() - t_total) * 1000,
+                )
+                _agent_debug_log(
+                    "D",
+                    "bot.py:_handle_vc_utterance",
+                    "play_done",
+                    {
+                        "user": str(getattr(user, "id", "")),
+                        "play_ms": round((time.perf_counter() - t_play) * 1000, 1),
+                    },
                 )
             if self._control.get("store_memory", True):
                 mem_kwargs = {}
@@ -4631,10 +5021,21 @@ class MaxwellBot(commands.Bot):
                 wav_path = str(Path(tmp) / "reply.wav")
                 t_tts = time.perf_counter()
                 prefer_local_tts = str(
-                    self._control.get("vc_tts_engine", "local")
+                    self._control.get("vc_tts_engine", "fish")
                 ).lower() in {"local", "espeak", "espeak-ng"}
+                # Maxwell can pick the Fish voice per-reply with a leading
+                # [voice=NAME] tag (tiktok|mommy). Strip it before synthesis;
+                # unknown names fall through to the vc_tts_voice control.
+                vc_voice = str(self._control.get("vc_tts_voice", "") or "")
+                vc_tag = re.match(r"^\s*\[voice=([A-Za-z0-9_-]+)\]\s*", response)
+                if vc_tag:
+                    vc_voice = vc_tag.group(1)
+                    response = response[vc_tag.end():]
                 await _synthesize_tts_wav(
-                    response, wav_path, prefer_local=prefer_local_tts
+                    response,
+                    wav_path,
+                    prefer_local=prefer_local_tts,
+                    voice=vc_voice,
                 )
                 t_tts_done = time.perf_counter()
                 if sink:
@@ -4665,6 +5066,7 @@ class MaxwellBot(commands.Bot):
                     )
                     if sink:
                         sink.set_ignore_until(loop.time() + 0.5)
+                        sink._playback_started_at = 0.0
                 except asyncio.CancelledError as _exc:
                     # Cancelled by a newer utterance (or bot shutdown). Stop
                     # playback immediately so the old audio doesn't bleed
@@ -5233,10 +5635,8 @@ class MaxwellBot(commands.Bot):
                 if srv is None:
                     raise CaptchaSolveError("human captcha server not started")
                 # LLM explanation DM in the background — never blocks the solve.
-                try:
+                with contextlib.suppress(Exception):
                     asyncio.create_task(self._explain_captcha_dm(url, exception))
-                except Exception:
-                    pass
                 return await srv.wait_for_token(url)
             except CaptchaSolveError as e:
                 logger.error("human captcha solve failed: %s", e)
@@ -5315,10 +5715,8 @@ class MaxwellBot(commands.Bot):
         join, or someone manually inviting the account). Runs auto-onboarding
         so role-gated servers are usable immediately, and records the join
         in the log. Failures are logged, never raised."""
-        try:
+        with contextlib.suppress(Exception):
             logger.info("Joined guild: %s (id=%s)", guild.name, guild.id)
-        except Exception:
-            pass
         # Give the gateway a beat to hydrate guild state before onboarding.
         await asyncio.sleep(2)
         try:
@@ -11801,10 +12199,8 @@ async def main():
             return
         _shutdown_called = True
         logger.info(f"Received signal {sig}, initiating graceful shutdown...")
-        try:
+        with contextlib.suppress(RuntimeError):
             _spawn_background(bot.close())
-        except RuntimeError:
-            pass
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
