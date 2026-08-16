@@ -117,7 +117,9 @@ def test_tts_spanish_falls_back_to_gtts_without_nvidia_key(monkeypatch, tmp_path
     )
 
     async def run():
-        result = await TtsTool(SimpleNamespace(config=SimpleNamespace(NVIDIA_API_KEY=""))).execute(
+        result = await TtsTool(
+            SimpleNamespace(config=SimpleNamespace(NVIDIA_API_KEY=""))
+        ).execute(
             message,
             text="hola mundo",
             language="spanish",
@@ -219,8 +221,11 @@ def test_fish_tts_returns_none_on_api_error(monkeypatch):
 
     async def run():
         result = await _synthesize_fish_tts(
-            "x", "/tmp/should_not_exist.mp3",
-            api_key="bad", model="s2.1-pro-free", reference_id="",
+            "x",
+            "/tmp/should_not_exist.mp3",
+            api_key="bad",
+            model="s2.1-pro-free",
+            reference_id="",
         )
         assert result is None
 
@@ -307,7 +312,11 @@ def test_tts_tool_prefers_fish_over_riva(monkeypatch, tmp_path):
     )
 
     async def run():
-        result = await TtsTool(SimpleNamespace(config=SimpleNamespace(NVIDIA_API_KEY="", FISH_API_KEY="sk-fish-test"))).execute(
+        result = await TtsTool(
+            SimpleNamespace(
+                config=SimpleNamespace(NVIDIA_API_KEY="", FISH_API_KEY="sk-fish-test")
+            )
+        ).execute(
             message,
             text="hello from fish",
             language="english",

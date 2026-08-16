@@ -10,7 +10,7 @@ from pathlib import Path
 from discord_vc_compat import ensure_voice_recv_compat
 
 ensure_voice_recv_compat()
-from discord.ext import voice_recv
+from discord.ext import voice_recv  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,9 @@ class LiveSpeechSink(voice_recv.AudioSink):
     channels = 2
     sample_width = 2
 
-    def __init__(self, *, loop, on_utterance, guild_id, control, self_user_id, debug=False):
+    def __init__(
+        self, *, loop, on_utterance, guild_id, control, self_user_id, debug=False
+    ):
         super().__init__()
         self.loop = loop
         self.on_utterance = on_utterance
@@ -117,18 +119,12 @@ class LiveSpeechSink(voice_recv.AudioSink):
                 started = self._playback_started_at or now
                 if (now - started) < grace:
                     return
-                if rms >= _safe_int(self.control.get("vc_rms_threshold", 500), 500) and self.control.get("vc_interrupt_enabled", True):
+                if rms >= _safe_int(
+                    self.control.get("vc_rms_threshold", 500), 500
+                ) and self.control.get("vc_interrupt_enabled", True):
                     vc = self.voice_client
                     if vc and vc.is_playing():
                         logger.info("VC playback interrupted by user=%s", uid)
-                        # #region agent log
-                        try:
-                            import json as _json
-                            with open("/root/.cursor/debug-f04133.log", "a", encoding="utf-8") as _df:
-                                _df.write(_json.dumps({"sessionId": "f04133", "hypothesisId": "D", "location": "voice_live.py:write", "message": "playback_interrupted", "data": {"user": uid}, "timestamp": int(time.time() * 1000)}) + "\n")
-                        except Exception:
-                            pass
-                        # #endregion
                         # Schedule stop on the event loop thread, not the audio thread
                         self.loop.call_soon_threadsafe(vc.stop)
                     self._ignore_until = 0.0
@@ -143,7 +139,13 @@ class LiveSpeechSink(voice_recv.AudioSink):
             st.user_obj = user
             st.last_packet_time = now
             st.pre_roll.append(frame)
-            pre_roll_max = max(1, int(_safe_float(self.control.get("vc_preroll_seconds", 0.25), 0.25) / max(frame_dur, 0.001)))
+            pre_roll_max = max(
+                1,
+                int(
+                    _safe_float(self.control.get("vc_preroll_seconds", 0.25), 0.25)
+                    / max(frame_dur, 0.001)
+                ),
+            )
             while len(st.pre_roll) > pre_roll_max:
                 st.pre_roll.popleft()
             if rms >= _safe_int(self.control.get("vc_rms_threshold", 500), 500):
@@ -161,7 +163,9 @@ class LiveSpeechSink(voice_recv.AudioSink):
                 st.voiced_seconds += frame_dur
                 st.active.extend(frame)
                 max_secs = _safe_float(self.control.get("vc_max_seconds", 18.0), 18.0)
-                if len(st.active) >= int(max_secs * self.sample_rate * self.channels * self.sample_width):
+                if len(st.active) >= int(
+                    max_secs * self.sample_rate * self.channels * self.sample_width
+                ):
                     self._finalize_locked(st, now, "max")
             elif st.currently_speaking:
                 st.active.extend(frame)
@@ -171,23 +175,54 @@ class LiveSpeechSink(voice_recv.AudioSink):
             st.currently_speaking = False
             st.active = bytearray()
             return
-        duration = len(st.active) / (self.sample_rate * self.channels * self.sample_width)
+        duration = len(st.active) / (
+            self.sample_rate * self.channels * self.sample_width
+        )
         min_secs = _safe_float(self.control.get("vc_min_seconds", 0.75), 0.75)
         min_voiced_secs = _safe_float(
-            self.control.get("vc_min_voiced_seconds", min(0.35, max(0.12, min_secs * 0.45))),
+            self.control.get(
+                "vc_min_voiced_seconds", min(0.35, max(0.12, min_secs * 0.45))
+            ),
             min(0.35, max(0.12, min_secs * 0.45)),
         )
         min_voiced_frames = _safe_int(self.control.get("vc_min_voiced_frames", 8), 8)
         max_decode_drops = _safe_int(
-            self.control.get("vc_max_decode_drops", max(8, int(st.voiced_frames * 0.25))),
+            self.control.get(
+                "vc_max_decode_drops", max(8, int(st.voiced_frames * 0.25))
+            ),
             max(8, int(st.voiced_frames * 0.25)),
         )
-        if duration >= min_secs and st.voiced_seconds >= min_voiced_secs and st.voiced_frames >= min_voiced_frames and st.decode_drops <= max_decode_drops and st.user_obj is not None:
+        if (
+            duration >= min_secs
+            and st.voiced_seconds >= min_voiced_secs
+            and st.voiced_frames >= min_voiced_frames
+            and st.decode_drops <= max_decode_drops
+            and st.user_obj is not None
+        ):
             self._ready.append((st.user_obj, bytes(st.active), duration))
             if self.debug:
-                logger.info("VC utterance ready guild=%s user=%s dur=%.2fs voiced=%.2fs frames=%s drops=%s (%s)", self.guild_id, getattr(st.user_obj, 'id', '?'), duration, st.voiced_seconds, st.voiced_frames, st.decode_drops, why)
+                logger.info(
+                    "VC utterance ready guild=%s user=%s dur=%.2fs voiced=%.2fs frames=%s drops=%s (%s)",
+                    self.guild_id,
+                    getattr(st.user_obj, "id", "?"),
+                    duration,
+                    st.voiced_seconds,
+                    st.voiced_frames,
+                    st.decode_drops,
+                    why,
+                )
         elif self.debug:
-            logger.info("VC utterance discarded guild=%s user=%s dur=%.2fs voiced=%.2fs frames=%s drops=%s max_drops=%s (%s)", self.guild_id, getattr(st.user_obj, 'id', '?'), duration, st.voiced_seconds, st.voiced_frames, st.decode_drops, max_decode_drops, why)
+            logger.info(
+                "VC utterance discarded guild=%s user=%s dur=%.2fs voiced=%.2fs frames=%s drops=%s max_drops=%s (%s)",
+                self.guild_id,
+                getattr(st.user_obj, "id", "?"),
+                duration,
+                st.voiced_seconds,
+                st.voiced_frames,
+                st.decode_drops,
+                max_decode_drops,
+                why,
+            )
         st.currently_speaking = False
         st.active = bytearray()
         st.voiced_frames = 0
@@ -203,7 +238,11 @@ class LiveSpeechSink(voice_recv.AudioSink):
                 with self._lock:
                     pause = _safe_float(self.control.get("vc_pause_seconds", 0.9), 0.9)
                     for st in self._states.values():
-                        if st.currently_speaking and st.last_voice_time and (now - st.last_voice_time) >= pause:
+                        if (
+                            st.currently_speaking
+                            and st.last_voice_time
+                            and (now - st.last_voice_time) >= pause
+                        ):
                             self._finalize_locked(st, now, "pause")
                     if self._ready:
                         out = self._ready[:]
@@ -230,7 +269,7 @@ class LiveSpeechSink(voice_recv.AudioSink):
             logger.warning("Utterance processing error: %s", e)
 
     async def _write_temp_wav(self, user, pcm: bytes) -> str:
-        name = f"vc-{self.guild_id}-{getattr(user, 'id', 'u')}-{int(time.time()*1000)}.wav"
+        name = f"vc-{self.guild_id}-{getattr(user, 'id', 'u')}-{int(time.time() * 1000)}.wav"
         out_dir = Path(__file__).resolve().parent / "temp"
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / name
@@ -249,6 +288,7 @@ class LiveSpeechSink(voice_recv.AudioSink):
         if self.channels == 1:
             return pcm
         import array
+
         try:
             samples = array.array("h", pcm)
         except ValueError:

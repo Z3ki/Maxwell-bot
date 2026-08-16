@@ -388,9 +388,7 @@ def _decode_tool_arguments(raw_args: Any) -> dict[str, Any]:
         if isinstance(current, dict):
             if len(current) == 1:
                 for wrapper in ("arguments", "parameters"):
-                    if wrapper in current and isinstance(
-                        current[wrapper], (dict, str)
-                    ):
+                    if wrapper in current and isinstance(current[wrapper], (dict, str)):
                         current = current[wrapper]
                         break
                 else:

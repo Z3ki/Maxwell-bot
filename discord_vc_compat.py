@@ -1,12 +1,13 @@
 """Compatibility shims for discord-ext-voice-recv on discord.py-self 2.2+."""
 
-from typing import Any, Dict, cast
+from typing import Any, cast
 
 
 def ensure_voice_recv_compat() -> None:
     """Patch discord.enums and voice_recv so guild-only code works in DMs."""
     _ensure_speaking_state()
     _patch_voice_recv_dm_hook()
+    _patch_voice_recv_reader_lookup()
 
 
 def _ensure_speaking_state() -> None:
@@ -47,9 +48,7 @@ def _vc_member(vc, uid: int):
         if member is not None:
             return member
     channel = getattr(vc, "channel", None)
-    me = getattr(vc, "user", None) or getattr(
-        getattr(vc, "client", None), "user", None
-    )
+    me = getattr(vc, "user", None) or getattr(getattr(vc, "client", None), "user", None)
     if me is not None and int(getattr(me, "id", 0) or 0) == uid:
         return me
     recipient = getattr(channel, "recipient", None)
@@ -89,9 +88,9 @@ def _patch_voice_recv_dm_hook() -> None:
     FLAGS = gw.FLAGS
     PLATFORM = gw.PLATFORM
 
-    async def hook(self, msg: Dict[str, Any]):
+    async def hook(self, msg: dict[str, Any]):
         op: int = msg["op"]
-        data: Dict[str, Any] = msg.get("d", {})
+        data: dict[str, Any] = msg.get("d", {})
         vc = self._connection.voice_client
 
         if op not in (3, 6):
@@ -106,26 +105,6 @@ def _patch_voice_recv_dm_hook() -> None:
 
         if op == self.READY:
             self_id = _vc_self_id(vc)
-            # #region agent log
-            try:
-                import json as _json, time as _time
-                with open("/root/.cursor/debug-f04133.log", "a", encoding="utf-8") as _df:
-                    _df.write(_json.dumps({
-                        "sessionId": "f04133", "hypothesisId": "B",
-                        "location": "discord_vc_compat.py:hook:READY",
-                        "message": "dm_hook_ready",
-                        "data": {
-                            "self_id": self_id,
-                            "guild_is_none": getattr(vc, "guild", "missing") is None,
-                            "guild_type": type(getattr(vc, "guild", None)).__name__,
-                            "ssrc": data.get("ssrc"),
-                            "channel_type": type(getattr(vc, "channel", None)).__name__,
-                        },
-                        "timestamp": int(_time.time() * 1000),
-                    }) + "\n")
-            except Exception:
-                pass
-            # #endregion
             if self_id:
                 vc._add_ssrc(self_id, data["ssrc"])
 
@@ -186,3 +165,29 @@ def _patch_voice_recv_dm_hook() -> None:
     VoiceRecvClient.create_connection_state = lambda self: VoiceConnectionState(
         self, hook=hook
     )
+
+
+def _patch_voice_recv_reader_lookup() -> None:
+    """voice_recv's SpeakingTimer._lookup_member assumes vc.guild is non-None.
+
+    In DM/group calls ``voice_client.guild`` is None, so a speaking-start
+    dispatch raises ``AttributeError: 'NoneType' object has no attribute
+    'get_member'`` on the audio thread and tears down the listener. Route the
+    lookup through _vc_member, which falls back to DM recipients and the bot's
+    own user instead of dereferencing guild unconditionally.
+    """
+    try:
+        from discord.ext.voice_recv.reader import SpeakingTimer
+    except Exception:
+        return
+    if getattr(SpeakingTimer._lookup_member, "_maxwell_dm_lookup", False):
+        return
+
+    def _lookup_member(self, ssrc: int):
+        whoid = self.voice_client._get_id_from_ssrc(ssrc)
+        if not whoid:
+            return None
+        return _vc_member(self.voice_client, whoid)
+
+    _lookup_member._maxwell_dm_lookup = True  # type: ignore[attr-defined]
+    SpeakingTimer._lookup_member = _lookup_member

@@ -195,6 +195,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     OWNER_IDS,
     ChangeAvatarTool,
     ChangePresenceTool,
+    ClearSleepTool,
     CreateCategoryTool,
     CreateChannelTool,
     CreateInviteTool,
@@ -231,12 +232,11 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     SetNicknameTool,
     ShellTool,
     SleepTool,
-    ClearSleepTool,
-    WaitTool,
-    UpdateBasePersonalityTool,
-    UpdateServerPromptTool,
     TtsTool,
     TypingTool,
+    UpdateBasePersonalityTool,
+    UpdateServerPromptTool,
+    WaitTool,
     WebSearchTool,
     YouTubeTool,
     _get_shared_session,
@@ -255,23 +255,23 @@ from control_defaults import (  # noqa: E402
     DEFAULT_CONTROL,
     parse_bool,
 )
-from rag_memory import RAGMemoryManager, RemEventLog, _parse_iso  # noqa: E402
 from providers import (  # noqa: E402
     MIME_MAP,
     OllamaProvider,
     ProviderUsageExhaustedError,
 )
+from rag_memory import RAGMemoryManager, RemEventLog, _parse_iso  # noqa: E402
 from rem import RemStore, load_rem_defaults, run_rem_once  # noqa: E402
+from tool_progress import make_progress as _make_tool_progress  # noqa: E402
+from tool_registry import (  # noqa: E402 — reasoning now rides inside tool calls
+    extract_reasoning,
+    record_reasoning,
+)
 from tool_schemas import (  # noqa: E402
     build_openai_tools,
     elide_tool_calls_for_history,
     normalize_native_tool_calls,
 )
-from tool_registry import (  # noqa: E402 — reasoning now rides inside tool calls
-    extract_reasoning,
-    record_reasoning,
-)
-from tool_progress import make_progress as _make_tool_progress  # noqa: E402
 from utils import (  # fd-safe, single source of truth  # noqa: E402
     FileLock,
     _atomic_json_write_sync,
@@ -602,12 +602,6 @@ async def _synthesize_tts_wav(
                         bool(fish_ref),
                         voice,
                     )
-                    _agent_debug_log(
-                        "D",
-                        "bot.py:_synthesize_tts_wav",
-                        "tts_engine",
-                        {"engine": "fish", "model": fish_model},
-                    )
                     return output_path
         except Exception as e:
             logger.warning("Fish VC TTS failed: %s. Falling back.", e)
@@ -810,30 +804,6 @@ async def _transcribe_vc_wav(wav_path: str) -> str:
     except Exception as e:
         logger.warning("Riva ASR failed for %s: %s", Path(wav_path).name, e)
         return ""
-
-
-def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: dict | None = None):
-    # #region agent log
-    try:
-        import json as _json
-
-        with open("/root/.cursor/debug-f04133.log", "a", encoding="utf-8") as _df:
-            _df.write(
-                _json.dumps(
-                    {
-                        "sessionId": "f04133",
-                        "hypothesisId": hypothesis_id,
-                        "location": location,
-                        "message": message,
-                        "data": data or {},
-                        "timestamp": int(time.time() * 1000),
-                    }
-                )
-                + "\n"
-            )
-    except Exception:
-        pass
-    # #endregion
 
 
 TEXT_ATTACHMENT_EXTS = {
@@ -3538,14 +3508,14 @@ class MaxwellBot(commands.Bot):
 
     async def _decide_incoming_call(self, call, channel):
         chan_id = int(getattr(channel, "id", 0) or 0)
-        caller = (
-            getattr(channel, "recipient", None)
-            or getattr(call, "initiator", None)
-        )
+        caller = getattr(channel, "recipient", None) or getattr(call, "initiator", None)
         caller_id = str(getattr(caller, "id", "") or "")
-        caller_name = getattr(caller, "display_name", None) or getattr(
-            caller, "name", None
-        ) or caller_id or "unknown"
+        caller_name = (
+            getattr(caller, "display_name", None)
+            or getattr(caller, "name", None)
+            or caller_id
+            or "unknown"
+        )
         try:
             if caller_id and (
                 caller_id in self._blacklist
@@ -3562,33 +3532,12 @@ class MaxwellBot(commands.Bot):
                 pickup = await self._llm_should_answer_call(
                     channel, caller_name, caller_id
                 )
-            _agent_debug_log(
-                "E",
-                "bot.py:_decide_incoming_call",
-                "call_decision",
-                {
-                    "channel": str(chan_id),
-                    "caller": caller_id,
-                    "pickup": pickup,
-                    "reason": reason,
-                },
-            )
             if pickup:
                 await self._answer_incoming_call(call, channel)
             else:
                 await self._deny_incoming_call(call, channel, reason)
-        except Exception as e:
+        except Exception:
             logger.exception("Incoming DM call handling failed")
-            _agent_debug_log(
-                "C",
-                "bot.py:_decide_incoming_call",
-                "call_handling_failed",
-                {
-                    "error_type": type(e).__name__,
-                    "error": str(e)[:400],
-                    "channel": str(chan_id),
-                },
-            )
             with contextlib.suppress(Exception):
                 await self._deny_incoming_call(call, channel, "error")
         finally:
@@ -3669,35 +3618,14 @@ class MaxwellBot(commands.Bot):
                     vc.stop_listening()
             with contextlib.suppress(Exception):
                 await vc.disconnect(force=True)
-        _agent_debug_log(
-            "E",
-            "bot.py:_disconnect_all_voice",
-            "left_voice",
-            {"channels": left},
-        )
         return left
 
     async def _answer_incoming_call(self, call, channel):
-        logger.info(
-            "Answering DM/group call channel=%s", getattr(channel, "id", "?")
-        )
+        logger.info("Answering DM/group call channel=%s", getattr(channel, "id", "?"))
         if voice_recv is None:
-            raise RuntimeError(
-                f"voice receive unavailable: {_voice_recv_import_error}"
-            )
+            raise RuntimeError(f"voice receive unavailable: {_voice_recv_import_error}")
         left = await self._disconnect_all_voice()
         logger.info("Left existing voice before DM call: %s", left)
-        _agent_debug_log(
-            "A",
-            "bot.py:_answer_incoming_call",
-            "pre_connect",
-            {
-                "channel": str(getattr(channel, "id", "")),
-                "channel_type": type(channel).__name__,
-                "channel_guild_is_none": getattr(channel, "guild", "missing") is None,
-                "left": left,
-            },
-        )
         try:
             vc = await call.connect(
                 timeout=30.0, reconnect=True, cls=voice_recv.VoiceRecvClient
@@ -3709,31 +3637,12 @@ class MaxwellBot(commands.Bot):
             vc = await call.connect(
                 timeout=30.0, reconnect=True, cls=voice_recv.VoiceRecvClient
             )
-        _agent_debug_log(
-            "A",
-            "bot.py:_answer_incoming_call",
-            "post_connect",
-            {
-                "vc_guild_is_none": getattr(vc, "guild", "missing") is None,
-                "vc_guild_type": type(getattr(vc, "guild", None)).__name__,
-                "vc_connected": bool(getattr(vc, "is_connected", lambda: False)()),
-            },
-        )
         listening = await self._vc_start_listening(None, channel, channel)
         logger.info(
             "Joined DM call channel=%s listening=%s vc=%s",
             getattr(channel, "id", "?"),
             listening,
             bool(vc),
-        )
-        _agent_debug_log(
-            "E",
-            "bot.py:_answer_incoming_call",
-            "joined_dm_call",
-            {
-                "channel": str(getattr(channel, "id", "")),
-                "listening": bool(listening),
-            },
         )
         with contextlib.suppress(Exception):
             await channel.send("picked up")
@@ -4709,20 +4618,6 @@ class MaxwellBot(commands.Bot):
             t_asr = time.perf_counter()
             transcript = await _transcribe_vc_wav(wav_path)
             t_media = time.perf_counter()
-            _agent_debug_log(
-                "A",
-                "bot.py:_handle_vc_utterance",
-                "asr_result",
-                {
-                    "user": str(getattr(user, "id", "")),
-                    "dur": round(float(duration), 2),
-                    "asr_ms": round((t_media - t_asr) * 1000, 1),
-                    "bytes": wav_bytes,
-                    "mode": str(self._control.get("vc_response_mode", "")),
-                    "has_text": bool(transcript),
-                    "text": (transcript or "")[:160],
-                },
-            )
             if not transcript:
                 logger.info(
                     "VC timing no_transcript user=%s audio_dur=%.2fs file=%s bytes=%s asr_ms=%.1f",
@@ -4862,19 +4757,6 @@ class MaxwellBot(commands.Bot):
                 await self._release_ai_slot()
             t_ai_done = time.perf_counter()
             resp = strip_tool_payload_leaks((resp or "").strip())
-            _agent_debug_log(
-                "C",
-                "bot.py:_handle_vc_utterance",
-                "llm_result",
-                {
-                    "user": str(getattr(user, "id", "")),
-                    "ai_ms": round((t_ai_done - t_ai) * 1000, 1),
-                    "empty": not bool(resp),
-                    "no_response": resp == "__NO_RESPONSE__",
-                    "chars": len(resp or ""),
-                    "preview": (resp or "")[:80],
-                },
-            )
             if not resp or resp == "__NO_RESPONSE__":
                 logger.info(
                     "VC timing no_response user=%s ai_ms=%.1f total_ms=%.1f",
@@ -4920,31 +4802,12 @@ class MaxwellBot(commands.Bot):
                 )
             if mode in {"voice", "both"}:
                 t_play = time.perf_counter()
-                _agent_debug_log(
-                    "D",
-                    "bot.py:_handle_vc_utterance",
-                    "play_start",
-                    {
-                        "user": str(getattr(user, "id", "")),
-                        "chars": len(resp),
-                        "mode": mode,
-                    },
-                )
                 await self._play_vc_response(guild, text_channel, resp)
                 logger.info(
                     "VC timing play_done user=%s play_call_ms=%.1f total_ms=%.1f",
                     getattr(user, "id", "?"),
                     (time.perf_counter() - t_play) * 1000,
                     (time.perf_counter() - t_total) * 1000,
-                )
-                _agent_debug_log(
-                    "D",
-                    "bot.py:_handle_vc_utterance",
-                    "play_done",
-                    {
-                        "user": str(getattr(user, "id", "")),
-                        "play_ms": round((time.perf_counter() - t_play) * 1000, 1),
-                    },
                 )
             if self._control.get("store_memory", True):
                 mem_kwargs = {}
@@ -5030,7 +4893,7 @@ class MaxwellBot(commands.Bot):
                 vc_tag = re.match(r"^\s*\[voice=([A-Za-z0-9_-]+)\]\s*", response)
                 if vc_tag:
                     vc_voice = vc_tag.group(1)
-                    response = response[vc_tag.end():]
+                    response = response[vc_tag.end() :]
                 await _synthesize_tts_wav(
                     response,
                     wav_path,
@@ -10503,7 +10366,8 @@ class MaxwellBot(commands.Bot):
                                 f"{title}\n  {url}\n  {content}"
                             )
                         dynamic_parts.append(
-                            "Earlier web results (cite URL if reused):\n" + "\n".join(web_lines)
+                            "Earlier web results (cite URL if reused):\n"
+                            + "\n".join(web_lines)
                         )
                 elif ltm:
                     # Fallback: no embeddings yet, use recent LTM
@@ -10563,8 +10427,7 @@ class MaxwellBot(commands.Bot):
         if conv_users:
             ul = [f"- {n} (ID {uid})" for uid, n in list(conv_users.items())[:30]]
             dynamic_parts.append(
-                "Users in this conversation (ping with <@USER_ID>):\n"
-                + "\n".join(ul)
+                "Users in this conversation (ping with <@USER_ID>):\n" + "\n".join(ul)
             )
         if message.guild and self._control.get("emoji_context_enabled", True):
             emojis = self._guild_emojis.get(str(message.guild.id), {})
@@ -11292,8 +11155,7 @@ class MaxwellBot(commands.Bot):
                             f"- [{kind_label}, {sim_pct}% match] {r['content']}"
                         )
                     dynamic_parts.append(
-                        "Relevant memories (background):\n"
-                        + "\n".join(rag_lines)
+                        "Relevant memories (background):\n" + "\n".join(rag_lines)
                     )
                 if rag_recent:
                     rec_lines = []
@@ -11323,7 +11185,8 @@ class MaxwellBot(commands.Bot):
                             f"{title}\n  {url}\n  {content}"
                         )
                     dynamic_parts.append(
-                        "Earlier web results (cite URL if reused):\n" + "\n".join(web_lines)
+                        "Earlier web results (cite URL if reused):\n"
+                        + "\n".join(web_lines)
                     )
             except Exception as e:
                 logger.warning(f"Telegram RAG retrieval failed: {e}")
