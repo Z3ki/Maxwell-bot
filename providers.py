@@ -198,7 +198,7 @@ class _CustomToolCallBuffer:
                 # from there — anything before that `{` cannot grow
                 # into an opener, so it's safe to release as visible.
                 # If there's no `{` at all, release the whole thing.
-                unreleased = self._buf[self._released_len:]
+                unreleased = self._buf[self._released_len :]
                 last_open = unreleased.rfind("{")
                 if last_open == -1:
                     # No possible opener prefix. Release all.
@@ -208,14 +208,14 @@ class _CustomToolCallBuffer:
                     # everything before it as visible.
                     release_to = self._released_len + last_open
                 if release_to > self._released_len:
-                    nv = self._buf[self._released_len:release_to]
+                    nv = self._buf[self._released_len : release_to]
                     self.text_parts.append(nv)
                     self._released_len = release_to
                     newly_visible_total += nv
                 break
             # Opener found. Text BEFORE the opener is plain visible.
             if m.start() > self._released_len:
-                prefix = self._buf[self._released_len:m.start()]
+                prefix = self._buf[self._released_len : m.start()]
                 self.text_parts.append(prefix)
                 self._released_len = m.start()
                 newly_visible_total += prefix
@@ -243,7 +243,7 @@ class _CustomToolCallBuffer:
             # the exact 2026-08-02 incident the repair pass was written
             # for. The repair was only ever reachable from a dead code
             # path, so the live streaming path never benefited from it.
-            candidate = self._buf[m.start():end]
+            candidate = self._buf[m.start() : end]
             obj = _safe_parse_tool_call_candidate(candidate)
             if obj is None:
                 # Balanced but not valid JSON even after repair — false
@@ -283,7 +283,7 @@ class _CustomToolCallBuffer:
         """
         if not hasattr(self, "_released_len"):
             return
-        held = self._buf[self._released_len:]
+        held = self._buf[self._released_len :]
         if held:
             self.text_parts.append(held)
             self._released_len = len(self._buf)
@@ -342,6 +342,7 @@ def _find_balanced_json_end(text: str, start: int) -> int | None:
 # for a balanced close, the tool call never ran, and the user got a
 # wall of broken text in 4 chunked Discord messages instead of a
 # working site.
+
 
 def _repair_unescaped_html_quotes(candidate: str) -> str | None:
     """Repair tool-call candidate JSON whose ``body`` field contains
@@ -711,6 +712,7 @@ async def _read_sse_response(
     if custom_tool_calls and on_tool_call_name is not None:
         # Patch the on_partial_name to also schedule on_tool_call_name
         original = custom_buffer._on_partial_name
+
         def _bridge(nm, _orig=original, _cb=on_tool_call_name):
             if _orig is not None:
                 _orig(nm)
@@ -718,6 +720,7 @@ async def _read_sse_response(
                 _fire_and_forget(_safe_call(_cb, nm, ""))
             except RuntimeError:
                 pass
+
         custom_buffer._on_partial_name = _bridge
 
     buf = b""
@@ -1457,9 +1460,7 @@ class OllamaProvider:
                 endpoint.name,
                 endpoint.model,
             )
-        effective_temperature = (
-            self.temperature if temperature is None else temperature
-        )
+        effective_temperature = self.temperature if temperature is None else temperature
         # An endpoint that already rejected our temperature gets its demanded
         # value up front instead of another guaranteed 400.
         forced_temperature = self._endpoint_temperatures.get(endpoint.name)
@@ -1783,9 +1784,7 @@ class OllamaProvider:
                 attempt, fast_fallback=fast_fallback, has_media=has_media
             )
             if endpoint.name in media_broken or endpoint.name in dead:
-                order = (
-                    self._media_endpoint_order() if has_media else self._endpoints
-                )
+                order = self._media_endpoint_order() if has_media else self._endpoints
                 usable = [
                     e
                     for e in order
@@ -1912,9 +1911,7 @@ class OllamaProvider:
                             # it so later turns skip this endpoint for media.
                             self._media_incapable.add(endpoint.name)
                             order = self._media_endpoint_order()
-                            usable = [
-                                e for e in order if e.name not in media_broken
-                            ]
+                            usable = [e for e in order if e.name not in media_broken]
                             if not usable:
                                 # Every endpoint refused the attachments. Drop
                                 # them and answer the text instead of failing

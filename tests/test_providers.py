@@ -37,9 +37,7 @@ def _sse_chunks_for(body):
             {"index": i, **tc} for i, tc in enumerate(message["tool_calls"])
         ]
     frame = {"choices": [{"index": 0, "delta": delta, "finish_reason": "stop"}]}
-    return [
-        f"data: {json.dumps(frame)}\n\ndata: [DONE]\n\n".encode("utf-8")
-    ]
+    return [f"data: {json.dumps(frame)}\n\ndata: [DONE]\n\n".encode("utf-8")]
 
 
 class FakeResponse:
@@ -1072,9 +1070,7 @@ def test_retry_loop_cannot_spin_forever_on_endless_deterministic_400s():
 
     async def run():
         with pytest.raises(Exception):
-            await provider.generate_chat_completion(
-                [{"role": "user", "content": "hi"}]
-            )
+            await provider.generate_chat_completion([{"role": "user", "content": "hi"}])
 
     asyncio.run(run())
     assert len(session.urls) <= 3 + 2 * len(provider._endpoints) + 2
