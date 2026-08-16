@@ -33,6 +33,9 @@ try:
         "off",
     }:
         raise ImportError("ENABLE_VC=false")
+    from discord_vc_compat import ensure_voice_recv_compat
+
+    ensure_voice_recv_compat()
     from discord.ext import voice_recv
 
     from voice_live import LiveSpeechSink
