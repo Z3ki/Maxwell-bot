@@ -659,6 +659,94 @@ async def _synthesize_tts_wav(
             pass
 
 
+# NVIDIA Parakeet CTC (en-US) on NVCF — same grpc.nvcf.nvidia.com path as Riva TTS.
+# Whisper is too slow for live VC; this is a dedicated ASR call (~sub-second).
+_ASR_RIVA_FUNCTION_ID_DEFAULT = "1598d209-5e27-4d3c-8079-4751568b1081"
+_riva_asr_service = None
+_riva_asr_auth_key = ""
+
+
+def _riva_asr_service_cached(api_key: str, function_id: str):
+    global _riva_asr_service, _riva_asr_auth_key
+    cache_key = f"{api_key}:{function_id}"
+    if _riva_asr_service is not None and _riva_asr_auth_key == cache_key:
+        return _riva_asr_service
+    import riva.client
+
+    auth = riva.client.Auth(
+        uri="grpc.nvcf.nvidia.com:443",
+        use_ssl=True,
+        metadata_args=[
+            ["function-id", function_id],
+            ["authorization", f"Bearer {api_key}"],
+        ],
+        options=cast(
+            Any,
+            [
+                ("grpc.max_receive_message_length", 64 * 1024 * 1024),
+                ("grpc.max_send_message_length", 64 * 1024 * 1024),
+            ],
+        ),
+    )
+    _riva_asr_service = riva.client.ASRService(auth)
+    _riva_asr_auth_key = cache_key
+    return _riva_asr_service
+
+
+def _transcribe_riva_wav_sync(wav_path: str) -> str:
+    """Offline NVIDIA Riva ASR. Returns stripped transcript or empty string."""
+    import wave
+
+    import riva.client
+    from riva.client.proto import riva_audio_pb2
+
+    api_key = os.environ.get("NVIDIA_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("NVIDIA_API_KEY is not configured")
+    function_id = (
+        os.environ.get("ASR_RIVA_FUNCTION_ID", "").strip()
+        or _ASR_RIVA_FUNCTION_ID_DEFAULT
+    )
+    language_code = os.environ.get("ASR_RIVA_LANGUAGE", "en-US").strip() or "en-US"
+    with wave.open(wav_path, "rb") as wav_f:
+        sample_rate = wav_f.getframerate()
+        channels = wav_f.getnchannels()
+        audio_bytes = wav_f.readframes(wav_f.getnframes())
+    if not audio_bytes:
+        return ""
+    config = riva.client.RecognitionConfig(
+        encoding=riva_audio_pb2.AudioEncoding.LINEAR_PCM,
+        sample_rate_hertz=sample_rate,
+        language_code=language_code,
+        audio_channel_count=channels,
+        max_alternatives=1,
+        enable_automatic_punctuation=True,
+        verbatim_transcripts=False,
+    )
+    service = _riva_asr_service_cached(api_key, function_id)
+    response = service.offline_recognize(audio_bytes, config)
+    parts = []
+    for result in getattr(response, "results", []) or []:
+        alts = getattr(result, "alternatives", None) or []
+        if alts:
+            text = str(getattr(alts[0], "transcript", "") or "").strip()
+            if text:
+                parts.append(text)
+    return " ".join(parts).strip()
+
+
+async def _transcribe_vc_wav(wav_path: str) -> str:
+    """Transcribe a VC utterance WAV via NVIDIA Riva ASR (not Whisper)."""
+    try:
+        text = await asyncio.get_running_loop().run_in_executor(
+            None, _transcribe_riva_wav_sync, wav_path
+        )
+        return (text or "").strip()
+    except Exception as e:
+        logger.warning("Riva ASR failed for %s: %s", Path(wav_path).name, e)
+        return ""
+
+
 TEXT_ATTACHMENT_EXTS = {
     ".1",
     ".2",
@@ -4253,7 +4341,6 @@ class MaxwellBot(commands.Bot):
 
     async def _handle_vc_utterance(self, guild, text_channel, user, wav_path, duration):
         t_total = time.perf_counter()
-        t_stage = t_total
         key = None
         current = None
         my_gen = 0
@@ -4276,17 +4363,35 @@ class MaxwellBot(commands.Bot):
                 self._vc_active_tasks[key] = current
             my_gen = self._vc_gen_counter.get(key, 0) + 1
             self._vc_gen_counter[key] = my_gen
-            with open(wav_path, "rb") as f:
-                wav_bytes = f.read()
-            media = {
-                "b64": base64.b64encode(wav_bytes).decode("utf-8"),
-                "mime_type": "audio/wav",
-                "filename": Path(wav_path).name,
-                "is_image": False,
-                "is_text": False,
-                "text": "",
-            }
+            wav_bytes = Path(wav_path).stat().st_size
+            t_asr = time.perf_counter()
+            transcript = await _transcribe_vc_wav(wav_path)
             t_media = time.perf_counter()
+            if not transcript:
+                logger.info(
+                    "VC timing no_transcript user=%s audio_dur=%.2fs file=%s bytes=%s asr_ms=%.1f",
+                    getattr(user, "id", "?"),
+                    duration,
+                    Path(wav_path).name,
+                    wav_bytes,
+                    (t_media - t_asr) * 1000,
+                )
+                return
+            if self._control.get("vc_response_mode", "addressed") == "addressed":
+                wakes = [
+                    str(w).strip().lower()
+                    for w in (self._control.get("vc_wake_words", ["maxwell"]) or [])
+                    if str(w).strip()
+                ] or ["maxwell"]
+                spoken = transcript.lower()
+                if not any(w in spoken for w in wakes):
+                    logger.info(
+                        "VC skip no-wake user=%s asr_ms=%.1f text=%r",
+                        getattr(user, "id", "?"),
+                        (t_media - t_asr) * 1000,
+                        transcript[:120],
+                    )
+                    return
             guild_id = str(guild.id) if guild else ""
             guild_name = getattr(guild, "name", "DM/group call")
             channel_id = str(getattr(text_channel, "id", ""))
@@ -4315,14 +4420,9 @@ class MaxwellBot(commands.Bot):
                 "Plain text only: no markdown, no emojis, no asterisks, no lists, no code, no tool tags. "
                 "Output is fed to TTS so it must read naturally when spoken — avoid 'lol', 'ngl', 'fr', "
                 "or anything that sounds weird read aloud.\n"
-                "Listen to the attached audio and reply directly to what was said. No reasoning, no "
+                "Reply directly to what they said. No reasoning, no "
                 "chain-of-thought, no meta-commentary, no narrating what you're doing."
             )
-            if self._control.get("vc_response_mode", "addressed") == "addressed":
-                sys_msg += (
-                    f" Only answer if this audio appears addressed to Maxwell or contains a wake word from "
-                    f"{self._control.get('vc_wake_words', ['maxwell'])}. Otherwise output exactly __NO_RESPONSE__."
-                )
             if facts:
                 sys_msg += "\nCross-context facts:\n" + "\n".join(
                     f"- [{f.get('scope')}, i{f.get('importance')}] {f.get('content')}"
@@ -4358,34 +4458,27 @@ class MaxwellBot(commands.Bot):
                         "content": f"{msg.get('author', 'user')}: {msg.get('content', '')[:220]}",
                     }
                 )
-            use_audio = bool(
-                self._control.get(
-                    "process_audio", getattr(self.config, "ENABLE_AUDIO_INPUT", False)
-                )
-            )
-            vc_note = (
-                "Audio is attached."
-                if use_audio
-                else "Voice activity detected (audio input disabled)."
-            )
             messages.append(
                 {
                     "role": "user",
-                    "content": f"Latest VC utterance from {user.display_name}. {vc_note} Reply quickly and naturally.",
+                    "content": (
+                        f"{user.display_name} said (voice, {duration:.1f}s): {transcript}"
+                    ),
                 }
             )
             t_prompt = time.perf_counter()
             logger.info(
-                "VC timing start user=%s audio_dur=%.2fs file=%s bytes=%s media_ms=%.1f context_ms=%.1f prompt_ms=%.1f messages=%s facts=%s",
+                "VC timing start user=%s audio_dur=%.2fs file=%s bytes=%s asr_ms=%.1f context_ms=%.1f prompt_ms=%.1f messages=%s facts=%s text=%r",
                 getattr(user, "id", "?"),
                 duration,
                 Path(wav_path).name,
-                len(wav_bytes),
-                (t_media - t_stage) * 1000,
+                wav_bytes,
+                (t_media - t_asr) * 1000,
                 (t_context - t_media) * 1000,
                 (t_prompt - t_context) * 1000,
                 len(messages),
                 len(facts),
+                transcript[:160],
             )
             vc_timeout = max(
                 8,
@@ -4406,16 +4499,9 @@ class MaxwellBot(commands.Bot):
             await self._acquire_ai_slot(timeout=vc_timeout, priority="user")
             try:
                 async with self._vc_ai_semaphore:
-                    use_audio = bool(
-                        self._control.get(
-                            "process_audio",
-                            getattr(self.config, "ENABLE_AUDIO_INPUT", False),
-                        )
-                    )
-                    vc_media = [media] if use_audio else []
                     resp = await self.ai_provider.generate_response(
                         messages,
-                        media=vc_media,
+                        media=[],
                         timeout=vc_timeout,
                         max_tokens=vc_max_tokens,
                         temperature=0.6,
@@ -4488,7 +4574,7 @@ class MaxwellBot(commands.Bot):
                         "author": user.display_name,
                         "author_id": str(user.id),
                         "author_is_bot": bool(getattr(user, "bot", False)),
-                        "content": f"[voice message, {duration:.1f}s]",
+                        "content": f"[voice] {transcript}",
                         **mem_kwargs,
                     },
                 )

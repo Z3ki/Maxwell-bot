@@ -206,6 +206,12 @@ class Config:
         "NVIDIA_IMAGE_URL",
         "https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.1-dev",
     )
+    # NVIDIA Riva ASR (Parakeet) for live VC transcription. Whisper is too
+    # slow for this path; VC utterances go through Riva then the text model.
+    ASR_RIVA_FUNCTION_ID = os.getenv(
+        "ASR_RIVA_FUNCTION_ID", "1598d209-5e27-4d3c-8079-4751568b1081"
+    ).strip()
+    ASR_RIVA_LANGUAGE = os.getenv("ASR_RIVA_LANGUAGE", "en-US").strip() or "en-US"
 
     GPT_IMAGE_URL = os.getenv("GPT_IMAGE_URL", "")
     GPT_IMAGE_API_KEY = os.getenv("GPT_IMAGE_API_KEY", "")

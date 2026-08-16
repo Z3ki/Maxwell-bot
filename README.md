@@ -149,7 +149,9 @@ auto-starting the background loop. Restart the bot to apply.
 |---|---|
 | `TTS_ENGINE` | `local` (espeak, no key) / `riva` (NVIDIA, paid) / `gtts` / `auto` |
 | `TTS_RIVA_*` | Riva TTS function ID, voice, language |
-| `NVIDIA_API_KEY` | Required for `riva`; also required for `hd_image` |
+| `ASR_RIVA_FUNCTION_ID` | NVIDIA Riva ASR (Parakeet) function ID for live VC transcription |
+| `ASR_RIVA_LANGUAGE` | ASR language code (default `en-US`) |
+| `NVIDIA_API_KEY` | Required for Riva TTS/ASR; also required for `hd_image` |
 
 ### Image generation
 
