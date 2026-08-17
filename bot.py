@@ -1975,6 +1975,16 @@ TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "send_file",
     "send_meme",
     "send_media",
+    # send_message was missing even though every Telegram prompt tells the
+    # model to "finish with send_message" — the tool was never offered, so
+    # the instruction was unfollowable and multi-step turns went silent.
+    "send_message",
+    # Email tools touch no Discord object (local Postfix/IMAP), and Telegram
+    # is admin-only, so they work as-is on this transport.
+    "email_send",
+    "email_read_inbox",
+    "email_get_message",
+    "email_search",
 }
 
 # Jailbreak / freedom-mode. OFF per server unless an admin runs `,jailbreak on`.
@@ -10953,6 +10963,21 @@ class MaxwellBot(commands.Bot):
             logger.error(
                 f"Telegram message processing failed: {e}\n{traceback.format_exc()}"
             )
+            # The polling loop used to own this apology; now that both
+            # transports funnel through here, it lives with the handler that
+            # actually knows the failure happened.
+            if self._control.get("error_replies", True) and chat_id:
+                with contextlib.suppress(Exception):
+                    await TelegramMessageAdapter(
+                        session,
+                        url_base,
+                        chat_id,
+                        (message or {}).get("message_id")
+                        if isinstance(message, dict)
+                        else None,
+                        user_id,
+                        user_name,
+                    ).reply("Sorry, please try again.")
 
     async def _process_telegram_message_inner(
         self, message, chat_id, text, user_name, user_id, session, url_base
@@ -11039,6 +11064,10 @@ class MaxwellBot(commands.Bot):
                                                     "is_text": False,
                                                     "text": "",
                                                 }
+                                            )
+                                            logger.info(
+                                                "Derived mono WAV from TG audio, size: %d bytes",
+                                                len(normal_wav),
                                             )
             except Exception as e:
                 logger.warning("Telegram audio processing failed: %s", e)
@@ -11221,10 +11250,14 @@ class MaxwellBot(commands.Bot):
                     == (self.user.display_name if self.user else self.bot_name)
                 )
                 role = "assistant" if is_self else "user"
-                text = m.get("content", "")[:4000]
+                # NOT `text` — that is the incoming message, and reusing the
+                # name here overwrote it with the last stored memory entry
+                # (usually the bot's own previous reply), so "[RESPOND TO
+                # THIS]" and the memory write both quoted the wrong thing.
+                mem_text = m.get("content", "")[:4000]
                 # 2026-07-21: assistant turns get NO author prefix to
                 # avoid the parrot bug (model continues 'You/Maxwell:').
-                content = text if is_self else f"{author}: {text}"
+                content = mem_text if is_self else f"{author}: {mem_text}"
                 if cur is not None and cur["role"] == role:
                     cur["content"] += "\n" + content
                 else:
@@ -11240,11 +11273,15 @@ class MaxwellBot(commands.Bot):
             for t in tg_turns:
                 messages.append(t)
 
+        latest_label = _telegram_latest_message_label(text, bool(tg_media))
+        # Match the Discord path: drop the "Latest message to answer from"
+        # meta framing when we're appending to an existing user turn (the
+        # historical turns already include this message).
         if messages and messages[-1].get("role") == "user":
-            user_parts = [f"[RESPOND TO THIS] {text or '[audio sent]'}"]
+            user_parts = [f"[RESPOND TO THIS] {latest_label}"]
         else:
             user_parts = [
-                f"[RESPOND TO THIS] Latest message to answer from {user_name}: {text or '[audio sent]'}"
+                f"[RESPOND TO THIS] Latest message to answer from {user_name}: {latest_label}"
             ]
         if tg_media:
             user_parts.append("Media available to inspect in the multimodal payload.")
@@ -11342,8 +11379,8 @@ class MaxwellBot(commands.Bot):
                             "content": (
                                 "=== TOOL RESULTS ===\n"
                                 + "\n".join(tool_results)
-                                + "\n=== END ===\nContinue. If a reply is needed, finish with send_message; "
-                                "if not, finish with no_response."
+                                + "\n=== END ===\n"
+                                + _telegram_tool_followup_instruction(bool(tg_media))
                             ),
                         }
                     )
@@ -11404,7 +11441,7 @@ class MaxwellBot(commands.Bot):
             response_text = strip_tool_payload_leaks(response_text)
 
         if self._control.get("store_memory", True):
-            memory_note = text or "[audio sent]"
+            memory_note = latest_label
             await self.memory.add_to_channel_memory(
                 tg_chan_id,
                 {
@@ -11443,6 +11480,16 @@ class MaxwellBot(commands.Bot):
             await tg_reply.reply(response_text)
 
     async def _telegram_loop(self):
+        """Long-poll getUpdates and hand each message to the shared processor.
+
+        This loop used to carry its own full copy of the message pipeline
+        (prompt build, RAG, tool loop, memory write) alongside the webhook
+        path's copy in `_process_telegram_message_inner`. The two drifted:
+        polling never got the web-results RAG block or the control-driven
+        AI timeout, webhook never got the latest-message labelling. Now the
+        loop only does transport — auth, offset bookkeeping, backoff — and
+        both modes share one implementation.
+        """
         token = self.config.TELEGRAM_TOKEN
         if not token:
             return
@@ -11453,8 +11500,6 @@ class MaxwellBot(commands.Bot):
         session = await _get_shared_session()
 
         while True:
-            chat_id = None
-            message = None
             try:
                 # getUpdates call. Pass an explicit ClientTimeout longer than the
                 # 25s long-poll so aiohttp's internal read timer doesn't fire
@@ -11497,8 +11542,7 @@ class MaxwellBot(commands.Bot):
                     await asyncio.sleep(5)
                     continue
 
-                updates = data.get("result", [])
-                for update in updates:
+                for update in data.get("result", []):
                     # `update_id` can be present-but-null from a malformed
                     # middlebox; dict.get(key, 0) only defaults on a MISSING
                     # key, so None + 1 used to raise TypeError and the loop
@@ -11508,8 +11552,7 @@ class MaxwellBot(commands.Bot):
                     if not message:
                         continue
 
-                    chat = message.get("chat", {})
-                    chat_id = chat.get("id")
+                    chat_id = (message.get("chat") or {}).get("id")
                     if not chat_id:
                         # Malformed update with no chat id — can't route the
                         # reply, and keying memory on it would cross-contaminate
@@ -11531,501 +11574,20 @@ class MaxwellBot(commands.Bot):
                         )
                         continue
 
-                    # Handle Voice / Audio inputs
-                    voice = message.get("voice")
-                    audio = message.get("audio")
-                    tg_media = []
-
-                    proc_aud = bool(
-                        self._control.get(
-                            "process_audio", self.config.ENABLE_AUDIO_INPUT
-                        )
+                    # Awaited, not fire-and-forget: polling keeps the original
+                    # one-at-a-time ordering, and the offset has already been
+                    # advanced so a slow turn can't re-deliver the update.
+                    # Failures are logged and apologised for inside the
+                    # processor, so they never break the poll.
+                    await self._process_telegram_message(
+                        message,
+                        chat_id,
+                        text,
+                        user_name,
+                        user_id,
+                        session,
+                        url_base,
                     )
-                    if (voice or audio) and not proc_aud:
-                        voice = None
-                        audio = None
-
-                    if voice or audio:
-                        media_file = voice or audio
-                        file_id = media_file.get("file_id")
-                        # fetch file path
-                        file_url = f"{url_base}/getFile?file_id={file_id}"
-                        async with session.get(file_url) as file_resp:
-                            if file_resp.status == 200:
-                                file_data = await file_resp.json()
-                                if file_data.get("ok"):
-                                    file_path = file_data["result"].get("file_path")
-                                    download_url = f"https://api.telegram.org/file/bot{token}/{file_path}"
-                                    async with session.get(
-                                        download_url
-                                    ) as download_resp:
-                                        if download_resp.status == 200:
-                                            blob = await _read_response_limited(
-                                                download_resp, 25 * 1024 * 1024
-                                            )
-                                            # Derive WAV mono 16khz using ffmpeg normalized audio pipeline
-                                            with tempfile.TemporaryDirectory(
-                                                prefix="maxwell-tg-audio-"
-                                            ) as tmp:
-                                                tmp_path = Path(tmp)
-                                                input_path = tmp_path / "tg_audio"
-                                                output_path = (
-                                                    tmp_path / "tg_audio_normal.wav"
-                                                )
-                                                input_path.write_bytes(blob)
-
-                                                audio_cmd = [
-                                                    "ffmpeg",
-                                                    "-hide_banner",
-                                                    "-loglevel",
-                                                    "error",
-                                                    "-y",
-                                                    "-i",
-                                                    str(input_path),
-                                                    "-ar",
-                                                    "16000",
-                                                    "-ac",
-                                                    "1",
-                                                    "-c:a",
-                                                    "pcm_s16le",
-                                                    str(output_path),
-                                                ]
-                                                proc = await asyncio.create_subprocess_exec(
-                                                    *audio_cmd,
-                                                    stdout=asyncio.subprocess.PIPE,
-                                                    stderr=asyncio.subprocess.PIPE,
-                                                )
-                                                try:
-                                                    await asyncio.wait_for(
-                                                        proc.communicate(), timeout=30
-                                                    )
-                                                except asyncio.TimeoutError as _exc:
-                                                    proc.kill()
-                                                    await proc.wait()
-                                                if (
-                                                    proc.returncode == 0
-                                                    and output_path.exists()
-                                                ):
-                                                    normal_wav = (
-                                                        output_path.read_bytes()
-                                                    )
-                                                    b64 = base64.b64encode(
-                                                        normal_wav
-                                                    ).decode("utf-8")
-                                                    tg_media.append(
-                                                        {
-                                                            "b64": b64,
-                                                            "mime_type": "audio/wav",
-                                                            "filename": "telegram_audio.wav",
-                                                            "is_image": False,
-                                                            "is_text": False,
-                                                            "text": "",
-                                                        }
-                                                    )
-                                                    logger.info(
-                                                        f"Deriving mono WAV from TG audio completed, size: {len(normal_wav)} bytes"
-                                                    )
-
-                    if not text and not tg_media:
-                        continue
-
-                    # Log message
-                    logger.info(
-                        f"TG MSG from {user_name} ({user_id}) in chat {chat_id}: {text[:100]}"
-                    )
-
-                    # Setup cross-context retrieve
-                    system_parts = [
-                        MAXWELL_BASE_KNOWLEDGE
-                        + "\n\nAnswer only the latest Telegram message. Match energy — short in, short out.",
-                        f"Core personality: {self._get_personality()}\nLimit: 500 chars.",
-                        f"User: {user_name} ({user_id}) | Telegram connection",
-                    ]
-                    # Prompt-cache friendliness: static content stays in
-                    # `system_parts` (stable across a user's messages);
-                    # per-turn content (cross-context facts, RAG results —
-                    # both depend on this message's text) goes in
-                    # `dynamic_parts`, appended AFTER the static block so the
-                    # stable prefix (rules + personality + tools) is a
-                    # reusable prefix for providers that cache automatically.
-                    dynamic_parts: list[str] = []
-
-                    # Fetch relevant scoped context
-                    if self._control.get("cross_context_enabled", True):
-                        try:
-                            facts = await self.memory.get_relevant_shared_context(
-                                user_id=user_id,
-                                is_dm=True,
-                                is_admin=self._is_admin(user_id),
-                                max_items=10,
-                            )
-                            if facts:
-                                lines = []
-                                for fact in facts:
-                                    if not self._shared_fact_relevant(text, fact):
-                                        continue
-                                    lines.append(
-                                        f"- [{fact.get('scope')}, i{fact.get('importance')}] {fact.get('content')}"
-                                    )
-                                if lines:
-                                    dynamic_parts.append(
-                                        "Cross-context facts (background; don't reveal source):\n"
-                                        + "\n".join(lines)
-                                    )
-                        except Exception as e:
-                            logger.warning(f"Telegram context fetching error: {e}")
-
-                    # RAG: semantic memory retrieval for Telegram
-                    if self._control.get("long_term_memory_enabled", True) and hasattr(
-                        self.memory, "rag_search"
-                    ):
-                        try:
-                            rag_results = await self.memory.rag_search(
-                                text,
-                                kinds=["ltm", "shared_context"],
-                                guild_id=str(chat_id or ""),
-                                top_k=20,
-                            )
-                            rag_context = [
-                                r for r in rag_results if r.get("similarity", 0) >= 0.35
-                            ]
-                            rec_results = await self.memory.rag_search(
-                                text,
-                                kinds=["message"],
-                                source="user",
-                                guild_id=str(chat_id or ""),
-                                apply_recency=True,
-                                recency_tau_days=3.0,
-                                top_k=8,
-                            )
-                            rag_recent = [
-                                r for r in rec_results if r.get("similarity", 0) >= 0.40
-                            ][:5]
-                            if rag_context:
-                                rag_lines = []
-                                for r in rag_context:
-                                    kind_label = (
-                                        "fact" if r["kind"] == "ltm" else "context"
-                                    )
-                                    sim_pct = int(r.get("similarity", 0) * 100)
-                                    rag_lines.append(
-                                        f"- [{kind_label}, {sim_pct}% match] {r['content']}"
-                                    )
-                                dynamic_parts.append(
-                                    "Relevant memories (background):\n"
-                                    + "\n".join(rag_lines)
-                                )
-                            if rag_recent:
-                                rec_lines = []
-                                for r in rag_recent:
-                                    who = r.get("author", "anon")
-                                    sim_pct = int(r.get("similarity", 0) * 100)
-                                    rec_lines.append(
-                                        f"- [{who}, {sim_pct}% match] {str(r['content'])[:300]}"
-                                    )
-                                dynamic_parts.append(
-                                    "Recent relevant messages (background):\n"
-                                    + "\n".join(rec_lines)
-                                )
-                        except Exception as e:
-                            logger.warning(f"Telegram RAG retrieval failed: {e}")
-
-                    tool_prompt = self._tool_system_prompt("telegram")
-                    if tool_prompt:
-                        system_parts.append(tool_prompt)
-
-                    # JAILBREAK: inject at end for recency bias (same as Discord path)
-                    # Telegram is a private channel — always get jailbreak
-                    dynamic_parts.append(JAILBREAK_PROMPT)
-
-                    messages = [
-                        {
-                            "role": "system",
-                            "content": "\n\n".join(system_parts + dynamic_parts),
-                        }
-                    ]
-
-                    # Build memory context from this TG chat as real conversation
-                    # turns (user/assistant) instead of a single flat system block.
-                    # The Discord path is the canonical implementation; this
-                    # is the same shape with a tighter budget because TG replies
-                    # are short (500 chars) and over-prompting is wasted spend.
-                    # chat_id is guaranteed truthy by the loop guard above,
-                    # but stay defensive: never key memory on "tg:None".
-                    tg_chan_id = f"tg:{chat_id}" if chat_id else ""
-                    memory = (
-                        await self.memory.get_channel_memory(tg_chan_id)
-                        if chat_id
-                        else None
-                    )
-                    if memory:
-                        self_user_id_tg = (
-                            str(getattr(self.user, "id", "")) if self.user else ""
-                        )
-                        tg_turns: list[dict] = []
-                        cur: dict | None = None
-                        for m in memory[-30:]:
-                            author = str(m.get("author", "?"))
-                            author_id = str(m.get("author_id") or "")
-                            is_self = bool(
-                                self_user_id_tg and author_id == self_user_id_tg
-                            ) or (
-                                not author_id
-                                and author
-                                == (
-                                    self.user.display_name
-                                    if self.user
-                                    else self.bot_name
-                                )
-                            )
-                            role = "assistant" if is_self else "user"
-                            text = m.get("content", "")[:4000]
-                            # 2026-07-21: no author prefix on assistant
-                            # turns (parrot bug).
-                            content = text if is_self else f"{author}: {text}"
-                            if cur is not None and cur["role"] == role:
-                                cur["content"] += "\n" + content
-                            else:
-                                if cur is not None:
-                                    tg_turns.append(cur)
-                                cur = {"role": role, "content": content}
-                        if cur is not None:
-                            tg_turns.append(cur)
-                        used = 0
-                        while tg_turns and used + len(tg_turns[0]["content"]) > 5000:
-                            used += len(tg_turns[0]["content"])
-                            tg_turns.pop(0)
-                        for t in tg_turns:
-                            messages.append(t)
-
-                    latest_label = _telegram_latest_message_label(text, bool(tg_media))
-                    # Match the Discord path: drop the "Latest message to answer
-                    # from" meta framing when we're appending to an existing user
-                    # turn (the historical turns already include this message).
-                    if messages and messages[-1].get("role") == "user":
-                        user_parts = [f"[RESPOND TO THIS] {latest_label}"]
-                    else:
-                        user_parts = [
-                            f"[RESPOND TO THIS] Latest message to answer from {user_name}: {latest_label}"
-                        ]
-                    if tg_media:
-                        user_parts.append(
-                            "Media available to inspect in the multimodal payload."
-                        )
-                    messages.append({"role": "user", "content": "\n".join(user_parts)})
-
-                    # Request LLM
-                    tg_openai_tools2 = self._build_openai_tools("telegram")
-                    await self._acquire_ai_slot(timeout=30, priority="user")
-                    try:
-                        async with session.post(
-                            f"{url_base}/sendChatAction",
-                            json={"chat_id": chat_id, "action": "typing"},
-                        ):
-                            pass
-                        try:
-                            response_text = await self.ai_provider.generate_response(
-                                messages,
-                                media=tg_media,
-                                timeout=30,
-                                tools=tg_openai_tools2 or None,
-                            )
-                        except ProviderUsageExhaustedError as e:
-                            logger.warning(
-                                f"Provider usage exhausted while handling Telegram message: {e}"
-                            )
-                            response_text = e.user_message
-                    finally:
-                        await self._release_ai_slot()
-
-                    tg_native2 = self._native_calls_from(response_text)
-                    if (
-                        not response_text or not str(response_text).strip()
-                    ) and not tg_native2:
-                        continue
-
-                    response_text = (response_text or "").strip()
-
-                    all_tool_results = []
-                    if self._control.get("tools_enabled", True):
-                        tg_tool_message = TelegramMessageAdapter(
-                            session,
-                            url_base,
-                            chat_id,
-                            message.get("message_id"),
-                            user_id,
-                            user_name,
-                        )
-                        max_iters = max(
-                            0,
-                            min(
-                                _safe_int(
-                                    self._control.get("max_tool_iterations", 25) or 0, 0
-                                ),
-                                50,
-                            ),
-                        )
-                        pending_native = tg_native2
-                        conversation_tail: list[dict] = []
-                        for _iteration in range(max_iters):
-                            (
-                                response_text,
-                                tool_results,
-                            ) = await self._dispatch_tool_calls(
-                                tg_tool_message,
-                                response_text,
-                                native_tool_calls=pending_native or None,
-                            )
-                            pending_native = None
-                            native_followup = list(
-                                getattr(self, "_last_native_followup_messages", None)
-                                or []
-                            )
-                            all_tool_results.extend(tool_results)
-                            if not tool_results:
-                                break
-                            if not _tool_results_need_followup(tool_results):
-                                break
-                            result_messages = [dict(m) for m in messages]
-                            for msg_item in result_messages:
-                                if msg_item.get("role") == "user" and isinstance(
-                                    msg_item.get("content"), str
-                                ):
-                                    msg_item["content"] = msg_item["content"].replace(
-                                        "\nMedia available to inspect in the multimodal payload.",
-                                        "",
-                                    )
-                            if native_followup:
-                                conversation_tail.extend(native_followup)
-                            else:
-                                hrt = response_text
-                                if "create_site" in (response_text or ""):
-                                    with contextlib.suppress(Exception):
-                                        hrt = re.sub(
-                                            r'(<parameter[^>]*\bname=["\']?body["\']?[^>]*>)(.*?)(</\s*parameter\s*>)',
-                                            r"\1[elided]\3",
-                                            hrt,
-                                            flags=re.DOTALL | re.IGNORECASE,
-                                        )
-                                conversation_tail.append(
-                                    {"role": "assistant", "content": hrt}
-                                )
-                                conversation_tail.append(
-                                    {
-                                        "role": "user",
-                                        "content": "=== TOOL RESULTS ===\n"
-                                        + "\n".join(tool_results)
-                                        + "\n=== END ===\n"
-                                        + _telegram_tool_followup_instruction(
-                                            bool(tg_media)
-                                        ),
-                                    }
-                                )
-                            if len(conversation_tail) > 24:
-                                conversation_tail = conversation_tail[-24:]
-                            result_messages = result_messages + list(conversation_tail)
-                            await self._acquire_ai_slot(timeout=30, priority="user")
-                            try:
-                                async with session.post(
-                                    f"{url_base}/sendChatAction",
-                                    json={"chat_id": chat_id, "action": "typing"},
-                                ):
-                                    pass
-                                followup = await self.ai_provider.generate_response(
-                                    result_messages,
-                                    media=[],
-                                    timeout=30,
-                                    tools=tg_openai_tools2 or None,
-                                )
-                                pending_native = self._native_calls_from(followup)
-                                if (
-                                    followup and str(followup).strip()
-                                ) or pending_native:
-                                    response_text = (followup or "").strip()
-                                else:
-                                    break
-                            finally:
-                                await self._release_ai_slot()
-                        if any(
-                            (
-                                tr.startswith("Tool no_response:")
-                                and "__NO_RESPONSE__" in tr
-                            )
-                            or "__MESSAGE_SENT__" in tr
-                            for tr in all_tool_results
-                        ):
-                            outcome = (
-                                "no_response"
-                                if any(
-                                    tr.startswith("Tool no_response:")
-                                    and "__NO_RESPONSE__" in tr
-                                    for tr in all_tool_results
-                                )
-                                else "send_message"
-                            )
-                            await self._ensure_reasoning_trace(
-                                tg_tool_message,
-                                all_tool_results,
-                                response_text,
-                                outcome,
-                            )
-                            response_text = ""
-                        response_text = re.sub(
-                            r"\[(\w+)\]\s*\n?\s*\{.*?\}\s*\n?\s*\[/\1\]",
-                            "",
-                            response_text,
-                            flags=re.DOTALL,
-                        )
-                        response_text = re.sub(
-                            r"\[/?(?:TOOL_CALL:)?[\w-]+.*?\]", "", response_text
-                        )
-                        response_text = (
-                            response_text.replace("__NO_RESPONSE__", "")
-                            .replace("__SHELL_SENT__", "")
-                            .replace("__MEME_SENT__", "")
-                            .replace("__MEDIA_SENT__", "")
-                            .strip()
-                        )
-                        response_text = strip_tool_payload_leaks(response_text)
-
-                    # Save context memory
-                    if self._control.get("store_memory", True):
-                        memory_note = latest_label
-                        await self.memory.add_to_channel_memory(
-                            tg_chan_id,
-                            {
-                                "author": user_name,
-                                "author_id": user_id,
-                                "content": memory_note,
-                            },
-                        )
-                        await self.memory.add_to_channel_memory(
-                            tg_chan_id,
-                            {
-                                "author": self.bot_name,
-                                # 2026-07-22: same author_id fix as the
-                                # other TG bot-reply path.
-                                "author_id": str(self.user.id) if self.user else "",
-                                "author_is_bot": True,
-                                "content": response_text or "[voice message sent]",
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
-                            },
-                        )
-
-                    # Reply back via TG when a tool did not already send a voice response.
-                    if response_text:
-                        tg_reply = TelegramMessageAdapter(
-                            session,
-                            url_base,
-                            chat_id,
-                            message.get("message_id"),
-                            user_id,
-                            user_name,
-                        )
-                        await self._ensure_reasoning_trace(
-                            tg_reply, all_tool_results, response_text, "reply"
-                        )
-                        await tg_reply.reply(response_text)
 
             except asyncio.CancelledError as _exc:
                 break
@@ -12033,21 +11595,6 @@ class MaxwellBot(commands.Bot):
                 logger.error(
                     f"Telegram polling loop exception: {e}\n{traceback.format_exc()}"
                 )
-                if self._control.get("error_replies", True):
-                    try:
-                        failed_chat_id = chat_id
-                        if failed_chat_id:
-                            failed_message_id = (
-                                (message or {}).get("message_id")
-                                if isinstance(message, dict)
-                                else None
-                            )
-                            tg_reply = TelegramMessageAdapter(
-                                session, url_base, failed_chat_id, failed_message_id
-                            )
-                            await tg_reply.reply("Sorry, please try again.")
-                    except Exception:
-                        pass
                 await asyncio.sleep(5)
 
 
