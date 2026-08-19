@@ -908,7 +908,7 @@
               if (d.control && typeof d.control === "object") return d.control;
               return d;
             })(),
-            tools: (controlData && controlData.tools) || [],
+            tools: (status && status.known_tools) || [],
             memory: Array.isArray(memory) ? memory : [],
             memoryJson: memoryJson || {},
             context: Array.isArray(context) ? context : [],
@@ -1224,12 +1224,18 @@
               ]),
             ),
           );
-        $("saveTools").onclick = () =>
+        $("saveTools").onclick = () => {
+          const boxes = [...document.querySelectorAll("[data-tool]")];
+          if (!boxes.length) {
+            toast("Tool list not loaded; not clearing disabled tools");
+            return;
+          }
           saveControl({
-            disabled_tools: [...document.querySelectorAll("[data-tool]")]
+            disabled_tools: boxes
               .filter((i) => !i.checked)
               .map((i) => i.dataset.tool),
           });
+        };
         $("savePersona").onclick = () =>
           saveControl({ base_personality: $("persona").value });
         if ($("saveAutonomyBlack")) {

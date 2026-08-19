@@ -231,7 +231,12 @@ class _CustomToolCallBuffer:
             # Try to find a balanced end for this opener.
             end = _find_balanced_json_end(self._buf, m.start())
             if end is None:
-                # Opener mid-JSON. Hold; wait for more deltas.
+                # Opener mid-JSON. Hold unless the held region is huge (unescaped
+                # quotes in create_site HTML, CSS `{`, etc.) — then skip the
+                # false opener so a later valid tool call can still parse.
+                if len(self._buf) - m.start() > _GIVE_UP_BYTES:
+                    self._released_len = m.start() + 1
+                    continue
                 break
             # Validate by parsing. Must go through
             # _safe_parse_tool_call_candidate, NOT bare json.loads: that
@@ -963,8 +968,10 @@ async def _read_sse_response(
             # Rebuild visible content from the buffer's text_parts (with
             # JSON objects stripped), overriding the raw content_parts
             # we accumulated.
-            if custom_buffer.text_parts:
-                content_parts = ["".join(custom_buffer.text_parts)]
+            # Always rebuild from the buffer, including when text_parts is
+            # empty (JSON-only tool turn). Gating on truthiness left the raw
+            # JSON in content_parts for the instructed "JSON line first" shape.
+            content_parts = ["".join(custom_buffer.text_parts)]
 
     # Sort tool calls by their index so the order matches the model's intent.
     # Strip the internal callback-tracking flags ("_name_sent"/"_reasoning_sent")

@@ -116,9 +116,11 @@ def _coerce_scope(value: Any, fallback: str = "global") -> str:
     return scope or fallback
 
 
-def _coerce_visibility(value: Any, fallback: str = "shared") -> str:
+def _coerce_visibility(value: Any, fallback: str | None = "shared") -> str | None:
     vis = str(value or "").strip().lower()
-    return vis if vis in VALID_VISIBILITIES else fallback
+    if vis in VALID_VISIBILITIES:
+        return vis
+    return fallback
 
 
 def _coerce_importance(value: Any, fallback: int = 5) -> int:
@@ -675,7 +677,9 @@ class ContextCleanupEngine:
                 if op.get("scope"):
                     updates["scope"] = _coerce_scope(op.get("scope"))
                 if op.get("visibility"):
-                    updates["visibility"] = _coerce_visibility(op.get("visibility"))
+                    vis = _coerce_visibility(op.get("visibility"), None)
+                    if vis is not None:
+                        updates["visibility"] = vis
                 if len(updates) > 1:
                     valid.append({"kind": "edit", "id": eid, "updates": updates})
             elif kind == "merge":

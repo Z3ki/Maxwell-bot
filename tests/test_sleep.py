@@ -76,6 +76,9 @@ class FakeBot:
         self._sleep_until = 0.0
         self._sleep_notified_at = {}
 
+    def _is_admin(self, user_id) -> bool:
+        return True
+
     def _now(self):
         # The real MaxwellBot uses asyncio.get_running_loop().time() so
         # the test mirror here uses time.monotonic() — same epoch,
@@ -191,16 +194,28 @@ def test_sleep_tool_clamps_to_60_minutes():
     assert result == "sleeping for 30m"
 
 
+def _admin_msg():
+    return SimpleNamespace(author=SimpleNamespace(id=1, bot=False))
+
+
 def test_clear_sleep_tool_idempotent():
     bot = FakeBot()
     tool = bot_tools.ClearSleepTool(bot)
-    result = asyncio.run(tool.execute(SimpleNamespace()))
+    result = asyncio.run(tool.execute(_admin_msg()))
     assert result == "not sleeping"
     bot.set_sleep(10)
-    result = asyncio.run(tool.execute(SimpleNamespace()))
+    result = asyncio.run(tool.execute(_admin_msg()))
     assert result == "sleep cleared, awake now"
-    result = asyncio.run(tool.execute(SimpleNamespace()))
+    result = asyncio.run(tool.execute(_admin_msg()))
     assert result == "not sleeping"
+
+
+def test_sleep_tools_refuse_non_admin():
+    bot = FakeBot()
+    bot._is_admin = lambda _uid: False
+    msg = SimpleNamespace(author=SimpleNamespace(id=99, bot=False))
+    assert asyncio.run(bot_tools.SleepTool(bot).execute(msg, duration_minutes=5)) == "Error: sleep is admin-only"
+    assert asyncio.run(bot_tools.ClearSleepTool(bot).execute(msg)) == "Error: clear_sleep is admin-only"
 
 
 # ---- SleepTool integration with real bot's sleep helpers ----

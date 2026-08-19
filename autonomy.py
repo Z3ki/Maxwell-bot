@@ -364,6 +364,7 @@ AUTONOMY_DISABLED_TOOLS = frozenset(
         "shell",
         "create_site",
         "list_admin_servers",
+        "list_servers",
         "create_category",
         "create_channel",
         "edit_channel",
@@ -372,6 +373,12 @@ AUTONOMY_DISABLED_TOOLS = frozenset(
         "set_nickname",
         "forward_message",
         "create_invite",
+        "email_send",
+        "email_read_inbox",
+        "email_get_message",
+        "email_search",
+        "sleep",
+        "clear_sleep",
     }
 )
 
@@ -1025,9 +1032,10 @@ class AutonomyEngine:
                 except Exception as e:
                     duration = time.time() - start
                     logger.error(f"Autonomy tick failed: {e}")
+                    # Do not advance last_tick on failure — drain_slice would
+                    # skip events the failed tick never planned over.
                     await self.store.patch_state(
                         {
-                            "last_tick": tick_start_iso,
                             "last_tick_duration": round(duration, 2),
                             "last_error": str(e)[:2000],
                         }

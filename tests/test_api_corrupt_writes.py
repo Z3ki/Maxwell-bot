@@ -19,13 +19,18 @@ def _json(resp):
     return resp.text
 
 
-def test_context_post_refuses_corrupt_shared_context(tmp_path, monkeypatch):
+def test_context_post_does_not_touch_legacy_json(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "DATA_DIR", tmp_path)
     (tmp_path / "shared_context.json").write_text("{ broken", encoding="utf-8")
 
+    class _Cur:
+        rowcount = 1
+
+    monkeypatch.setattr(api, "_rag_exec", lambda *a, **k: _Cur())
+
     async def run():
         resp = await api.context_post(FakeRequest({"content": "new fact"}))
-        assert resp.status == 409
+        assert resp.status == 200
         assert (tmp_path / "shared_context.json").read_text(encoding="utf-8") == "{ broken"
 
     asyncio.run(run())

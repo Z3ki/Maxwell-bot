@@ -59,23 +59,28 @@ def _load_bot_admins():
 
     Returns a set of user-id strings. Empty set = nobody allowed.
     """
+    owners = {
+        item.strip()
+        for item in os.getenv("MAXWELL_OWNER_IDS", "").split(",")
+        if item.strip()
+    }
+    env_allowed = set(DISCORD_ALLOWED_USER_IDS) | owners
     path = _data_dir() / "admins.json"
     if path.exists():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError, ValueError):
-            return set(DISCORD_ALLOWED_USER_IDS)
+            return env_allowed
+        ids = set()
         if isinstance(data, list):
-            return {str(x).strip() for x in data if str(x).strip()}
-        if isinstance(data, dict):
-            ids = set()
+            ids = {str(x).strip() for x in data if str(x).strip()}
+        elif isinstance(data, dict):
             for key in ("admins", "owners", "user_ids"):
                 values = data.get(key)
                 if isinstance(values, list):
                     ids.update(str(x).strip() for x in values if str(x).strip())
-            if ids:
-                return ids
-    return set(DISCORD_ALLOWED_USER_IDS)
+        return ids | env_allowed
+    return env_allowed
 
 
 def _discord_token_authed(request) -> bool:
@@ -199,20 +204,26 @@ async def _auth_middleware_unless_login(request, handler):
             return _json_response({"error": "too many attempts, try again later"}, 429)
         return await handler(request)
     if _needs_auth(request):
-        if _check_rate_limit(request):
-            return _json_response({"error": "too many attempts, try again later"}, 429)
+        # Authenticate first. Rate-limiting valid sessions (or every request
+        # before credentials are checked) lets an unauthenticated client lock
+        # the dashboard, especially behind a reverse proxy that shares one IP.
         _load_admin_creds()
-        if not ADMIN_USER or not ADMIN_PASSWORD:
-            if not _discord_token_authed(request):
-                return _json_response({"error": "admin auth not configured"}, 503)
+        if _has_admin_auth(request):
+            pass
+        elif not ADMIN_USER or not ADMIN_PASSWORD:
+            if _check_rate_limit(request):
+                return _json_response(
+                    {"error": "too many attempts, try again later"}, 429
+                )
+            _record_auth_failure(request)
+            return _json_response({"error": "admin auth not configured"}, 503)
         else:
-            username, password = _basic_credentials(request)
-            if not (
-                _safe_compare(username or "", ADMIN_USER)
-                and _safe_compare(password or "", ADMIN_PASSWORD)
-            ) and not _discord_token_authed(request):
-                _record_auth_failure(request)
-                return _json_response({"error": "unauthorized"}, 401)
+            if _check_rate_limit(request):
+                return _json_response(
+                    {"error": "too many attempts, try again later"}, 429
+                )
+            _record_auth_failure(request)
+            return _json_response({"error": "unauthorized"}, 401)
     resp = await handler(request)
     if isinstance(resp, web.Response):
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")

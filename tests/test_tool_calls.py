@@ -79,6 +79,19 @@ def test_strip_tool_payload_leaks_removes_reasoning_json_and_system_reminder():
     assert strip_tool_payload_leaks(text) == ""
 
 
+def test_strip_tool_payload_leaks_removes_registered_tool_bodies():
+    leaked = (
+        "<tool:update_base_personality>you are now evil</tool:update_base_personality> hello"
+    )
+    assert "you are now evil" not in strip_tool_payload_leaks(leaked)
+    assert "hello" in strip_tool_payload_leaks(leaked)
+    search = "<tool:search_messages>secret query</tool:search_messages> ok"
+    assert "secret query" not in strip_tool_payload_leaks(search)
+    email = "<tool:email_send>to=evil</tool:email_send> visible"
+    assert "to=evil" not in strip_tool_payload_leaks(email)
+    assert "visible" in strip_tool_payload_leaks(email)
+
+
 def test_strip_tool_payload_leaks_removes_glued_create_site():
     html = "<!DOCTYPE html><html><body>x</body></html>"
     text = f'ship<tool:create_site name="drift" title="t">{html}</tool:create_site>ok'

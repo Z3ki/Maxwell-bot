@@ -657,20 +657,24 @@ class ImageGeneratorTool(Tool):
                     timeout=aiohttp.ClientTimeout(total=120),
                 ) as response:
                     if response.status == 429:
-                        wait_time = (attempt + 1) * 10
+                        last_error = "Error: NVIDIA image generation rate limited. Try again later."
                         logger.warning(
                             f"NVIDIA image rate limited, retry {attempt + 1}/{max_retries}"
                         )
-                        await asyncio.sleep(wait_time)
-                        continue
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep((attempt + 1) * 10)
+                            continue
+                        break
                     if 500 <= response.status < 600:
                         error_text = await response.text()
+                        last_error = f"Error generating image: NVIDIA returned {response.status}."
                         logger.warning(
                             f"NVIDIA image server error {response.status}, retry {attempt + 1}/{max_retries}: {error_text[:200]}"
                         )
-                        wait_time = (attempt + 1) * 15
-                        await asyncio.sleep(wait_time)
-                        continue
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep((attempt + 1) * 15)
+                            continue
+                        break
                     if response.status != 200:
                         error_text = await response.text()
                         logger.error(
@@ -1225,6 +1229,8 @@ class SleepTool(Tool):
             n = 60
         if self.bot is None:
             return "Error: bot not attached, cannot sleep"
+        if not self.bot._is_admin(message.author.id):
+            return "Error: sleep is admin-only"
         return self.bot.set_sleep(n)
 
 
@@ -1245,6 +1251,8 @@ class ClearSleepTool(Tool):
     async def execute(self, message: Message, **kwargs) -> str:
         if self.bot is None:
             return "Error: bot not attached"
+        if not self.bot._is_admin(message.author.id):
+            return "Error: clear_sleep is admin-only"
         return self.bot.clear_sleep()
 
 
@@ -1921,9 +1929,8 @@ class ListServersTool(Tool):
         return "List your servers and group chats. No params."
 
     async def execute(self, message: Message, **kwargs) -> str:
-        # Not admin-gated: this is a read-only inventory of where the bot is
-        # deployed. No mutation, no privilege to protect — anyone who's
-        # already in the same Discord session can see the bot's presence.
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: list_servers is admin-only"
         lines = []
         if self.bot.guilds:
             lines.append(f"Servers ({len(self.bot.guilds)}):")
@@ -2152,6 +2159,7 @@ class EditChannelTool(Tool):
         topic: str | None = None,
         slowmode_seconds: str | None = None,
         nsfw: str | None = None,
+        position: str | None = None,
         **kwargs,
     ) -> str:
         if self.bot and not self.bot._is_admin(message.author.id):
@@ -2203,6 +2211,11 @@ class EditChannelTool(Tool):
             return (
                 "Error: topic, slowmode_seconds, and nsfw only apply to text channels"
             )
+        if position is not None:
+            try:
+                updates["position"] = max(0, int(position))
+            except (TypeError, ValueError):
+                return "Error: position must be a number"
         if not updates:
             return "Error: provide at least one edit field"
         try:
@@ -2425,7 +2438,9 @@ class CreateSiteTool(Tool):
         try:
             session = await _get_shared_session()
             async with session.get(
-                url, timeout=aiohttp.ClientTimeout(total=30, connect=10)
+                url,
+                timeout=aiohttp.ClientTimeout(total=30, connect=10),
+                allow_redirects=False,
             ) as resp:
                 if resp.status != 200:
                     return None, f"HTTP {resp.status}"
@@ -2564,6 +2579,7 @@ class CreateSiteTool(Tool):
             return f"Error: content too long ({len(body)} chars, max {self.MAX_CONTENT_SIZE})"
 
         site_dir = os.path.join(self.base_dir, slug)
+        created_new_dir = not os.path.isdir(site_dir)
         try:
             os.makedirs(site_dir, exist_ok=True)
 
@@ -2748,20 +2764,20 @@ class CreateSiteTool(Tool):
                     self._commit_site_locked, slug, user_id, is_admin, site_entry
                 )
             except Exception as e:
-                # Best-effort cleanup of the orphaned live HTML we just published.
-                # NB: do NOT `import shutil` here — shutil is already imported at
-                # module level, and a local import inside this method would make
-                # the name function-local, breaking the earlier `shutil.copy2`
-                # call in the image-copy loop with UnboundLocalError.
-                with contextlib.suppress(Exception):
-                    shutil.rmtree(site_dir, ignore_errors=True)
+                # Best-effort cleanup of orphaned HTML only when this call
+                # created the directory. Never rmtree a slug another user
+                # already committed.
+                if created_new_dir:
+                    with contextlib.suppress(Exception):
+                        shutil.rmtree(site_dir, ignore_errors=True)
                 logger.error(f"Failed to commit site metadata for {slug}: {e}")
                 return f"Error creating site: {e}"
             if not committed:
                 # Overwrite disallowed by a concurrent owner change / quota hit
-                # discovered under the lock; clean up the HTML we wrote.
-                with contextlib.suppress(Exception):
-                    shutil.rmtree(site_dir, ignore_errors=True)
+                # discovered under the lock; clean up only a directory we created.
+                if created_new_dir:
+                    with contextlib.suppress(Exception):
+                        shutil.rmtree(site_dir, ignore_errors=True)
                 return (
                     f"Error: site slug '{slug}' could not be committed "
                     "(owner/quota changed concurrently). Try again."
@@ -2808,8 +2824,8 @@ class CreateSiteTool(Tool):
                     if isinstance(data, dict):
                         sites = {k: v for k, v in data.items() if isinstance(v, dict)}
             except (json.JSONDecodeError, OSError, ValueError) as e:
-                logger.warning(f"Corrupt sites.json on commit, starting fresh: {e}")
-                sites = {}
+                logger.error(f"Corrupt sites.json on commit, aborting: {e}")
+                return False
             # Re-check slug ownership under the lock (may have changed).
             existing = sites.get(slug)
             if isinstance(existing, dict):
@@ -3039,6 +3055,7 @@ class SendMessageTool(Tool):
         if not text:
             return "Error: content is required"
         sent_any = False
+        sent_chunks: list[str] = []
         try:
             chunks = self._chunks(text)
             use_reply = str(reply).lower() not in {"0", "false", "no", "off"}
@@ -3061,9 +3078,10 @@ class SendMessageTool(Tool):
                     else:
                         await message.channel.send(chunk)
                     sent_any = True
+                    sent_chunks.append(chunk)
                 except Exception:
                     if sent_any:
-                        return f"__MESSAGE_SENT__\n{text}"
+                        return "__MESSAGE_SENT__\n" + "\n".join(sent_chunks)
                     raise
                 if len(chunks) > 1:
                     await asyncio.sleep(0.2)
@@ -3186,6 +3204,7 @@ class SendFileTool(Tool):
             host_path, host_error = await self._try_read_host_file(resolved_input)
             if host_path is not None:
                 target = host_path
+                tmp_to_clean = None
             else:
                 # Fallback: the model passed a container-only path (anything
                 # inside the maxwell-shell container). Try docker cp it out.
@@ -3199,12 +3218,16 @@ class SendFileTool(Tool):
                         f"Host: {host_error or 'not found'}. "
                         f"Container: {cp_error or 'not found or not readable'}."
                     )
+                tmp_to_clean = target
 
             try:
                 blob = await asyncio.to_thread(target.read_bytes)
             except Exception as e:
                 return f"Error reading file from disk: {e}"
-            # Always sanitize the outbound attachment name (never trust filename=).
+            finally:
+                if tmp_to_clean is not None:
+                    with contextlib.suppress(Exception):
+                        shutil.rmtree(tmp_to_clean.parent, ignore_errors=True)
             safe_name = _safe_attachment_filename(
                 filename or target.name, default="file"
             )
@@ -3343,20 +3366,40 @@ class SendFileTool(Tool):
             try:
                 _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+                with contextlib.suppress(Exception):
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
                 return None, "docker cp timed out"
+            except asyncio.CancelledError:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+                with contextlib.suppress(Exception):
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                raise
             if proc.returncode != 0:
+                with contextlib.suppress(Exception):
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
                 return None, (
                     stderr.decode(errors="replace").strip()
                     or f"docker cp exit {proc.returncode}"
                 )
             if not os.path.isfile(local_path):
+                with contextlib.suppress(Exception):
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
                 return None, "docker cp reported success but file is missing"
             return Path(local_path), None
         except FileNotFoundError:
+            with contextlib.suppress(Exception):
+                shutil.rmtree(tmp_dir, ignore_errors=True)
             return None, "docker is not installed or not on PATH"
         except Exception as e:
+            with contextlib.suppress(Exception):
+                shutil.rmtree(tmp_dir, ignore_errors=True)
             return None, f"docker cp failed: {e}"
 
     async def _send_blob(self, message: Message, blob: bytes, safe_name: str) -> str:
@@ -3366,7 +3409,19 @@ class SendFileTool(Tool):
         file = File(BytesIO(blob), filename=safe_name)
         sent = None
         try:
-            sent = await message.reply(file=file)
+            try:
+                sent = await message.reply(file=file)
+            except (discord.NotFound, discord.HTTPException) as exc:
+                code = getattr(exc, "code", None)
+                parent_gone = isinstance(exc, discord.NotFound) or code in {
+                    10008,
+                    50035,
+                }
+                if code == 50035 and "message_reference" not in str(exc).lower():
+                    raise
+                if not parent_gone:
+                    raise
+                sent = await message.channel.send(file=file)
         except discord.Forbidden:
             return "Error: no permission to send files here"
         except discord.HTTPException as e:
@@ -3598,17 +3653,20 @@ class ShellTool(Tool):
                 mode = parts[1] if len(parts) > 1 else ""
                 if running and mode == desired_mode:
                     return
-                # Wrong mode or stopped — recreate cleanly.
-                with contextlib.suppress(Exception):
-                    await self._run_docker("rm", "-f", self.CONTAINER_NAME, timeout=10)
-                (_stdout, stderr), start_code = await self._run_docker(
-                    "start", self.CONTAINER_NAME, timeout=15
+                if not running and mode == desired_mode:
+                    (_stdout, stderr), start_code = await self._run_docker(
+                        "start", self.CONTAINER_NAME, timeout=15
+                    )
+                    if start_code == 0:
+                        return
+                # Wrong mode or start failed — require a successful rm, then recreate.
+                (_stdout, stderr), rm_code = await self._run_docker(
+                    "rm", "-f", self.CONTAINER_NAME, timeout=10
                 )
-                if start_code == 0:
-                    return
-                # Stale container with wrong flags — remove and recreate below.
-                with contextlib.suppress(Exception):
-                    await self._run_docker("rm", "-f", self.CONTAINER_NAME, timeout=10)
+                if running and mode != desired_mode and rm_code != 0:
+                    raise RuntimeError(
+                        "could not replace sandbox container with the desired isolation mode"
+                    )
         except FileNotFoundError as exc:
             raise RuntimeError("docker is not installed or not on PATH") from exc
         except asyncio.TimeoutError as exc:
@@ -3726,7 +3784,7 @@ class ShellTool(Tool):
                 "command onto the same line or use a separate shell call"
             )
         for pattern in _SHELL_BLOCKED_PATTERNS:
-            if re.search(pattern, non_heredoc, re.IGNORECASE):
+            if re.search(pattern, command, re.IGNORECASE):
                 return "blocked dangerous shell pattern"
         return None
 
@@ -3833,7 +3891,8 @@ class ShellTool(Tool):
             room = max(0, limit - len(notice))
             chunks[-1] = last[:room] + notice
         for i, chunk in enumerate(chunks):
-            await message.channel.send(f"```ansi\n{chunk}\n```")
+            safe = chunk.replace("```", "'''")
+            await message.channel.send(f"```ansi\n{safe}\n```")
             if len(chunks) > 1 and i < len(chunks) - 1:
                 await asyncio.sleep(0.3)
 
@@ -5539,14 +5598,32 @@ def _imap_format_address_list(s: str) -> str:
     return ", ".join(addrs)
 
 
+def _imap_safe_seq(message_id: str) -> str | None:
+    s = str(message_id or "").strip()
+    return s if re.fullmatch(r"[0-9]+", s) else None
+
+
+def _imap_safe_text_query(query: str) -> str | None:
+    raw = str(query or "")
+    if any(c in raw for c in '\r\n"\\'):
+        return None
+    s = raw.strip()
+    if not s or len(s) > 200:
+        return None
+    return s
+
+
 def _imap_get_message_sync(
     host: str, port: int, user: str, password: str, message_id: str, max_chars: int
 ) -> str:
     """Fetch one message and return its headers + body, capped at max_chars."""
+    seq = _imap_safe_seq(message_id)
+    if seq is None:
+        return "Error: message_id must be a numeric IMAP sequence number"
     M = _imap_connect_sync(host, port, user, password)
     try:
         M.select("INBOX")
-        typ, data = M.fetch(message_id, "(RFC822)")
+        typ, data = M.fetch(seq, "(RFC822)")
         if typ != "OK" or not data or not data[0]:
             return f"Error: IMAP fetch failed for message {message_id}"
         # Response shape varies by server: Dovecot collapses into a single
@@ -5640,10 +5717,13 @@ def _imap_search_sync(
     limit: int,
 ) -> str:
     """Run an IMAP SEARCH and return matching message ids + envelopes."""
+    safe = _imap_safe_text_query(query)
+    if safe is None:
+        return "Error: query contains invalid IMAP characters or is empty"
     M = _imap_connect_sync(host, port, user, password)
     try:
         M.select("INBOX")
-        typ, data = M.search(None, f'TEXT "{query}"')
+        typ, data = M.search(None, f'TEXT "{safe}"')
         if typ != "OK" or not data or not data[0]:
             return f"No messages matched: {query!r}"
         ids = data[0].split()[-limit:]
@@ -5733,6 +5813,8 @@ class EmailSendTool(Tool):
         bcc: str | None = None,
         **kwargs,
     ) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: email tools are admin-only"
         cfg = _email_cfg(self.bot)
         if not cfg["password"]:
             return (
@@ -5794,7 +5876,7 @@ class EmailSendTool(Tool):
 class EmailReadInboxTool(Tool):
     """List recent messages in the local mailbox."""
 
-    is_destructive: bool = False
+    is_destructive: bool = True
 
     def get_description(self) -> str:
         return (
@@ -5811,6 +5893,8 @@ class EmailReadInboxTool(Tool):
         unread_only: str = "false",
         **kwargs,
     ) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: email tools are admin-only"
         cfg = _email_cfg(self.bot)
         if not cfg["password"]:
             return (
@@ -5826,7 +5910,7 @@ class EmailReadInboxTool(Tool):
         except (TypeError, ValueError):
             days = 7
         try:
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 _imap_list_recent_sync,
                 cfg["imap_host"],
                 cfg["imap_port"],
@@ -5838,12 +5922,15 @@ class EmailReadInboxTool(Tool):
             )
         except Exception as e:
             return f"Error: IMAP read failed: {e}"
+        if self.bot is not None:
+            self.bot.mark_message_tainted(message)
+        return result
 
 
 class EmailGetMessageTool(Tool):
     """Fetch the full body of a single local message by id."""
 
-    is_destructive: bool = False
+    is_destructive: bool = True
 
     def get_description(self) -> str:
         return (
@@ -5858,6 +5945,8 @@ class EmailGetMessageTool(Tool):
         max_chars: str = "8000",
         **kwargs,
     ) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: email tools are admin-only"
         if not message_id or not str(message_id).strip():
             return "Error: message_id is required"
         try:
@@ -5869,7 +5958,7 @@ class EmailGetMessageTool(Tool):
         if not cfg["password"]:
             return "Error: local mail is not configured. Set MAXWELL_EMAIL_PASSWORD in .env."
         try:
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 _imap_get_message_sync,
                 cfg["imap_host"],
                 cfg["imap_port"],
@@ -5880,12 +5969,15 @@ class EmailGetMessageTool(Tool):
             )
         except Exception as e:
             return f"Error: IMAP fetch failed: {e}"
+        if self.bot is not None:
+            self.bot.mark_message_tainted(message)
+        return result
 
 
 class EmailSearchTool(Tool):
     """Full-text search of the local mailbox."""
 
-    is_destructive: bool = False
+    is_destructive: bool = True
 
     def get_description(self) -> str:
         return (
@@ -5900,6 +5992,8 @@ class EmailSearchTool(Tool):
         max_results: str = "10",
         **kwargs,
     ) -> str:
+        if self.bot and not self.bot._is_admin(message.author.id):
+            return "Error: email tools are admin-only"
         if not query or not str(query).strip():
             return "Error: query is required"
         try:
@@ -5910,7 +6004,7 @@ class EmailSearchTool(Tool):
         if not cfg["password"]:
             return "Error: local mail is not configured. Set MAXWELL_EMAIL_PASSWORD in .env."
         try:
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 _imap_search_sync,
                 cfg["imap_host"],
                 cfg["imap_port"],
@@ -5921,6 +6015,9 @@ class EmailSearchTool(Tool):
             )
         except Exception as e:
             return f"Error: IMAP search failed: {e}"
+        if self.bot is not None:
+            self.bot.mark_message_tainted(message)
+        return result
 
 
 # ---------------------------------------------------------------------------

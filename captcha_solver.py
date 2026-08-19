@@ -83,9 +83,17 @@ class _BaseSolver:
         while True:
             data = await get_result()
             status = data.get("status")
-            if status in ("ready", "success", "completed"):
+            # CapSolver uses "ready"/"success"; 2captcha JSON uses status=1
+            # with the token in "request". Integer 1 never matched the string
+            # set, so 2captcha polls timed out even after a valid solve.
+            if status in (1, "1", "ready", "success", "completed"):
                 return data
-            if status in ("failed", "error"):
+            request = str(data.get("request") or "")
+            if status in (0, "0") and request == "CAPCHA_NOT_READY":
+                pass
+            elif status in ("failed", "error") or (
+                status in (0, "0") and request and request != "CAPCHA_NOT_READY"
+            ):
                 raise CaptchaSolveError(f"{self.service}: task failed: {data}")
             if asyncio.get_event_loop().time() > deadline:
                 raise CaptchaSolveError(
@@ -348,8 +356,9 @@ class HumanCaptchaServer:
         rqdata = getattr(exc, "rqdata", None) or ""
         invisible = bool(getattr(exc, "should_serve_invisible", False))
         service = getattr(exc, "service", "hcaptcha")
-        if service != "hcaptcha" and "recaptcha" not in service:
-            # Only hCaptcha is hosted (the join/DM challenge service).
+        if str(service or "").lower() not in {"hcaptcha", "h-captcha"}:
+            # Only hCaptcha is hosted. Discord reCAPTCHA cannot be solved by
+            # this widget; serving hCaptcha for it wastes the human-solve window.
             return web.Response(
                 text=f"<h1>Unsupported captcha service: {service}</h1>",
                 content_type="text/html",

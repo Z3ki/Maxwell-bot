@@ -689,12 +689,14 @@ class RAGMemoryManager:
             "CREATE INDEX IF NOT EXISTS idx_content_hash ON vectors(content_hash)"
         )
         self._db.execute("CREATE INDEX IF NOT EXISTS idx_parent ON vectors(parent_id)")
-        # Unique constraint prevents duplicate (same channel + same content).
-        # Skipped rows via OR IGNORE in insert path.
+        # Unique per kind so LTM / shared_context / web_result rows that
+        # share channel_id='' cannot INSERT OR REPLACE each other away.
+        with contextlib.suppress(Exception):
+            self._db.execute("DROP INDEX IF EXISTS idx_unique_content")
         with contextlib.suppress(Exception):
             self._db.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_content "
-                "ON vectors(channel_id, content_hash) WHERE content_hash != ''"
+                "ON vectors(kind, channel_id, content_hash) WHERE content_hash != ''"
             )
 
         # ─── persistent embedding cache ────────────────────────────────
@@ -1902,6 +1904,8 @@ class RAGMemoryManager:
         rows = self._db.execute(
             "SELECT id, channel_id, author, content, timestamp FROM vectors "
             "WHERE kind='message' AND source='user' AND timestamp > ? "
+            "AND IFNULL(guild_id, '') != '' "
+            "AND channel_id NOT LIKE 'tg:%' "
             "ORDER BY timestamp ASC LIMIT 500",
             (cutoff,),
         ).fetchall()

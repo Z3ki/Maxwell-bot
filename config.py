@@ -195,9 +195,7 @@ class Config:
     CAPTCHA_HUMAN_PORT = _int_env(
         "CAPTCHA_HUMAN_PORT", 8790, min_value=1, max_value=65535
     )
-    CAPTCHA_FALLBACK_USER_ID = os.getenv(
-        "CAPTCHA_FALLBACK_USER_ID", "1471821513824014480"
-    ).strip()
+    CAPTCHA_FALLBACK_USER_ID = os.getenv("CAPTCHA_FALLBACK_USER_ID", "").strip()
 
     POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "flux")
 

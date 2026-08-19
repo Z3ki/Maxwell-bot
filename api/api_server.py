@@ -44,9 +44,11 @@ from api.storage import (  # noqa: E402
 
 from control_defaults import (  # noqa: E402
     DEFAULT_CONTROL,
+    KNOWN_TOOLS,
 )
 from utils import (  # noqa: E402 - fd-safe atomic writes
     FileLock,
+    FileLockTimeout,
     _atomic_json_write_sync,
 )
 
@@ -150,14 +152,11 @@ from api.state import (  # noqa: E402
     _load_autonomy_state,
     _load_commands,
     _load_commands_for_write,
-    _load_context_entries,
-    _load_context_entries_for_write,
     _load_control,
     _load_rem_control_for_write,
     _load_rem_status,
     _normalize_context_content,
     _normalize_memory_line,
-    _save_context_entries,
     _save_rem_control,
     _sanitize_control,
 )
@@ -271,8 +270,38 @@ async def rag_ltm_list(request):
 
 
 async def context_get(request):
-    async with _file_lock:
-        entries = _load_context_entries()
+    """List shared-context facts from the live RAG SQLite DB.
+
+    The old JSON file (`data/shared_context.json`) is a one-time migration
+    source for the bot and is not written back. Dashboard edits must hit
+    the same `kind='shared_context'` rows the bot injects into prompts.
+    """
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
+    try:
+        rows = _rag_query(
+            "SELECT id, content, scope, importance, timestamp, metadata "
+            "FROM vectors WHERE kind='shared_context' "
+            "ORDER BY importance DESC, created_at DESC"
+        )
+    except sqlite3.Error as e:
+        return _json_response({"error": f"rag db: {e}"}, 500)
+    entries = []
+    for row in rows:
+        entry = {
+            "id": row["id"],
+            "content": row["content"],
+            "scope": row["scope"] or "global",
+            "importance": row["importance"] or 5,
+            "timestamp": row["timestamp"],
+        }
+        try:
+            meta = json.loads(row["metadata"] or "{}")
+            if isinstance(meta, dict):
+                entry.update(meta)
+        except Exception:
+            pass
+        entries.append(entry)
     return _json_response(entries)
 
 
@@ -294,12 +323,12 @@ async def context_post(request):
     except (TypeError, ValueError):
         importance = 8
     now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
-    entry = {
-        "id": str(_uuid.uuid4())[:8],
-        "scope": str(body.get("scope") or "global")[:80],
-        "visibility": str(body.get("visibility") or "shared")[:32],
-        "importance": max(1, min(importance, 10)),
-        "content": content,
+    cid = str(_uuid.uuid4())[:8]
+    visibility = str(body.get("visibility") or "shared")[:32]
+    if visibility not in {"private", "shared", "admin_only", "public_hint"}:
+        visibility = "shared"
+    metadata = {
+        "visibility": visibility,
         "source_user_id": str(body.get("source_user_id") or "admin")[:64],
         "source_channel_id": str(body.get("source_channel_id") or "dashboard")[:64],
         "source_guild_id": str(body.get("source_guild_id") or "")[:64],
@@ -309,14 +338,30 @@ async def context_post(request):
         "last_seen_at": now,
         "expires_at": str(body.get("expires_at") or "")[:64],
     }
-    async with _file_lock:
-        try:
-            entries = _load_context_entries_for_write()
-        except ValueError as exc:
-            return _json_response({"error": str(exc)}, 409)
-        entries.insert(0, entry)
-        await _save_context_entries(entries)
-    return _json_response({"ok": True, "id": entry["id"], "entry": entry})
+    content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    try:
+        _rag_exec(
+            "INSERT INTO vectors "
+            "(id, kind, channel_id, guild_id, author, author_id, source, content, "
+            "content_hash, embedding, metadata, scope, importance, parent_id, "
+            "chunk_index, downvotes, timestamp, created_at) "
+            "VALUES (?, 'shared_context', '', '', '', '', 'user', ?, ?, NULL, ?, ?, ?, "
+            "'', 0, 0, ?, ?)",
+            (
+                cid,
+                content,
+                content_hash,
+                json.dumps(metadata),
+                str(body.get("scope") or "global")[:80],
+                max(1, min(importance, 10)),
+                now,
+                time.time(),
+            ),
+        )
+    except sqlite3.Error as e:
+        return _json_response({"error": f"rag db: {e}"}, 500)
+    entry = {"id": cid, "content": content, "scope": str(body.get("scope") or "global"), **metadata}
+    return _json_response({"ok": True, "id": cid, "entry": entry})
 
 
 async def context_put(request):
@@ -328,41 +373,85 @@ async def context_put(request):
     if not context_id:
         return _json_response({"error": "id required"}, 400)
     allowed = {"scope", "visibility", "importance", "content", "tags", "expires_at"}
-    async with _file_lock:
-        try:
-            entries = _load_context_entries_for_write()
-        except ValueError as exc:
-            return _json_response({"error": str(exc)}, 409)
-        for entry in entries:
-            if str(entry.get("id")) == context_id:
-                for key in allowed:
-                    if key in body:
-                        entry[key] = (
-                            _normalize_context_content(body[key])
-                            if key == "content"
-                            else body[key]
-                        )
-                entry["last_seen_at"] = time.strftime(
-                    "%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()
-                )
-                await _save_context_entries(entries)
-                return _json_response({"ok": True, "entry": entry})
-    return _json_response({"error": "not found"}, 404)
+    try:
+        row = _rag_query_one(
+            "SELECT id, content, scope, importance, timestamp, metadata "
+            "FROM vectors WHERE id=? AND kind='shared_context'",
+            (context_id,),
+        )
+    except sqlite3.Error as e:
+        return _json_response({"error": f"rag db: {e}"}, 500)
+    if row is None:
+        return _json_response({"error": "not found"}, 404)
+    try:
+        meta = json.loads(row["metadata"] or "{}")
+        if not isinstance(meta, dict):
+            meta = {}
+    except Exception:
+        meta = {}
+    content = row["content"]
+    scope = row["scope"] or "global"
+    importance = row["importance"] or 5
+    sets = []
+    params: list = []
+    for key in allowed:
+        if key not in body:
+            continue
+        if key == "content":
+            content = _normalize_context_content(body[key])
+            sets.append("content=?")
+            params.append(content)
+            sets.append("content_hash=?")
+            params.append(hashlib.sha256(content.encode("utf-8")).hexdigest())
+            sets.append("embedding=NULL")
+        elif key == "scope":
+            scope = str(body[key] or "global")[:80]
+            sets.append("scope=?")
+            params.append(scope)
+        elif key == "importance":
+            try:
+                importance = max(1, min(int(body[key]), 10))
+            except (TypeError, ValueError):
+                continue
+            sets.append("importance=?")
+            params.append(importance)
+        else:
+            meta[key] = body[key]
+    meta["last_seen_at"] = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    sets.append("metadata=?")
+    params.append(json.dumps(meta))
+    params.append(context_id)
+    try:
+        _rag_exec(
+            f"UPDATE vectors SET {', '.join(sets)} WHERE id=? AND kind='shared_context'",
+            tuple(params),
+        )
+    except sqlite3.Error as e:
+        return _json_response({"error": f"rag db: {e}"}, 500)
+    entry = {
+        "id": context_id,
+        "content": content,
+        "scope": scope,
+        "importance": importance,
+        "timestamp": row["timestamp"],
+        **meta,
+    }
+    return _json_response({"ok": True, "entry": entry})
 
 
 async def context_delete(request):
     context_id = str(request.query.get("id", "")).strip()
     if not context_id:
         return _json_response({"error": "id required"}, 400)
-    async with _file_lock:
-        try:
-            entries = _load_context_entries_for_write()
-        except ValueError as exc:
-            return _json_response({"error": str(exc)}, 409)
-        kept = [e for e in entries if str(e.get("id")) != context_id]
-        if len(kept) == len(entries):
-            return _json_response({"error": "not found"}, 404)
-        await _save_context_entries(kept)
+    try:
+        cur = _rag_exec(
+            "DELETE FROM vectors WHERE id=? AND kind='shared_context'",
+            (context_id,),
+        )
+    except sqlite3.Error as e:
+        return _json_response({"error": f"rag db: {e}"}, 500)
+    if cur.rowcount == 0:
+        return _json_response({"error": "not found"}, 404)
     return _json_response({"ok": True})
 
 
@@ -673,27 +762,10 @@ async def _queue_command(cmd_type: str, extra: dict | None = None):
             return cmd_id, ""
         except ValueError as exc:
             return "", str(exc)
-        except Exception:
-            # Best effort fallback
-            try:
-                cmds = _load_commands_for_write()
-                cmd_id = str(_uuid.uuid4())[:8]
-                entry = {
-                    "id": cmd_id,
-                    "type": cmd_type,
-                    "status": "pending",
-                    "result": "",
-                    "created_at": time.time(),
-                }
-                if extra:
-                    entry.update(extra)
-                cmds.append(entry)
-                if len(cmds) > MAX_COMMANDS:
-                    cmds = cmds[-MAX_COMMANDS:]
-                await atomic_json_write(_commands_path(), cmds)
-                return cmd_id, ""
-            except Exception as e:
-                return "", str(e)
+        except FileLockTimeout as exc:
+            return "", str(exc)
+        except Exception as e:
+            return "", str(e)
 
 
 async def rem_run(request):
@@ -1057,15 +1129,22 @@ async def commands_post(request):
         pass
     else:
         return _json_response({"error": f"unknown command type: {cmd_type}"}, 400)
+
+    def _do_append():
+        with FileLock(_commands_path(), timeout=5.0):
+            cmds = _load_commands_for_write()
+            cmds.append(command)
+            if len(cmds) > MAX_COMMANDS:
+                cmds = cmds[-MAX_COMMANDS:]
+            _atomic_json_write_sync(_commands_path(), cmds)
+
     async with _file_lock:
         try:
-            cmds = _load_commands_for_write()
+            await asyncio.to_thread(_do_append)
         except ValueError as exc:
             return _json_response({"error": str(exc)}, 409)
-        cmds.append(command)
-        if len(cmds) > MAX_COMMANDS:
-            cmds = cmds[-MAX_COMMANDS:]
-        await atomic_json_write(_commands_path(), cmds)
+        except FileLockTimeout as exc:
+            return _json_response({"error": str(exc)}, 409)
     return _json_response({"ok": True, "id": cmd_id})
 
 
@@ -1078,13 +1157,20 @@ async def commands_get(request):
 
 async def commands_del(request):
     cid = request.query.get("id", "")
+
+    def _do_delete():
+        with FileLock(_commands_path(), timeout=5.0):
+            cmds = _load_commands_for_write()
+            cmds = [c for c in cmds if c.get("id") != cid]
+            _atomic_json_write_sync(_commands_path(), cmds)
+
     async with _file_lock:
         try:
-            cmds = _load_commands_for_write()
+            await asyncio.to_thread(_do_delete)
         except ValueError as exc:
             return _json_response({"error": str(exc)}, 409)
-        cmds = [c for c in cmds if c.get("id") != cid]
-        await atomic_json_write(_commands_path(), cmds)
+        except FileLockTimeout as exc:
+            return _json_response({"error": str(exc)}, 409)
     return _json_response({"ok": True})
 
 
@@ -1368,6 +1454,7 @@ async def bot_status(request):
                 ]
             },
             "stats": rag_stats,
+            "known_tools": list(KNOWN_TOOLS),
             "pm2": {
                 "bot": {
                     "status": bot_proc.get("pm2_env", {}).get("status")

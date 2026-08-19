@@ -51,11 +51,27 @@ def short_term_slice_prompt(events: list[dict]) -> str:
     )
 
 
-def _load_json(path: Path, default):
+def _load_json(path: Path, default, *, fail_closed: bool = False):
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, ValueError):
-        return default
+        if not path.exists():
+            return default if not callable(default) else default()
+        raw = path.read_text(encoding="utf-8").strip()
+        if not raw:
+            return default if not callable(default) else default()
+        data = json.loads(raw)
+        return data
+    except (json.JSONDecodeError, OSError, ValueError) as e:
+        # Fail closed on corrupt files: overwriting rem_state.json with {}
+        # wiped last_rem_run_ts and made the next pass re-assimilate the
+        # whole event ring. Leave the file intact for recovery.
+        logger.warning(
+            "Corrupt/unreadable %s, using defaults (file left intact): %s",
+            path.name,
+            e,
+        )
+        if fail_closed:
+            raise
+        return default if not callable(default) else default()
 
 
 async def _save_json(path: Path, data):
@@ -116,9 +132,15 @@ class RemStore:
 
     async def patch_state(self, updates: dict) -> dict:
         async with self._lock:
-            state = _load_json(self.state_file, {})
+            try:
+                state = _load_json(self.state_file, {}, fail_closed=True)
+            except (json.JSONDecodeError, OSError, ValueError):
+                return {}
             if not isinstance(state, dict):
-                state = {}
+                logger.warning(
+                    "rem_state.json is not an object; skip patch to avoid wipe"
+                )
+                return {}
             state.update(updates)
             await _save_json(self.state_file, state)
             return state
@@ -130,9 +152,13 @@ class RemStore:
 
     async def append_run(self, run: dict):
         async with self._lock:
-            runs = _load_json(self.runs_file, [])
+            try:
+                runs = _load_json(self.runs_file, [], fail_closed=True)
+            except (json.JSONDecodeError, OSError, ValueError):
+                return
             if not isinstance(runs, list):
-                runs = []
+                logger.warning("rem_runs.json is not a list; skip append to avoid wipe")
+                return
             runs.append(dict(run or {}))
             await _save_json(self.runs_file, runs[-self.run_history :])
 
@@ -219,14 +245,21 @@ async def _apply_audit_actions(raw_audit: str, memory_manager) -> tuple[dict, st
         content = str(shared.get("content") or "").strip()
         if not content:
             continue
+        scope = str(shared.get("scope") or "global").strip() or "global"
+        vis = str(shared.get("visibility") or "private").strip().lower()
+        if vis not in {"private", "shared", "admin_only", "public_hint"}:
+            vis = "private"
+        # Mixed-channel REM slices are untrusted Discord text. Never promote
+        # a model-supplied fact to globally shared visibility by default.
+        if scope == "global" and vis not in {"private", "admin_only"}:
+            vis = "private"
         entry = {
             "content": content,
-            "scope": str(shared.get("scope") or "global"),
+            "scope": scope,
             "importance": shared.get("importance", 5),
+            "visibility": vis,
+            "source_kind": "rem",
         }
-        for opt in ("source_user_id", "source_channel_id", "source_guild_id", "tags", "source_kind"):
-            if opt in shared:
-                entry[opt] = shared[opt]
         try:
             await memory_manager.add_shared_context(entry)
             counts["shared_added"] += 1

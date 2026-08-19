@@ -253,6 +253,7 @@ from config import Config  # noqa: E402
 from control_defaults import (  # noqa: E402
     DEAD_CONTROL_KEYS,
     DEFAULT_CONTROL,
+    KNOWN_TOOLS,
     parse_bool,
 )
 from providers import (  # noqa: E402
@@ -478,6 +479,7 @@ async def _synthesize_local_tts_wav(text: str, output_path: str) -> str | None:
         pitch,
         "-w",
         raw_path,
+        "--",
         text,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -591,10 +593,9 @@ async def _synthesize_tts_wav(
                     proc.kill()
                     await proc.wait()
                     raise RuntimeError("Fish TTS ffmpeg conversion timed out") from None
-                try:
-                    os.unlink(mp3_path)
-                except OSError:
-                    pass
+                finally:
+                    with contextlib.suppress(OSError):
+                        os.unlink(mp3_path)
                 if proc.returncode == 0 and os.path.exists(output_path):
                     logger.info(
                         "Fish VC TTS synthesized audio model=%r ref=%s voice=%s",
@@ -984,43 +985,16 @@ def extract_json_object(text: str, start: int = 0) -> tuple[str, int] | None:
 # tool, add its name here so a leaked tag for it still gets cleaned.
 # (reasoning_log is intentionally absent — reasoning lives inside every tool's
 # `reasoning` param now, not as a standalone tool.)
-KNOWN_TOOL_NAMES: frozenset[str] = frozenset(
+KNOWN_TOOL_NAMES: frozenset[str] = frozenset(KNOWN_TOOLS) | frozenset(
     {
-        "react",
-        "web_search",
-        "create_poll",
-        "send_file",
-        "send_message",
-        "tts",
-        "fetch_url",
-        "youtube",
-        "shell",
-        "set_nickname",
-        "set_activity",
-        "create_site",
-        "change_avatar",
-        "change_presence",
-        "create_category",
-        "create_channel",
-        "create_invite",
-        "join_server",
-        "leave_server",
-        "delete_channel",
-        "delete_message",
-        "edit_channel",
-        "edit_message",
-        "forward_message",
-        "hd_image",
-        "image_generator",
-        "list_admin_servers",
-        "list_servers",
-        "list_sites",
-        "lookup_user",
-        "no_response",
-        "send_media",
-        "send_meme",
-        "typing",
-        "leave_vc",
+        "wait",
+        "search_messages",
+        "update_base_personality",
+        "update_server_prompt",
+        "email_send",
+        "email_read_inbox",
+        "email_get_message",
+        "email_search",
     }
 )
 
@@ -1356,6 +1330,9 @@ def strip_model_artifact_leaks(text: str, strip_pipe_markers: bool = True) -> st
 
 def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = None):
     text = str(response or "")
+    available_lower = (
+        {n.lower() for n in available_tools} if available_tools is not None else None
+    )
     code_ranges = _fenced_code_ranges(text)
     pipe_matches = []
     for match in PIPE_TOOL_RE.finditer(text):
@@ -1364,7 +1341,7 @@ def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = 
         name = match.group(1)
         if name and name.lower().startswith("tool_"):
             name = name[5:]
-        if available_tools is None or name in available_tools:
+        if available_lower is None or name.lower() in available_lower:
             pipe_matches.append(
                 (
                     match.start(),
@@ -1381,7 +1358,7 @@ def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = 
         name = match.group(1)
         if name and name.lower().startswith("tool_"):
             name = name[5:]
-        if available_tools is None or name in available_tools:
+        if available_lower is None or name.lower() in available_lower:
             pipe_matches.append(
                 (match.start(), match.end(), name, match.group(2), "", True)
             )
@@ -1391,7 +1368,7 @@ def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = 
         name = match.group(1)
         if name and name.lower().startswith("tool_"):
             name = name[5:]
-        if available_tools is None or name in available_tools:
+        if available_lower is None or name.lower() in available_lower:
             pipe_matches.append(
                 (match.start(), match.end(), name, "", match.group(2), False)
             )
@@ -1444,7 +1421,9 @@ def _iter_top_level_tool_tags(response: str, available_tools: set[str] | None = 
         if tag_end == -1:
             break
         name, attrs_str, self_closing = _parse_xml_open_tag(text[start : tag_end + 1])
-        if not name or (available_tools is not None and name not in available_tools):
+        if not name or (
+            available_lower is not None and name.lower() not in available_lower
+        ):
             pos = start + 1
             continue
         if self_closing:
@@ -1808,7 +1787,7 @@ class TelegramMessageAdapter:
         self.session = session
         self.url_base = url_base
         self.chat_id = chat_id
-        self.id = message_id or chat_id
+        self.id = message_id
         self.guild = None
         self.channel = TelegramChannelAdapter(self)
         self.author = TelegramUserAdapter(user_id or chat_id, user_name)
@@ -1851,8 +1830,12 @@ class TelegramMessageAdapter:
 
         form = aiohttp.FormData()
         form.add_field("chat_id", str(self.chat_id))
-        if self.id:
-            form.add_field("reply_parameters", json.dumps({"message_id": self.id}))
+        try:
+            reply_to = int(self.id) if self.id is not None else 0
+        except (TypeError, ValueError):
+            reply_to = 0
+        if reply_to > 0:
+            form.add_field("reply_parameters", json.dumps({"message_id": reply_to}))
         form.add_field(field_name, blob, filename=filename, content_type=content_type)
         async with self.session.post(f"{self.url_base}/{endpoint}", data=form) as resp:
             if resp.status != 200:
@@ -1888,8 +1871,12 @@ class TelegramMessageAdapter:
         if content:
             for chunk in _telegram_html_chunks(str(content)):
                 payload = {"chat_id": self.chat_id, "text": chunk, "parse_mode": "HTML"}
-                if self.id:
-                    payload["reply_parameters"] = {"message_id": self.id}
+                try:
+                    reply_to = int(self.id) if self.id is not None else 0
+                except (TypeError, ValueError):
+                    reply_to = 0
+                if reply_to > 0:
+                    payload["reply_parameters"] = {"message_id": reply_to}
                 async with self.session.post(
                     f"{self.url_base}/sendMessage", json=payload
                 ) as resp:
@@ -2018,6 +2005,8 @@ FOLLOWUP_TOOL_NAMES = {
     # dot the user just explicitly set, and a follow-up turn would race to
     # undo it.
     "set_activity",
+    "update_base_personality",
+    "update_server_prompt",
 }
 
 TELEGRAM_COMPATIBLE_TOOL_NAMES = {
@@ -2291,6 +2280,7 @@ class MaxwellBot(commands.Bot):
         self._rem_running = False
         self.tools = {}
         self._channel_locks: dict[str, asyncio.Lock] = {}
+        self._telegram_chat_locks: dict[str, asyncio.Lock] = {}
         # Channels the bot is currently generating a reply for (in-flight).
         # Autonomy reads this to avoid posting into a channel mid-reply, which
         # would race the real reply and produce a duplicate/odd message.
@@ -2939,6 +2929,14 @@ class MaxwellBot(commands.Bot):
             self._channel_locks[channel_id] = asyncio.Lock()
         return self._channel_locks[channel_id]
 
+    def _get_telegram_chat_lock(self, chat_id) -> asyncio.Lock:
+        key = str(chat_id)
+        lock = self._telegram_chat_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._telegram_chat_locks[key] = lock
+        return lock
+
     def _mem_kwargs(self, message) -> dict:
         """Build the standard kwargs for add_to_channel_memory from a
         discord.Message. Centralizes guild_id + message_type so every
@@ -3345,7 +3343,7 @@ class MaxwellBot(commands.Bot):
                         asyncio.shield(_await_task_done(active)),
                         timeout=5.0,
                     )
-                except (asyncio.TimeoutError, asyncio.CancelledError):
+                except asyncio.TimeoutError:
                     pass
 
         _lock = self._get_channel_lock(channel_id)
@@ -3356,8 +3354,27 @@ class MaxwellBot(commands.Bot):
             _lock_acquired = True
         except asyncio.TimeoutError as _exc:
             logger.warning(
-                f"Channel lock timeout for {channel_id}; dropping message to avoid double-processing"
+                f"Channel lock timeout for {channel_id}; storing memory and skipping reply"
             )
+            if self._control.get("store_memory", True):
+                with contextlib.suppress(Exception):
+                    await self.add_message_to_memory(
+                        channel_id,
+                        {
+                            "author": getattr(
+                                getattr(message, "author", None),
+                                "display_name",
+                                "System",
+                            ),
+                            "author_id": str(
+                                getattr(getattr(message, "author", None), "id", "system")
+                            ),
+                            "content": (message.content or "")[:4000] or "[media attached]",
+                            "message_id": str(getattr(message, "id", "")),
+                            "timestamp": _message_created_at_iso(message),
+                        },
+                        message,
+                    )
             return
         try:
             if self._control.get("store_memory", True):
@@ -3664,11 +3681,12 @@ class MaxwellBot(commands.Bot):
             )
             if text.startswith("DENY") or text.startswith("NO"):
                 return False
-            if text.startswith("ANSWER") or text.startswith("YES") or "ANSWER" in text:
+            if text.startswith("ANSWER") or text.startswith("YES"):
                 return True
+            return False
         except Exception:
             logger.warning("DM call LLM decision failed; defaulting to deny")
-        return bool(recent)
+            return False
 
     async def _disconnect_all_voice(self):
         """User accounts can only be in one voice session. Leave guild VC before a DM call."""
@@ -3919,6 +3937,13 @@ class MaxwellBot(commands.Bot):
                 self.memory.clear_server_prompt(server_id)
                 await message.channel.send("Server prompt cleared.")
             elif cmd == "clearmem":
+                active = self._active_requests.get(channel_id)
+                if active is not None and not active.done():
+                    active.cancel()
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(
+                            asyncio.shield(_await_task_done(active)), timeout=5.0
+                        )
                 await self.memory.clear_channel_memory(channel_id)
                 self._media_context.pop(channel_id, None)
                 self._active_requests.pop(channel_id, None)
@@ -5454,9 +5479,11 @@ class MaxwellBot(commands.Bot):
                 logger.error("captcha notify failed: %s", e)
         return url
 
-    async def _notify_captcha_link(self, url: str, exception) -> None:
+    async def _notify_captcha_link(self, url: str, exception=None) -> None:
         """DM the solve link to every admin (fallback user if none)."""
-        summary = self._captcha_summary(exception)
+        summary = (
+            self._captcha_summary(exception) if exception is not None else "CAPTCHA"
+        )
         msg = (
             "⚠️ Discord hit a CAPTCHA: "
             + summary
@@ -5561,8 +5588,11 @@ class MaxwellBot(commands.Bot):
         # 2) human-in-the-loop solve page + DM notification
         if getattr(self.config, "CAPTCHA_HUMAN_SOLVE", False):
             try:
+                async def _notify(url: str, _exc=exception):
+                    await self._notify_captcha_link(url, _exc)
+
                 url = await self._create_captcha_challenge(
-                    exception, notify=self._notify_captcha_link
+                    exception, notify=_notify
                 )
                 srv = self._human_captcha_server
                 if srv is None:
@@ -7373,6 +7403,8 @@ class MaxwellBot(commands.Bot):
                 # if disabled. Video may still yield image frames even if audio track skipped later.
                 if mime.startswith("audio/") and not proc_aud:
                     continue
+                if mime.startswith("image/") and not proc_img:
+                    continue
                 if mime == "image/gif" or ext == ".gif":
                     normalized = await self._normalize_gif(
                         blob, attachment.filename, max_size
@@ -7775,7 +7807,9 @@ class MaxwellBot(commands.Bot):
         try:
             session = await _get_shared_session()
             async with session.get(
-                url, timeout=aiohttp.ClientTimeout(total=20, connect=8)
+                url,
+                timeout=aiohttp.ClientTimeout(total=20, connect=8),
+                allow_redirects=False,
             ) as resp:
                 if resp.status != 200:
                     logger.warning(
@@ -8270,8 +8304,9 @@ class MaxwellBot(commands.Bot):
         max_out_tokens = getattr(self.config, "OLLAMA_MAX_TOKENS", 200000) or 200000
         try:
             _images, media = await self._extract_media(message)
-            media.extend(await self._extract_embeds(message))
-            media.extend(await self._extract_gif_links(message))
+            if bool(self._control.get("process_images", True)):
+                media.extend(await self._extract_embeds(message))
+                media.extend(await self._extract_gif_links(message))
         except Exception as e:
             logger.warning(f"Media extraction failed: {e}")
             media = []
@@ -9696,22 +9731,24 @@ class MaxwellBot(commands.Bot):
         # tool result at 32KB to keep context size bounded.
         _IMG_RE = re.compile(r"__IMAGE_B64__([A-Za-z0-9+/=\s]+)__END_IMAGE_B64__")
         _MAX_TOOL_RESULT_CHARS = 32_000
-        for tr in tool_results:
+        for tr in list(result_by_id.values()) + list(tool_results):
             for m in _IMG_RE.finditer(tr):
                 raw = m.group(1).replace("\n", "").replace(" ", "")
                 if len(raw) < 5_000_000:
                     tool_images.append(raw)
-        tool_results = [_IMG_RE.sub("", tr).strip() for tr in tool_results]
-        # Cap each tool result before sending it to the LLM.
-        truncated_results = []
-        for tr in tool_results:
+
+        def _truncate_tool_result(tr: str) -> str:
+            tr = _IMG_RE.sub("", tr).strip()
             if len(tr) > _MAX_TOOL_RESULT_CHARS:
                 half = _MAX_TOOL_RESULT_CHARS // 2
-                truncated_results.append(
+                return (
                     f"{tr[:half]}\n\n[...truncated {len(tr) - _MAX_TOOL_RESULT_CHARS} chars...]\n\n{tr[-half:]}"
                 )
-            else:
-                truncated_results.append(tr)
+            return tr
+
+        truncated_by_id = {
+            cid: _truncate_tool_result(tr) for cid, tr in result_by_id.items()
+        }
 
         # Build OpenAI tool-role follow-up messages (assistant + tool results)
         assistant_msg: dict[str, Any] = {
@@ -9720,11 +9757,9 @@ class MaxwellBot(commands.Bot):
             "tool_calls": history_tool_calls,
         }
         followup_msgs: list[dict] = [assistant_msg]
-        for i, call in enumerate(calls):
-            line = (
-                truncated_results[i]
-                if i < len(truncated_results)
-                else (result_by_id.get(call["id"], f"Tool {call['name']}: (no result)"))
+        for call in calls:
+            line = truncated_by_id.get(
+                call["id"], f"Tool {call['name']}: (no result)"
             )
             followup_msgs.append(
                 {
@@ -9734,9 +9769,10 @@ class MaxwellBot(commands.Bot):
                 }
             )
         self._last_native_followup_messages = followup_msgs
-        # Use the truncated results in the return value too, so the
-        # rest of the pipeline (memory writes, dashboard view) sees
-        # the same bounded content the LLM saw.
+        # Return results in original emission order, paired by tool_call_id.
+        truncated_results = [
+            truncated_by_id.get(c["id"], "") for c in calls
+        ]
         tool_results = truncated_results
         return (
             (cleaned, tool_results, tool_images)
@@ -9804,6 +9840,10 @@ class MaxwellBot(commands.Bot):
         calls = getattr(response, "tool_calls", None)
         if calls is not None:
             return list(calls) if isinstance(calls, list) else []
+        # A plain string (quota errors, user-facing messages) must not pop
+        # leftover tool_calls from a previous provider success.
+        if isinstance(response, str):
+            return []
         return self._consume_native_tool_calls()
 
     def _usage_from(self, response) -> dict:
@@ -10938,7 +10978,7 @@ class MaxwellBot(commands.Bot):
 
             # Fire and forget: process the message in the background
             task = asyncio.create_task(
-                self._process_telegram_message(
+                self._process_telegram_message_serialized(
                     message,
                     chat_id,
                     text,
@@ -10948,6 +10988,7 @@ class MaxwellBot(commands.Bot):
                     url_base,
                 )
             )
+            self._track_task(task)
             def _on_webhook_task_done(t: asyncio.Task) -> None:
                 if t.cancelled():
                     return
@@ -10995,6 +11036,15 @@ class MaxwellBot(commands.Bot):
             with contextlib.suppress(Exception):
                 await runner.cleanup()
 
+    async def _process_telegram_message_serialized(
+        self, message, chat_id, text, user_name, user_id, session, url_base
+    ):
+        """Webhook path: keep a fast 200 but serialize per chat_id."""
+        async with self._get_telegram_chat_lock(chat_id):
+            await self._process_telegram_message(
+                message, chat_id, text, user_name, user_id, session, url_base
+            )
+
     async def _process_telegram_message(
         self, message, chat_id, text, user_name, user_id, session, url_base
     ):
@@ -11029,6 +11079,8 @@ class MaxwellBot(commands.Bot):
         self, message, chat_id, text, user_name, user_id, session, url_base
     ):
         """Shared Telegram message processing for both polling and webhook modes."""
+        if not self._control.get("bot_enabled", True):
+            return
         # Handle Voice / Audio inputs
         voice = message.get("voice")
         audio = message.get("audio")
@@ -11319,9 +11371,9 @@ class MaxwellBot(commands.Bot):
                     cur = {"role": role, "content": content}
             if cur is not None:
                 tg_turns.append(cur)
-            used = 0
-            while tg_turns and used + len(tg_turns[0]["content"]) > 5000:
-                used += len(tg_turns[0]["content"])
+            used = sum(len(t["content"]) for t in tg_turns)
+            while tg_turns and used > 5000 and len(tg_turns) > 1:
+                used -= len(tg_turns[0]["content"])
                 tg_turns.pop(0)
             for t in tg_turns:
                 messages.append(t)
@@ -11338,7 +11390,13 @@ class MaxwellBot(commands.Bot):
             ]
         if tg_media:
             user_parts.append("Media available to inspect in the multimodal payload.")
-        messages.append({"role": "user", "content": "\n".join(user_parts)})
+        latest_block = "\n".join(user_parts)
+        if messages and messages[-1].get("role") == "user":
+            messages[-1]["content"] = (
+                str(messages[-1].get("content") or "") + "\n" + latest_block
+            )
+        else:
+            messages.append({"role": "user", "content": latest_block})
 
         tg_openai_tools = self._build_openai_tools("telegram")
         await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
@@ -11357,7 +11415,15 @@ class MaxwellBot(commands.Bot):
                 )
             except ProviderUsageExhaustedError as e:
                 logger.warning("Provider usage exhausted in Telegram: %s", e)
-                response_text = e.user_message
+                await TelegramMessageAdapter(
+                    session,
+                    url_base,
+                    chat_id,
+                    message.get("message_id"),
+                    user_id,
+                    user_name,
+                ).reply(e.user_message)
+                return
         finally:
             await self._release_ai_slot()
 
