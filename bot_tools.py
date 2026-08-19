@@ -364,40 +364,67 @@ def _clean_channel_name(value: str | None) -> str:
     return text[:100]
 
 
+# Bash heredoc opener. Models almost always write the redirect on the same
+# line as the delimiter (`cat << 'EOF' > file.py`); a here-string (`<<<`)
+# is not a heredoc. Optional `<<-` (tab-stripped body) is accepted.
+_HEREDOC_DELIM_RE = re.compile(
+    r"""
+    (?<!<)<<(?!<)
+    -?
+    \s*
+    (?:
+        '([A-Za-z_][A-Za-z0-9_-]*)'
+      | "([A-Za-z_][A-Za-z0-9_-]*)"
+      | \\?([A-Za-z_][A-Za-z0-9_-]*)
+    )
+    """,
+    re.VERBOSE,
+)
+
+
+def _heredoc_delimiter(line: str) -> str | None:
+    """Return the heredoc delimiter token if `line` opens a heredoc."""
+    m = _HEREDOC_DELIM_RE.search(line)
+    if not m:
+        return None
+    return m.group(1) or m.group(2) or m.group(3)
+
+
 def _strip_heredoc_blocks(command: str) -> str:
     """Return `command` with heredoc bodies removed.
 
-    A heredoc looks like `... << 'EOF'` (or `<< "EOF"` / `<<EOF`) followed by
-    lines of literal content ending with a line containing only the delimiter
-    `EOF`. The literal block is the only place we permit newlines, so stripping
-    it lets us validate the remaining (non-heredoc) parts as a single line.
+    A heredoc looks like `... << 'EOF'` (or `<< "EOF"` / `<<EOF` / `<<-EOF`)
+    followed by lines of literal content ending with a line containing only
+    the delimiter. Redirects and pipes after the delimiter on the opener line
+    (`cat << 'EOF' > file`, `python3 - <<'PY' | tee out.py`) are part of the
+    command, not the body. Stripping the body lets us validate the remaining
+    (non-heredoc) parts as a single line.
     """
     out: list[str] = []
     i = 0
     lines = command.split("\n")
     while i < len(lines):
         line = lines[i]
-        # Heredoc opener: find `<<` then the delimiter token. Anchor on the
-        # unquoted start of the line; backtracking-safe.
-        idx = line.find("<<")
-        if idx >= 0:
-            tail = line[idx + 2 :]
-            stripped = tail.strip()
-            m = re.match(r"^(['\"]?)([A-Za-z0-9_]+)\1\s*$", stripped)
-            if m:
-                delimiter = m.group(2)
-                # Keep the opener line so callers see the full line structure
-                # (a missing opener would let a post-heredoc injected command
-                # look like part of the body). The body lines themselves are
-                # the only place newlines are legitimate.
-                out.append(line)
-                i += 1
-                # Skip until we hit the closing delimiter on its own line.
-                while i < len(lines) and lines[i].strip() != delimiter:
+        delimiter = _heredoc_delimiter(line)
+        if delimiter:
+            # Keep the opener line so callers see the full line structure
+            # (a missing opener would let a post-heredoc injected command
+            # look like part of the body). The body lines themselves are
+            # the only place newlines are legitimate.
+            out.append(line)
+            i += 1
+            closed = False
+            while i < len(lines):
+                if lines[i].strip() == delimiter:
+                    closed = True
                     i += 1
-                # Discard the closing delimiter line itself.
+                    break
                 i += 1
-                continue
+            if not closed:
+                # Leave a blank line so the newline guard still fires; the
+                # dedicated unterminated-heredoc hint explains how to close it.
+                out.append("")
+            continue
         out.append(line)
         i += 1
     # A well-formed heredoc frequently ends with a trailing newline after the
@@ -421,17 +448,17 @@ def _unterminated_heredoc_error(command: str) -> str | None:
     lines = str(command or "").split("\n")
     opener: str | None = None  # the delimiter token, when inside a heredoc body
     opener_text = ""
+    saw_unparsed_opener = False
     i = 0
     while i < len(lines):
         line = lines[i]
         if opener is None:
-            idx = line.find("<<")
-            if idx >= 0:
-                tail = line[idx + 2 :].strip()
-                m = re.match(r"^(['\"]?)([A-Za-z0-9_]+)\1\s*$", tail)
-                if m:
-                    opener = m.group(2)
-                    opener_text = line.strip()
+            delimiter = _heredoc_delimiter(line)
+            if delimiter:
+                opener = delimiter
+                opener_text = line.strip()
+            elif "<<" in line and "<<<" not in line:
+                saw_unparsed_opener = True
         else:
             if line.strip() == opener:
                 # Closing delimiter found. Anything non-blank after it is a
@@ -449,6 +476,12 @@ def _unterminated_heredoc_error(command: str) -> str | None:
         return (
             f"heredoc opened with `{opener_text}` but never closed — add a final "
             f"line containing exactly `{opener}` (nothing else, no trailing text)"
+        )
+    if saw_unparsed_opener:
+        return (
+            "could not parse the heredoc opener — use `cat << 'EOF' > file` "
+            "(quoted delimiter; `> file` on the same line is fine), then the "
+            "file body, then a line containing only EOF"
         )
     return None
 
@@ -3597,18 +3630,25 @@ class ShellTool(Tool):
             f"Limits: command <= {max_cmd_str}, output <= {max_out_str}, "
             f"channel preview <= {chan_str}, timeout {to}s."
         )
+        how = (
+            "To write a file, put the redirect on the opener line: "
+            "`cat << 'EOF' > path/file.py` then the body then a line containing "
+            "only EOF. `cmd` is an alias for `command`. Do not prefix `$ ` or "
+            "wrap the command in a markdown fence. Attach outputs with files= "
+            "(comma-separated paths under /home/maxwell)."
+        )
         if self._full_host_access():
             return (
                 "Run bash -lc in the maxwell-shell container (FULL ACCESS: host "
                 "net, /host, root). Params: command (required), files (optional "
-                "paths to attach). Container persists across calls. "
-                f"{limits_note}"
+                "paths to attach). "
+                f"{how} Container persists across calls. {limits_note}"
             )
         return (
             "Run bash -lc in the maxwell-shell sandbox (workdir /home/maxwell). "
             "Params: command (required), files (optional paths under /home/maxwell "
-            "to attach to the channel). Container persists across calls. "
-            f"Max 10 MB per file. {limits_note}"
+            "to attach to the channel). "
+            f"{how} Container persists across calls. Max 10 MB per file. {limits_note}"
         )
 
     async def _run_docker(self, *args: str, timeout: int = 30):
@@ -3742,10 +3782,39 @@ class ShellTool(Tool):
                 stderr.decode(errors="replace").strip() or "docker run failed"
             )
 
+    @staticmethod
+    def _command_arg(command: str | None = None, **kwargs) -> str | None:
+        """Pick the command string out of native-tool args.
+
+        Models frequently send `cmd` (and sometimes `script`/`code`) instead
+        of `command`. Accept those aliases so a valid heredoc is not rejected
+        as an empty command.
+        """
+        if command is not None and str(command).strip():
+            return command
+        for key in ("cmd", "script", "code"):
+            val = kwargs.get(key)
+            if val is not None and str(val).strip():
+                return val
+        return command
+
     def _normalize_command(self, command: str | None) -> str:
         raw = str(command or "").strip()
         if not raw:
             return ""
+        raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+
+        # Models wrap the command in a markdown fence, or copy the `$ `
+        # prompt from the channel echo of a previous shell call.
+        fence = re.match(
+            r"^```(?:bash|sh|shell|zsh|python|py)?[ \t]*\n(.*)\n```[ \t]*$",
+            raw,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if fence:
+            raw = fence.group(1).strip()
+        if raw.startswith("$"):
+            raw = re.sub(r"^\$[ \t]+", "", raw)
 
         # If the model leaked a tool call payload, try to recover a literal command from backticks.
         if "<tool:" in raw.lower():
@@ -3765,23 +3834,27 @@ class ShellTool(Tool):
             return f"command too long (max {max_len} chars; set MAXWELL_SHELL_MAX_COMMAND_LENGTH=0 to disable)"
         # Newlines are only allowed inside heredoc bodies. Bare newlines would
         # let the LLM chain a second top-level command (e.g. "ls\nrm -rf /")
-        # which is classic command injection. We strip heredoc bodies first,
-        # so anything still on its own line in `non_heredoc` is a real second
-        # command. The Docker sandbox is the real security boundary (no host
-        # FS/net/sock by default); the taint-check gate (in execute) + the
-        # blocked patterns below defend against prompt-injection chains that
-        # fit on a single line.
+        # which is classic command injection. Check for an unclosed / followed-on
+        # heredoc BEFORE stripping: an unclosed opener would otherwise consume
+        # the rest of the command as "body" and look like a single legal line.
+        # Then strip heredoc bodies so anything still on its own line in
+        # `non_heredoc` is a real second command. The Docker sandbox is the
+        # real security boundary (no host FS/net/sock by default); the
+        # taint-check gate (in execute) + the blocked patterns below defend
+        # against prompt-injection chains that fit on a single line.
+        if "\n" in command:
+            hint = _unterminated_heredoc_error(command)
+            if hint:
+                return "newlines are only allowed inside heredoc bodies — " + hint
         non_heredoc = _strip_heredoc_blocks(command)
         if any(ord(c) < 32 and c not in ("\t", "\n", "\r") for c in non_heredoc):
             return "control characters are not allowed in shell commands"
         if "\n" in non_heredoc:
-            hint = _unterminated_heredoc_error(command)
-            if hint:
-                return "newlines are only allowed inside heredoc bodies — " + hint
             return (
                 "newlines are only allowed inside heredoc bodies — a `<< 'EOF'` ... EOF "
-                "block is the only place bare newlines are permitted; chain any other "
-                "command onto the same line or use a separate shell call"
+                "block is the only place bare newlines are permitted; put `> file` on "
+                "the opener line (`cat << 'EOF' > file`), close with a line containing "
+                "only EOF, or run a follow-up in a separate shell call"
             )
         for pattern in _SHELL_BLOCKED_PATTERNS:
             if re.search(pattern, command, re.IGNORECASE):
@@ -3903,7 +3976,7 @@ class ShellTool(Tool):
         files: str | None = None,
         **kwargs,
     ) -> str:
-        normalized = self._normalize_command(command)
+        normalized = self._normalize_command(self._command_arg(command, **kwargs))
         if not normalized:
             return "Error: command is required (tool-call markup was detected or command was empty)"
 

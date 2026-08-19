@@ -214,7 +214,12 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     ),
     "shell": _obj(
         {
-            "command": _str("Bash command to run in the sandbox container"),
+            "command": _str(
+                "Bash command to run in the sandbox. Newlines are only allowed "
+                "inside a heredoc. To write a file: cat << 'EOF' > path/file.py "
+                "then the body then a line containing only EOF. Put `> file` on "
+                "the opener line, not after EOF."
+            ),
             "files": _str("Optional comma-separated files to attach after the command"),
         },
         ["command"],
