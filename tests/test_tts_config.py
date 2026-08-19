@@ -129,7 +129,8 @@ def test_tts_spanish_falls_back_to_gtts_without_nvidia_key(monkeypatch, tmp_path
     asyncio.run(run())
 
     assert calls == [("hola mundo", "es")]
-    assert sent == ["tts_123.ogg"]
+    assert len(sent) == 1
+    assert sent[0].startswith("tts_") and sent[0].endswith(".ogg")
 
 
 def test_fish_tts_writes_audio_on_success(monkeypatch, tmp_path):
@@ -328,4 +329,5 @@ def test_tts_tool_prefers_fish_over_riva(monkeypatch, tmp_path):
     assert len(fish_calls) == 1
     assert fish_calls[0][0] == "hello from fish"
     assert fish_calls[0][2] == "s2.1-pro-free"
-    assert sent == ["tts_999.ogg"]
+    assert len(sent) == 1
+    assert sent[0].startswith("tts_") and sent[0].endswith(".ogg")

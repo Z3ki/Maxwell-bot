@@ -29,6 +29,7 @@ import aiofiles
 import aiohttp
 import asyncio
 import base64
+import uuid
 import discord
 from discord import Activity, File, Message, Status
 from tools import Tool
@@ -2552,7 +2553,11 @@ class CreateSiteTool(Tool):
         )
         max_sites = int(control.get("create_site_quota_per_user", 10))
         active_user_sites = [s for s in sites.values() if s.get("user_id") == user_id]
-        if len(active_user_sites) >= max_sites:
+        already_ours = (
+            isinstance(existing, dict)
+            and str(existing.get("user_id") or "") == user_id
+        )
+        if not already_ours and len(active_user_sites) >= max_sites:
             return f"Error: site quota reached ({len(active_user_sites)}/{max_sites} active sites). Delete an old site first."
 
         if len(body) > self.MAX_CONTENT_SIZE:
@@ -3033,14 +3038,33 @@ class SendMessageTool(Tool):
         text = str(content or "").strip()
         if not text:
             return "Error: content is required"
+        sent_any = False
         try:
             chunks = self._chunks(text)
             use_reply = str(reply).lower() not in {"0", "false", "no", "off"}
             for i, chunk in enumerate(chunks):
-                if i == 0 and use_reply:
-                    await message.reply(chunk)
-                else:
-                    await message.channel.send(chunk)
+                try:
+                    if i == 0 and use_reply:
+                        try:
+                            await message.reply(chunk)
+                        except (discord.NotFound, discord.HTTPException) as exc:
+                            code = getattr(exc, "code", None)
+                            parent_gone = isinstance(exc, discord.NotFound) or code in {
+                                10008,
+                                50035,
+                            }
+                            if code == 50035 and "message_reference" not in str(exc).lower():
+                                raise
+                            if not parent_gone:
+                                raise
+                            await message.channel.send(chunk)
+                    else:
+                        await message.channel.send(chunk)
+                    sent_any = True
+                except Exception:
+                    if sent_any:
+                        return f"__MESSAGE_SENT__\n{text}"
+                    raise
                 if len(chunks) > 1:
                     await asyncio.sleep(0.2)
             # Return the marker followed by the actual sent content. The
@@ -3054,6 +3078,8 @@ class SendMessageTool(Tool):
         except discord.Forbidden:
             return "Error: missing permissions to send message"
         except Exception as e:
+            if sent_any:
+                return f"__MESSAGE_SENT__\n{text}"
             return f"Error sending message: {e}"
 
 
@@ -4773,8 +4799,9 @@ class TtsTool(Tool):
         fish_api_key = os.environ.get("FISH_API_KEY", "") or getattr(
             bot_config, "FISH_API_KEY", ""
         )
-        filename = f"tts_{message.id}.wav"
-        voice_filename = f"tts_{message.id}.ogg"
+        token = uuid.uuid4().hex[:12]
+        filename = f"tts_{token}.wav"
+        voice_filename = f"tts_{token}.ogg"
 
         tts_source = None  # path to synthesized audio; drives fallback chain
 

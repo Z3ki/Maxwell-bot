@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import sqlite3
+import hashlib
 import time
 import uuid as _uuid
 from pathlib import Path
@@ -1658,13 +1659,16 @@ async def memory_add(request):
         return _json_response({"error": "empty"}, 400)
     new_id = _uuid.uuid4().hex
     ts = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     try:
         _rag_exec(
             "INSERT INTO vectors "
-            "(id, kind, channel_id, author, author_id, content, embedding, "
-            "metadata, scope, importance, timestamp, created_at) "
-            "VALUES (?, 'ltm', '', '', '', ?, NULL, '{}', 'global', 5, ?, ?)",
-            (content, ts, time.time()),
+            "(id, kind, channel_id, guild_id, author, author_id, source, content, "
+            "content_hash, embedding, metadata, scope, importance, parent_id, "
+            "chunk_index, downvotes, timestamp, created_at) "
+            "VALUES (?, 'ltm', '', '', '', '', 'user', ?, ?, NULL, '{}', 'global', "
+            "5, '', 0, 0, ?, ?)",
+            (new_id, content, content_hash, ts, time.time()),
         )
     except sqlite3.Error as e:
         return _json_response({"error": f"rag db: {e}"}, 500)
@@ -1694,10 +1698,11 @@ async def memory_update(request):
             return _json_response({"error": "not found"}, 404)
         return _json_response({"ok": True})
     try:
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
         cur = _rag_exec(
-            "UPDATE vectors SET content=?, embedding=NULL "
+            "UPDATE vectors SET content=?, content_hash=?, embedding=NULL "
             "WHERE id=? AND kind='ltm'",
-            (content, target_id),
+            (content, content_hash, target_id),
         )
     except sqlite3.Error as e:
         return _json_response({"error": f"rag db: {e}"}, 500)

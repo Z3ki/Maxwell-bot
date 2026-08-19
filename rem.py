@@ -153,36 +153,28 @@ def _message_content(message: dict) -> str:
 def _extract_rem_json(raw: str) -> dict | None:
     """Pull the trailing JSON object from a REM response.
 
-    The model is told to end with a single-line JSON object. We scan
-    brace-balanced blocks from the right so a stray '{' in the prose
-    doesn't get mistaken for the action payload. Returns None if no
-    well-formed JSON object is found.
+    Uses JSONDecoder.raw_decode so braces inside quoted strings do not
+    split a valid payload. Prefers the last well-formed object.
     """
     text = str(raw or "").strip()
     if not text or "{" not in text:
         return None
-    for i in range(len(text) - 1, -1, -1):
-        if text[i] != "}":
-            continue
-        depth = 0
-        start = -1
-        for j in range(i, -1, -1):
-            c = text[j]
-            if c == "}":
-                depth += 1
-            elif c == "{":
-                depth -= 1
-                if depth == 0:
-                    start = j
-                    break
+    decoder = json.JSONDecoder()
+    last = None
+    i = 0
+    while i < len(text):
+        start = text.find("{", i)
         if start < 0:
-            continue
-        candidate = text[start : i + 1]
+            break
         try:
-            return json.loads(candidate)
-        except (ValueError, TypeError):
+            obj, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            i = start + 1
             continue
-    return None
+        if isinstance(obj, dict):
+            last = obj
+        i = max(end, start + 1)
+    return last
 
 
 async def _apply_audit_actions(raw_audit: str, memory_manager) -> tuple[dict, str]:

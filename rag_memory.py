@@ -320,6 +320,8 @@ def _detect_source(message: dict) -> str:
     src = message.get("source")
     if src in ("user", "bot", "system"):
         return src
+    if message.get("is_tool") or message.get("tool_name"):
+        return "bot"
     if message.get("author_is_bot"):
         return "bot"
     content = str(message.get("content") or "")
@@ -1099,9 +1101,13 @@ class RAGMemoryManager:
         vec = await self._embed(text)
         if vec is not None:
             blob = _embedding_to_blob(vec)
+            import hashlib as _hashlib
+
+            ch = _hashlib.sha256(_strip_for_embedding(text).encode("utf-8")).hexdigest()
             self._db.execute(
-                "UPDATE vectors SET embedding=? WHERE id=?",
-                (blob, row_id),
+                "UPDATE vectors SET embedding=? WHERE id=? AND "
+                "(content_hash=? OR content_hash='' OR content_hash IS NULL)",
+                (blob, row_id, ch),
             )
             return True
         return False
@@ -1171,6 +1177,7 @@ class RAGMemoryManager:
                 payload = {"model": EMBED_MODEL, "input": texts}
 
                 try:
+                    fallback_rows = None
                     async with (
                         self._embed_semaphore,
                         aiohttp.ClientSession() as session,
@@ -1185,28 +1192,27 @@ class RAGMemoryManager:
                             logger.warning(
                                 f"Batch embed API returned {resp.status}: {body[:200]}"
                             )
-                            # Fall back to one-by-one
-                            for row in rows:
-                                if await self._embed_and_store(
-                                    row["id"], row["content"]
-                                ):
-                                    total_embedded += 1
-                            continue
-                        data = await resp.json()
-                        embeddings = data.get("embeddings") or []
-                        if not embeddings:
-                            logger.warning("Batch embed returned no embeddings")
-                            continue
-                        for i, row in enumerate(rows):
-                            if i < len(embeddings):
-                                vec = np.array(embeddings[i], dtype=np.float32)
-                                if len(vec) == EMBED_DIM:
-                                    blob = _embedding_to_blob(vec)
-                                    self._db.execute(
-                                        "UPDATE vectors SET embedding=? WHERE id=?",
-                                        (blob, row["id"]),
-                                    )
-                                    total_embedded += 1
+                            fallback_rows = rows
+                        else:
+                            data = await resp.json()
+                            embeddings = data.get("embeddings") or []
+                            if not embeddings:
+                                logger.warning("Batch embed returned no embeddings")
+                            else:
+                                for i, row in enumerate(rows):
+                                    if i < len(embeddings):
+                                        vec = np.array(embeddings[i], dtype=np.float32)
+                                        if len(vec) == EMBED_DIM:
+                                            blob = _embedding_to_blob(vec)
+                                            self._db.execute(
+                                                "UPDATE vectors SET embedding=? WHERE id=?",
+                                                (blob, row["id"]),
+                                            )
+                                            total_embedded += 1
+                    if fallback_rows:
+                        for row in fallback_rows:
+                            if await self._embed_and_store(row["id"], row["content"]):
+                                total_embedded += 1
                 except Exception as e:
                     logger.warning(f"Batch embed failed: {e}")
                     # Fall back to one-by-one for this batch
@@ -1414,14 +1420,14 @@ class RAGMemoryManager:
 
         # Prune old messages for this channel
         count_row = self._db.execute(
-            "SELECT COUNT(*) as c FROM vectors WHERE kind='message' AND channel_id=?",
+            "SELECT COUNT(*) as c FROM vectors WHERE kind IN ('message','bot_output') AND channel_id=?",
             (channel_id,),
         ).fetchone()
         if count_row and count_row["c"] > self.max_messages:
             excess = count_row["c"] - self.max_messages
             self._db.execute(
                 "DELETE FROM vectors WHERE id IN ("
-                "SELECT id FROM vectors WHERE kind='message' AND channel_id=? "
+                "SELECT id FROM vectors WHERE kind IN ('message','bot_output') AND channel_id=? "
                 "ORDER BY created_at ASC LIMIT ?)",
                 (channel_id, excess),
             )
@@ -1429,13 +1435,13 @@ class RAGMemoryManager:
         # Prune channels if too many
         chan_rows = self._db.execute(
             "SELECT channel_id, COUNT(*) as c FROM vectors "
-            "WHERE kind='message' GROUP BY channel_id "
+            "WHERE kind IN ('message','bot_output') GROUP BY channel_id "
             "ORDER BY MAX(created_at) DESC"
         ).fetchall()
         if len(chan_rows) > MAX_CHANNELS:
             for row in chan_rows[MAX_CHANNELS:]:
                 self._db.execute(
-                    "DELETE FROM vectors WHERE kind='message' AND channel_id=?",
+                    "DELETE FROM vectors WHERE kind IN ('message','bot_output') AND channel_id=?",
                     (row["channel_id"],),
                 )
 
@@ -1447,7 +1453,7 @@ class RAGMemoryManager:
 
     async def clear_channel_memory(self, channel_id: str):
         self._db.execute(
-            "DELETE FROM vectors WHERE kind='message' AND channel_id=?",
+            "DELETE FROM vectors WHERE kind IN ('message','bot_output') AND channel_id=?",
             (str(channel_id),),
         )
 
@@ -1708,6 +1714,8 @@ class RAGMemoryManager:
         is_dm: bool = False,
         is_admin: bool = False,
         max_items: int = 10,
+        budget: int | None = None,
+        **kwargs,
     ) -> list[dict]:
         """Return shared context entries relevant to the current context.
 
@@ -1757,7 +1765,44 @@ class RAGMemoryManager:
                 or str(e.get("scope", "")) == f"dm:{user_id}"
             ]
 
-        return result[:max_items]
+        now = datetime.now(timezone.utc)
+        filtered = []
+        for entry in result:
+            vis = str(entry.get("visibility") or "shared").strip().lower()
+            if vis == "admin_only" and not is_admin:
+                continue
+            if vis == "private":
+                source_uid = str(entry.get("source_user_id") or "")
+                if not is_admin and source_uid and source_uid != str(user_id):
+                    continue
+            expires = str(entry.get("expires_at") or "").strip()
+            if expires:
+                try:
+                    exp = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+                    if exp.tzinfo is None:
+                        exp = exp.replace(tzinfo=timezone.utc)
+                    if exp < now:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+            filtered.append(entry)
+        result = filtered[:max_items]
+        if budget is not None:
+            try:
+                budget_i = max(0, int(budget))
+            except (TypeError, ValueError):
+                budget_i = 0
+            if budget_i:
+                kept = []
+                used = 0
+                for entry in result:
+                    piece = str(entry.get("content") or "")
+                    if kept and used + len(piece) > budget_i:
+                        break
+                    kept.append(entry)
+                    used += len(piece)
+                result = kept
+        return result
 
     # ─── Tier 3: feedback + summarization ────────────────────────────
 

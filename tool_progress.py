@@ -264,7 +264,13 @@ class ToolProgress:
             if self._stopped or self._tool_streaming or self._posted is not None:
                 return
             content = self._render()
-            self._posted = await self._post_reply(content)
+            posted = await self._post_reply(content)
+            if self._stopped:
+                if posted is not None:
+                    with contextlib.suppress(Exception):
+                        await posted.delete()
+                return
+            self._posted = posted
             self._last_content = content
             self._last_edit = time.monotonic()
             self._edits_made = 1

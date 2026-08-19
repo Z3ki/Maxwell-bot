@@ -2232,33 +2232,29 @@ Return ONLY JSON, no fence:
             m = re.search(r"```(?:json)?\s*\n?(\{[^`]*)\s*```", text, re.DOTALL)
             if m:
                 json_str = m.group(1)
-        # 3. fallback: collect all balanced { ... } blocks, prefer the one with "actions"
+        # 3. fallback: collect well-formed JSON objects, prefer one with "actions"
         if json_str is None:
+            decoder = json.JSONDecoder()
             candidates = []
             i = 0
             while i < len(text):
-                if text[i] == "{":
-                    depth = 0
-                    for j in range(i, len(text)):
-                        if text[j] == "{":
-                            depth += 1
-                        elif text[j] == "}":
-                            depth -= 1
-                            if depth == 0:
-                                candidates.append(text[i : j + 1])
-                                i = j
-                                break
-                i += 1
-            for c in candidates:
+                start = text.find("{", i)
+                if start < 0:
+                    break
                 try:
-                    obj = json.loads(c)
-                    if isinstance(obj, dict) and "actions" in obj:
-                        json_str = c
-                        break
-                except json.JSONDecodeError as _exc:
-                    pass
+                    obj, end = decoder.raw_decode(text, start)
+                except json.JSONDecodeError:
+                    i = start + 1
+                    continue
+                if isinstance(obj, dict):
+                    candidates.append((obj, text[start:end]))
+                i = max(end, start + 1)
+            for obj, raw_obj in candidates:
+                if "actions" in obj:
+                    json_str = raw_obj
+                    break
             if json_str is None and candidates:
-                json_str = candidates[0]
+                json_str = candidates[0][1]
         if json_str is None:
             logger.warning(f"Autonomy planner returned no JSON. Raw: {text[:500]}")
             return [
@@ -2773,6 +2769,12 @@ Return ONLY JSON, no fence:
         if channel is None:
             result["result"] = "error"
             result["error"] = "channel not found"
+            return
+
+        guild = getattr(channel, "guild", None)
+        if guild and not self._guild_allowed(str(guild.id)):
+            result["result"] = "error"
+            result["error"] = "channel not allowed for autonomy"
             return
 
         result["guild_id"] = str(getattr(getattr(channel, "guild", None), "id", ""))

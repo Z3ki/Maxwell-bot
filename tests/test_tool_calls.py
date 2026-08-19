@@ -110,15 +110,18 @@ def test_strip_tool_payload_leaks_removes_deepseek_dsml_invoke():
         "my bad</｜｜DSML｜｜parameter>\n"
         "</｜｜DSML｜｜invoke>"
     )
-    assert strip_tool_payload_leaks(leaked).strip() == ""
-    assert strip_tool_payload_leaks("ok " + leaked).strip() == "ok"
+    assert strip_tool_payload_leaks(leaked).strip() == "my bad"
+    assert strip_tool_payload_leaks("ok " + leaked).strip() == "ok my bad"
     ascii_leaked = (
         '<|DSML|invoke name="send_message">'
         '<parameter name="content">hi</parameter>'
         "</invoke>"
     )
-    assert "hi" not in strip_tool_payload_leaks(ascii_leaked)
+    assert strip_tool_payload_leaks(ascii_leaked).strip() == "hi"
     assert strip_tool_payload_leaks('<invoke name="send_message">secret</invoke> visible').strip() == "visible"
+    leftover_name = "send_message\n" + leaked
+    assert strip_tool_payload_leaks(leftover_name).strip() == "my bad"
+    assert strip_tool_payload_leaks("send_message").strip() == "send_message"
 
 
 def test_strip_tool_payload_leaks_extracts_send_message_arg_protocol():

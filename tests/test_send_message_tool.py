@@ -50,3 +50,31 @@ def test_send_message_tool_non_reply_sends_all_chunks_to_channel():
         assert len(message.channel.sent) == 2
 
     asyncio.run(run())
+
+
+def test_send_message_partial_failure_keeps_sent_marker():
+    class FlakyChannel:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, text):
+            if self.sent:
+                raise RuntimeError("second chunk failed")
+            self.sent.append(text)
+
+    class FlakyMessage:
+        def __init__(self):
+            self.channel = FlakyChannel()
+            self.replies = []
+
+        async def reply(self, text):
+            self.replies.append(text)
+
+    async def run():
+        tool = SendMessageTool(SimpleNamespace())
+        message = FlakyMessage()
+        result = await tool.execute(message, content="x" * 4100)
+        assert "__MESSAGE_SENT__" in result
+        assert len(message.replies) == 1
+
+    asyncio.run(run())

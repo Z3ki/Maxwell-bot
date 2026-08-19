@@ -1285,13 +1285,34 @@ def _strip_leading_reasoning_json(text: str) -> str:
     return text[end:].lstrip()
 
 
+_DSML_INVOKE_NAME_RE = re.compile(
+    r"""\bname\s*=\s*['"]([^'"]+)['"]""",
+    re.IGNORECASE,
+)
+_DSML_CONTENT_PARAM_RE = re.compile(
+    r"<[^>]*parameter[^>]*\bname\s*=\s*['\"]content['\"][^>]*>(.*?)</[^>]*parameter[^>]*>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _replace_dsml_invoke(match: re.Match) -> str:
+    """Keep send_message content; drop every other DSML invoke block."""
+    block = match.group(0)
+    name_m = _DSML_INVOKE_NAME_RE.search(block)
+    name = (name_m.group(1) if name_m else "").strip().lower()
+    if name != "send_message":
+        return ""
+    contents = [m.group(1).strip() for m in _DSML_CONTENT_PARAM_RE.finditer(block)]
+    return contents[-1] if contents else ""
+
+
 def _strip_dsml_tool_leaks(text: str) -> str:
-    """Drop DeepSeek DSML invoke/parameter dumps from visible replies."""
+    """Drop DeepSeek DSML dumps; keep leaked send_message content as the reply."""
     cleaned = str(text or "")
     before = cleaned
-    cleaned = _DSML_WRAPPED_INVOKE_RE.sub("", cleaned)
+    cleaned = _DSML_WRAPPED_INVOKE_RE.sub(_replace_dsml_invoke, cleaned)
+    cleaned = _DSML_INVOKE_BLOCK_RE.sub(_replace_dsml_invoke, cleaned)
     cleaned = _DSML_WRAPPED_PARAMETER_RE.sub("", cleaned)
-    cleaned = _DSML_INVOKE_BLOCK_RE.sub("", cleaned)
     cleaned = _DSML_PARAMETER_BLOCK_RE.sub("", cleaned)
     cleaned = _DSML_TAG_RE.sub("", cleaned)
     if cleaned != before:
@@ -1299,6 +1320,19 @@ def _strip_dsml_tool_leaks(text: str) -> str:
             "Stripped DeepSeek DSML tool leak (%d chars)",
             len(before) - len(cleaned),
         )
+        leftover = cleaned.strip()
+        names = sorted(KNOWN_TOOL_NAMES, key=len, reverse=True)
+        name_alt = "|".join(re.escape(n) for n in names)
+        if leftover and re.fullmatch(name_alt, leftover, flags=re.IGNORECASE):
+            cleaned = ""
+        else:
+            cleaned = re.sub(
+                rf"^(?:{name_alt})\s*\n+",
+                "",
+                leftover,
+                count=1,
+                flags=re.IGNORECASE,
+            )
     return cleaned
 
 
@@ -1591,6 +1625,30 @@ def strip_tool_payload_leaks(text: str) -> str:
     return cleaned
 
 
+def _sanitize_visible_reply(text: str) -> str:
+    """Shared Discord/Telegram cleanup for leaked tool traces and sent-markers."""
+    response = re.sub(
+        r"\[(\w+)\]\s*\n?\s*\{.*?\}\s*\n?\s*\[/\1\]",
+        "",
+        str(text or ""),
+        flags=re.DOTALL,
+    )
+    response = re.sub(r"\[/?(?:TOOL_CALL:)?[\w-]+.*?\]", "", response)
+    response = TOOL_TRACE_LINE_RE.sub("", response)
+    for marker in (
+        "__NO_RESPONSE__",
+        "__TTS_SENT__",
+        "__SHELL_SENT__",
+        "__MEME_SENT__",
+        "__MEDIA_SENT__",
+        "__FILE_SENT__",
+        "__MESSAGE_SENT__",
+        "__REASONING_RECORDED__",
+    ):
+        response = response.replace(marker, "")
+    return strip_tool_payload_leaks(response).strip()
+
+
 def _auto_format_discord(text: str) -> str:
     if not text or len(text.strip()) < 10:
         return text
@@ -1650,6 +1708,9 @@ def _split_html_payload(fragment: str, limit: int = 3900) -> list[str]:
         cut = remaining.rfind("\n", 0, limit)
         if cut < 1:
             cut = limit
+            amp = remaining.rfind("&", 0, cut)
+            if amp > 0 and ";" not in remaining[amp:cut]:
+                cut = amp
         chunks.append(remaining[:cut])
         remaining = remaining[cut:].lstrip("\n")
     return chunks
@@ -1684,8 +1745,7 @@ def _telegram_html_chunks(text: str, limit: int = 3900) -> list[str]:
         budget = max(1, limit - len(open_tag) - len(close_tag))
         for piece in _split_html_payload(html.escape(code_text.strip("\n")), budget):
             block = open_tag + piece + close_tag
-            if current and len(current) + len(block) > limit:
-                flush()
+            flush()
             chunks.append(block)
 
     pos = 0
@@ -8827,23 +8887,7 @@ class MaxwellBot(commands.Bot):
                 and not (response or "").strip()
             ):
                 return
-            response = re.sub(
-                r"\[(\w+)\]\s*\n?\s*\{.*?\}\s*\n?\s*\[/\1\]",
-                "",
-                response,
-                flags=re.DOTALL,
-            )
-            response = re.sub(r"\[/?(?:TOOL_CALL:)?[\w-]+.*?\]", "", response)
-            response = TOOL_TRACE_LINE_RE.sub("", response)
-            response = (
-                response.replace("__NO_RESPONSE__", "")
-                .replace("__TTS_SENT__", "")
-                .replace("__SHELL_SENT__", "")
-                .replace("__MEME_SENT__", "")
-                .replace("__MEDIA_SENT__", "")
-                .strip()
-            )
-            response = strip_tool_payload_leaks(response)
+            response = _sanitize_visible_reply(response)
             # Safety net: if the user asked for a site/page/website and the
             # model replied with raw HTML/JS in chat instead of calling
             # create_site, auto-route the HTML to create_site so the user
@@ -8933,16 +8977,11 @@ class MaxwellBot(commands.Bot):
                                     break
                         except Exception as _e:  # noqa: BLE001
                             logger.debug("transition_to_final failed: %s", _e)
+                reply_delivered = bool(transitioned)
                 for i, chunk in enumerate(chunks):
                     if i == 0 and transitioned:
-                        # Progress message is now the reply; no second
-                        # message needed. Fall through to chunks 2+ if any.
-                        if len(chunks) > 1:
-                            sent = await self._send_with_slowmode(
-                                message.channel, content=chunk
-                            )
-                            if sent is None:
-                                break
+                        # Progress message is already the first chunk.
+                        continue
                     elif i == 0:
                         try:
                             sent = await self._send_with_slowmode(
@@ -8965,12 +9004,14 @@ class MaxwellBot(commands.Bot):
                             )
                         if sent is None:
                             break
+                        reply_delivered = True
                     else:
                         sent = await self._send_with_slowmode(
                             message.channel, content=chunk
                         )
                         if sent is None:
                             break
+                        reply_delivered = True
                 # Write the bot's own reply to channel memory. Without
                 # this the next turn sees the user's "Explain X" question
                 # but NOT the bot's answer — the user comes back and
@@ -8986,7 +9027,8 @@ class MaxwellBot(commands.Bot):
                 # user's message_id so it's stable across retries and
                 # doesn't collide with the user's own message_id.
                 if (
-                    response
+                    reply_delivered
+                    and response
                     and self._control.get("store_memory", True)
                     and getattr(self, "memory", None) is not None
                 ):
@@ -9007,8 +9049,9 @@ class MaxwellBot(commands.Bot):
                         logger.debug(
                             f"Failed to record bot reply in channel memory: {_e}"
                         )
-                await self._record_rem_event(message, "assistant", response)
-                normal_reply_sent = True
+                if reply_delivered:
+                    await self._record_rem_event(message, "assistant", response)
+                    normal_reply_sent = True
         except asyncio.CancelledError as _exc:
             logger.info(f"Cancelled active request in channel {channel_id}")
             raise
@@ -10237,7 +10280,7 @@ class MaxwellBot(commands.Bot):
                     # LTM + shared_context for durable facts (don't decay).
                     rag_results = await self.memory.rag_search(
                         user_message,
-                        kinds=["ltm", "shared_context"],
+                        kinds=["ltm"],
                         guild_id=str(getattr(message.guild, "id", "") or ""),
                         channel_id=str(getattr(message.channel, "id", "") or ""),
                         apply_recency=False,
@@ -10299,7 +10342,7 @@ class MaxwellBot(commands.Bot):
                         ]
                     except Exception as e:
                         logger.debug(f"recall_web_results skipped: {e}")
-                if rag_context or rag_recent:
+                if rag_context or rag_recent or rag_web:
                     # Build RAG-augmented memory block. Durable facts first
                     # (LTM/shared_context — they don't decay), then recent
                     # user messages from the same channel/guild. The bot
@@ -10885,7 +10928,7 @@ class MaxwellBot(commands.Bot):
                 # memory key on a shared "tg:None" bucket.
                 logger.warning("Telegram webhook update missing chat id; skipping")
                 return web.Response(status=200)
-            text = message.get("text", "").strip()
+            text = (message.get("text") or message.get("caption") or "").strip()
             user = message.get("from", {})
             user_name = user.get("first_name", "Telegram User")
             user_id = str(user.get("id", "unknown"))
@@ -10905,15 +10948,18 @@ class MaxwellBot(commands.Bot):
                     url_base,
                 )
             )
-            task.add_done_callback(
-                lambda t: (
+            def _on_webhook_task_done(t: asyncio.Task) -> None:
+                if t.cancelled():
+                    return
+                exc = t.exception()
+                if exc is not None:
                     logger.error(
-                        f"Telegram webhook task failed: {t.exception()}\n{traceback.format_exc()}"
+                        "Telegram webhook task failed: %s",
+                        exc,
+                        exc_info=(type(exc), exc, exc.__traceback__),
                     )
-                    if t.exception()
-                    else None
-                )
-            )
+
+            task.add_done_callback(_on_webhook_task_done)
             return web.Response(status=200)
 
         app = web.Application()
@@ -11082,6 +11128,16 @@ class MaxwellBot(commands.Bot):
             chat_id,
             text[:100],
         )
+        tg_chan_id = f"tg:{chat_id}" if chat_id else ""
+        if self._control.get("store_memory", True) and tg_chan_id:
+            await self.memory.add_to_channel_memory(
+                tg_chan_id,
+                {
+                    "author": user_name,
+                    "author_id": user_id,
+                    "content": text or "[media]",
+                },
+            )
 
         ai_timeout = max(
             10,
@@ -11134,20 +11190,21 @@ class MaxwellBot(commands.Bot):
             self.memory, "rag_search"
         ):
             try:
-                # LTM + shared_context for durable facts
+                # LTM only here. Shared context is loaded above with
+                # visibility/scope checks; rag_search would leak private facts.
                 rag_results = await self.memory.rag_search(
                     text,
-                    kinds=["ltm", "shared_context"],
-                    guild_id=str(chat_id or ""),
+                    kinds=["ltm"],
+                    channel_id=tg_chan_id,
                     top_k=20,
                 )
                 rag_context = [r for r in rag_results if r.get("similarity", 0) >= 0.35]
-                # Recent user messages — same channel/guild as the chat
+                # Recent user messages — same Telegram chat, not every DM
                 rec_results = await self.memory.rag_search(
                     text,
                     kinds=["message"],
                     source="user",
-                    guild_id=str(chat_id or ""),
+                    channel_id=tg_chan_id,
                     apply_recency=True,
                     recency_tau_days=3.0,
                     top_k=8,
@@ -11232,10 +11289,6 @@ class MaxwellBot(commands.Bot):
             {"role": "system", "content": "\n\n".join(system_parts + dynamic_parts)}
         ]
 
-        # chat_id is guaranteed truthy by callers, but guard anyway: a
-        # None here would key memory on a shared "tg:None" bucket and
-        # cross-contaminate every malformed Telegram message.
-        tg_chan_id = f"tg:{chat_id}" if chat_id else ""
         memory = await self.memory.get_channel_memory(tg_chan_id) if chat_id else None
         if memory:
             self_user_id_tg = str(getattr(self.user, "id", "")) if self.user else ""
@@ -11334,6 +11387,8 @@ class MaxwellBot(commands.Bot):
             )
             pending_native = tg_native_calls
             conversation_tail: list[dict] = []
+            followup_turn_ran = False
+            tool_results: list[str] = []
             for _iteration in range(max_iters):
                 response_text, tool_results = await self._dispatch_tool_calls(
                     tg_tool_message,
@@ -11403,68 +11458,31 @@ class MaxwellBot(commands.Bot):
                     pending_native = self._native_calls_from(followup)
                     if (followup and str(followup).strip()) or pending_native:
                         response_text = (followup or "").strip()
+                        followup_turn_ran = True
                     else:
                         break
                 finally:
                     await self._release_ai_slot()
             if any(
-                (tr.startswith("Tool no_response:") and "__NO_RESPONSE__" in tr)
-                or "__MESSAGE_SENT__" in tr
+                tr.startswith("Tool no_response:") and "__NO_RESPONSE__" in tr
                 for tr in all_tool_results
             ):
-                outcome = (
-                    "no_response"
-                    if any(
-                        tr.startswith("Tool no_response:") and "__NO_RESPONSE__" in tr
-                        for tr in all_tool_results
-                    )
-                    else "send_message"
-                )
                 await self._ensure_reasoning_trace(
-                    tg_tool_message, all_tool_results, response_text, outcome
+                    tg_tool_message, all_tool_results, response_text, "no_response"
                 )
                 response_text = ""
-            response_text = re.sub(
-                r"\[(\w+)\]\s*\n?\s*\{.*?\}\s*\n?\s*\[/\1\]",
-                "",
-                response_text,
-                flags=re.DOTALL,
-            )
-            response_text = re.sub(r"\[/?(?:TOOL_CALL:)?[\w-]+.*?\]", "", response_text)
-            response_text = (
-                response_text.replace("__NO_RESPONSE__", "")
-                .replace("__SHELL_SENT__", "")
-                .replace("__MEME_SENT__", "")
-                .replace("__MEDIA_SENT__", "")
-                .strip()
-            )
-            response_text = strip_tool_payload_leaks(response_text)
+            elif _should_skip_plaintext_after_send(
+                tool_results, all_tool_results, followup_turn_ran, response_text
+            ):
+                await self._ensure_reasoning_trace(
+                    tg_tool_message, all_tool_results, response_text, "send_message"
+                )
+                response_text = ""
+            response_text = _sanitize_visible_reply(response_text)
 
-        if self._control.get("store_memory", True):
-            memory_note = latest_label
-            await self.memory.add_to_channel_memory(
-                tg_chan_id,
-                {
-                    "author": user_name,
-                    "author_id": user_id,
-                    "content": memory_note,
-                },
-            )
-            await self.memory.add_to_channel_memory(
-                tg_chan_id,
-                {
-                    "author": self.bot_name,
-                    # 2026-07-22: add author_id/author_is_bot so is_self
-                    # detection works. The old dict had no author_id, so the
-                    # bot's TG reply was mis-rendered as a user turn (a
-                    # "user named Maxwell" said it).
-                    "author_id": str(self.user.id) if self.user else "",
-                    "author_is_bot": True,
-                    "content": response_text or "[voice message sent]",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                },
-            )
+        response_text = _sanitize_visible_reply(response_text)
 
+        delivered_text = ""
         if response_text:
             tg_reply = TelegramMessageAdapter(
                 session,
@@ -11478,6 +11496,25 @@ class MaxwellBot(commands.Bot):
                 tg_reply, all_tool_results, response_text, "reply"
             )
             await tg_reply.reply(response_text)
+            delivered_text = response_text
+        elif any("__TTS_SENT__" in tr for tr in all_tool_results):
+            delivered_text = "[voice message sent]"
+
+        if (
+            delivered_text
+            and self._control.get("store_memory", True)
+            and tg_chan_id
+        ):
+            await self.memory.add_to_channel_memory(
+                tg_chan_id,
+                {
+                    "author": self.bot_name,
+                    "author_id": str(self.user.id) if self.user else "",
+                    "author_is_bot": True,
+                    "content": delivered_text,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            )
 
     async def _telegram_loop(self):
         """Long-poll getUpdates and hand each message to the shared processor.
@@ -11498,6 +11535,18 @@ class MaxwellBot(commands.Bot):
         offset = 0
         timeout = 25
         session = await _get_shared_session()
+        try:
+            async with session.post(
+                f"{url_base}/deleteWebhook",
+                json={"drop_pending_updates": False},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                logger.info(
+                    "Telegram polling cleared leftover webhook (status=%d)",
+                    resp.status,
+                )
+        except Exception as e:
+            logger.warning("Telegram deleteWebhook before polling failed: %s", e)
 
         while True:
             try:
@@ -11562,7 +11611,7 @@ class MaxwellBot(commands.Bot):
                             f"update {update.get('update_id')}"
                         )
                         continue
-                    text = message.get("text", "").strip()
+                    text = (message.get("text") or message.get("caption") or "").strip()
                     user = message.get("from", {})
                     user_name = user.get("first_name", "Telegram User")
                     user_id = str(user.get("id", "unknown"))

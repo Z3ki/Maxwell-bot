@@ -1,6 +1,6 @@
 import json
 
-from rem import rem_system_prompt, short_term_slice_prompt
+from rem import rem_system_prompt, short_term_slice_prompt, _extract_rem_json
 
 
 def test_rem_system_prompt_shape():
@@ -26,3 +26,10 @@ def test_short_term_slice_prompt_serializes_stably():
     assert "reasoning excluded" in prompt
     payload = prompt.split("\n", 1)[1]
     assert json.loads(payload) == events
+
+
+def test_extract_rem_json_allows_braces_inside_strings():
+    raw = 'notes here {"audit":"text } here","actions":{}}'
+    payload = _extract_rem_json(raw)
+    assert payload["audit"] == "text } here"
+    assert payload["actions"] == {}

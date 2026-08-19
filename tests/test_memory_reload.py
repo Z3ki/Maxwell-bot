@@ -80,6 +80,25 @@ def test_channel_memory_clear(tmp_path):
         await mgr.clear_channel_memory("chan1")
         assert len(await mgr.get_channel_memory("chan1")) == 0
 
+        await mgr.add_to_channel_memory("chan1", {
+            "message_id": "u1",
+            "author": "Alice",
+            "author_id": "123",
+            "content": "user line",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+        })
+        await mgr.add_to_channel_memory("chan1", {
+            "message_id": "b1",
+            "author": "Maxwell",
+            "author_id": "999",
+            "author_is_bot": True,
+            "content": "bot line that is long enough to store",
+            "timestamp": "2026-01-01T00:00:01+00:00",
+        })
+        assert len(await mgr.get_channel_memory("chan1")) == 2
+        await mgr.clear_channel_memory("chan1")
+        assert len(await mgr.get_channel_memory("chan1")) == 0
+
     _run(run())
 
 
@@ -145,5 +164,43 @@ def test_message_dedup(tmp_path):
         mem = await mgr.get_channel_memory("chan1")
         assert len(mem) == 1
         assert mem[0]["content"] == "updated"
+
+    _run(run())
+
+
+def test_shared_context_accepts_budget_and_hides_expired_admin_facts(tmp_path):
+    async def run():
+        mgr = RAGMemoryManager(str(tmp_path))
+        await mgr.add_shared_context({
+            "content": "public fact",
+            "scope": "global",
+            "importance": 5,
+            "visibility": "shared",
+        })
+        await mgr.add_shared_context({
+            "content": "secret admin fact",
+            "scope": "global",
+            "importance": 9,
+            "visibility": "admin_only",
+        })
+        await mgr.add_shared_context({
+            "content": "expired fact",
+            "scope": "global",
+            "importance": 8,
+            "visibility": "shared",
+            "expires_at": "2000-01-01T00:00:00+00:00",
+        })
+        visible = await mgr.get_relevant_shared_context(
+            user_id="1", is_admin=False, max_items=20, budget=10000
+        )
+        contents = [e["content"] for e in visible]
+        assert "public fact" in contents
+        assert "secret admin fact" not in contents
+        assert "expired fact" not in contents
+        admin = await mgr.get_relevant_shared_context(
+            user_id="1", is_admin=True, max_items=20, budget=10000
+        )
+        admin_contents = [e["content"] for e in admin]
+        assert "secret admin fact" in admin_contents
 
     _run(run())

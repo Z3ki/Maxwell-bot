@@ -1,4 +1,4 @@
-from bot import MaxwellBot
+from bot import MaxwellBot, _telegram_html_chunks
 
 
 def test_split_response_closes_and_reopens_code_fence_when_chunking():
@@ -51,3 +51,10 @@ def test_split_response_reopens_fence_on_every_code_chunk():
         assert chunk.startswith("```")
         assert chunk.rstrip().endswith("```")
         assert chunk.count("```") == 2
+
+
+def test_telegram_html_chunks_keeps_text_before_code_block():
+    chunks = _telegram_html_chunks("hello\n```py\nprint(1)\n```\nbye")
+    joined = "".join(chunks)
+    assert joined.find("hello") < joined.find("print(1)")
+    assert "bye" in joined

@@ -1669,7 +1669,10 @@ class OllamaProvider:
         stream. This lets callers update a live progress message mid-generation.
         """
         if not self.available:
-            raise RuntimeError("Provider not available")
+            logger.warning("Provider marked unavailable; retrying initialization")
+            await self.initialize()
+            if not self.available:
+                raise RuntimeError("Provider not available")
 
         chat_messages = [dict(m) for m in messages]
 
