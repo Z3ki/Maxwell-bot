@@ -8532,6 +8532,19 @@ class MaxwellBot(commands.Bot):
                 custom_tool_calls,
                 len(openai_tools or []),
             )
+            if logger.isEnabledFor(logging.DEBUG):
+                # LOG_LEVEL=debug shows the result contract the model is
+                # actually being handed this turn, so a mislabeled tool is
+                # visible in the log instead of only in the model's behavior.
+                _groups = contract_groups(
+                    [t["function"]["name"] for t in (openai_tools or [])]
+                )
+                logger.debug(
+                    "Tool result contract: returns_output=%s silent=%s ends_turn=%s",
+                    _groups["result"],
+                    _groups["silent"],
+                    _groups["ending"],
+                )
             # When the custom protocol is on, instruct the model to emit the
             # tool call as a single-line bare JSON object. The provider parses
             # it from the text stream incrementally, so the bot's progress
