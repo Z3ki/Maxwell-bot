@@ -1227,6 +1227,27 @@ class ProviderEndpoint:
     disable_reasoning: bool = False
 
 
+def normalize_base_url(base_url: str) -> str:
+    """Normalize an OpenAI-compatible base URL to the API root.
+
+    Requests are built as ``{base_url}/chat/completions``, so the base has
+    to include the API path segment. Everyone pastes the bare host
+    ("http://localhost:11434", "https://api.openai.com"), which then 404s in
+    a way that looks like a broken bot rather than a missing "/v1". If the
+    URL carries no path at all we add the conventional one; a URL that
+    already has a path (/v1, /v2, /api/v1, ...) is left exactly as given.
+    """
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        return base
+    _, _, rest = base.partition("://")
+    if not rest:  # no scheme: treat the whole thing as a host
+        rest = base
+    if "/" in rest:  # already carries a path — the operator's business
+        return base
+    return f"{base}/v1"
+
+
 class OllamaProvider:
     """OpenAI-compatible LLM Provider with multimodal support using /v1/chat/completions"""
 
@@ -1249,7 +1270,7 @@ class OllamaProvider:
         vision_api_key: str = "",
         vision_disable_reasoning: bool = True,
     ):
-        self.base_url = base_url.rstrip("/")
+        self.base_url = normalize_base_url(base_url)
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
@@ -1265,7 +1286,7 @@ class OllamaProvider:
             self._endpoints.append(
                 ProviderEndpoint(
                     "fallback",
-                    fallback_base_url.rstrip("/"),
+                    normalize_base_url(fallback_base_url),
                     fallback_model,
                     fallback_api_key.strip(),
                     fallback_disable_reasoning,
@@ -1277,7 +1298,7 @@ class OllamaProvider:
             self._endpoints.append(
                 ProviderEndpoint(
                     "vision",
-                    (vision_base_url or self.base_url).rstrip("/"),
+                    normalize_base_url(vision_base_url or self.base_url),
                     vision_model,
                     (vision_api_key or self.api_key).strip(),
                     vision_disable_reasoning,

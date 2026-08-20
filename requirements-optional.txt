@@ -1,0 +1,25 @@
+# Optional extras. Install only the lines for features you actually want —
+# every one of them is auto-detected, so a missing package just means that
+# feature stays off (see `python3 doctor.py`).
+#
+#   pip install -r requirements-optional.txt   # all of it
+#   pip install ddgs                           # or just the one you want
+
+# --- web search (ENABLE_WEB_SEARCH) ------------------------------------------
+ddgs>=9.14.0
+
+# --- YouTube tool (ENABLE_YOUTUBE) -------------------------------------------
+# Also needs `node` or `deno` on PATH for YouTube's JS challenge.
+yt-dlp>=2026.7.4
+yt-dlp-ejs>=0.8.0
+
+# --- voice channels (ENABLE_VC) ----------------------------------------------
+# Also needs system libopus + libsodium, and ffmpeg for playback.
+PyNaCl>=1.6.0
+davey>=0.1.6
+discord-ext-voice-recv==0.5.2a179
+
+# --- text to speech (ENABLE_TTS) ---------------------------------------------
+# Only needed for the gTTS engine; espeak-ng (system package) and the
+# Fish/NVIDIA APIs need nothing here.
+gTTS>=2.5.0

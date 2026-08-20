@@ -220,6 +220,18 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         },
         ["command"],
     ),
+    "sub_agent": _obj(
+        {
+            "task": _str(
+                "The complete task for the sub-agent. It cannot ask "
+                "questions, so include the goal, any constraints, and how it "
+                "should verify the result."
+            ),
+            "workdir": _str("Optional short name for the scratch directory"),
+            "max_steps": _int("Optional cap on sub-agent steps (default 24)"),
+        },
+        ["task"],
+    ),
     "fetch_url": _obj(
         {
             "url": _str("URL to fetch"),
@@ -356,6 +368,7 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "fetch_url",
         "youtube",
         "shell",
+        "sub_agent",
         "list_admin_servers",
         "create_category",
         "create_channel",

@@ -232,6 +232,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     SetNicknameTool,
     ShellTool,
     SleepTool,
+    SubAgentTool,
     TtsTool,
     TypingTool,
     UpdateBasePersonalityTool,
@@ -2384,8 +2385,6 @@ class MaxwellBot(commands.Bot):
         self._setup_memory()
         self._setup_tools()
         self.autonomy_engine = AutonomyEngine(self)
-        # ContextCleanupEngine removed — replaced by RAG vector memory
-        self.context_cleanup_engine = None
 
     def _update_recent_users(self, channel_id: str, user: Any):
         """Track users seen in this channel's conversation so render can resolve
@@ -2808,6 +2807,10 @@ class MaxwellBot(commands.Bot):
         self.tools["no_response"] = NoResponseTool(self)
         if self.config.ENABLE_SHELL:
             self.tools["shell"] = ShellTool(self)
+        if self.config.ENABLE_SUBAGENT:
+            # Native sub-agent: a nested Maxwell on the same provider, not an
+            # external coding-agent binary. See bot_tools.SubAgentTool.
+            self.tools["sub_agent"] = SubAgentTool(self)
         if self.config.ENABLE_FETCH_URL:
             self.tools["fetch_url"] = FetchUrlTool(self)
         if self.config.ENABLE_YOUTUBE:
@@ -3024,9 +3027,6 @@ class MaxwellBot(commands.Bot):
             asyncio.create_task(self._rem_scheduler_loop()),
         ]
         await self.autonomy_engine.start()
-        # ContextCleanupEngine.start() removed — RAG memory doesn't need a janitor
-        if self.context_cleanup_engine:
-            await self.context_cleanup_engine.start()
         if self.config.TELEGRAM_TOKEN and self.config.ENABLE_TELEGRAM:
             if self.config.TELEGRAM_WEBHOOK_URL:
                 self._tasks.append(asyncio.create_task(self._telegram_webhook_loop()))
@@ -6816,13 +6816,9 @@ class MaxwellBot(commands.Bot):
                                 f"autonomy interval set to {control['autonomy_interval_seconds']}s"
                             )
                         elif typ == "context_cleanup_run":
-                            if self.context_cleanup_engine:
-                                result = await self.context_cleanup_engine.run_once()
-                                cmd["result"] = f"context cleanup: {result}"
-                            else:
-                                cmd["result"] = (
-                                    "context cleanup engine removed (RAG memory active)"
-                                )
+                            cmd["result"] = (
+                                "context cleanup engine removed (RAG memory active)"
+                            )
                         elif typ in (
                             "context_cleanup_enable",
                             "context_cleanup_disable",
@@ -11744,12 +11740,6 @@ async def main():
             await bot.autonomy_engine.stop()
         except Exception as e:
             logger.error(f"Failed to stop autonomy engine: {e}")
-        try:
-            cc = getattr(bot, "context_cleanup_engine", None)
-            if cc is not None and hasattr(cc, "stop"):
-                await cc.stop()
-        except Exception as e:
-            logger.error(f"Failed to stop context cleanup engine: {e}")
         for task in getattr(bot, "_tasks", []):
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

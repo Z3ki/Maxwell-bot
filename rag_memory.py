@@ -35,14 +35,76 @@ logger = logging.getLogger(__name__)
 
 # ─── constants ────────────────────────────────────────────────────────
 
-# Embedding model. qwen3-embedding:0.6b wins on context length (32k
-# tokens ≈ 128k chars, vs bge-m3's 8k). For memory use case — whole
-# conversations, not single sentences — the long context is the
-# deciding factor; we can skip a chunking pipeline entirely. 1024-dim
-# output. ollama pull qwen3-embedding:0.6b
-EMBED_MODEL = "qwen3-embedding:0.6b"
-EMBED_DIM = 1024
-OLLAMA_EMBED_URL = "http://localhost:11434/api/embed"
+# Embedding backend. The default is a local Ollama serving
+# qwen3-embedding:0.6b — it wins on context length (32k tokens ≈ 128k
+# chars, vs bge-m3's 8k), which suits whole conversations rather than
+# single sentences, and it is free. `ollama pull qwen3-embedding:0.6b`.
+#
+# Nothing here is hardcoded any more: point MAXWELL_EMBED_BASE_URL at any
+# OpenAI-compatible /v1/embeddings service (OpenAI, OpenRouter, LM Studio,
+# vLLM, Infinity) and set MAXWELL_EMBED_MODEL / MAXWELL_EMBED_DIM to match.
+# Both the Ollama and the OpenAI response shapes are parsed below, so the
+# only thing you change is the URL.
+try:  # config is the single source of truth; fall back for standalone use
+    from config import Config as _Cfg
+
+    EMBED_MODEL = _Cfg.EMBED_MODEL
+    EMBED_DIM = _Cfg.EMBED_DIM
+    EMBED_API_KEY = _Cfg.EMBED_API_KEY
+    EMBED_BASE_URL = _Cfg.EMBED_BASE_URL
+    EMBEDDINGS_ENABLED = _Cfg.ENABLE_RAG
+except Exception:  # pragma: no cover - config import failure is not fatal here
+    EMBED_MODEL = os.getenv("MAXWELL_EMBED_MODEL", "qwen3-embedding:0.6b")
+    EMBED_DIM = int(os.getenv("MAXWELL_EMBED_DIM", "1024"))
+    EMBED_API_KEY = os.getenv("MAXWELL_EMBED_API_KEY", "")
+    EMBED_BASE_URL = os.getenv("MAXWELL_EMBED_BASE_URL", "http://localhost:11434")
+    EMBEDDINGS_ENABLED = True
+
+
+def _embed_endpoint(base_url: str) -> str:
+    """Turn a base URL into the actual embeddings endpoint.
+
+    Accepts a full endpoint (used as-is), an OpenAI-style `/v1` base
+    (-> `/v1/embeddings`), or an Ollama host (-> `/api/embed`).
+    """
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        return "http://localhost:11434/api/embed"
+    if base.endswith(("/api/embed", "/embeddings")):
+        return base
+    if base.endswith("/v1") or "/v1/" in base:
+        return f"{base}/embeddings"
+    return f"{base}/api/embed"
+
+
+EMBED_URL = _embed_endpoint(EMBED_BASE_URL)
+# Ollama needs no auth; hosted endpoints do. Empty key = no header.
+EMBED_HEADERS = {"Authorization": f"Bearer {EMBED_API_KEY}"} if EMBED_API_KEY else {}
+# Kept as an alias: older code (and a few tests) referenced this name.
+OLLAMA_EMBED_URL = EMBED_URL
+
+
+def _extract_embeddings(data: dict) -> list[list[float]]:
+    """Pull vectors out of an Ollama or OpenAI embeddings response."""
+    if not isinstance(data, dict):
+        return []
+    vectors = data.get("embeddings")
+    if isinstance(vectors, list) and vectors:
+        return vectors
+    single = data.get("embedding")
+    if isinstance(single, list) and single:
+        return [single]
+    # OpenAI: {"data": [{"embedding": [...], "index": 0}, ...]}
+    items = data.get("data")
+    if isinstance(items, list) and items:
+        out = [
+            item["embedding"]
+            for item in items
+            if isinstance(item, dict) and isinstance(item.get("embedding"), list)
+        ]
+        if out:
+            return out
+    return []
 
 
 def _float_env(name: str, default: float, minimum: float, maximum: float) -> float:
@@ -913,6 +975,10 @@ class RAGMemoryManager:
         Cold call: ~138ms (ollama warmup).
         Cache hit: ~0.5ms (SQLite SELECT).
         """
+        if not EMBEDDINGS_ENABLED:
+            # ENABLE_RAG=false: no embedding calls at all. Retrieval falls
+            # back to plain recent-history context and the bot keeps working.
+            return None
         text = str(text or "").strip()
         if not text:
             return None
@@ -968,8 +1034,9 @@ class RAGMemoryManager:
                 for ci, chunk_text in enumerate(chunks_to_embed):
                     payload = {"model": EMBED_MODEL, "input": chunk_text}
                     async with session.post(
-                        OLLAMA_EMBED_URL,
+                        EMBED_URL,
                         json=payload,
+                        headers=EMBED_HEADERS,
                         timeout=aiohttp.ClientTimeout(total=EMBED_HTTP_TIMEOUT_SECONDS),
                     ) as resp:
                         if resp.status != 200:
@@ -984,11 +1051,7 @@ class RAGMemoryManager:
                             )
                             return None
                         data = await resp.json()
-                        embeddings = data.get("embeddings") or []
-                        if not embeddings:
-                            emb = data.get("embedding")
-                            if emb:
-                                embeddings = [emb]
+                        embeddings = _extract_embeddings(data)
                         if not embeddings:
                             logger.warning(
                                 f"Embedding API returned no embeddings "
@@ -1237,8 +1300,9 @@ class RAGMemoryManager:
                         self._embed_semaphore,
                         aiohttp.ClientSession() as session,
                         session.post(
-                            OLLAMA_EMBED_URL,
+                            EMBED_URL,
                             json=payload,
+                            headers=EMBED_HEADERS,
                             timeout=aiohttp.ClientTimeout(total=120),
                         ) as resp,
                     ):
@@ -1250,7 +1314,7 @@ class RAGMemoryManager:
                             fallback_rows = rows
                         else:
                             data = await resp.json()
-                            embeddings = data.get("embeddings") or []
+                            embeddings = _extract_embeddings(data)
                             if not embeddings:
                                 logger.warning("Batch embed returned no embeddings")
                             else:

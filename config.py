@@ -1,6 +1,29 @@
-"""Configuration management for Maxwell Bot"""
+"""Configuration management for Maxwell Bot.
+
+Design note — optional features
+-------------------------------
+Maxwell only *requires* two things: a Discord token and an OpenAI-compatible
+model endpoint. Everything else (voice, YouTube, web search, TTS, email,
+video frames, RAG embeddings) is optional and gated behind an ``ENABLE_*``
+switch.
+
+Those switches are tri-state:
+
+    true   -> force on  (you promise the dependency is installed)
+    false  -> force off (never register the tool / import the dep)
+    auto   -> DEFAULT. Turn the feature on only if its dependency is
+              actually present on this machine.
+
+"auto" is what makes a bare ``git clone`` + ``pip install -r
+requirements.txt`` work: features whose system package, Python package or
+API key is missing quietly stay off instead of erroring on first use, and
+``python3 doctor.py`` explains every decision.
+"""
 
 import os
+import shutil
+import sys
+from importlib.util import find_spec
 from pathlib import Path
 
 from dotenv.main import load_dotenv
@@ -52,6 +75,89 @@ def _bool_env(name: str, default: bool) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _first_env(*names: str, default: str = "") -> str:
+    """First non-empty value among ``names`` (aliases), else ``default``."""
+    for name in names:
+        value = os.getenv(name)
+        if value is not None and value.strip():
+            return value.strip()
+    return default
+
+
+# --- optional-feature detection -------------------------------------------
+# Every check below is cheap and runs once, at import: find_spec() does NOT
+# execute the module, and shutil.which() is a PATH scan. Restart to re-detect
+# after installing something.
+
+_TRUE = {"1", "true", "yes", "on"}
+_FALSE = {"0", "false", "no", "off"}
+
+
+def _has_module(name: str) -> bool:
+    try:
+        return find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _has_binary(name: str) -> bool:
+    """True if ``name`` is runnable: on PATH, or beside this interpreter.
+
+    The second case matters for venv installs started by absolute
+    interpreter path (PM2 does exactly that): the venv's bin/ holds the
+    console scripts but is not on PATH.
+    """
+    if not name:
+        return False
+    if shutil.which(name):
+        return True
+    sibling = Path(sys.executable).parent / name
+    return sibling.is_file() and os.access(sibling, os.X_OK)
+
+
+# Human-readable reason for each feature decision, filled in by
+# _feature_env(). Consumed by Config.feature_report() / doctor.py.
+FEATURE_REASONS: dict[str, str] = {}
+
+
+def _feature_env(
+    name: str,
+    detect=None,
+    *,
+    needs: str = "",
+    default: bool = True,
+    on_text: str = "",
+    off_text: str = "",
+) -> bool:
+    """Resolve a tri-state ENABLE_* switch (true / false / auto).
+
+    ``detect`` is a zero-arg callable returning True when the feature's
+    dependency is available. With no ``detect`` the feature has no external
+    dependency and ``auto`` means ``default``. Accepts the legacy plain
+    booleans, so an existing .env keeps behaving exactly as before.
+    """
+    raw = (os.getenv(name) or "").strip().lower()
+    if raw in _TRUE:
+        FEATURE_REASONS[name] = f"forced on ({name}=true)"
+        return True
+    if raw in _FALSE:
+        FEATURE_REASONS[name] = f"disabled ({name}=false)"
+        return False
+    # auto / unset / garbage
+    if detect is None:
+        FEATURE_REASONS[name] = "on by default" if default else "off by default"
+        return default
+    if detect():
+        FEATURE_REASONS[name] = (
+            on_text or (f"auto: {needs} found" if needs else "auto: available")
+        )
+        return True
+    FEATURE_REASONS[name] = off_text or (
+        f"auto: off, {needs} not installed" if needs else "auto: off, dependency missing"
+    )
+    return False
+
+
 class Config:
     DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
@@ -62,7 +168,10 @@ class Config:
 
     OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", os.getenv("OPENAI_COMPAT_API_KEY", ""))
-    OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:31b-cloud")
+    # No default model on purpose: a hardcoded one that your endpoint does
+    # not serve fails later, as an opaque 404 from the provider. Empty fails
+    # at startup with a sentence that says what to do.
+    OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "").strip()
     OLLAMA_REM_MODEL = os.getenv("OLLAMA_REM_MODEL") or OLLAMA_MODEL
     # max_tokens = max *output* tokens per completion (not context window).
     # minimax-m3 allows huge context but caps output ~131072; 8192 is a sane default.
@@ -88,30 +197,108 @@ class Config:
         "OLLAMA_RETRY_ATTEMPTS", 3, min_value=1, max_value=10
     )
 
-    # Toggle for "omni" (audio+vision capable) model input.
-    # Default is now OFF. Set to true in .env to allow audio input for models that support it.
-    ENABLE_AUDIO_INPUT = _bool_env("ENABLE_AUDIO_INPUT", False)
+    # Toggle for "omni" (audio+vision capable) model input. Off by default:
+    # most models 400 on audio parts, so this is opt-in per install.
+    ENABLE_AUDIO_INPUT = _feature_env("ENABLE_AUDIO_INPUT", default=False)
 
     # -------------------------------------------------------------------------
-    # Feature kill switches (default true unless noted — matches legacy
-    # behaviour). All read once at import time; restart the bot to change.
+    # Optional features (true / false / auto — see the module docstring).
+    #
+    # Unset means "auto": the feature turns itself on only when whatever it
+    # needs is actually installed. A bare clone with nothing but ffmpeg
+    # missing loses video frames, not the whole bot. Read once at import
+    # time; restart to re-detect.
     # -------------------------------------------------------------------------
-    ENABLE_IMAGE_INPUT = _bool_env("ENABLE_IMAGE_INPUT", True)
-    ENABLE_VIDEO_INPUT = _bool_env("ENABLE_VIDEO_INPUT", True)
-    ENABLE_IMAGE_GEN = _bool_env("ENABLE_IMAGE_GEN", True)
-    ENABLE_TTS = _bool_env("ENABLE_TTS", True)
-    ENABLE_TTS_VC = _bool_env("ENABLE_TTS_VC", True)
-    ENABLE_EMAIL_TOOLS = _bool_env("ENABLE_EMAIL_TOOLS", True)
-    ENABLE_VC = _bool_env("ENABLE_VC", True)
-    ENABLE_YOUTUBE = _bool_env("ENABLE_YOUTUBE", True)
-    ENABLE_WEB_SEARCH = _bool_env("ENABLE_WEB_SEARCH", True)
+
+    # No external dependency — pure code paths, on by default.
+    ENABLE_IMAGE_INPUT = _feature_env("ENABLE_IMAGE_INPUT")
+    ENABLE_FETCH_URL = _feature_env("ENABLE_FETCH_URL")
+    ENABLE_CREATE_SITE = _feature_env("ENABLE_CREATE_SITE")
+    ENABLE_AVATAR = _feature_env("ENABLE_AVATAR")
+    ENABLE_TELEGRAM = _feature_env("ENABLE_TELEGRAM")
+    ENABLE_AUTONOMY = _feature_env("ENABLE_AUTONOMY")
+    # image_generator uses Pollinations (free, keyless); hd_image needs an
+    # NVIDIA key but degrades to a clear error instead of breaking the tool.
+    ENABLE_IMAGE_GEN = _feature_env("ENABLE_IMAGE_GEN")
+
+    # Needs a system binary or Python package.
+    ENABLE_VIDEO_INPUT = _feature_env(
+        "ENABLE_VIDEO_INPUT", lambda: _has_binary("ffmpeg"), needs="ffmpeg"
+    )
+    # The tool shells out to the yt-dlp binary, so the binary is what counts.
+    ENABLE_YOUTUBE = _feature_env(
+        "ENABLE_YOUTUBE", lambda: _has_binary("yt-dlp"), needs="the yt-dlp binary"
+    )
+    ENABLE_WEB_SEARCH = _feature_env(
+        "ENABLE_WEB_SEARCH", lambda: _has_module("ddgs"), needs="the ddgs package"
+    )
+    ENABLE_VC = _feature_env(
+        "ENABLE_VC",
+        lambda: _has_module("discord.ext.voice_recv") and _has_module("nacl"),
+        needs="discord-ext-voice-recv + PyNaCl",
+    )
+    # TTS works through any one of: Fish (key), NVIDIA Riva (key), gTTS
+    # (package), espeak (binary). Off only when none of them exist.
+    ENABLE_TTS = _feature_env(
+        "ENABLE_TTS",
+        lambda: bool(
+            os.getenv("FISH_API_KEY", "").strip()
+            or os.getenv("NVIDIA_API_KEY", "").strip()
+            or _has_module("gtts")
+            or _has_binary("espeak-ng")
+            or _has_binary("espeak")
+        ),
+        needs="a TTS engine (espeak-ng, gTTS, or a Fish/NVIDIA key)",
+    )
+    # Playing TTS into a voice channel additionally needs ffmpeg.
+    ENABLE_TTS_VC = _feature_env(
+        "ENABLE_TTS_VC",
+        lambda _tts=ENABLE_TTS: _tts and _has_binary("ffmpeg"),
+        needs="ffmpeg + a TTS engine",
+    )
+    # Email needs a real mailbox. Without a password the four tools could
+    # only ever answer "not configured", so auto keeps them unregistered.
+    ENABLE_EMAIL_TOOLS = _feature_env(
+        "ENABLE_EMAIL_TOOLS",
+        lambda: bool(os.getenv("MAXWELL_EMAIL_PASSWORD", "").strip()),
+        on_text="auto: MAXWELL_EMAIL_PASSWORD is set",
+        off_text="auto: off, no MAXWELL_EMAIL_PASSWORD",
+    )
+
+    # Host access. Kept on by default for parity with older installs, but
+    # this is THE security-relevant switch: `shell` runs commands as the bot
+    # user. validate() warns loudly at startup so it is never a surprise.
+    ENABLE_SHELL = _feature_env("ENABLE_SHELL")
+    # Native sub-agent: Maxwell spawns a nested copy of itself (same
+    # provider, restricted toolset, its own workdir) to work a coding task
+    # to completion. It writes and runs code, so it inherits ENABLE_SHELL's
+    # trust decision unless set explicitly.
+    ENABLE_SUBAGENT = _feature_env(
+        "ENABLE_SUBAGENT",
+        lambda _sh=ENABLE_SHELL: _sh,
+        on_text="auto: follows ENABLE_SHELL",
+        off_text="auto: off, follows ENABLE_SHELL=false",
+    )
+
+    # RAG vector memory. Needs a reachable embedding endpoint (see
+    # EMBED_* below); without one the bot still works, it just loses
+    # semantic recall and falls back to recent-history context.
+    ENABLE_RAG = _feature_env("ENABLE_RAG")
     RAG_WEB_STORE_ENABLED = _bool_env("RAG_WEB_STORE_ENABLED", True)
-    ENABLE_FETCH_URL = _bool_env("ENABLE_FETCH_URL", True)
-    ENABLE_CREATE_SITE = _bool_env("ENABLE_CREATE_SITE", True)
-    ENABLE_AVATAR = _bool_env("ENABLE_AVATAR", True)
-    ENABLE_SHELL = _bool_env("ENABLE_SHELL", True)
-    ENABLE_TELEGRAM = _bool_env("ENABLE_TELEGRAM", True)
-    ENABLE_AUTONOMY = _bool_env("ENABLE_AUTONOMY", True)
+
+    # -------------------------------------------------------------------------
+    # Embeddings for RAG memory. Defaults target a local Ollama, but any
+    # OpenAI-compatible /v1/embeddings endpoint works — set EMBED_BASE_URL
+    # to e.g. https://api.openai.com/v1 with EMBED_MODEL/EMBED_DIM to match.
+    # -------------------------------------------------------------------------
+    EMBED_BASE_URL = _first_env(
+        "MAXWELL_EMBED_BASE_URL", "EMBED_BASE_URL", default="http://localhost:11434"
+    ).rstrip("/")
+    EMBED_MODEL = _first_env(
+        "MAXWELL_EMBED_MODEL", "EMBED_MODEL", default="qwen3-embedding:0.6b"
+    )
+    EMBED_API_KEY = _first_env("MAXWELL_EMBED_API_KEY", "EMBED_API_KEY")
+    EMBED_DIM = _int_env("MAXWELL_EMBED_DIM", 1024, min_value=8, max_value=16384)
 
     # When false (default), shell refuses to run on a turn
     # that read untrusted fetched content (URLs, web search) without an
@@ -217,7 +404,13 @@ class Config:
     MEMORY_MESSAGE_LIMIT = _int_env(
         "MEMORY_MESSAGE_LIMIT", 2000, min_value=1, max_value=10000
     )
-    REM_ENABLED = _bool_env("REM_ENABLED", True)
+    # REM is a background LLM loop: it spends tokens on its own schedule.
+    # Opt-in, so a fresh install never quietly bills you. `ENABLE_REM` is
+    # accepted as an alias because that is the name the docs always used.
+    REM_ENABLED = _bool_env("REM_ENABLED", _bool_env("ENABLE_REM", False))
+    FEATURE_REASONS["REM_ENABLED"] = (
+        "enabled in .env" if REM_ENABLED else "off by default (opt in with ENABLE_REM=true)"
+    )
     REM_INTERVAL_SECONDS = _int_env("REM_INTERVAL_SECONDS", 600, min_value=10)
     REM_MAX_TURNS = _int_env("REM_MAX_TURNS", 3, min_value=0, max_value=10)
     REM_EVENT_BUFFER_MAX = _int_env(
@@ -249,10 +442,31 @@ class Config:
     MAXWELL_SMTP_PORT = _int_env("MAXWELL_SMTP_PORT", 25, min_value=1, max_value=65535)
     MAXWELL_IMAP_HOST = os.getenv("MAXWELL_IMAP_HOST", "127.0.0.1").strip()
     MAXWELL_IMAP_PORT = _int_env("MAXWELL_IMAP_PORT", 993, min_value=1, max_value=65535)
-    MAXWELL_EMAIL_USER = os.getenv("MAXWELL_EMAIL_USER", "maxwell@z3ki.dev").strip()
+    MAXWELL_EMAIL_USER = os.getenv("MAXWELL_EMAIL_USER", "").strip()
     MAXWELL_EMAIL_PASSWORD = os.getenv("MAXWELL_EMAIL_PASSWORD", "").strip()
-    MAXWELL_EMAIL_FROM = os.getenv("MAXWELL_EMAIL_FROM", "maxwell@z3ki.dev").strip()
+    # Blank From: falls back to the mailbox itself — one less thing to fill in.
+    MAXWELL_EMAIL_FROM = (
+        os.getenv("MAXWELL_EMAIL_FROM", "").strip() or MAXWELL_EMAIL_USER
+    )
     MAXWELL_EMAIL_FROM_NAME = os.getenv("MAXWELL_EMAIL_FROM_NAME", "Maxwell").strip()
+
+    # -------------------------------------------------------------------------
+    # Native sub-agent (only used if ENABLE_SUBAGENT resolves true).
+    # Maxwell runs the task itself on its own provider inside a scratch
+    # workdir — no external coding-agent binary, no container image.
+    # -------------------------------------------------------------------------
+    SUBAGENT_BASE_DIR = os.getenv("SUBAGENT_BASE_DIR", "data/subagents").strip()
+    SUBAGENT_MODEL = os.getenv("SUBAGENT_MODEL", "").strip()  # blank = main model
+    SUBAGENT_MAX_STEPS = _int_env("SUBAGENT_MAX_STEPS", 24, min_value=1, max_value=200)
+    SUBAGENT_TIMEOUT_SECONDS = _int_env(
+        "SUBAGENT_TIMEOUT_SECONDS", 900, min_value=30, max_value=7200
+    )
+    SUBAGENT_COMMAND_TIMEOUT_SECONDS = _int_env(
+        "SUBAGENT_COMMAND_TIMEOUT_SECONDS", 120, min_value=5, max_value=3600
+    )
+    SUBAGENT_MAX_FILE_BYTES = _int_env(
+        "SUBAGENT_MAX_FILE_BYTES", 200_000, min_value=1000, max_value=5_000_000
+    )
 
     # Admin / owner allowlists. Re-exported here so Config is the single
     # source of truth; bot_tools.refresh_owner_ids() still does a runtime
@@ -265,14 +479,61 @@ class Config:
         if item.strip()
     }
 
+    # Every optional feature, in the order doctor.py and the startup log
+    # print them. (attribute, human label).
+    FEATURE_SWITCHES = (
+        ("ENABLE_IMAGE_INPUT", "image input (vision)"),
+        ("ENABLE_VIDEO_INPUT", "video input (frame extraction)"),
+        ("ENABLE_AUDIO_INPUT", "audio input (omni models)"),
+        ("ENABLE_IMAGE_GEN", "image generation"),
+        ("ENABLE_TTS", "text-to-speech"),
+        ("ENABLE_TTS_VC", "TTS playback in voice channels"),
+        ("ENABLE_VC", "voice channels (live listening)"),
+        ("ENABLE_WEB_SEARCH", "web search"),
+        ("ENABLE_FETCH_URL", "fetch_url"),
+        ("ENABLE_YOUTUBE", "YouTube"),
+        ("ENABLE_CREATE_SITE", "site generation"),
+        ("ENABLE_AVATAR", "avatar changes"),
+        ("ENABLE_EMAIL_TOOLS", "email tools"),
+        ("ENABLE_SHELL", "shell (host access)"),
+        ("ENABLE_SUBAGENT", "native sub-agent"),
+        ("ENABLE_RAG", "RAG vector memory"),
+        ("ENABLE_TELEGRAM", "Telegram transport"),
+        ("ENABLE_AUTONOMY", "autonomy engine"),
+        ("REM_ENABLED", "REM dreaming pass"),
+    )
+
+    @classmethod
+    def feature_report(cls) -> list[tuple[str, str, bool, str]]:
+        """(env name, label, enabled, reason) for every optional feature."""
+        report = []
+        for name, label in cls.FEATURE_SWITCHES:
+            enabled = bool(getattr(cls, name, False))
+            reason = FEATURE_REASONS.get(name, "")
+            if not reason:
+                reason = "set in .env" if os.getenv(name) else "default"
+            report.append((name, label, enabled, reason))
+        return report
+
     @classmethod
     def validate(cls):
+        # The only two hard requirements. Anything else has a default or
+        # degrades to "feature off", which is the whole point of the
+        # ENABLE_*=auto design.
         if not cls.DISCORD_TOKEN:
             raise ValueError(
-                "DISCORD_TOKEN is required. Set it in .env before starting the bot."
+                "DISCORD_TOKEN is required. Run ./setup.sh, or set it in .env, "
+                "then start the bot again."
             )
         if not cls.OLLAMA_BASE_URL:
-            raise ValueError("OLLAMA_BASE_URL is required")
+            raise ValueError(
+                "OLLAMA_BASE_URL is required — point it at any OpenAI-compatible "
+                "endpoint (local Ollama, OpenRouter, LM Studio, ...)."
+            )
+        if not cls.OLLAMA_MODEL:
+            raise ValueError(
+                "OLLAMA_MODEL is required — set the model name your endpoint serves."
+            )
         if cls.OLLAMA_MAX_TOKENS < 1:
             raise ValueError("OLLAMA_MAX_TOKENS must be >= 1")
 
@@ -307,10 +568,28 @@ class Config:
                 "TELEGRAM_TOKEN is set — Telegram polling will auto-start. "
                 "Set ENABLE_TELEGRAM=false to suppress without removing the token."
             )
-        # TTS engine sanity check
-        if cls.TTS_ENGINE not in {"auto", "local", "riva", "gtts"}:
+        if cls.ENABLE_SHELL:
             _log.warning(
-                "TTS_ENGINE=%r is not one of auto/local/riva/gtts — falling "
+                "ENABLE_SHELL is on — the model can run commands on this host "
+                "as the bot user. Set ENABLE_SHELL=false in .env if you did "
+                "not mean to grant that."
+            )
+        # TTS engine sanity check
+        if cls.TTS_ENGINE not in {"auto", "local", "riva", "gtts", "fish"}:
+            _log.warning(
+                "TTS_ENGINE=%r is not one of auto/local/riva/gtts/fish — falling "
                 "back to 'auto' behaviour.",
                 cls.TTS_ENGINE,
             )
+
+        # One line per optional feature, so "why isn't X working" is answered
+        # by the top of the log instead of by reading the source.
+        on = [label for _, label, enabled, _ in cls.feature_report() if enabled]
+        off = [
+            f"{label} ({reason})"
+            for _, label, enabled, reason in cls.feature_report()
+            if not enabled
+        ]
+        _log.info("Features on: %s", ", ".join(on) or "none")
+        if off:
+            _log.info("Features off: %s", "; ".join(off))

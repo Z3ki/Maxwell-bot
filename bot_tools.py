@@ -17,6 +17,7 @@ import re
 import shutil
 import socket
 import ssl
+import sys
 import tempfile
 import time
 import wave
@@ -35,6 +36,8 @@ import discord
 from discord import Activity, File, Message, Status
 from tools import Tool
 from captcha_solver import CaptchaSolveError
+from config import Config
+from tool_schemas import normalize_native_tool_calls
 from utils import (  # single source of truth, fd-safe
     FileLock,
     _atomic_json_write_sync,
@@ -4111,6 +4114,412 @@ class ShellTool(Tool):
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+class SubAgentTool(Tool):
+    """Delegate a coding task to a nested Maxwell that works it to completion.
+
+    There is no external coding agent here — no `opencode` binary, no
+    container image to build. The sub-agent is Maxwell: it runs on the same
+    provider the bot already talks to, in its own scratch workdir, with a
+    deliberately small toolset (run a command, read/write/list files,
+    finish). That keeps the install requirement at "an AI model and a
+    Discord token" instead of "an AI model, a Discord token, Docker, and a
+    second agent runtime".
+
+    The loop is: ask the model -> execute the tool calls it emits inside the
+    workdir -> feed the results back -> repeat until it calls `finish`, or
+    until the step/time budget runs out. The final report goes back to the
+    main turn as the tool result.
+    """
+
+    # Writes files and runs commands: same trust class as `shell`.
+    is_destructive = True
+
+    _SYSTEM_PROMPT = (
+        "You are Maxwell's sub-agent: a focused engineer working one task to "
+        "completion, alone, with no user to ask.\n"
+        "\n"
+        "You work inside {workdir} — a scratch directory that is yours. Every "
+        "command runs there; file paths are relative to it.\n"
+        "\n"
+        "Rules:\n"
+        "- Work in small steps: inspect, change, run, check the output.\n"
+        "- Actually verify. Run the code, the test, the linter — do not claim "
+        "something works because it looks right.\n"
+        "- Never ask questions. Pick the reasonable option and note the "
+        "assumption in your final report.\n"
+        "- Stay inside the workdir and keep commands short-lived. No "
+        "interactive programs, no servers that never exit, no `sudo`.\n"
+        "- When the task is done (or genuinely cannot be finished), call "
+        "`finish` with a report: what you built, which files matter, what you "
+        "verified, and anything left undone.\n"
+        "\n"
+        "You have {max_steps} steps. Spend them on the task, not on narration."
+    )
+
+    # The sub-agent's own tools. Small on purpose: a bigger surface makes
+    # weaker models wander, and everything below is expressible as a command.
+    _TOOLS = [
+        {
+            "type": "function",
+            "function": {
+                "name": "run_command",
+                "description": (
+                    "Run a bash command in the workdir and get stdout/stderr "
+                    "plus the exit code back."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string", "description": "Bash to run"}
+                    },
+                    "required": ["command"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": (
+                    "Create or overwrite a file in the workdir. Writes the "
+                    "whole file — include the complete contents."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path relative to the workdir",
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Full file contents",
+                        },
+                    },
+                    "required": ["path", "content"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a file from the workdir.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path relative to the workdir",
+                        }
+                    },
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_files",
+                "description": "List files in the workdir (recursive, capped).",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "finish",
+                "description": (
+                    "End the task and report back. Call this exactly once, "
+                    "when the work is done or definitively blocked."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "report": {
+                            "type": "string",
+                            "description": (
+                                "What you built, the files that matter, what "
+                                "you verified, and anything left undone."
+                            ),
+                        }
+                    },
+                    "required": ["report"],
+                },
+            },
+        },
+    ]
+
+    def get_description(self) -> str:
+        return (
+            "Hand a self-contained coding task to a sub-agent (another "
+            "instance of you) that writes the code, runs it, fixes what "
+            "breaks, and reports back with the result. Use it for work that "
+            "needs several build-and-test rounds — a script, a small program, "
+            "a data-crunching job — not for a one-liner you could just run "
+            "with `shell`. It cannot ask questions, so state the task fully."
+        )
+
+    # ─── workspace helpers ────────────────────────────────────────────
+
+    @staticmethod
+    def _slugify(text: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "-", str(text or "").lower()).strip("-")
+        return (slug[:40] or "task").strip("-")
+
+    def _workspace(self, task: str, workdir: str = "") -> Path:
+        base = Path(Config.SUBAGENT_BASE_DIR)
+        if not base.is_absolute():
+            base = Path(__file__).resolve().parent / base
+        name = self._slugify(workdir) if workdir else self._slugify(task)
+        path = base / f"{name}-{uuid.uuid4().hex[:6]}"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _resolve(self, workspace: Path, rel_path: str) -> Path:
+        """Resolve a sub-agent path, refusing anything outside the workdir."""
+        candidate = (workspace / str(rel_path or "").lstrip("/")).resolve()
+        workspace = workspace.resolve()
+        if candidate != workspace and workspace not in candidate.parents:
+            raise ValueError(f"path escapes the workdir: {rel_path}")
+        return candidate
+
+    # ─── the sub-agent's own tools ────────────────────────────────────
+
+    async def _run_command(self, workspace: Path, command: str) -> str:
+        command = str(command or "").strip()
+        if not command:
+            return "error: empty command"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "bash",
+                "-lc",
+                command,
+                cwd=str(workspace),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        except Exception as e:
+            return f"error: could not start command: {e}"
+        try:
+            out, _ = await asyncio.wait_for(
+                proc.communicate(), timeout=Config.SUBAGENT_COMMAND_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
+            return (
+                f"error: command timed out after "
+                f"{Config.SUBAGENT_COMMAND_TIMEOUT_SECONDS}s (it was killed)"
+            )
+        text = (out or b"").decode("utf-8", errors="replace")
+        if len(text) > 12000:
+            text = text[:12000] + "\n… (output truncated)"
+        return f"exit={proc.returncode}\n{text or '(no output)'}"
+
+    def _write_file(self, workspace: Path, path: str, content: str) -> str:
+        try:
+            target = self._resolve(workspace, path)
+        except ValueError as e:
+            return f"error: {e}"
+        body = str(content or "")
+        if len(body.encode("utf-8", errors="ignore")) > Config.SUBAGENT_MAX_FILE_BYTES:
+            return (
+                f"error: file exceeds SUBAGENT_MAX_FILE_BYTES "
+                f"({Config.SUBAGENT_MAX_FILE_BYTES} bytes)"
+            )
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(body, encoding="utf-8")
+        except OSError as e:
+            return f"error: {e}"
+        return f"wrote {target.relative_to(workspace.resolve())} ({len(body)} chars)"
+
+    def _read_file(self, workspace: Path, path: str) -> str:
+        try:
+            target = self._resolve(workspace, path)
+        except ValueError as e:
+            return f"error: {e}"
+        if not target.is_file():
+            return f"error: no such file: {path}"
+        try:
+            text = target.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            return f"error: {e}"
+        if len(text) > 12000:
+            text = text[:12000] + "\n… (truncated)"
+        return text or "(empty file)"
+
+    def _list_files(self, workspace: Path) -> str:
+        root = workspace.resolve()
+        entries = []
+        for item in sorted(root.rglob("*")):
+            if item.is_dir():
+                continue
+            with contextlib.suppress(OSError):
+                entries.append(f"{item.relative_to(root)} ({item.stat().st_size}b)")
+            if len(entries) >= 200:
+                entries.append("… (more files not listed)")
+                break
+        return "\n".join(entries) or "(workdir is empty)"
+
+    async def _dispatch(self, workspace: Path, name: str, args: dict) -> str:
+        if name == "run_command":
+            return await self._run_command(workspace, args.get("command", ""))
+        if name == "write_file":
+            return self._write_file(
+                workspace, args.get("path", ""), args.get("content", "")
+            )
+        if name == "read_file":
+            return self._read_file(workspace, args.get("path", ""))
+        if name == "list_files":
+            return self._list_files(workspace)
+        return f"error: unknown tool {name!r}"
+
+    # ─── the loop ─────────────────────────────────────────────────────
+
+    async def execute(self, message: Message, **kwargs) -> str:
+        task = str(kwargs.get("task") or "").strip()
+        if not task:
+            return "sub_agent needs a `task` describing the work."
+
+        provider = getattr(self.bot, "provider", None)
+        if provider is None:
+            return "sub_agent is unavailable: no LLM provider on this bot."
+
+        max_steps = Config.SUBAGENT_MAX_STEPS
+        try:
+            requested = int(kwargs.get("max_steps") or 0)
+        except (TypeError, ValueError):
+            requested = 0
+        if requested > 0:
+            max_steps = min(requested, Config.SUBAGENT_MAX_STEPS)
+
+        workspace = self._workspace(task, str(kwargs.get("workdir") or ""))
+        deadline = time.monotonic() + Config.SUBAGENT_TIMEOUT_SECONDS
+        model = Config.SUBAGENT_MODEL or None
+
+        messages = [
+            {
+                "role": "system",
+                "content": self._SYSTEM_PROMPT.format(
+                    workdir=workspace, max_steps=max_steps
+                ),
+            },
+            {"role": "user", "content": task},
+        ]
+
+        steps = 0
+        commands_run = 0
+        files_written: list[str] = []
+        while steps < max_steps:
+            if time.monotonic() > deadline:
+                return self._report(
+                    task,
+                    workspace,
+                    steps,
+                    commands_run,
+                    files_written,
+                    f"stopped: hit the {Config.SUBAGENT_TIMEOUT_SECONDS}s time budget",
+                )
+            steps += 1
+            try:
+                reply = await provider.generate_chat_completion(
+                    messages=messages,
+                    tools=self._TOOLS,
+                    model=model,
+                    timeout=int(max(30, deadline - time.monotonic())),
+                )
+            except Exception as e:
+                logger.warning("sub_agent provider call failed: %s", e)
+                return self._report(
+                    task,
+                    workspace,
+                    steps,
+                    commands_run,
+                    files_written,
+                    f"stopped: the model call failed ({e})",
+                )
+
+            calls = normalize_native_tool_calls(reply.get("tool_calls"))
+            content = str(reply.get("content") or "").strip()
+            if not calls:
+                # No tool call: the model is done talking, or it drifted into
+                # prose. Either way its text is the best report we have.
+                return self._report(
+                    task,
+                    workspace,
+                    steps,
+                    commands_run,
+                    files_written,
+                    content or "the sub-agent stopped without a report",
+                )
+
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": reply.get("content") or "",
+                    "tool_calls": reply.get("tool_calls") or [],
+                }
+            )
+
+            for call in calls:
+                name = call.get("name") or ""
+                args = call.get("arguments") or {}
+                if name == "finish":
+                    return self._report(
+                        task,
+                        workspace,
+                        steps,
+                        commands_run,
+                        files_written,
+                        str(args.get("report") or content or "done"),
+                    )
+                if name == "run_command":
+                    commands_run += 1
+                result = await self._dispatch(workspace, name, args)
+                if name == "write_file" and not result.startswith("error:"):
+                    written = str(args.get("path") or "").strip()
+                    if written and written not in files_written:
+                        files_written.append(written)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.get("id") or name,
+                        "content": result,
+                    }
+                )
+
+        return self._report(
+            task,
+            workspace,
+            steps,
+            commands_run,
+            files_written,
+            f"stopped: used all {max_steps} steps without calling finish",
+        )
+
+    def _report(
+        self,
+        task: str,
+        workspace: Path,
+        steps: int,
+        commands_run: int,
+        files_written: list[str],
+        outcome: str,
+    ) -> str:
+        lines = [
+            f"sub-agent finished after {steps} step(s), {commands_run} command(s).",
+            f"workdir: {workspace}",
+        ]
+        if files_written:
+            lines.append(f"files written: {', '.join(files_written[:20])}")
+        lines.append("")
+        lines.append(outcome.strip())
+        return "\n".join(lines)
+
 class FetchUrlTool(Tool):
     """Fetch and extract text content from a URL"""
 
@@ -4272,8 +4681,26 @@ class YouTubeTool(Tool):
             return None
         return None
 
+    @staticmethod
+    def _yt_dlp_binary() -> str:
+        """Locate yt-dlp: PATH first, then this interpreter's own bin dir.
+
+        `pip install yt-dlp` inside a venv puts the console script in that
+        venv's bin/, which is NOT on PATH when the process was started by its
+        absolute interpreter path (exactly what PM2 does). Checking sys.executable's
+        directory means an install that has the package always finds the tool.
+        Returns "" when it genuinely isn't installed.
+        """
+        found = shutil.which("yt-dlp")
+        if found:
+            return found
+        sibling = Path(sys.executable).parent / "yt-dlp"
+        if sibling.is_file() and os.access(sibling, os.X_OK):
+            return str(sibling)
+        return ""
+
     def _yt_dlp_args(self, *args: str) -> list[str]:
-        cmd = ["yt-dlp", "--no-update"]
+        cmd = [self._yt_dlp_binary() or "yt-dlp", "--no-update"]
         if shutil.which("node"):
             cmd.extend(["--js-runtimes", "node"])
         cookies = self._cookies_file()
@@ -4483,7 +4910,7 @@ class YouTubeTool(Tool):
         direct = await self._download_timedtext(url, lang)
         if direct:
             return direct
-        if not shutil.which("yt-dlp"):
+        if not self._yt_dlp_binary():
             return ""
         out_tpl = str(tmp / "subs.%(ext)s")
         args = self._yt_dlp_args(
@@ -4591,7 +5018,7 @@ class YouTubeTool(Tool):
                         }
         except Exception:
             fallback = {}
-        if not shutil.which("yt-dlp"):
+        if not self._yt_dlp_binary():
             return fallback
         code, stdout, _stderr = await self._run_cmd(
             self._yt_dlp_args("--dump-json", "--no-playlist", url), timeout=45
@@ -4609,7 +5036,7 @@ class YouTubeTool(Tool):
     async def _extract_frames(
         self, url: str, timestamps: list[float], tmp: Path
     ) -> list[str]:
-        if not timestamps or not shutil.which("ffmpeg") or not shutil.which("yt-dlp"):
+        if not timestamps or not shutil.which("ffmpeg") or not self._yt_dlp_binary():
             return []
         code, stream_url, stderr = await self._run_cmd(
             self._yt_dlp_args(
@@ -4797,7 +5224,7 @@ class YouTubeTool(Tool):
         return "\n".join(parts)
 
     async def _dump_playlist(self, url: str, limit: int) -> dict:
-        if not shutil.which("yt-dlp"):
+        if not self._yt_dlp_binary():
             return {"error": "yt-dlp is not installed"}
         code, stdout, stderr = await self._run_cmd(
             self._yt_dlp_args(

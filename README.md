@@ -4,19 +4,136 @@ Maxwell is a Discord self-bot backed by any OpenAI-compatible API. It reads text
 
 **This is a self-bot** (`discord.py-self`, `self_bot=True`). Self-bots may violate Discord ToS. Use at your own risk.
 
+## Quick start
+
+You need exactly two things: **a Discord token** and **a model** (any
+OpenAI-compatible endpoint). Everything else is optional and turns itself on
+only if what it needs is already installed.
+
+```bash
+git clone <this repo> maxwell && cd maxwell
+./setup.sh          # venv + core deps + asks for the two required values
+python3 bot.py
+```
+
+Prefer to do it by hand?
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env      # fill in DISCORD_TOKEN, OLLAMA_BASE_URL, OLLAMA_MODEL
+python3 doctor.py         # what's on, what's off, and why
+python3 bot.py
+```
+
+`python3 doctor.py --probe` also calls your model and embedding endpoints, so
+you find out the URL or key is wrong before the bot does.
+
+### The minimum .env
+
+```ini
+DISCORD_TOKEN=your-discord-user-token
+OLLAMA_BASE_URL=http://localhost:11434   # or https://openrouter.ai/api/v1, etc.
+OLLAMA_MODEL=qwen3:8b                    # whatever your endpoint serves
+```
+
+A bare host URL gets `/v1` appended automatically; a URL that already has a
+path is used as-is. Add `OLLAMA_API_KEY` if your endpoint needs a bearer token,
+and `MAXWELL_OWNER_IDS` (your Discord user ID) if you want admin commands to
+work.
+
+### Optional extras
+
+Nothing below is needed to run the bot. Install a line only if you want that
+feature — each one is detected at startup, and a missing dependency turns that
+one feature off instead of breaking anything.
+
+```bash
+pip install -r requirements-optional.txt   # all of it
+pip install ddgs                           # or just web search
+```
+
+| You want | Install | Feature |
+|---|---|---|
+| Web search | `pip install ddgs` | `web_search` tool |
+| YouTube | `pip install yt-dlp yt-dlp-ejs` + `node` | `youtube` tool |
+| Video attachments | `ffmpeg` | frame extraction for `video/*` |
+| Voice channels | `pip install PyNaCl davey discord-ext-voice-recv` + `libopus0 libsodium-dev` | live VC listening, `,vc` commands |
+| Text to speech | `espeak-ng` (free), or `pip install gTTS`, or a Fish/NVIDIA key | `tts` tool, VC speech |
+| Semantic memory | `ollama pull qwen3-embedding:0.6b`, or any embeddings endpoint | RAG vector recall |
+| Email tools | Postfix + Dovecot, then set `MAXWELL_EMAIL_PASSWORD` | `email_*` tools |
+
+Debian/Ubuntu, everything except mail:
+
+```bash
+sudo apt install ffmpeg libopus0 libsodium-dev espeak-ng nodejs
+```
+
+### Optional features are tri-state
+
+Every `ENABLE_*` switch takes `true`, `false`, or `auto` — and `auto` is the
+default, including when you leave it out of `.env` entirely:
+
+- `auto` — on only if the dependency is actually present on this machine.
+- `true` — force on. You promise the dependency is there.
+- `false` — force off. The tool is never registered and the dependency never imported.
+
+So you never have to fill in a wall of flags to install Maxwell; you set one
+only to overrule a detection result. `python3 doctor.py` prints the resolved
+state of every switch with the reason, and the bot logs the same summary at
+startup.
+
+Two features are opt-in rather than auto-detected, because they spend tokens
+on a timer with nobody watching: `ENABLE_REM` and `ENABLE_AUTONOMY`.
+
+### Run it
+
+```bash
+python3 bot.py                 # the bot
+python3 api/api_server.py      # dashboard + admin API (optional)
+```
+
+Or under PM2 (what the author runs in production):
+
+```bash
+pm2 start ecosystem.config.js
+pm2 logs maxwell-bot maxwell-api
+```
+
+The PM2 config uses `.venv/bin/python3` when that exists, and only manages an
+`ollama` process if the `ollama` binary is on your PATH (`MAXWELL_PM2_OLLAMA=true|false`
+to overrule).
+
+For the YouTube tool, set `YOUTUBE_COOKIES_FILE=/path/to/cookies.txt` in `.env`
+for videos that trigger YouTube bot checks. Never commit that file.
+
 ## Features
 
 - Multimodal input: images, audio, video, text files, and Discord embeds are forwarded to the model with normalized video, extracted frames, and extracted audio.
 - Visual memory: recent images persist across messages per channel (configurable depth).
-- Tool system: image generation (NVIDIA NIM, GPT-compatible), web search, URL fetch, YouTube transcript/frame extraction, arbitrary file sending, meme/media sending, shell execution, polls, invites, server join/leave (`join_server`, `leave_server`), site generation, avatar/presence/nickname changes, message editing/forwarding/deletion, live tool-call progress messages, and more.
+- Tool system: image generation (Pollinations, NVIDIA NIM, GPT-compatible), web search, URL fetch, YouTube transcript/frame extraction, arbitrary file sending, meme/media sending, shell execution, a native coding sub-agent, polls, invites, server join/leave (`join_server`, `leave_server`), site generation, avatar/presence/nickname changes, message editing/forwarding/deletion, live tool-call progress messages, and more.
 - Full-message context: every message in context carries its timestamp plus structured annotations for polls, app-command invocations, system/welcome events, embeds (title/description/fields/images), direct media URLs, and attachment names — including messages that never pinged Maxwell (they still reach context via memory/history).
 - CAPTCHA handling: Discord's hCaptcha challenges (invite accepts, DM gates, phone checks) are auto-solved via a configured solver service (`CAPTCHA_SOLVER_SERVICE` — capsolver/2captcha), or handled human-in-the-loop: the bot hosts a one-shot solve page (`/captcha/<id>`, proxied at `MAXWELL_PUBLIC_BASE_URL`), DMs the link to the owner (fallback `CAPTCHA_FALLBACK_USER_ID`), waits for a browser solve, and retries the original request with the solved token. Auto-onboarding completes role-selection prompts when joining a server that uses `GUILD_ONBOARDING`.
 - Autonomy: periodic self-directed checks where Maxwell reviews context/goals and decides whether to act without running a decider on every few messages.
 - Per-server custom prompts, RAG vector memory, and scoped cross-context facts across DMs, servers, groups, and channels.
-- RAG vector memory: all messages, long-term facts, and shared context entries are embedded via `qwen3-embedding:0.6b` (ollama) and stored in a SQLite vector database. Semantic search retrieves the most relevant memories for each conversation — global across all channels and servers.
+- RAG vector memory: messages, long-term facts, and shared context entries are embedded through any OpenAI-compatible or Ollama embeddings endpoint and stored in a SQLite vector database. Semantic search retrieves the most relevant memories for each conversation — global across all channels and servers. With no embedder reachable the bot logs one line and falls back to recent-history context.
 - Opt-in REM "dreaming" pass that periodically consolidates recent visible traffic into long-term memory.
 - Web dashboard/admin API protected by HTTP Basic auth.
 - Temporary site hosting: generates HTML sites served under a configurable public URL.
+
+## Sub-agent
+
+`sub_agent` hands a self-contained coding task to another instance of Maxwell:
+same provider, its own scratch directory under `SUBAGENT_BASE_DIR`, and a small
+toolset (run a command, read/write/list files, finish). It writes the code, runs
+it, fixes what breaks, and reports back — then that report comes back into the
+conversation as the tool result.
+
+There is no external coding-agent binary and no container image to build; the
+old OpenCode/Docker backend is gone. The sub-agent writes and runs code, so it
+follows `ENABLE_SHELL` unless you set `ENABLE_SUBAGENT` explicitly, and it
+refuses any path outside its workdir. Budgets: `SUBAGENT_MAX_STEPS` (24),
+`SUBAGENT_TIMEOUT_SECONDS` (900), `SUBAGENT_COMMAND_TIMEOUT_SECONDS` (120).
 
 ## Project Structure
 
@@ -24,84 +141,42 @@ Maxwell is a Discord self-bot backed by any OpenAI-compatible API. It reads text
 bot.py              Main bot entry point
 bot_tools.py        Tool implementations
 providers.py        OpenAI-compatible provider wrapper
-config.py           Environment-backed configuration
-rag_memory.py       RAG vector memory (SQLite + numpy + ollama embeddings)
+config.py           Environment-backed configuration (incl. feature detection)
+rag_memory.py       RAG vector memory (SQLite + numpy + embeddings API)
+doctor.py           Install check: what works, what doesn't, why
+setup.sh            One-command installer
 api/api_server.py   Dashboard and admin API server
 web/                Static dashboard files (index.html, admin/)
 examples/           Caddyfile and PM2 config examples
-docker/             Legacy shell sandbox Dockerfile
+docker/             Shell sandbox Dockerfile
 ecosystem.config.js PM2 process config
-```
-
-## Setup
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-# edit .env — DISCORD_TOKEN is the only required value
-```
-
-### System packages
-
-`pip install -r requirements.txt` covers the Python side. These system
-packages are required for the features listed:
-
-| Package | Needed for | Optional? |
-|---|---|---|
-| `ffmpeg` | TTS playback, video frame extraction, audio conversion | only required if `ENABLE_VIDEO_INPUT=true` or you use TTS |
-| `libopus0` / `libopus-dev` | voice receive (live VC listening) | only required if `ENABLE_VC=true` |
-| `libsodium` / `libsodium-dev` | PyNaCl (voice crypto) | only required if `ENABLE_VC=true` |
-| `espeak-ng` | local TTS engine (default) | only required if `TTS_ENGINE=local` or `auto` without NVIDIA key |
-| `node` or `deno` | yt-dlp YouTube JS challenge solver | only required if `ENABLE_YOUTUBE=true` |
-| `postfix` + `dovecot-imapd` | email tools | only required if `ENABLE_EMAIL_TOOLS=true` |
-| `docker` | opencode subagent (default backend) | only required if `ENABLE_SUBAGENT=true` and `OPENCODE_SUBAGENT_DOCKER=true` |
-
-Debian/Ubuntu one-liner for everything except Postfix/Dovecot:
-
-```bash
-sudo apt install ffmpeg libopus0 libsodium-dev espeak-ng nodejs
-```
-
-For the YouTube tool, set `YOUTUBE_COOKIES_FILE=/path/to/cookies.txt` in
-`.env` for videos that trigger YouTube bot checks. Never commit that file.
-
-### Run it
-
-```bash
-# two terminals, or background each
-python bot.py
-python api/api_server.py
-```
-
-Or with PM2 (recommended for production):
-
-```bash
-pm2 start ecosystem.config.js
-pm2 logs maxwell-bot maxwell-api
 ```
 
 ## Environment Variables
 
-See `.env.example` for the full template with comments. The most
-important ones:
+See `.env.example` for the full template with comments — it is ordered so the
+required values are the first thing in the file. The ones that matter:
 
-### Required to start
+### Required
 
 | Variable | Description |
 |---|---|
 | `DISCORD_TOKEN` | Discord user token (self-bot — may violate Discord ToS) |
+| `OLLAMA_BASE_URL` | Any OpenAI-compatible API base URL. A bare host gets `/v1` appended. |
+| `OLLAMA_MODEL` | Model name your endpoint serves. No default — an unset value fails at startup with a clear message instead of a 404 later. |
+
+### Strongly recommended
+
+| Variable | Description |
+|---|---|
+| `OLLAMA_API_KEY` | Bearer token, if your endpoint needs one (falls back to `OPENAI_COMPAT_API_KEY`) |
+| `MAXWELL_OWNER_IDS` | Comma-separated Discord user IDs allowed to run admin commands. Empty = every admin command is denied. |
 | `MAXWELL_ADMIN_USER` / `MAXWELL_ADMIN_PASSWORD` | Dashboard / API Basic auth. Empty password = 503 on every request. |
-| `MAXWELL_OWNER_IDS` | Comma-separated Discord user IDs allowed to run admin commands |
 
 ### LLM provider
 
 | Variable | Description |
 |---|---|
-| `OLLAMA_BASE_URL` | OpenAI-compatible API base URL (default: `http://localhost:11434`) |
-| `OLLAMA_API_KEY` | Bearer token (falls back to `OPENAI_COMPAT_API_KEY`) |
-| `OLLAMA_MODEL` | Model name (default: `gemma4:31b-cloud`) |
 | `OLLAMA_REM_MODEL` | REM dreamer model (defaults to `OLLAMA_MODEL`) |
 | `OLLAMA_MAX_TOKENS` | Max output tokens per completion (default: `8192`) |
 | `OLLAMA_TEMPERATURE` | Temperature (default: `1.0`) |
@@ -109,39 +184,54 @@ important ones:
 | `OLLAMA_VISION_*` | Optional vision/omni model for image/video turns (blank base/key inherit primary) |
 | `OLLAMA_RETRY_ATTEMPTS` | Total attempts per request (default: `3`) |
 | `AUTONOMY_BASE_URL` / `AUTONOMY_API_KEY` / `AUTONOMY_MODEL` | Override the autonomy engine endpoint; blank = use main |
+| `AUX_BASE_URL` / `AUX_API_KEY` / `AUX_MODEL` | Background context agents; blank = fall back to autonomy, then main |
 
-### Feature kill switches
+### Optional features
 
-All default to `true` (matches legacy behaviour). Set any of these to
-`false` to skip registering the tool, importing the heavy dep, or
-auto-starting the background loop. Restart the bot to apply.
+`true` / `false` / `auto`, default `auto` (on only if the dependency is
+present). Restart to re-detect. `python3 doctor.py` shows the resolved state.
 
-| Variable | Disables |
+| Variable | Controls | `auto` needs |
+|---|---|---|
+| `ENABLE_IMAGE_INPUT` | Forwarding images to the LLM (also `process_images` in the dashboard) | — |
+| `ENABLE_VIDEO_INPUT` | Video frame extraction for `video/*` attachments | `ffmpeg` |
+| `ENABLE_AUDIO_INPUT` | Forwarding audio to "omni" audio-capable models | opt-in (`false` by default) |
+| `ENABLE_IMAGE_GEN` | `image_generator` (Pollinations, free) + `hd_image` (NVIDIA key) | — |
+| `ENABLE_TTS` | The `tts` tool | espeak-ng, gTTS, or a Fish/NVIDIA key |
+| `ENABLE_TTS_VC` | TTS playback into voice channels | `ffmpeg` + a TTS engine |
+| `ENABLE_VC` | `voice_recv` import + `,vc` commands | `discord-ext-voice-recv` + PyNaCl |
+| `ENABLE_WEB_SEARCH` | `web_search` tool | the `ddgs` package |
+| `ENABLE_YOUTUBE` | `youtube` tool | the `yt-dlp` binary |
+| `ENABLE_FETCH_URL` | `fetch_url` tool | — |
+| `ENABLE_CREATE_SITE` | `create_site` / `list_sites` tools | — |
+| `ENABLE_AVATAR` | `change_avatar` tool | — |
+| `ENABLE_EMAIL_TOOLS` | The four `email_*` tools | `MAXWELL_EMAIL_PASSWORD` set |
+| `ENABLE_SHELL` | `shell` tool (host access — only enable if you trust the model) | — |
+| `ENABLE_SUBAGENT` | `sub_agent` tool (writes and runs code) | follows `ENABLE_SHELL` |
+| `ENABLE_RAG` | RAG vector memory; `false` makes no embedding calls at all | — |
+| `ENABLE_TELEGRAM` | Auto-start Telegram polling/webhook when `TELEGRAM_TOKEN` is set | — |
+| `ENABLE_AUTONOMY` | Autonomy engine (also controlled via dashboard) | opt-in in `.env.example` |
+| `ENABLE_REM` | Background REM dreaming pass (alias of `REM_ENABLED`) | opt-in (`false` by default) |
+
+### RAG embeddings (only used if `ENABLE_RAG` is on)
+
+| Variable | Description |
 |---|---|
-| `ENABLE_IMAGE_INPUT` | Forwarding images to the LLM (also controlled via `process_images` in dashboard) |
-| `ENABLE_VIDEO_INPUT` | ffmpeg video frame extraction for `video/*` attachments |
-| `ENABLE_AUDIO_INPUT` | Forwarding audio to "omni" audio-capable models (default `false`) |
-| `ENABLE_IMAGE_GEN` | `image_generator` + `hd_image` tools (NVIDIA NIM key required otherwise) |
-| `ENABLE_TTS` | The `tts` tool |
-| `ENABLE_TTS_VC` | VC TTS playback paths |
-| `ENABLE_EMAIL_TOOLS` | `email_send` / `email_read_inbox` / `email_get_message` / `email_search` |
-| `ENABLE_VC` | `voice_recv` import + `,vc` commands (needs `discord-ext-voice-recv`) |
-| `ENABLE_YOUTUBE` | `youtube` tool (needs `yt-dlp`) |
-| `ENABLE_WEB_SEARCH` | `web_search` tool (needs `ddgs`) |
-| `ENABLE_FETCH_URL` | `fetch_url` tool |
-| `ENABLE_SUBAGENT` | `sub_agent` tool (needs `opencode` binary) |
-| `ENABLE_CREATE_SITE` | `create_site` / `list_sites` tools |
-| `ENABLE_AVATAR` | `change_avatar` tool |
-| `ENABLE_SHELL` | `shell` tool (host access — only enable if you trust the model) |
-| `ENABLE_TELEGRAM` | Auto-start Telegram polling/webhook when `TELEGRAM_TOKEN` is set |
-| `ENABLE_AUTONOMY` | Autonomy engine (also controlled via dashboard) |
-| `ENABLE_REM` | Background REM dreaming pass |
+| `MAXWELL_EMBED_BASE_URL` | Embeddings endpoint (default `http://localhost:11434`). A bare host uses Ollama's `/api/embed`; a `/v1` base uses OpenAI's `/v1/embeddings`. Both response shapes are parsed. |
+| `MAXWELL_EMBED_MODEL` | Embedding model (default `qwen3-embedding:0.6b`) |
+| `MAXWELL_EMBED_API_KEY` | Bearer token for hosted embedding endpoints |
+| `MAXWELL_EMBED_DIM` | Vector dimension, must match the model (default `1024`) |
+
+### CAPTCHA handling
+
+| Variable | Description |
+|---|---|
 | `CAPTCHA_SOLVER_SERVICE` | `capsolver` or `2captcha` — auto-solves Discord captcha challenges (requires `CAPTCHA_SOLVER_API_KEY`) |
 | `CAPTCHA_SOLVER_API_KEY` | API key for the solver service |
 | `CAPTCHA_SOLVER_TIMEOUT` | Max seconds to wait for a captcha solution (default 180) |
 | `CAPTCHA_HUMAN_SOLVE` | `true` (default) — host a human-solve page + DM the link when no auto-solver is configured/fails |
 | `CAPTCHA_HUMAN_PORT` | Local port for the solve-page server (default 8790; Caddy proxies `/captcha/*` to it) |
-| `CAPTCHA_FALLBACK_USER_ID` | Discord user ID to DM captcha solve links when no admin is resolvable (default 1471821513824014480) |
+| `CAPTCHA_FALLBACK_USER_ID` | Discord user ID to DM captcha solve links when no admin is resolvable |
 
 ### TTS engine (only used if `ENABLE_TTS=true`)
 
@@ -181,17 +271,16 @@ auto-starting the background loop. Restart the bot to apply.
 | `MAXWELL_EMAIL_USER` / `MAXWELL_EMAIL_PASSWORD` | SASL credentials |
 | `MAXWELL_EMAIL_FROM` / `MAXWELL_EMAIL_FROM_NAME` | `From:` header |
 
-### OpenCode sub-agent (only used if `ENABLE_SUBAGENT=true`)
+### Sub-agent (only used if `ENABLE_SUBAGENT` is on)
 
 | Variable | Description |
 |---|---|
-| `OPENCODE_BIN` | Path to `opencode` binary |
-| `OPENCODE_SUBAGENT_BASE_DIR` | Workdir for sub-agent tasks (default `subagents/`, gitignored) |
-| `OPENCODE_SUBAGENT_MODEL` | Default model (default `ollama-cloud/minimax-m3`) |
-| `OPENCODE_SUBAGENT_TIMEOUT_MINUTES` | Per-task timeout (default `30`) |
-| `OPENCODE_SUBAGENT_DOCKER` | Run in Docker (default `true`) |
-| `OPENCODE_SUBAGENT_MEMORY` / `OPENCODE_SUBAGENT_CPUS` | Container resource limits |
-| `OPENCODE_SUBAGENT_NETWORK` | `bridge` (default) or `none` |
+| `SUBAGENT_BASE_DIR` | Where sub-agent workdirs are created (default `data/subagents`, gitignored) |
+| `SUBAGENT_MODEL` | Model for sub-agent work; blank = the main `OLLAMA_MODEL` |
+| `SUBAGENT_MAX_STEPS` | Tool-call steps before it must report back (default `24`) |
+| `SUBAGENT_TIMEOUT_SECONDS` | Wall-clock budget for one task (default `900`) |
+| `SUBAGENT_COMMAND_TIMEOUT_SECONDS` | Per-command timeout (default `120`) |
+| `SUBAGENT_MAX_FILE_BYTES` | Largest file the sub-agent may write (default `200000`) |
 
 ### Temporary Free Model
 
@@ -253,7 +342,9 @@ When tools are enabled, Maxwell can use `web_search` for recent/searchable info,
 
 ## Memory and RAG
 
-Maxwell uses a **RAG (Retrieval-Augmented Generation) vector memory system** backed by SQLite and numpy. All channel messages, long-term facts, and shared context entries are stored as vectors in `data/maxwell_rag.db`, embedded via `qwen3-embedding:0.6b` through a local ollama instance.
+Maxwell uses a **RAG (Retrieval-Augmented Generation) vector memory system** backed by SQLite and numpy. All channel messages, long-term facts, and shared context entries are stored as vectors in `data/maxwell_rag.db`, embedded through whatever endpoint `MAXWELL_EMBED_BASE_URL` points at — a local Ollama running `qwen3-embedding:0.6b` by default, or any OpenAI-compatible `/v1/embeddings` service.
+
+RAG is optional. With no embedder reachable, the bot logs one line, stops calling the endpoint for a cooldown, and keeps working on recent-history context; `ENABLE_RAG=false` skips embedding entirely.
 
 **How it works:**
 - Every message stored in the bot is embedded (1024-dim float32 vector) and saved to the SQLite vector store.
@@ -263,10 +354,21 @@ Maxwell uses a **RAG (Retrieval-Augmented Generation) vector memory system** bac
 - On startup, any vectors without embeddings are batch-embedded in the background.
 - The old `memory.py` (flat JSON) and `context_cleanup.py` (LLM janitor) have been removed. The RAG system handles dedup, pruning, and retrieval automatically.
 
-**Embedding model setup:**
+**Embedding model setup** (the free local default):
 ```bash
 ollama pull qwen3-embedding:0.6b
 ```
+
+Or point it somewhere else, e.g. OpenAI:
+```ini
+MAXWELL_EMBED_BASE_URL=https://api.openai.com/v1
+MAXWELL_EMBED_MODEL=text-embedding-3-small
+MAXWELL_EMBED_API_KEY=sk-...
+MAXWELL_EMBED_DIM=1536
+```
+
+Changing the model or dimension invalidates existing vectors: delete
+`data/maxwell_rag.db` (or accept that old rows stop matching) when you switch.
 
 The SQLite database lives at `data/maxwell_rag.db` (gitignored). Channel memory, LTM, and shared context are all in one `vectors` table distinguished by `kind` (`message`, `ltm`, `shared_context`).
 
@@ -274,7 +376,7 @@ REM adds a separate visible-only ring at `data/rem_events.json` and, when enable
 
 The REM pass is not a live chat response and never posts to Discord. Current code sends a bounded short-term slice plus a long-term memory snapshot to the configured OpenAI-compatible provider and stores an audit row in `data/rem_runs.json`. It does **not** currently run memory-edit tools despite the name; treat it as review/audit unless that loop gets rebuilt.
 
-REM is opt-in with `REM_ENABLED=false` by default. Configure `REM_INTERVAL_SECONDS`, `REM_EVENT_BUFFER_MAX`, `REM_RUN_HISTORY`, and `OLLAMA_REM_MODEL` in `.env`. Admins can use `,rem*` commands or the dashboard REM card.
+REM is opt-in: it is off unless you set `ENABLE_REM=true` (or `REM_ENABLED=true`) in `.env`. Configure `REM_INTERVAL_SECONDS`, `REM_EVENT_BUFFER_MAX`, `REM_RUN_HISTORY`, and `OLLAMA_REM_MODEL` in `.env`. Admins can use `,rem*` commands or the dashboard REM card.
 
 ## Autonomy
 
@@ -301,16 +403,24 @@ This is a **rolling release** project.
 - `main` is always the current release.
 - `git push origin main` + `pm2 restart maxwell-bot maxwell-api` is the deployment.
 - No semantic version numbers, no release tags, no version branches.
-- Features (like the hourly Intel knowledge roller) land continuously.
+- Features land continuously.
 
 If you're running via PM2 (recommended), a push to main followed by a restart gives you the latest rolling update immediately.
 
-> The Intel engine was removed in commit `d455e4b`. The `,intel` commands
-> and the `intel_enabled` / `intel_interval_seconds` keys are stripped
-> from `bot_control.json` at load. The `context_cleanup` background loop
-> and `context_cleanup.py` have also been removed — the RAG vector memory
-> system handles cleanup automatically. The `autonomy` engine still
-> writes fresh facts into long-term memory on its own cadence.
+Before you push, run the checks:
+
+```bash
+python3 -m pytest -q     # test suite
+python3 doctor.py        # config/feature sanity
+```
+
+> Removed along the way: the Intel engine (commit `d455e4b`; the `,intel`
+> commands and the `intel_enabled` / `intel_interval_seconds` control keys
+> are stripped from `bot_control.json` at load), `memory.py`,
+> `context_cleanup.py`, and the OpenCode/Docker sub-agent backend. RAG
+> vector memory handles memory upkeep, and `sub_agent` now runs inside
+> Maxwell itself. The `autonomy` engine still writes fresh facts into
+> long-term memory on its own cadence.
 
 ## Dashboard / API
 
@@ -327,7 +437,8 @@ Static files (`web/index.html`, `web/admin/index.html`) should be copied to a we
 - Never commit `.env`, `data/`, logs, PM2 dumps, or generated sites.
 - Set real values for `MAXWELL_ADMIN_USER` and `MAXWELL_ADMIN_PASSWORD`. The API does not persist or bootstrap credentials.
 - Generated bot sites serve arbitrary HTML. Host them on a separate origin from admin pages to prevent credential theft via XSS.
-- The shell tool runs commands directly with `bash -lc` from the bot process environment. Only enable tools where that level of host access is intended.
+- The shell tool runs commands directly with `bash -lc` from the bot process environment, and the sub-agent writes and runs code in its workdir. Both are on by default; set `ENABLE_SHELL=false` (which also turns off `sub_agent`) if you don't want the model to have that access. The bot logs a warning at startup whenever shell is enabled.
+- `DISABLE_TAINT_GATE=false` (the default) makes `shell` require an out-of-band `,confirm` on any turn that read fetched web content — the second line of defence against indirect prompt injection. Only disable it on a single-user install you fully trust.
 
 ## License
 
