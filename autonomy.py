@@ -29,7 +29,6 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -39,7 +38,12 @@ from control_defaults import (
     DEFAULT_CONTROL,
 )  # noqa: E402
 from utils import (  # noqa: E402
+    JsonStateStore,
     _atomic_json_write_sync,
+    _load_json_safe,
+    _safe_int,
+    _truncate,
+    _utcnow_iso,
 )
 from utils import (
     _coerce_utc_datetime as _coerce_utc_dt_shared,
@@ -55,14 +59,6 @@ from utils import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _safe_int(val, default=0):
-    """Parse int safely, returning default on failure."""
-    try:
-        return int(val) if val is not None else default
-    except (TypeError, ValueError):
-        return default
 
 
 # Regex constants, _discord_display_name, _discord_id, _coerce_utc_datetime,
@@ -391,42 +387,6 @@ AUTONOMY_DISABLED_TOOLS = frozenset(
 # _atomic_json_write_sync imported from utils.py
 
 
-def _load_json_safe(path: Path, default):
-    """Load JSON, tolerating missing/corrupt files."""
-    try:
-        if not path.exists():
-            return default if not callable(default) else default()
-        raw = path.read_text(encoding="utf-8").strip()
-        if not raw:
-            return default if not callable(default) else default()
-        data = json.loads(raw)
-        return data
-    except (json.JSONDecodeError, OSError, ValueError) as e:
-        # Fail closed: do NOT overwrite the on-disk file with {} on a transient
-        # read error. Overwriting wiped state/goals/watermarks in production (a
-        # corrupt read of autonomy_goals.json silently deleted all user goals).
-        # Leave the file intact so a human can recover it.
-        logger.warning(
-            f"Corrupt/unreadable {path.name}, using defaults (file left intact): {e}"
-        )
-        return default if not callable(default) else default()
-
-
-def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _truncate(text: str, budget: int) -> str:
-    """Truncate text to budget, adding ellipsis if cut."""
-    budget = max(0, _safe_int(budget, 0))
-    if len(text) <= budget:
-        return text
-    suffix = "\n... [truncated]"
-    if budget <= len(suffix):
-        return text[:budget]
-    return text[: budget - len(suffix)] + suffix
-
-
 def _truncate_keep_tail(text: str, budget: int) -> str:
     """Keep newest lines when context gets too fat. Front truncation betrayed us."""
     budget = max(0, _safe_int(budget, 0))
@@ -551,45 +511,21 @@ class SyntheticMessage:
 # ---------------------------------------------------------------------------
 
 
-class AutonomyStore:
-    """Manages the three autonomy data files with atomic writes."""
+class AutonomyStore(JsonStateStore):
+    """Manages the three autonomy data files with atomic writes.
+
+    State + audit log come from utils.JsonStateStore; goals are autonomy's own.
+    """
+
+    log_ring_size = LOG_RING_SIZE
 
     def __init__(self, data_dir: str):
-        self.data_dir = Path(data_dir)
-        self.state_file = self.data_dir / "autonomy_state.json"
+        super().__init__(
+            data_dir,
+            state_file="autonomy_state.json",
+            log_file="autonomy_log.json",
+        )
         self.goals_file = self.data_dir / "autonomy_goals.json"
-        self.log_file = self.data_dir / "autonomy_log.json"
-        self._lock = asyncio.Lock()
-
-    # -- state --
-
-    async def load_state(self) -> dict:
-        async with self._lock:
-            data = await asyncio.to_thread(_load_json_safe, self.state_file, dict)
-            return data if isinstance(data, dict) else {}
-
-    async def save_state(self, state: dict):
-        async with self._lock:
-            await asyncio.to_thread(_atomic_json_write_sync, self.state_file, state)
-
-    async def patch_state(self, updates: dict) -> dict:
-        async with self._lock:
-            state = await asyncio.to_thread(_load_json_safe, self.state_file, dict)
-            if not isinstance(state, dict):
-                state = {}
-            state.update(updates)
-            await asyncio.to_thread(_atomic_json_write_sync, self.state_file, state)
-            return state
-
-    async def update_state(self, fn) -> dict:
-        """Read-modify-write under a single lock. fn(state) mutates in-place."""
-        async with self._lock:
-            state = await asyncio.to_thread(_load_json_safe, self.state_file, dict)
-            if not isinstance(state, dict):
-                state = {}
-            fn(state)
-            await asyncio.to_thread(_atomic_json_write_sync, self.state_file, state)
-            return state
 
     # -- goals --
 
@@ -681,37 +617,6 @@ class AutonomyStore:
             return None
 
     # -- action log (ring buffer) --
-
-    async def load_log(self) -> list[dict]:
-        async with self._lock:
-            data = await asyncio.to_thread(_load_json_safe, self.log_file, dict)
-            entries = data.get("entries", []) if isinstance(data, dict) else []
-            return entries if isinstance(entries, list) else []
-
-    async def append_log_entry(self, entry: dict):
-        async with self._lock:
-            data = await asyncio.to_thread(_load_json_safe, self.log_file, dict)
-            entries = data.get("entries", []) if isinstance(data, dict) else []
-            if not isinstance(entries, list):
-                entries = []
-            entries.append(entry)
-            # ring buffer
-            entries = entries[-LOG_RING_SIZE:]
-            await asyncio.to_thread(
-                _atomic_json_write_sync, self.log_file, {"entries": entries}
-            )
-
-    async def clear_log(self):
-        async with self._lock:
-            await asyncio.to_thread(
-                _atomic_json_write_sync, self.log_file, {"entries": []}
-            )
-
-    # -- error shortcut --
-
-    async def record_error(self, error: str):
-        await self.patch_state({"last_error": str(error)[:2000]})
-
 
 # ---------------------------------------------------------------------------
 # AutonomyEngine

@@ -39,12 +39,17 @@ import logging
 import re
 import time
 import uuid
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, cast
 
 from control_defaults import DEFAULT_CONTROL  # noqa: E402
-from utils import _atomic_json_write_sync  # noqa: E402
+from utils import (  # noqa: E402
+    JsonStateStore,
+    _atomic_json_write_sync,
+    _load_json_safe,
+    _safe_int,
+    _truncate,
+    _utcnow_iso,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,49 +67,6 @@ MAX_ACTIONS_PER_PASS = MAX_OPS_PER_PASS
 
 VALID_OP_KINDS = frozenset({"delete", "edit", "merge", "add"})
 VALID_VISIBILITIES = frozenset({"shared", "private", "admin_only", "public_hint"})
-
-
-def _safe_int(val, default=0):
-    """Parse int safely, returning default on failure."""
-    try:
-        return int(val) if val is not None else default
-    except (TypeError, ValueError):
-        return default
-
-
-def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _load_json_safe(path: Path, default):
-    try:
-        if not path.exists():
-            return default() if callable(default) else default
-        raw = path.read_text(encoding="utf-8").strip()
-        if not raw:
-            return default() if callable(default) else default
-        data = json.loads(raw)
-        return data
-    except (json.JSONDecodeError, OSError, ValueError) as e:
-        # Fail closed: do NOT overwrite the on-disk file with {} on a transient
-        # read error. Overwriting wiped state/watermarks in production (a corrupt
-        # read of autonomy_goals/context_cleanup_state reset everything and made
-        # the next pass reprocess the entire slice). Leave the file intact so a
-        # human can recover it; the engine runs off in-memory defaults this cycle.
-        logger.warning(
-            f"Corrupt/unreadable {path.name}, using defaults (file left intact): {e}"
-        )
-        return default() if callable(default) else default
-
-
-def _truncate(text: str, budget: int) -> str:
-    budget = max(0, _safe_int(budget, 0))
-    if len(text) <= budget:
-        return text
-    suffix = "\n... [truncated]"
-    if budget <= len(suffix):
-        return text[:budget]
-    return text[: budget - len(suffix)] + suffix
 
 
 def _strip_id(value: Any) -> str:
@@ -130,42 +92,22 @@ def _coerce_importance(value: Any, fallback: int = 5) -> int:
         return fallback
 
 
-class ContextCleanupStore:
-    """JSON-backed state + audit log for the cleanup agent (atomic writes)."""
+class ContextCleanupStore(JsonStateStore):
+    """JSON-backed state + audit log for the cleanup agent (atomic writes).
+
+    State, log, and error plumbing come from utils.JsonStateStore. The only
+    thing that is genuinely this agent's own is the control file.
+    """
+
+    log_ring_size = LOG_RING_SIZE
 
     def __init__(self, data_dir: str):
-        self.data_dir = Path(data_dir)
-        self.state_file = self.data_dir / "context_cleanup_state.json"
-        self.log_file = self.data_dir / "context_cleanup_log.json"
+        super().__init__(
+            data_dir,
+            state_file="context_cleanup_state.json",
+            log_file="context_cleanup_log.json",
+        )
         self.control_file = self.data_dir / "context_cleanup_control.json"
-        self._lock = asyncio.Lock()
-
-    async def load_state(self) -> dict:
-        async with self._lock:
-            data = await asyncio.to_thread(_load_json_safe, self.state_file, dict)
-            return data if isinstance(data, dict) else {}
-
-    async def save_state(self, state: dict):
-        async with self._lock:
-            await asyncio.to_thread(_atomic_json_write_sync, self.state_file, state)
-
-    async def patch_state(self, updates: dict) -> dict:
-        async with self._lock:
-            state = await asyncio.to_thread(_load_json_safe, self.state_file, dict)
-            if not isinstance(state, dict):
-                state = {}
-            state.update(updates)
-            await asyncio.to_thread(_atomic_json_write_sync, self.state_file, state)
-            return state
-
-    async def update_state(self, fn) -> dict:
-        async with self._lock:
-            state = await asyncio.to_thread(_load_json_safe, self.state_file, dict)
-            if not isinstance(state, dict):
-                state = {}
-            fn(state)
-            await asyncio.to_thread(_atomic_json_write_sync, self.state_file, state)
-            return state
 
     async def load_control(self) -> dict:
         async with self._lock:
@@ -177,33 +119,6 @@ class ContextCleanupStore:
             await asyncio.to_thread(
                 _atomic_json_write_sync, self.control_file, dict(control or {})
             )
-
-    async def load_log(self) -> list[dict]:
-        async with self._lock:
-            data = await asyncio.to_thread(_load_json_safe, self.log_file, dict)
-            entries = data.get("entries", []) if isinstance(data, dict) else []
-            return entries if isinstance(entries, list) else []
-
-    async def append_log_entry(self, entry: dict):
-        async with self._lock:
-            data = await asyncio.to_thread(_load_json_safe, self.log_file, dict)
-            entries = data.get("entries", []) if isinstance(data, dict) else []
-            if not isinstance(entries, list):
-                entries = []
-            entries.append(entry)
-            entries = entries[-LOG_RING_SIZE:]
-            await asyncio.to_thread(
-                _atomic_json_write_sync, self.log_file, {"entries": entries}
-            )
-
-    async def clear_log(self):
-        async with self._lock:
-            await asyncio.to_thread(
-                _atomic_json_write_sync, self.log_file, {"entries": []}
-            )
-
-    async def record_error(self, error: str):
-        await self.patch_state({"last_error": str(error)[:2000]})
 
 
 def _entry_digest(entry: dict) -> str:

@@ -25,6 +25,12 @@ DEFAULT_CONTROL = {
     "bot_enabled": True,
     "log_messages": False,
     "error_replies": True,
+    # When True, the apology posted on a failed turn carries a short,
+    # secret-redacted line of the ACTUAL exception (type + message) instead of
+    # a bare "Sorry, please try again." Operators could only see the real cause
+    # by tailing pm2 logs, which meant every user report was "it just said
+    # sorry". Turn off if you don't want internals visible in a channel.
+    "error_details": True,
     "typing_indicator": True,
     "store_memory": True,
     "long_term_memory_enabled": True,

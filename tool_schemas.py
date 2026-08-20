@@ -316,6 +316,115 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Result contract
+# ---------------------------------------------------------------------------
+# The model had no way to know whether a tool hands its output back. That
+# ignorance cost us real turns: it would answer *before* web_search returned
+# ("here's what I found: ...") because it assumed the call was fire-and-forget,
+# and it would sit waiting for a second turn after `react`/`typing`, which
+# never produce one, leaving the channel silent.
+#
+# These three sets are the single source of truth. build_openai_tools() stamps
+# the matching one-line contract onto every tool description, the system prompt
+# lists tools grouped by contract, and bot.py imports RESULT_TOOL_NAMES to
+# decide whether a batch loops back for another model turn. Add a new tool to
+# exactly one set — the prompt, the schema, and the dispatch loop all follow.
+
+# Tools whose output is fed back to the model in a fresh turn.
+RESULT_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "image_generator",
+        "hd_image",
+        "lookup_user",
+        "search_messages",
+        "create_invite",
+        "join_server",
+        "leave_server",
+        "create_poll",
+        "forward_message",
+        "edit_message",
+        # change_avatar returns a bare success ack ("Avatar changed
+        # successfully"). Without a follow-up turn a model that calls only
+        # this leaves the turn silent — the user sees the new avatar and no
+        # text at all.
+        "change_avatar",
+        "list_servers",
+        "create_site",
+        "list_sites",
+        "web_search",
+        "fetch_url",
+        "youtube",
+        "shell",
+        "list_admin_servers",
+        "create_category",
+        "create_channel",
+        "edit_channel",
+        "delete_channel",
+        "send_file",
+        "send_meme",
+        "send_media",
+        # email_send is here too so a batch like email_send + send_message
+        # still gets a second turn to confirm, retry, or react.
+        "email_send",
+        "email_read_inbox",
+        "email_get_message",
+        "email_search",
+        "leave_vc",
+        # set_activity gets a follow-up so the model can react to its own
+        # status change. change_presence deliberately does NOT — that one is
+        # the online/idle/dnd dot the user just set, and a follow-up turn
+        # would race to undo it.
+        "set_activity",
+        "update_base_personality",
+        "update_server_prompt",
+    }
+)
+
+# Tools that end the turn outright. Nothing after them runs, and there is no
+# follow-up turn unless a RESULT tool shared the same batch.
+TURN_ENDING_TOOL_NAMES: frozenset[str] = frozenset(
+    {"send_message", "no_response", "sleep"}
+)
+
+# One line per contract class, appended to the tool's description so the model
+# reads it in the same place it reads the parameters. Kept short on purpose —
+# this text is paid for on every single request, for every single tool.
+_CONTRACT_RESULT = (
+    " [returns output: you get another turn with the result — "
+    "do not describe or invent the result before you see it]"
+)
+_CONTRACT_ENDING = (
+    " [ends the turn: nothing after it runs and you are not called again]"
+)
+_CONTRACT_SILENT = (
+    " [returns nothing: no result, no extra turn — pair it with send_message "
+    "in the SAME batch if the user should see a reply]"
+)
+
+
+def result_contract(name: str) -> str:
+    """The one-line result contract appended to `name`'s description."""
+    if name in RESULT_TOOL_NAMES:
+        return _CONTRACT_RESULT
+    if name in TURN_ENDING_TOOL_NAMES:
+        return _CONTRACT_ENDING
+    return _CONTRACT_SILENT
+
+
+def contract_groups(names: list[str]) -> dict[str, list[str]]:
+    """Split `names` into the three contract buckets, order preserved."""
+    groups: dict[str, list[str]] = {"result": [], "ending": [], "silent": []}
+    for name in names:
+        if name in RESULT_TOOL_NAMES:
+            groups["result"].append(name)
+        elif name in TURN_ENDING_TOOL_NAMES:
+            groups["ending"].append(name)
+        else:
+            groups["silent"].append(name)
+    return groups
+
+
 # The reasoning parameter is stamped onto EVERY tool so the model does its
 # real reasoning *inside the tool call it wants to use* instead of a separate,
 # pointless `reasoning_log` tool. Same shape everywhere — see tool_registry.py.
@@ -342,6 +451,11 @@ def build_openai_tools(
     it declared in TOOL_PARAMETERS. Reasoning lives INSIDE the tool call now —
     there is no standalone reasoning_log tool anymore. If you add a new tool,
     you do nothing special: it gets reasoning for free. Stop forgetting.
+
+    Every description also gets its result contract appended (see
+    result_contract) so the model knows, per tool, whether the output comes
+    back to it. The contract is added AFTER the description is truncated, so
+    a long description can never eat the part that changes the model's plan.
     """
     disabled = disabled_names or set()
     out: list[dict[str, Any]] = []
@@ -356,6 +470,7 @@ def build_openai_tools(
             desc = name
         if len(desc) > max_description_chars:
             desc = desc[: max_description_chars - 1] + "…"
+        desc = (desc or name) + result_contract(name)
         params = dict(
             TOOL_PARAMETERS.get(
                 name, {"type": "object", "properties": {}, "additionalProperties": True}
@@ -378,7 +493,7 @@ def build_openai_tools(
                 "type": "function",
                 "function": {
                     "name": name,
-                    "description": desc or name,
+                    "description": desc,
                     "parameters": params,
                 },
             }

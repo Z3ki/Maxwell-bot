@@ -269,13 +269,19 @@ from tool_registry import (  # noqa: E402 — reasoning now rides inside tool ca
     record_reasoning,
 )
 from tool_schemas import (  # noqa: E402
+    RESULT_TOOL_NAMES,
     build_openai_tools,
+    contract_groups,
     elide_tool_calls_for_history,
     normalize_native_tool_calls,
+    result_contract,
 )
 from utils import (  # fd-safe, single source of truth  # noqa: E402
     FileLock,
     _atomic_json_write_sync,
+    _coerce_utc_datetime,
+    _safe_int,
+    _spawn_background,
     render_discord_context_text,
 )
 
@@ -298,7 +304,32 @@ _stderr_handler = logging.StreamHandler(sys.stderr)
 _stderr_handler.setFormatter(_log_format)
 _stderr_handler.setLevel(logging.ERROR)
 
-logging.basicConfig(level=logging.INFO, handlers=[_stdout_handler, _stderr_handler])
+# LOG_LEVEL has been in .env (and config.py) since forever but nothing ever
+# read it — the root level was hardcoded to INFO, so `LOG_LEVEL=debug` did
+# nothing and there was no way to see runtime values without editing code.
+_LOG_LEVEL = getattr(
+    logging, os.getenv("LOG_LEVEL", "info").strip().upper(), logging.INFO
+)
+logging.basicConfig(level=_LOG_LEVEL, handlers=[_stdout_handler, _stderr_handler])
+
+# Third-party DEBUG is unusable noise: discord.gateway logs every heartbeat and
+# aiohttp/httpx log every socket. Pin them a notch above ours so LOG_LEVEL=debug
+# shows OUR values, not the websocket's.
+if _LOG_LEVEL <= logging.DEBUG:
+    for _noisy in (
+        "discord",
+        "discord.gateway",
+        "discord.client",
+        "discord.http",
+        "aiohttp",
+        "httpx",
+        "httpcore",
+        "urllib3",
+        "asyncio",
+        "PIL",
+    ):
+        logging.getLogger(_noisy).setLevel(logging.INFO)
+
 logger = logging.getLogger(__name__)
 
 # How long an out-of-band `,confirm` authorizes one destructive tool call on a
@@ -321,35 +352,28 @@ PRIOR_VISUAL_REFERENCE_RE = re.compile(
 )
 
 
-def _safe_int(val, default=0):
-    """Parse int safely, returning default on failure."""
-    try:
-        return int(val) if val is not None else default
-    except (TypeError, ValueError):
-        return default
+# Secrets that must never reach a channel even inside an error string. Provider
+# errors love to echo the request back, which historically meant the whole
+# Authorization header.
+_SECRET_IN_ERROR_RE = re.compile(
+    r"(?i)\b(?:sk-[A-Za-z0-9_\-]{8,}|Bearer\s+[A-Za-z0-9._\-]{8,}"
+    r"|(?:api[_-]?key|token|password|secret)\s*[=:]\s*\S+)"
+)
 
 
-# asyncio holds only a WEAK reference to a running task, so a detached
-# create_task() whose handle nobody keeps can be garbage-collected mid-flight.
-# providers.py and tool_progress.py already learned this the hard way (dropped
-# progress edits); the same pattern here silently kills background loops — a
-# collected _daily_summarizer_loop() means LTM summarization just stops until
-# the next restart, with nothing in the logs. Keep a strong ref until done.
-_BACKGROUND_TASKS: set[asyncio.Task] = set()
+def _format_user_error(exc: BaseException, limit: int = 300) -> str:
+    """One redacted line describing `exc`, safe to post in a channel.
 
-
-def _spawn_background(coro) -> asyncio.Task:
-    """Schedule a detached task that cannot be GC'd before it finishes."""
-    try:
-        task = asyncio.get_running_loop().create_task(coro)
-    except RuntimeError:
-        # No running loop (import-time / sync context). The caller's
-        # contextlib.suppress(RuntimeError) sites relied on this raising.
-        coro.close()
-        raise
-    _BACKGROUND_TASKS.add(task)
-    task.add_done_callback(_BACKGROUND_TASKS.discard)
-    return task
+    Operators could previously only tell a 429 from a crash by tailing pm2, so
+    every report was "it just said sorry". This gives the channel the exception
+    type plus a trimmed, secret-scrubbed message.
+    """
+    detail = " ".join(str(exc).split())
+    detail = _SECRET_IN_ERROR_RE.sub("[redacted]", detail)
+    if len(detail) > limit:
+        detail = detail[: limit - 1].rstrip() + "…"
+    name = type(exc).__name__
+    return f"`{name}: {detail}`" if detail else f"`{name}`"
 
 
 def _web_result_snippet(content: str, title: str, limit: int = 280) -> str:
@@ -371,21 +395,6 @@ def _web_result_snippet(content: str, title: str, limit: int = 280) -> str:
             i += 1
         text = "\n".join(lines[i:])
     return text.strip()[:limit]
-
-
-def _coerce_utc_datetime(value) -> datetime | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        dt = value
-    else:
-        try:
-            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        except (TypeError, ValueError):
-            return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
 
 
 def _message_created_at_iso(message) -> str:
@@ -910,18 +919,6 @@ def render_custom_emoji_aliases(text: str, emojis: dict[str, str]) -> str:
         return emojis.get(match.group(1).lower()) or match.group(0)
 
     return CUSTOM_EMOJI_ALIAS_RE.sub(replace, text)
-
-
-def _discord_display_name(obj: Any) -> str:
-    return str(
-        getattr(obj, "display_name", None)
-        or getattr(obj, "name", None)
-        or getattr(obj, "id", "unknown")
-    )
-
-
-def _discord_id(obj: Any) -> str:
-    return str(getattr(obj, "id", "unknown"))
 
 
 # Discord error codes that all mean "the message you referenced is gone".
@@ -1955,59 +1952,11 @@ def _is_text_attachment(
 # (see imports above)
 
 
-FOLLOWUP_TOOL_NAMES = {
-    "image_generator",
-    "hd_image",
-    "lookup_user",
-    "search_messages",
-    "create_invite",
-    "join_server",
-    "leave_server",
-    "create_poll",
-    "forward_message",
-    "edit_message",
-    # change_avatar returns a bare success ack ("Avatar changed successfully").
-    # Without follow-up, a model that calls this as its only tool leaves the
-    # turn silent — the user sees the avatar change but no text response.
-    # Adding it here forces a second turn so the model can confirm / react.
-    "change_avatar",
-    "list_servers",
-    "create_site",
-    "list_sites",
-    "web_search",
-    "fetch_url",
-    "youtube",
-    "shell",
-    "list_admin_servers",
-    "create_category",
-    "create_channel",
-    "edit_channel",
-    "delete_channel",
-    "send_file",
-    "send_meme",
-    "send_media",
-    # Email tools must trigger a follow-up so the model can read the result
-    # and act on it. email_send ALSO needs follow-up so a batch like
-    # email_send + send_message still gets a second turn to summarize or
-    # react; without it the model would post the message and go silent even
-    # when the user asked for a confirmation, retry, or related action.
-    "email_send",
-    "email_read_inbox",
-    "email_get_message",
-    "email_search",
-    "leave_vc",
-    # Status: set_activity gets a follow-up turn so the model can react to
-    # its own status change (re-pick a better one based on the latest user
-    # message, or produce a final text reply that leans into the new vibe).
-    # Without this the tool just returns and the conversation ends, which
-    # is how Maxwell's status used to go stale for hours. We deliberately
-    # do NOT add change_presence here — that one is the online/idle/dnd
-    # dot the user just explicitly set, and a follow-up turn would race to
-    # undo it.
-    "set_activity",
-    "update_base_personality",
-    "update_server_prompt",
-}
+# Which tools hand their output back to the model. Defined once in
+# tool_schemas.RESULT_TOOL_NAMES, which also stamps the matching contract onto
+# every tool description, so the set the dispatcher loops on is literally the
+# set the model was told about. Do not re-list them here.
+FOLLOWUP_TOOL_NAMES = RESULT_TOOL_NAMES
 
 TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "image_generator",
@@ -2101,6 +2050,19 @@ TOOL_PROTOCOL = (
     "update_base_personality / update_server_prompt: admin-only; rewrite runtime "
     "personality only when asked or voice is clearly drifting. Base Knowledge "
     "in code is not editable.\n"
+    "## What comes back\n"
+    "Each tool description ends with its result contract. Read it before you "
+    "plan the turn:\n"
+    "[returns output] — the result is handed back and you are called AGAIN "
+    "with it. Never state, summarize, or invent that result in the same turn "
+    "you request it; call the tool, stop, and answer on the next turn from "
+    "what actually came back.\n"
+    "[returns nothing] — it runs and you are NOT called again. If the user "
+    "should see a reply, put send_message in the SAME batch; waiting for a "
+    "turn that never comes is how you go silent.\n"
+    "[ends the turn] — nothing after it runs.\n"
+    "A batch mixing both loops back once the [returns output] tools finish, so "
+    "a short send_message plus a slow lookup is fine: you get the result turn.\n"
     "## Reasoning\n"
     "Every tool call needs `reasoning` as the FIRST argument: one plain-English "
     "sentence (max ~280 chars) of WHY, not the artifact. Plain text only — no "
@@ -9109,6 +9071,10 @@ class MaxwellBot(commands.Bot):
                         await message.channel.send(
                             "timed out waiting for a response (10 min). try again or break the task into smaller pieces."
                         )
+                    elif self._control.get("error_details", True):
+                        await message.channel.send(
+                            f"something broke — {_format_user_error(e)}"
+                        )
                     else:
                         await message.channel.send("Sorry, please try again.")
                     normal_reply_sent = True
@@ -9966,6 +9932,20 @@ class MaxwellBot(commands.Bot):
         ]
         if not names:
             return ""
+        # Group the catalog by result contract instead of dumping one flat
+        # list. Same tokens, but the model reads "these hand output back,
+        # those don't" as structure rather than having to remember it
+        # per-tool from the schema descriptions.
+        groups = contract_groups(names)
+        catalog = "\n".join(
+            f"{label}: {', '.join(members)}"
+            for label, members in (
+                ("Return output to you (you get another turn)", groups["result"]),
+                ("Return nothing (no extra turn)", groups["silent"]),
+                ("End the turn", groups["ending"]),
+            )
+            if members
+        )
         native = bool(self._control.get("native_tool_calls", True))
         if native:
             # Native tools= already carries each tool's get_description().
@@ -9975,16 +9955,18 @@ class MaxwellBot(commands.Bot):
                 "## Tools\n"
                 "Use the provider's native function/tool calling API. "
                 "Do not put tool markup in visible text and do not invent "
-                "XML tags like <tool:name>. "
-                f"Available: {', '.join(names)}."
+                "XML tags like <tool:name>.\n" + catalog
             )
         else:
             descriptions = [
-                f"{name}: {self.tools[name].get_description()}" for name in names
+                f"{name}: {self.tools[name].get_description()}"
+                f"{result_contract(name)}"
+                for name in names
             ]
             header = (
                 "## Available tools\n"
                 + "\n".join(descriptions)
+                + "\n\n" + catalog
                 + "\n\n## How to call\n"
                 "XML text tags only, one tag per call:\n"
                 "<tool:name>\n<param>value</param>\n</tool:name>\n"
@@ -11073,7 +11055,11 @@ class MaxwellBot(commands.Bot):
                         else None,
                         user_id,
                         user_name,
-                    ).reply("Sorry, please try again.")
+                    ).reply(
+                        f"something broke — {_format_user_error(e)}"
+                        if self._control.get("error_details", True)
+                        else "Sorry, please try again."
+                    )
 
     async def _process_telegram_message_inner(
         self, message, chat_id, text, user_name, user_id, session, url_base

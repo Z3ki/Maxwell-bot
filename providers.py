@@ -16,15 +16,7 @@ logger = logging.getLogger(__name__)
 # asyncio holds only a weak reference to a running task, so a bare
 # `create_task(...)` whose result nobody keeps can be garbage-collected
 # mid-flight and silently cancel the work. Keep a strong ref until it's done.
-_BACKGROUND_TASKS: set[asyncio.Task] = set()
-
-
-def _fire_and_forget(coro) -> asyncio.Task:
-    """Schedule a detached task that can't be GC'd before it finishes."""
-    task = asyncio.create_task(coro)
-    _BACKGROUND_TASKS.add(task)
-    task.add_done_callback(_BACKGROUND_TASKS.discard)
-    return task
+from utils import _spawn_background as _fire_and_forget  # noqa: E402
 
 
 # Matches the `reasoning` string value inside a (possibly partial) tool-call

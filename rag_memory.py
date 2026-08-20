@@ -63,6 +63,12 @@ RAG_QUERY_TIMEOUT_SECONDS = _float_env(
 RAG_QUERY_FAILURE_COOLDOWN_SECONDS = _float_env(
     "MAXWELL_RAG_QUERY_FAILURE_COOLDOWN_SECONDS", 15.0, 1.0, 120.0
 )
+# How long to stop calling the embedder after a connection-level failure.
+# Short enough that a restarted Ollama is picked up within a message or two,
+# long enough that a dead one doesn't cost a connect attempt per message.
+EMBED_ENDPOINT_COOLDOWN_SECONDS = _float_env(
+    "MAXWELL_EMBED_ENDPOINT_COOLDOWN_SECONDS", 30.0, 5.0, 600.0
+)
 EMBED_HTTP_TIMEOUT_SECONDS = _float_env(
     "MAXWELL_EMBED_HTTP_TIMEOUT_SECONDS", 30.0, 2.0, 180.0
 )
@@ -550,6 +556,14 @@ class RAGMemoryManager:
         # If the local embedder is unavailable or too slow, don't retry it for
         # every RAG search in the same turn (or every concurrent turn).
         self._query_embed_disabled_until = 0.0
+        # Endpoint-level breaker. When Ollama is down entirely, every stored
+        # message used to open a fresh TCP connection, fail, and log a
+        # WARNING — two per message, forever. Now the first failure opens the
+        # circuit for EMBED_ENDPOINT_COOLDOWN_SECONDS and every embed in that
+        # window returns None immediately, with one summary line at the end
+        # instead of a flood.
+        self._embed_endpoint_down_until = 0.0
+        self._embed_suppressed_failures = 0
         self._init_db()
 
     def _spawn(self, coro) -> asyncio.Task | None:
@@ -937,6 +951,13 @@ class RAGMemoryManager:
         except Exception:
             pass
 
+        # ─── endpoint breaker ───────────────────────────────────────
+        # Checked AFTER the cache lookup on purpose: a cached vector is still
+        # served while the embedder is down.
+        if time.monotonic() < self._embed_endpoint_down_until:
+            self._embed_suppressed_failures += 1
+            return None
+
         # ─── embed (single-chunk fast path vs multi-chunk mean-pool) ───
         try:
             chunk_vecs: list[np.ndarray] = []
@@ -1024,13 +1045,42 @@ class RAGMemoryManager:
             except Exception:
                 pass  # cache write failure is non-fatal
 
+            self._embed_endpoint_recovered()
             return vec
         except asyncio.TimeoutError:
-            logger.warning("Embedding API timeout")
+            self._trip_embed_breaker("timeout")
+            return None
+        except (aiohttp.ClientError, OSError) as e:
+            # Connection refused / DNS / reset: the endpoint itself is down,
+            # so back off instead of retrying per message.
+            self._trip_embed_breaker(str(e))
             return None
         except Exception as e:
             logger.warning(f"Embedding failed: {e}")
             return None
+
+    def _trip_embed_breaker(self, reason: str) -> None:
+        """Open the embed circuit, logging once per outage rather than per call."""
+        first = time.monotonic() >= self._embed_endpoint_down_until
+        self._embed_endpoint_down_until = (
+            time.monotonic() + EMBED_ENDPOINT_COOLDOWN_SECONDS
+        )
+        if first:
+            logger.warning(
+                "Embedding endpoint unreachable (%s); pausing embeds for %.0fs",
+                str(reason)[:200],
+                EMBED_ENDPOINT_COOLDOWN_SECONDS,
+            )
+
+    def _embed_endpoint_recovered(self) -> None:
+        """Close the circuit after a success, reporting what we skipped."""
+        if self._embed_suppressed_failures:
+            logger.info(
+                "Embedding endpoint recovered (%d embed(s) skipped while down)",
+                self._embed_suppressed_failures,
+            )
+            self._embed_suppressed_failures = 0
+        self._embed_endpoint_down_until = 0.0
 
     async def _embed_for_query(self, query: str) -> np.ndarray | None:
         """Best-effort query embedding with a strict interactive deadline.

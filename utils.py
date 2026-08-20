@@ -3,6 +3,7 @@
 Don't duplicate these in other files. Import from here.
 """
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -267,6 +268,41 @@ def _fsync_dir(dir_path: Path) -> None:
             os.close(dfd)
 
 
+# asyncio holds only a WEAK reference to a running task, so a detached
+# create_task() whose handle nobody keeps can be garbage-collected mid-flight.
+# providers.py and tool_progress.py learned this the hard way (dropped progress
+# edits); the same pattern kills background loops — a collected
+# _daily_summarizer_loop() means LTM summarization just stops until the next
+# restart, with nothing in the logs. One process-wide strong-ref set, so a task
+# is held until it finishes no matter which module spawned it.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn_background(coro) -> asyncio.Task:
+    """Schedule a detached task that cannot be GC'd before it finishes.
+
+    Raises RuntimeError with no running loop (import-time / sync context) and
+    closes the coroutine first, so callers that wrap this in
+    contextlib.suppress(RuntimeError) don't leak an un-awaited coroutine.
+    """
+    try:
+        task = asyncio.get_running_loop().create_task(coro)
+    except RuntimeError:
+        coro.close()
+        raise
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return task
+
+
+def _safe_int(val, default=0):
+    """Parse int safely, returning default on failure."""
+    try:
+        return int(val) if val is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
 def _coerce_utc_datetime(value) -> datetime | None:
     """Normalize any datetime-like value to UTC datetime."""
     if value is None:
@@ -462,3 +498,120 @@ def _with_file_lock(path: Path | str, func, timeout: float = 30.0):
     """
     with FileLock(path, timeout=timeout):
         return func()
+
+
+def _load_json_safe(path: Path, default):
+    """Load JSON, tolerating missing/corrupt files.
+
+    Fail closed: a transient read error must NOT overwrite the on-disk file
+    with {}. Doing so wiped state/goals/watermarks in production (a corrupt
+    read of autonomy_goals.json silently deleted every user goal). The file is
+    left intact so a human can recover it; the caller runs off in-memory
+    defaults for this cycle.
+    """
+    try:
+        if not path.exists():
+            return default() if callable(default) else default
+        raw = path.read_text(encoding="utf-8").strip()
+        if not raw:
+            return default() if callable(default) else default
+        return json.loads(raw)
+    except (json.JSONDecodeError, OSError, ValueError) as e:
+        logger.warning(
+            f"Corrupt/unreadable {path.name}, using defaults (file left intact): {e}"
+        )
+        return default() if callable(default) else default
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _truncate(text: str, budget: int) -> str:
+    """Truncate text to budget, marking the cut so the LLM knows it happened."""
+    budget = max(0, _safe_int(budget, 0))
+    if len(text) <= budget:
+        return text
+    suffix = "\n... [truncated]"
+    if budget <= len(suffix):
+        return text[:budget]
+    return text[: budget - len(suffix)] + suffix
+
+
+class JsonStateStore:
+    """Lock-guarded JSON state + ring-buffered audit log on disk.
+
+    autonomy.AutonomyStore and context_cleanup.ContextCleanupStore had
+    byte-identical copies of all eight of these methods; the only real
+    difference was the filenames and the log ring size. They drifted once
+    already (one grew the fail-closed load fix months before the other), so
+    the shared half lives here now. Subclasses set the file paths in __init__
+    and add whatever is genuinely theirs (autonomy's goals, cleanup's control).
+
+    Every write goes through _atomic_json_write_sync on a worker thread, and
+    every read-modify-write holds `self._lock` for the whole cycle so two
+    concurrent ticks can't clobber each other's state.
+    """
+
+    #: Entries kept in the audit log. Override per subclass.
+    log_ring_size: int = 100
+
+    def __init__(self, data_dir: str, *, state_file: str, log_file: str):
+        self.data_dir = Path(data_dir)
+        self.state_file = self.data_dir / state_file
+        self.log_file = self.data_dir / log_file
+        self._lock = asyncio.Lock()
+
+    # -- state --
+
+    async def load_state(self) -> dict:
+        async with self._lock:
+            data = await asyncio.to_thread(_load_json_safe, self.state_file, dict)
+            return data if isinstance(data, dict) else {}
+
+    async def save_state(self, state: dict):
+        async with self._lock:
+            await asyncio.to_thread(_atomic_json_write_sync, self.state_file, state)
+
+    async def patch_state(self, updates: dict) -> dict:
+        """Shallow-merge `updates` into state under one lock."""
+        return await self.update_state(lambda state: state.update(updates))
+
+    async def update_state(self, fn) -> dict:
+        """Read-modify-write under a single lock. fn(state) mutates in-place."""
+        async with self._lock:
+            state = await asyncio.to_thread(_load_json_safe, self.state_file, dict)
+            if not isinstance(state, dict):
+                state = {}
+            fn(state)
+            await asyncio.to_thread(_atomic_json_write_sync, self.state_file, state)
+            return state
+
+    # -- audit log --
+
+    async def load_log(self) -> list[dict]:
+        async with self._lock:
+            data = await asyncio.to_thread(_load_json_safe, self.log_file, dict)
+            entries = data.get("entries", []) if isinstance(data, dict) else []
+            return entries if isinstance(entries, list) else []
+
+    async def append_log_entry(self, entry: dict):
+        async with self._lock:
+            data = await asyncio.to_thread(_load_json_safe, self.log_file, dict)
+            entries = data.get("entries", []) if isinstance(data, dict) else []
+            if not isinstance(entries, list):
+                entries = []
+            entries.append(entry)
+            entries = entries[-self.log_ring_size :]  # ring buffer
+            await asyncio.to_thread(
+                _atomic_json_write_sync, self.log_file, {"entries": entries}
+            )
+
+    async def clear_log(self):
+        async with self._lock:
+            await asyncio.to_thread(
+                _atomic_json_write_sync, self.log_file, {"entries": []}
+            )
+
+    async def record_error(self, error: str):
+        await self.patch_state({"last_error": str(error)[:2000]})

@@ -50,15 +50,7 @@ logger = logging.getLogger(__name__)
 # create_task() whose handle nobody holds can be collected mid-flight, which
 # here means a progress message that never gets edited to its final content or
 # never gets deleted. Hold a strong ref until the task completes.
-_BACKGROUND_TASKS: set[asyncio.Task] = set()
-
-
-def _fire_and_forget(coro) -> asyncio.Task:
-    """Schedule a detached task that can't be GC'd before it finishes."""
-    task = asyncio.create_task(coro)
-    _BACKGROUND_TASKS.add(task)
-    task.add_done_callback(_BACKGROUND_TASKS.discard)
-    return task
+from utils import _spawn_background as _fire_and_forget  # noqa: E402
 
 
 # Minimum seconds between two edits of the same progress message. Discord
