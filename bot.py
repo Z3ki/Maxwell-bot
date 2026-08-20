@@ -10917,7 +10917,6 @@ class MaxwellBot(commands.Bot):
 
     async def _telegram_webhook_loop(self):
         """Telegram webhook mode: register webhook and serve updates via aiohttp."""
-        token = self.config.TELEGRAM_TOKEN
         webhook_url = self.config.TELEGRAM_WEBHOOK_URL.rstrip("/")
         port = self.config.TELEGRAM_WEBHOOK_PORT
         # Do not put the bot token in the public path; use a dedicated secret.
@@ -10930,8 +10929,9 @@ class MaxwellBot(commands.Bot):
             "TELEGRAM_WEBHOOK_SECRET", ""
         ).strip() or _secrets.token_urlsafe(32)
         full_webhook_url = f"{webhook_url}/telegram/{webhook_path_secret}"
-        url_base = f"https://api.telegram.org/bot{token}"
-        session = await _get_shared_session()
+        url_base, session = await self._telegram_transport()
+        set_timeout = aiohttp.ClientTimeout(total=15)
+        delete_timeout = aiohttp.ClientTimeout(total=10)
 
         # Register webhook with Telegram (secret_token is verified on each update).
         try:
@@ -10943,7 +10943,7 @@ class MaxwellBot(commands.Bot):
                     "allowed_updates": ["message"],
                     "max_connections": 10,
                 },
-                timeout=aiohttp.ClientTimeout(total=15),
+                timeout=set_timeout,
             ) as resp:
                 data = await resp.json()
                 if data.get("ok"):
@@ -10985,10 +10985,7 @@ class MaxwellBot(commands.Bot):
                 # memory key on a shared "tg:None" bucket.
                 logger.warning("Telegram webhook update missing chat id; skipping")
                 return web.Response(status=200)
-            text = (message.get("text") or message.get("caption") or "").strip()
-            user = message.get("from", {})
-            user_name = user.get("first_name", "Telegram User")
-            user_id = str(user.get("id", "unknown"))
+            text, _user, user_name, user_id = self._telegram_message_fields(message)
 
             if not self._is_admin(user_id):
                 return web.Response(status=200)
@@ -11044,7 +11041,7 @@ class MaxwellBot(commands.Bot):
             try:
                 async with session.post(
                     f"{url_base}/deleteWebhook",
-                    timeout=aiohttp.ClientTimeout(total=10),
+                    timeout=delete_timeout,
                 ) as resp:
                     logger.info(
                         "Telegram webhook unregistered (status=%d)", resp.status
@@ -11103,6 +11100,317 @@ class MaxwellBot(commands.Bot):
         """Shared Telegram message processing for both polling and webhook modes."""
         if not self._control.get("bot_enabled", True):
             return
+        tg_media = await self._telegram_ingest_audio(message, session, url_base)
+        if not text and not tg_media:
+            return
+
+        logger.info(
+            "TG MSG from %s (%s) in chat %s: %s",
+            user_name,
+            user_id,
+            chat_id,
+            text[:100],
+        )
+        tg_chan_id = f"tg:{chat_id}" if chat_id else ""
+        if self._control.get("store_memory", True) and tg_chan_id:
+            await self.memory.add_to_channel_memory(
+                tg_chan_id,
+                {
+                    "author": user_name,
+                    "author_id": user_id,
+                    "content": text or "[media]",
+                },
+            )
+
+        ai_timeout = max(
+            10,
+            min(
+                _safe_int(self._control.get("ai_timeout_seconds", 3600) or 3600, 3600),
+                7200,
+            ),
+        )
+        system_parts = [
+            MAXWELL_BASE_KNOWLEDGE
+            + "\n\nAnswer only the latest Telegram message. Match energy — short in, short out.",
+            f"Core personality: {self._get_personality()}\nLimit: 500 chars.",
+            f"User: {user_name} ({user_id}) | Telegram connection",
+        ]
+        # Prompt-cache friendliness: static content goes in `system_parts`
+        # (stable across a user's messages), per-turn content (cross-context
+        # facts, RAG results — both depend on this message's text) goes in
+        # `dynamic_parts` and is appended AFTER the static block, so the
+        # stable prefix (rules + personality + tools) can be cache-hit by
+        # providers that do automatic prefix caching instead of being
+        # invalidated by search results that differ on every call.
+        dynamic_parts: list[str] = []
+
+        await self._telegram_append_cross_context(dynamic_parts, text, user_id)
+        await self._telegram_append_rag(dynamic_parts, text, tg_chan_id, chat_id)
+
+        tool_prompt = self._tool_system_prompt("telegram")
+        if tool_prompt:
+            system_parts.append(tool_prompt)
+
+        # JAILBREAK: inject at end for recency bias (same as Discord path)
+        # Telegram is a private channel — always get jailbreak
+        dynamic_parts.append(JAILBREAK_PROMPT)
+
+        messages = [
+            {"role": "system", "content": "\n\n".join(system_parts + dynamic_parts)}
+        ]
+
+        await self._telegram_append_channel_history(messages, tg_chan_id, chat_id)
+
+        latest_label = _telegram_latest_message_label(text, bool(tg_media))
+        # Match the Discord path: drop the "Latest message to answer from"
+        # meta framing when we're appending to an existing user turn (the
+        # historical turns already include this message).
+        if messages and messages[-1].get("role") == "user":
+            user_parts = [f"[RESPOND TO THIS] {latest_label}"]
+        else:
+            user_parts = [
+                f"[RESPOND TO THIS] Latest message to answer from {user_name}: {latest_label}"
+            ]
+        if tg_media:
+            user_parts.append("Media available to inspect in the multimodal payload.")
+        latest_block = "\n".join(user_parts)
+        if messages and messages[-1].get("role") == "user":
+            messages[-1]["content"] = (
+                str(messages[-1].get("content") or "") + "\n" + latest_block
+            )
+        else:
+            messages.append({"role": "user", "content": latest_block})
+
+        tg_openai_tools = self._build_openai_tools("telegram")
+        await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
+        try:
+            async with session.post(
+                f"{url_base}/sendChatAction",
+                json={"chat_id": chat_id, "action": "typing"},
+            ):
+                pass
+            try:
+                response_text = await self.ai_provider.generate_response(
+                    messages,
+                    media=tg_media,
+                    timeout=ai_timeout,
+                    tools=tg_openai_tools or None,
+                )
+            except ProviderUsageExhaustedError as e:
+                logger.warning("Provider usage exhausted in Telegram: %s", e)
+                await TelegramMessageAdapter(
+                    session,
+                    url_base,
+                    chat_id,
+                    message.get("message_id"),
+                    user_id,
+                    user_name,
+                ).reply(e.user_message)
+                return
+        finally:
+            await self._release_ai_slot()
+
+        tg_native_calls = self._native_calls_from(response_text)
+        if (
+            not response_text or not str(response_text).strip()
+        ) and not tg_native_calls:
+            return
+
+        response_text = (response_text or "").strip()
+
+        response_text, all_tool_results = await self._telegram_run_tool_loop(
+            message,
+            chat_id,
+            user_id,
+            user_name,
+            session,
+            url_base,
+            messages,
+            response_text,
+            tg_native_calls,
+            tg_media,
+            tg_openai_tools,
+            ai_timeout,
+        )
+
+        response_text = _sanitize_visible_reply(response_text)
+
+        delivered_text = ""
+        if response_text:
+            tg_reply = TelegramMessageAdapter(
+                session,
+                url_base,
+                chat_id,
+                message.get("message_id"),
+                user_id,
+                user_name,
+            )
+            await self._ensure_reasoning_trace(
+                tg_reply, all_tool_results, response_text, "reply"
+            )
+            await tg_reply.reply(response_text)
+            delivered_text = response_text
+        elif any("__TTS_SENT__" in tr for tr in all_tool_results):
+            delivered_text = "[voice message sent]"
+
+        if (
+            delivered_text
+            and self._control.get("store_memory", True)
+            and tg_chan_id
+        ):
+            await self.memory.add_to_channel_memory(
+                tg_chan_id,
+                {
+                    "author": self.bot_name,
+                    "author_id": str(self.user.id) if self.user else "",
+                    "author_is_bot": True,
+                    "content": delivered_text,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+
+    async def _telegram_loop(self):
+        """Long-poll getUpdates and hand each message to the shared processor.
+
+        This loop used to carry its own full copy of the message pipeline
+        (prompt build, RAG, tool loop, memory write) alongside the webhook
+        path's copy in `_process_telegram_message_inner`. The two drifted:
+        polling never got the web-results RAG block or the control-driven
+        AI timeout, webhook never got the latest-message labelling. Now the
+        loop only does transport — auth, offset bookkeeping, backoff — and
+        both modes share one implementation.
+        """
+        token = self.config.TELEGRAM_TOKEN
+        if not token:
+            return
+        logger.info("Telegram connection polling loop started")
+        url_base, session = await self._telegram_transport()
+        offset = 0
+        timeout = 25
+        poll_timeout = aiohttp.ClientTimeout(
+            total=timeout + 30, connect=10, sock_read=timeout + 30
+        )
+        try:
+            async with session.post(
+                f"{url_base}/deleteWebhook",
+                json={"drop_pending_updates": False},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                logger.info(
+                    "Telegram polling cleared leftover webhook (status=%d)",
+                    resp.status,
+                )
+        except Exception as e:
+            logger.warning("Telegram deleteWebhook before polling failed: %s", e)
+
+        while True:
+            try:
+                # getUpdates call. Pass an explicit ClientTimeout longer than the
+                # 25s long-poll so aiohttp's internal read timer doesn't fire
+                # mid-poll and surface a TimeoutError that used to kill the loop
+                # (and the process). See pm2 restart count climbing.
+                url = f"{url_base}/getUpdates?offset={offset}&timeout={timeout}"
+                try:
+                    async with session.get(
+                        url,
+                        timeout=poll_timeout,
+                    ) as resp:
+                        if resp.status != 200:
+                            logger.warning(f"Telegram polling error: {resp.status}")
+                            await asyncio.sleep(5)
+                            continue
+                        data = await resp.json()
+                except asyncio.TimeoutError as _exc:
+                    # Network legitimately stuck; just retry the long-poll.
+                    logger.warning("Telegram long-poll timed out; retrying")
+                    await asyncio.sleep(1)
+                    continue
+                except (aiohttp.ClientError, ConnectionError, OSError) as _exc:
+                    # Transient network reset / DNS failure on the long-poll
+                    # (e.g. aiohttp ClientConnectorError wrapping a
+                    # ConnectionResetError from api.telegram.org). Previously
+                    # this bubbled to the loop-level handler, dumping a full
+                    # traceback and sending the user a bogus error reply for a
+                    # blip that needs no user-visible handling. Catch, back
+                    # off briefly, retry.
+                    logger.warning(
+                        "Telegram long-poll connection error: %s; retrying", _exc
+                    )
+                    await asyncio.sleep(5)
+                    continue
+
+                if not data.get("ok"):
+                    logger.warning(f"Telegram getUpdates returned error: {data}")
+                    await asyncio.sleep(5)
+                    continue
+
+                for update in data.get("result", []):
+                    # `update_id` can be present-but-null from a malformed
+                    # middlebox; dict.get(key, 0) only defaults on a MISSING
+                    # key, so None + 1 used to raise TypeError and the loop
+                    # re-fetched the same broken batch forever.
+                    offset = max(offset, (update.get("update_id") or 0) + 1)
+                    message = update.get("message")
+                    if not message:
+                        continue
+
+                    chat_id = (message.get("chat") or {}).get("id")
+                    if not chat_id:
+                        # Malformed update with no chat id — can't route the
+                        # reply, and keying memory on it would cross-contaminate
+                        # a shared "tg:None" bucket. Skip it.
+                        logger.warning(
+                            "Telegram update missing chat id; skipping "
+                            f"update {update.get('update_id')}"
+                        )
+                        continue
+                    text, user, user_name, user_id = self._telegram_message_fields(
+                        message
+                    )
+
+                    # Only admins are allowed to talk to the bot on Telegram
+                    if not self._is_admin(user_id):
+                        logger.warning(
+                            f"Unauthorized Telegram access attempt by {user_name} ({user_id}, username: {user.get('username')})"
+                        )
+                        continue
+
+                    # Awaited, not fire-and-forget: polling keeps the original
+                    # one-at-a-time ordering, and the offset has already been
+                    # advanced so a slow turn can't re-deliver the update.
+                    # Failures are logged and apologised for inside the
+                    # processor, so they never break the poll.
+                    await self._process_telegram_message(
+                        message,
+                        chat_id,
+                        text,
+                        user_name,
+                        user_id,
+                        session,
+                        url_base,
+                    )
+
+            except asyncio.CancelledError as _exc:
+                break
+            except Exception as e:
+                logger.error(
+                    f"Telegram polling loop exception: {e}\n{traceback.format_exc()}"
+                )
+                await asyncio.sleep(5)
+
+    async def _telegram_transport(self):
+        url_base = f"https://api.telegram.org/bot{self.config.TELEGRAM_TOKEN}"
+        session = await _get_shared_session()
+        return url_base, session
+
+    def _telegram_message_fields(self, message):
+        text = (message.get("text") or message.get("caption") or "").strip()
+        user = message.get("from", {})
+        user_name = user.get("first_name", "Telegram User")
+        user_id = str(user.get("id", "unknown"))
+        return text, user, user_name, user_id
+
+    async def _telegram_ingest_audio(self, message, session, url_base):
         # Handle Voice / Audio inputs
         voice = message.get("voice")
         audio = message.get("audio")
@@ -11191,544 +11499,295 @@ class MaxwellBot(commands.Bot):
                                             )
             except Exception as e:
                 logger.warning("Telegram audio processing failed: %s", e)
+        return tg_media
 
-        if not text and not tg_media:
+    async def _telegram_append_cross_context(self, dynamic_parts, text, user_id):
+        if not self._control.get("cross_context_enabled", True):
             return
-
-        logger.info(
-            "TG MSG from %s (%s) in chat %s: %s",
-            user_name,
-            user_id,
-            chat_id,
-            text[:100],
-        )
-        tg_chan_id = f"tg:{chat_id}" if chat_id else ""
-        if self._control.get("store_memory", True) and tg_chan_id:
-            await self.memory.add_to_channel_memory(
-                tg_chan_id,
-                {
-                    "author": user_name,
-                    "author_id": user_id,
-                    "content": text or "[media]",
-                },
+        try:
+            facts = await self.memory.get_relevant_shared_context(
+                user_id=user_id,
+                is_dm=True,
+                is_admin=self._is_admin(user_id),
+                max_items=10,
             )
+            if facts:
+                lines = []
+                for fact in facts:
+                    if not self._shared_fact_relevant(text, fact):
+                        continue
+                    lines.append(
+                        f"- [{fact.get('scope')}, i{fact.get('importance')}] {fact.get('content')}"
+                    )
+                if lines:
+                    dynamic_parts.append(
+                        "Cross-context facts (background; don't reveal source):\n"
+                        + "\n".join(lines)
+                    )
+        except Exception as e:
+            logger.warning("Telegram context fetching error: %s", e)
 
-        ai_timeout = max(
-            10,
+    async def _telegram_append_rag(self, dynamic_parts, text, tg_chan_id, chat_id):
+        # RAG: semantic memory retrieval for Telegram
+        if not (
+            self._control.get("long_term_memory_enabled", True)
+            and hasattr(self.memory, "rag_search")
+        ):
+            return
+        try:
+            # LTM only here. Shared context is loaded above with
+            # visibility/scope checks; rag_search would leak private facts.
+            rag_results = await self.memory.rag_search(
+                text,
+                kinds=["ltm"],
+                channel_id=tg_chan_id,
+                top_k=20,
+            )
+            rag_context = [r for r in rag_results if r.get("similarity", 0) >= 0.35]
+            # Recent user messages — same Telegram chat, not every DM
+            rec_results = await self.memory.rag_search(
+                text,
+                kinds=["message"],
+                source="user",
+                channel_id=tg_chan_id,
+                apply_recency=True,
+                recency_tau_days=3.0,
+                top_k=8,
+            )
+            rag_recent = [r for r in rec_results if r.get("similarity", 0) >= 0.40][
+                :5
+            ]
+            # ─── web results (operator feature 2026-08-09) ───
+            rag_web: list[dict] = []
+            if (
+                hasattr(self.memory, "recall_web_results")
+                and self._control.get("long_term_memory_enabled", True)
+                and bool(getattr(self.config, "RAG_WEB_STORE_ENABLED", True))
+            ):
+                try:
+                    web_rows = await self.memory.recall_web_results(
+                        text,
+                        guild_id=str(chat_id or ""),
+                        top_k=4,
+                        min_similarity=0.40,
+                        max_age_days=7,
+                    )
+                    rag_web = [
+                        r for r in web_rows if r.get("similarity", 0) >= 0.40
+                    ]
+                except Exception as e:
+                    logger.debug(f"tg recall_web_results skipped: {e}")
+            if rag_context:
+                rag_lines = []
+                for r in rag_context:
+                    kind_label = "fact" if r["kind"] == "ltm" else "context"
+                    sim_pct = int(r.get("similarity", 0) * 100)
+                    rag_lines.append(
+                        f"- [{kind_label}, {sim_pct}% match] {r['content']}"
+                    )
+                dynamic_parts.append(
+                    "Relevant memories (background):\n" + "\n".join(rag_lines)
+                )
+            if rag_recent:
+                rec_lines = []
+                for r in rag_recent:
+                    who = r.get("author", "anon")
+                    sim_pct = int(r.get("similarity", 0) * 100)
+                    rec_lines.append(
+                        f"- [{who}, {sim_pct}% match] {str(r['content'])[:300]}"
+                    )
+                dynamic_parts.append(
+                    "Recent relevant messages (background):\n"
+                    + "\n".join(rec_lines)
+                )
+            if rag_web:
+                web_lines = []
+                for r in rag_web:
+                    url = r.get("url") or "(no url)"
+                    title = r.get("title") or url
+                    sim_pct = int(r.get("similarity", 0) * 100)
+                    q = r.get("query") or ""
+                    qpart = f" (was searching: {q})" if q else ""
+                    content = _web_result_snippet(
+                        r.get("content", ""), r.get("title", "")
+                    )
+                    web_lines.append(
+                        f"- [{sim_pct}% match, web]{qpart} "
+                        f"{title}\n  {url}\n  {content}"
+                    )
+                dynamic_parts.append(
+                    "Earlier web results (cite URL if reused):\n"
+                    + "\n".join(web_lines)
+                )
+        except Exception as e:
+            logger.warning(f"Telegram RAG retrieval failed: {e}")
+
+    async def _telegram_append_channel_history(self, messages, tg_chan_id, chat_id):
+        memory = await self.memory.get_channel_memory(tg_chan_id) if chat_id else None
+        if not memory:
+            return
+        self_user_id_tg = str(getattr(self.user, "id", "")) if self.user else ""
+        tg_turns: list[dict] = []
+        cur: dict | None = None
+        for m in memory[-30:]:
+            author = str(m.get("author", "?"))
+            author_id = str(m.get("author_id") or "")
+            is_self = bool(self_user_id_tg and author_id == self_user_id_tg) or (
+                not author_id
+                and author
+                == (self.user.display_name if self.user else self.bot_name)
+            )
+            role = "assistant" if is_self else "user"
+            # NOT `text` — that is the incoming message, and reusing the
+            # name here overwrote it with the last stored memory entry
+            # (usually the bot's own previous reply), so "[RESPOND TO
+            # THIS]" and the memory write both quoted the wrong thing.
+            mem_text = m.get("content", "")[:4000]
+            # 2026-07-21: assistant turns get NO author prefix to
+            # avoid the parrot bug (model continues 'You/Maxwell:').
+            content = mem_text if is_self else f"{author}: {mem_text}"
+            if cur is not None and cur["role"] == role:
+                cur["content"] += "\n" + content
+            else:
+                if cur is not None:
+                    tg_turns.append(cur)
+                cur = {"role": role, "content": content}
+        if cur is not None:
+            tg_turns.append(cur)
+        used = sum(len(t["content"]) for t in tg_turns)
+        while tg_turns and used > 5000 and len(tg_turns) > 1:
+            used -= len(tg_turns[0]["content"])
+            tg_turns.pop(0)
+        for t in tg_turns:
+            messages.append(t)
+
+    async def _telegram_run_tool_loop(
+        self,
+        message,
+        chat_id,
+        user_id,
+        user_name,
+        session,
+        url_base,
+        messages,
+        response_text,
+        tg_native_calls,
+        tg_media,
+        tg_openai_tools,
+        ai_timeout,
+    ):
+        all_tool_results = []
+        if not self._control.get("tools_enabled", True):
+            return response_text, all_tool_results
+        tg_tool_message = TelegramMessageAdapter(
+            session,
+            url_base,
+            chat_id,
+            message.get("message_id"),
+            user_id,
+            user_name,
+        )
+        max_iters = max(
+            0,
             min(
-                _safe_int(self._control.get("ai_timeout_seconds", 3600) or 3600, 3600),
-                7200,
+                _safe_int(self._control.get("max_tool_iterations", 30) or 0, 0), 100
             ),
         )
-        system_parts = [
-            MAXWELL_BASE_KNOWLEDGE
-            + "\n\nAnswer only the latest Telegram message. Match energy — short in, short out.",
-            f"Core personality: {self._get_personality()}\nLimit: 500 chars.",
-            f"User: {user_name} ({user_id}) | Telegram connection",
-        ]
-        # Prompt-cache friendliness: static content goes in `system_parts`
-        # (stable across a user's messages), per-turn content (cross-context
-        # facts, RAG results — both depend on this message's text) goes in
-        # `dynamic_parts` and is appended AFTER the static block, so the
-        # stable prefix (rules + personality + tools) can be cache-hit by
-        # providers that do automatic prefix caching instead of being
-        # invalidated by search results that differ on every call.
-        dynamic_parts: list[str] = []
-
-        if self._control.get("cross_context_enabled", True):
-            try:
-                facts = await self.memory.get_relevant_shared_context(
-                    user_id=user_id,
-                    is_dm=True,
-                    is_admin=self._is_admin(user_id),
-                    max_items=10,
-                )
-                if facts:
-                    lines = []
-                    for fact in facts:
-                        if not self._shared_fact_relevant(text, fact):
-                            continue
-                        lines.append(
-                            f"- [{fact.get('scope')}, i{fact.get('importance')}] {fact.get('content')}"
-                        )
-                    if lines:
-                        dynamic_parts.append(
-                            "Cross-context facts (background; don't reveal source):\n"
-                            + "\n".join(lines)
-                        )
-            except Exception as e:
-                logger.warning("Telegram context fetching error: %s", e)
-
-        # RAG: semantic memory retrieval for Telegram
-        if self._control.get("long_term_memory_enabled", True) and hasattr(
-            self.memory, "rag_search"
-        ):
-            try:
-                # LTM only here. Shared context is loaded above with
-                # visibility/scope checks; rag_search would leak private facts.
-                rag_results = await self.memory.rag_search(
-                    text,
-                    kinds=["ltm"],
-                    channel_id=tg_chan_id,
-                    top_k=20,
-                )
-                rag_context = [r for r in rag_results if r.get("similarity", 0) >= 0.35]
-                # Recent user messages — same Telegram chat, not every DM
-                rec_results = await self.memory.rag_search(
-                    text,
-                    kinds=["message"],
-                    source="user",
-                    channel_id=tg_chan_id,
-                    apply_recency=True,
-                    recency_tau_days=3.0,
-                    top_k=8,
-                )
-                rag_recent = [r for r in rec_results if r.get("similarity", 0) >= 0.40][
-                    :5
-                ]
-                # ─── web results (operator feature 2026-08-09) ───
-                rag_web: list[dict] = []
-                if (
-                    hasattr(self.memory, "recall_web_results")
-                    and self._control.get("long_term_memory_enabled", True)
-                    and bool(getattr(self.config, "RAG_WEB_STORE_ENABLED", True))
-                ):
-                    try:
-                        web_rows = await self.memory.recall_web_results(
-                            text,
-                            guild_id=str(chat_id or ""),
-                            top_k=4,
-                            min_similarity=0.40,
-                            max_age_days=7,
-                        )
-                        rag_web = [
-                            r for r in web_rows if r.get("similarity", 0) >= 0.40
-                        ]
-                    except Exception as e:
-                        logger.debug(f"tg recall_web_results skipped: {e}")
-                if rag_context:
-                    rag_lines = []
-                    for r in rag_context:
-                        kind_label = "fact" if r["kind"] == "ltm" else "context"
-                        sim_pct = int(r.get("similarity", 0) * 100)
-                        rag_lines.append(
-                            f"- [{kind_label}, {sim_pct}% match] {r['content']}"
-                        )
-                    dynamic_parts.append(
-                        "Relevant memories (background):\n" + "\n".join(rag_lines)
-                    )
-                if rag_recent:
-                    rec_lines = []
-                    for r in rag_recent:
-                        who = r.get("author", "anon")
-                        sim_pct = int(r.get("similarity", 0) * 100)
-                        rec_lines.append(
-                            f"- [{who}, {sim_pct}% match] {str(r['content'])[:300]}"
-                        )
-                    dynamic_parts.append(
-                        "Recent relevant messages (background):\n"
-                        + "\n".join(rec_lines)
-                    )
-                if rag_web:
-                    web_lines = []
-                    for r in rag_web:
-                        url = r.get("url") or "(no url)"
-                        title = r.get("title") or url
-                        sim_pct = int(r.get("similarity", 0) * 100)
-                        q = r.get("query") or ""
-                        qpart = f" (was searching: {q})" if q else ""
-                        content = _web_result_snippet(
-                            r.get("content", ""), r.get("title", "")
-                        )
-                        web_lines.append(
-                            f"- [{sim_pct}% match, web]{qpart} "
-                            f"{title}\n  {url}\n  {content}"
-                        )
-                    dynamic_parts.append(
-                        "Earlier web results (cite URL if reused):\n"
-                        + "\n".join(web_lines)
-                    )
-            except Exception as e:
-                logger.warning(f"Telegram RAG retrieval failed: {e}")
-
-        tool_prompt = self._tool_system_prompt("telegram")
-        if tool_prompt:
-            system_parts.append(tool_prompt)
-
-        # JAILBREAK: inject at end for recency bias (same as Discord path)
-        # Telegram is a private channel — always get jailbreak
-        dynamic_parts.append(JAILBREAK_PROMPT)
-
-        messages = [
-            {"role": "system", "content": "\n\n".join(system_parts + dynamic_parts)}
-        ]
-
-        memory = await self.memory.get_channel_memory(tg_chan_id) if chat_id else None
-        if memory:
-            self_user_id_tg = str(getattr(self.user, "id", "")) if self.user else ""
-            tg_turns: list[dict] = []
-            cur: dict | None = None
-            for m in memory[-30:]:
-                author = str(m.get("author", "?"))
-                author_id = str(m.get("author_id") or "")
-                is_self = bool(self_user_id_tg and author_id == self_user_id_tg) or (
-                    not author_id
-                    and author
-                    == (self.user.display_name if self.user else self.bot_name)
-                )
-                role = "assistant" if is_self else "user"
-                # NOT `text` — that is the incoming message, and reusing the
-                # name here overwrote it with the last stored memory entry
-                # (usually the bot's own previous reply), so "[RESPOND TO
-                # THIS]" and the memory write both quoted the wrong thing.
-                mem_text = m.get("content", "")[:4000]
-                # 2026-07-21: assistant turns get NO author prefix to
-                # avoid the parrot bug (model continues 'You/Maxwell:').
-                content = mem_text if is_self else f"{author}: {mem_text}"
-                if cur is not None and cur["role"] == role:
-                    cur["content"] += "\n" + content
-                else:
-                    if cur is not None:
-                        tg_turns.append(cur)
-                    cur = {"role": role, "content": content}
-            if cur is not None:
-                tg_turns.append(cur)
-            used = sum(len(t["content"]) for t in tg_turns)
-            while tg_turns and used > 5000 and len(tg_turns) > 1:
-                used -= len(tg_turns[0]["content"])
-                tg_turns.pop(0)
-            for t in tg_turns:
-                messages.append(t)
-
-        latest_label = _telegram_latest_message_label(text, bool(tg_media))
-        # Match the Discord path: drop the "Latest message to answer from"
-        # meta framing when we're appending to an existing user turn (the
-        # historical turns already include this message).
-        if messages and messages[-1].get("role") == "user":
-            user_parts = [f"[RESPOND TO THIS] {latest_label}"]
-        else:
-            user_parts = [
-                f"[RESPOND TO THIS] Latest message to answer from {user_name}: {latest_label}"
-            ]
-        if tg_media:
-            user_parts.append("Media available to inspect in the multimodal payload.")
-        latest_block = "\n".join(user_parts)
-        if messages and messages[-1].get("role") == "user":
-            messages[-1]["content"] = (
-                str(messages[-1].get("content") or "") + "\n" + latest_block
+        pending_native = tg_native_calls
+        conversation_tail: list[dict] = []
+        followup_turn_ran = False
+        tool_results: list[str] = []
+        for _iteration in range(max_iters):
+            response_text, tool_results = await self._dispatch_tool_calls(
+                tg_tool_message,
+                response_text,
+                native_tool_calls=pending_native or None,
             )
-        else:
-            messages.append({"role": "user", "content": latest_block})
-
-        tg_openai_tools = self._build_openai_tools("telegram")
-        await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
-        try:
-            async with session.post(
-                f"{url_base}/sendChatAction",
-                json={"chat_id": chat_id, "action": "typing"},
-            ):
-                pass
+            pending_native = None
+            native_followup = list(
+                getattr(self, "_last_native_followup_messages", None) or []
+            )
+            all_tool_results.extend(tool_results)
+            if not tool_results:
+                break
+            if not _tool_results_need_followup(tool_results):
+                break
+            result_messages = [dict(m) for m in messages]
+            for msg_item in result_messages:
+                if msg_item.get("role") == "user" and isinstance(
+                    msg_item.get("content"), str
+                ):
+                    msg_item["content"] = msg_item["content"].replace(
+                        "\nMedia available to inspect in the multimodal payload.",
+                        "",
+                    )
+            if native_followup:
+                conversation_tail.extend(native_followup)
+            else:
+                history_response_text = response_text
+                if "create_site" in (response_text or ""):
+                    with contextlib.suppress(Exception):
+                        history_response_text = re.sub(
+                            r'(<parameter[^>]*\bname=["\']?body["\']?[^>]*>)(.*?)(</\s*parameter\s*>)',
+                            r"\1[large body elided]\3",
+                            history_response_text,
+                            flags=re.DOTALL | re.IGNORECASE,
+                        )
+                conversation_tail.append(
+                    {"role": "assistant", "content": history_response_text}
+                )
+                conversation_tail.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "=== TOOL RESULTS ===\n"
+                            + "\n".join(tool_results)
+                            + "\n=== END ===\n"
+                            + _telegram_tool_followup_instruction(bool(tg_media))
+                        ),
+                    }
+                )
+            if len(conversation_tail) > 24:
+                conversation_tail = conversation_tail[-24:]
+            result_messages = result_messages + list(conversation_tail)
+            await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
             try:
-                response_text = await self.ai_provider.generate_response(
-                    messages,
-                    media=tg_media,
+                async with session.post(
+                    f"{url_base}/sendChatAction",
+                    json={"chat_id": chat_id, "action": "typing"},
+                ):
+                    pass
+                followup = await self.ai_provider.generate_response(
+                    result_messages,
+                    media=[],
                     timeout=ai_timeout,
                     tools=tg_openai_tools or None,
                 )
-            except ProviderUsageExhaustedError as e:
-                logger.warning("Provider usage exhausted in Telegram: %s", e)
-                await TelegramMessageAdapter(
-                    session,
-                    url_base,
-                    chat_id,
-                    message.get("message_id"),
-                    user_id,
-                    user_name,
-                ).reply(e.user_message)
-                return
-        finally:
-            await self._release_ai_slot()
-
-        tg_native_calls = self._native_calls_from(response_text)
-        if (
-            not response_text or not str(response_text).strip()
-        ) and not tg_native_calls:
-            return
-
-        response_text = (response_text or "").strip()
-
-        all_tool_results = []
-        if self._control.get("tools_enabled", True):
-            tg_tool_message = TelegramMessageAdapter(
-                session,
-                url_base,
-                chat_id,
-                message.get("message_id"),
-                user_id,
-                user_name,
-            )
-            max_iters = max(
-                0,
-                min(
-                    _safe_int(self._control.get("max_tool_iterations", 30) or 0, 0), 100
-                ),
-            )
-            pending_native = tg_native_calls
-            conversation_tail: list[dict] = []
-            followup_turn_ran = False
-            tool_results: list[str] = []
-            for _iteration in range(max_iters):
-                response_text, tool_results = await self._dispatch_tool_calls(
-                    tg_tool_message,
-                    response_text,
-                    native_tool_calls=pending_native or None,
-                )
-                pending_native = None
-                native_followup = list(
-                    getattr(self, "_last_native_followup_messages", None) or []
-                )
-                all_tool_results.extend(tool_results)
-                if not tool_results:
-                    break
-                if not _tool_results_need_followup(tool_results):
-                    break
-                result_messages = [dict(m) for m in messages]
-                for msg_item in result_messages:
-                    if msg_item.get("role") == "user" and isinstance(
-                        msg_item.get("content"), str
-                    ):
-                        msg_item["content"] = msg_item["content"].replace(
-                            "\nMedia available to inspect in the multimodal payload.",
-                            "",
-                        )
-                if native_followup:
-                    conversation_tail.extend(native_followup)
+                pending_native = self._native_calls_from(followup)
+                if (followup and str(followup).strip()) or pending_native:
+                    response_text = (followup or "").strip()
+                    followup_turn_ran = True
                 else:
-                    history_response_text = response_text
-                    if "create_site" in (response_text or ""):
-                        with contextlib.suppress(Exception):
-                            history_response_text = re.sub(
-                                r'(<parameter[^>]*\bname=["\']?body["\']?[^>]*>)(.*?)(</\s*parameter\s*>)',
-                                r"\1[large body elided]\3",
-                                history_response_text,
-                                flags=re.DOTALL | re.IGNORECASE,
-                            )
-                    conversation_tail.append(
-                        {"role": "assistant", "content": history_response_text}
-                    )
-                    conversation_tail.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "=== TOOL RESULTS ===\n"
-                                + "\n".join(tool_results)
-                                + "\n=== END ===\n"
-                                + _telegram_tool_followup_instruction(bool(tg_media))
-                            ),
-                        }
-                    )
-                if len(conversation_tail) > 24:
-                    conversation_tail = conversation_tail[-24:]
-                result_messages = result_messages + list(conversation_tail)
-                await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
-                try:
-                    async with session.post(
-                        f"{url_base}/sendChatAction",
-                        json={"chat_id": chat_id, "action": "typing"},
-                    ):
-                        pass
-                    followup = await self.ai_provider.generate_response(
-                        result_messages,
-                        media=[],
-                        timeout=ai_timeout,
-                        tools=tg_openai_tools or None,
-                    )
-                    pending_native = self._native_calls_from(followup)
-                    if (followup and str(followup).strip()) or pending_native:
-                        response_text = (followup or "").strip()
-                        followup_turn_ran = True
-                    else:
-                        break
-                finally:
-                    await self._release_ai_slot()
-            if any(
-                tr.startswith("Tool no_response:") and "__NO_RESPONSE__" in tr
-                for tr in all_tool_results
-            ):
-                await self._ensure_reasoning_trace(
-                    tg_tool_message, all_tool_results, response_text, "no_response"
-                )
-                response_text = ""
-            elif _should_skip_plaintext_after_send(
-                tool_results, all_tool_results, followup_turn_ran, response_text
-            ):
-                await self._ensure_reasoning_trace(
-                    tg_tool_message, all_tool_results, response_text, "send_message"
-                )
-                response_text = ""
-            response_text = _sanitize_visible_reply(response_text)
-
-        response_text = _sanitize_visible_reply(response_text)
-
-        delivered_text = ""
-        if response_text:
-            tg_reply = TelegramMessageAdapter(
-                session,
-                url_base,
-                chat_id,
-                message.get("message_id"),
-                user_id,
-                user_name,
-            )
+                    break
+            finally:
+                await self._release_ai_slot()
+        if any(
+            tr.startswith("Tool no_response:") and "__NO_RESPONSE__" in tr
+            for tr in all_tool_results
+        ):
             await self._ensure_reasoning_trace(
-                tg_reply, all_tool_results, response_text, "reply"
+                tg_tool_message, all_tool_results, response_text, "no_response"
             )
-            await tg_reply.reply(response_text)
-            delivered_text = response_text
-        elif any("__TTS_SENT__" in tr for tr in all_tool_results):
-            delivered_text = "[voice message sent]"
-
-        if delivered_text and self._control.get("store_memory", True) and tg_chan_id:
-            await self.memory.add_to_channel_memory(
-                tg_chan_id,
-                {
-                    "author": self.bot_name,
-                    "author_id": str(self.user.id) if self.user else "",
-                    "author_is_bot": True,
-                    "content": delivered_text,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                },
+            response_text = ""
+        elif _should_skip_plaintext_after_send(
+            tool_results, all_tool_results, followup_turn_ran, response_text
+        ):
+            await self._ensure_reasoning_trace(
+                tg_tool_message, all_tool_results, response_text, "send_message"
             )
-
-    async def _telegram_loop(self):
-        """Long-poll getUpdates and hand each message to the shared processor.
-
-        This loop used to carry its own full copy of the message pipeline
-        (prompt build, RAG, tool loop, memory write) alongside the webhook
-        path's copy in `_process_telegram_message_inner`. The two drifted:
-        polling never got the web-results RAG block or the control-driven
-        AI timeout, webhook never got the latest-message labelling. Now the
-        loop only does transport — auth, offset bookkeeping, backoff — and
-        both modes share one implementation.
-        """
-        token = self.config.TELEGRAM_TOKEN
-        if not token:
-            return
-        logger.info("Telegram connection polling loop started")
-        url_base = f"https://api.telegram.org/bot{token}"
-        offset = 0
-        timeout = 25
-        session = await _get_shared_session()
-        try:
-            async with session.post(
-                f"{url_base}/deleteWebhook",
-                json={"drop_pending_updates": False},
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                logger.info(
-                    "Telegram polling cleared leftover webhook (status=%d)",
-                    resp.status,
-                )
-        except Exception as e:
-            logger.warning("Telegram deleteWebhook before polling failed: %s", e)
-
-        while True:
-            try:
-                # getUpdates call. Pass an explicit ClientTimeout longer than the
-                # 25s long-poll so aiohttp's internal read timer doesn't fire
-                # mid-poll and surface a TimeoutError that used to kill the loop
-                # (and the process). See pm2 restart count climbing.
-                url = f"{url_base}/getUpdates?offset={offset}&timeout={timeout}"
-                try:
-                    async with session.get(
-                        url,
-                        timeout=aiohttp.ClientTimeout(
-                            total=timeout + 30, connect=10, sock_read=timeout + 30
-                        ),
-                    ) as resp:
-                        if resp.status != 200:
-                            logger.warning(f"Telegram polling error: {resp.status}")
-                            await asyncio.sleep(5)
-                            continue
-                        data = await resp.json()
-                except asyncio.TimeoutError as _exc:
-                    # Network legitimately stuck; just retry the long-poll.
-                    logger.warning("Telegram long-poll timed out; retrying")
-                    await asyncio.sleep(1)
-                    continue
-                except (aiohttp.ClientError, ConnectionError, OSError) as _exc:
-                    # Transient network reset / DNS failure on the long-poll
-                    # (e.g. aiohttp ClientConnectorError wrapping a
-                    # ConnectionResetError from api.telegram.org). Previously
-                    # this bubbled to the loop-level handler, dumping a full
-                    # traceback and sending the user a bogus error reply for a
-                    # blip that needs no user-visible handling. Catch, back
-                    # off briefly, retry.
-                    logger.warning(
-                        "Telegram long-poll connection error: %s; retrying", _exc
-                    )
-                    await asyncio.sleep(5)
-                    continue
-
-                if not data.get("ok"):
-                    logger.warning(f"Telegram getUpdates returned error: {data}")
-                    await asyncio.sleep(5)
-                    continue
-
-                for update in data.get("result", []):
-                    # `update_id` can be present-but-null from a malformed
-                    # middlebox; dict.get(key, 0) only defaults on a MISSING
-                    # key, so None + 1 used to raise TypeError and the loop
-                    # re-fetched the same broken batch forever.
-                    offset = max(offset, (update.get("update_id") or 0) + 1)
-                    message = update.get("message")
-                    if not message:
-                        continue
-
-                    chat_id = (message.get("chat") or {}).get("id")
-                    if not chat_id:
-                        # Malformed update with no chat id — can't route the
-                        # reply, and keying memory on it would cross-contaminate
-                        # a shared "tg:None" bucket. Skip it.
-                        logger.warning(
-                            "Telegram update missing chat id; skipping "
-                            f"update {update.get('update_id')}"
-                        )
-                        continue
-                    text = (message.get("text") or message.get("caption") or "").strip()
-                    user = message.get("from", {})
-                    user_name = user.get("first_name", "Telegram User")
-                    user_id = str(user.get("id", "unknown"))
-
-                    # Only admins are allowed to talk to the bot on Telegram
-                    if not self._is_admin(user_id):
-                        logger.warning(
-                            f"Unauthorized Telegram access attempt by {user_name} ({user_id}, username: {user.get('username')})"
-                        )
-                        continue
-
-                    # Awaited, not fire-and-forget: polling keeps the original
-                    # one-at-a-time ordering, and the offset has already been
-                    # advanced so a slow turn can't re-deliver the update.
-                    # Failures are logged and apologised for inside the
-                    # processor, so they never break the poll.
-                    await self._process_telegram_message(
-                        message,
-                        chat_id,
-                        text,
-                        user_name,
-                        user_id,
-                        session,
-                        url_base,
-                    )
-
-            except asyncio.CancelledError as _exc:
-                break
-            except Exception as e:
-                logger.error(
-                    f"Telegram polling loop exception: {e}\n{traceback.format_exc()}"
-                )
-                await asyncio.sleep(5)
+            response_text = ""
+        response_text = _sanitize_visible_reply(response_text)
+        return response_text, all_tool_results
 
 
 async def main():
