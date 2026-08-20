@@ -53,7 +53,7 @@ DEFAULT_CONTROL = {
     # the channel. Reactions are not text and shouldn't kick off a
     # generation. Default off so channel reactions don't spam noise,
     # opt-in via dashboard control if you want emoji-aware replies.
-    "reaction_replies": False,
+    "reaction_replies": True,
     "per_user_cooldown_seconds": 1.5,
     "process_images": True,
     "process_audio": False,
