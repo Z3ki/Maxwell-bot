@@ -7334,8 +7334,7 @@ class MaxwellBot(commands.Bot):
             return [], []
         images = []
         media = []
-        max_mb = float(self._control.get("max_image_size_mb", 10) or 10)
-        max_size = _safe_int(max(1, min(max_mb, 25)) * 1024 * 1024, 1048576)
+        max_size = self._max_media_bytes()
         image_exts = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
         media_exts = set(MIME_MAP.keys())
         for attachment in message.attachments:
@@ -7398,11 +7397,9 @@ class MaxwellBot(commands.Bot):
                     # ENABLE_VIDEO_INPUT=false in .env skips ffmpeg frame
                     # extraction. The video still flows through as a media
                     # attachment; the model just doesn't get the JPEG frames.
-                    if not getattr(self.config, "ENABLE_VIDEO_INPUT", True):
-                        # Skip derivative extraction entirely; the original
-                        # blob gets appended as a media item further down.
-                        pass
-                    else:
+                    # Skip derivative extraction entirely; the original
+                    # blob gets appended as a media item further down.
+                    if getattr(self.config, "ENABLE_VIDEO_INPUT", True):
                         normalized = await self._normalize_video(
                             blob, attachment.filename, max_size
                         )
@@ -7430,19 +7427,19 @@ class MaxwellBot(commands.Bot):
                     b64 = base64.b64encode(blob).decode("utf-8")
                 if is_image:
                     images.append(b64)
-                item = {
-                    "b64": b64,
-                    "mime_type": mime,
-                    "filename": filename,
-                    "is_image": is_image,
-                    "is_text": bool(text),
-                    "text": text,
-                    "message_id": getattr(message, "id", None),
+                item = self._media_item(
+                    b64=b64,
+                    mime_type=mime,
+                    filename=filename,
+                    is_image=is_image,
+                    is_text=bool(text),
+                    text=text,
+                    message_id=getattr(message, "id", None),
                     # Every piece of media carries its source URL when
                     # possible so the model can curl/pull/reuse it in
                     # sites instead of being blind to where it came from.
-                    "url": getattr(attachment, "url", "") or "",
-                }
+                    url=getattr(attachment, "url", "") or "",
+                )
                 media.append(item)
                 kind = "text" if text else "media"
                 logger.info(
@@ -7453,6 +7450,50 @@ class MaxwellBot(commands.Bot):
                     f"Failed to download attachment {attachment.filename}: {e}"
                 )
         return images, media
+
+    def _max_media_bytes(self) -> int:
+        max_mb = float(self._control.get("max_image_size_mb", 10) or 10)
+        return _safe_int(max(1, min(max_mb, 25)) * 1024 * 1024, 1048576)
+
+    @staticmethod
+    def _ffmpeg_input_argv(input_path) -> list[str]:
+        return [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(input_path),
+        ]
+
+    @staticmethod
+    def _media_item(
+        *,
+        b64: str,
+        mime_type: str,
+        filename: str,
+        is_image: bool,
+        message_id,
+        url: str | None = None,
+        is_text: bool = False,
+        text: str = "",
+        source: str | None = None,
+    ) -> dict:
+        item = {
+            "b64": b64,
+            "mime_type": mime_type,
+            "filename": filename,
+            "is_image": is_image,
+            "is_text": is_text,
+            "text": text,
+            "message_id": message_id,
+        }
+        if source is not None:
+            item["source"] = source
+        if url is not None:
+            item["url"] = url
+        return item
 
     async def _normalize_video(
         self, blob: bytes, filename: str, max_size: int
@@ -7465,13 +7506,7 @@ class MaxwellBot(commands.Bot):
                 output_path = tmp_path / "normalized.mp4"
                 input_path.write_bytes(blob)
                 cmd = [
-                    "ffmpeg",
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-y",
-                    "-i",
-                    str(input_path),
+                    *self._ffmpeg_input_argv(input_path),
                     "-vf",
                     "scale='min(1280,iw)':-2,fps=24,format=yuv420p",
                     "-c:v",
@@ -7544,13 +7579,7 @@ class MaxwellBot(commands.Bot):
                 # Extract frames at 2fps, capped at 6 frames max and 15s duration
                 frame_pattern = str(tmp_path / "frame-%03d.jpg")
                 frame_cmd = [
-                    "ffmpeg",
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-y",
-                    "-i",
-                    str(video_path),
+                    *self._ffmpeg_input_argv(video_path),
                     "-t",
                     "15",
                     "-vf",
@@ -7579,17 +7608,15 @@ class MaxwellBot(commands.Bot):
                         if len(frame_blob) > max_size:
                             continue
                         results.append(
-                            {
-                                "b64": base64.b64encode(frame_blob).decode("utf-8"),
-                                "mime_type": "image/jpeg",
-                                "filename": f"{filename}-{frame_path.stem}.jpg",
-                                "is_image": True,
-                                "is_text": False,
-                                "text": "",
-                                "message_id": message_id,
-                                "source": "video_frame",
-                                "url": source_url,
-                            }
+                            self._media_item(
+                                b64=base64.b64encode(frame_blob).decode("utf-8"),
+                                mime_type="image/jpeg",
+                                filename=f"{filename}-{frame_path.stem}.jpg",
+                                is_image=True,
+                                message_id=message_id,
+                                source="video_frame",
+                                url=source_url,
+                            )
                         )
                 else:
                     logger.warning(
@@ -7604,13 +7631,7 @@ class MaxwellBot(commands.Bot):
                 if proc_aud:
                     audio_path = tmp_path / "audio.wav"
                     audio_cmd = [
-                        "ffmpeg",
-                        "-hide_banner",
-                        "-loglevel",
-                        "error",
-                        "-y",
-                        "-i",
-                        str(video_path),
+                        *self._ffmpeg_input_argv(video_path),
                         "-t",
                         "30",
                         "-vn",
@@ -7642,17 +7663,15 @@ class MaxwellBot(commands.Bot):
                         audio_blob = audio_path.read_bytes()
                         if len(audio_blob) <= max_size:
                             results.append(
-                                {
-                                    "b64": base64.b64encode(audio_blob).decode("utf-8"),
-                                    "mime_type": "audio/wav",
-                                    "filename": f"{filename}-audio.wav",
-                                    "is_image": False,
-                                    "is_text": False,
-                                    "text": "",
-                                    "message_id": message_id,
-                                    "source": "video_audio",
-                                    "url": source_url,
-                                }
+                                self._media_item(
+                                    b64=base64.b64encode(audio_blob).decode("utf-8"),
+                                    mime_type="audio/wav",
+                                    filename=f"{filename}-audio.wav",
+                                    is_image=False,
+                                    message_id=message_id,
+                                    source="video_audio",
+                                    url=source_url,
+                                )
                             )
                     elif proc.returncode != 0:
                         logger.info(
@@ -7680,13 +7699,7 @@ class MaxwellBot(commands.Bot):
                 output_path = tmp_path / "gif-sheet.jpg"
                 input_path.write_bytes(blob)
                 cmd = [
-                    "ffmpeg",
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-y",
-                    "-i",
-                    str(input_path),
+                    *self._ffmpeg_input_argv(input_path),
                     "-vf",
                     "fps=2,scale=320:-2:flags=lanczos,tile=4x2:padding=4:margin=4:color=white",
                     "-frames:v",
@@ -7825,26 +7838,23 @@ class MaxwellBot(commands.Bot):
         logger.info(
             f"Extracted embed media {filename} ({len(blob)} bytes, mime={mime})"
         )
-        return {
-            "b64": base64.b64encode(blob).decode("utf-8"),
-            "mime_type": mime,
-            "filename": filename,
-            "is_image": is_image,
-            "is_text": False,
-            "text": "",
-            "message_id": message_id,
-            "source": "embed",
+        return self._media_item(
+            b64=base64.b64encode(blob).decode("utf-8"),
+            mime_type=mime,
+            filename=filename,
+            is_image=is_image,
+            message_id=message_id,
+            source="embed",
             # Attach the source URL so the model can curl/reuse the
             # original instead of only having a base64 copy.
-            "url": url,
-        }
+            url=url,
+        )
 
     async def _extract_embeds(self, message) -> list[dict]:
         embeds = list(getattr(message, "embeds", []) or [])
         if not embeds:
             return []
-        max_mb = float(self._control.get("max_image_size_mb", 10) or 10)
-        max_size = _safe_int(max(1, min(max_mb, 25)) * 1024 * 1024, 1048576)
+        max_size = self._max_media_bytes()
         media = []
         text_blocks = []
         message_id = getattr(message, "id", None)
@@ -7902,16 +7912,16 @@ class MaxwellBot(commands.Bot):
         if text_blocks:
             media.insert(
                 0,
-                {
-                    "b64": "",
-                    "mime_type": "text/plain",
-                    "filename": "discord-embeds.txt",
-                    "is_image": False,
-                    "is_text": True,
-                    "text": "\n\n".join(text_blocks),
-                    "message_id": message_id,
-                    "source": "embed",
-                },
+                self._media_item(
+                    b64="",
+                    mime_type="text/plain",
+                    filename="discord-embeds.txt",
+                    is_image=False,
+                    is_text=True,
+                    text="\n\n".join(text_blocks),
+                    message_id=message_id,
+                    source="embed",
+                ),
             )
             logger.info(f"Extracted text from {len(text_blocks)} embed(s)")
         return media
@@ -7926,8 +7936,7 @@ class MaxwellBot(commands.Bot):
                 gif_urls.append(cleaned)
         if not gif_urls:
             return []
-        max_mb = float(self._control.get("max_image_size_mb", 10) or 10)
-        max_size = _safe_int(max(1, min(max_mb, 25)) * 1024 * 1024, 1048576)
+        max_size = self._max_media_bytes()
         media = []
         message_id = getattr(message, "id", None)
         for idx, url in enumerate(gif_urls[:5], 1):
@@ -8061,11 +8070,17 @@ class MaxwellBot(commands.Bot):
             if not str(item.get("mime_type", "")).startswith("image/")
         ]
         parts = []
+
+        def _media_line(i, item, default_name, default_mime, label):
+            filename = item.get("filename", default_name)
+            mime = item.get("mime_type", default_mime)
+            url = item.get("url") or ""
+            return f"{i}. {filename} ({mime}, {label}){' — ' + url if url else ''}"
+
         if active_images:
             lines = []
             for i, item in enumerate(active_images, 1):
                 filename = item.get("filename", "image")
-                mime = item.get("mime_type", "image")
                 label = (
                     "new"
                     if any(
@@ -8075,10 +8090,7 @@ class MaxwellBot(commands.Bot):
                     )
                     else "recent"
                 )
-                url = item.get("url") or ""
-                lines.append(
-                    f"{i}. {filename} ({mime}, {label}){' — ' + url if url else ''}"
-                )
+                lines.append(_media_line(i, item, "image", "image", label))
             parts.append(
                 "Images available to inspect, oldest to newest. Only discuss them when relevant to the latest message. Source URL attached for each (curl/pull/reuse in sites if needed):\n"
                 + "\n".join(lines)
@@ -8086,12 +8098,7 @@ class MaxwellBot(commands.Bot):
         if active_non_images:
             lines = []
             for i, item in enumerate(active_non_images, 1):
-                filename = item.get("filename", "media")
-                mime = item.get("mime_type", "media")
-                url = item.get("url") or ""
-                lines.append(
-                    f"{i}. {filename} ({mime}, new){' — ' + url if url else ''}"
-                )
+                lines.append(_media_line(i, item, "media", "media", "new"))
             parts.append(
                 "Audio/video available to inspect in the multimodal message payload. Use the actual attached media when answering:\n"
                 + "\n".join(lines)
