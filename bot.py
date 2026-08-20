@@ -2133,6 +2133,7 @@ def _read_json(path):
 def _str_set(data):
     return {str(x) for x in data}
 
+
 class ToolCircuitBreaker:
     """Track tool failures and temporarily disable failing tools."""
 
@@ -3337,9 +3338,12 @@ class MaxwellBot(commands.Bot):
                                 "System",
                             ),
                             "author_id": str(
-                                getattr(getattr(message, "author", None), "id", "system")
+                                getattr(
+                                    getattr(message, "author", None), "id", "system"
+                                )
                             ),
-                            "content": (message.content or "")[:4000] or "[media attached]",
+                            "content": (message.content or "")[:4000]
+                            or "[media attached]",
                             "message_id": str(getattr(message, "id", "")),
                             "timestamp": _message_created_at_iso(message),
                         },
@@ -5395,8 +5399,7 @@ class MaxwellBot(commands.Bot):
         rq = getattr(exception, "rqdata", None)
         if rq:
             parts.append(f"rqdata={rq}")
-        invisible = getattr(exception, "should_serve_invisible", False)
-        if invisible:
+        if getattr(exception, "should_serve_invisible", False):
             parts.append("invisible=1")
         return " | ".join(parts)
 
@@ -5407,6 +5410,13 @@ class MaxwellBot(commands.Bot):
             return admins
         fb = (getattr(self.config, "CAPTCHA_FALLBACK_USER_ID", "") or "").strip()
         return [fb] if fb else []
+
+    async def _captcha_resolve_user(self, uid: str | int):
+        """Resolve a user id to a User object, fetching if not cached."""
+        user = self.get_user(int(uid))
+        if user is None:
+            user = await self.fetch_user(int(uid))
+        return user
 
     async def _human_captcha_ensure(self) -> HumanCaptchaServer:
         """Start (once) the local HTTP server hosting solve pages."""
@@ -5448,9 +5458,7 @@ class MaxwellBot(commands.Bot):
         )
         for uid in self._captcha_recipient_ids():
             try:
-                user = self.get_user(int(uid))
-                if user is None:
-                    user = await self.fetch_user(int(uid))
+                user = await self._captcha_resolve_user(uid)
                 if user is None:
                     continue
                 await user.send(msg)
@@ -5490,10 +5498,7 @@ class MaxwellBot(commands.Bot):
             text = (text or "").strip()
             if not text or text == "__NO_RESPONSE__":
                 return
-            uid = recipients[0]
-            user = self.get_user(int(uid))
-            if user is None:
-                user = await self.fetch_user(int(uid))
+            user = await self._captcha_resolve_user(recipients[0])
             if user is not None:
                 await user.send(text[:1500])
         except Exception as e:
@@ -5544,12 +5549,11 @@ class MaxwellBot(commands.Bot):
         # 2) human-in-the-loop solve page + DM notification
         if getattr(self.config, "CAPTCHA_HUMAN_SOLVE", False):
             try:
+
                 async def _notify(url: str, _exc=exception):
                     await self._notify_captcha_link(url, _exc)
 
-                url = await self._create_captcha_challenge(
-                    exception, notify=_notify
-                )
+                url = await self._create_captcha_challenge(exception, notify=_notify)
                 srv = self._human_captcha_server
                 if srv is None:
                     raise CaptchaSolveError("human captcha server not started")
@@ -6809,11 +6813,7 @@ class MaxwellBot(commands.Bot):
                             cmd["result"] = (
                                 f"autonomy interval set to {control['autonomy_interval_seconds']}s"
                             )
-                        elif typ == "context_cleanup_run":
-                            cmd["result"] = (
-                                "context cleanup engine removed (RAG memory active)"
-                            )
-                        elif typ in (
+                        elif typ == "context_cleanup_run" or typ in (
                             "context_cleanup_enable",
                             "context_cleanup_disable",
                             "context_cleanup_interval",
@@ -9710,9 +9710,7 @@ class MaxwellBot(commands.Bot):
             tr = _IMG_RE.sub("", tr).strip()
             if len(tr) > _MAX_TOOL_RESULT_CHARS:
                 half = _MAX_TOOL_RESULT_CHARS // 2
-                return (
-                    f"{tr[:half]}\n\n[...truncated {len(tr) - _MAX_TOOL_RESULT_CHARS} chars...]\n\n{tr[-half:]}"
-                )
+                return f"{tr[:half]}\n\n[...truncated {len(tr) - _MAX_TOOL_RESULT_CHARS} chars...]\n\n{tr[-half:]}"
             return tr
 
         truncated_by_id = {
@@ -9727,9 +9725,7 @@ class MaxwellBot(commands.Bot):
         }
         followup_msgs: list[dict] = [assistant_msg]
         for call in calls:
-            line = truncated_by_id.get(
-                call["id"], f"Tool {call['name']}: (no result)"
-            )
+            line = truncated_by_id.get(call["id"], f"Tool {call['name']}: (no result)")
             followup_msgs.append(
                 {
                     "role": "tool",
@@ -9739,9 +9735,7 @@ class MaxwellBot(commands.Bot):
             )
         self._last_native_followup_messages = followup_msgs
         # Return results in original emission order, paired by tool_call_id.
-        truncated_results = [
-            truncated_by_id.get(c["id"], "") for c in calls
-        ]
+        truncated_results = [truncated_by_id.get(c["id"], "") for c in calls]
         tool_results = truncated_results
         return (
             (cleaned, tool_results, tool_images)
@@ -9962,14 +9956,14 @@ class MaxwellBot(commands.Bot):
             )
         else:
             descriptions = [
-                f"{name}: {self.tools[name].get_description()}"
-                f"{result_contract(name)}"
+                f"{name}: {self.tools[name].get_description()}{result_contract(name)}"
                 for name in names
             ]
             header = (
                 "## Available tools\n"
                 + "\n".join(descriptions)
-                + "\n\n" + catalog
+                + "\n\n"
+                + catalog
                 + "\n\n## How to call\n"
                 "XML text tags only, one tag per call:\n"
                 "<tool:name>\n<param>value</param>\n</tool:name>\n"
@@ -10974,6 +10968,7 @@ class MaxwellBot(commands.Bot):
                 )
             )
             self._track_task(task)
+
             def _on_webhook_task_done(t: asyncio.Task) -> None:
                 if t.cancelled():
                     return
@@ -11555,11 +11550,7 @@ class MaxwellBot(commands.Bot):
         elif any("__TTS_SENT__" in tr for tr in all_tool_results):
             delivered_text = "[voice message sent]"
 
-        if (
-            delivered_text
-            and self._control.get("store_memory", True)
-            and tg_chan_id
-        ):
+        if delivered_text and self._control.get("store_memory", True) and tg_chan_id:
             await self.memory.add_to_channel_memory(
                 tg_chan_id,
                 {
