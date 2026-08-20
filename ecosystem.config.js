@@ -32,6 +32,32 @@ module.exports = {
 			merge_logs: true,
 		},
 		{
+			// Ollama serves the embedding model (qwen3-embedding) and the
+			// autonomy/background-agent model (AUTONOMY_BASE_URL points at
+			// localhost:11434). It runs here rather than under systemd because
+			// the packaged unit runs as user `ollama` with HOME=/usr/share/ollama,
+			// whose model store is empty — the 2.3G of pulled models live in
+			// /root/.ollama and /root is 0700. pm2 runs as root, so it sees them.
+			// The systemd unit is stopped and disabled; don't re-enable it
+			// without moving the model store first.
+			name: "ollama",
+			script: "ollama",
+			args: "serve",
+			interpreter: "none",
+			cwd: appRoot,
+			instances: 1,
+			autorestart: true,
+			watch: false,
+			kill_timeout: 10000,
+			kill_signal: "SIGTERM",
+			env: {
+				HOME: "/root",
+				OLLAMA_ORIGINS: "*",
+			},
+			log_date_format: "YYYY-MM-DD HH:mm:ss Z",
+			merge_logs: true,
+		},
+		{
 			name: "maxwell-api",
 			script: "api/api_server.py",
 			interpreter: "python3",
