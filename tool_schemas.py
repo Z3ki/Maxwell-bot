@@ -229,11 +229,16 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     ),
     "youtube": _obj(
         {
-            "url": _str("YouTube video URL"),
+            "url": _str(
+                "YouTube video, channel, playlist, or search URL. "
+                "Handles like @name also work."
+            ),
+            "query": _str("Optional YouTube search if url is omitted"),
+            "limit": _int("Optional max videos for channel/playlist/search (default 15)"),
             "timestamps": _str("Optional comma-separated timestamps for frames"),
             "max_transcript_chars": _int("Optional transcript length cap"),
+            "lang": _str("Optional caption language (default en)"),
         },
-        ["url"],
     ),
     "send_meme": _obj({"subreddit": _str("Optional subreddit name (e.g. me_irl)")}),
     "send_media": _obj(

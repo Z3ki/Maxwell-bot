@@ -18,6 +18,7 @@ import shutil
 import socket
 import ssl
 import tempfile
+import time
 import wave
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
@@ -4214,19 +4215,40 @@ class FetchUrlTool(Tool):
 
 
 class YouTubeTool(Tool):
-    """Fetch YouTube transcripts and optional timestamp frames."""
+    """Fetch YouTube transcripts, channel/playlist listings, and frames."""
 
     MAX_TRANSCRIPT_CHARS = 20000
     MAX_FRAMES = 6
+    MAX_LIST_ITEMS = 50
+    DEFAULT_LIST_ITEMS = 15
     YOUTUBE_HOST_RE = re.compile(
-        r"(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com)$", re.I
+        r"(^|\.)((?:music\.)?youtube\.com|youtu\.be|youtube-nocookie\.com)$",
+        re.I,
     )
+    YOUTUBE_URL_RE = re.compile(
+        r"https?://(?:www\.|m\.|music\.)?(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/[^\s<>\"']+",
+        re.I,
+    )
+    HANDLE_RE = re.compile(
+        r"^@([A-Za-z0-9._-]{1,30})(?:/(videos|shorts|streams|live|playlists|featured|about))?/?$",
+        re.I,
+    )
+    CHANNEL_ID_RE = re.compile(r"^UC[A-Za-z0-9_-]{20,24}$")
+    TAB_RE = re.compile(
+        r"/(videos|shorts|streams|live|playlists|featured|about|community)/?$",
+        re.I,
+    )
+    CACHE_TTL = 10 * 60
+    _result_cache: dict[str, tuple[float, str]] = {}
 
     def get_description(self):
         return (
-            "Fetch a YouTube transcript and optional timestamp frames (attached "
-            "to the model, not posted). Prefer this over fetch_url for YouTube. "
-            "Params: url, timestamps (optional comma-separated seconds or mm:ss), "
+            "YouTube helper: transcripts + optional timestamp frames for videos; "
+            "recent-upload listings for channels and playlists; search by query. "
+            "Prefer this over fetch_url for any youtube.com / youtu.be link. "
+            "Params: url (video, channel, playlist, @handle, or /videos page), "
+            "query (optional search if no url), limit (channel/playlist/search, "
+            "default 15), timestamps (optional comma-separated seconds or mm:ss), "
             "max_transcript_chars (default 12000), lang (default en)."
         )
 
@@ -4281,12 +4303,74 @@ class YouTubeTool(Tool):
                 text,
                 flags=re.IGNORECASE,
             ).strip()
-        match = re.search(
-            r"https?://(?:www\.)?(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/[^\s<>\"']+",
-            text,
-            re.IGNORECASE,
-        )
-        return match.group(0).rstrip(".,)]") if match else text
+        match = cls.YOUTUBE_URL_RE.search(text)
+        if match:
+            return match.group(0).rstrip(".,)]>")
+        handle = cls.HANDLE_RE.search(text)
+        if handle:
+            tab = (handle.group(2) or "videos").lower()
+            if tab in {"featured", "about", "community"}:
+                tab = "videos"
+            if tab == "live":
+                tab = "streams"
+            return f"https://www.youtube.com/@{handle.group(1)}/{tab}"
+        if cls.CHANNEL_ID_RE.fullmatch(text):
+            return f"https://www.youtube.com/channel/{text}/videos"
+        return text
+
+    @classmethod
+    def _url_kind(cls, url: str) -> str:
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return "video"
+        host = (parsed.hostname or "").lower()
+        path = parsed.path or ""
+        qs = parse_qs(parsed.query)
+        if host.endswith("youtu.be"):
+            return "video"
+        if qs.get("v"):
+            return "video"
+        if re.search(r"/(?:embed|shorts|live)/[A-Za-z0-9_-]{6,}", path):
+            return "video"
+        if "/playlist" in path and qs.get("list"):
+            return "playlist"
+        if "/results" in path or qs.get("search_query"):
+            return "search"
+        if (
+            "/@" in f"/{path.lstrip('/')}"
+            or "/channel/" in path
+            or path.startswith("/c/")
+            or path.startswith("/user/")
+        ):
+            return "channel"
+        return "video"
+
+    @classmethod
+    def _normalize_list_url(cls, url: str, kind: str) -> str:
+        if kind != "channel":
+            return url
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return url
+        path = (parsed.path or "").rstrip("/")
+        if cls.TAB_RE.search(path):
+            path = cls.TAB_RE.sub(
+                lambda m: "/streams"
+                if m.group(1).lower() == "live"
+                else (
+                    "/videos"
+                    if m.group(1).lower() in {"featured", "about", "community"}
+                    else f"/{m.group(1).lower()}"
+                ),
+                path,
+            )
+        elif path:
+            path = f"{path}/videos"
+        else:
+            return url
+        return parsed._replace(path=path, query="", fragment="").geturl()
 
     @staticmethod
     def _video_id(url: str) -> str:
@@ -4609,6 +4693,148 @@ class YouTubeTool(Tool):
                 continue
         return ""
 
+    @classmethod
+    def _cache_get(cls, key: str) -> str | None:
+        item = cls._result_cache.get(key)
+        if not item:
+            return None
+        expires, value = item
+        if time.monotonic() >= expires:
+            cls._result_cache.pop(key, None)
+            return None
+        return value
+
+    @classmethod
+    def _cache_set(cls, key: str, value: str) -> None:
+        if len(cls._result_cache) > 64:
+            cls._result_cache.clear()
+        cls._result_cache[key] = (time.monotonic() + cls.CACHE_TTL, value)
+
+    @classmethod
+    def _parse_limit(cls, raw: Any) -> int:
+        try:
+            return max(1, min(int(raw), cls.MAX_LIST_ITEMS))
+        except (TypeError, ValueError):
+            return cls.DEFAULT_LIST_ITEMS
+
+    @staticmethod
+    def _entry_watch_url(entry: dict) -> str:
+        eid = str(entry.get("id") or "").strip()
+        webpage = str(entry.get("url") or entry.get("webpage_url") or "").strip()
+        if webpage.startswith("http") and "youtube" in webpage:
+            return webpage
+        if eid.startswith(("PL", "UU", "FL", "RD", "OL")):
+            return f"https://www.youtube.com/playlist?list={eid}"
+        if eid:
+            return f"https://www.youtube.com/watch?v={eid}"
+        return webpage
+
+    @classmethod
+    def _format_catalog(cls, kind: str, data: dict, limit: int) -> str:
+        title = str(
+            data.get("title")
+            or data.get("playlist_title")
+            or data.get("channel")
+            or data.get("uploader")
+            or "YouTube"
+        )
+        channel = str(data.get("channel") or data.get("uploader") or "")
+        channel_url = str(data.get("channel_url") or data.get("uploader_url") or "")
+        webpage = str(data.get("webpage_url") or data.get("original_url") or "")
+        description = str(data.get("description") or "").strip()
+        if len(description) > 400:
+            description = description[:400] + "…"
+        entries = [
+            e
+            for e in (data.get("entries") or [])
+            if isinstance(e, dict) and (e.get("id") or e.get("title"))
+        ][:limit]
+        parts = [
+            f"Type: {kind}",
+            f"Title: {title}",
+        ]
+        if channel:
+            parts.append(f"Channel: {channel}")
+        if channel_url:
+            parts.append(f"Channel URL: {channel_url}")
+        if webpage:
+            parts.append(f"URL: {webpage}")
+        count = data.get("playlist_count")
+        if isinstance(count, int) and count > 0:
+            parts.append(f"Total items: {count}")
+        if description:
+            parts.append(f"Description: {description}")
+        if not entries:
+            parts.append("No videos listed (empty, private, or blocked).")
+            return "\n".join(parts)
+        parts.append(f"Showing {len(entries)} item(s):")
+        lines = []
+        for i, entry in enumerate(entries, 1):
+            etitle = str(entry.get("title") or entry.get("id") or "untitled")
+            dur = entry.get("duration")
+            dur_text = (
+                f" ({cls._format_ts(float(dur))})"
+                if isinstance(dur, (int, float)) and dur >= 0
+                else ""
+            )
+            watch = cls._entry_watch_url(entry)
+            extra = []
+            views = entry.get("view_count")
+            if isinstance(views, (int, float)):
+                extra.append(f"{int(views)} views")
+            uploaded = entry.get("upload_date") or entry.get("release_date")
+            if isinstance(uploaded, str) and len(uploaded) == 8 and uploaded.isdigit():
+                extra.append(f"{uploaded[:4]}-{uploaded[4:6]}-{uploaded[6:]}")
+            meta = f" — {', '.join(extra)}" if extra else ""
+            block = f"{i}. {etitle}{dur_text}{meta}"
+            if watch:
+                block += f"\n   {watch}"
+            lines.append(block)
+        parts.append("\n".join(lines))
+        parts.append(
+            "Call this tool again with a specific video URL to fetch a transcript or frames."
+        )
+        return "\n".join(parts)
+
+    async def _dump_playlist(self, url: str, limit: int) -> dict:
+        if not shutil.which("yt-dlp"):
+            return {"error": "yt-dlp is not installed"}
+        code, stdout, stderr = await self._run_cmd(
+            self._yt_dlp_args(
+                "--flat-playlist",
+                "--dump-single-json",
+                "--playlist-end",
+                str(limit),
+                "--no-warnings",
+                url,
+            ),
+            timeout=75,
+        )
+        blob = (stdout or "").strip()
+        if code != 0 or not blob:
+            err = (stderr or stdout or "unknown error").strip()[:300]
+            return {"error": err}
+        try:
+            data = json.loads(blob)
+        except json.JSONDecodeError:
+            return {"error": "yt-dlp returned invalid JSON"}
+        return data if isinstance(data, dict) else {"error": "unexpected yt-dlp payload"}
+
+    async def _list_catalog(self, url: str, kind: str, limit: int) -> str:
+        cache_key = f"list:{kind}:{url}:{limit}"
+        cached = self._cache_get(cache_key)
+        if cached:
+            return cached
+        data = await self._dump_playlist(url, limit)
+        if data.get("error") and not data.get("entries"):
+            return (
+                f"Error listing YouTube {kind}: {data['error']}\n"
+                "If this is a 429 / bot check, wait and retry; cookies may need a refresh."
+            )
+        text = self._format_catalog(kind, data, limit)
+        self._cache_set(cache_key, text)
+        return text
+
     async def execute(
         self,
         message: Message,
@@ -4616,13 +4842,34 @@ class YouTubeTool(Tool):
         timestamps: str | None = None,
         max_transcript_chars: str = "12000",
         lang: str = "en",
+        query: str | None = None,
+        limit: Any = None,
         **kwargs,
     ) -> str:
+        query = str(query or kwargs.get("q") or "").strip()
+        list_limit = self._parse_limit(limit if limit is not None else kwargs.get("max_videos"))
+        if query and not url:
+            return await self._list_catalog(f"ytsearch{list_limit}:{query}", "search", list_limit)
         if not url:
-            return "Error: url is required"
+            return "Error: url or query is required"
         url = self._extract_youtube_url(url)
-        if not self._is_youtube_url(url):
-            return "Error: expected a YouTube URL"
+        if url.startswith("ytsearch") or self._is_youtube_url(url):
+            kind = (
+                "search"
+                if url.startswith("ytsearch")
+                else self._url_kind(url)
+            )
+            if kind == "search" and not url.startswith("ytsearch"):
+                q = parse_qs(urlparse(url).query).get("search_query", [""])[0].strip()
+                if q:
+                    return await self._list_catalog(
+                        f"ytsearch{list_limit}:{q}", "search", list_limit
+                    )
+            if kind in {"channel", "playlist", "search"}:
+                url = self._normalize_list_url(url, kind)
+                return await self._list_catalog(url, kind, list_limit)
+        else:
+            return "Error: expected a YouTube URL or @handle"
         try:
             max_chars = max(
                 1000, min(int(max_transcript_chars), self.MAX_TRANSCRIPT_CHARS)
