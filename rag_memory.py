@@ -974,10 +974,13 @@ class RAGMemoryManager:
                     ) as resp:
                         if resp.status != 200:
                             body = await resp.text()
-                            logger.warning(
-                                f"Embedding API returned {resp.status} "
-                                f"(chunk {ci}/{len(chunks_to_embed)}): "
-                                f"{body[:200]}"
+                            # A non-200 is just as persistent as a refused
+                            # connection — a 404 for a model that isn't pulled
+                            # repeats for every single message. Trip the same
+                            # breaker so it's one line per outage, not one per
+                            # embed.
+                            self._trip_embed_breaker(
+                                f"HTTP {resp.status}: {body[:200]}"
                             )
                             return None
                         data = await resp.json()
