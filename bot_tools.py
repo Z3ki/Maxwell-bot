@@ -1389,28 +1389,54 @@ class CreateInviteTool(Tool):
             return f"Error creating invite: {e}"
 
 
-_INVITE_CODE_RE = re.compile(
-    r"(?:discord(?:app)?\.com/invite/|discord\.gg/)?([a-zA-Z0-9_-]{2,32})",
+# The Discord host/path is REQUIRED before the capture group. An optional
+# prefix made ``https://discord.gg/xyz`` match the scheme token ``https``,
+# so every HTTPS invite joined discord.gg/https instead of the target.
+_INVITE_URL_RE = re.compile(
+    r"(?:https?://)?(?:www\.)?(?:(?:ptb|canary)\.)?"
+    r"(?:discord(?:app)?\.com/invite|discord\.gg)/"
+    r"([a-zA-Z0-9_-]{2,32})",
     re.IGNORECASE,
 )
+_INVITE_BARE_RE = re.compile(r"^[a-zA-Z0-9_-]{2,32}$")
+_INVITE_PARAM_KEYS = ("invite", "url", "link", "code", "invite_url", "invite_code")
+
+
+def _invite_raw_from_params(invite: Any = None, kwargs: dict | None = None) -> str:
+    """Return the first non-empty invite string from the primary arg or aliases."""
+    values: list[Any] = [invite]
+    if kwargs:
+        for key in _INVITE_PARAM_KEYS:
+            if key == "invite":
+                continue
+            values.append(kwargs.get(key))
+    for val in values:
+        if isinstance(val, (list, tuple)) and val:
+            val = val[0]
+        text = str(val or "").strip()
+        if text:
+            return text
+    return ""
 
 
 def _extract_invite_code(invite: str) -> str:
     """Normalize an invite to its bare code.
 
     Accepts ``discord.gg/xyz``, ``https://discord.com/invite/xyz``,
-    ``discordapp.com/invite/xyz``, or a bare code like ``xyz``.
+    ``discordapp.com/invite/xyz``, ptb/canary hosts, Discord ``<>``
+    markdown, query strings, or a bare code like ``xyz``.
     """
-    invite = (invite or "").strip()
+    invite = (invite or "").strip().strip("<>").strip()
     if not invite:
         return ""
-    # Bare codes can't contain a slash; anything with a slash must be a URL.
-    if "/" in invite:
-        m = _INVITE_CODE_RE.search(invite)
-        if m:
-            return m.group(1)
+    m = _INVITE_URL_RE.search(invite)
+    if m:
+        return m.group(1)
+    if "/" in invite or "://" in invite:
         return ""
-    return invite
+    if _INVITE_BARE_RE.fullmatch(invite):
+        return invite
+    return ""
 
 
 _VERIFY_CHANNEL_KEYWORDS = (
@@ -1459,7 +1485,9 @@ class JoinServerTool(Tool):
 
     def get_description(self):
         return (
-            "Join a Discord server via invite code or link (discord.gg/code). "
+            "Join a Discord server via invite code or full invite URL "
+            "(https://discord.gg/code). Always pass the exact link or code "
+            "the user gave — do not invent or reuse another invite. "
             "Reports name, gates, captcha, and errors. Params: invite (required)."
         )
 
@@ -1468,11 +1496,12 @@ class JoinServerTool(Tool):
     ) -> str:
         if self.bot and not self.bot._is_admin(message.author.id):
             return "Error: join_server is admin-only"
-        code = _extract_invite_code(invite or "")
+        raw = _invite_raw_from_params(invite, kwargs)
+        code = _extract_invite_code(raw)
         if not code:
             return (
                 "Error: could not parse an invite code from "
-                f"'{invite}'. Pass a link like discord.gg/xyz or a bare code."
+                f"'{raw or invite}'. Pass a link like discord.gg/xyz or a bare code."
             )
         try:
             inv = await self.bot.fetch_invite(code, with_counts=True)

@@ -95,8 +95,9 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     "join_server": _obj(
         {
             "invite": _str(
-                "Invite code or link to join (e.g. discord.gg/xyz or "
-                "https://discord.com/invite/xyz)."
+                "The exact invite the user provided: a full URL "
+                "(https://discord.gg/xyz, https://discord.com/invite/xyz) "
+                "or the bare code. Never substitute a different invite."
             )
         },
         ["invite"],
