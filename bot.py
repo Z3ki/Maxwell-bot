@@ -2125,6 +2125,14 @@ def _should_skip_plaintext_after_send(
     return False
 
 
+def _read_json(path):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _str_set(data):
+    return {str(x) for x in data}
+
 class ToolCircuitBreaker:
     """Track tool failures and temporarily disable failing tools."""
 
@@ -5174,22 +5182,38 @@ class MaxwellBot(commands.Bot):
                     break
         return "\n".join(parts)
 
+    def _json_path(self, name):
+        return Path(self.config.DATA_DIR) / name
+
+    def _try_load_str_set(self, name, *, require_list=True):
+        path = self._json_path(name)
+        if not path.exists():
+            return None
+        data = _read_json(path)
+        if require_list and not isinstance(data, list):
+            return None
+        return _str_set(data)
+
+    def _save_str_set(self, name, values, err, *, sort=False):
+        try:
+            _atomic_json_write_sync(
+                self._json_path(name), sorted(values) if sort else list(values)
+            )
+        except Exception as e:
+            logger.error(f"{err}: {e}")
+
     def _load_sites(self, quiet: bool = False):
         try:
-            path = Path(self.config.DATA_DIR) / "sites.json"
+            path = self._json_path("sites.json")
             mtime = path.stat().st_mtime if path.exists() else 0.0
             if mtime == self._sites_mtime:
                 return
-            if path.exists():
-                with open(path, encoding="utf-8") as f:
-                    data = json.load(f)
-                self._sites = (
-                    {k: v for k, v in data.items() if isinstance(v, dict)}
-                    if isinstance(data, dict)
-                    else {}
-                )
-            else:
-                self._sites = {}
+            data = _read_json(path) if path.exists() else {}
+            self._sites = (
+                {k: v for k, v in data.items() if isinstance(v, dict)}
+                if isinstance(data, dict)
+                else {}
+            )
             self._sites_mtime = mtime
             if not quiet:
                 logger.info(f"Loaded {len(self._sites)} tracked sites from disk")
@@ -5200,12 +5224,9 @@ class MaxwellBot(commands.Bot):
 
     def _load_auto_channels(self, quiet: bool = False):
         try:
-            path = Path(self.config.DATA_DIR) / "auto_channels.json"
-            if path.exists():
-                with open(path, encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, list):
-                    self._auto_channels = {str(x) for x in data}
+            ids = self._try_load_str_set("auto_channels.json")
+            if ids is not None:
+                self._auto_channels = ids
             if not quiet:
                 logger.info(f"Loaded {len(self._auto_channels)} auto-channels")
         except Exception as e:
@@ -5213,22 +5234,15 @@ class MaxwellBot(commands.Bot):
             self._auto_channels = set()
 
     def _save_auto_channels(self):
-        try:
-            _atomic_json_write_sync(
-                Path(self.config.DATA_DIR) / "auto_channels.json",
-                list(self._auto_channels),
-            )
-        except Exception as e:
-            logger.error(f"Failed to save auto channels: {e}")
+        self._save_str_set(
+            "auto_channels.json", self._auto_channels, "Failed to save auto channels"
+        )
 
     def _load_jailbreak(self, quiet: bool = False):
         try:
-            path = Path(self.config.DATA_DIR) / "jailbreak_servers.json"
-            if path.exists():
-                with open(path, encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, list):
-                    self._jailbreak_servers = {str(x) for x in data}
+            ids = self._try_load_str_set("jailbreak_servers.json")
+            if ids is not None:
+                self._jailbreak_servers = ids
             if not quiet:
                 logger.info(f"Loaded {len(self._jailbreak_servers)} jailbreak servers")
         except Exception as e:
@@ -5236,13 +5250,12 @@ class MaxwellBot(commands.Bot):
             self._jailbreak_servers = set()
 
     def _save_jailbreak(self):
-        try:
-            _atomic_json_write_sync(
-                Path(self.config.DATA_DIR) / "jailbreak_servers.json",
-                sorted(self._jailbreak_servers),
-            )
-        except Exception as e:
-            logger.error(f"Failed to save jailbreak servers: {e}")
+        self._save_str_set(
+            "jailbreak_servers.json",
+            self._jailbreak_servers,
+            "Failed to save jailbreak servers",
+            sort=True,
+        )
 
     def _jailbreak_enabled(self, server_id: str) -> bool:
         """Jailbreak (freedom-mode prompt) is OFF by default everywhere; only on
@@ -5251,18 +5264,12 @@ class MaxwellBot(commands.Bot):
 
     def _load_progress_servers(self, quiet: bool = False):
         try:
-            path = Path(self.config.DATA_DIR) / "progress_servers.json"
-            if path.exists():
-                with open(path, encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, list):
-                    self._progress_servers = {str(x) for x in data}
-            off_path = Path(self.config.DATA_DIR) / "progress_servers_off.json"
-            if off_path.exists():
-                with open(off_path, encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, list):
-                    self._progress_servers_off = {str(x) for x in data}
+            ids = self._try_load_str_set("progress_servers.json")
+            if ids is not None:
+                self._progress_servers = ids
+            off = self._try_load_str_set("progress_servers_off.json")
+            if off is not None:
+                self._progress_servers_off = off
             if not quiet:
                 logger.info(
                     f"Loaded {len(self._progress_servers)} progress-enabled servers, "
@@ -5276,11 +5283,11 @@ class MaxwellBot(commands.Bot):
     def _save_progress_servers(self):
         try:
             _atomic_json_write_sync(
-                Path(self.config.DATA_DIR) / "progress_servers.json",
+                self._json_path("progress_servers.json"),
                 sorted(self._progress_servers),
             )
             _atomic_json_write_sync(
-                Path(self.config.DATA_DIR) / "progress_servers_off.json",
+                self._json_path("progress_servers_off.json"),
                 sorted(self._progress_servers_off),
             )
         except Exception as e:
@@ -5305,12 +5312,9 @@ class MaxwellBot(commands.Bot):
 
     def _load_blacklist(self, quiet: bool = False):
         try:
-            path = Path(self.config.DATA_DIR) / "blacklist.json"
-            if path.exists():
-                with open(path, encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, list):
-                    self._blacklist = {str(x) for x in data}
+            ids = self._try_load_str_set("blacklist.json")
+            if ids is not None:
+                self._blacklist = ids
             if not quiet:
                 logger.info(f"Loaded {len(self._blacklist)} blacklisted users")
         except Exception as e:
@@ -5319,10 +5323,9 @@ class MaxwellBot(commands.Bot):
 
     def _load_shell_whitelist(self, quiet: bool = False):
         try:
-            path = Path(self.config.DATA_DIR) / "shell_whitelist.json"
-            if path.exists():
-                with open(path, encoding="utf-8") as f:
-                    self._shell_whitelist = {str(x) for x in json.load(f)}
+            ids = self._try_load_str_set("shell_whitelist.json", require_list=False)
+            if ids is not None:
+                self._shell_whitelist = ids
             if not quiet:
                 logger.info(
                     f"Loaded {len(self._shell_whitelist)} whitelisted shell users"
@@ -5332,36 +5335,30 @@ class MaxwellBot(commands.Bot):
             self._shell_whitelist = set()
 
     def _save_shell_whitelist(self):
-        try:
-            _atomic_json_write_sync(
-                Path(self.config.DATA_DIR) / "shell_whitelist.json",
-                list(self._shell_whitelist),
-            )
-        except Exception as e:
-            logger.error(f"Failed to save shell whitelist: {e}")
+        self._save_str_set(
+            "shell_whitelist.json",
+            self._shell_whitelist,
+            "Failed to save shell whitelist",
+        )
 
     def _save_blacklist(self):
-        try:
-            _atomic_json_write_sync(
-                Path(self.config.DATA_DIR) / "blacklist.json", list(self._blacklist)
-            )
-        except Exception as e:
-            logger.error(f"Failed to save blacklist: {e}")
+        self._save_str_set(
+            "blacklist.json", self._blacklist, "Failed to save blacklist"
+        )
 
     def _load_admins(self, quiet: bool = False):
         admins = set(OWNER_IDS)
         try:
-            path = Path(self.config.DATA_DIR) / "admins.json"
+            path = self._json_path("admins.json")
             if path.exists():
-                with open(path, encoding="utf-8") as f:
-                    data = json.load(f)
+                data = _read_json(path)
                 if isinstance(data, list):
-                    admins.update(str(x) for x in data)
+                    admins.update(_str_set(data))
                 elif isinstance(data, dict):
                     for key in ("admins", "owners", "user_ids"):
                         values = data.get(key)
                         if isinstance(values, list):
-                            admins.update(str(x) for x in values)
+                            admins.update(_str_set(values))
             self._admins = admins
             if not quiet:
                 logger.info(f"Loaded {len(self._admins)} admin user(s)")
@@ -5373,12 +5370,9 @@ class MaxwellBot(commands.Bot):
         return str(user_id) in self._admins
 
     def _save_admins(self):
-        try:
-            _atomic_json_write_sync(
-                Path(self.config.DATA_DIR) / "admins.json", sorted(self._admins)
-            )
-        except Exception as e:
-            logger.error(f"Failed to save admins: {e}")
+        self._save_str_set(
+            "admins.json", self._admins, "Failed to save admins", sort=True
+        )
 
     # ------------------------------------------------------------------
     # CAPTCHA handling — Discord hits these on invite accepts, DM gates,
