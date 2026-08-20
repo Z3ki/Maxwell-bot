@@ -2133,6 +2133,7 @@ def _read_json(path):
 def _str_set(data):
     return {str(x) for x in data}
 
+
 class ToolCircuitBreaker:
     """Track tool failures and temporarily disable failing tools."""
 
@@ -3337,9 +3338,12 @@ class MaxwellBot(commands.Bot):
                                 "System",
                             ),
                             "author_id": str(
-                                getattr(getattr(message, "author", None), "id", "system")
+                                getattr(
+                                    getattr(message, "author", None), "id", "system"
+                                )
                             ),
-                            "content": (message.content or "")[:4000] or "[media attached]",
+                            "content": (message.content or "")[:4000]
+                            or "[media attached]",
                             "message_id": str(getattr(message, "id", "")),
                             "timestamp": _message_created_at_iso(message),
                         },
@@ -4655,17 +4659,184 @@ class MaxwellBot(commands.Bot):
         if sink:
             sink.cleanup()
 
+    def _vc_should_ignore_user(self, user) -> bool:
+        if not self.user or user.id == self.user.id:
+            return True
+        if str(user.id) in self._blacklist or str(user.id) in set(
+            self._control.get("ignore_users", []) or []
+        ):
+            return True
+        return False
+
+    def _vc_build_system_prompt(self, user, guild, facts: list) -> str:
+        guild_id = str(guild.id) if guild else ""
+        guild_name = getattr(guild, "name", "DM/group call")
+        base_style = self._get_personality()
+        style_bits = (
+            base_style.split("Discord style:", 1)[-1].strip()
+            if "Discord style:" in base_style
+            else "short, casual, easygoing and kind."
+        )
+        sys_msg = (
+            f"You are Maxwell in a Discord voice call. Speaker: {user.display_name}. Context: {guild_name}.\n"
+            f"Style: {style_bits}\n"
+            "Reply in 1-2 short sentences — the way you'd actually talk out loud, not type. "
+            "Plain text only: no markdown, no emojis, no asterisks, no lists, no code, no tool tags. "
+            "Output is fed to TTS so it must read naturally when spoken — avoid 'lol', 'ngl', 'fr', "
+            "or anything that sounds weird read aloud.\n"
+            "Reply directly to what they said. No reasoning, no "
+            "chain-of-thought, no meta-commentary, no narrating what you're doing."
+            "\nOptional: start your reply with [voice=NAME] to pick your TTS voice "
+            "(choices: tiktok, mommy). Defaults to tiktok if you don't specify."
+        )
+        if self._control.get("vc_response_mode", "always") == "addressed":
+            wakes = self._control.get("vc_wake_words", ["maxwell"]) or ["maxwell"]
+            sys_msg += (
+                f" Only answer if they are talking to you (Maxwell) or the transcript "
+                f"contains a wake word from {wakes} (ASR may garble the name). "
+                "Otherwise output exactly __NO_RESPONSE__."
+            )
+        if facts:
+            sys_msg += "\nCross-context facts:\n" + "\n".join(
+                f"- [{f.get('scope')}, i{f.get('importance')}] {f.get('content')}"
+                for f in facts
+            )
+        # JAILBREAK: inject if enabled for this guild
+        _jb = getattr(self, "_jailbreak_enabled", None)
+        if callable(_jb) and _jb(guild_id):
+            sys_msg += "\n\n" + JAILBREAK_PROMPT_VC
+        return sys_msg
+
+    async def _vc_build_prompt_messages(
+        self,
+        user,
+        guild,
+        channel_id: str,
+        transcript: str,
+        duration: float,
+        facts: list,
+    ) -> list:
+        sys_msg = self._vc_build_system_prompt(user, guild, facts)
+        messages = [{"role": "system", "content": sys_msg}]
+        memory_count = max(
+            0,
+            min(
+                _safe_int(self._control.get("vc_memory_history_messages", 2) or 0, 0),
+                5,
+            ),
+        )
+        memory = (
+            await self.memory.get_channel_memory(channel_id) if memory_count else []
+        )
+        for msg in memory[-memory_count:]:
+            role = (
+                "assistant"
+                if msg.get("author")
+                == (self.user.display_name if self.user else self.bot_name)
+                else "user"
+            )
+            messages.append(
+                {
+                    "role": role,
+                    "content": f"{msg.get('author', 'user')}: {msg.get('content', '')[:220]}",
+                }
+            )
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"{user.display_name} said (voice, {duration:.1f}s): {transcript}"
+                ),
+            }
+        )
+        return messages
+
+    async def _vc_generate_ai_response(self, messages: list) -> str:
+        vc_timeout = max(
+            8,
+            min(
+                _safe_int(self._control.get("vc_ai_timeout_seconds", 25) or 25, 25),
+                120,
+            ),
+        )
+        vc_max_tokens = max(
+            24,
+            min(_safe_int(self._control.get("vc_ai_max_tokens", 90) or 90, 90), 2000),
+        )
+        # Use the global AI slot (instead of only private VC semaphore) so noisy VC
+        # does not starve text replies, autonomy, REM etc. Keep a local bound too.
+        await self._acquire_ai_slot(timeout=vc_timeout, priority="user")
+        try:
+            async with self._vc_ai_semaphore:
+                return await self.ai_provider.generate_response(
+                    messages,
+                    media=[],
+                    timeout=vc_timeout,
+                    max_tokens=vc_max_tokens,
+                    temperature=0.6,
+                    disable_reasoning=True,
+                    fast_fallback=True,
+                )
+        finally:
+            await self._release_ai_slot()
+
+    def _vc_format_response(self, raw_resp: str | None) -> str | None:
+        resp = strip_tool_payload_leaks((raw_resp or "").strip())
+        if not resp or resp == "__NO_RESPONSE__":
+            return None
+        max_chars = max(
+            80,
+            min(
+                _safe_int(self._control.get("vc_max_response_chars", 260) or 260, 260),
+                4000,
+            ),
+        )
+        if len(resp) > max_chars:
+            resp = resp[:max_chars].rsplit(" ", 1)[0].rstrip(".,;: ") + "..."
+        return resp
+
+    async def _vc_record_memory(
+        self, guild, channel_id: str, user, transcript: str, resp: str
+    ):
+        if not self._control.get("store_memory", True):
+            return
+        mem_kwargs = {}
+        if guild:
+            mem_kwargs["guild_id"] = str(getattr(guild, "id", "") or "")
+        await self.memory.add_to_channel_memory(
+            channel_id,
+            {
+                "author": user.display_name,
+                "author_id": str(user.id),
+                "author_is_bot": bool(getattr(user, "bot", False)),
+                "content": f"[voice] {transcript}",
+                **mem_kwargs,
+            },
+        )
+        await self.memory.add_to_channel_memory(
+            channel_id,
+            {
+                "author": (self.user.display_name if self.user else self.bot_name),
+                # 2026-07-22: use the bot's numeric id consistently.
+                # The old `else 0` fallback produced author_id=0 which
+                # never matched self_user_id, so the bot's own VC reply
+                # was mis-rendered as a user turn (attribution bug).
+                # Empty string falls back to name-only is_self matching
+                # in _build_messages, which is more robust than a bogus 0.
+                "author_id": str(self.user.id) if self.user else "",
+                "author_is_bot": True,
+                "content": resp,
+                **mem_kwargs,
+            },
+        )
+
     async def _handle_vc_utterance(self, guild, text_channel, user, wav_path, duration):
         t_total = time.perf_counter()
         key = None
         current = None
         my_gen = 0
         try:
-            if not self.user or user.id == self.user.id:
-                return
-            if str(user.id) in self._blacklist or str(user.id) in set(
-                self._control.get("ignore_users", []) or []
-            ):
+            if self._vc_should_ignore_user(user):
                 return
             key = self._vc_context_key(guild, None, text_channel)
             # Cancel any still-running VC reply for this channel so the newest
@@ -4694,7 +4865,6 @@ class MaxwellBot(commands.Bot):
                 )
                 return
             guild_id = str(guild.id) if guild else ""
-            guild_name = getattr(guild, "name", "DM/group call")
             channel_id = str(getattr(text_channel, "id", ""))
             facts = []
             if self._control.get("vc_cross_context_enabled", False):
@@ -4708,73 +4878,8 @@ class MaxwellBot(commands.Bot):
                     budget=1500,
                 )
             t_context = time.perf_counter()
-            base_style = self._get_personality()
-            style_bits = (
-                base_style.split("Discord style:", 1)[-1].strip()
-                if "Discord style:" in base_style
-                else "short, casual, easygoing and kind."
-            )
-            sys_msg = (
-                f"You are Maxwell in a Discord voice call. Speaker: {user.display_name}. Context: {guild_name}.\n"
-                f"Style: {style_bits}\n"
-                "Reply in 1-2 short sentences — the way you'd actually talk out loud, not type. "
-                "Plain text only: no markdown, no emojis, no asterisks, no lists, no code, no tool tags. "
-                "Output is fed to TTS so it must read naturally when spoken — avoid 'lol', 'ngl', 'fr', "
-                "or anything that sounds weird read aloud.\n"
-                "Reply directly to what they said. No reasoning, no "
-                "chain-of-thought, no meta-commentary, no narrating what you're doing."
-                "\nOptional: start your reply with [voice=NAME] to pick your TTS voice "
-                "(choices: tiktok, mommy). Defaults to tiktok if you don't specify."
-            )
-            if self._control.get("vc_response_mode", "always") == "addressed":
-                wakes = self._control.get("vc_wake_words", ["maxwell"]) or ["maxwell"]
-                sys_msg += (
-                    f" Only answer if they are talking to you (Maxwell) or the transcript "
-                    f"contains a wake word from {wakes} (ASR may garble the name). "
-                    "Otherwise output exactly __NO_RESPONSE__."
-                )
-            if facts:
-                sys_msg += "\nCross-context facts:\n" + "\n".join(
-                    f"- [{f.get('scope')}, i{f.get('importance')}] {f.get('content')}"
-                    for f in facts
-                )
-            # JAILBREAK: inject if enabled for this guild
-            _jb = getattr(self, "_jailbreak_enabled", None)
-            if callable(_jb) and _jb(guild_id):
-                sys_msg += "\n\n" + JAILBREAK_PROMPT_VC
-            messages = [{"role": "system", "content": sys_msg}]
-            memory_count = max(
-                0,
-                min(
-                    _safe_int(
-                        self._control.get("vc_memory_history_messages", 2) or 0, 0
-                    ),
-                    5,
-                ),
-            )
-            memory = (
-                await self.memory.get_channel_memory(channel_id) if memory_count else []
-            )
-            for msg in memory[-memory_count:]:
-                role = (
-                    "assistant"
-                    if msg.get("author")
-                    == (self.user.display_name if self.user else self.bot_name)
-                    else "user"
-                )
-                messages.append(
-                    {
-                        "role": role,
-                        "content": f"{msg.get('author', 'user')}: {msg.get('content', '')[:220]}",
-                    }
-                )
-            messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        f"{user.display_name} said (voice, {duration:.1f}s): {transcript}"
-                    ),
-                }
+            messages = await self._vc_build_prompt_messages(
+                user, guild, channel_id, transcript, duration, facts
             )
             t_prompt = time.perf_counter()
             logger.info(
@@ -4790,39 +4895,11 @@ class MaxwellBot(commands.Bot):
                 len(facts),
                 transcript[:160],
             )
-            vc_timeout = max(
-                8,
-                min(
-                    _safe_int(self._control.get("vc_ai_timeout_seconds", 25) or 25, 25),
-                    120,
-                ),
-            )
-            vc_max_tokens = max(
-                24,
-                min(
-                    _safe_int(self._control.get("vc_ai_max_tokens", 90) or 90, 90), 2000
-                ),
-            )
             t_ai = time.perf_counter()
-            # Use the global AI slot (instead of only private VC semaphore) so noisy VC
-            # does not starve text replies, autonomy, REM etc. Keep a local bound too.
-            await self._acquire_ai_slot(timeout=vc_timeout, priority="user")
-            try:
-                async with self._vc_ai_semaphore:
-                    resp = await self.ai_provider.generate_response(
-                        messages,
-                        media=[],
-                        timeout=vc_timeout,
-                        max_tokens=vc_max_tokens,
-                        temperature=0.6,
-                        disable_reasoning=True,
-                        fast_fallback=True,
-                    )
-            finally:
-                await self._release_ai_slot()
+            raw_resp = await self._vc_generate_ai_response(messages)
             t_ai_done = time.perf_counter()
-            resp = strip_tool_payload_leaks((resp or "").strip())
-            if not resp or resp == "__NO_RESPONSE__":
+            resp = self._vc_format_response(raw_resp)
+            if not resp:
                 logger.info(
                     "VC timing no_response user=%s ai_ms=%.1f total_ms=%.1f",
                     getattr(user, "id", "?"),
@@ -4830,17 +4907,6 @@ class MaxwellBot(commands.Bot):
                     (time.perf_counter() - t_total) * 1000,
                 )
                 return
-            max_chars = max(
-                80,
-                min(
-                    _safe_int(
-                        self._control.get("vc_max_response_chars", 260) or 260, 260
-                    ),
-                    4000,
-                ),
-            )
-            if len(resp) > max_chars:
-                resp = resp[:max_chars].rsplit(" ", 1)[0].rstrip(".,;: ") + "..."
             # Bail if a newer utterance superseded this one while generating,
             # so we don't replay a stale answer after the conversation moved on.
             if self._vc_gen_counter.get(key, my_gen) != my_gen:
@@ -4874,38 +4940,7 @@ class MaxwellBot(commands.Bot):
                     (time.perf_counter() - t_play) * 1000,
                     (time.perf_counter() - t_total) * 1000,
                 )
-            if self._control.get("store_memory", True):
-                mem_kwargs = {}
-                if guild:
-                    mem_kwargs["guild_id"] = str(getattr(guild, "id", "") or "")
-                await self.memory.add_to_channel_memory(
-                    channel_id,
-                    {
-                        "author": user.display_name,
-                        "author_id": str(user.id),
-                        "author_is_bot": bool(getattr(user, "bot", False)),
-                        "content": f"[voice] {transcript}",
-                        **mem_kwargs,
-                    },
-                )
-                await self.memory.add_to_channel_memory(
-                    channel_id,
-                    {
-                        "author": (
-                            self.user.display_name if self.user else self.bot_name
-                        ),
-                        # 2026-07-22: use the bot's numeric id consistently.
-                        # The old `else 0` fallback produced author_id=0 which
-                        # never matched self_user_id, so the bot's own VC reply
-                        # was mis-rendered as a user turn (attribution bug).
-                        # Empty string falls back to name-only is_self matching
-                        # in _build_messages, which is more robust than a bogus 0.
-                        "author_id": str(self.user.id) if self.user else "",
-                        "author_is_bot": True,
-                        "content": resp,
-                        **mem_kwargs,
-                    },
-                )
+            await self._vc_record_memory(guild, channel_id, user, transcript, resp)
         except Exception as e:
             msg = str(e)
             # Provider empty/error on VC is usually "not addressed to me" or a
@@ -5544,12 +5579,11 @@ class MaxwellBot(commands.Bot):
         # 2) human-in-the-loop solve page + DM notification
         if getattr(self.config, "CAPTCHA_HUMAN_SOLVE", False):
             try:
+
                 async def _notify(url: str, _exc=exception):
                     await self._notify_captcha_link(url, _exc)
 
-                url = await self._create_captcha_challenge(
-                    exception, notify=_notify
-                )
+                url = await self._create_captcha_challenge(exception, notify=_notify)
                 srv = self._human_captcha_server
                 if srv is None:
                     raise CaptchaSolveError("human captcha server not started")
@@ -6809,11 +6843,7 @@ class MaxwellBot(commands.Bot):
                             cmd["result"] = (
                                 f"autonomy interval set to {control['autonomy_interval_seconds']}s"
                             )
-                        elif typ == "context_cleanup_run":
-                            cmd["result"] = (
-                                "context cleanup engine removed (RAG memory active)"
-                            )
-                        elif typ in (
+                        elif typ == "context_cleanup_run" or typ in (
                             "context_cleanup_enable",
                             "context_cleanup_disable",
                             "context_cleanup_interval",
@@ -9710,9 +9740,7 @@ class MaxwellBot(commands.Bot):
             tr = _IMG_RE.sub("", tr).strip()
             if len(tr) > _MAX_TOOL_RESULT_CHARS:
                 half = _MAX_TOOL_RESULT_CHARS // 2
-                return (
-                    f"{tr[:half]}\n\n[...truncated {len(tr) - _MAX_TOOL_RESULT_CHARS} chars...]\n\n{tr[-half:]}"
-                )
+                return f"{tr[:half]}\n\n[...truncated {len(tr) - _MAX_TOOL_RESULT_CHARS} chars...]\n\n{tr[-half:]}"
             return tr
 
         truncated_by_id = {
@@ -9727,9 +9755,7 @@ class MaxwellBot(commands.Bot):
         }
         followup_msgs: list[dict] = [assistant_msg]
         for call in calls:
-            line = truncated_by_id.get(
-                call["id"], f"Tool {call['name']}: (no result)"
-            )
+            line = truncated_by_id.get(call["id"], f"Tool {call['name']}: (no result)")
             followup_msgs.append(
                 {
                     "role": "tool",
@@ -9739,9 +9765,7 @@ class MaxwellBot(commands.Bot):
             )
         self._last_native_followup_messages = followup_msgs
         # Return results in original emission order, paired by tool_call_id.
-        truncated_results = [
-            truncated_by_id.get(c["id"], "") for c in calls
-        ]
+        truncated_results = [truncated_by_id.get(c["id"], "") for c in calls]
         tool_results = truncated_results
         return (
             (cleaned, tool_results, tool_images)
@@ -9962,14 +9986,14 @@ class MaxwellBot(commands.Bot):
             )
         else:
             descriptions = [
-                f"{name}: {self.tools[name].get_description()}"
-                f"{result_contract(name)}"
+                f"{name}: {self.tools[name].get_description()}{result_contract(name)}"
                 for name in names
             ]
             header = (
                 "## Available tools\n"
                 + "\n".join(descriptions)
-                + "\n\n" + catalog
+                + "\n\n"
+                + catalog
                 + "\n\n## How to call\n"
                 "XML text tags only, one tag per call:\n"
                 "<tool:name>\n<param>value</param>\n</tool:name>\n"
@@ -10974,6 +10998,7 @@ class MaxwellBot(commands.Bot):
                 )
             )
             self._track_task(task)
+
             def _on_webhook_task_done(t: asyncio.Task) -> None:
                 if t.cancelled():
                     return
@@ -11555,11 +11580,7 @@ class MaxwellBot(commands.Bot):
         elif any("__TTS_SENT__" in tr for tr in all_tool_results):
             delivered_text = "[voice message sent]"
 
-        if (
-            delivered_text
-            and self._control.get("store_memory", True)
-            and tg_chan_id
-        ):
+        if delivered_text and self._control.get("store_memory", True) and tg_chan_id:
             await self.memory.add_to_channel_memory(
                 tg_chan_id,
                 {
