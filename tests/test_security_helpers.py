@@ -84,12 +84,56 @@ class TestShellToolValidation:
         cmd = "python3 - <<'PY'\nprint('hi')\nPY"
         assert tool._validate_command(cmd) is None
 
+    def test_allows_heredoc_with_redirect_after_delimiter(self):
+        # The form models actually emit: redirect on the opener line.
+        tool = ShellTool(None)  # type: ignore[arg-type]
+        cmd = "cat << 'EOF' > make_pdf.py\nfrom reportlab.lib.pagesizes import letter\nprint(1)\nEOF"
+        assert tool._validate_command(cmd) is None
+        cmd = "cat <<EOF >file.txt\nhello\nEOF"
+        assert tool._validate_command(cmd) is None
+        cmd = "python3 - <<'PY' > out.py\nprint(1)\nPY"
+        assert tool._validate_command(cmd) is None
+        cmd = "cat <<-EOF >> log.txt\n\thello\nEOF"
+        assert tool._validate_command(cmd) is None
+
+    def test_rejects_unterminated_heredoc_with_redirect(self):
+        tool = ShellTool(None)  # type: ignore[arg-type]
+        cmd = "cat << 'EOF' > make_pdf.py\nfrom reportlab.lib.pagesizes import letter"
+        err = tool._validate_command(cmd)
+        assert err is not None
+        assert "never closed" in err
+
+    def test_rejects_unterminated_heredoc_without_redirect(self):
+        # Unclosed bodies used to be stripped to a single opener line and
+        # incorrectly accepted (bash would then hang until timeout).
+        tool = ShellTool(None)  # type: ignore[arg-type]
+        cmd = "python3 - <<'PY'\nprint('hi')"
+        err = tool._validate_command(cmd)
+        assert err is not None
+        assert "never closed" in err
+
     def test_rejects_heredoc_opener_followed_by_injected_command(self):
         # Opening a heredoc but injecting a second command AFTER the closing
         # delimiter must still be rejected.
         tool = ShellTool(None)  # type: ignore[arg-type]
         cmd = "cat <<'EOF'\nhello\nEOF\nrm -rf /"
         assert tool._validate_command(cmd) is not None
+        cmd = "cat << 'EOF' > f.py\nhello\nEOF\nrm -rf /"
+        assert tool._validate_command(cmd) is not None
+
+    def test_command_arg_accepts_cmd_alias(self):
+        assert ShellTool._command_arg(command="ls") == "ls"
+        assert ShellTool._command_arg(command=None, cmd="pwd") == "pwd"
+        assert ShellTool._command_arg(command="  ", script="echo hi") == "echo hi"
+        assert ShellTool._command_arg(command=None, code="true") == "true"
+
+    def test_normalize_strips_prompt_prefix_and_markdown_fence(self):
+        tool = ShellTool(None)  # type: ignore[arg-type]
+        assert tool._normalize_command("$ cat << 'EOF' > f.py") == "cat << 'EOF' > f.py"
+        fenced = "```bash\ncat << 'EOF' > f.py\nprint(1)\nEOF\n```"
+        assert tool._normalize_command(fenced) == "cat << 'EOF' > f.py\nprint(1)\nEOF"
+        # Fence-stripped heredoc with redirect must still validate.
+        assert tool._validate_command(tool._normalize_command(fenced)) is None
 
     def test_rejects_control_chars(self):
         tool = ShellTool(None)  # type: ignore[arg-type]
