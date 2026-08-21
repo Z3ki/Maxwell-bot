@@ -1083,3 +1083,42 @@ def test_exec_post_channel_refuses_a_dm_channel(tmp_path):
     assert result["result"] == "error"
     assert "send_dm" in result["error"]
     assert dm.sent == []
+
+
+def test_register_conversation_fetches_when_the_guild_cache_is_cold(tmp_path):
+    """The tick right after a restart runs before the guild cache fills.
+
+    get_channel() returns None for perfectly real channels there. The first
+    registration fixes a room's kind for the whole tick, so writing them off
+    as unreachable stranded Maxwell with nowhere to post — observed live as
+    `unreachable=X1=COOLDOWN` for #grandpa-general seconds after a restart.
+    """
+    real = SimpleNamespace(id=17, name="grandpa-general", guild=SimpleNamespace(name="g"))
+    engine = _engine(tmp_path)
+    engine.bot.get_channel = lambda cid: None  # cold cache
+
+    async def fetch_channel(cid):
+        return real if str(cid) == "17" else None
+
+    engine.bot.fetch_channel = fetch_channel
+    engine.bot.private_channels = []
+    idx = AutonomyContextIndex()
+
+    handle, label = asyncio.run(engine._register_conversation(idx, "17"))
+    assert handle == "1"
+    assert label == "channel=1(#grandpa-general)"
+
+    # One fetch per channel per tick, negative answers included.
+    calls = []
+
+    async def counting_fetch(cid):
+        calls.append(cid)
+        raise RuntimeError("no such channel")
+
+    engine.bot.fetch_channel = counting_fetch
+    engine._channel_fetch_cache = {}
+    for _ in range(3):
+        handle, label = asyncio.run(engine._register_conversation(idx, "99"))
+    assert len(calls) == 1
+    # Genuinely unresolvable stays unreachable — that part was right.
+    assert label == "unreachable=X1"

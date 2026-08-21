@@ -846,7 +846,7 @@ class AutonomyEngine:
         # Inverse of the above: DM channel id -> the user send_dm must target.
         self._dm_user_by_channel: dict[str, str] = {}
 
-    def _register_conversation(
+    async def _register_conversation(
         self, ctx_index: AutonomyContextIndex, channel_id: str, channel: Any = None
     ) -> tuple[str, str]:
         """Register a room for this tick and return (handle, display label).
@@ -855,18 +855,46 @@ class AutonomyEngine:
         naming scheme everywhere: `channel=3(#general)`, `dm=D1(with Z3ki)`,
         `group=G1(Z3ki, dirac)`. Rooms that aren't guild channels can't come
         out looking like one.
+
+        The first registration fixes a room's kind for the whole tick, so it
+        has to be right the first time — a later section can't renumber a
+        handle that's already been printed. On the tick right after a restart
+        the guild cache is still cold and `get_channel` returns None for real
+        channels, so fall back to one fetch rather than writing them off as
+        unreachable for the tick.
         """
         cid = re.sub(r"[^0-9]", "", str(channel_id or ""))
         if not cid:
             return "", "room=unknown"
         if cid not in ctx_index.handle_by_id:
             kind, name = _classify_conversation(self.bot, cid, channel)
+            if kind == AutonomyContextIndex.KIND_UNKNOWN:
+                fetched = await self._fetch_channel_cached(cid)
+                if fetched is not None:
+                    kind, name = _classify_conversation(self.bot, cid, fetched)
             ctx_index.add_ref(cid, kind=kind, name=name)
         elif channel is not None and not ctx_index.name_by_id.get(cid):
             _, name = _classify_conversation(self.bot, cid, channel)
             if name:
                 ctx_index.name_by_id[cid] = name
         return ctx_index.handle_by_id.get(cid, ""), ctx_index.describe(cid)
+
+    async def _fetch_channel_cached(self, cid: str) -> Any:
+        """One bounded fetch per channel per tick, negative results remembered."""
+        cache = getattr(self, "_channel_fetch_cache", None)
+        if cache is None:
+            cache = self._channel_fetch_cache = {}
+        if cid in cache:
+            return cache[cid]
+        ch = None
+        try:
+            ch = await asyncio.wait_for(
+                self.bot.fetch_channel(_safe_int(cid)), timeout=5
+            )
+        except Exception:
+            ch = None
+        cache[cid] = ch
+        return ch
 
     def _resolve_planner_channel_ref(self, raw: str) -> tuple[str | None, str]:
         idx = getattr(self, "_context_index", None)
@@ -1347,6 +1375,7 @@ class AutonomyEngine:
         self._floor_verdicts = {}
         self._dm_channel_by_user = {}
         self._dm_user_by_channel = {}
+        self._channel_fetch_cache = {}
 
         # 2. Active goals (most decision-relevant — what should I work on?)
         active_goals: list = []
@@ -1406,7 +1435,9 @@ class AutonomyEngine:
                     ch_label = "room=unknown"
                     if cid != "?":
                         with contextlib.suppress(Exception):
-                            ch_label = self._register_conversation(ctx_index, cid)[1]
+                            ch_label = (
+                                await self._register_conversation(ctx_index, cid)
+                            )[1]
                     uid = str(ev.get("user_id") or "?")
                     uname = str(ev.get("user_name") or "?")
                     role = str(ev.get("role") or "?")
@@ -1539,7 +1570,9 @@ class AutonomyEngine:
                     )
                     tag_text = " ".join(tags)
                     msg_id = str(getattr(m, "id", ""))
-                    ch_label = self._register_conversation(ctx_index, _cid, ch)[1]
+                    ch_label = (
+                        await self._register_conversation(ctx_index, _cid, ch)
+                    )[1]
                     msg_idx = ctx_index.add_message(msg_id, _cid) if msg_id else 0
                     author = _user_ref(getattr(m, "author", None), self.bot.user)
                     ch_lines.append(
@@ -1599,7 +1632,7 @@ class AutonomyEngine:
                     rows = await memory.get_channel_memory(cid)
                     if not rows:
                         continue
-                    ch_label = self._register_conversation(ctx_index, cid)[1]
+                    ch_label = (await self._register_conversation(ctx_index, cid))[1]
                     history_count = max(
                         1,
                         min(
@@ -1759,7 +1792,7 @@ class AutonomyEngine:
         for channel in list(getattr(self.bot, "private_channels", []) or [])[:20]:
             try:
                 cid_private = str(getattr(channel, "id", "") or "")
-                handle, room_label = self._register_conversation(
+                handle, room_label = await self._register_conversation(
                     ctx_index, cid_private, channel
                 )
                 is_group = isinstance(channel, discord.GroupChannel)
@@ -1927,7 +1960,7 @@ class AutonomyEngine:
                 # a private one. This block is the first thing the planner
                 # reads, so a label here that looks like a channel number is a
                 # standing invitation to post into a DM.
-                _, label = self._register_conversation(ctx_index, cid)
+                _, label = await self._register_conversation(ctx_index, cid)
                 kind = ctx_index.kind_by_id.get(cid, AutonomyContextIndex.KIND_UNKNOWN)
                 if kind == AutonomyContextIndex.KIND_DM:
                     uid = self._dm_user_by_channel.get(cid, "")
