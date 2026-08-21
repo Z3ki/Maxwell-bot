@@ -210,12 +210,12 @@ def test_clear_sleep_tool_idempotent():
     assert result == "not sleeping"
 
 
-def test_sleep_tools_refuse_non_admin():
+def test_sleep_tools_allow_non_admin():
     bot = FakeBot()
     bot._is_admin = lambda _uid: False
     msg = SimpleNamespace(author=SimpleNamespace(id=99, bot=False))
-    assert asyncio.run(bot_tools.SleepTool(bot).execute(msg, duration_minutes=5)) == "Error: sleep is admin-only"
-    assert asyncio.run(bot_tools.ClearSleepTool(bot).execute(msg)) == "Error: clear_sleep is admin-only"
+    assert asyncio.run(bot_tools.SleepTool(bot).execute(msg, duration_minutes=5)) == "sleeping for 5m"
+    assert asyncio.run(bot_tools.ClearSleepTool(bot).execute(msg)) == "sleep cleared, awake now"
 
 
 # ---- SleepTool integration with real bot's sleep helpers ----

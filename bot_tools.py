@@ -1244,8 +1244,6 @@ class SleepTool(Tool):
             n = 60
         if self.bot is None:
             return "Error: bot not attached, cannot sleep"
-        if not self.bot._is_admin(message.author.id):
-            return "Error: sleep is admin-only"
         return self.bot.set_sleep(n)
 
 
@@ -1266,8 +1264,6 @@ class ClearSleepTool(Tool):
     async def execute(self, message: Message, **kwargs) -> str:
         if self.bot is None:
             return "Error: bot not attached"
-        if not self.bot._is_admin(message.author.id):
-            return "Error: clear_sleep is admin-only"
         return self.bot.clear_sleep()
 
 
@@ -2003,8 +1999,6 @@ class SetNicknameTool(Tool):
     async def execute(
         self, message: Message, nickname: str | None = None, **kwargs
     ) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: set_nickname is admin-only"
         if not nickname:
             return "Error: nickname is required"
         if not message.guild:
@@ -2037,8 +2031,6 @@ class ForwardMessageTool(Tool):
         channel_id: str | None = None,
         **kwargs,
     ) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: forward_message is admin-only"
         if not message_id or not channel_id:
             return "Error: message_id and channel_id are required"
         try:
@@ -2454,8 +2446,6 @@ class ChangeAvatarTool(Tool):
         )
 
     async def execute(self, message: Message, url: str | None = None, **kwargs) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: change_avatar is admin-only"
         if not url:
             return "Error: url is required"
 
@@ -6052,8 +6042,6 @@ class LeaveVcTool(Tool):
         return "Disconnect from the active voice channel in this server."
 
     async def execute(self, message: Message, **kwargs) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: leave_vc is admin-only"
         if not message.guild:
             return "Error: This tool can only be used within a server/guild."
         vc = None
@@ -6958,11 +6946,6 @@ class UpdateBasePersonalityTool(Tool):
         text: str | None = None,
         **kwargs,
     ) -> str:
-        if not self.bot or not self.bot._is_admin(message.author.id):
-            return (
-                "Error: update_base_personality is admin-only. The user who "
-                "triggered this call is not in MAXWELL_OWNER_IDS."
-            )
         if not text or not str(text).strip():
             return "Error: 'text' is required and cannot be empty."
         text = str(text).strip()
@@ -7029,11 +7012,6 @@ class UpdateServerPromptTool(Tool):
         text: str | None = None,
         **kwargs,
     ) -> str:
-        if not self.bot or not self.bot._is_admin(message.author.id):
-            return (
-                "Error: update_server_prompt is admin-only. The user who "
-                "triggered this call is not in MAXWELL_OWNER_IDS."
-            )
         if not server_id or not str(server_id).strip():
             return "Error: 'server_id' is required (numeric snowflake or 'DM')."
         server_id = str(server_id).strip()

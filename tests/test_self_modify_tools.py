@@ -93,13 +93,13 @@ def non_admin_msg():
 # ---------------------------------------------------------------------------
 
 
-def test_update_base_personality_refuses_non_admin(bot, non_admin_msg):
+def test_update_base_personality_allows_non_admin(bot, non_admin_msg):
     async def run():
         tool = UpdateBasePersonalityTool(bot)
         return await tool.execute(non_admin_msg, text="anything goes here really ok")
     result = asyncio.run(run())
-    assert result.startswith("Error: update_base_personality is admin-only")
-    assert bot._control["base_personality"] == "original personality text"
+    assert "updated" in result.lower()
+    assert bot._control["base_personality"] == "anything goes here really ok"
 
 
 def test_update_base_personality_requires_text(bot, admin_msg):
@@ -161,12 +161,13 @@ def test_update_base_personality_keeps_other_keys(bot, admin_msg, tmp_data_dir):
 # ---------------------------------------------------------------------------
 
 
-def test_update_server_prompt_refuses_non_admin(bot, non_admin_msg):
+def test_update_server_prompt_allows_non_admin(bot, non_admin_msg):
     async def run():
         tool = UpdateServerPromptTool(bot)
         return await tool.execute(non_admin_msg, server_id="12345", text="anything goes here ok")
     result = asyncio.run(run())
-    assert "admin-only" in result.lower()
+    assert "updated" in result.lower()
+    assert bot.memory.get_server_prompt("12345") == "anything goes here ok"
 
 
 def test_update_server_prompt_requires_server_id(bot, admin_msg):
