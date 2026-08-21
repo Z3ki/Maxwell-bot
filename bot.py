@@ -3180,13 +3180,24 @@ class MaxwellBot(commands.Bot):
         stickers_found = []
         cleaned_text = text
         for sticker in getattr(guild, "stickers", []) or []:
-            if getattr(sticker, "format", None) and str(sticker.format).lower() in ("lottie", "apng", "gif"):
+            fmt = getattr(sticker, "format", None)
+            fmt_str = str(fmt).lower() if fmt else ""
+            fmt_name = getattr(fmt, "name", "").lower()
+            if "lottie" in fmt_str or "apng" in fmt_str or "gif" in fmt_str or fmt_name in ("lottie", "apng", "gif"):
                 continue
-            s_name = sticker.name
-            tag = f"[{s_name}]"
-            tag_lower = f"[{s_name.lower()}]"
-            if tag in cleaned_text or tag_lower in cleaned_text.lower():
-                cleaned_text = re.sub(re.escape(tag), "", cleaned_text, flags=re.IGNORECASE).strip()
+            s_name = sticker.name.strip()
+            # Match [sticker_name] or just exact sticker_name
+            patterns = [
+                re.compile(rf"\[{re.escape(s_name)}\]", re.IGNORECASE),
+                re.compile(rf"\b{re.escape(s_name)}\b", re.IGNORECASE) if len(s_name) >= 3 else None,
+            ]
+            matched = False
+            for pat in patterns:
+                if pat and pat.search(cleaned_text):
+                    cleaned_text = pat.sub("", cleaned_text).strip()
+                    matched = True
+                    break
+            if matched:
                 stickers_found.append(sticker)
                 if len(stickers_found) >= 3:
                     break
@@ -10660,7 +10671,7 @@ class MaxwellBot(commands.Bot):
                     )
                 if sticker_items:
                     grid_parts.append(
-                        "Static Server Stickers: "
+                        "Static Server Stickers (type [sticker_name] to dispatch as real Discord sticker): "
                         + ", ".join(f"[{sname}]" for sname in sticker_items)
                     )
                 system_parts.append("\n".join(grid_parts))
