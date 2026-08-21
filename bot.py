@@ -1622,10 +1622,13 @@ def strip_tool_payload_leaks(text: str) -> str:
 
 def _sanitize_visible_reply(text: str) -> str:
     """Shared Discord/Telegram cleanup for leaked tool traces and sent-markers."""
+    raw = str(text or "")
+    if "\\n" in raw and "```" not in raw:
+        raw = raw.replace("\\n", "\n")
     response = re.sub(
         r"\[(\w+)\]\s*\n?\s*\{.*?\}\s*\n?\s*\[/\1\]",
         "",
-        str(text or ""),
+        raw,
         flags=re.DOTALL,
     )
     response = re.sub(r"\[/?(?:TOOL_CALL:)?[\w-]+.*?\]", "", response)
@@ -2348,6 +2351,7 @@ class MaxwellBot(commands.Bot):
         self._shell_whitelist: set[str] = set()
         self._admins: set[str] = set(OWNER_IDS)
         self._guild_emojis: dict[str, dict[str, str]] = {}
+        self._guild_stickers: dict[str, dict[str, str]] = {}
         self._media_context: dict[str, list[dict]] = {}
         # Indirect-prompt-injection defense. When the model has just read
         # content from a less-trusted source (fetch_url, web_search, a URL in
@@ -3148,17 +3152,26 @@ class MaxwellBot(commands.Bot):
 
     def _load_emojis(self):
         self._guild_emojis = {}
+        self._guild_stickers = {}
         for guild in self.guilds:
             gid = str(guild.id)
             self._guild_emojis[gid] = {}
             for emoji in guild.emojis:
+                if getattr(emoji, "animated", False):
+                    continue
                 self._guild_emojis[gid][emoji.name.lower()] = str(emoji)
+            self._guild_stickers[gid] = {}
+            for sticker in getattr(guild, "stickers", []) or []:
+                if getattr(sticker, "format", None) and str(sticker.format).lower() in ("lottie", "apng", "gif"):
+                    continue
+                self._guild_stickers[gid][sticker.name.lower()] = str(sticker.name)
             logger.info(
-                f"Loaded {len(self._guild_emojis[gid])} emojis for guild {guild.name}"
+                f"Loaded {len(self._guild_emojis[gid])} emojis and {len(self._guild_stickers[gid])} stickers for guild {guild.name}"
             )
-        total = sum(len(v) for v in self._guild_emojis.values())
+        total_e = sum(len(v) for v in self._guild_emojis.values())
+        total_s = sum(len(v) for v in self._guild_stickers.values())
         logger.info(
-            f"Loaded {total} total custom emojis across {len(self._guild_emojis)} guilds"
+            f"Loaded {total_e} static custom emojis and {total_s} stickers across {len(self._guild_emojis)} guilds"
         )
 
     def _render_custom_emojis(self, text: str, guild) -> str:
@@ -10604,16 +10617,22 @@ class MaxwellBot(commands.Bot):
             )
         if message.guild and self._control.get("emoji_context_enabled", True):
             emojis = self._guild_emojis.get(str(message.guild.id), {})
-            if emojis:
-                # Smaller, sorted-by-name list is easier for the model to scan
-                # and recall than dumping 50 aliases. 25 covers the commonly
-                # used ones without bloating the system prompt.
+            stickers = getattr(self, "_guild_stickers", {}).get(str(message.guild.id), {})
+            if emojis or stickers:
                 items = sorted(emojis.items())[:25]
-                system_parts.append(
-                    "Custom emojis (write the :name: alias verbatim; "
-                    "do NOT write raw emoji IDs or <:name:> form): "
-                    + ", ".join(f":{name}:" for name, _code in items)
-                )
+                sticker_items = sorted(stickers.keys())[:15]
+                grid_parts = []
+                if items:
+                    grid_parts.append(
+                        "Static Server Emojis (use :name: format, no animated/Nitro): "
+                        + ", ".join(f":{name}:" for name, _ in items)
+                    )
+                if sticker_items:
+                    grid_parts.append(
+                        "Static Server Stickers: "
+                        + ", ".join(f"[{sname}]" for sname in sticker_items)
+                    )
+                system_parts.append("\n".join(grid_parts))
         tool_prompt = self._tool_system_prompt()
         if tool_prompt:
             system_parts.append(tool_prompt)

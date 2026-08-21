@@ -845,6 +845,8 @@ class AutonomyEngine:
         self._dm_channel_by_user: dict[str, str] = {}
         # Inverse of the above: DM channel id -> the user send_dm must target.
         self._dm_user_by_channel: dict[str, str] = {}
+        # Track users whose DMs are closed / bot is blocked so autonomy doesn't spam retry: user_id -> failure_ts
+        self._unreachable_dm_users: dict[str, float] = {}
 
     async def _register_conversation(
         self, ctx_index: AutonomyContextIndex, channel_id: str, channel: Any = None
@@ -1817,18 +1819,24 @@ class AutonomyEngine:
                 # only through send_dm + user id; a group DM only through
                 # post_channel + its G-handle. Leaving that implicit is how
                 # replies ended up in the wrong room.
+                messages = [m async for m in channel.history(limit=20)]
+                last_msg_age = ""
+                if messages:
+                    last_created = getattr(messages[0], "created_at", None)
+                    if last_created:
+                        last_msg_age = f" (last active {_context_time(last_created)})"
+
                 if is_group:
                     header = (
-                        f"{room_label} — group DM, reply with "
+                        f"{room_label}{last_msg_age} — group DM, reply with "
                         f'post_channel target_channel_id="{handle}"'
                     )
                 else:
                     uid = str(getattr(recipient, "id", "")) if recipient else ""
-                    header = f"{room_label} — private DM, reply with send_dm" + (
+                    header = f"{room_label}{last_msg_age} — private DM, reply with send_dm" + (
                         f" target_user_id={uid}" if uid else ""
                     )
                 lines = [header]
-                messages = [m async for m in channel.history(limit=20)]
                 for m in reversed(messages):
                     _cid = str(getattr(channel, "id", "") or "")
                     _ku = (getattr(self.bot, "_recent_users", {}) or {}).get(_cid, {})
@@ -3071,6 +3079,12 @@ Return ONLY JSON, no fence. "thought" is what you're actually thinking, in your 
         result["target"] = f"user:{user_id}"
         result["content_summary"] = content[:200]
 
+        if str(user_id) in self._unreachable_dm_users:
+            if time.time() - self._unreachable_dm_users[str(user_id)] < 86400:
+                result["result"] = "error"
+                result["error"] = "user has DMs disabled or blocked the bot (backing off for 24h)"
+                return
+
         user = self.bot.get_user(_safe_int(user_id))
         if user is None:
             try:
@@ -3095,6 +3109,7 @@ Return ONLY JSON, no fence. "thought" is what you're actually thinking, in your 
             try:
                 dm_channel = await user.create_dm()
             except discord.HTTPException as e:
+                self._unreachable_dm_users[str(user_id)] = time.time()
                 result["result"] = "error"
                 result["error"] = (
                     f"failed to create DM channel (user may have DMs disabled): {e}"
@@ -3118,6 +3133,7 @@ Return ONLY JSON, no fence. "thought" is what you're actually thinking, in your 
                     dm_channel, msg, content, reason=action.get("reason", "")
                 )
         except discord.Forbidden as _exc:
+            self._unreachable_dm_users[str(user_id)] = time.time()
             result["result"] = "error"
             result["error"] = "user has DMs disabled or blocked the bot"
             return

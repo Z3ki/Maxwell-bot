@@ -377,6 +377,13 @@ def read_floor(
             if pending.created_at
             else silence
         )
+        # If the inbound message is extremely stale (> 48 hours), don't force ADDRESSED
+        if waited > 172800:
+            return verdict(
+                FLOOR_IDLE,
+                f"stale ping waiting since {_ago(waited)} (dormant conversation)",
+                silence,
+            )
         return verdict(FLOOR_ADDRESSED, f"waiting since {_ago(waited)}", silence)
 
     # 4. Nobody is waiting. From here on, speaking is Maxwell starting
