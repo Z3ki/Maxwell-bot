@@ -234,10 +234,24 @@ def floor_message_from_discord(
 
     addresses_self = bool(implicit_address and not is_self)
     if bot_id and not addresses_self:
+        # Check user mentions
         for user in list(getattr(message, "mentions", []) or [])[:20]:
             if str(getattr(user, "id", "") or "") == bot_id:
                 addresses_self = True
                 break
+        # Check @everyone / @here
+        if not addresses_self and getattr(message, "mention_everyone", False):
+            addresses_self = True
+        # Check role mentions
+        if not addresses_self:
+            guild = getattr(message, "guild", None)
+            if guild and bot_user:
+                me = getattr(guild, "me", None) or (guild.get_member(getattr(bot_user, "id", 0)) if hasattr(guild, "get_member") else None)
+                if me:
+                    bot_roles = set(getattr(me, "roles", []) or [])
+                    msg_roles = set(getattr(message, "role_mentions", []) or [])
+                    if bot_roles & msg_roles:
+                        addresses_self = True
         if not addresses_self and reply is not None:
             reply_author = getattr(reply, "author", None)
             if str(getattr(reply_author, "id", "") or "") == bot_id:

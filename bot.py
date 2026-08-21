@@ -2961,18 +2961,24 @@ class MaxwellBot(commands.Bot):
         }
 
     def _message_addresses_self(self, message) -> bool:
-        """True if this message is directed at Maxwell (DM, mention, or reply to him).
-
-        Used for the same-user interrupt check, which runs before the channel
-        lock is acquired. Callers should ensure message.reference is already
-        resolved (fetch happens earlier in on_message) for the reply case.
-        """
+        """True if this message is directed at Maxwell (DM, user mention, @everyone/@here, role mention, or reply)."""
         if self.user is None:
             return False
         if isinstance(message.channel, discord.DMChannel):
             return True
         if self.user in (message.mentions or []):
             return True
+        if getattr(message, "mention_everyone", False):
+            return True
+        # Check role mentions
+        guild = getattr(message, "guild", None)
+        if guild:
+            me = guild.me or (guild.get_member(self.user.id) if self.user else None)
+            if me:
+                bot_roles = set(getattr(me, "roles", []) or [])
+                msg_roles = set(getattr(message, "role_mentions", []) or [])
+                if bot_roles & msg_roles:
+                    return True
         ref = getattr(message, "reference", None)
         resolved = getattr(ref, "resolved", None) if ref else None
         if resolved is not None and hasattr(resolved, "author"):
@@ -3552,7 +3558,7 @@ class MaxwellBot(commands.Bot):
                 return
 
             if isinstance(message.channel, discord.GroupChannel):
-                mentioned = self.user in message.mentions if self.user else False
+                mentioned = self._message_addresses_self(message)
                 reply_to_bot = bool(
                     message.reference
                     and message.reference.resolved
@@ -3570,7 +3576,7 @@ class MaxwellBot(commands.Bot):
                 return
 
             if message.guild:
-                mentioned = self.user in message.mentions if self.user else False
+                mentioned = self._message_addresses_self(message)
                 reply_to_bot = bool(
                     message.reference
                     and message.reference.resolved
@@ -3584,7 +3590,7 @@ class MaxwellBot(commands.Bot):
                     return
                 clean = (
                     re.sub(rf"<@!?{self.user.id}>", "", message.content).strip()
-                    if mentioned and self.user
+                    if self.user
                     else message.content
                 )
                 # 2026-08-02 (Z3ki): allow Maxwell to respond to bare pings
