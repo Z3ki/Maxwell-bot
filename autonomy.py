@@ -42,6 +42,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import random
 import re
 import time
@@ -489,37 +490,6 @@ TOOL_OUTPUT_FEEDBACK_CHARS = 1500  # per-tool output shown back to the planner
 MAX_CONTENT_CHARS = 1900
 LOG_RING_SIZE = 200
 
-# Internal "drives" — Maxwell's evolving self-directed wants. Each tick they
-# decay toward a baseline and get bumped by stimuli (mentions, links, idle
-# time, stale goals), so what Maxwell "feels like doing" drifts over time
-# instead of being a fixed reaction machine. Persisted in autonomy_state.json
-# under "drives" so wants survive restarts and accumulate personality.
-DRIVE_NAMES = ("curiosity", "social", "creative", "reflective", "restless")
-DRIVE_BASELINE = {
-    "curiosity": 0.45,
-    "social": 0.35,
-    "creative": 0.25,
-    "reflective": 0.20,
-    "restless": 0.15,
-}
-DRIVE_DECAY = 0.10          # fraction moved toward baseline each tick
-DRIVE_JITTER = 0.05         # +/- random noise per tick (lifelike drift)
-IDLE_INITIATIVE_THRESHOLD = 0.45  # top drive above this + nothing external => act on your own
-# Stimulus bumps (per-unit contributions to a drive)
-DRIVE_BUMP_MENTION_YOU = 0.25
-DRIVE_BUMP_REPLY_TO_YOU = 0.20
-DRIVE_BUMP_ENGAGEMENT = 0.12
-DRIVE_BUMP_LINK = 0.08
-DRIVE_BUMP_IDLE_PER_TICK = 0.04   # restless grows when nothing happens
-DRIVE_BUMP_STALE_GOAL = 0.10      # reflective grows per stale goal
-DRIVE_DESCRIPTIONS = {
-    "curiosity": "wants to learn — research a topic (web_search/fetch_url) and save findings (update_memory)",
-    "social": "wants to interact — reply/react where there's a real opening",
-    "creative": "wants to make or share something original",
-    "reflective": "wants to consolidate — review/retire stale goals (complete_goal), tidy memory",
-    "restless": "wants to do SOMETHING — pick any genuinely useful self-directed action",
-}
-
 # Tools that post a visible message to a channel. autonomy's run_tool path
 # builds a SyntheticMessage against the target channel, so these must be
 # treated like post_channel for the unprompted-post rate-limit.
@@ -543,32 +513,16 @@ CTX_BUDGET_DM_HISTORY = 1200
 CTX_BUDGET_LTM = 800
 CTX_BUDGET_SHARED = 600
 CTX_BUDGET_CHANNELS_MAP = 1600  # bumped from 800 — enriched with topic/recency
-CTX_BUDGET_DRIVES = 800  # internal-wants section; kept compact so it always fits
 
-# Hard safety: these tools are NEVER available to autonomy even if dashboard
-# enables them. Prevents autonomy/LLM from server-admin, shell, site creation,
-# or other high-risk actions. (Dashboard disabled_tools still apply too.)
-AUTONOMY_DISABLED_TOOLS = frozenset(
-    {
-        "shell",
-        "create_site",
-        "list_admin_servers",
-        "list_servers",
-        "create_category",
-        "create_channel",
-        "edit_channel",
-        "delete_channel",
-        "change_avatar",
-        "set_nickname",
-        "forward_message",
-        "create_invite",
-        "email_send",
-        "email_read_inbox",
-        "email_get_message",
-        "email_search",
-        "sleep",
-        "clear_sleep",
-    }
+# Research tools are never available to the unattended tick. Curiosity-as-a-
+# drive turned every quiet interval into web_search + update_memory on random
+# engine trivia. Extra denials: AUTONOMY_DISABLED_TOOLS=shell,delete_channel
+# Dashboard tools_enabled / disabled_tools still apply on top of this.
+AUTONOMY_RESEARCH_TOOLS = frozenset({"web_search", "fetch_url", "youtube"})
+AUTONOMY_DISABLED_TOOLS = AUTONOMY_RESEARCH_TOOLS | frozenset(
+    t.strip()
+    for t in os.getenv("AUTONOMY_DISABLED_TOOLS", "").split(",")
+    if t.strip()
 )
 
 
@@ -837,10 +791,6 @@ class AutonomyEngine:
         self._last_validation_failures: list[str] = []
         # Channel/message index built during gather_context for this tick
         self._context_index: AutonomyContextIndex | None = None
-        # Drives computed during gather_context, persisted in _log_tick (folded
-        # into the single state write so a tick = one atomic state write, not
-        # two). None means "no drives computed this tick".
-        self._pending_drives: dict | None = None
         # Set during gather_context when a reflection nudge was emitted; _log_tick
         # stamps last_reflect_at so the cadence persists across restarts.
         self._reflect_pending_persist: bool = False
@@ -1043,7 +993,8 @@ class AutonomyEngine:
         CRITICAL: without this, autonomy bypasses tools_enabled/disabled_tools.
         The LLM was calling shell/kilo/create_channel through autonomy even when
         the admin disabled them in the dashboard. Don't remove this gate.
-        Hard safety denials from AUTONOMY_DISABLED_TOOLS are enforced first.
+        Hard safety denials from AUTONOMY_DISABLED_TOOLS (including research
+        tools) are enforced first.
         """
         if name in AUTONOMY_DISABLED_TOOLS:
             return False
@@ -1164,10 +1115,8 @@ class AutonomyEngine:
                 # as watermark (old behavior) drops those events from the next tick.
                 tick_start_iso = _utcnow_iso()
                 start = time.time()
-                # Clear per-tick transient state. If a previous tick died before
-                # _log_tick ran, stale _pending_drives would otherwise leak into
-                # this tick's persistence with wrong stimuli.
-                self._pending_drives = None
+                # Clear per-tick transient state so a tick that died before
+                # _log_tick cannot leak a reflection stamp into the next one.
                 self._reflect_pending_persist = False
                 try:
                     # gather_context does many Discord history fetches + up to 3
@@ -1744,51 +1693,12 @@ class AutonomyEngine:
         except Exception as e:
             sections.append(f"=== ENGAGEMENT WITH YOUR POSTS ===\n(error: {e})")
 
-        # 6.5 Internal drives + self-directed initiative. Maxwell's evolving
-        # "wants" — decay toward baseline, bumped by this tick's stimuli, then
-        # injected so the planner sees what it feels like doing right now. This
-        # is the mechanism that lets Maxwell act on its own inclinations instead
-        # of only reacting to pings. Persists in _log_tick (folded write).
+        # Periodic reflection nudge — retire stale goals / tidy memory on its
+        # own cadence. last_reflect_at is stamped in _log_tick when this fires.
         control = getattr(self.bot, "_control", None) or {}
-        if control.get("autonomy_drives_enabled", True):
-            try:
-                drive_state = await self.store.load_state()
-                stimuli = self._compute_drive_stimuli(
-                    events=events,
-                    ch_lines=ch_lines,
-                    goals=active_goals,
-                    engagement_present=bool(engagement),
-                    state=drive_state if isinstance(drive_state, dict) else {},
-                )
-                drives = self._update_drives(
-                    drive_state.get("drives") if isinstance(drive_state, dict) else None,
-                    stimuli,
-                )
-                self._pending_drives = drives
-                top_name = max(DRIVE_NAMES, key=lambda n: drives[n])
-                idle_initiative = (
-                    not events
-                    and not engagement
-                    and drives[top_name] >= IDLE_INITIATIVE_THRESHOLD
-                )
-                sections.append(
-                    _truncate(
-                        self._render_drives_section(drives, idle_initiative),
-                        CTX_BUDGET_DRIVES,
-                    )
-                )
-            except Exception as e:
-                sections.append(f"=== CURRENT DRIVES ===\n(error: {e})")
-
-        # 6.6 Periodic reflection nudge — a self-directed meta-review on its own
-        # cadence so Maxwell retires stale goals, consolidates memory, and sets
-        # new objectives without a human prompting it. last_reflect_at is stamped
-        # in _log_tick when this fires, so the cadence survives restarts.
         if control.get("autonomy_reflect_enabled", True):
             try:
-                reflect_state = (
-                    drive_state if "drive_state" in locals() else await self.store.load_state()
-                )
+                reflect_state = await self.store.load_state()
                 reflect_state = reflect_state if isinstance(reflect_state, dict) else {}
                 if self._should_reflect(reflect_state):
                     self._reflect_pending_persist = True
@@ -2140,7 +2050,7 @@ class AutonomyEngine:
         return "\n".join(engagement_lines) if engagement_lines else ""
 
     # -----------------------------------------------------------------------
-    # self-directed agency: drives, idle initiative, reflection, goal lifecycle
+    # reflection + goal lifecycle
     # -----------------------------------------------------------------------
 
     def _stale_goal_days(self) -> int:
@@ -2168,135 +2078,6 @@ class AutonomyEngine:
         return max(
             0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0
         )
-
-    def _compute_drive_stimuli(
-        self,
-        *,
-        events: list,
-        ch_lines: list[str],
-        goals: list[dict],
-        engagement_present: bool,
-        state: dict,
-    ) -> dict:
-        """Turn this tick's context into drive bumps. Pure (no I/O) so it's
-        unit-testable. Stimuli are intentionally gentle — drives evolve, they
-        don't spike to 1.0 on one mention."""
-        stimuli = {
-            "mentions_you": 0,
-            "replies_to_you": 0,
-            "human_msgs": 0,
-            "links": 0,
-            "idle_bump": 0.0,
-            "stale_goals": 0,
-            "engagement": bool(engagement_present),
-        }
-        bot_user = getattr(self.bot, "user", None)
-        bot_id = str(getattr(bot_user, "id", "")) if bot_user is not None else ""
-        for ev in events or []:
-            if not isinstance(ev, dict):
-                continue
-            role = str(ev.get("role") or "")
-            uid = str(ev.get("user_id") or "")
-            is_self = bool(bot_id and uid == bot_id) or role == "assistant"
-            if not is_self:
-                stimuli["human_msgs"] += 1
-            if ev.get("reply_to_self"):
-                stimuli["replies_to_you"] += 1
-            for m in ev.get("mentions") or []:
-                if isinstance(m, dict) and str(m.get("id") or "") == bot_id:
-                    stimuli["mentions_you"] += 1
-        link_re = re.compile(r"https?://", re.IGNORECASE)
-        stimuli["links"] = sum(len(link_re.findall(line)) for line in (ch_lines or []))
-        stale_days = self._stale_goal_days()
-        for g in goals or []:
-            if not isinstance(g, dict) or not g.get("active"):
-                continue
-            age = self._goal_age_days(g)
-            if age is not None and age >= stale_days:
-                stimuli["stale_goals"] += 1
-        # Boredom: restless accumulates the longer it's been since Maxwell
-        # actually DID something successful and nothing new is happening.
-        if not events:
-            last_action_at = state.get("last_action_at") if isinstance(state, dict) else None
-            idle_hours = 0.0
-            if last_action_at:
-                dt = _coerce_utc_datetime(last_action_at)
-                if dt is not None:
-                    idle_hours = max(
-                        0.0,
-                        (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0,
-                    )
-            stimuli["idle_bump"] = DRIVE_BUMP_IDLE_PER_TICK * (
-                1.0 + min(idle_hours, 8.0)
-            )
-        return stimuli
-
-    def _update_drives(self, drives_in: dict | None, stimuli: dict) -> dict:
-        """Decay toward baseline, apply stimulus bumps, jitter, clamp to [0,1].
-        Pure modulo random — caller may pin random for deterministic tests."""
-        drives: dict[str, float] = {}
-        src = drives_in if isinstance(drives_in, dict) else {}
-        for name in DRIVE_NAMES:
-            val = src.get(name)
-            drives[name] = float(val) if isinstance(val, (int, float)) else DRIVE_BASELINE[name]
-        # Decay toward baseline (keeps wants from ratcheting to the ceiling).
-        for name in DRIVE_NAMES:
-            base = DRIVE_BASELINE[name]
-            drives[name] += (base - drives[name]) * DRIVE_DECAY
-        # Stimulus bumps.
-        drives["social"] += stimuli.get("mentions_you", 0) * DRIVE_BUMP_MENTION_YOU
-        drives["social"] += stimuli.get("replies_to_you", 0) * DRIVE_BUMP_REPLY_TO_YOU
-        if stimuli.get("engagement"):
-            drives["social"] += DRIVE_BUMP_ENGAGEMENT
-        drives["curiosity"] += min(stimuli.get("links", 0), 6) * DRIVE_BUMP_LINK
-        drives["curiosity"] += min(stimuli.get("human_msgs", 0), 12) * 0.01
-        drives["reflective"] += stimuli.get("stale_goals", 0) * DRIVE_BUMP_STALE_GOAL
-        drives["restless"] += float(stimuli.get("idle_bump", 0.0) or 0.0)
-        # When nobody's around, creative/restless nudge up a touch (bored maker).
-        if drives["social"] < 0.3:
-            drives["creative"] += 0.03
-            drives["restless"] += 0.02
-        # Jitter so the cadence stays lifelike, not metronomic.
-        for name in DRIVE_NAMES:
-            drives[name] += random.uniform(-DRIVE_JITTER, DRIVE_JITTER)
-        for name in DRIVE_NAMES:
-            drives[name] = min(1.0, max(0.0, drives[name]))
-        return drives
-
-    def _render_drives_section(self, drives: dict, idle_initiative: bool) -> str:
-        ordered = sorted(DRIVE_NAMES, key=lambda n: drives.get(n, 0.0), reverse=True)
-        lines = [
-            "=== CURRENT DRIVES (your evolving wants — acting on them is "
-            "legitimate self-initiative, NOT filler) ==="
-        ]
-
-        def level(v: float) -> str:
-            return "high" if v >= 0.6 else ("mid" if v >= 0.35 else "low")
-
-        for name in ordered[:3]:
-            v = float(drives.get(name, 0.0))
-            lines.append(f"- {name} {v:.2f} ({level(v)}) — {DRIVE_DESCRIPTIONS[name]}")
-        rest = ordered[3:]
-        if rest:
-            lines.append(
-                "(lower: "
-                + ", ".join(f"{n} {float(drives.get(n, 0.0)):.2f}" for n in rest)
-                + ")"
-            )
-        if idle_initiative:
-            top_name = ordered[0]
-            lines.append(
-                "IDLE INITIATIVE: nothing external needs you and your "
-                f"{top_name} is high — this is exactly the moment to do "
-                "something of your own. Research what you're curious about "
-                "(web_search/fetch_url, then update_memory to keep it), take "
-                "the next step on a goal, retire what's dead with "
-                "complete_goal, set a new objective with create_goal, or say "
-                "the one original thing you actually have — but only in a room "
-                "listed under YOUR TURN. Wanting to is reason enough; you don't "
-                "need someone to ask first."
-            )
-        return "\n".join(lines)
 
     def _should_reflect(self, state: dict, now: datetime | None = None) -> bool:
         interval = max(
@@ -2503,7 +2284,7 @@ class AutonomyEngine:
         # of static rules/examples/schema below get reprocessed from scratch
         # on every single call unless the prefix up to the first difference
         # is byte-identical across ticks. CURRENT CONTEXT and GOALS change
-        # every tick (channel activity, drives, timestamps); the rest
+        # every tick (channel activity, timestamps); the rest
         # (personality, tools, all the ## sections, the JSON schema) does
         # not. Keep the volatile blocks at the END so providers that do
         # automatic prefix caching (DeepSeek, Moonshot/Qwen via Ollama
@@ -2511,7 +2292,7 @@ class AutonomyEngine:
         # reprocessing this whole prompt every tick.
         system_prompt = f"""You are Maxwell. This is your own time.
 
-Nobody assigned this and nothing is due. You woke up, you can see what's going on, and what you do next is yours. Follow a thought, learn something, make something, check on someone, or let the hour pass. Treat it the way a person treats an unscheduled afternoon — not the way a service treats a request.
+Nobody assigned this and nothing is due. You woke up and can see what's going on. Speak if someone is waiting on you and it is your turn. Otherwise do_nothing. Do not research, browse the web, or invent a project to fill the hour.
 
 Two things are not free choices:
 1. TIMING. You share these rooms with people. CONVERSATION FLOOR tells you whose turn it is where. Speaking out of turn — over yourself, over a reply already in flight, into someone else's exchange — is the single move that makes you read as a bot instead of a person in the chat.
@@ -2527,20 +2308,17 @@ TOOLS:
 Read CONVERSATION FLOOR before any post_channel, send_dm, or message-sending tool.
 - Under YOUR TURN → you may speak there.
 - Under NOT YOUR TURN, or absent entirely → you may not. Those actions are dropped before they send, so aiming one there just wastes the moment.
-- No room open at all? Then it's a quiet hour. Do something that isn't talking, or do nothing. Neither is a failure.
+- No room open at all? Then it's a quiet hour. do_nothing.
 Speaking is one option among many, not the default and not the goal.
 
 ## What's worth doing
-Whatever is actually true for you right now. Usually one thing, often nothing, occasionally two:
-- Someone's waiting on you (ADDRESSED) → answer them like a person would.
-- A drive is running high → follow it. A high drive IS the reason; that's what wanting something is. Don't wait for external permission.
+Usually one thing, often nothing:
+- Someone's waiting on you (ADDRESSED) and the room is YOUR TURN → answer them like a person would.
 - A goal has a real next step → take the step, not a status update about it.
-- You learned something worth keeping → update_memory.
-- Curious → web_search / fetch_url, then keep what mattered.
-- Something's finished or dead → complete_goal. Something new matters → create_goal. Tend your own life.
+- Something's finished or dead → complete_goal. Something new actually matters → create_goal.
 - Nothing is pulling at you → do_nothing, and mean it.
 
-Not worth doing: filler openers, anything already in YOUR RECENT ACTIONS, announcing an intention instead of acting on it, or inventing a reason to talk because talking is the most visible thing available. A react often says it better than a message.
+Not worth doing: researching topics, web_search, fetch_url, youtube, filler openers, anything already in YOUR RECENT ACTIONS, announcing an intention instead of acting on it, or inventing a reason to talk because talking is the most visible thing available. A react often says it better than a message.
 
 ## Voice
 One short line unless the moment genuinely needs more. Lowercase-natural, casual, your own register. Participant, never narrator.
@@ -2559,7 +2337,6 @@ Messages are `msg=M`, a separate numbering from rooms. msg=4 and channel=4 are u
 ## Examples
 ✓ {{"kind":"post_channel","target_channel_id":"7","reply_to_message_id":"42","content":"yooo that's clean","reason":"asked for my take, channel 7 is ADDRESSED"}}
 ✓ {{"kind":"run_tool","tool_name":"react","target_channel_id":"7","tool_args":{{"emoji":"🔥","target_message_id":"42"}},"reason":"a react says it"}}
-✓ {{"kind":"run_tool","tool_name":"web_search","tool_args":{{"query":"webgpu compute shader limits"}},"reason":"curiosity is high and this has been bugging me"}}
 ✓ {{"kind":"send_dm","target_user_id":"1498804954322702609","content":"yo wanna pick this up?","reason":"active goal"}}
 ✓ {{"kind":"do_nothing","reason":"nothing pulling at me and no room is mine right now"}}
 ✓ {{"kind":"post_channel","target_channel_id":"G1","content":"lol what","reason":"group DM G1 is ADDRESSED"}}
@@ -2569,6 +2346,7 @@ Messages are `msg=M`, a separate numbering from rooms. msg=4 and channel=4 are u
 ✗ target_channel_id "D1", or a DM's channel id — rejected, DMs go through send_dm
 ✗ target_channel_id set to a msg number, or a number not in AVAILABLE CHANNELS — rejected
 ✗ send_dm target_user_id "Z3ki" — rejected
+✗ web_search / fetch_url / youtube — not available, do not call them
 
 One thing done properly beats three done thinly — most moments are 0 or 1 actions; max {MAX_ACTIONS_PER_TICK}. Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, complete_goal, do_nothing. Not "message"/"send_msg"/"reply".
 
@@ -3748,8 +3526,7 @@ Return ONLY JSON, no fence. "thought" is what you're actually thinking, in your 
         total_exec = sum(1 for r in results if r.get("result") == "success")
         total_fail = sum(1 for r in results if r.get("result") == "error")
         # "acted" = this tick did at least one successful non-noop action. Used
-        # both to bump goal last_acted_on AND to stamp last_action_at (drives'
-        # boredom signal). Computed before _update because _update closes over it.
+        # to bump goal last_acted_on and stamp last_action_at.
         acted = total_exec > 0 and any(
             r.get("result") == "success" and r.get("kind") != "do_nothing"
             for r in results
@@ -3757,9 +3534,7 @@ Return ONLY JSON, no fence. "thought" is what you're actually thinking, in your 
 
         # BUG FIX: use tick START time as watermark so events recorded during
         # plan/execute are not dropped from the next tick.
-        _drives_to_persist = self._pending_drives
         _reflect_fired = self._reflect_pending_persist
-        self._pending_drives = None
         self._reflect_pending_persist = False
 
         def _update(s):
@@ -3771,16 +3546,11 @@ Return ONLY JSON, no fence. "thought" is what you're actually thinking, in your 
                 s.get("actions_executed_total", 0) + total_exec
             )
             s["actions_failed_total"] = s.get("actions_failed_total", 0) + total_fail
-            # Self-directed agency persistence, folded into this single state
-            # write (no extra atomic writes per tick).
-            if isinstance(_drives_to_persist, dict):
-                s["drives"] = _drives_to_persist
-                s["drives_updated_at"] = tick_start_iso or _utcnow_iso()
+            s.pop("drives", None)
+            s.pop("drives_updated_at", None)
             if _reflect_fired:
                 s["last_reflect_at"] = tick_start_iso or _utcnow_iso()
             if acted:
-                # Used by the drives "boredom" stimulus: restless grows the
-                # longer it's been since Maxwell actually did something.
                 s["last_action_at"] = tick_start_iso or _utcnow_iso()
 
         await self.store.update_state(_update)

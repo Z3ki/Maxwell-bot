@@ -9,8 +9,7 @@ from autonomy import (
     AutonomyContextIndex,
     AutonomyEngine,
     AutonomyStore,
-    DRIVE_NAMES,
-    IDLE_INITIATIVE_THRESHOLD,
+    AUTONOMY_RESEARCH_TOOLS,
     _truncate,
 )
 
@@ -546,7 +545,7 @@ def test_gather_context_includes_normal_channel_memory(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# self-directed agency: drives, idle initiative, complete_goal, reflection
+# goal lifecycle + reflection (no drives / research loop)
 # ---------------------------------------------------------------------------
 
 
@@ -652,89 +651,11 @@ def test_exec_complete_goal_unknown_id_errors(tmp_path):
     assert "not found" in result["error"]
 
 
-def test_update_drives_decays_toward_baseline_and_clamps(monkeypatch, tmp_path):
-    engine = AutonomyEngine(_bot_with_user(tmp_path))
-    # No jitter -> deterministic.
-    monkeypatch.setattr("autonomy.random.uniform", lambda a, b: 0.0)
-    # Start every drive pinned to the ceiling; with empty stimuli they should
-    # decay 10% toward baseline and stay within [0,1].
-    drives_in = {name: 1.0 for name in DRIVE_NAMES}
-    out = engine._update_drives(drives_in, {})
-    for name in DRIVE_NAMES:
-        assert 0.0 <= out[name] <= 1.0
-    # curiosity: 1.0 + (0.45 - 1.0) * 0.10 == 0.945 (no bumps, social high so no
-    # bored-maker nudge).
-    assert out["curiosity"] == pytest.approx(0.945)
-    assert out["social"] == pytest.approx(0.935)
-    assert out["restless"] == pytest.approx(0.915)
-
-
-def test_update_drives_bored_maker_nudge_when_social_low(monkeypatch, tmp_path):
-    engine = AutonomyEngine(_bot_with_user(tmp_path))
-    monkeypatch.setattr("autonomy.random.uniform", lambda a, b: 0.0)
-    out = engine._update_drives({name: 0.0 for name in DRIVE_NAMES}, {})
-    # creative gets the +0.03 bored-maker nudge because social<0.3.
-    # creative = 0 + (0.25-0)*0.10 + 0.03 = 0.055
-    assert out["creative"] == pytest.approx(0.055)
-    # restless = 0 + (0.15-0)*0.10 + 0.02 = 0.035
-    assert out["restless"] == pytest.approx(0.035)
-
-
-def test_update_drives_jitter_can_push_past_zero_then_clamps(monkeypatch, tmp_path):
-    engine = AutonomyEngine(_bot_with_user(tmp_path))
-    # Strong negative jitter on a near-zero drive must clamp at 0, not go negative.
-    monkeypatch.setattr("autonomy.random.uniform", lambda a, b: -1.0)
-    out = engine._update_drives({name: 0.0 for name in DRIVE_NAMES}, {})
-    for name in DRIVE_NAMES:
-        assert out[name] >= 0.0
-
-
-def test_compute_drive_stimuli_counts_mentions_replies_links(tmp_path):
-    engine = AutonomyEngine(_bot_with_user(tmp_path))
-    events = [
-        {"role": "user", "user_id": "7", "mentions": [{"id": "42"}]},  # mentions you
-        {"role": "user", "user_id": "8", "reply_to_self": True},       # reply to you
-        {"role": "user", "user_id": "9"},                              # plain human msg
-        {"role": "assistant", "user_id": "42"},                        # self -> not human
-    ]
-    ch_lines = ['content="see https://example.com and http://foo.bar/x"']
-    stimuli = engine._compute_drive_stimuli(
-        events=events, ch_lines=ch_lines, goals=[], engagement_present=False, state={}
-    )
-    assert stimuli["mentions_you"] == 1
-    assert stimuli["replies_to_you"] == 1
-    assert stimuli["human_msgs"] == 3  # 7, 8, 9 (assistant excluded)
-    assert stimuli["links"] == 2
-    assert stimuli["idle_bump"] == 0.0  # events present -> not idle
-
-
-def test_compute_drive_stimuli_idle_grows_with_time_since_action(tmp_path):
-    engine = AutonomyEngine(_bot_with_user(tmp_path))
-    old = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
-    stimuli = engine._compute_drive_stimuli(
-        events=[], ch_lines=[], goals=[], engagement_present=False,
-        state={"last_action_at": old},
-    )
-    # 4h idle -> factor (1 + min(4,8)) = 5x the per-tick bump.
-    assert stimuli["idle_bump"] > 0.0
-    assert stimuli["idle_bump"] == pytest.approx(0.04 * 5.0)
-
-
-def test_compute_drive_stimuli_counts_stale_goals(tmp_path):
-    engine = AutonomyEngine(
-        _bot_with_user(tmp_path, control={"autonomy_goal_stale_days": 14})
-    )
-    old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-    fresh = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-    goals = [
-        {"id": "g1", "active": True, "last_progress_at": old},
-        {"id": "g2", "active": True, "last_progress_at": fresh},
-        {"id": "g3", "active": False, "last_progress_at": old},  # inactive -> ignored
-    ]
-    stimuli = engine._compute_drive_stimuli(
-        events=[], ch_lines=[], goals=goals, engagement_present=False, state={}
-    )
-    assert stimuli["stale_goals"] == 1
+def test_research_tools_blocked_from_autonomy(tmp_path):
+    engine = AutonomyEngine(_bot_with_user(tmp_path, control={"tools_enabled": True}))
+    for name in AUTONOMY_RESEARCH_TOOLS:
+        assert engine._autonomy_tool_allowed(name) is False
+    assert engine._autonomy_tool_allowed("react") is True
 
 
 def test_goal_age_uses_last_progress_not_last_acted(tmp_path):
@@ -755,33 +676,6 @@ def test_goal_age_uses_last_progress_not_last_acted(tmp_path):
     }
     age = engine._goal_age_days(goal)
     assert age is not None and age >= 14
-
-
-def test_render_drives_section_idle_initiative_line(tmp_path):
-    engine = AutonomyEngine(_bot_with_user(tmp_path))
-    drives = {name: 0.2 for name in DRIVE_NAMES}
-    drives["curiosity"] = 0.9  # high -> top drive
-    text = engine._render_drives_section(drives, idle_initiative=True)
-    assert "CURRENT DRIVES" in text
-    assert "curiosity 0.90 (high)" in text
-    assert "IDLE INITIATIVE" in text
-    assert "curiosity is high" in text
-
-
-def test_render_drives_section_no_idle_initiative(tmp_path):
-    engine = AutonomyEngine(_bot_with_user(tmp_path))
-    drives = {name: 0.2 for name in DRIVE_NAMES}
-    text = engine._render_drives_section(drives, idle_initiative=False)
-    assert "IDLE INITIATIVE" not in text
-
-
-def test_idle_initiative_gate_threshold(tmp_path):
-    # Top drive below threshold + no events -> no idle initiative line.
-    engine = AutonomyEngine(_bot_with_user(tmp_path))
-    drives = {name: 0.2 for name in DRIVE_NAMES}
-    drives["curiosity"] = IDLE_INITIATIVE_THRESHOLD - 0.01
-    text = engine._render_drives_section(drives, idle_initiative=False)
-    assert "IDLE INITIATIVE" not in text
 
 
 def test_should_reflect_true_when_never_or_old(tmp_path):
@@ -807,7 +701,7 @@ def test_reflection_section_text(tmp_path):
     assert "create_goal" in text
 
 
-def test_gather_context_includes_drives_section(tmp_path):
+def test_gather_context_omits_drives_section(tmp_path):
     class Store:
         async def load_goals(self):
             return []
@@ -825,7 +719,7 @@ def test_gather_context_includes_drives_section(tmp_path):
     bot = SimpleNamespace(
         config=SimpleNamespace(DATA_DIR=str(tmp_path)),
         _auto_channels=set(),
-        _control={"bot_enabled": True},
+        _control={"bot_enabled": True, "autonomy_reflect_enabled": False},
         tools={},
         user=SimpleNamespace(id=42, display_name="Maxwell", name="Maxwell"),
         guilds=[SimpleNamespace(text_channels=[], me=SimpleNamespace())],
@@ -840,10 +734,9 @@ def test_gather_context_includes_drives_section(tmp_path):
 
     context = asyncio.run(engine.gather_context())
 
-    assert "CURRENT DRIVES" in context
-    # Every drive name should be surfaced so the planner knows its wants.
-    for name in DRIVE_NAMES:
-        assert name in context
+    assert "CURRENT DRIVES" not in context
+    assert "IDLE INITIATIVE" not in context
+    assert "curiosity" not in context.lower()
 
 
 def test_gather_context_flags_stale_goal_and_nudges_complete_goal(tmp_path):

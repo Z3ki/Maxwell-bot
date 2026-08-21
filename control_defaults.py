@@ -145,7 +145,7 @@ DEFAULT_CONTROL = {
     # --- Conversational turn-taking (autonomy_social.py) ---------------------
     # Autonomy runs on a timer; conversation runs on turns. These decide whether
     # Maxwell holds the floor in a room before he's allowed to speak unprompted.
-    # They gate ONLY speaking — research, memory, and goal actions are untouched.
+    # They gate ONLY speaking — memory and goal actions are untouched.
     # Off means the planner still sees the room read but execute() stops
     # enforcing it: a debugging escape hatch, not a mode to run in.
     "autonomy_floor_enabled": True,
@@ -170,11 +170,6 @@ DEFAULT_CONTROL = {
     # while normal bot replies (mentions etc) can still work if not otherwise blocked.
     "autonomy_blocked_channels": [],
     "autonomy_blocked_servers": [],
-    # Self-directed agency: internal "drives" (curiosity/social/creative/reflective/restless)
-    # that evolve each tick and bias what Maxwell feels like doing, plus an idle-initiative
-    # hint that permits acting on your own when nothing external needs you. Lets the bot
-    # do what it wants, whenever, without a human triggering it.
-    "autonomy_drives_enabled": True,
     # Goals not acted on for this many days are flagged STALE in context (candidates for
     # the complete_goal action). Not auto-deleted — the bot decides to retire them.
     "autonomy_goal_stale_days": 14,
@@ -199,6 +194,7 @@ DEAD_CONTROL_KEYS = frozenset(
         "intel_interval_seconds",
         "intel_feed_urls",
         "intel_run_history",
+        "autonomy_drives_enabled",
     }
 )
 

@@ -533,8 +533,7 @@ def _ctx_bot(tmp_path, channel, *, replying=(), private_channels=()):
     bot = SimpleNamespace(
         config=SimpleNamespace(DATA_DIR=str(tmp_path)),
         _auto_channels={str(channel.id)},
-        _control={"bot_enabled": True, "autonomy_drives_enabled": False,
-                  "autonomy_reflect_enabled": False},
+        _control={"bot_enabled": True, "autonomy_reflect_enabled": False},
         tools={},
         user=SimpleNamespace(id=42, display_name="Maxwell", name="Maxwell"),
         guilds=[SimpleNamespace(id=1, text_channels=[channel], me=SimpleNamespace())],
