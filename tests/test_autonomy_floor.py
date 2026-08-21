@@ -10,6 +10,8 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import discord
+
 from autonomy import AutonomyEngine
 from autonomy_social import (
     FLOOR_ADDRESSED,
@@ -681,25 +683,32 @@ def test_a_blocked_post_does_not_consume_the_room_slot(tmp_path):
     assert channel.sent == []
 
 
-def test_dm_labels_omit_the_channel_snowflake(tmp_path, monkeypatch):
+class _CtxDM(discord.DMChannel):
+    """A real DMChannel by type — isinstance is what classification keys on —
+    with a test-friendly history(). Subclassing (rather than patching the
+    label) is the point: it pins the branch production actually takes."""
+
+    def __init__(self, cid, recipient, messages=()):
+        self.id = cid
+        self.recipient = recipient
+        self._messages = list(messages)
+
+    async def history(self, limit=12):
+        for msg in self._messages[:limit]:
+            yield msg
+
+
+def test_dm_labels_omit_the_channel_snowflake(tmp_path):
     """send_dm targets a user id — a DM channel id in the prompt is only misusable.
 
-    Patches _conversation_label to the exact string production emits for a DM
-    (observed in the live log) rather than faking a discord.DMChannel, so this
-    pins the stripping against the real input shape.
+    And a DM must never render as a channel: it gets a D-handle, so no number
+    the planner types into target_channel_id can ever land here.
     """
-    import autonomy as autonomy_mod
-
     dm_cid = "1452530107255095459"
-    real_label = f"DM with Eliel(1416565530504200254) channel={dm_cid}"
-    monkeypatch.setattr(
-        autonomy_mod,
-        "_conversation_label",
-        lambda bot, cid: real_label if str(cid) == dm_cid else f"#c{cid}",
+    recipient = SimpleNamespace(
+        id=1416565530504200254, display_name="Eliel", name="eliel", bot=False
     )
-
-    dm = _CtxChannel(cid=int(dm_cid), messages=[_ctx_msg(900, 30, author_id=7)])
-    dm.recipient = SimpleNamespace(id=7, display_name="Eliel", name="eliel", bot=False)
+    dm = _CtxDM(int(dm_cid), recipient, [_ctx_msg(900, 30, author_id=7)])
     channel = _CtxChannel(messages=[_ctx_msg(555, 30, author_id=7)])
     engine = AutonomyEngine(_ctx_bot(tmp_path, channel, private_channels=[dm]))
     engine.store = _CtxStore()
@@ -707,6 +716,10 @@ def test_dm_labels_omit_the_channel_snowflake(tmp_path, monkeypatch):
     context = asyncio.run(engine.gather_context())
     floor = context.split("=== CONVERSATION FLOOR")[1].split("\n\n=== ")[0]
 
-    assert "DM with Eliel(1416565530504200254)" in floor
     # The recipient's user id survives (send_dm needs it); the channel id does not.
+    assert "Eliel(1416565530504200254)" in floor
     assert dm_cid not in floor
+    # It is named as a DM, with the action that reaches it — never as channel=N.
+    assert "dm=D1" in floor
+    assert "send_dm target_user_id=1416565530504200254" in floor
+    assert "channel=D1" not in floor

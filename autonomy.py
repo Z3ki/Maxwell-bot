@@ -124,8 +124,11 @@ def _visible_message_content(
 
 
 def _message_relation_tags(
-    message: Any, *, bot_user: Any = None, reply: Any = None
+    message: Any, *, bot_user: Any = None, reply: Any = None, private: bool = False
 ) -> list[str]:
+    """`private` marks a 1:1 DM, where an inbound message is aimed at Maxwell
+    whether or not it carries a mention. Without it these lines came out as
+    `addressed_to=channel` in a room with no channel and one other person."""
     tags: list[str] = []
     addressed: list[str] = []
 
@@ -150,11 +153,15 @@ def _message_relation_tags(
         ):
             tags.append("mentions_you")
 
-    tags.append(
-        "addressed_to=[" + "; ".join(addressed) + "]"
-        if addressed
-        else "addressed_to=channel"
-    )
+    if addressed:
+        tags.append("addressed_to=[" + "; ".join(addressed) + "]")
+    elif private:
+        is_self = bot_user is not None and str(
+            getattr(getattr(message, "author", None), "id", "")
+        ) == str(getattr(bot_user, "id", ""))
+        tags.append("addressed_to=you" if not is_self else "addressed_to=them")
+    else:
+        tags.append("addressed_to=channel")
     return tags
 
 
@@ -203,91 +210,243 @@ def _format_memory_context_line(msg: dict, *, bot_user: Any = None, now=None) ->
     return f"{prefix}{label}{relation}: {str(msg.get('content', ''))[:600]}"
 
 
+def _classify_conversation(
+    bot: Any, channel_id: str, channel: Any = None
+) -> tuple[str, str]:
+    """(kind, display_name) for a room. kind is guild / dm / group / unknown.
+
+    Autonomy used to render every room as `#{name}` and fall back to the
+    snowflake when there was no name — so a DM came out as `#1418...` and a
+    group DM as `#None`, both indistinguishable from a real text channel. The
+    planner then posted into them. Classify once, here, and let every context
+    section print the result.
+    """
+    cid = re.sub(r"[^0-9]", "", str(channel_id or ""))
+    ch = channel
+    if ch is None and cid:
+        with contextlib.suppress(Exception):
+            ch = bot.get_channel(_safe_int(cid))
+    if ch is None and cid:
+        for private in list(getattr(bot, "private_channels", []) or []):
+            if str(getattr(private, "id", "")) == cid:
+                ch = private
+                break
+    if ch is None:
+        return "unknown", ""
+    if isinstance(ch, discord.DMChannel):
+        recipient = getattr(ch, "recipient", None)
+        who = (
+            _user_ref(recipient, getattr(bot, "user", None))
+            if recipient is not None
+            else "unknown user"
+        )
+        return "dm", who
+    if isinstance(ch, discord.GroupChannel):
+        name = getattr(ch, "name", None)
+        if not name:
+            people = [
+                str(getattr(r, "display_name", None) or getattr(r, "name", "?"))
+                for r in (getattr(ch, "recipients", None) or [])
+            ]
+            name = ", ".join(people[:3])
+            if len(people) > 3:
+                name += f" +{len(people) - 3}"
+        return "group", str(name or "group dm")
+    return "guild", str(getattr(ch, "name", None) or cid)
+
+
 def _conversation_label(bot: Any, channel_id: str) -> str:
     """Human-readable channel/DM label for autonomy context."""
     cid = re.sub(r"[^0-9]", "", str(channel_id or ""))
     if not cid:
         return str(channel_id or "unknown")
-    channel = None
-    with contextlib.suppress(Exception):
-        channel = bot.get_channel(_safe_int(cid))
-    if channel is None:
-        for private in list(getattr(bot, "private_channels", []) or []):
-            if str(getattr(private, "id", "")) == cid:
-                channel = private
-                break
-    if isinstance(channel, discord.DMChannel):
-        recipient = getattr(channel, "recipient", None)
-        if recipient is not None:
-            return f"DM with {_user_ref(recipient, getattr(bot, 'user', None))} channel={cid}"
-        return f"DM channel={cid}"
-    if channel is not None:
-        name = getattr(channel, "name", None) or cid
-        guild = getattr(channel, "guild", None)
-        guild_name = getattr(guild, "name", None)
+    kind, name = _classify_conversation(bot, cid)
+    if kind == "dm":
+        return f"DM with {name}"
+    if kind == "group":
+        return f"group DM ({name})"
+    if kind == "guild":
+        channel = None
+        with contextlib.suppress(Exception):
+            channel = bot.get_channel(_safe_int(cid))
+        guild_name = getattr(getattr(channel, "guild", None), "name", None)
         if guild_name:
-            return f"#{name}({cid}) in {guild_name}"
-        return f"#{name}({cid})"
+            return f"#{name} in {guild_name}"
+        return f"#{name}"
     return f"channel={cid}"
 
 
 class AutonomyContextIndex:
-    """Maps small integers shown to the planner to real Discord IDs for one tick.
+    """Maps short handles shown to the planner to real Discord IDs for one tick.
 
-    The LLM sees channel=1, msg=3 instead of 18-digit snowflakes, which it
-    routinely garbles. Resolution happens in _parse_plan before execution.
+    Three deliberately non-colliding handle spaces:
+
+      guild text channel -> "3"     (postable with post_channel)
+      DM                 -> "D1"    (reply with send_dm + target_user_id)
+      group DM           -> "G1"    (postable with post_channel)
+      unreadable room    -> "X1"    (not addressable at all)
+
+    Everything used to share one integer space, and only guild channels were
+    ever listed in AVAILABLE CHANNELS — so a DM that showed up in the event
+    feed got a plain number like `channel=3`, the floor block invited the
+    planner to speak there, and the "channel post" landed in someone's DM or
+    group chat. A number can no longer name a private room: to post in one the
+    planner has to type its prefix, and to post in a guild channel it has to
+    use a number that only guild channels ever get.
+
+    Resolution happens in _parse_plan, before anything is sent.
     """
+
+    KIND_GUILD = "guild"
+    KIND_DM = "dm"
+    KIND_GROUP = "group"
+    KIND_UNKNOWN = "unknown"
+
+    _PREFIX = {KIND_DM: "D", KIND_GROUP: "G", KIND_UNKNOWN: "X"}
 
     def __init__(self):
         self.channel_by_idx: dict[int, str] = {}
         self.channel_idx_by_id: dict[str, int] = {}
         self.message_by_idx: dict[int, str] = {}
         self.message_channel_by_idx: dict[int, str] = {}
+        self.msg_idx_by_id: dict[str, int] = {}
+        self.kind_by_id: dict[str, str] = {}
+        self.name_by_id: dict[str, str] = {}
+        self.handle_by_id: dict[str, str] = {}
+        self.id_by_handle: dict[str, str] = {}
         self._next_channel = 1
         self._next_message = 1
+        self._next_by_kind: dict[str, int] = {}
 
-    def add_channel(self, channel_id: str) -> int:
+    # -- registration ----------------------------------------------------
+    def add_ref(self, channel_id: str, *, kind: str = KIND_GUILD, name: str = "") -> str:
+        """Register a room and return the handle the planner will see.
+
+        First registration wins the kind. `_collect_available_channels` runs
+        before every other context section and registers exactly the channels
+        Maxwell may post in, so anything discovered later that isn't already
+        known as a guild channel is, by construction, not one.
+        """
         cid = re.sub(r"[^0-9]", "", str(channel_id or ""))
         if not cid:
-            return 0
-        existing = self.channel_idx_by_id.get(cid)
-        if existing is not None:
+            return ""
+        if name:
+            self.name_by_id.setdefault(cid, name)
+        existing = self.handle_by_id.get(cid)
+        if existing:
             return existing
-        idx = self._next_channel
-        self._next_channel += 1
-        self.channel_by_idx[idx] = cid
-        self.channel_idx_by_id[cid] = idx
-        return idx
+        self.kind_by_id[cid] = kind
+        if kind == self.KIND_GUILD:
+            idx = self._next_channel
+            self._next_channel += 1
+            self.channel_by_idx[idx] = cid
+            self.channel_idx_by_id[cid] = idx
+            handle = str(idx)
+        else:
+            prefix = self._PREFIX.get(kind, "X")
+            num = self._next_by_kind.get(prefix, 1)
+            self._next_by_kind[prefix] = num + 1
+            handle = f"{prefix}{num}"
+        self.handle_by_id[cid] = handle
+        self.id_by_handle[handle.upper()] = cid
+        return handle
+
+    def add_channel(self, channel_id: str) -> int:
+        """Register a guild text channel; returns its integer index (0 if none)."""
+        handle = self.add_ref(channel_id, kind=self.KIND_GUILD)
+        try:
+            return int(handle)
+        except (TypeError, ValueError):
+            return 0
 
     def add_message(self, message_id: str, channel_id: str) -> int:
         mid = re.sub(r"[^0-9]", "", str(message_id or ""))
         cid = re.sub(r"[^0-9]", "", str(channel_id or ""))
         if not mid:
             return 0
+        # One message, one number. The same message routinely shows up in the
+        # event feed, in channel activity and in DM history; handing it three
+        # different msg= ids taught the planner that these numbers are
+        # arbitrary, which is half of why it typed them into channel slots.
+        existing = self.msg_idx_by_id.get(mid)
+        if existing is not None:
+            if cid:
+                self.message_channel_by_idx[existing] = cid
+            return existing
         idx = self._next_message
         self._next_message += 1
         self.message_by_idx[idx] = mid
+        self.msg_idx_by_id[mid] = idx
         if cid:
             self.message_channel_by_idx[idx] = cid
         return idx
 
+    # -- display ---------------------------------------------------------
+    def describe(self, channel_id: str) -> str:
+        """The one label every context section prints for a room."""
+        cid = re.sub(r"[^0-9]", "", str(channel_id or ""))
+        handle = self.handle_by_id.get(cid, "")
+        kind = self.kind_by_id.get(cid, self.KIND_UNKNOWN)
+        name = self.name_by_id.get(cid, "")
+        if not handle:
+            return "room=unknown"
+        if kind == self.KIND_GUILD:
+            return f"channel={handle}" + (f"(#{name})" if name else "")
+        if kind == self.KIND_DM:
+            return f"dm={handle}" + (f"(with {name})" if name else "")
+        if kind == self.KIND_GROUP:
+            return f"group={handle}" + (f"({name})" if name else "")
+        return f"unreachable={handle}"
+
+    # -- resolution ------------------------------------------------------
     @staticmethod
     def _digits(raw: str) -> str:
         return re.sub(r"[^0-9]", "", str(raw or "").strip())
 
-    def resolve_channel(self, raw: str) -> str | None:
-        digits = self._digits(raw)
+    def resolve_channel_ref(self, raw: str) -> tuple[str | None, str]:
+        """Resolve a planner-supplied target into (channel_id, error).
+
+        Never guesses. An unknown handle comes back as an error the planner
+        gets to read next tick, which is strictly better than fabricating an
+        id or, worse, hitting a real room the planner didn't mean.
+        """
+        token = str(raw or "").strip().strip("#<>@").upper()
+        if not token:
+            return None, ""
+        if token in self.id_by_handle:
+            cid = self.id_by_handle[token]
+            kind = self.kind_by_id.get(cid, self.KIND_UNKNOWN)
+            if kind == self.KIND_DM:
+                return None, (
+                    f"{raw} is a DM, not a channel — reply there with "
+                    f"send_dm and the recipient's user id"
+                )
+            if kind == self.KIND_UNKNOWN:
+                return None, f"{raw} is a room autonomy can't read or post in"
+            return cid, ""
+        digits = self._digits(token)
         if not digits:
-            return None
+            return None, (
+                f"'{raw}' is not a room handle — use channel=N from "
+                f"AVAILABLE CHANNELS, or a G-handle for a group DM"
+            )
         if len(digits) >= 15:
-            return digits
-        try:
-            num = int(digits)
-        except ValueError:
-            return None
-        if num in self.channel_by_idx:
-            return self.channel_by_idx[num]
-        return digits
+            # A real snowflake. Allowed for compatibility with tools and
+            # config that carry raw ids, but never for a private room the
+            # planner merely saw quoted somewhere in context.
+            kind = self.kind_by_id.get(digits)
+            if kind == self.KIND_DM:
+                return None, (
+                    "that id is a DM channel — use send_dm with target_user_id"
+                )
+            return digits, ""
+        return None, (
+            f"no room numbered {digits} in this context — pick a number "
+            f"from AVAILABLE CHANNELS"
+        )
+
+    def resolve_channel(self, raw: str) -> str | None:
+        return self.resolve_channel_ref(raw)[0]
 
     def resolve_message(self, raw: str) -> tuple[str | None, str | None]:
         digits = self._digits(raw)
@@ -301,7 +460,7 @@ class AutonomyContextIndex:
             return None, None
         if num in self.message_by_idx:
             return self.message_by_idx[num], self.message_channel_by_idx.get(num)
-        return digits, None
+        return None, None
 
 
 # _render_discord_context_text imported from utils.py
@@ -684,15 +843,43 @@ class AutonomyEngine:
         # user_id -> DM channel id, so send_dm can be gated by the same floor
         # rules as a channel post.
         self._dm_channel_by_user: dict[str, str] = {}
+        # Inverse of the above: DM channel id -> the user send_dm must target.
+        self._dm_user_by_channel: dict[str, str] = {}
 
-    def _resolve_planner_channel(self, raw: str) -> str | None:
+    def _register_conversation(
+        self, ctx_index: AutonomyContextIndex, channel_id: str, channel: Any = None
+    ) -> tuple[str, str]:
+        """Register a room for this tick and return (handle, display label).
+
+        Every context section routes through this so the planner sees one
+        naming scheme everywhere: `channel=3(#general)`, `dm=D1(with Z3ki)`,
+        `group=G1(Z3ki, dirac)`. Rooms that aren't guild channels can't come
+        out looking like one.
+        """
+        cid = re.sub(r"[^0-9]", "", str(channel_id or ""))
+        if not cid:
+            return "", "room=unknown"
+        if cid not in ctx_index.handle_by_id:
+            kind, name = _classify_conversation(self.bot, cid, channel)
+            ctx_index.add_ref(cid, kind=kind, name=name)
+        elif channel is not None and not ctx_index.name_by_id.get(cid):
+            _, name = _classify_conversation(self.bot, cid, channel)
+            if name:
+                ctx_index.name_by_id[cid] = name
+        return ctx_index.handle_by_id.get(cid, ""), ctx_index.describe(cid)
+
+    def _resolve_planner_channel_ref(self, raw: str) -> tuple[str | None, str]:
         idx = getattr(self, "_context_index", None)
         if idx is not None:
-            resolved = idx.resolve_channel(raw)
-            if resolved:
-                return resolved
+            return idx.resolve_channel_ref(raw)
+        # No index means we're outside a real tick — gather_context always
+        # builds one before plan() runs. Fall back to the plain digit parse
+        # rather than rejecting everything.
         digits = re.sub(r"[^0-9]", "", str(raw or ""))
-        return digits or None
+        return (digits or None), ""
+
+    def _resolve_planner_channel(self, raw: str) -> str | None:
+        return self._resolve_planner_channel_ref(raw)[0]
 
     def _resolve_planner_message(self, raw: str) -> tuple[str | None, str | None]:
         idx = getattr(self, "_context_index", None)
@@ -723,7 +910,11 @@ class AutonomyEngine:
                         continue
                     if not perms.send_messages or not self._channel_allowed(str(ch_id)):
                         continue
-                    idx = ctx_index.add_channel(str(ch.id))
+                    idx = ctx_index.add_ref(
+                        str(ch.id),
+                        kind=AutonomyContextIndex.KIND_GUILD,
+                        name=str(getattr(ch, "name", "") or ch.id),
+                    )
                     tags = []
                     if str(ch.id) in (self.bot._auto_channels or set()):
                         tags.append("auto")
@@ -1155,6 +1346,7 @@ class AutonomyEngine:
         floor_snapshots: dict[str, list] = {}
         self._floor_verdicts = {}
         self._dm_channel_by_user = {}
+        self._dm_user_by_channel = {}
 
         # 2. Active goals (most decision-relevant — what should I work on?)
         active_goals: list = []
@@ -1211,15 +1403,10 @@ class AutonomyEngine:
                             ev_dt = _coerce_utc_datetime(ts)
                             when = _context_time(ev_dt) if ev_dt else "?"
                     cid = str(ev.get("channel_id") or "?")
-                    ch_name = cid
-                    ch_idx = 0
-                    with contextlib.suppress(Exception):
-                        ch_obj = self.bot.get_channel(int(cid)) if cid != "?" else None
-                        ch_name = (
-                            getattr(ch_obj, "name", cid) if ch_obj is not None else cid
-                        )
-                        if cid != "?":
-                            ch_idx = ctx_index.add_channel(cid)
+                    ch_label = "room=unknown"
+                    if cid != "?":
+                        with contextlib.suppress(Exception):
+                            ch_label = self._register_conversation(ctx_index, cid)[1]
                     uid = str(ev.get("user_id") or "?")
                     uname = str(ev.get("user_name") or "?")
                     role = str(ev.get("role") or "?")
@@ -1273,11 +1460,6 @@ class AutonomyEngine:
                         else "addressed_to=channel"
                     )
                     tag_text = " ".join(tags)
-                    ch_label = (
-                        f"channel={ch_idx}(#{ch_name})"
-                        if ch_idx
-                        else f"channel=#{ch_name}"
-                    )
                     ev_lines.append(
                         f'time={when} {ch_label} speaker={uname}({uid}, {speaker_kind}) {tag_text} content="{content}"'
                     )
@@ -1350,15 +1532,18 @@ class AutonomyEngine:
                         continue
                     age = _context_time(getattr(m, "created_at", None))
                     tags = _message_relation_tags(
-                        m, bot_user=self.bot.user, reply=reply
+                        m,
+                        bot_user=self.bot.user,
+                        reply=reply,
+                        private=isinstance(ch, discord.DMChannel),
                     )
                     tag_text = " ".join(tags)
                     msg_id = str(getattr(m, "id", ""))
-                    ch_idx = ctx_index.add_channel(_cid)
+                    ch_label = self._register_conversation(ctx_index, _cid, ch)[1]
                     msg_idx = ctx_index.add_message(msg_id, _cid) if msg_id else 0
                     author = _user_ref(getattr(m, "author", None), self.bot.user)
                     ch_lines.append(
-                        f'time={age} channel={ch_idx}(#{getattr(ch, "name", cid)}) msg={msg_idx} speaker={author} {tag_text} content="{content}"'
+                        f'time={age} {ch_label} msg={msg_idx} speaker={author} {tag_text} content="{content}"'
                     )
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 continue
@@ -1414,11 +1599,7 @@ class AutonomyEngine:
                     rows = await memory.get_channel_memory(cid)
                     if not rows:
                         continue
-                    ch_name = cid
-                    ch_idx = ctx_index.add_channel(cid)
-                    with contextlib.suppress(Exception):
-                        ch_obj = self.bot.get_channel(int(cid))
-                        ch_name = getattr(ch_obj, "name", cid) if ch_obj else cid
+                    ch_label = self._register_conversation(ctx_index, cid)[1]
                     history_count = max(
                         1,
                         min(
@@ -1470,7 +1651,7 @@ class AutonomyEngine:
                         channel_lines.append(line)
                         used += len(line)
                     if channel_lines:
-                        mem_lines.append(f"# channel {ch_idx} (#{ch_name})")
+                        mem_lines.append(f"# {ch_label}")
                         mem_lines.extend(reversed(channel_lines))
             if mem_lines:
                 sections.append(
@@ -1573,25 +1754,47 @@ class AutonomyEngine:
             except Exception:
                 pass
 
-        # 7. DM history
+        # 7. DM + group DM history
         dm_blocks = []
         for channel in list(getattr(self.bot, "private_channels", []) or [])[:20]:
             try:
+                cid_private = str(getattr(channel, "id", "") or "")
+                handle, room_label = self._register_conversation(
+                    ctx_index, cid_private, channel
+                )
+                is_group = isinstance(channel, discord.GroupChannel)
                 recipient = getattr(channel, "recipient", None)
                 recipient_ref = (
                     _user_ref(recipient, self.bot.user)
-                    if recipient
-                    else f"channel({channel.id})"
+                    if recipient is not None
+                    else room_label
                 )
                 # A DM is a conversation too, and the "don't answer yourself"
                 # rule matters more there than anywhere — there's only one
                 # other person to notice. Map recipient -> DM channel so
                 # send_dm can be gated on the same read as a channel post.
                 if recipient is not None:
-                    self._dm_channel_by_user[str(getattr(recipient, "id", ""))] = str(
-                        getattr(channel, "id", "")
+                    self._dm_channel_by_user[str(getattr(recipient, "id", ""))] = (
+                        cid_private
                     )
-                lines = [f"DM with {recipient_ref} channel={channel.id}"]
+                    self._dm_user_by_channel[cid_private] = str(
+                        getattr(recipient, "id", "")
+                    )
+                # Say how to answer, right on the header. A DM is reachable
+                # only through send_dm + user id; a group DM only through
+                # post_channel + its G-handle. Leaving that implicit is how
+                # replies ended up in the wrong room.
+                if is_group:
+                    header = (
+                        f"{room_label} — group DM, reply with "
+                        f'post_channel target_channel_id="{handle}"'
+                    )
+                else:
+                    uid = str(getattr(recipient, "id", "")) if recipient else ""
+                    header = f"{room_label} — private DM, reply with send_dm" + (
+                        f" target_user_id={uid}" if uid else ""
+                    )
+                lines = [header]
                 messages = [m async for m in channel.history(limit=20)]
                 for m in reversed(messages):
                     _cid = str(getattr(channel, "id", "") or "")
@@ -1618,7 +1821,12 @@ class AutonomyEngine:
                     direction = (
                         f"from=you/Maxwell({getattr(self.bot.user, 'id', '?')}) to={recipient_ref}"
                         if author_is_self
-                        else f"from={_user_ref(m.author, self.bot.user)} to=you/Maxwell({getattr(self.bot.user, 'id', '?')})"
+                        else f"from={_user_ref(m.author, self.bot.user)} to="
+                        + (
+                            room_label
+                            if is_group
+                            else f"you/Maxwell({getattr(self.bot.user, 'id', '?')})"
+                        )
                     )
                     msg_idx = ctx_index.add_message(str(getattr(m, "id", "")), _cid)
                     lines.append(
@@ -1633,12 +1841,14 @@ class AutonomyEngine:
         if dm_blocks:
             sections.append(
                 _truncate(
-                    "=== DM HISTORY ===\n" + "\n\n".join(dm_blocks[-20:]),
+                    "=== DIRECT MESSAGES & GROUP DMS (private rooms — NOT in "
+                    "AVAILABLE CHANNELS; never target one with a plain "
+                    "channel number) ===\n" + "\n\n".join(dm_blocks[-20:]),
                     CTX_BUDGET_DM_HISTORY,
                 )
             )
         else:
-            sections.append("=== DM HISTORY ===\n(no accessible DMs)")
+            sections.append("=== DIRECT MESSAGES & GROUP DMS ===\n(no accessible DMs)")
 
         # 8. Long-term memory (includes fresh facts from the hourly Intel/news gatherer)
         try:
@@ -1670,7 +1880,7 @@ class AutonomyEngine:
             # Autonomy should also do research, memory updates, goals, DMs, reacts etc.
             sections.append(
                 _truncate(
-                    "=== AVAILABLE CHANNELS (use the number as target_channel_id; only post when you have a real reason; prefer research/update_memory for knowledge goals) ===\n"
+                    "=== AVAILABLE CHANNELS (server text channels — the ONLY rooms a plain number targets; use the number as target_channel_id; only post when you have a real reason; prefer research/update_memory for knowledge goals) ===\n"
                     + "\n".join(available_channel_lines[:18]),
                     CTX_BUDGET_CHANNELS_MAP,
                 )
@@ -1712,23 +1922,22 @@ class AutonomyEngine:
         try:
             verdicts = []
             for cid, snapshot in floor_snapshots.items():
-                idx = ctx_index.channel_idx_by_id.get(cid) if ctx_index else None
-                if idx:
-                    # Address rooms the same way the rest of the context does:
-                    # by small index, no snowflake. Leaking 18-digit ids here
-                    # is how the planner starts pasting them into
-                    # target_channel_id and getting actions dropped.
-                    ch_obj = self.bot.get_channel(_safe_int(cid))
-                    ch_name = getattr(ch_obj, "name", None) if ch_obj else None
-                    label = f"channel={idx}" + (f" (#{ch_name})" if ch_name else "")
-                else:
-                    label = _conversation_label(self.bot, cid)
-                    # DMs have no channel index, and _conversation_label tacks
-                    # the channel snowflake on. Drop it: send_dm targets a
-                    # user id, never a channel id, so that number is noise the
-                    # planner can only misuse.
-                    if label.startswith("DM with "):
-                        label = label.split(" channel=")[0]
+                # Address rooms exactly the way the rest of the context does —
+                # same handle, same spelling — and spell out how to answer in
+                # a private one. This block is the first thing the planner
+                # reads, so a label here that looks like a channel number is a
+                # standing invitation to post into a DM.
+                _, label = self._register_conversation(ctx_index, cid)
+                kind = ctx_index.kind_by_id.get(cid, AutonomyContextIndex.KIND_UNKNOWN)
+                if kind == AutonomyContextIndex.KIND_DM:
+                    uid = self._dm_user_by_channel.get(cid, "")
+                    label += (
+                        f" [reply with send_dm target_user_id={uid}]"
+                        if uid
+                        else " [DM — reply with send_dm]"
+                    )
+                elif kind == AutonomyContextIndex.KIND_GROUP:
+                    label += " [group DM]"
                 verdict = self._read_floor_for(cid, snapshot, label=label)
                 # Always remember the verdict — the execute-time gate needs it
                 # for DM channels too, which never carry a channel index.
@@ -2196,13 +2405,15 @@ Not worth doing: filler openers, anything already in YOUR RECENT ACTIONS, announ
 ## Voice
 One short line unless the moment genuinely needs more. Lowercase-natural, casual, your own register. Participant, never narrator.
 
-## Targeting (mechanical — wrong ids get dropped)
-AVAILABLE CHANNELS is channel=1,2,3… CHANNEL ACTIVITY uses channel=N(#name) and msg=M. N and M are small integers, NOT Discord snowflakes.
-- post_channel: target_channel_id is that integer string, e.g. "3".
-- run_tool posting (send_message/send_meme/send_file/send_media/tts): target_channel_id is a TOP-LEVEL sibling of tool_name, not inside tool_args.
-- No target_channel_id → dropped. Never invent numbers. If it isn't in AVAILABLE CHANNELS, don't post.
-- Reply: reply_to_message_id (post_channel) or target_message_id (run_tool) = msg=M. Pass both ids if you only know the message.
-- DMs: send_dm needs target_user_id as a 17–20 digit snowflake, never a name.
+## Rooms and targeting (mechanical — wrong ids get dropped)
+Three kinds of room, three kinds of handle. They never mix, and the handle in the context IS the handle you type back:
+- `channel=3(#general)` — a server text channel. Only these get a plain number, and every one of them is listed in AVAILABLE CHANNELS. post_channel target_channel_id "3".
+- `dm=D1(with Z3ki(111))` — a private DM. NOT a channel. You cannot post_channel into it. Answer with send_dm target_user_id "111" (the user id, 17–20 digits, never a name).
+- `group=G1(Z3ki, dirac)` — a group DM: several people, one private room. post_channel target_channel_id "G1".
+Messages are `msg=M`, a separate numbering from rooms. msg=4 and channel=4 are unrelated — never put a msg number in a channel slot.
+- If a room isn't in AVAILABLE CHANNELS and has no D/G handle, you can't reach it. Don't guess a number, don't paste a snowflake.
+- run_tool posting (send_message/send_meme/send_file/send_media/tts): target_channel_id is a TOP-LEVEL sibling of tool_name, not inside tool_args. Same handles.
+- Reply: reply_to_message_id (post_channel) or target_message_id (run_tool) = msg=M. The message's own room wins over the channel you typed, so when in doubt pass the msg id.
 - react/edit/delete/forward: pass both target_message_id and target_channel_id.
 
 ## Examples
@@ -2211,9 +2422,12 @@ AVAILABLE CHANNELS is channel=1,2,3… CHANNEL ACTIVITY uses channel=N(#name) an
 ✓ {{"kind":"run_tool","tool_name":"web_search","tool_args":{{"query":"webgpu compute shader limits"}},"reason":"curiosity is high and this has been bugging me"}}
 ✓ {{"kind":"send_dm","target_user_id":"1498804954322702609","content":"yo wanna pick this up?","reason":"active goal"}}
 ✓ {{"kind":"do_nothing","reason":"nothing pulling at me and no room is mine right now"}}
+✓ {{"kind":"post_channel","target_channel_id":"G1","content":"lol what","reason":"group DM G1 is ADDRESSED"}}
 ✗ posting into a channel listed under NOT YOUR TURN — dropped
 ✗ run_tool send_message without target_channel_id — dropped
 ✗ target_channel_id "general" or a snowflake — rejected
+✗ target_channel_id "D1", or a DM's channel id — rejected, DMs go through send_dm
+✗ target_channel_id set to a msg number, or a number not in AVAILABLE CHANNELS — rejected
 ✗ send_dm target_user_id "Z3ki" — rejected
 
 One thing done properly beats three done thinly — most moments are 0 or 1 actions; max {MAX_ACTIONS_PER_TICK}. Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, complete_goal, do_nothing. Not "message"/"send_msg"/"reply".
@@ -2436,21 +2650,51 @@ Return ONLY JSON, no fence. "thought" is what you're actually thinking, in your 
 
             elif kind == "post_channel":
                 cid_raw = str(action.get("target_channel_id", ""))
-                cid = self._resolve_planner_channel(cid_raw)
+                cid, cid_err = self._resolve_planner_channel_ref(cid_raw)
                 content = str(action.get("content", "")).strip()
                 if not content:
                     validation_failures.append("post_channel: empty content")
-                    continue
-                if not cid:
-                    validation_failures.append(
-                        "post_channel: missing target_channel (use channel number from AVAILABLE CHANNELS)"
-                    )
                     continue
                 reply_to_raw = str(action.get("reply_to_message_id", ""))
                 reply_to, reply_ch = self._resolve_planner_message(reply_to_raw)
                 if reply_to_raw.strip() and not reply_to:
                     validation_failures.append(
                         "post_channel: invalid reply_to_message_id (use msg number from CHANNEL ACTIVITY)"
+                    )
+                    continue
+                # A message knows which room it lives in; a hand-typed channel
+                # number is a guess. When they disagree, believe the message.
+                # The old code resolved reply_ch and then ignored it, so a
+                # reply aimed at the wrong number fetched nothing, fell back to
+                # a plain send, and dropped a contextless line into whatever
+                # room the number happened to name.
+                if reply_ch and reply_ch != cid:
+                    if cid:
+                        logger.info(
+                            "Autonomy post_channel: reply target msg lives in "
+                            "%s, not %s — routing to the message's channel",
+                            reply_ch,
+                            cid,
+                        )
+                    cid, cid_err = reply_ch, ""
+                if cid and (
+                    (getattr(self, "_context_index", None) or AutonomyContextIndex())
+                    .kind_by_id.get(cid)
+                    == AutonomyContextIndex.KIND_DM
+                ):
+                    validation_failures.append(
+                        "post_channel: that room is a DM — use send_dm with "
+                        "target_user_id instead"
+                    )
+                    continue
+                if not cid:
+                    validation_failures.append(
+                        "post_channel: "
+                        + (
+                            cid_err
+                            or "missing target_channel (use the channel number "
+                            "from AVAILABLE CHANNELS)"
+                        )
                     )
                     continue
                 parsed_action = {
@@ -2509,10 +2753,17 @@ Return ONLY JSON, no fence. "thought" is what you're actually thinking, in your 
                     "reason": str(action.get("reason", ""))[:500],
                 }
                 target_cid_raw = str(action.get("target_channel_id", ""))
-                target_cid = self._resolve_planner_channel(target_cid_raw)
+                target_cid, target_err = self._resolve_planner_channel_ref(
+                    target_cid_raw
+                )
                 if target_cid_raw.strip() and not target_cid:
                     validation_failures.append(
-                        "run_tool: invalid target_channel_id (use channel number from AVAILABLE CHANNELS)"
+                        "run_tool: "
+                        + (
+                            target_err
+                            or "invalid target_channel_id (use channel number "
+                            "from AVAILABLE CHANNELS)"
+                        )
                     )
                     continue
                 if target_cid:
@@ -2866,6 +3117,21 @@ Return ONLY JSON, no fence. "thought" is what you're actually thinking, in your 
         if channel is None:
             result["result"] = "error"
             result["error"] = "channel not found"
+            return
+
+        # Last line of defence. Validation resolves handles, but a raw
+        # snowflake from a tool arg or a stale config entry can still point at
+        # a private room, and a "channel post" that lands in somebody's DM is
+        # the worst version of this bug — send_dm is the only way in.
+        if isinstance(channel, discord.DMChannel):
+            result["result"] = "error"
+            result["error"] = (
+                "refused: that id is a DM channel, not a text channel — "
+                "use send_dm with target_user_id"
+            )
+            logger.warning(
+                "Autonomy post_channel refused: %s is a DM channel", channel_id
+            )
             return
 
         guild = getattr(channel, "guild", None)

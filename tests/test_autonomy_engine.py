@@ -953,3 +953,133 @@ def test_log_tick_does_not_mark_progress_when_only_do_nothing(tmp_path):
     goal = {x["id"]: x for x in goals}[gid]
     assert goal.get("last_acted_on") is None  # no all-bump on a do_nothing tick
     assert "last_action_at" not in state
+
+
+# ---------------------------------------------------------------------------
+# Room addressing: a DM must never be reachable by a channel number.
+#
+# The bug these pin: DMs and group DMs picked up plain integer handles from the
+# event feed, rendered as `channel=3(#1452530107255095459)` or `channel=4(#None)`,
+# and were listed as YOUR TURN in the floor block — while AVAILABLE CHANNELS
+# only ever listed guild channels. The planner did what the context told it and
+# posted into people's private rooms.
+# ---------------------------------------------------------------------------
+
+
+def test_index_gives_dms_and_groups_non_numeric_handles():
+    idx = AutonomyContextIndex()
+    assert idx.add_ref("100", kind=idx.KIND_GUILD, name="general") == "1"
+    assert idx.add_ref("200", kind=idx.KIND_DM, name="Z3ki(7)") == "D1"
+    assert idx.add_ref("300", kind=idx.KIND_GROUP, name="Z3ki, dirac") == "G1"
+    assert idx.add_ref("400", kind=idx.KIND_GUILD, name="random") == "2"
+    # Numbers only ever name guild channels.
+    assert idx.channel_by_idx == {1: "100", 2: "400"}
+    assert idx.describe("100") == "channel=1(#general)"
+    assert idx.describe("200") == "dm=D1(with Z3ki(7))"
+    assert idx.describe("300") == "group=G1(Z3ki, dirac)"
+
+
+def test_resolve_channel_rejects_dm_handles_and_unknown_numbers():
+    idx = AutonomyContextIndex()
+    idx.add_ref("100", kind=idx.KIND_GUILD, name="general")
+    idx.add_ref("200", kind=idx.KIND_DM, name="Z3ki(7)")
+    idx.add_ref("300", kind=idx.KIND_GROUP, name="Z3ki, dirac")
+
+    assert idx.resolve_channel_ref("1") == ("100", "")
+    assert idx.resolve_channel_ref("G1") == ("300", "")
+    # A DM handle names a real room but not a postable one, and says so.
+    cid, err = idx.resolve_channel_ref("D1")
+    assert cid is None and "send_dm" in err
+    # The DM's raw snowflake is refused the same way.
+    cid, err = idx.resolve_channel_ref("200")
+    assert cid is None
+    # An index nobody handed out is an error, never a fabricated channel id.
+    cid, err = idx.resolve_channel_ref("9")
+    assert cid is None and "AVAILABLE CHANNELS" in err
+
+
+def test_index_reuses_one_number_per_message():
+    # The same message shows up in the event feed, channel activity and DM
+    # history; three different msg= ids for it taught the planner these
+    # numbers are arbitrary.
+    idx = AutonomyContextIndex()
+    first = idx.add_message("555", "100")
+    assert idx.add_message("555", "100") == first
+    assert idx.add_message("556", "100") != first
+
+
+def test_parse_plan_rejects_post_channel_into_a_dm(tmp_path):
+    engine = _engine(tmp_path)
+    idx = AutonomyContextIndex()
+    idx.add_ref("100", kind=idx.KIND_GUILD, name="general")
+    idx.add_ref("200", kind=idx.KIND_DM, name="Z3ki(7)")
+    engine._context_index = idx
+
+    raw = json.dumps({"actions": [{
+        "kind": "post_channel", "target_channel_id": "D1", "content": "hi",
+    }]})
+    actions, failures = engine._parse_plan(raw)
+    assert any("send_dm" in f for f in failures)
+    assert all(a["kind"] == "do_nothing" for a in actions)
+
+
+def test_parse_plan_allows_post_channel_into_a_group_dm(tmp_path):
+    engine = _engine(tmp_path)
+    idx = AutonomyContextIndex()
+    idx.add_ref("300", kind=idx.KIND_GROUP, name="Z3ki, dirac")
+    engine._context_index = idx
+
+    raw = json.dumps({"actions": [{
+        "kind": "post_channel", "target_channel_id": "G1", "content": "lol what",
+    }]})
+    actions, failures = engine._parse_plan(raw)
+    assert failures == []
+    assert actions[0]["target_channel_id"] == "300"
+
+
+def test_parse_plan_routes_reply_to_the_messages_own_channel(tmp_path):
+    # The planner names channel 1 but replies to a message living in channel 2.
+    # The message knows where it is; the typed number is a guess. Before this,
+    # reply_ch was resolved and thrown away: the fetch failed in channel 1 and
+    # the fallback send dropped a contextless line there.
+    engine = _engine(tmp_path)
+    idx = AutonomyContextIndex()
+    idx.add_ref("100", kind=idx.KIND_GUILD, name="general")
+    idx.add_ref("400", kind=idx.KIND_GUILD, name="random")
+    msg_idx = idx.add_message("555", "400")
+    engine._context_index = idx
+
+    raw = json.dumps({"actions": [{
+        "kind": "post_channel", "target_channel_id": "1",
+        "reply_to_message_id": str(msg_idx), "content": "yeah exactly",
+    }]})
+    actions, failures = engine._parse_plan(raw)
+    assert failures == []
+    assert actions[0]["target_channel_id"] == "400"
+    assert actions[0]["reply_to_message_id"] == "555"
+
+
+def test_exec_post_channel_refuses_a_dm_channel(tmp_path):
+    """The backstop: even handed a DM channel id directly, post_channel won't send."""
+    import discord
+
+    class _DM(discord.DMChannel):
+        def __init__(self):
+            self.id = 200
+            self.sent = []
+
+        async def send(self, content, **kwargs):  # pragma: no cover - must not run
+            self.sent.append(content)
+            raise AssertionError("posted into a DM")
+
+    dm = _DM()
+    engine = _engine(tmp_path, control={"bot_enabled": True})
+    engine.bot.get_channel = lambda cid: dm if str(cid) == "200" else None
+
+    result = {}
+    asyncio.run(engine._exec_post_channel(
+        {"target_channel_id": "200", "content": "hello"}, result
+    ))
+    assert result["result"] == "error"
+    assert "send_dm" in result["error"]
+    assert dm.sent == []
