@@ -3878,9 +3878,9 @@ class MaxwellBot(commands.Bot):
             # 'content'". Every reaction-triggered reply died that way.
             async def fake_reply(content=None, **kwargs):
                 if hasattr(message, "reply"):
-                    return await message.reply(content, **kwargs)
+                    return await message.reply(content=content, **kwargs)
                 if channel is not None:
-                    return await channel.send(content, **kwargs)
+                    return await channel.send(content=content, **kwargs)
                 return None
 
             fake_message.reply = fake_reply
