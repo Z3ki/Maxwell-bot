@@ -106,6 +106,23 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
         except Exception:
             pass
 
+    # Stickers carry no content and are not attachments, so without this a
+    # sticker-only message renders as an empty string and the model never
+    # learns it happened. The image itself is fetched separately in
+    # _extract_sticker_emoji_media; this is the text-side signal.
+    stickers = list(getattr(message, "stickers", None) or [])
+    if stickers:
+        names = []
+        for st in stickers[:3]:
+            try:
+                nm = str(getattr(st, "name", "") or "").strip()
+                if nm:
+                    names.append(nm)
+            except Exception:
+                pass
+        if names:
+            parts.append("[sticker: " + ", ".join(names) + "]")
+
     inter = getattr(message, "interaction", None)
     if inter is not None:
         try:

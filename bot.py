@@ -7565,6 +7565,11 @@ class MaxwellBot(commands.Bot):
                 logger.error(
                     f"Failed to download attachment {attachment.filename}: {e}"
                 )
+        if proc_img:
+            for item in await self._extract_sticker_emoji_media(message, max_size):
+                if item.get("is_image") and item.get("b64"):
+                    images.append(item["b64"])
+                media.append(item)
         return images, media
 
     def _max_media_bytes(self) -> int:
@@ -7908,6 +7913,74 @@ class MaxwellBot(commands.Bot):
             seen.add(url)
             unique.append((label, url))
         return unique
+
+    # Discord CDN roots for the two "image-like" payloads that are NOT
+    # attachments: custom emojis are inline markup in content, stickers ride
+    # on message.stickers. Without this the model is blind to both — a
+    # sticker-only message has empty content and no attachments, so it used
+    # to reach the prompt as an empty string.
+    _EMOJI_MARKUP_RE = re.compile(r"<(a)?:([A-Za-z0-9_]{2,32}):(\d{15,25})>")
+    _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_-]+")
+    _MAX_INLINE_EMOJIS = 3
+    _MAX_INLINE_STICKERS = 3
+
+    async def _extract_sticker_emoji_media(self, message, max_size: int) -> list[dict]:
+        """Download custom stickers/emojis on a message as real image media.
+
+        Both are plain CDN images, so they go through the same download path
+        as embed media (SSRF check, size cap, GIF normalization). Lottie
+        stickers are skipped: they are vector JSON, not an image the model
+        can look at — the text annotation still names them.
+        """
+        media: list[dict] = []
+        message_id = getattr(message, "id", None)
+
+        for sticker in (getattr(message, "stickers", None) or [])[
+            : self._MAX_INLINE_STICKERS
+        ]:
+            fmt = getattr(sticker, "format", None)
+            fmt_name = str(getattr(fmt, "name", fmt) or "").lower()
+            if "lottie" in fmt_name:
+                logger.info(
+                    f"Skipping lottie sticker {getattr(sticker, 'name', '?')} (vector JSON, not an image)"
+                )
+                continue
+            url = str(getattr(sticker, "url", "") or "")
+            if not url:
+                continue
+            name = self._SAFE_NAME_RE.sub(
+                "_", str(getattr(sticker, "name", "") or "sticker")
+            )[:64]
+            ext = Path(urlparse(url).path).suffix.lower() or ".png"
+            item = await self._download_embed_media(
+                url, f"sticker-{name}{ext}", max_size, message_id
+            )
+            if item:
+                item["source"] = "sticker"
+                media.append(item)
+
+        seen: set[str] = set()
+        for match in self._EMOJI_MARKUP_RE.finditer(
+            str(getattr(message, "content", "") or "")
+        ):
+            if len(seen) >= self._MAX_INLINE_EMOJIS:
+                break
+            animated, name, emoji_id = match.groups()
+            if emoji_id in seen:
+                continue
+            seen.add(emoji_id)
+            ext = ".gif" if animated else ".png"
+            item = await self._download_embed_media(
+                f"https://cdn.discordapp.com/emojis/{emoji_id}{ext}",
+                f"emoji-{self._SAFE_NAME_RE.sub('_', name)[:64]}{ext}",
+                max_size,
+                message_id,
+            )
+            if item:
+                item["source"] = "emoji"
+                media.append(item)
+
+        return media
 
     async def _download_embed_media(
         self, url: str, filename: str, max_size: int, message_id
