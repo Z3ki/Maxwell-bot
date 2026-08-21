@@ -1967,13 +1967,25 @@ class SearchMessagesTool(Tool):
     async def execute(
         self, message: Message, query: str | None = None, limit: str = "5", **kwargs
     ) -> str:
-        if not query:
-            return "Error: query is required"
-        if not message.guild:
-            return "Error: Cannot search in DMs"
+        if not message.guild and not getattr(message, "channel", None):
+            return "Error: Channel context unavailable"
         try:
             search_limit = max(1, min(int(limit), 25))
             results = []
+            # If query is empty or blank, fetch recent channel history instead of failing
+            if not query or not str(query).strip():
+                chan = getattr(message, "channel", None)
+                if chan and hasattr(chan, "history"):
+                    async for msg in chan.history(limit=search_limit):
+                        snippet = msg.content[:150] + ("..." if len(msg.content) > 150 else "")
+                        results.append(f"[{msg.id}] {msg.author.display_name}: {snippet}")
+                    if not results:
+                        return "No recent messages found in this channel"
+                    return f"Recent messages ({len(results)}):\n" + "\n".join(results)
+                return "Error: query is required"
+
+            if not message.guild:
+                return "Error: Cannot search by keyword in DMs"
             async for msg in message.guild.search(content=query, limit=search_limit):
                 snippet = msg.content[:150] + ("..." if len(msg.content) > 150 else "")
                 results.append(f"[{msg.id}] {msg.author.display_name}: {snippet}")
