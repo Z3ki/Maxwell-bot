@@ -1723,6 +1723,12 @@ class AutonomyEngine:
                     label = f"channel={idx}" + (f" (#{ch_name})" if ch_name else "")
                 else:
                     label = _conversation_label(self.bot, cid)
+                    # DMs have no channel index, and _conversation_label tacks
+                    # the channel snowflake on. Drop it: send_dm targets a
+                    # user id, never a channel id, so that number is noise the
+                    # planner can only misuse.
+                    if label.startswith("DM with "):
+                        label = label.split(" channel=")[0]
                 verdict = self._read_floor_for(cid, snapshot, label=label)
                 # Always remember the verdict — the execute-time gate needs it
                 # for DM channels too, which never carry a channel index.

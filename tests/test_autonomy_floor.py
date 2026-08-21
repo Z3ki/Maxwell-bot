@@ -679,3 +679,34 @@ def test_a_blocked_post_does_not_consume_the_room_slot(tmp_path):
         assert FLOOR_HOLDING in r["content_summary"]
         assert "already sent" not in r["content_summary"]
     assert channel.sent == []
+
+
+def test_dm_labels_omit_the_channel_snowflake(tmp_path, monkeypatch):
+    """send_dm targets a user id — a DM channel id in the prompt is only misusable.
+
+    Patches _conversation_label to the exact string production emits for a DM
+    (observed in the live log) rather than faking a discord.DMChannel, so this
+    pins the stripping against the real input shape.
+    """
+    import autonomy as autonomy_mod
+
+    dm_cid = "1452530107255095459"
+    real_label = f"DM with Eliel(1416565530504200254) channel={dm_cid}"
+    monkeypatch.setattr(
+        autonomy_mod,
+        "_conversation_label",
+        lambda bot, cid: real_label if str(cid) == dm_cid else f"#c{cid}",
+    )
+
+    dm = _CtxChannel(cid=int(dm_cid), messages=[_ctx_msg(900, 30, author_id=7)])
+    dm.recipient = SimpleNamespace(id=7, display_name="Eliel", name="eliel", bot=False)
+    channel = _CtxChannel(messages=[_ctx_msg(555, 30, author_id=7)])
+    engine = AutonomyEngine(_ctx_bot(tmp_path, channel, private_channels=[dm]))
+    engine.store = _CtxStore()
+
+    context = asyncio.run(engine.gather_context())
+    floor = context.split("=== CONVERSATION FLOOR")[1].split("\n\n=== ")[0]
+
+    assert "DM with Eliel(1416565530504200254)" in floor
+    # The recipient's user id survives (send_dm needs it); the channel id does not.
+    assert dm_cid not in floor
