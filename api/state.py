@@ -182,6 +182,32 @@ def _sanitize_control(control):
     out["autonomy_recent_reply_block_seconds"] = max(
         0, min(_safe_int(out.get("autonomy_recent_reply_block_seconds") or 0, 0), 86400)
     )
+    # Conversational turn-taking windows (autonomy_social.py). Clamped so a
+    # fat-fingered dashboard value can't either disable turn-taking outright
+    # (0 everywhere) or wedge autonomy silent for a day.
+    out["autonomy_floor_cooldown_seconds"] = max(
+        0,
+        min(_safe_int(out.get("autonomy_floor_cooldown_seconds") or 90, 90), 3600),
+    )
+    out["autonomy_floor_hold_release_seconds"] = max(
+        60,
+        min(
+            _safe_int(out.get("autonomy_floor_hold_release_seconds") or 1800, 1800),
+            86400,
+        ),
+    )
+    out["autonomy_floor_mid_flow_seconds"] = max(
+        0,
+        min(_safe_int(out.get("autonomy_floor_mid_flow_seconds") or 45, 45), 600),
+    )
+    out["autonomy_floor_mid_flow_messages"] = max(
+        2,
+        min(_safe_int(out.get("autonomy_floor_mid_flow_messages") or 3, 3), 20),
+    )
+    out["autonomy_floor_idle_seconds"] = max(
+        60,
+        min(_safe_int(out.get("autonomy_floor_idle_seconds") or 600, 600), 86400),
+    )
     out["autonomy_base_url"] = str(out.get("autonomy_base_url", "") or "")[:512]
     out["autonomy_api_key"] = str(out.get("autonomy_api_key", "") or "")[:512]
     out["autonomy_model"] = str(out.get("autonomy_model", "") or "")[:200]

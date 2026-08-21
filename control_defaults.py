@@ -137,7 +137,31 @@ DEFAULT_CONTROL = {
     "aux_model": "",  # "" = use autonomy (then main) model
     "aux_disable_reasoning": True,  # False for endpoints that reject the reasoning param
     "autonomy_min_post_gap_seconds": 0,  # deprecated — no longer enforced, kept for compat
-    "autonomy_recent_reply_block_seconds": 0,  # skip autonomy post if bot replied in-channel within this window (0=off)
+    # Legacy single-purpose cooldown. Superseded by autonomy_floor_* below, which
+    # subsumes it; kept because it's honored as a FLOOR on the new cooldown, so an
+    # operator who tuned this up doesn't silently get a shorter window. 0 = defer
+    # entirely to autonomy_floor_cooldown_seconds.
+    "autonomy_recent_reply_block_seconds": 0,
+    # --- Conversational turn-taking (autonomy_social.py) ---------------------
+    # Autonomy runs on a timer; conversation runs on turns. These decide whether
+    # Maxwell holds the floor in a room before he's allowed to speak unprompted.
+    # They gate ONLY speaking — research, memory, and goal actions are untouched.
+    # Off means the planner still sees the room read but execute() stops
+    # enforcing it: a debugging escape hatch, not a mode to run in.
+    "autonomy_floor_enabled": True,
+    # Quiet window after Maxwell's own last line before an *unprompted* new one.
+    # Being addressed bypasses it. Tuned to conversational rhythm, not to the
+    # tick interval — politeness is a property of the room, not of the clock.
+    "autonomy_floor_cooldown_seconds": 90,
+    # How long he keeps holding the floor after speaking into silence. Past this
+    # the room has plainly moved on and starting something fresh is fair.
+    "autonomy_floor_hold_release_seconds": 1800,
+    # Several messages from several people inside this window = an exchange in
+    # progress; cutting in is what makes a bot feel like an interruption.
+    "autonomy_floor_mid_flow_seconds": 45,
+    "autonomy_floor_mid_flow_messages": 3,
+    # Silence past this and the room reads as idle rather than active.
+    "autonomy_floor_idle_seconds": 600,
     "context_cleanup_enabled": True,  # background context janitor (dedupe/merge/remove weird shared-context facts)
     "context_cleanup_interval_seconds": 1800,  # how often the janitor runs (>=300s)
     "context_cleanup_ltm_enabled": True,  # also clean long_term_memory (where remote feeds/intel would have dumped)

@@ -5988,6 +5988,20 @@ class MaxwellBot(commands.Bot):
                 or "(not yet computed)"
             )
             last_reflect = state.get("last_reflect_at") or "never"
+            # Whose turn it was in each room as of the last tick. This is the
+            # first thing to look at when the question is "why didn't he post" —
+            # a HOLDING or BUSY room is a deliberate silence, not a failure.
+            try:
+                from autonomy_social import summarize_floor
+
+                verdicts = list(
+                    (getattr(self.autonomy_engine, "_floor_verdicts", None) or {}).values()
+                )
+                floor_line = summarize_floor(verdicts)
+                if not self._control.get("autonomy_floor_enabled", True):
+                    floor_line += " (enforcement OFF)"
+            except Exception:
+                floor_line = "floor: unavailable"
             await message.channel.send(
                 "Autonomy status\n"
                 f"enabled: {enabled} interval: {interval}s\n"
@@ -5995,6 +6009,7 @@ class MaxwellBot(commands.Bot):
                 f"actions executed: {state.get('actions_executed_total', 0)} failed: {state.get('actions_failed_total', 0)}\n"
                 f"last error: {state.get('last_error') or '-'}\n"
                 f"drives: {drives_line}\n"
+                f"{floor_line}\n"
                 f"last reflection: {last_reflect}\n"
                 f"blacklists — channels: {', '.join(ab_ch) or '(none)'} servers: {', '.join(ab_sv) or '(none)'}\n"
                 f"thought: {thought}"

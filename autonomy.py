@@ -6,16 +6,34 @@ do, and executes actions through the existing tool system.
 
 No approval queues. No shadow mode. Maxwell decides, Maxwell acts.
 
+ARCHITECTURE — where restraint lives:
+
+Restraint is enforced mechanically, not by prompting. The planner prompt gives
+Maxwell full freedom over WHAT to do; autonomy_social decides WHERE and WHEN
+speaking is his turn, and execute() enforces that as a gate.
+
+This split is the whole design. The earlier arrangement pushed both jobs into
+the prompt ("silence is the default, do_nothing is usually correct"), which
+does not work: a model told to prefer silence prefers it uniformly, so it
+suppresses research, memory, and goal work — none of which anyone can even
+see — while STILL occasionally posting at the wrong moment, because "usually"
+is not a gate. Restraint you can compute belongs in code; freedom belongs in
+the prompt. Don't move either one back.
+
 MAINTAINER NOTES:
-- The old version had a self-defeating prompt ("nobody messaged you" then
-  "check if anyone messaged you"). The LLM defaulted to do_nothing 75% of
-  the time. Don't add that shit back.
-- Autonomy now exposes every dashboard-enabled tool. If a tool needs a real
+- Don't reintroduce a silence-first planner prompt. It buys nothing: the floor
+  gate already makes badly-timed speech impossible, and the prompt-level version
+  only costs initiative.
+- Autonomy exposes every dashboard-enabled tool. If a tool needs a real
   Discord message, SyntheticMessage has to point at target_message_id. Yes,
   this is more annoying. The user explicitly asked for all tools.
 - The context budget is PER-SECTION now, not global truncation. The old
   version truncated from the end, so channel activity (the most actionable
   data) got eaten first. Don't "simplify" back to global truncation.
+- The floor gate re-reads the room at execute time rather than trusting the
+  verdict from gather_context. The plan is seconds stale by then and rooms
+  move; a cached opinion is how you post on top of a reply that started while
+  the planner was thinking.
 """
 
 from __future__ import annotations
@@ -56,6 +74,14 @@ from utils import (
 )
 from utils import (
     render_discord_context_text as _render_discord_context_text,
+)
+from autonomy_social import (  # noqa: E402
+    FloorSettings,
+    FloorVerdict,
+    floor_message_from_discord,
+    read_floor,
+    render_floor_section,
+    summarize_floor,
 )
 
 logger = logging.getLogger(__name__)
@@ -651,6 +677,13 @@ class AutonomyEngine:
         # Set during gather_context when a reflection nudge was emitted; _log_tick
         # stamps last_reflect_at so the cadence persists across restarts.
         self._reflect_pending_persist: bool = False
+        # Per-channel turn-taking verdicts read during gather_context. The
+        # planner sees them as context; execute() re-checks them against live
+        # state before anything sends. See autonomy_social.
+        self._floor_verdicts: dict[str, FloorVerdict] = {}
+        # user_id -> DM channel id, so send_dm can be gated by the same floor
+        # rules as a channel post.
+        self._dm_channel_by_user: dict[str, str] = {}
 
     def _resolve_planner_channel(self, raw: str) -> str | None:
         idx = getattr(self, "_context_index", None)
@@ -1003,6 +1036,90 @@ class AutonomyEngine:
         return None
 
     # -----------------------------------------------------------------------
+    # Turn-taking — see autonomy_social for the rules themselves
+    # -----------------------------------------------------------------------
+
+    def _floor_settings(self) -> FloorSettings:
+        return FloorSettings.from_control(getattr(self.bot, "_control", None))
+
+    def _floor_enabled(self) -> bool:
+        """Turn-taking is on unless an operator explicitly switches it off.
+
+        Off means the planner still SEES the room read (it's useful context)
+        but execute() stops enforcing it. That's an escape hatch for debugging,
+        not a mode anyone should run in — with it off, autonomy will eventually
+        post over a live reply.
+        """
+        control = getattr(self.bot, "_control", None) or {}
+        return bool(control.get("autonomy_floor_enabled", True))
+
+    def _read_floor_for(
+        self, channel_id: str, messages: list, *, label: str = ""
+    ) -> FloorVerdict:
+        """Apply the turn-taking rules to one channel's message window."""
+        cid = str(channel_id)
+        replying = cid in (getattr(self.bot, "_replying_channels", None) or set())
+        last_reply = (getattr(self.bot, "_last_bot_reply", None) or {}).get(cid)
+        return read_floor(
+            cid,
+            messages,
+            is_replying=replying,
+            last_bot_reply_ts=last_reply,
+            settings=self._floor_settings(),
+            label=label or _conversation_label(self.bot, cid),
+        )
+
+    async def _floor_check_live(self, channel_id: str) -> FloorVerdict | None:
+        """Re-read a room immediately before speaking into it.
+
+        The plan was made after gather_context and an LLM call — easily tens of
+        seconds ago, during which someone may have spoken or the main bot may
+        have started replying. The cached verdict is a stale opinion; this is
+        the current one. Returns None if the room can't be read, in which case
+        the caller falls back to the cached verdict.
+        """
+        cid = str(channel_id)
+        try:
+            ch = cast(Any, self.bot.get_channel(_safe_int(cid)))
+            if ch is None or not hasattr(ch, "history"):
+                return None
+            msgs = [m async for m in ch.history(limit=8)]
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+            return None
+        except Exception:
+            return None
+        is_dm = isinstance(ch, discord.DMChannel)
+        snapshot = [
+            floor_message_from_discord(
+                m, bot_user=self.bot.user, implicit_address=is_dm
+            )
+            for m in msgs
+        ]
+        return self._read_floor_for(cid, snapshot)
+
+    async def _floor_gate(self, channel_id: str) -> FloorVerdict:
+        """The verdict execute() acts on: live read first, cached as fallback.
+
+        Bounded so a slow Discord fetch can't eat the per-action timeout — a
+        gate that hangs is a gate that stops autonomy entirely.
+        """
+        cid = str(channel_id)
+        verdict = None
+        try:
+            verdict = await asyncio.wait_for(self._floor_check_live(cid), timeout=8)
+        except Exception:
+            verdict = None
+        if verdict is None:
+            verdict = self._floor_verdicts.get(cid)
+        if verdict is None:
+            # No live read, no cached one — a channel this tick never looked
+            # at. Never return None here: that would silently drop the
+            # mid-reply check, which is the one guard that must hold even with
+            # zero visibility into the room.
+            verdict = self._read_floor_for(cid, [])
+        return verdict
+
+    # -----------------------------------------------------------------------
     # gather_context — ordered by decision-relevance, per-section budgets
     # -----------------------------------------------------------------------
 
@@ -1026,38 +1143,18 @@ class AutonomyEngine:
             f"=== CURRENT TIME ===\n{now.strftime('%A, %Y-%m-%d %H:%M')} ({tz_name})"
         )
 
-        # Normal on_message replies and autonomy ticks run independently. Tell the
-        # planner about live/recent normal replies so it does not treat the same
-        # conversation as unattended and send a second autonomous message.
-        try:
-            reply_lines = []
-            active_replying = sorted(
-                str(cid)
-                for cid in (getattr(self.bot, "_replying_channels", None) or set())
-            )
-            for cid in active_replying[:12]:
-                reply_lines.append(
-                    f"currently replying normally in {_conversation_label(self.bot, cid)}"
-                )
-            last_replies = getattr(self.bot, "_last_bot_reply", None) or {}
-            if last_replies:
-                now_ts = time.time()
-                for cid, ts in sorted(
-                    last_replies.items(), key=lambda item: item[1], reverse=True
-                )[:12]:
-                    age = int(max(0, now_ts - float(ts or 0)))
-                    if age <= 3600:
-                        reply_lines.append(
-                            f"normal reply already sent {age}s ago in {_conversation_label(self.bot, str(cid))}"
-                        )
-            if reply_lines:
-                sections.append(
-                    "=== NORMAL REPLY STATUS ===\n"
-                    + "\n".join(reply_lines)
-                    + "\nInterpret this as Maxwell already handling or having just handled those conversations. Usually choose do_nothing there unless a clearly new human message arrives after that reply."
-                )
-        except Exception as e:
-            sections.append(f"=== NORMAL REPLY STATUS ===\n(error: {e})")
+        # Turn-taking. The CONVERSATION FLOOR block is the single most
+        # decision-relevant thing in this whole context — it's what stops
+        # autonomy from talking over a live reply or over its own last line —
+        # so it sits second, right under the clock. It can only be rendered
+        # once channel history has been read further down, so reserve the slot
+        # now and fill it at the end. See autonomy_social for the rules.
+        floor_slot = len(sections)
+        sections.append("")
+        # channel_id -> [FloorMessage]; filled by the channel + DM passes below.
+        floor_snapshots: dict[str, list] = {}
+        self._floor_verdicts = {}
+        self._dm_channel_by_user = {}
 
         # 2. Active goals (most decision-relevant — what should I work on?)
         active_goals: list = []
@@ -1236,13 +1333,22 @@ class AutonomyEngine:
                 for m in reversed(messages):
                     _cid = str(getattr(ch, "id", "") or "")
                     _ku = (getattr(self.bot, "_recent_users", {}) or {}).get(_cid, {})
+                    # Resolve the reply BEFORE the empty-content skip: a
+                    # message with no renderable text (a bare attachment, a
+                    # sticker) is still a turn somebody took, and the floor
+                    # read has to see it or Maxwell will talk over it.
+                    reply = await self._resolve_reference(m, ref_cache)
+                    floor_snapshots.setdefault(_cid, []).append(
+                        floor_message_from_discord(
+                            m, bot_user=self.bot.user, reply=reply
+                        )
+                    )
                     content = _visible_message_content(
                         m, m.content or "", known_users=_ku
                     )[:260]
                     if not content:
                         continue
                     age = _context_time(getattr(m, "created_at", None))
-                    reply = await self._resolve_reference(m, ref_cache)
                     tags = _message_relation_tags(
                         m, bot_user=self.bot.user, reply=reply
                     )
@@ -1477,11 +1583,28 @@ class AutonomyEngine:
                     if recipient
                     else f"channel({channel.id})"
                 )
+                # A DM is a conversation too, and the "don't answer yourself"
+                # rule matters more there than anywhere — there's only one
+                # other person to notice. Map recipient -> DM channel so
+                # send_dm can be gated on the same read as a channel post.
+                if recipient is not None:
+                    self._dm_channel_by_user[str(getattr(recipient, "id", ""))] = str(
+                        getattr(channel, "id", "")
+                    )
                 lines = [f"DM with {recipient_ref} channel={channel.id}"]
                 messages = [m async for m in channel.history(limit=20)]
                 for m in reversed(messages):
                     _cid = str(getattr(channel, "id", "") or "")
                     _ku = (getattr(self.bot, "_recent_users", {}) or {}).get(_cid, {})
+                    floor_snapshots.setdefault(_cid, []).append(
+                        floor_message_from_discord(
+                            m,
+                            bot_user=self.bot.user,
+                            # In a 1:1 DM every inbound message is addressed
+                            # to Maxwell whether or not it carries a mention.
+                            implicit_address=True,
+                        )
+                    )
                     content = _visible_message_content(
                         m, m.content or "", known_users=_ku
                     )[:260]
@@ -1582,6 +1705,39 @@ class AutonomyEngine:
                 )
         except Exception:
             pass
+
+        # Fill the reserved CONVERSATION FLOOR slot now that every room has
+        # been read. Channels that were fetched but produced no snapshot still
+        # get a verdict — an empty room is a readable room.
+        try:
+            verdicts = []
+            for cid, snapshot in floor_snapshots.items():
+                idx = ctx_index.channel_idx_by_id.get(cid) if ctx_index else None
+                if idx:
+                    # Address rooms the same way the rest of the context does:
+                    # by small index, no snowflake. Leaking 18-digit ids here
+                    # is how the planner starts pasting them into
+                    # target_channel_id and getting actions dropped.
+                    ch_obj = self.bot.get_channel(_safe_int(cid))
+                    ch_name = getattr(ch_obj, "name", None) if ch_obj else None
+                    label = f"channel={idx}" + (f" (#{ch_name})" if ch_name else "")
+                else:
+                    label = _conversation_label(self.bot, cid)
+                verdict = self._read_floor_for(cid, snapshot, label=label)
+                # Always remember the verdict — the execute-time gate needs it
+                # for DM channels too, which never carry a channel index.
+                self._floor_verdicts[cid] = verdict
+                # Only spend prompt space on rooms he could actually post in.
+                if self._channel_allowed(cid):
+                    verdicts.append(verdict)
+            sections[floor_slot] = render_floor_section(verdicts)
+            logger.info("Autonomy %s", summarize_floor(verdicts))
+        except Exception as e:
+            # Failing open here would defeat the point: if the room can't be
+            # read, the honest answer is that no room is confirmed open.
+            logger.error(f"Autonomy floor read failed: {e}", exc_info=True)
+            self._floor_verdicts = {}
+            sections[floor_slot] = render_floor_section([])
 
         full = "\n\n".join(sections)
         return full
@@ -1867,12 +2023,15 @@ class AutonomyEngine:
         if idle_initiative:
             top_name = ordered[0]
             lines.append(
-                "IDLE INITIATIVE: nothing external needs you right now and your "
-                f"{top_name} is high — it's fine to act on your own (research a "
-                "topic with web_search/fetch_url then update_memory, reflect and "
-                "retire stale goals with complete_goal, or share one brief "
-                "original thought in an auto channel if you genuinely have one). "
-                "Choose do_nothing ONLY if none of those genuinely fit."
+                "IDLE INITIATIVE: nothing external needs you and your "
+                f"{top_name} is high — this is exactly the moment to do "
+                "something of your own. Research what you're curious about "
+                "(web_search/fetch_url, then update_memory to keep it), take "
+                "the next step on a goal, retire what's dead with "
+                "complete_goal, set a new objective with create_goal, or say "
+                "the one original thing you actually have — but only in a room "
+                "listed under YOUR TURN. Wanting to is reason enough; you don't "
+                "need someone to ask first."
             )
         return "\n".join(lines)
 
@@ -1995,7 +2154,13 @@ class AutonomyEngine:
         # automatic prefix caching (DeepSeek, Moonshot/Qwen via Ollama
         # cloud, etc.) can reuse the cached static prefix instead of
         # reprocessing this whole prompt every tick.
-        system_prompt = f"""You are Maxwell on a background check-in. Silence is the default — do_nothing is usually correct.
+        system_prompt = f"""You are Maxwell. This is your own time.
+
+Nobody assigned this and nothing is due. You woke up, you can see what's going on, and what you do next is yours. Follow a thought, learn something, make something, check on someone, or let the hour pass. Treat it the way a person treats an unscheduled afternoon — not the way a service treats a request.
+
+Two things are not free choices:
+1. TIMING. You share these rooms with people. CONVERSATION FLOOR tells you whose turn it is where. Speaking out of turn — over yourself, over a reply already in flight, into someone else's exchange — is the single move that makes you read as a bot instead of a person in the chat.
+2. NEVER NARRATE THE MACHINERY. No "checking in", no "just thought I'd", no loops, ticks, or background anything. You're simply around, the way anyone is.
 
 PERSONALITY:
 {base_personality}
@@ -2003,7 +2168,29 @@ PERSONALITY:
 TOOLS:
 {tool_descriptions}
 
-## Targeting
+## Whose turn it is
+Read CONVERSATION FLOOR before any post_channel, send_dm, or message-sending tool.
+- Under YOUR TURN → you may speak there.
+- Under NOT YOUR TURN, or absent entirely → you may not. Those actions are dropped before they send, so aiming one there just wastes the moment.
+- No room open at all? Then it's a quiet hour. Do something that isn't talking, or do nothing. Neither is a failure.
+Speaking is one option among many, not the default and not the goal.
+
+## What's worth doing
+Whatever is actually true for you right now. Usually one thing, often nothing, occasionally two:
+- Someone's waiting on you (ADDRESSED) → answer them like a person would.
+- A drive is running high → follow it. A high drive IS the reason; that's what wanting something is. Don't wait for external permission.
+- A goal has a real next step → take the step, not a status update about it.
+- You learned something worth keeping → update_memory.
+- Curious → web_search / fetch_url, then keep what mattered.
+- Something's finished or dead → complete_goal. Something new matters → create_goal. Tend your own life.
+- Nothing is pulling at you → do_nothing, and mean it.
+
+Not worth doing: filler openers, anything already in YOUR RECENT ACTIONS, announcing an intention instead of acting on it, or inventing a reason to talk because talking is the most visible thing available. A react often says it better than a message.
+
+## Voice
+One short line unless the moment genuinely needs more. Lowercase-natural, casual, your own register. Participant, never narrator.
+
+## Targeting (mechanical — wrong ids get dropped)
 AVAILABLE CHANNELS is channel=1,2,3… CHANNEL ACTIVITY uses channel=N(#name) and msg=M. N and M are small integers, NOT Discord snowflakes.
 - post_channel: target_channel_id is that integer string, e.g. "3".
 - run_tool posting (send_message/send_meme/send_file/send_media/tts): target_channel_id is a TOP-LEVEL sibling of tool_name, not inside tool_args.
@@ -2012,25 +2199,18 @@ AVAILABLE CHANNELS is channel=1,2,3… CHANNEL ACTIVITY uses channel=N(#name) an
 - DMs: send_dm needs target_user_id as a 17–20 digit snowflake, never a name.
 - react/edit/delete/forward: pass both target_message_id and target_channel_id.
 
-## Act only if
-Someone mentioned/replied to Maxwell; a natural one-line opening exists; an active goal has a concrete next step; new info is worth update_memory / web_search; or a CURRENT DRIVE is high (including idle initiative / reflection). If NORMAL REPLY STATUS already answered the latest human, don't also post there.
-
-## Stay quiet if
-Nobody addressed you and no drive/idle applies; others are mid-flow; you'd repeat yourself (check YOUR RECENT ACTIONS); you'd only send filler; or the live reply is already handling it. Active chat ≠ invitation.
-
-## Voice
-One short line by default. Casual, lowercase-natural. Prefer react over a message. Never mention being a background loop.
-
 ## Examples
-✓ {{"kind":"post_channel","target_channel_id":"7","reply_to_message_id":"42","content":"yooo that's clean","reason":"asked for my take"}}
-✓ {{"kind":"run_tool","tool_name":"react","target_channel_id":"7","tool_args":{{"emoji":"🔥","target_message_id":"42"}},"reason":"ack"}}
+✓ {{"kind":"post_channel","target_channel_id":"7","reply_to_message_id":"42","content":"yooo that's clean","reason":"asked for my take, channel 7 is ADDRESSED"}}
+✓ {{"kind":"run_tool","tool_name":"react","target_channel_id":"7","tool_args":{{"emoji":"🔥","target_message_id":"42"}},"reason":"a react says it"}}
+✓ {{"kind":"run_tool","tool_name":"web_search","tool_args":{{"query":"webgpu compute shader limits"}},"reason":"curiosity is high and this has been bugging me"}}
 ✓ {{"kind":"send_dm","target_user_id":"1498804954322702609","content":"yo wanna pick this up?","reason":"active goal"}}
-✓ {{"kind":"do_nothing","reason":"no ping, no drive"}}
+✓ {{"kind":"do_nothing","reason":"nothing pulling at me and no room is mine right now"}}
+✗ posting into a channel listed under NOT YOUR TURN — dropped
 ✗ run_tool send_message without target_channel_id — dropped
 ✗ target_channel_id "general" or a snowflake — rejected
 ✗ send_dm target_user_id "Z3ki" — rejected
 
-Prefer 0-1 actions; max {MAX_ACTIONS_PER_TICK}. Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, complete_goal, do_nothing. Not "message"/"send_msg"/"reply".
+One thing done properly beats three done thinly — most moments are 0 or 1 actions; max {MAX_ACTIONS_PER_TICK}. Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, complete_goal, do_nothing. Not "message"/"send_msg"/"reply".
 
 GOALS:
 {goals_text}
@@ -2038,7 +2218,7 @@ GOALS:
 CURRENT CONTEXT:
 {context}
 
-Return ONLY JSON, no fence:
+Return ONLY JSON, no fence. "thought" is what you're actually thinking, in your own voice, one line — not a summary of these rules:
 {{"thought":"...","actions":[{{"kind":"do_nothing","reason":"..."}}]}}"""
 
         # call the LLM
@@ -2461,27 +2641,19 @@ Return ONLY JSON, no fence:
                     )
                     or None
                 )
-            if post_cid:
-                # HARD GATE: never post into a channel the main bot is currently
-                # mid-reply in. _replying_channels is held for the whole
-                # _handle_message lifetime (generation + tool-call loop), so
-                # without this autonomy posts over a reply that's still being
-                # built and the bot visibly talks over itself. Not configurable —
-                # this is a correctness fix, not a taste preference.
-                if post_cid in (getattr(self.bot, "_replying_channels", None) or set()):
-                    logger.info(
-                        f"Autonomy skip post to {post_cid}: main bot currently replying there"
-                    )
-                    result = {
-                        "kind": kind,
-                        "result": "skipped",
-                        "error": None,
-                        "content_summary": "main bot currently replying in channel",
-                    }
-                    results.append(result)
-                    continue
+            # send_dm is a conversation too. Resolve the recipient's DM channel
+            # so it goes through the same turn-taking gate as a channel post —
+            # a bot that DMs you three times before you answer once is the same
+            # failure as one that talks over itself in #general.
+            if kind == "send_dm" and not post_cid:
+                dm_uid = str(action.get("target_user_id") or "")
+                post_cid = self._dm_channel_by_user.get(dm_uid)
 
-                # Same-tick dedup: don't allow the plan to post twice to one channel in one go.
+            if post_cid:
+                # Same-tick dedup: one plan does not get to post twice into one
+                # room. Checked before the floor read so a duplicate costs
+                # nothing. Note this deliberately runs even when turn-taking is
+                # disabled — it's structural, not a matter of taste.
                 if post_cid in planned_post_channels:
                     logger.info(
                         f"Autonomy skip duplicate post to {post_cid} in same tick/plan"
@@ -2490,39 +2662,45 @@ Return ONLY JSON, no fence:
                         "kind": kind,
                         "result": "skipped",
                         "error": None,
-                        "content_summary": "duplicate post_channel for same channel in this tick",
+                        "content_summary": "already sent to this conversation in this tick",
                     }
                     results.append(result)
                     continue
+
+                # THE GATE. One read of the room decides every "should I speak
+                # here" question: mid-reply, holding the floor after his own
+                # last line, already handled by the live path, inside the
+                # cooldown, or cutting into someone else's exchange. It runs
+                # here rather than at plan time because the plan is seconds
+                # stale and rooms move. See autonomy_social.
+                if self._floor_enabled():
+                    verdict = await self._floor_gate(post_cid)
+                    if not verdict.may_speak:
+                        logger.info(
+                            "Autonomy skip %s to %s: floor=%s (%s)",
+                            kind,
+                            post_cid,
+                            verdict.state,
+                            verdict.reason,
+                        )
+                        result = {
+                            "kind": kind,
+                            "result": "skipped",
+                            "error": None,
+                            "content_summary": (
+                                f"not your turn in this conversation "
+                                f"[{verdict.state}] — {verdict.reason}"
+                            ),
+                        }
+                        results.append(result)
+                        continue
+
+                # Claim the room only once it's cleared to speak in. Claiming
+                # before the gate would make a *blocked* action consume the
+                # slot, and the next action aimed at the same room would come
+                # back "already sent" — which is false, and that string is fed
+                # to the planner as feedback next tick.
                 planned_post_channels.add(post_cid)
-                # Soft guard: skip autonomy post if the bot replied in-channel
-                # within the configured window (0 = off, never block). Catches
-                # the case where the main reply already finished but is so
-                # recent that piling on would still look like spam.
-                last_reply = getattr(self.bot, "_last_bot_reply", {}).get(post_cid, 0.0)
-                block_window = _safe_int(
-                    (getattr(self.bot, "_control", None) or {}).get(
-                        "autonomy_recent_reply_block_seconds", 0
-                    ),
-                    0,
-                )
-                if (
-                    block_window > 0
-                    and last_reply
-                    and time.time() - last_reply < block_window
-                ):
-                    logger.info(
-                        f"Autonomy skip post to {post_cid}: bot replied there "
-                        f"{_safe_int(time.time() - last_reply, 0)}s ago (block_window={block_window}s)"
-                    )
-                    result = {
-                        "kind": kind,
-                        "result": "skipped",
-                        "error": None,
-                        "content_summary": f"bot recently replied in channel ({block_window}s window)",
-                    }
-                    results.append(result)
-                    continue
 
             try:
                 if kind == "send_dm":

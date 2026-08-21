@@ -382,7 +382,40 @@ REM is opt-in: it is off unless you set `ENABLE_REM=true` (or `REM_ENABLED=true`
 
 Autonomy is separate from the removed `,auto` auto-reply mode. It wakes on `autonomy_interval_seconds`, gathers recent conversations, DMs, goals, memory, and available channels, then asks the LLM for a JSON action plan. Supported actions are channel posts, DMs, tool calls, memory updates, goal creation, or doing nothing.
 
-Channel post cooldowns were removed. The engine can post to the same channel on consecutive ticks if the planner decides to. Keep the interval sane if you do not want spam; the code is no longer pretending a hardcoded 30-minute cooldown is wisdom.
+### Turn-taking
+
+Autonomy runs on a timer; conversation runs on turns. Reconciling the two is `autonomy_social.py`, and it is the reason Maxwell no longer walks into a conversation he is already in.
+
+Before anything sends, the engine reads each room and returns a verdict on whether the floor is his:
+
+| State | Meaning | Speak? |
+| --- | --- | --- |
+| `REPLYING` | the main reply path is generating here right now | no |
+| `HOLDING` | he spoke last and nobody has answered yet | no |
+| `HANDLED` | the live reply already covered the newest ping | no |
+| `COOLDOWN` | he spoke here inside the quiet window | no |
+| `BUSY` | other people are mid-exchange and not talking to him | no |
+| `ADDRESSED` | someone is waiting on him and nothing has answered | yes |
+| `OPEN` | ordinary room, nobody mid-thought | yes |
+| `IDLE` | quiet for a while | yes |
+
+The verdict is used twice on purpose: it is rendered into the planner prompt as a `CONVERSATION FLOOR` section so the model can choose freely among the rooms that are actually his, and it is re-checked against live state immediately before the send, because the plan is seconds stale by then and rooms move.
+
+**This gates speaking only.** Research, memory writes, goal work, and reflection are never blocked by it — the point is to constrain timing, not initiative. Restraint that can be computed lives in code; the prompt is left free.
+
+| Control | Default | Meaning |
+| --- | --- | --- |
+| `autonomy_floor_enabled` | `true` | Enforce turn-taking. Off = planner still sees the read, `execute()` stops acting on it. Debugging only. |
+| `autonomy_floor_cooldown_seconds` | `90` | Quiet window after his own last line before an unprompted new one. Being addressed bypasses it. |
+| `autonomy_floor_hold_release_seconds` | `1800` | How long he keeps holding the floor after speaking into silence. |
+| `autonomy_floor_mid_flow_seconds` / `_messages` | `45` / `3` | What counts as other people mid-exchange. |
+| `autonomy_floor_idle_seconds` | `600` | Silence after which a room reads as idle rather than active. |
+
+`autonomy_recent_reply_block_seconds` is the older single-purpose knob for the same idea. It still works and is honored as a minimum for the cooldown, so an existing tuned value is never silently shortened.
+
+Manage these in the dashboard under **Autonomy → Turn-taking**.
+
+Note that these windows are conversational, not mechanical: they are deliberately independent of `autonomy_interval_seconds`, because how long it is polite to wait before speaking again is a property of the room rather than of how often Maxwell wakes up.
 
 Autonomy respects two dedicated blacklists (in addition to the general `blocked_channels`/`allowed_channels`):
 
