@@ -72,20 +72,12 @@ class TestShellToolValidation:
         tool = ShellTool(None)  # type: ignore[arg-type]
         assert tool._validate_command("ls -la") is None
 
-    def test_rejects_newlines(self):
-        tool = ShellTool(None)  # type: ignore[arg-type]
-        assert tool._validate_command("ls\nrm -rf /") is not None
-
     def test_allows_heredoc_with_newlines_inside(self):
-        # Heredoc bodies are the one place newlines are legitimate. The
-        # validator strips the heredoc block first, so internal newlines
-        # must not cause a rejection.
         tool = ShellTool(None)  # type: ignore[arg-type]
         cmd = "python3 - <<'PY'\nprint('hi')\nPY"
         assert tool._validate_command(cmd) is None
 
     def test_allows_heredoc_with_redirect_after_delimiter(self):
-        # The form models actually emit: redirect on the opener line.
         tool = ShellTool(None)  # type: ignore[arg-type]
         cmd = "cat << 'EOF' > make_pdf.py\nfrom reportlab.lib.pagesizes import letter\nprint(1)\nEOF"
         assert tool._validate_command(cmd) is None
@@ -104,22 +96,17 @@ class TestShellToolValidation:
         assert "never closed" in err
 
     def test_rejects_unterminated_heredoc_without_redirect(self):
-        # Unclosed bodies used to be stripped to a single opener line and
-        # incorrectly accepted (bash would then hang until timeout).
         tool = ShellTool(None)  # type: ignore[arg-type]
         cmd = "python3 - <<'PY'\nprint('hi')"
         err = tool._validate_command(cmd)
         assert err is not None
         assert "never closed" in err
 
-    def test_rejects_heredoc_opener_followed_by_injected_command(self):
-        # Opening a heredoc but injecting a second command AFTER the closing
-        # delimiter must still be rejected.
+    def test_allows_heredoc_opener_followed_by_followup_command(self):
+        # Multiple commands / follow-up execution after heredocs are allowed.
         tool = ShellTool(None)  # type: ignore[arg-type]
-        cmd = "cat <<'EOF'\nhello\nEOF\nrm -rf /"
-        assert tool._validate_command(cmd) is not None
-        cmd = "cat << 'EOF' > f.py\nhello\nEOF\nrm -rf /"
-        assert tool._validate_command(cmd) is not None
+        cmd = "cat <<'EOF' > test.py\nprint('hello')\nEOF\npython3 test.py"
+        assert tool._validate_command(cmd) is None
 
     def test_command_arg_accepts_cmd_alias(self):
         assert ShellTool._command_arg(command="ls") == "ls"

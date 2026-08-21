@@ -416,43 +416,25 @@ def _strip_heredoc_blocks(command: str) -> str:
         line = lines[i]
         delimiter = _heredoc_delimiter(line)
         if delimiter:
-            # Keep the opener line so callers see the full line structure
-            # (a missing opener would let a post-heredoc injected command
-            # look like part of the body). The body lines themselves are
-            # the only place newlines are legitimate.
             out.append(line)
             i += 1
-            closed = False
             while i < len(lines):
                 if lines[i].strip() == delimiter:
-                    closed = True
+                    out.append(lines[i])
                     i += 1
                     break
                 i += 1
-            if not closed:
-                # Leave a blank line so the newline guard still fires; the
-                # dedicated unterminated-heredoc hint explains how to close it.
-                out.append("")
             continue
         out.append(line)
         i += 1
-    # A well-formed heredoc frequently ends with a trailing newline after the
-    # closing delimiter ("...EOF\n"). That produces a trailing empty element
-    # here which would otherwise read as a bare newline and fail the validator
-    # with a confusing "newlines only allowed inside heredoc bodies" error on
-    # a perfectly legal command. Trailing blank lines are harmless, so drop
-    # them before joining. Only the LAST of them is stripped; blank lines
-    # between real statements are still caught by the newline check below.
     return "\n".join(out).rstrip("\n")
 
 
 def _unterminated_heredoc_error(command: str) -> str | None:
     """Explain a newline violation caused by a malformed heredoc.
 
-    The generic newline error is confusing when the real problem is a heredoc
-    that was never closed, or a second command placed after the closing
-    delimiter. Return a targeted hint for those cases so the model (or a human
-    pasting a command) is told exactly what to fix.
+    Return a targeted hint when a heredoc was never closed so the caller
+    is told exactly what to fix.
     """
     lines = str(command or "").split("\n")
     opener: str | None = None  # the delimiter token, when inside a heredoc body
@@ -470,16 +452,7 @@ def _unterminated_heredoc_error(command: str) -> str | None:
                 saw_unparsed_opener = True
         else:
             if line.strip() == opener:
-                # Closing delimiter found. Anything non-blank after it is a
-                # second top-level command, which the newline guard rejects.
-                rest = [ln for ln in lines[i + 1 :] if ln.strip()]
-                if rest:
-                    return (
-                        f"heredoc `{opener}` closed but more command text follows "
-                        f"({rest[0]!r}) — only the heredoc body may span lines; "
-                        "run the follow-up in a separate shell call"
-                    )
-                return None
+                opener = None
         i += 1
     if opener is not None:
         return (
@@ -3985,30 +3958,14 @@ class ShellTool(Tool):
         max_len = self._max_command_length()
         if max_len and len(command) > max_len:
             return f"command too long (max {max_len} chars; set MAXWELL_SHELL_MAX_COMMAND_LENGTH=0 to disable)"
-        # Newlines are only allowed inside heredoc bodies. Bare newlines would
-        # let the LLM chain a second top-level command (e.g. "ls\nrm -rf /")
-        # which is classic command injection. Check for an unclosed / followed-on
-        # heredoc BEFORE stripping: an unclosed opener would otherwise consume
-        # the rest of the command as "body" and look like a single legal line.
-        # Then strip heredoc bodies so anything still on its own line in
-        # `non_heredoc` is a real second command. The Docker sandbox is the
-        # real security boundary (no host FS/net/sock by default); the
-        # taint-check gate (in execute) + the blocked patterns below defend
-        # against prompt-injection chains that fit on a single line.
+        # Multi-line commands & heredocs are allowed.
         if "\n" in command:
             hint = _unterminated_heredoc_error(command)
             if hint:
-                return "newlines are only allowed inside heredoc bodies — " + hint
+                return "heredoc error — " + hint
         non_heredoc = _strip_heredoc_blocks(command)
         if any(ord(c) < 32 and c not in ("\t", "\n", "\r") for c in non_heredoc):
             return "control characters are not allowed in shell commands"
-        if "\n" in non_heredoc:
-            return (
-                "newlines are only allowed inside heredoc bodies — a `<< 'EOF'` ... EOF "
-                "block is the only place bare newlines are permitted; put `> file` on "
-                "the opener line (`cat << 'EOF' > file`), close with a line containing "
-                "only EOF, or run a follow-up in a separate shell call"
-            )
         for pattern in _SHELL_BLOCKED_PATTERNS:
             if re.search(pattern, command, re.IGNORECASE):
                 return "blocked dangerous shell pattern"
