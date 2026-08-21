@@ -4038,6 +4038,9 @@ class ShellTool(Tool):
     async def _send_ansi_chunks(self, message: Message, text: str) -> None:
         """Send `text` as one or more ```ansi codeblocks, each ≤2000 chars.
 
+        If a previous update message or live progress message exists in the channel,
+        edit that message instead of spamming new messages.
+
         Discord rejects (400 Invalid Form Body, 50035) any message over 2000
         chars. The ```ansi\n...\n``` wrapper is 13 chars (8 for the opener
         `` ```ansi\n`` + 5 for the closer `` \n``` ``) and we leave an
@@ -4073,9 +4076,42 @@ class ShellTool(Tool):
             last = chunks[-1]
             room = max(0, limit - len(notice))
             chunks[-1] = last[:room] + notice
+
+        chan_key = str(getattr(getattr(message, "channel", None), "id", id(message)))
         for i, chunk in enumerate(chunks):
             safe = chunk.replace("```", "'''")
-            await message.channel.send(f"```ansi\n{safe}\n```")
+            formatted = f"```ansi\n{safe}\n```"
+
+            target_msg = None
+            if i == 0:
+                # 1. Try reusing the live progress message if posted
+                progress = self._get_channel_progress(message)
+                if progress is not None:
+                    posted = getattr(progress, "_posted", None)
+                    if posted is not None and hasattr(posted, "edit"):
+                        target_msg = posted
+                # 2. Try reusing a previous shell message in this channel
+                if target_msg is None and hasattr(self, "_last_shell_msg_by_channel"):
+                    target_msg = self._last_shell_msg_by_channel.get(chan_key)
+
+            edited = False
+            if target_msg is not None:
+                try:
+                    await target_msg.edit(content=formatted)
+                    edited = True
+                    if not hasattr(self, "_last_shell_msg_by_channel"):
+                        self._last_shell_msg_by_channel = {}
+                    self._last_shell_msg_by_channel[chan_key] = target_msg
+                except Exception:
+                    edited = False
+
+            if not edited:
+                sent = await message.channel.send(formatted)
+                if not hasattr(self, "_last_shell_msg_by_channel"):
+                    self._last_shell_msg_by_channel = {}
+                if sent is not None and hasattr(sent, "edit"):
+                    self._last_shell_msg_by_channel[chan_key] = sent
+
             if len(chunks) > 1 and i < len(chunks) - 1:
                 await asyncio.sleep(0.3)
 
