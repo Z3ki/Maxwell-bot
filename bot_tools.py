@@ -6722,8 +6722,6 @@ class EmailSendTool(Tool):
         bcc: str | None = None,
         **kwargs,
     ) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: email tools are admin-only"
         cfg = _email_cfg(self.bot)
         if not cfg["password"]:
             return (
@@ -6802,8 +6800,6 @@ class EmailReadInboxTool(Tool):
         unread_only: str = "false",
         **kwargs,
     ) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: email tools are admin-only"
         cfg = _email_cfg(self.bot)
         if not cfg["password"]:
             return (
@@ -6854,8 +6850,6 @@ class EmailGetMessageTool(Tool):
         max_chars: str = "8000",
         **kwargs,
     ) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: email tools are admin-only"
         if not message_id or not str(message_id).strip():
             return "Error: message_id is required"
         try:
@@ -6901,8 +6895,6 @@ class EmailSearchTool(Tool):
         max_results: str = "10",
         **kwargs,
     ) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: email tools are admin-only"
         if not query or not str(query).strip():
             return "Error: query is required"
         try:
