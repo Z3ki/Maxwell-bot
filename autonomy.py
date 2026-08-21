@@ -2583,7 +2583,23 @@ Return ONLY JSON, no fence. "thought" is what you're actually thinking, in your 
 
         # call the LLM
         try:
-            messages = [{"role": "system", "content": system_prompt}]
+            # A system-only messages array is rejected by Claude models with
+            # 400 INVALID_ARGUMENT — they require at least one user turn. The
+            # old fallback (ling-3.0-flash) tolerated it, so this only showed
+            # up once the fallback became claude-opus-4-6: the primary would
+            # return empty, fail over, and the fallback would 400, turning a
+            # transient blip into a dead tick. The explicit user turn is also
+            # a better prompt shape for every other provider.
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": (
+                        "Decide what to do right now based on the context above. "
+                        "Reply with ONLY the JSON plan."
+                    ),
+                },
+            ]
             # Cap the timeout like the REM path (bot.py _run_rem_once_guarded)
             # so a misconfigured ai_timeout_seconds can't hang a tick for hours.
             timeout = max(

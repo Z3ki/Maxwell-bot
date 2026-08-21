@@ -3,8 +3,10 @@
 import asyncio
 import base64
 import contextlib
+import hashlib
 import hmac
 import html
+import io
 import json
 import logging
 import os
@@ -2353,6 +2355,10 @@ class MaxwellBot(commands.Bot):
         self._guild_emojis: dict[str, dict[str, str]] = {}
         self._guild_stickers: dict[str, dict[str, str]] = {}
         self._media_context: dict[str, list[dict]] = {}
+        # channel_id -> emoji-grid cache key already shown there. Keyed by the
+        # grid's content hash, so a guild adding an emoji re-shows the sheet
+        # instead of Maxwell running on a stale one.
+        self._emoji_grid_shown: dict[str, str] = {}
         # Indirect-prompt-injection defense. When the model has just read
         # content from a less-trusted source (fetch_url, web_search, a URL in
         # a user message, etc.), we mark the current message as "tainted" so
@@ -3988,6 +3994,7 @@ class MaxwellBot(commands.Bot):
                         )
                 await self.memory.clear_channel_memory(channel_id)
                 self._media_context.pop(channel_id, None)
+                self._emoji_grid_shown.pop(channel_id, None)
                 self._active_requests.pop(channel_id, None)
                 self._active_request_user.pop(channel_id, None)
                 self._stop_until.pop(channel_id, None)
@@ -7914,6 +7921,179 @@ class MaxwellBot(commands.Bot):
             unique.append((label, url))
         return unique
 
+    # ---- server emoji/sticker reference grid -------------------------------
+    # Maxwell was told the *names* of every server emoji/sticker but had never
+    # seen one, so it picked them blind. This renders a labeled contact sheet
+    # once per guild (cached to disk, keyed by the emoji set) and shows it the
+    # first time Maxwell speaks in a channel.
+    _GRID_CELL = 72          # icon box, px
+    _GRID_LABEL_H = 14       # label strip under each icon, px
+    _GRID_COLS = 8
+    _GRID_MAX_EMOJIS = 48
+    _GRID_MAX_STICKERS = 12
+
+    def _emoji_grid_dir(self) -> Path:
+        d = Path(getattr(self.config, "DATA_DIR", "data")) / "emoji_grids"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    @staticmethod
+    def _grid_entries(guild) -> list[tuple[str, str]]:
+        """(name, cdn_url) for the icons worth drawing, stickers first."""
+        entries: list[tuple[str, str]] = []
+        for st in list(getattr(guild, "stickers", None) or []):
+            fmt = getattr(st, "format", None)
+            if "lottie" in str(getattr(fmt, "name", fmt) or "").lower():
+                continue  # vector JSON, nothing to rasterize
+            url = str(getattr(st, "url", "") or "")
+            if url:
+                entries.append((str(getattr(st, "name", "?")), url))
+        entries = entries[: MaxwellBot._GRID_MAX_STICKERS]
+        emojis = []
+        for em in list(getattr(guild, "emojis", None) or []):
+            eid = getattr(em, "id", None)
+            if not eid:
+                continue
+            ext = ".gif" if getattr(em, "animated", False) else ".png"
+            emojis.append(
+                (str(getattr(em, "name", "?")), f"https://cdn.discordapp.com/emojis/{eid}{ext}")
+            )
+        return entries + emojis[: MaxwellBot._GRID_MAX_EMOJIS]
+
+    async def _emoji_grid_media(self, guild) -> dict | None:
+        """Build (or load from cache) the labeled grid for a guild."""
+        entries = self._grid_entries(guild)
+        if not entries:
+            return None
+        # Key on the exact icon set, so adding or removing an emoji rebuilds
+        # rather than serving a stale sheet forever.
+        key = hashlib.sha256(
+            "|".join(f"{n}:{u}" for n, u in entries).encode("utf-8")
+        ).hexdigest()[:16]
+        path = self._emoji_grid_dir() / f"{getattr(guild, 'id', 'guild')}-{key}.png"
+
+        if not path.exists():
+            built = await asyncio.to_thread(self._render_emoji_grid, await self._fetch_grid_icons(entries), path)
+            if not built:
+                return None
+        try:
+            blob = path.read_bytes()
+        except OSError as e:
+            logger.warning(f"Emoji grid unreadable ({path}): {e}")
+            return None
+        return self._media_item(
+            b64=base64.b64encode(blob).decode("utf-8"),
+            mime_type="image/png",
+            filename="SERVER-EMOJI-STICKER-REFERENCE-GRID.png",
+            is_image=True,
+            message_id=None,
+            source="emoji_grid",
+        )
+
+    async def _maybe_emoji_grid(self, message, channel_id: str) -> dict | None:
+        """Return the grid media item the first time we speak in a channel.
+
+        Attaching it every turn would bill vision tokens on every message in
+        every guild; once per channel session is enough for Maxwell to learn
+        what the names look like, and the text name-list carries the rest.
+        """
+        guild = getattr(message, "guild", None)
+        if guild is None or not self._control.get("emoji_context_enabled", True):
+            return None
+        try:
+            item = await self._emoji_grid_media(guild)
+        except Exception as e:
+            logger.warning(f"Emoji grid build failed for guild {getattr(guild, 'id', '?')}: {e}")
+            return None
+        if item is None:
+            return None
+        key = item.get("b64", "")[:64]
+        if self._emoji_grid_shown.get(channel_id) == key:
+            return None
+        self._emoji_grid_shown[channel_id] = key
+        logger.info(f"Attaching server emoji grid to channel {channel_id}")
+        return item
+
+    async def _fetch_grid_icons(self, entries: list[tuple[str, str]]) -> list[tuple[str, bytes]]:
+        """Download the icons concurrently; skip whatever fails."""
+        sem = asyncio.Semaphore(8)
+        session = await _get_shared_session()
+
+        async def one(name: str, url: str):
+            async with sem:
+                try:
+                    async with session.get(
+                        url, timeout=aiohttp.ClientTimeout(total=15, connect=6)
+                    ) as resp:
+                        if resp.status != 200:
+                            return None
+                        return name, await _read_response_limited(resp, 2 * 1024 * 1024)
+                except Exception:
+                    return None
+
+        done = await asyncio.gather(*(one(n, u) for n, u in entries))
+        return [d for d in done if d]
+
+    @classmethod
+    def _render_emoji_grid(cls, icons: list[tuple[str, bytes]], path: Path) -> bool:
+        """Compose the contact sheet. Runs in a thread — PIL is blocking."""
+        if not icons:
+            return False
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+        except ImportError:
+            logger.warning("Pillow missing — cannot build emoji grid")
+            return False
+        try:
+            font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 10
+            )
+        except Exception:
+            font = ImageFont.load_default()
+
+        cell_h = cls._GRID_CELL + cls._GRID_LABEL_H
+        cols = min(cls._GRID_COLS, len(icons))
+        rows = (len(icons) + cols - 1) // cols
+        # Light background: these are mostly dark-outlined emojis, and a
+        # transparent sheet flattens to black in most vision pipelines.
+        sheet = Image.new("RGB", (cols * cls._GRID_CELL, rows * cell_h), (245, 245, 247))
+        draw = ImageDraw.Draw(sheet)
+
+        for idx, (name, blob) in enumerate(icons):
+            col, row = idx % cols, idx // cols
+            x0, y0 = col * cls._GRID_CELL, row * cell_h
+            try:
+                im = Image.open(io.BytesIO(blob))
+                im.seek(0)  # animated: first frame is enough to identify it
+                im = im.convert("RGBA")
+                im.thumbnail((cls._GRID_CELL - 8, cls._GRID_CELL - 8))
+                sheet.paste(
+                    im,
+                    (x0 + (cls._GRID_CELL - im.width) // 2,
+                     y0 + (cls._GRID_CELL - im.height) // 2),
+                    im,
+                )
+            except Exception:
+                continue
+            label = name if len(name) <= 12 else name[:11] + "…"
+            try:
+                tw = draw.textlength(label, font=font)
+            except Exception:
+                tw = len(label) * 5
+            draw.text(
+                (x0 + max(0, (cls._GRID_CELL - tw) // 2), y0 + cls._GRID_CELL),
+                label,
+                fill=(30, 30, 35),
+                font=font,
+            )
+        try:
+            sheet.save(path, format="PNG", optimize=True)
+        except OSError as e:
+            logger.warning(f"Failed to save emoji grid {path}: {e}")
+            return False
+        logger.info(f"Built emoji grid {path.name} ({len(icons)} icons)")
+        return True
+
     # Discord CDN roots for the two "image-like" payloads that are NOT
     # attachments: custom emojis are inline markup in content, stickers ride
     # on message.stickers. Without this the model is blind to both — a
@@ -8486,6 +8666,9 @@ class MaxwellBot(commands.Bot):
             if bool(self._control.get("process_images", True)):
                 media.extend(await self._extract_embeds(message))
                 media.extend(await self._extract_gif_links(message))
+                grid = await self._maybe_emoji_grid(message, channel_id)
+                if grid is not None:
+                    media.append(grid)
         except Exception as e:
             logger.warning(f"Media extraction failed: {e}")
             media = []
