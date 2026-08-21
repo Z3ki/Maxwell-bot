@@ -3856,11 +3856,18 @@ class MaxwellBot(commands.Bot):
                 suppress_typing=True,
             )
 
-            async def fake_reply(reply_content=None, **kwargs):
+            # The parameter MUST be named `content`. Callers reach this via
+            # the normal send path, and _send_with_slowmode passes the body as
+            # a keyword (`reply.reply(content=...)`). Naming it anything else
+            # lets `content` fall through into **kwargs while the positional
+            # stays None — then this forwards None positionally AND content by
+            # keyword, and discord.py raises "got multiple values for argument
+            # 'content'". Every reaction-triggered reply died that way.
+            async def fake_reply(content=None, **kwargs):
                 if hasattr(message, "reply"):
-                    return await message.reply(reply_content, **kwargs)
+                    return await message.reply(content, **kwargs)
                 if channel is not None:
-                    return await channel.send(reply_content, **kwargs)
+                    return await channel.send(content, **kwargs)
                 return None
 
             fake_message.reply = fake_reply
