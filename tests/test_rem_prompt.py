@@ -33,3 +33,19 @@ def test_extract_rem_json_allows_braces_inside_strings():
     payload = _extract_rem_json(raw)
     assert payload["audit"] == "text } here"
     assert payload["actions"] == {}
+
+
+def test_short_term_slice_prompt_bounds_a_huge_slice():
+    """500 events x 4000 chars would serialize past any context window."""
+    events = [
+        {"role": "user", "content": "x" * 4000, "ts": f"2026-01-01T00:00:{i:02d}+00:00"}
+        for i in range(500)
+    ]
+    prompt = short_term_slice_prompt(events)
+
+    assert len(prompt) < 200_000
+    payload = json.loads(prompt.split("\n", 1)[1])
+    # Every event survives (shortened) — the watermark moves past this slice,
+    # so a dropped event would never be assimilated at all.
+    assert len(payload) == len(events)
+    assert all("chars)" in e["content"] for e in payload)

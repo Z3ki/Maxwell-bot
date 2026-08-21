@@ -43,11 +43,36 @@ def rem_system_prompt(turns_remaining: int, prompt_body: str | None = None) -> s
     )
 
 
+# The event ring holds up to DEFAULT_REM_EVENT_BUFFER_MAX (500) events of up
+# to 4000 chars each, so an un-budgeted slice can serialize to ~2M chars — well
+# past any model's context window, which fails the whole assimilation pass
+# instead of just losing detail. Shrink every event proportionally rather than
+# dropping the oldest ones: the watermark advances past this slice either way,
+# so a dropped event is never assimilated at all, while a shortened one still
+# contributes its decision/preference/task.
+REM_SLICE_MAX_CHARS = 120_000
+REM_SLICE_MIN_EVENT_CHARS = 300
+
+
 def short_term_slice_prompt(events: list[dict]) -> str:
+    events = list(events or [])
+    if events:
+        per_event = max(REM_SLICE_MIN_EVENT_CHARS, REM_SLICE_MAX_CHARS // len(events))
+        budgeted = []
+        for event in events:
+            content = str(event.get("content") or "")
+            if len(content) <= per_event:
+                budgeted.append(event)
+                continue
+            trimmed = dict(event)
+            trimmed["content"] = (
+                content[:per_event] + f"… (+{len(content) - per_event} chars)"
+            )
+            budgeted.append(trimmed)
+        events = budgeted
     return (
         "Short-term visible slice (inputs/outputs, reasoning excluded). "
-        "Keep what matters:\n"
-        + json.dumps(events, ensure_ascii=False, sort_keys=True)
+        "Keep what matters:\n" + json.dumps(events, ensure_ascii=False, sort_keys=True)
     )
 
 

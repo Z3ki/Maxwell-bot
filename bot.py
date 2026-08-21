@@ -274,8 +274,10 @@ from tool_schemas import (  # noqa: E402
     build_openai_tools,
     contract_groups,
     elide_tool_calls_for_history,
+    message_chars,
     normalize_native_tool_calls,
     result_contract,
+    trim_tool_tail,
 )
 from utils import (  # fd-safe, single source of truth  # noqa: E402
     FileLock,
@@ -415,10 +417,25 @@ async def _await_task_done(task: asyncio.Task) -> None:
         pass
 
 
-def _format_context_timestamp(value, *, now: datetime | None = None) -> str:
+def _format_context_timestamp(
+    value, *, now: datetime | None = None, relative: bool = True
+) -> str:
+    """Render a stored timestamp for the prompt.
+
+    ``relative=False`` returns ONLY the absolute local stamp, which is stable
+    for a given message forever. Anything replayed on every turn (the channel
+    transcript) must use it: a relative "12m ago" is recomputed against the
+    current clock, so every historical line changes bytes on every request and
+    the provider-side prefix cache misses on the single largest part of the
+    prompt. The live current time is stated once in the volatile block instead,
+    which is enough for the model to derive age.
+    """
     dt = _coerce_utc_datetime(value)
     if dt is None:
         return ""
+    local = dt.astimezone().strftime("%a %Y-%m-%d %H:%M")
+    if not relative:
+        return f"{local} local"
     now = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
     age_s = _safe_int((now - dt).total_seconds(), 0)
     if age_s < 0:
@@ -431,7 +448,6 @@ def _format_context_timestamp(value, *, now: datetime | None = None) -> str:
         rel = f"{age_s // 3600}h ago"
     else:
         rel = f"{age_s // 86400}d ago"
-    local = dt.astimezone().strftime("%a %Y-%m-%d %H:%M")
     return f"{rel} / {local} local"
 
 
@@ -8752,10 +8768,13 @@ class MaxwellBot(commands.Bot):
                             + "\n=== END ===\nUse these results to continue. Tool images are attached. Don't text-reply if the user asked for an image — send_media or re-run image_generator instead.",
                         }
                     )
-                # Keep tail bounded. Native tool turns are multi-message; cap by count.
-                if len(conversation_tail) > 24:
-                    conversation_tail = conversation_tail[-24:]
-                result_messages = [dict(m) for m in messages] + list(conversation_tail)
+                # Keep the tail bounded by size as well as count, dropping
+                # whole rounds so an assistant turn is never separated from
+                # the role=tool messages holding its tool_call_ids.
+                conversation_tail = trim_tool_tail(conversation_tail)
+                result_messages = MaxwellBot._apply_prompt_budget(
+                    self, [dict(m) for m in messages] + list(conversation_tail)
+                )
                 await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
                 try:
                     # Attach images from tools so the model can SEE them
@@ -10153,16 +10172,8 @@ class MaxwellBot(commands.Bot):
 
     @staticmethod
     def _message_content_chars(message: dict) -> int:
-        content = message.get("content", "")
-        if isinstance(content, str):
-            return len(content)
-        if isinstance(content, list):
-            return sum(
-                len(str(part.get("text", "")))
-                for part in content
-                if isinstance(part, dict)
-            )
-        return len(str(content or ""))
+        """Prompt size of one message — see tool_schemas.message_chars."""
+        return message_chars(message)
 
     @staticmethod
     def _trim_middle(text: str, limit: int) -> str:
@@ -10179,11 +10190,14 @@ class MaxwellBot(commands.Bot):
             + text[-keep:]
         )
 
-    def _apply_prompt_budget(self, messages: list[dict]) -> list[dict]:
-        # 2026-07-19: model context window is 256k. Use most of it. The
-        # previous default of 60k left ~190k of context unused while the
-        # bot forgot things said 10 minutes ago. Output reserve scales
-        # so we don't over-fill and starve the reply.
+    def _prompt_budget_chars(self) -> int:
+        """Chars the whole prompt may occupy, output headroom already removed.
+
+        2026-07-19: model context window is 256k. Use most of it. The previous
+        default of 60k left ~190k of context unused while the bot forgot things
+        said 10 minutes ago. The output reserve scales with the budget so a
+        full context window can't leave the model with no room to answer.
+        """
         raw_budget = max(
             10000,
             min(
@@ -10194,10 +10208,11 @@ class MaxwellBot(commands.Bot):
                 2000000,
             ),
         )
-        # Reserve output headroom so the model has room to generate a response.
-        # Without this, a full context window means the model cannot produce output.
         output_reserve = max(16000, raw_budget // 4)
-        budget = max(10000, raw_budget - output_reserve)
+        return max(10000, raw_budget - output_reserve)
+
+    def _apply_prompt_budget(self, messages: list[dict]) -> list[dict]:
+        budget = MaxwellBot._prompt_budget_chars(self)
         total = sum(MaxwellBot._message_content_chars(m) for m in messages)
         if total <= budget:
             return messages
@@ -10272,11 +10287,11 @@ class MaxwellBot(commands.Bot):
         # messages in the same server — same tools, same personality, same
         # custom prompt. Anything that changes on EVERY call (timestamp, RAG
         # search results, cross-context facts, the live user/channel line)
-        # goes into `dynamic_parts` instead and is appended AFTER the static
-        # block at the very end. Providers that do automatic prefix-based
-        # caching (DeepSeek, Moonshot/Qwen via Ollama cloud, etc.) can then
-        # reuse the cached static prefix instead of reprocessing the whole
-        # system message from byte zero on every single turn.
+        # goes into `dynamic_parts` instead, which is emitted as its own
+        # system message AFTER the transcript. Providers that do automatic
+        # prefix-based caching (DeepSeek, Moonshot/Qwen via Ollama cloud,
+        # xAI, etc.) match on a byte-identical PREFIX, so the volatile block
+        # has to sit behind everything we want cached — not in front of it.
         dynamic_parts: list[str] = []
         server_id = str(message.guild.id) if message.guild else "DM"
         custom_prompt = self.memory.get_server_prompt(server_id)
@@ -10583,12 +10598,14 @@ class MaxwellBot(commands.Bot):
         _jailbreak_enabled = getattr(self, "_jailbreak_enabled", None)
         if callable(_jailbreak_enabled) and _jailbreak_enabled(server_id):
             dynamic_parts.append(JAILBREAK_PROMPT)
-        # Static prefix first, volatile per-turn content last — see the
-        # `dynamic_parts` comment above for why this ordering matters for
-        # provider-side prompt caching.
-        messages = [
-            {"role": "system", "content": "\n\n".join(system_parts + dynamic_parts)}
-        ]
+        # Static prefix ONLY in the leading system message — see the
+        # `dynamic_parts` comment above. The volatile block is appended as its
+        # own system message AFTER the transcript (below), because prefix
+        # caching is positional: anything that changes on every turn poisons
+        # every token that follows it. Keeping the volatile block in the first
+        # message capped the reusable prefix at a few hundred tokens and left
+        # the whole (much larger) transcript uncacheable.
+        messages = [{"role": "system", "content": "\n\n".join(system_parts)}]
         memory = await self.memory.get_channel_memory(channel_id)
         if memory:
             # 2026-07-19: model context is 256k. Use most of it. The previous defaults
@@ -10607,6 +10624,22 @@ class MaxwellBot(commands.Bot):
                     240000,
                 ),
             )
+            # The transcript is a single message in the MIDDLE of the list, and
+            # _apply_prompt_budget only trims system messages plus the two ends
+            # — so an oversized transcript survives every later trim and takes
+            # the request past the context window. Default memory_context_budget
+            # (200k) is on its own larger than the default whole-prompt budget
+            # (180k after the output reserve), so clamp the transcript to what
+            # is actually left once the system blocks are paid for.
+            reserved = (
+                sum(MaxwellBot._message_content_chars(m) for m in messages)
+                + sum(len(p) for p in dynamic_parts)
+                + len(JAILBREAK_PROMPT)
+                + 4000  # live user turn, media summary, music context
+            )
+            budget = max(
+                1000, min(budget, MaxwellBot._prompt_budget_chars(self) - reserved)
+            )
             count = max(
                 0,
                 min(
@@ -10618,7 +10651,17 @@ class MaxwellBot(commands.Bot):
                 ),
             )
             current_message_id = getattr(message, "id", None)
-            recent_memory = memory[-count:] if count else []
+            # Slide the history window in BLOCKS, not one message per turn.
+            # `memory[-count:]` drops exactly one old turn every time a new
+            # message arrives, so the transcript starts at different bytes on
+            # every single request and no provider-side prefix cache can ever
+            # hit once a channel has filled the window. Snapping the cut to a
+            # fixed boundary keeps the same start for a block of turns; the
+            # window overshoots `count` by at most one block, which the char
+            # budget below still bounds.
+            block = max(1, min(16, count // 8))
+            start = max(0, len(memory) - count)
+            recent_memory = memory[start - (start % block) :] if count else []
             recent_ids = {id(msg) for msg in recent_memory}
             tool_limit = max(
                 0,
@@ -10637,7 +10680,6 @@ class MaxwellBot(commands.Bot):
                 else []
             )
             context_memory = tool_history + list(recent_memory)
-            context_now = datetime.now(timezone.utc)
             self_user_id = str(getattr(self.user, "id", "")) if self.user else ""
             # 2026-07-21: build the channel history as a real conversation
             # transcript (user/assistant turns), not a single flat system
@@ -10671,7 +10713,9 @@ class MaxwellBot(commands.Bot):
                     current_message_id
                 ):
                     continue
-                stamp = _format_context_timestamp(msg.get("timestamp"), now=context_now)
+                # relative=False: see _format_context_timestamp — a re-rendered
+                # "12m ago" on every replayed line invalidates the cached prefix.
+                stamp = _format_context_timestamp(msg.get("timestamp"), relative=False)
                 if msg.get("is_tool"):
                     line = (
                         f"[{stamp}] [Tool] {msg.get('content', '')[:12000]}"
@@ -10794,9 +10838,17 @@ class MaxwellBot(commands.Bot):
             # list). Drop whole turns so we never cut a turn in half or
             # break role alternation. We keep at least the most recent turn
             # so the model always sees the latest exchange.
-            while merged and used > budget:
-                used -= len(merged[0].get("_rendered", ""))
-                merged.pop(0)
+            #
+            # Trim with hysteresis: once eviction is needed, go down to 85% of
+            # the budget rather than stopping at the first turn that fits.
+            # Stopping exactly at the budget means the next turn pushes it over
+            # again and evicts one more — a transcript whose first bytes move
+            # on every request, which no prefix cache can reuse.
+            if merged and used > budget:
+                target = int(budget * 0.85)
+                while len(merged) > 1 and used > target:
+                    used -= len(merged[0].get("_rendered", ""))
+                    merged.pop(0)
             # 2026-07-25: wrap ALL conversation history in a single user
             # message with <previous_conversation> delimiters. The old code
             # appended each turn as a separate user/assistant message with
@@ -10823,6 +10875,13 @@ class MaxwellBot(commands.Bot):
                         + "\n</previous_conversation>",
                     }
                 )
+        # Volatile per-turn context goes here: after the static system block
+        # and after the transcript, so the cacheable prefix is
+        # [static system + transcript] and only this small tail changes every
+        # turn. It also lands closer to the live message, which is the
+        # stronger position for the time/user line and the jailbreak block.
+        if dynamic_parts:
+            messages.append({"role": "system", "content": "\n\n".join(dynamic_parts)})
         # The live message is appended as a final user turn below. The
         # historical channel turns above give the model full context of
         # who-said-what, but per the persona rules the bot only RESPONDS
@@ -11138,10 +11197,10 @@ class MaxwellBot(commands.Bot):
         # Prompt-cache friendliness: static content goes in `system_parts`
         # (stable across a user's messages), per-turn content (cross-context
         # facts, RAG results — both depend on this message's text) goes in
-        # `dynamic_parts` and is appended AFTER the static block, so the
-        # stable prefix (rules + personality + tools) can be cache-hit by
-        # providers that do automatic prefix caching instead of being
-        # invalidated by search results that differ on every call.
+        # `dynamic_parts`, which is emitted as its own system message AFTER
+        # the transcript. Prefix caching matches a byte-identical prefix, so
+        # the volatile block must sit behind everything we want cached
+        # (rules + personality + tools + history), never in front of it.
         dynamic_parts: list[str] = []
 
         await self._telegram_append_cross_context(dynamic_parts, text, user_id)
@@ -11155,11 +11214,12 @@ class MaxwellBot(commands.Bot):
         # Telegram is a private channel — always get jailbreak
         dynamic_parts.append(JAILBREAK_PROMPT)
 
-        messages = [
-            {"role": "system", "content": "\n\n".join(system_parts + dynamic_parts)}
-        ]
+        messages = [{"role": "system", "content": "\n\n".join(system_parts)}]
 
         await self._telegram_append_channel_history(messages, tg_chan_id, chat_id)
+
+        if dynamic_parts:
+            messages.append({"role": "system", "content": "\n\n".join(dynamic_parts)})
 
         latest_label = _telegram_latest_message_label(text, bool(tg_media))
         # Match the Discord path: drop the "Latest message to answer from"
@@ -11747,9 +11807,10 @@ class MaxwellBot(commands.Bot):
                         ),
                     }
                 )
-            if len(conversation_tail) > 24:
-                conversation_tail = conversation_tail[-24:]
-            result_messages = result_messages + list(conversation_tail)
+            conversation_tail = trim_tool_tail(conversation_tail)
+            result_messages = MaxwellBot._apply_prompt_budget(
+                self, result_messages + list(conversation_tail)
+            )
             await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
             try:
                 async with session.post(

@@ -619,6 +619,88 @@ def normalize_native_tool_calls(raw_calls: list | None) -> list[dict[str, Any]]:
     return normalized
 
 
+# ── tool-loop transcript bounds ──────────────────────────────────────────
+# Every agent loop in this repo (Discord, Telegram, sub_agent) replays the
+# whole assistant/tool transcript on every round, so an unbounded tail is how a
+# turn walks off the end of the context window mid-loop. Per-result truncation
+# is not enough on its own: 24 rounds of a 32k-capped result is still ~768k
+# chars riding on top of an already-full prompt.
+TOOL_TAIL_MAX_MESSAGES = 24
+TOOL_TAIL_MAX_CHARS = 96_000
+
+
+def message_chars(message: dict) -> int:
+    """Prompt size of one chat message, tool_calls included.
+
+    An assistant turn replayed in a tool loop carries its arguments (a
+    create_site body, a shell script, a long send_message) and those are real
+    prompt tokens — counting only ``content`` leaves a budget blind to the
+    heaviest messages in the conversation.
+    """
+    extra = 0
+    for call in message.get("tool_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        fn = call.get("function")
+        if isinstance(fn, dict):
+            extra += len(str(fn.get("name") or "")) + len(
+                str(fn.get("arguments") or "")
+            )
+    content = message.get("content", "")
+    if isinstance(content, str):
+        return len(content) + extra
+    if isinstance(content, list):
+        return (
+            sum(
+                len(str(part.get("text", "")))
+                for part in content
+                if isinstance(part, dict)
+            )
+            + extra
+        )
+    return len(str(content or "")) + extra
+
+
+def tool_tail_groups(tail: list[dict]) -> list[list[dict]]:
+    """Split a tool-loop tail into (assistant, tool, tool, ...) rounds.
+
+    A ``role: "tool"`` message is only valid while the assistant message that
+    emitted its ``tool_call_id`` is still present, so grouping is what makes
+    trimming safe.
+    """
+    groups: list[list[dict]] = []
+    for msg in tail:
+        if msg.get("role") == "tool" and groups:
+            groups[-1].append(msg)
+        else:
+            groups.append([msg])
+    return groups
+
+
+def trim_tool_tail(
+    tail: list[dict],
+    *,
+    max_messages: int = TOOL_TAIL_MAX_MESSAGES,
+    max_chars: int = TOOL_TAIL_MAX_CHARS,
+) -> list[dict]:
+    """Bound a tool-loop tail by size AND count, oldest round first.
+
+    Never slices mid-round: a plain ``tail[-24:]`` can cut an assistant message
+    away from the ``role: "tool"`` replies carrying its tool_call_ids, which
+    OpenAI-compatible providers reject with a 400 ("tool_call_id not found").
+    Whole rounds are dropped instead, and the newest round always survives so
+    the model still sees what it just ran.
+    """
+    groups = tool_tail_groups(tail)
+    used = sum(message_chars(m) for m in tail)
+    count = len(tail)
+    while len(groups) > 1 and (count > max_messages or used > max_chars):
+        dropped = groups.pop(0)
+        count -= len(dropped)
+        used -= sum(message_chars(m) for m in dropped)
+    return [msg for group in groups for msg in group]
+
+
 def elide_tool_calls_for_history(
     tool_calls: list[dict],
     *,

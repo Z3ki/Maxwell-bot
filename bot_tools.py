@@ -37,7 +37,11 @@ from discord import Activity, File, Message, Status
 from tools import Tool
 from captcha_solver import CaptchaSolveError
 from config import Config
-from tool_schemas import normalize_native_tool_calls
+from tool_schemas import (
+    elide_tool_calls_for_history,
+    normalize_native_tool_calls,
+    trim_tool_tail,
+)
 from utils import (  # single source of truth, fd-safe
     FileLock,
     _atomic_json_write_sync,
@@ -4534,7 +4538,12 @@ class SubAgentTool(Tool):
                 {
                     "role": "assistant",
                     "content": reply.get("content") or "",
-                    "tool_calls": reply.get("tool_calls") or [],
+                    # Elided: a write_file call carries the whole file body,
+                    # and the replayed transcript would otherwise pay for it
+                    # again on every remaining step.
+                    "tool_calls": elide_tool_calls_for_history(
+                        reply.get("tool_calls") or []
+                    ),
                 }
             )
 
@@ -4564,6 +4573,14 @@ class SubAgentTool(Tool):
                         "content": result,
                     }
                 )
+            # Bound the replayed transcript. Results are capped at 12k chars
+            # each, but SUBAGENT_MAX_STEPS goes up to 200 — unbounded, the loop
+            # walks off the end of the context window long before it can call
+            # `finish`. The system prompt and the task stay pinned; only older
+            # rounds are dropped, whole rounds at a time so no role=tool
+            # message is ever orphaned from its assistant call.
+            head, tail = messages[:2], messages[2:]
+            messages = head + trim_tool_tail(tail)
 
         return self._report(
             task,
