@@ -3174,6 +3174,24 @@ class MaxwellBot(commands.Bot):
             f"Loaded {total_e} static custom emojis and {total_s} stickers across {len(self._guild_emojis)} guilds"
         )
 
+    def _extract_stickers_from_text(self, text: str, guild) -> tuple[str, list]:
+        if not guild or not text:
+            return text, []
+        stickers_found = []
+        cleaned_text = text
+        for sticker in getattr(guild, "stickers", []) or []:
+            if getattr(sticker, "format", None) and str(sticker.format).lower() in ("lottie", "apng", "gif"):
+                continue
+            s_name = sticker.name
+            tag = f"[{s_name}]"
+            tag_lower = f"[{s_name.lower()}]"
+            if tag in cleaned_text or tag_lower in cleaned_text.lower():
+                cleaned_text = re.sub(re.escape(tag), "", cleaned_text, flags=re.IGNORECASE).strip()
+                stickers_found.append(sticker)
+                if len(stickers_found) >= 3:
+                    break
+        return cleaned_text, stickers_found
+
     def _render_custom_emojis(self, text: str, guild) -> str:
         if not guild:
             return text
@@ -3878,9 +3896,9 @@ class MaxwellBot(commands.Bot):
             # 'content'". Every reaction-triggered reply died that way.
             async def fake_reply(content=None, **kwargs):
                 if hasattr(message, "reply"):
-                    return await message.reply(content=content, **kwargs)
+                    return await message.reply(content, **kwargs)
                 if channel is not None:
-                    return await channel.send(content=content, **kwargs)
+                    return await channel.send(content, **kwargs)
                 return None
 
             fake_message.reply = fake_reply
@@ -7352,11 +7370,15 @@ class MaxwellBot(commands.Bot):
         retried as a plain ``channel.send`` so the reply still lands.
         """
         await self._respect_slowmode(channel)
+        stickers = kwargs.pop("stickers", None)
         if reply_to is not None:
             # Catch Forbidden (no perms) and every flavour of "the parent
             # message is gone" so the response still reaches the user.
             try:
-                sent = await reply_to.reply(content=content, file=file, **kwargs)
+                if stickers:
+                    sent = await reply_to.reply(content=content, file=file, stickers=stickers, **kwargs)
+                else:
+                    sent = await reply_to.reply(content=content, file=file, **kwargs)
             except discord.Forbidden:
                 logger.warning(
                     "reply failed (forbidden) in channel %s",
@@ -7380,7 +7402,10 @@ class MaxwellBot(commands.Bot):
                     getattr(channel, "id", "?"),
                 )
                 try:
-                    sent = await channel.send(content=content, file=file, **kwargs)
+                    if stickers:
+                        sent = await channel.send(content=content, file=file, stickers=stickers, **kwargs)
+                    else:
+                        sent = await channel.send(content=content, file=file, **kwargs)
                 except (discord.Forbidden, discord.NotFound) as exc:
                     logger.warning(
                         "fallback send failed (%s) in channel %s",
@@ -7391,7 +7416,10 @@ class MaxwellBot(commands.Bot):
             self._mark_bot_sent(channel)
             return sent
         try:
-            sent = await channel.send(content=content, file=file, **kwargs)
+            if stickers:
+                sent = await channel.send(content=content, file=file, stickers=stickers, **kwargs)
+            else:
+                sent = await channel.send(content=content, file=file, **kwargs)
         except (discord.Forbidden, discord.NotFound) as exc:
             logger.warning(
                 "send failed (%s) in channel %s",
@@ -9070,7 +9098,10 @@ class MaxwellBot(commands.Bot):
                 )
                 response = _auto_format_discord(response)
                 response = self._render_custom_emojis(response, message.guild)
+                response, send_stickers = self._extract_stickers_from_text(response, message.guild)
                 chunks = self._split_response(response, limit=1900)
+                if not chunks and send_stickers:
+                    chunks = [""]
                 # Fast-tool fix: try to transition the live progress message
                 # (if any) into the final reply instead of deleting it and
                 # posting a fresh reply. The old code always did
@@ -9103,7 +9134,7 @@ class MaxwellBot(commands.Bot):
                     elif i == 0:
                         try:
                             sent = await self._send_with_slowmode(
-                                message.channel, content=chunk, reply_to=message
+                                message.channel, content=chunk, reply_to=message, stickers=send_stickers
                             )
                         except (discord.NotFound, discord.HTTPException) as _exc:
                             # Referenced message was deleted between read and reply;
@@ -9118,7 +9149,7 @@ class MaxwellBot(commands.Bot):
                                 getattr(message.channel, "id", "?"),
                             )
                             sent = await self._send_with_slowmode(
-                                message.channel, content=chunk
+                                message.channel, content=chunk, stickers=send_stickers
                             )
                         if sent is None:
                             break

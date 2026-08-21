@@ -1509,8 +1509,6 @@ class JoinServerTool(Tool):
     async def execute(
         self, message: Message, invite: str | None = None, **kwargs
     ) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: join_server is admin-only"
         raw = _invite_raw_from_params(invite, kwargs)
         code = _extract_invite_code(raw)
         if not code:
@@ -1895,8 +1893,6 @@ class LeaveServerTool(Tool):
     async def execute(
         self, message: Message, server: str | None = None, **kwargs
     ) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: leave_server is admin-only"
         target = (server or "").strip()
         if not target:
             return "Error: leave_server requires a server name or ID"
