@@ -478,6 +478,14 @@ AUTONOMY_VALID_KINDS = frozenset(
     }
 )
 MAX_ACTIONS_PER_TICK = 3  # reduced from 5 — prevents spam bursts
+# Tool-loop: after a run_tool returns output, autonomy gets to look at that
+# output and decide a follow-up in the SAME tick, instead of waiting for the
+# next tick (minutes later) to see a 180-char summary. Bounded hard — each
+# round is a real LLM call and every action still runs the normal validation
+# and post-gating.
+MAX_TOOL_LOOP_ROUNDS = 3  # continuation rounds after the initial plan
+MAX_TOOL_LOOP_ACTIONS = 6  # total executed actions per tick, all rounds
+TOOL_OUTPUT_FEEDBACK_CHARS = 1500  # per-tool output shown back to the planner
 MAX_CONTENT_CHARS = 1900
 LOG_RING_SIZE = 200
 
@@ -1177,8 +1185,7 @@ class AutonomyEngine:
                             "skipping tick to recover the loop"
                         )
                         raise RuntimeError("gather_context timed out")
-                    actions = await self.plan(context)
-                    results = await self.execute(actions)
+                    actions, results = await self._plan_execute_loop(context)
                     duration = time.time() - start
                     await self._log_tick(
                         context, actions, results, duration, tick_start_iso
@@ -2354,6 +2361,98 @@ class AutonomyEngine:
     # plan
     # -----------------------------------------------------------------------
 
+    @staticmethod
+    def _tool_loop_feedback(results: list[dict]) -> str:
+        """Render this round's tool output for the planner, or '' if there is
+        nothing new to react to.
+
+        Only run_tool results carry output worth looping on. A post/DM has
+        already had its effect and a failed tool is reported so the model can
+        correct itself rather than silently retrying the same call.
+        """
+        lines = []
+        for r in results:
+            if r.get("kind") != "run_tool":
+                continue
+            tool = r.get("tool_called") or r.get("target") or "tool"
+            if r.get("result") == "success":
+                out = str(r.get("tool_output") or "").strip()
+                if not out:
+                    continue
+                lines.append(f"- {tool} returned:\n{out}")
+            elif r.get("result") == "error":
+                lines.append(f"- {tool} FAILED: {str(r.get('error') or '')[:300]}")
+        if not lines:
+            return ""
+        return (
+            "\n\n=== TOOL RESULTS (this tick, just now) ===\n"
+            + "\n".join(lines)
+            + "\n\nYou ran those yourself moments ago and are seeing the output "
+            "for the first time. Decide what follows FROM it — post what you "
+            "found, run another tool to go deeper, or save it. Do NOT re-run a "
+            "tool you just ran with the same arguments. If the output already "
+            "settled it and nothing is worth doing, return do_nothing."
+        )
+
+    async def _plan_execute_loop(self, context: str) -> tuple[list[dict], list[dict]]:
+        """Plan and execute, then let the model react to its own tool output.
+
+        Autonomy used to be strictly one-shot per tick: it could fire
+        search_messages but never see the results until the next tick, where
+        they arrived as a 180-char summary line. Now a run_tool that returns
+        output is fed straight back for a follow-up decision, bounded by
+        MAX_TOOL_LOOP_ROUNDS rounds and MAX_TOOL_LOOP_ACTIONS total actions.
+        """
+        # Shared across rounds so the one-post-per-channel guard survives the
+        # loop rather than resetting each round.
+        planned_post_channels: set[str] = set()
+
+        actions = await self.plan(context)
+        results = await self.execute(actions, planned_post_channels)
+
+        loop_context = context
+        last_round = results
+        for round_no in range(1, MAX_TOOL_LOOP_ROUNDS + 1):
+            if len(results) >= MAX_TOOL_LOOP_ACTIONS:
+                logger.info(
+                    f"Autonomy tool loop: action budget reached "
+                    f"({len(results)}/{MAX_TOOL_LOOP_ACTIONS}), stopping"
+                )
+                break
+            feedback = self._tool_loop_feedback(last_round)
+            if not feedback:
+                break  # nothing new happened — normal end of the tick
+
+            loop_context += feedback
+            try:
+                more = await self.plan(loop_context)
+            except Exception as e:
+                # A failed continuation must not lose the work already done
+                # this tick, so report and stop rather than propagating.
+                logger.warning(f"Autonomy tool loop round {round_no} plan failed: {e}")
+                break
+            if not more or all(
+                a.get("kind", "do_nothing") == "do_nothing" for a in more
+            ):
+                logger.info(
+                    f"Autonomy tool loop: model finished after round {round_no}"
+                )
+                break
+
+            # Respect the total budget even if the model asked for more.
+            room = MAX_TOOL_LOOP_ACTIONS - len(results)
+            more = more[:room]
+            new_results = await self.execute(more, planned_post_channels)
+            actions.extend(more)
+            results.extend(new_results)
+            last_round = new_results
+            logger.info(
+                f"Autonomy tool loop round {round_no}: "
+                f"{len(new_results)} more action(s), {len(results)} total"
+            )
+
+        return actions, results
+
     async def plan(self, context: str) -> list[dict]:
         """Ask the LLM what to do. Returns validated action list."""
         # Clip descriptions so autonomy ticks don't pay for the full
@@ -2898,15 +2997,23 @@ Return ONLY JSON, no fence. "thought" is what you're actually thinking, in your 
     # execute
     # -----------------------------------------------------------------------
 
-    async def execute(self, actions: list[dict]) -> list[dict]:
-        """Execute each action. One failure doesn't kill the rest."""
+    async def execute(
+        self, actions: list[dict], planned_post_channels: set[str] | None = None
+    ) -> list[dict]:
+        """Execute each action. One failure doesn't kill the rest.
+
+        ``planned_post_channels`` is passed in by the tool loop so the
+        one-post-per-channel-per-tick guarantee holds across continuation
+        rounds; a fresh set per round would let the loop post twice.
+        """
         results = []
         ACTION_TIMEOUT = 30  # seconds per action
 
         # Prevent multiple posts to the *same* channel within a single autonomy tick/plan.
         # This was a bypass of cooldowns noted in reviews: validation happened before any
         # side effects, so the LLM could return several post_channel for one cid and all would run.
-        planned_post_channels: set[str] = set()
+        if planned_post_channels is None:
+            planned_post_channels = set()
 
         for action in actions:
             # bail if bot disconnected mid-tick
@@ -3551,6 +3658,11 @@ Return ONLY JSON, no fence. "thought" is what you're actually thinking, in your 
                 result["content_summary"] = (
                     text[:300] if text else result["content_summary"]
                 )
+                # Full-ish output kept separately: content_summary is clipped
+                # to 300 for logs//next-tick feedback, which is too little for
+                # the model to actually act on a search/fetch result.
+                if text:
+                    result["tool_output"] = text[:TOOL_OUTPUT_FEEDBACK_CHARS]
         except Exception as e:
             result["result"] = "error"
             result["error"] = str(e)[:1000]
