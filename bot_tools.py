@@ -3214,13 +3214,26 @@ class SendMessageTool(Tool):
         sent_any = False
         sent_chunks: list[str] = []
         try:
+            guild = getattr(message, "guild", None)
+            stickers = []
+            if self.bot and hasattr(self.bot, "_render_custom_emojis"):
+                text = self.bot._render_custom_emojis(text, guild)
+            if self.bot and hasattr(self.bot, "_extract_stickers_from_text"):
+                text, stickers = self.bot._extract_stickers_from_text(text, guild)
+
             chunks = self._chunks(text)
+            if not chunks and stickers:
+                chunks = [""]
             use_reply = str(reply).lower() not in {"0", "false", "no", "off"}
             for i, chunk in enumerate(chunks):
+                chunk_stickers = stickers if i == 0 else None
                 try:
                     if i == 0 and use_reply:
                         try:
-                            await message.reply(chunk)
+                            if chunk_stickers:
+                                await message.reply(chunk, stickers=chunk_stickers)
+                            else:
+                                await message.reply(chunk)
                         except (discord.NotFound, discord.HTTPException) as exc:
                             code = getattr(exc, "code", None)
                             parent_gone = isinstance(exc, discord.NotFound) or code in {
@@ -3231,9 +3244,15 @@ class SendMessageTool(Tool):
                                 raise
                             if not parent_gone:
                                 raise
-                            await message.channel.send(chunk)
+                            if chunk_stickers:
+                                await message.channel.send(chunk, stickers=chunk_stickers)
+                            else:
+                                await message.channel.send(chunk)
                     else:
-                        await message.channel.send(chunk)
+                        if chunk_stickers:
+                            await message.channel.send(chunk, stickers=chunk_stickers)
+                        else:
+                            await message.channel.send(chunk)
                     sent_any = True
                     sent_chunks.append(chunk)
                 except Exception:
