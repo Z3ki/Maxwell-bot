@@ -102,6 +102,20 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         },
         ["invite"],
     ),
+    "server_setup": _obj(
+        {
+            "server": _str(
+                "Server name or numeric ID. Omit to set up the current server."
+            ),
+            "preferences": _str(
+                "Optional steer for which options to take, e.g. "
+                "'only AI and coding stuff, no ping roles'"
+            ),
+            "list_only": _bool(
+                "True to list the available roles/channels without picking any"
+            ),
+        }
+    ),
     "leave_server": _obj(
         {"server": _str("Server name or numeric ID to leave")},
         ["server"],
@@ -358,6 +372,7 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "create_invite",
         "join_server",
         "leave_server",
+        "server_setup",
         "create_poll",
         "forward_message",
         "edit_message",

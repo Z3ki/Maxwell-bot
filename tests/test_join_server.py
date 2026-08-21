@@ -86,8 +86,9 @@ def test_join_server_fetches_path_code_not_https():
                 )
             return None
 
-        async def _auto_onboard(self, _guild):
-            return "no onboarding"
+        async def _auto_onboard(self, _guild, detail=False, **_kwargs):
+            result = {"ok": False, "summary": "no onboarding", "prompts": []}
+            return result if detail else result["summary"]
 
     message = SimpleNamespace(author=SimpleNamespace(id=1))
 

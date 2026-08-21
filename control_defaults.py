@@ -197,6 +197,7 @@ KNOWN_TOOLS = [
     "tts",
     "list_servers",
     "list_admin_servers",
+    "server_setup",
     "create_category",
     "create_channel",
     "edit_channel",

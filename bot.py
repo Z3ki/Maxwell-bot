@@ -228,6 +228,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     SendMediaTool,
     SendMemeTool,
     SendMessageTool,
+    ServerSetupTool,
     SetActivityTool,
     SetNicknameTool,
     ShellTool,
@@ -257,6 +258,7 @@ from control_defaults import (  # noqa: E402
     KNOWN_TOOLS,
     parse_bool,
 )
+import guild_onboarding  # noqa: E402
 from providers import (  # noqa: E402
     MIME_MAP,
     OllamaProvider,
@@ -2809,6 +2811,7 @@ class MaxwellBot(commands.Bot):
         self.tools["create_invite"] = CreateInviteTool(self)
         self.tools["lookup_user"] = LookupUserTool(self)
         self.tools["join_server"] = JoinServerTool(self)
+        self.tools["server_setup"] = ServerSetupTool(self)
         self.tools["leave_server"] = LeaveServerTool(self)
         self.tools["search_messages"] = SearchMessagesTool(self)
         self.tools["set_nickname"] = SetNicknameTool(self)
@@ -5613,72 +5616,88 @@ class MaxwellBot(commands.Bot):
         # 3) surface the original challenge to the caller (tool reports it)
         raise exception
 
-    async def _auto_onboard(self, guild, notify=None) -> str:
-        """Complete Discord's member-onboarding flow automatically.
+    async def _discord_request(self, method: str, path: str, payload=None, **params):
+        """Raw authenticated call against a Discord route the library lacks.
 
-        Many servers gate their roles behind GUILD_ONBOARDING prompts
-        (role_select / multiple_choice / dropdown). This fetches the
-        member's onboarding status and answers every prompt with its
-        first option, granting the default roles so the account is
-        actually usable in the server. Returns a summary string for
-        tool results / logs; never raises.
+        discord.py-self has no member-side onboarding support, so
+        guild_onboarding drives the HTTP itself through this shim. ``path``
+        is an unformatted template and ``params`` its values, so the Route
+        keeps its major parameter and its own rate-limit bucket.
+        """
+        from discord.http import Route
+
+        route = Route(method, path, **params)
+        if payload is None:
+            return await self.http.request(route)
+        return await self.http.request(route, json=payload)
+
+    async def _onboard_ask_llm(self, messages: list) -> str:
+        """One short model turn that picks onboarding options. Never raises."""
+        await self._acquire_ai_slot(timeout=20, priority="user")
+        try:
+            resp = await self.ai_provider.generate_response(
+                messages,
+                timeout=45,
+                max_tokens=400,
+                temperature=0.3,
+                disable_reasoning=True,
+                fast_fallback=True,
+            )
+        finally:
+            await self._release_ai_slot()
+        return resp or ""
+
+    async def _auto_onboard(
+        self,
+        guild,
+        notify=None,
+        *,
+        preferences: str = "",
+        dry_run: bool = False,
+        detail: bool = False,
+    ):
+        """Answer a server's onboarding prompts so the account is usable.
+
+        Most COMMUNITY servers hide their roles and half their channels
+        behind GUILD_ONBOARDING prompts. Maxwell picks the options himself
+        (the titles/descriptions go to the model); if the model is
+        unreachable or answers with nonsense, guild_onboarding falls back
+        to the first option of each prompt so the account still lands with
+        roles instead of stranded.
+
+        Returns the summary string for tool results / logs, or the full
+        result dict when ``detail`` is set. Never raises.
         """
         try:
-            features = list(getattr(guild, "features", []) or [])
-            if "GUILD_ONBOARDING" not in features:
-                return "no onboarding flow (GUILD_ONBOARDING feature absent)"
-            gid = guild.id
-            from discord.http import Route
-
-            data = await self.http.request(
-                Route("GET", "/guilds/{guild_id}/members/@me/onboarding", guild_id=gid)
+            result = await guild_onboarding.run_onboarding(
+                self._discord_request,
+                guild.id,
+                getattr(guild, "name", str(guild.id)),
+                ask_llm=self._onboard_ask_llm,
+                personality=self._get_personality(),
+                preferences=preferences,
+                dry_run=dry_run,
             )
-            prompts = (data or {}).get("prompts") or []
-            if not prompts:
-                return "onboarding: no prompts to complete"
-            responses = []
-            picked = []
-            for p in prompts:
-                try:
-                    pid = p.get("id")
-                    options = p.get("options") or []
-                    if not pid or not options:
-                        continue
-                    first = options[0]
-                    responses.append(
-                        {"prompt_id": pid, "option_ids": [first.get("id")]}
-                    )
-                    picked.append(
-                        f"{str(p.get('title') or '?')[:60]} -> {str(first.get('title') or '?')[:60]}"
-                    )
-                except Exception:
-                    continue
-            if not responses:
-                return "onboarding: no selectable prompts"
-            body: dict = {"onboarding_responses": responses}
-            default_channels = (data or {}).get("default_channel_ids") or []
-            if default_channels:
-                body["default_channel_ids"] = default_channels
-            await self.http.request(
-                Route("PUT", "/guilds/{guild_id}/members/@me/onboarding", guild_id=gid),
-                json=body,
+        except Exception as e:
+            result = {
+                "ok": False,
+                "summary": f"onboarding failed: {type(e).__name__}: {e}",
+                "prompts": [],
+                "choice": {},
+                "role_ids": [],
+                "channel_ids": [],
+            }
+        summary = str(result.get("summary") or "onboarding: no result")
+        if result.get("ok") and not dry_run:
+            logger.info(
+                "Auto-onboard %s (guild %s): %s", guild.name, guild.id, summary
             )
-            summary = "onboarding completed: " + "; ".join(picked)
-            logger.info("Auto-onboard %s (guild %s): %s", guild.name, gid, summary)
             if notify is not None:
                 try:
                     await notify(summary)
                 except Exception as e:
                     logger.debug("auto-onboard notify failed: %s", e)
-            return summary
-        except discord.NotFound:
-            # 404 = member has no pending onboarding (returning member, or the
-            # server gates via membership screening instead of prompts).
-            return "no onboarding pending"
-        except discord.HTTPException as e:
-            return f"onboarding failed: HTTP {e.status}: {str(e.text)[:160]}"
-        except Exception as e:
-            return f"onboarding failed: {type(e).__name__}: {e}"
+        return result if detail else summary
 
     async def on_guild_join(self, guild):
         """Fire when the account is added to a server (invite accept, tool
@@ -5690,21 +5709,28 @@ class MaxwellBot(commands.Bot):
         # Give the gateway a beat to hydrate guild state before onboarding.
         await asyncio.sleep(2)
         try:
-            result = await self._auto_onboard(guild)
-            if "no onboarding" in result or "failed" in result:
-                logger.info("Auto-onboard skip/failed for %s: %s", guild.name, result)
-            else:
-                logger.info("Auto-onboard %s: %s", guild.name, result)
-                try:
-                    owner_ids = self._captcha_recipient_ids()
-                    if owner_ids:
-                        user = self.get_user(int(owner_ids[0]))
-                        if user is None:
-                            user = await self.fetch_user(int(owner_ids[0]))
-                        if user is not None:
-                            await user.send(f"✅ Joined **{guild.name}** — {result}")
-                except Exception as e:
-                    logger.debug("auto-onboard owner DM failed: %s", e)
+            result = await self._auto_onboard(guild, detail=True)
+            summary = str(result.get("summary") or "")
+            if not result.get("ok"):
+                logger.info("Auto-onboard skip/failed for %s: %s", guild.name, summary)
+                return
+            roles = len(result.get("role_ids") or [])
+            channels = len(result.get("channel_ids") or [])
+            gained = f"{roles} role(s)"
+            if channels:
+                gained += f", {channels} channel(s)"
+            try:
+                owner_ids = self._captcha_recipient_ids()
+                if owner_ids:
+                    user = self.get_user(int(owner_ids[0]))
+                    if user is None:
+                        user = await self.fetch_user(int(owner_ids[0]))
+                    if user is not None:
+                        await user.send(
+                            f"✅ Joined **{guild.name}** — {summary} ({gained})"
+                        )
+            except Exception as e:
+                logger.debug("auto-onboard owner DM failed: %s", e)
         except Exception as e:
             logger.warning("auto-onboard error for %s: %s", guild.name, e)
 

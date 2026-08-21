@@ -37,6 +37,7 @@ from discord import Activity, File, Message, Status
 from tools import Tool
 from captcha_solver import CaptchaSolveError
 from config import Config
+from control_defaults import parse_bool
 from tool_schemas import (
     elide_tool_calls_for_history,
     normalize_native_tool_calls,
@@ -1643,13 +1644,11 @@ class JoinServerTool(Tool):
                 if joined_guild is not None:
                     onboard_note = ""
                     try:
-                        onboard = await self.bot._auto_onboard(joined_guild)
-                        if (
-                            onboard
-                            and "no onboarding" not in onboard
-                            and "failed" not in onboard
-                        ):
-                            onboard_note = "\n" + onboard
+                        onboard = await self.bot._auto_onboard(
+                            joined_guild, detail=True
+                        )
+                        if onboard.get("ok"):
+                            onboard_note = "\n" + str(onboard.get("summary") or "")
                     except Exception as ex:
                         logger.debug("auto-onboard (captcha join) failed: %s", ex)
                     return (
@@ -1740,9 +1739,18 @@ class JoinServerTool(Tool):
         # Auto-complete the server's onboarding flow (role selection prompts)
         # so role-gated servers are usable right away.
         try:
-            onboard = await self.bot._auto_onboard(joined_guild)
-            if onboard and "no onboarding" not in onboard and "failed" not in onboard:
-                lines.append(f"  {onboard}")
+            onboard = await self.bot._auto_onboard(joined_guild, detail=True)
+            if onboard.get("ok"):
+                lines.append(f"  {onboard.get('summary')}")
+                roles = len(onboard.get("role_ids") or [])
+                if roles:
+                    lines.append(
+                        f"  picked up {roles} role(s) — run server_setup to change them."
+                    )
+            elif onboard.get("prompts"):
+                # Prompts exist but the submit didn't land: say so, because the
+                # account is role-less in there until someone retries.
+                lines.append(f"  onboarding NOT completed: {onboard.get('summary')}")
         except Exception as ex:
             logger.debug("auto-onboard via join tool failed: %s", ex)
 
@@ -1767,6 +1775,139 @@ class JoinServerTool(Tool):
         return result
 
 
+def _resolve_guild(guilds: list, target: str) -> tuple[Any, str]:
+    """Find one guild by ID, exact name, then unique partial name.
+
+    Returns (guild, "") on a hit and (None, error_text) otherwise, so both
+    leave_server and server_setup report ambiguity the same way.
+    """
+    target = (target or "").strip()
+    if not guilds:
+        return None, "Error: not in any servers"
+    if not target:
+        return None, "Error: no server given"
+    if target.isdigit():
+        guild = next((g for g in guilds if str(g.id) == target), None)
+        if guild is not None:
+            return guild, ""
+    lowered = target.lower()
+    guild = next((g for g in guilds if (g.name or "").lower() == lowered), None)
+    if guild is not None:
+        return guild, ""
+    matches = [g for g in guilds if lowered in (g.name or "").lower()]
+    if len(matches) == 1:
+        return matches[0], ""
+    if len(matches) > 1:
+        return None, (
+            f"Error: '{target}' matches {len(matches)} servers "
+            + ", ".join(f"{g.name} ({g.id})" for g in matches[:8])
+            + " — use the numeric ID to disambiguate."
+        )
+    return None, (
+        f"Error: not in any server named/matching '{target}'. "
+        "Use list_servers to see current servers."
+    )
+
+
+class ServerSetupTool(Tool):
+    """Pick your own roles and channels through a server's onboarding prompts."""
+
+    def get_description(self):
+        return (
+            "Set yourself up in a server: read its onboarding prompts (the "
+            "'what roles do you want' / channel pickers) and choose the options "
+            "you actually want. Use this when you're in a server but have no "
+            "roles or can't see the channels. Runs automatically on join, so "
+            "this is for servers you're already in or to change your picks. "
+            "Params: server (name or ID; defaults to the current server), "
+            "preferences (optional steer, e.g. 'only AI and coding stuff'), "
+            "list_only (true to see the options without picking anything)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        server: str | None = None,
+        preferences: str | None = None,
+        list_only: bool = False,
+        **kwargs,
+    ) -> str:
+        target = (server or "").strip()
+        if target:
+            guild, err = _resolve_guild(list(self.bot.guilds or []), target)
+            if guild is None:
+                return err
+        else:
+            guild = getattr(message, "guild", None)
+            if guild is None:
+                return (
+                    "Error: no server given and this isn't a server channel. "
+                    "Pass server (name or ID) — list_servers shows them."
+                )
+
+        # Models hand booleans over as "true"/"false" strings often enough
+        # that bool("false") would silently flip this into a real submit.
+        dry_run = parse_bool(list_only, False)
+        try:
+            result = await self.bot._auto_onboard(
+                guild,
+                preferences=(preferences or ""),
+                dry_run=dry_run,
+                detail=True,
+            )
+        except Exception as e:
+            return f"Error setting up {guild.name}: {type(e).__name__}: {e}"
+
+        prompts = result.get("prompts") or []
+        lines = [f"{guild.name} (ID: {guild.id})"]
+        if not prompts:
+            lines.append(
+                f"  {result.get('summary')} — nothing to pick here. If you still "
+                "can't see channels, the server gates on verification, not onboarding."
+            )
+            return "\n".join(lines)
+
+        lines.append(f"  prompts: {len(prompts)}")
+        for prompt in prompts:
+            rule = "one" if prompt["single_select"] else "any"
+            chosen = set((result.get("choice") or {}).get(prompt["id"], []))
+            lines.append(f'  • "{prompt["title"]}" (pick {rule}):')
+            for opt in prompt["options"]:
+                mark = "✓" if opt["id"] in chosen else " "
+                desc = f' — {opt["description"]}' if opt["description"] else ""
+                lines.append(f'      [{mark}] {opt["title"]}{desc}'[:240])
+
+        roles = [
+            r.name
+            for r in (
+                guild.get_role(int(rid)) for rid in (result.get("role_ids") or [])
+            )
+            if r is not None
+        ]
+        channels = [
+            c.name
+            for c in (
+                guild.get_channel(int(cid)) for cid in (result.get("channel_ids") or [])
+            )
+            if c is not None
+        ]
+        if not result.get("ok"):
+            lines.append(f"  FAILED: {result.get('summary')}")
+            return "\n".join(lines)
+        verb = "would take" if dry_run else "took"
+        lines.append(f"  {result.get('summary')}")
+        if roles:
+            lines.append(f"  {verb} roles: {', '.join(roles)}")
+        if channels:
+            lines.append(f"  {verb} channels: {', '.join(channels)}")
+        if result.get("picked_by") == "fallback":
+            lines.append(
+                "  NOTE: the model call failed, so these are first-option "
+                "defaults — rerun to choose properly."
+            )
+        return "\n".join(lines)
+
+
 class LeaveServerTool(Tool):
     """Leave a Discord server by name or ID."""
 
@@ -1787,34 +1928,9 @@ class LeaveServerTool(Tool):
         if not target:
             return "Error: leave_server requires a server name or ID"
 
-        guilds = list(self.bot.guilds or [])
-        if not guilds:
-            return "Error: not in any servers"
-
-        guild: Any = None
-        # 1) exact ID
-        if target.isdigit():
-            guild = next((g for g in guilds if str(g.id) == target), None)
-        # 2) exact name (case-insensitive)
+        guild, err = _resolve_guild(list(self.bot.guilds or []), target)
         if guild is None:
-            guild = next((g for g in guilds if g.name.lower() == target.lower()), None)
-        # 3) unique partial name (case-insensitive)
-        if guild is None:
-            matches = [g for g in guilds if target.lower() in (g.name or "").lower()]
-            if len(matches) == 1:
-                guild = matches[0]
-            elif len(matches) > 1:
-                return (
-                    f"Error: '{target}' matches {len(matches)} servers "
-                    + ", ".join(f"{g.name} ({g.id})" for g in matches[:8])
-                    + " — use the numeric ID to disambiguate."
-                )
-
-        if guild is None:
-            return (
-                f"Error: not in any server named/matching '{target}'. "
-                "Use list_servers to see current servers."
-            )
+            return err
 
         try:
             await guild.leave()
