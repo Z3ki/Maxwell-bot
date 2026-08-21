@@ -397,32 +397,6 @@ def read_floor(
                 silence,
             )
 
-    # 5. Two or more other people trading messages right now. Cutting in is
-    #    what makes a bot feel like an interruption rather than a participant.
-    if silence <= settings.mid_flow_seconds:
-        recent_authors = set()
-        recent_count = 0
-        for m in reversed(dated):
-            if m.created_at is None:
-                continue
-            if (now - m.created_at).total_seconds() > settings.mid_flow_seconds:
-                break
-            if m.is_self:
-                continue
-            recent_count += 1
-            if m.author_id:
-                recent_authors.add(m.author_id)
-        if (
-            recent_count >= settings.mid_flow_min_messages
-            and len(recent_authors) >= 2
-        ):
-            return verdict(
-                FLOOR_BUSY,
-                f"{recent_count} messages from {len(recent_authors)} people in the last "
-                f"{int(settings.mid_flow_seconds)}s",
-                silence,
-            )
-
     # 6. Quiet room vs live room. Both are open; the distinction only shapes
     #    what's natural to say.
     if silence >= settings.idle_after_seconds:

@@ -157,11 +157,12 @@ def test_legacy_reply_ts_alone_triggers_cooldown():
 
 
 def test_busy_when_two_people_are_mid_exchange():
+    # BUSY restriction was removed so active exchanges remain OPEN.
     verdict = _read(
         [_msg(30, author="a"), _msg(20, author="b"), _msg(5, author="a")]
     )
-    assert verdict.state == FLOOR_BUSY
-    assert verdict.may_speak is False
+    assert verdict.state == FLOOR_OPEN
+    assert verdict.may_speak is True
 
 
 def test_one_person_talking_to_themselves_is_not_busy():
