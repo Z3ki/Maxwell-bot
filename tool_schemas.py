@@ -51,7 +51,20 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         ["prompt"],
     ),
     "hd_image": _obj(
-        {"prompt": _str("HD image generation prompt")},
+        {
+            "prompt": _str(
+                "What to generate, or — when an input image is supplied — the "
+                "change to make to it (e.g. 'make the jacket red')"
+            ),
+            "image": _str(
+                "Optional image to edit or use as reference: an http(s) URL "
+                "(Discord CDN, a permanent URL from a previous image, any public "
+                "link) or a local path Maxwell wrote. For several, pass a JSON "
+                "list or a comma-separated string (max 4). Omit to generate from "
+                "scratch; images attached to the user's message are used "
+                "automatically."
+            ),
+        },
         ["prompt"],
     ),
     "react": _obj({"emoji": _str("Emoji or custom emoji name")}, ["emoji"]),

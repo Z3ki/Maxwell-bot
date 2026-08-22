@@ -9848,7 +9848,11 @@ class MaxwellBot(commands.Bot):
                 "send_message": "body",
                 "edit_message": "content",
                 "image_generator": "prompt",
-                "hd_image_generator": "prompt",
+                # The registered tool name is "hd_image"; the old
+                # "hd_image_generator" key never matched, so the preview fell
+                # through to "first string param" — which now risks showing the
+                # image URL (or a data URI) instead of the prompt.
+                "hd_image": "prompt",
                 "web_search": "query",
                 "tts": "text",
             }

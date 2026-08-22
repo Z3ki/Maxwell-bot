@@ -398,8 +398,35 @@ class Config:
     ).strip()
     ASR_RIVA_LANGUAGE = os.getenv("ASR_RIVA_LANGUAGE", "en-US").strip() or "en-US"
 
+    # Legacy ChatGPT2API image endpoint. Kept only so an existing .env does
+    # not error on load — hd_image no longer uses it (that host dropped every
+    # image model and now 404s on /v1/images/generations).
     GPT_IMAGE_URL = os.getenv("GPT_IMAGE_URL", "")
     GPT_IMAGE_API_KEY = os.getenv("GPT_IMAGE_API_KEY", "")
+
+    # hd_image: Gemini image model on the OpenAI-compatible endpoint. Blank
+    # base/key inherit the primary chat endpoint (OLLAMA_*), which is where
+    # the image model lives anyway — one key, one host.
+    #
+    # Generation goes through /chat/completions rather than
+    # /images/generations because only the chat route accepts an input image
+    # (the /images/edits route on this gateway ignores `model` and pins
+    # gemini-3-pro-image, which has no quota). The chat route returns images
+    # as markdown data-URIs in message.content.
+    GEMINI_IMAGE_BASE_URL = os.getenv("GEMINI_IMAGE_BASE_URL", "").strip()
+    GEMINI_IMAGE_API_KEY = os.getenv("GEMINI_IMAGE_API_KEY", "").strip()
+    GEMINI_IMAGE_MODEL = (
+        os.getenv("GEMINI_IMAGE_MODEL", "").strip() or "gemini-3.1-flash-image"
+    )
+    # Input images are downscaled to this longest edge before upload. Payload
+    # size dominates latency on this endpoint: a 629KB input took 89s where
+    # the same edit with a 64KB input took 20s.
+    GEMINI_IMAGE_MAX_INPUT_EDGE = _int_env(
+        "GEMINI_IMAGE_MAX_INPUT_EDGE", 1024, min_value=256, max_value=4096
+    )
+    GEMINI_IMAGE_TIMEOUT = _int_env(
+        "GEMINI_IMAGE_TIMEOUT", 300, min_value=30, max_value=900
+    )
 
     MEMORY_MESSAGE_LIMIT = _int_env(
         "MEMORY_MESSAGE_LIMIT", 2000, min_value=1, max_value=10000

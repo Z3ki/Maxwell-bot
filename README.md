@@ -196,7 +196,7 @@ present). Restart to re-detect. `python3 doctor.py` shows the resolved state.
 | `ENABLE_IMAGE_INPUT` | Forwarding images to the LLM (also `process_images` in the dashboard) | — |
 | `ENABLE_VIDEO_INPUT` | Video frame extraction for `video/*` attachments | `ffmpeg` |
 | `ENABLE_AUDIO_INPUT` | Forwarding audio to "omni" audio-capable models | opt-in (`false` by default) |
-| `ENABLE_IMAGE_GEN` | `image_generator` (Pollinations, free) + `hd_image` (NVIDIA key) | — |
+| `ENABLE_IMAGE_GEN` | `image_generator` (NVIDIA Flux) + `hd_image` (Gemini, generate **and** edit) | — |
 | `ENABLE_TTS` | The `tts` tool | espeak-ng, gTTS, or a Fish/NVIDIA key |
 | `ENABLE_TTS_VC` | TTS playback into voice channels | `ffmpeg` + a TTS engine |
 | `ENABLE_VC` | `voice_recv` import + `,vc` commands | `discord-ext-voice-recv` + PyNaCl |
@@ -241,15 +241,19 @@ present). Restart to re-detect. `python3 doctor.py` shows the resolved state.
 | `TTS_RIVA_*` | Riva TTS function ID, voice, language |
 | `ASR_RIVA_FUNCTION_ID` | NVIDIA Riva ASR (Parakeet) function ID for live VC transcription |
 | `ASR_RIVA_LANGUAGE` | ASR language code (default `en-US`) |
-| `NVIDIA_API_KEY` | Required for Riva TTS/ASR; also required for `hd_image` |
+| `NVIDIA_API_KEY` | Required for Riva TTS/ASR and for `image_generator` |
 
 ### Image generation
 
 | Variable | Description |
 |---|---|
-| `NVIDIA_API_KEY` | NVIDIA NIM key for `image_generator` (Flux) and `hd_image` |
+| `NVIDIA_API_KEY` | NVIDIA NIM key for `image_generator` (Flux) |
 | `NVIDIA_IMAGE_URL` | NVIDIA NIM endpoint |
-| `GPT_IMAGE_URL` / `GPT_IMAGE_API_KEY` | Optional GPT-Image-2 compatible endpoint for `hd_image` |
+| `GEMINI_IMAGE_BASE_URL` / `GEMINI_IMAGE_API_KEY` | Endpoint for `hd_image`. Blank inherits `OLLAMA_BASE_URL` / `OLLAMA_API_KEY` |
+| `GEMINI_IMAGE_MODEL` | Image model for `hd_image` (default `gemini-3.1-flash-image`) |
+| `GEMINI_IMAGE_MAX_INPUT_EDGE` | Longest edge an input image is downscaled to before upload (default `1024`) |
+| `GEMINI_IMAGE_TIMEOUT` | Per-request timeout in seconds (default `300`) |
+| `GPT_IMAGE_URL` / `GPT_IMAGE_API_KEY` | Unused. The old GPT-Image-2 host dropped its image models; kept so existing `.env` files still load |
 
 ### Admin API / dashboard
 
