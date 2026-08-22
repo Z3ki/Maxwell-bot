@@ -8,6 +8,8 @@ from providers import (
     OllamaProvider,
     ProviderUsageExhaustedError,
     USAGE_EXHAUSTED_MESSAGE,
+    _is_content_policy_block,
+    _is_policy_block_text,
 )
 
 
@@ -1074,3 +1076,99 @@ def test_retry_loop_cannot_spin_forever_on_endless_deterministic_400s():
 
     asyncio.run(run())
     assert len(session.urls) <= 3 + 2 * len(provider._endpoints) + 2
+
+
+GEMINI_PROMPT_BLOCK = (
+    "The prompt could not be submitted. The prompt contains sensitive words that "
+    "violate Google's (https://policies.google.com/terms/generative-ai/use-policy). "
+    "Try rephrasing the prompt. If you think this was an error, "
+    "(https://ai.google.dev/gemini-api/docs/troubleshooting)."
+)
+
+
+def test_policy_block_text_detected_and_normal_replies_are_not():
+    """Gemini hands the prompt block back as a 200 body; Maxwell relayed it."""
+    assert _is_policy_block_text(GEMINI_PROMPT_BLOCK)
+    assert _is_policy_block_text("the prompt could not be submitted")
+    # Ordinary replies, including plain model refusals, must not trip it.
+    assert not _is_policy_block_text("yo whats good")
+    assert not _is_policy_block_text("I cannot fulfill this request.")
+    assert not _is_policy_block_text("")
+
+
+def test_content_policy_http_error_detected_without_false_positives():
+    assert _is_content_policy_block(400, GEMINI_PROMPT_BLOCK)
+    assert _is_content_policy_block(400, '{"blockReason":"PROHIBITED_CONTENT"}')
+    # Adjacent 400s that have their own handlers must not be swallowed here.
+    assert not _is_content_policy_block(400, "maximum context length is 8192 tokens")
+    assert not _is_content_policy_block(400, "DEGRADED function cannot be invoked")
+    assert not _is_content_policy_block(400, "unknown variant `image_url`")
+    assert not _is_content_policy_block(429, GEMINI_PROMPT_BLOCK)
+
+
+def test_policy_block_fails_over_once_and_never_returns_the_notice():
+    """One shot at the blocked model, then the fallback answers.
+
+    Regression: the notice was posted to Discord verbatim, and the blocked
+    endpoint was retried instead of being handed straight to the fallback.
+    """
+    provider = OllamaProvider(
+        base_url="http://primary.test",
+        model="gemini-3.7-flash-low",
+        max_tokens=256,
+        temperature=0.7,
+        fallback_base_url="http://fallback.test",
+        fallback_model="grok-4.6",
+        retry_attempts=3,
+    )
+    provider.available = True
+
+    calls = []
+
+    class _BlockedResponse(FakeResponse):
+        def _json_body(self):
+            return {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": GEMINI_PROMPT_BLOCK,
+                        },
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+
+    class _AnswerResponse(FakeResponse):
+        def _json_body(self):
+            return {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "real answer"},
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+
+    class PolicyBlockSession(FakeSession):
+        def post(self, url, json=None, timeout=None, headers=None):
+            calls.append(url)
+            self.urls.append(url)
+            self.payloads.append(copy.deepcopy(json))
+            return _BlockedResponse() if "primary.test" in url else _AnswerResponse()
+
+    provider._session = PolicyBlockSession()
+
+    async def run():
+        return await provider.generate_chat_completion(
+            [{"role": "user", "content": "something spicy"}]
+        )
+
+    message = asyncio.run(run())
+
+    assert message["content"] == "real answer"
+    assert not _is_policy_block_text(message["content"])
+    assert sum("primary.test" in u for u in calls) == 1, calls
+    assert sum("fallback.test" in u for u in calls) == 1, calls

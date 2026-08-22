@@ -1118,6 +1118,33 @@ def _is_usage_exhausted_error(status: int, error_text: str) -> bool:
     return is_quota_marker
 
 
+def _is_policy_block_text(text: str) -> bool:
+    """True when a 200-OK *reply body* is actually Gemini's prompt-block notice.
+
+    z3ki (and Google's OpenAI-compat surface) do not return an HTTP error for a
+    blocked prompt — they hand back a normal 200 whose message content is:
+
+        The prompt could not be submitted. The prompt contains sensitive words
+        that violate Google's (...use-policy). Try rephrasing the prompt. ...
+
+    Nothing upstream flags it, so Maxwell relayed it into the channel verbatim
+    (logged 2026-08-21, #villa-31 and #poketwo-spawns). These markers are the
+    provider's own boilerplate; a genuine reply does not contain them. A false
+    positive only costs us one turn answered by the fallback model, so this is
+    deliberately eager.
+    """
+    t = (text or "").lower()
+    return any(
+        m in t
+        for m in (
+            "the prompt could not be submitted",
+            "contains sensitive words",
+            "policies.google.com/terms/generative-ai/use-policy",
+            "ai.google.dev/gemini-api/docs/troubleshooting",
+        )
+    )
+
+
 def _is_content_policy_block(status: int, error_text: str) -> bool:
     """True when the provider refused the *prompt* on content-policy grounds.
 
@@ -1478,11 +1505,12 @@ class OllamaProvider:
             return False
         return True
 
-    def _cool_endpoint(self, name: str) -> None:
+    def _cool_endpoint(self, name: str, reason: str = "rate-limited") -> None:
         self._endpoint_cooldown[name] = time.monotonic() + self._cooldown_seconds
         logger.warning(
-            "Provider endpoint %s rate-limited; cooling for %.0fs (using alternative if available)",
+            "Provider endpoint %s %s; cooling for %.0fs (using alternative if available)",
             name,
+            reason,
             self._cooldown_seconds,
         )
 
@@ -2044,7 +2072,9 @@ class OllamaProvider:
                         # fallback model rather than burning retries or surfacing
                         # a raw Google error into the channel.
                         if _is_content_policy_block(resp.status, error_text):
-                            self._cool_endpoint(endpoint.name)
+                            self._cool_endpoint(
+                                endpoint.name, "blocked the prompt on content policy"
+                            )
                             logger.warning(
                                 "Provider endpoint %s blocked the prompt on content policy; "
                                 "failing over: %s",
@@ -2062,8 +2092,7 @@ class OllamaProvider:
                                 continue
                             raise RuntimeError(
                                 f"Provider {endpoint.name} blocked this prompt on content "
-                                f"policy and no fallback endpoint was available: "
-                                f"{error_text[:200]}"
+                                f"policy and no fallback endpoint was available"
                             )
                         # Auto-clamp max_tokens on context overflow (OpenRouter returns 400)
                         if (
@@ -2330,6 +2359,35 @@ class OllamaProvider:
                         )
                         if content:
                             message["content"] = content
+                    # A blocked prompt comes back as a normal 200 whose content
+                    # IS Google's notice. Never let that reach the channel: drop
+                    # it, cool the endpoint and hand the turn to the fallback
+                    # model on the very next attempt (no second try against the
+                    # model that just refused — the same payload always loses).
+                    if content and _is_policy_block_text(content):
+                        self._cool_endpoint(
+                            endpoint.name, "blocked the prompt on content policy"
+                        )
+                        logger.warning(
+                            "Provider %s returned a content-policy prompt block as its "
+                            "reply; discarding it and failing over",
+                            endpoint.name,
+                        )
+                        content = ""
+                        message["content"] = ""
+                        if await self._retry_after_attempt(
+                            attempt,
+                            endpoint,
+                            f"Provider {endpoint.name} content-policy block",
+                            max_attempts=max_attempts,
+                            fast_fallback=True,
+                            has_media=has_media,
+                        ):
+                            continue
+                        raise RuntimeError(
+                            "Prompt was blocked by the provider's content policy and "
+                            "no fallback endpoint was available"
+                        )
                     if not content and not message.get("tool_calls"):
                         # Some providers return choices with a message but blank content (e.g. refusals, reasoning-only, or bugs).
                         logger.warning(
