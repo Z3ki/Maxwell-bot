@@ -10,6 +10,7 @@ from autonomy import (
     AutonomyEngine,
     AutonomyStore,
     AUTONOMY_RESEARCH_TOOLS,
+    _planner_system_prompt,
     _truncate,
 )
 
@@ -93,6 +94,38 @@ def test_parse_plan_resolves_channel_and_message_indices(tmp_path):
             "reason": "",
         }
     ]
+
+
+def test_parse_plan_allows_standalone_post_without_reply(tmp_path):
+    engine = _engine(tmp_path, auto_channels={"100"})
+    idx = AutonomyContextIndex()
+    idx.add_channel("100")
+    engine._context_index = idx
+
+    raw = json.dumps(
+        {
+            "thought": "just talk in the room",
+            "actions": [
+                {
+                    "kind": "post_channel",
+                    "target_channel_id": "1",
+                    "content": "wait that song slaps though",
+                }
+            ],
+        }
+    )
+    actions, failures = engine._parse_plan(raw)
+
+    assert failures == []
+    assert actions == [
+        {
+            "kind": "post_channel",
+            "target_channel_id": "100",
+            "content": "wait that song slaps though",
+            "reason": "",
+        }
+    ]
+    assert "reply_to_message_id" not in actions[0]
 
 
 def test_parse_plan_preserves_reply_to_message_id(tmp_path):
@@ -304,6 +337,48 @@ def test_exec_post_channel_replies_to_specific_message(tmp_path):
     assert result["sent_as_reply"] is True
     assert channel.ref.replies == [("threaded correctly", {"mention_author": True})]
     assert channel.sent == []
+
+
+def test_exec_post_channel_sends_standalone_when_reply_omitted(tmp_path):
+    class SentMessage:
+        id = 778
+
+    class Channel:
+        id = 100
+        guild = SimpleNamespace(id=9)
+
+        def __init__(self):
+            self.sent = []
+
+        async def fetch_message(self, message_id):  # pragma: no cover
+            raise AssertionError("standalone post should not fetch a reply target")
+
+        async def send(self, content):
+            self.sent.append(content)
+            return SentMessage()
+
+    channel = Channel()
+    bot = SimpleNamespace(
+        config=SimpleNamespace(DATA_DIR=str(tmp_path)),
+        _auto_channels={"100"},
+        _control={},
+        tools={},
+        get_channel=lambda channel_id: channel if channel_id == 100 else None,
+        fetch_channel=None,
+    )
+    engine = AutonomyEngine(bot)
+    result = {"kind": "post_channel", "result": "success", "error": None}
+
+    asyncio.run(
+        engine._exec_post_channel(
+            {"target_channel_id": "100", "content": "just talking"},
+            result,
+        )
+    )
+
+    assert result["result"] == "success"
+    assert result["sent_as_reply"] is False
+    assert channel.sent == ["just talking"]
 
 
 def test_exec_post_channel_records_autonomy_message_as_self_memory(tmp_path):
@@ -1015,3 +1090,22 @@ def test_register_conversation_fetches_when_the_guild_cache_is_cold(tmp_path):
     assert len(calls) == 1
     # Genuinely unresolvable stays unreachable — that part was right.
     assert label == "unreachable=X1"
+
+
+def test_planner_prompt_is_not_silence_first():
+    prompt = _planner_system_prompt(
+        base_personality="dry and short",
+        tool_descriptions="- react: add an emoji",
+        goals_text="- [goal_1] Be social.",
+        context="channel=7 is OPEN",
+    )
+    lowered = prompt.lower()
+    assert "otherwise do_nothing" not in lowered
+    assert "do_nothing, and mean it" not in lowered
+    assert "often nothing" not in lowered
+    assert "quiet hour" not in lowered
+    assert "silence is the default" not in lowered
+    assert "you do not need a mention" in lowered
+    assert "omit reply_to_message_id" in lowered
+    assert "no reply" in lowered
+    assert '"kind":"do_nothing","reason":"..."' not in prompt.replace(" ", "")
