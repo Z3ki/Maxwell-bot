@@ -1118,6 +1118,39 @@ def _is_usage_exhausted_error(status: int, error_text: str) -> bool:
     return is_quota_marker
 
 
+def _is_content_policy_block(status: int, error_text: str) -> bool:
+    """True when the provider refused the *prompt* on content-policy grounds.
+
+    Gemini (and OpenAI-compatible proxies in front of it) reject the request
+    outright rather than returning a completion, e.g.
+
+        The prompt could not be submitted. The prompt contains sensitive words
+        that violate Google's use policy. Try rephrasing the prompt.
+
+    The native API signals the same thing as promptFeedback.blockReason
+    (PROHIBITED_CONTENT / BLOCKLIST / SPII / SAFETY). None of it is transient:
+    retrying the identical payload against the same endpoint always loses, so
+    this cools the endpoint and fails straight over to the fallback model.
+    """
+    text = (error_text or "").lower()
+    if status not in (400, 403, 422, 451, 200):
+        return False
+    markers = (
+        "sensitive words",
+        "could not be submitted",
+        "generative-ai/use-policy",
+        "prohibited_content",
+        "blocked_reason",
+        "blockreason",
+        "safety_ratings",
+        "content policy",
+        "content_policy",
+        "content_filter",
+        "responsibleaipolicyviolation",
+    )
+    return any(m in text for m in markers)
+
+
 def _is_media_unsupported_error(status: int, error_text: str) -> bool:
     """True when the endpoint rejected image/video/audio content parts."""
     text = (error_text or "").lower()
@@ -1723,6 +1756,7 @@ class OllamaProvider:
                     or "Media available to inspect" in content
                     or "Audio/video available to inspect" in content
                     or "Images available to inspect" in content
+                    or "Server emoji/sticker reference sheet" in content
                 ):
                     target = msg
                     break
@@ -2002,6 +2036,34 @@ class OllamaProvider:
                                 continue
                             raise RuntimeError(
                                 f"Provider {endpoint.name} 403 and no fallback available: {error_text[:200]}"
+                            )
+                        # Content-policy prompt blocks (Gemini "sensitive words
+                        # that violate Google's use policy"). Not transient and
+                        # not payload-shaped: the same text will be refused every
+                        # time, so cool the endpoint and hand the turn to the
+                        # fallback model rather than burning retries or surfacing
+                        # a raw Google error into the channel.
+                        if _is_content_policy_block(resp.status, error_text):
+                            self._cool_endpoint(endpoint.name)
+                            logger.warning(
+                                "Provider endpoint %s blocked the prompt on content policy; "
+                                "failing over: %s",
+                                endpoint.name,
+                                error_text[:200],
+                            )
+                            if await self._retry_after_attempt(
+                                attempt,
+                                endpoint,
+                                f"Provider {endpoint.name} content-policy block",
+                                max_attempts=max_attempts,
+                                fast_fallback=True,
+                                has_media=has_media,
+                            ):
+                                continue
+                            raise RuntimeError(
+                                f"Provider {endpoint.name} blocked this prompt on content "
+                                f"policy and no fallback endpoint was available: "
+                                f"{error_text[:200]}"
                             )
                         # Auto-clamp max_tokens on context overflow (OpenRouter returns 400)
                         if (

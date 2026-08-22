@@ -8430,12 +8430,24 @@ class MaxwellBot(commands.Bot):
     def _format_media_summary(
         current_media: list[dict], active_media: list[dict]
     ) -> str:
-        current_images = [item for item in current_media if item.get("is_image")]
+        current_images = [
+            item
+            for item in current_media
+            if item.get("is_image") and item.get("source") != "emoji_grid"
+        ]
         current_other = [item for item in current_media if not item.get("is_image")]
+        # The emoji reference sheet is our own injected context, not something a
+        # user posted. Listing it as a normal image made Maxwell either ignore it
+        # (the image list says "only discuss when relevant") or describe it back
+        # at the channel, so it gets its own labeled block below.
+        grid_items = [
+            item for item in active_media if item.get("source") == "emoji_grid"
+        ]
         active_images = [
             item
             for item in active_media
             if str(item.get("mime_type", "")).startswith("image/")
+            and item.get("source") != "emoji_grid"
         ]
         active_non_images = [
             item
@@ -8467,6 +8479,17 @@ class MaxwellBot(commands.Bot):
             parts.append(
                 "Images available to inspect, oldest to newest. Only discuss them when relevant to the latest message. Source URL attached for each (curl/pull/reuse in sites if needed):\n"
                 + "\n".join(lines)
+            )
+        if grid_items:
+            parts.append(
+                "Server emoji/sticker reference sheet is attached as an image "
+                "(SERVER-EMOJI-STICKER-REFERENCE-GRID.png): a labeled contact sheet "
+                "of this server's custom emojis and stickers, each icon captioned "
+                "with its exact name underneath. Stickers come first, then emojis. "
+                "This is reference material for you — no user posted it, so never "
+                "describe, mention, or react to it. Look at it so you know what each "
+                ":name: emoji and [sticker_name] actually depicts, and pick ones "
+                "whose picture fits what you mean instead of guessing from the name."
             )
         if active_non_images:
             lines = []
@@ -10921,8 +10944,11 @@ class MaxwellBot(commands.Bot):
             emojis = self._guild_emojis.get(str(message.guild.id), {})
             stickers = getattr(self, "_guild_stickers", {}).get(str(message.guild.id), {})
             if emojis or stickers:
-                items = sorted(emojis.items())[:25]
-                sticker_items = sorted(stickers.keys())[:15]
+                # Keep the name list and the reference grid on the same caps —
+                # they drifted (25/15 vs 48/12), so Maxwell saw icons he had no
+                # name for and was given sticker names that were never drawn.
+                items = sorted(emojis.items())[: self._GRID_MAX_EMOJIS]
+                sticker_items = sorted(stickers.keys())[: self._GRID_MAX_STICKERS]
                 grid_parts = []
                 if items:
                     grid_parts.append(
