@@ -1108,4 +1108,6 @@ def test_planner_prompt_is_not_silence_first():
     assert "you do not need a mention" in lowered
     assert "omit reply_to_message_id" in lowered
     assert "no reply" in lowered
+    assert "inbox_act" in lowered
+    assert "join_vc" in lowered
     assert '"kind":"do_nothing","reason":"..."' not in prompt.replace(" ", "")

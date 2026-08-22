@@ -1172,3 +1172,44 @@ def test_policy_block_fails_over_once_and_never_returns_the_notice():
     assert not _is_policy_block_text(message["content"])
     assert sum("primary.test" in u for u in calls) == 1, calls
     assert sum("fallback.test" in u for u in calls) == 1, calls
+
+
+def test_audio_attaches_as_input_audio_when_enabled():
+    provider = OllamaProvider(
+        "http://example.test", "omni-model", 10, 0.5, enable_audio_input=True
+    )
+    provider.available = True
+    session = FakeSession()
+    provider._session = session
+
+    async def run():
+        await provider.generate_chat_completion(
+            [{"role": "user", "content": "[User attached media]"}],
+            media=[{"b64": "AAA", "mime_type": "audio/mpeg"}],
+        )
+
+    asyncio.run(run())
+    parts = session.payloads[0]["messages"][0]["content"]
+    audio = [p for p in parts if isinstance(p, dict) and p.get("type") == "input_audio"]
+    assert audio == [
+        {"type": "input_audio", "input_audio": {"data": "AAA", "format": "mp3"}}
+    ]
+
+
+def test_audio_is_not_attached_when_disabled():
+    provider = OllamaProvider(
+        "http://example.test", "text-model", 10, 0.5, enable_audio_input=False
+    )
+    provider.available = True
+    session = FakeSession()
+    provider._session = session
+
+    async def run():
+        await provider.generate_chat_completion(
+            [{"role": "user", "content": "listen to this"}],
+            media=[{"b64": "AAA", "mime_type": "audio/mpeg"}],
+        )
+
+    asyncio.run(run())
+    content = session.payloads[0]["messages"][0]["content"]
+    assert content == "listen to this"

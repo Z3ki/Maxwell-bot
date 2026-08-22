@@ -153,6 +153,7 @@ from api.state import (  # noqa: E402
     _load_commands,
     _load_commands_for_write,
     _load_control,
+    _load_inbox,
     _load_rem_control_for_write,
     _load_rem_status,
     _normalize_context_content,
@@ -1127,6 +1128,16 @@ async def commands_post(request):
         "context_cleanup_interval",
     }:
         pass
+    elif cmd_type == "inbox_act":
+        command["action"] = str(body.get("action", "")).strip().lower()
+        command["item_id"] = str(body.get("item_id", "")).strip()
+        command["user_id"] = str(body.get("user_id", "")).strip()
+        if command["action"] not in {"accept", "decline", "dismiss"}:
+            return _json_response(
+                {"error": "action must be accept, decline, or dismiss"}, 400
+            )
+        if not command["item_id"] and not command["user_id"]:
+            return _json_response({"error": "item_id or user_id required"}, 400)
     else:
         return _json_response({"error": f"unknown command type: {cmd_type}"}, 400)
 
@@ -1179,6 +1190,38 @@ async def discord_state(request):
         return _json_response({"error": "unauthorized"}, 401)
     state = _safe_object(_load(DATA_DIR / "discord_state.json"))
     return _json_response(state)
+
+
+async def inbox_get(request):
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
+    return _json_response({"items": _load_inbox()})
+
+
+async def inbox_act(request):
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
+    item_id = str(request.match_info.get("id", "")).strip()
+    if not item_id:
+        return _json_response({"error": "id required"}, 400)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    class _Queued:
+        async def json(self):
+            return {
+                "type": "inbox_act",
+                "action": body.get("action", ""),
+                "item_id": item_id,
+                "user_id": body.get("user_id", ""),
+            }
+
+    # Command queue only — this process never calls Discord HTTP.
+    return await commands_post(_Queued())
 
 
 # ---------- PM2 / System ----------
@@ -1871,6 +1914,8 @@ app.router.add_get("/api/commands", commands_get)
 app.router.add_post("/api/commands", commands_post)
 app.router.add_delete("/api/commands", commands_del)
 app.router.add_get("/api/discord/state", discord_state)
+app.router.add_get("/api/inbox", inbox_get)
+app.router.add_post("/api/inbox/{id}/act", inbox_act)
 app.router.add_post("/api/login", login_post)
 app.router.add_get("/api/auth/discord/state", discord_auth_state)
 app.router.add_get("/api/auth/discord/callback", discord_auth_callback)

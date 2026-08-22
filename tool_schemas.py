@@ -299,6 +299,29 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         },
         ["text"],
     ),
+    "inbox_list": _obj({}),
+    "inbox_act": _obj(
+        {
+            "action": _str("accept, decline, or dismiss"),
+            "item_id": _str("Inbox item id, e.g. friend_123"),
+            "user_id": _str("Requester Discord id if item_id is omitted"),
+        },
+        ["action"],
+    ),
+    "join_vc": _obj(
+        {
+            "voice_channel_id": _str(
+                "Numeric Discord voice channel id (snowflake, not a planner channel number)"
+            ),
+            "channel_name": _str("Voice channel name in the current server"),
+            "user_id": _str("Join this user's current voice channel"),
+        },
+    ),
+    "vc_status": _obj({}),
+    "vc_where": _obj(
+        {"user_id": _str("Numeric user ID or @mention")},
+        ["user_id"],
+    ),
     "leave_vc": _obj({}),
     "wait": _obj(
         {"seconds": _num("Pause this tool batch (default 2, max 10)")},
@@ -416,6 +439,11 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "email_read_inbox",
         "email_get_message",
         "email_search",
+        "inbox_list",
+        "inbox_act",
+        "join_vc",
+        "vc_status",
+        "vc_where",
         "leave_vc",
         # set_activity gets a follow-up so the model can react to its own
         # status change. change_presence deliberately does NOT — that one is

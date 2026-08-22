@@ -513,6 +513,7 @@ CTX_BUDGET_DM_HISTORY = 1200
 CTX_BUDGET_LTM = 800
 CTX_BUDGET_SHARED = 600
 CTX_BUDGET_CHANNELS_MAP = 1600  # bumped from 800 — enriched with topic/recency
+CTX_BUDGET_INBOX = 500
 
 # Research tools are never available to the unattended tick. Curiosity-as-a-
 # drive turned every quiet interval into web_search + update_memory on random
@@ -814,6 +815,8 @@ Take the next real step, or sit it out if there isn't one:
 - A goal has a real next step → take the step, not a status update about it.
 - Something's finished or dead → complete_goal. Something new actually matters → create_goal.
 - Nothing you actually want to do → do_nothing.
+- Friend requests and notices show under INBOX in CURRENT CONTEXT when there are any. inbox_list / inbox_act to accept, decline, or dismiss. You do not have to act.
+- join_vc / vc_where / vc_status / leave_vc when you want to hop into voice. join_vc can follow a user_id into their current VC.
 
 Not worth doing: researching topics, web_search, fetch_url, youtube, empty "hey what's up" openers, anything already in YOUR RECENT ACTIONS, announcing an intention instead of acting on it. A react is fine when a line is enough.
 
@@ -2011,6 +2014,17 @@ class AutonomyEngine:
             logger.error(f"Autonomy floor read failed: {e}", exc_info=True)
             self._floor_verdicts = {}
             sections[floor_slot] = render_floor_section([])
+
+        # Volatile tail only. Empty inbox omits the section so the cached
+        # prefix never moves just because a heading exists.
+        try:
+            store = getattr(self.bot, "inbox", None)
+            if store is not None:
+                inbox_text = store.render_planner(await store.load_items())
+                if inbox_text:
+                    sections.append(_truncate(inbox_text, CTX_BUDGET_INBOX))
+        except Exception as e:
+            logger.debug("Autonomy inbox context failed: %s", e)
 
         full = "\n\n".join(sections)
         return full

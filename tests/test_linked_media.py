@@ -9,7 +9,7 @@ import asyncio
 
 import pytest
 
-from bot import MaxwellBot
+from bot import MaxwellBot, _owner_audio_input_enabled
 
 
 refs = MaxwellBot._media_link_refs
@@ -148,6 +148,24 @@ def test_caps_at_five_items():
     media, fetched = _run({"process_images": True, "process_audio": True}, content)
     assert len(fetched) == 5
     assert len(media) == 5
+
+
+def test_audio_flag_prefers_dashboard_then_env():
+    from types import SimpleNamespace
+
+    assert (
+        _owner_audio_input_enabled(
+            SimpleNamespace(_control={"process_audio": False}, config=SimpleNamespace(ENABLE_AUDIO_INPUT=True))
+        )
+        is False
+    )
+    assert (
+        _owner_audio_input_enabled(
+            SimpleNamespace(_control={}, config=SimpleNamespace(ENABLE_AUDIO_INPUT=True))
+        )
+        is True
+    )
+    assert _owner_audio_input_enabled(SimpleNamespace(_control={}, config=None)) is False
 
 
 def test_items_are_tagged_with_source_and_url():

@@ -2173,7 +2173,11 @@ class LookupUserTool(Tool):
     """Look up information about a Discord user"""
 
     def get_description(self):
-        return "Look up a Discord user by ID or mention. Params: user_id (required, numeric ID or @mention). Returns name, creation date, avatar."
+        return (
+            "Look up a Discord user by ID or mention. Params: user_id "
+            "(required, numeric ID or @mention). Returns name, creation date, "
+            "avatar, and whether they are in a voice channel."
+        )
 
     async def execute(
         self, message: Message, user_id: str | None = None, **kwargs
@@ -2198,6 +2202,17 @@ class LookupUserTool(Tool):
                 f"Bot: {user.bot}\n"
                 f"Avatar: {getattr(user.display_avatar, 'url', 'none') if hasattr(user, 'display_avatar') else getattr(user, 'avatar_url', 'none')}"
             )
+            member, voice_ch = _find_member_voice(
+                self.bot, int(cleaned), getattr(message, "guild", None)
+            )
+            if voice_ch is not None:
+                gname = getattr(getattr(voice_ch, "guild", None), "name", "?")
+                info += (
+                    f"\nVoice: in #{getattr(voice_ch, 'name', voice_ch.id)} "
+                    f"({gname})"
+                )
+            else:
+                info += "\nVoice: not in a voice channel (from cached members)"
             return info
         except discord.NotFound:
             return f"Error: User {user_id} not found"
@@ -6309,6 +6324,272 @@ class TtsTool(Tool):
                             os.remove(path)
         else:
             return f"Error: Audio file {filename} was not generated"
+
+
+def _is_voice_channel(ch) -> bool:
+    if ch is None:
+        return False
+    try:
+        if isinstance(ch, discord.VoiceChannel):
+            return True
+        stage = getattr(discord, "StageChannel", None)
+        if stage is not None and isinstance(ch, stage):
+            return True
+    except Exception:
+        pass
+    return type(ch).__name__ in {"VoiceChannel", "StageChannel"}
+
+
+def _find_member_voice(bot, user_id: int, prefer_guild=None):
+    """Return (member, voice_channel) if that user is in a VC we can see."""
+    guilds = []
+    if prefer_guild is not None:
+        guilds.append(prefer_guild)
+    for guild in getattr(bot, "guilds", None) or []:
+        if prefer_guild is not None and getattr(guild, "id", None) == getattr(
+            prefer_guild, "id", None
+        ):
+            continue
+        guilds.append(guild)
+    for guild in guilds:
+        member = None
+        getter = getattr(guild, "get_member", None)
+        if callable(getter):
+            member = getter(user_id)
+        if member is None:
+            continue
+        voice = getattr(member, "voice", None)
+        channel = getattr(voice, "channel", None) if voice is not None else None
+        if channel is not None:
+            return member, channel
+    return None, None
+
+
+def _resolve_voice_channel(bot, message, channel_id=None, channel_name=None, user_id=None):
+    """Find a VoiceChannel from an id, name, or a user who is already in one."""
+    if user_id:
+        cleaned = re.sub(r"[^0-9]", "", str(user_id))
+        if cleaned:
+            _member, channel = _find_member_voice(
+                bot, int(cleaned), getattr(message, "guild", None)
+            )
+            if channel is not None:
+                return channel
+    cid = re.sub(r"[^0-9]", "", str(channel_id or ""))
+    if cid:
+        ch = bot.get_channel(int(cid))
+        if _is_voice_channel(ch):
+            return ch
+    name = str(channel_name or "").strip().lstrip("#").lower()
+    guild = getattr(message, "guild", None)
+    if name and guild is not None:
+        for ch in getattr(guild, "voice_channels", []) or []:
+            if str(getattr(ch, "name", "")).lower() == name:
+                return ch
+    return None
+
+
+def _vc_listen_text_channel(message, guild):
+    channel = getattr(message, "channel", None)
+    if channel is not None and hasattr(channel, "send"):
+        return channel
+    if guild is None:
+        return None
+    text_channels = list(getattr(guild, "text_channels", []) or [])
+    return text_channels[0] if text_channels else None
+
+
+class InboxListTool(Tool):
+    """List unread inbox items (friend requests, notices)."""
+
+    def get_description(self):
+        return (
+            "List unread inbox items: friend requests and other notices. No params. "
+            "Use inbox_act to accept, decline, or dismiss."
+        )
+
+    async def execute(self, message: Message, **kwargs) -> str:
+        store = getattr(self.bot, "inbox", None)
+        if store is None:
+            return "Error: inbox is not available"
+        items = store.actionable(await store.load_items())
+        if not items:
+            return "Inbox is empty."
+        lines = [f"Inbox ({len(items)} actionable):"]
+        for item in items[:20]:
+            acts = ", ".join(str(a) for a in (item.get("actions") or [])[:4])
+            lines.append(
+                f"- [{item.get('id')}] {item.get('kind')} "
+                f"{item.get('actor_name') or '?'}({item.get('actor_id') or '?'}): "
+                f"{item.get('summary')} [{acts}]"
+            )
+        return "\n".join(lines)
+
+
+class InboxActTool(Tool):
+    """Accept, decline, or dismiss an inbox item."""
+
+    def get_description(self):
+        return (
+            "Act on an inbox item. Params: action (required: accept, decline, or dismiss), "
+            "item_id (inbox id like friend_123) or user_id (the requester's Discord id)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        action: str | None = None,
+        item_id: str | None = None,
+        user_id: str | None = None,
+        **kwargs,
+    ) -> str:
+        from inbox import apply_inbox_action
+
+        return await apply_inbox_action(
+            self.bot,
+            action=str(action or ""),
+            item_id=str(item_id or ""),
+            user_id=re.sub(r"[^0-9]", "", str(user_id or "")),
+        )
+
+
+class JoinVcTool(Tool):
+    """Join a voice channel, optionally by following a user."""
+
+    def get_description(self):
+        return (
+            "Join a voice channel. Params: voice_channel_id (Discord snowflake), "
+            "channel_name in this server, or user_id to hop into that person's "
+            "current VC. Then you can hear and talk."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        voice_channel_id: str | None = None,
+        channel_id: str | None = None,
+        channel_name: str | None = None,
+        user_id: str | None = None,
+        **kwargs,
+    ) -> str:
+        if not getattr(getattr(self.bot, "config", None), "ENABLE_VC", True):
+            return "Error: voice is disabled (ENABLE_VC=false)"
+        target = _resolve_voice_channel(
+            self.bot,
+            message,
+            voice_channel_id or channel_id,
+            channel_name,
+            user_id,
+        )
+        if target is None:
+            return (
+                "Error: no voice channel found. Pass channel_id, channel_name, "
+                "or user_id of someone already in a VC."
+            )
+        guild = getattr(target, "guild", None) or getattr(message, "guild", None)
+        text_channel = _vc_listen_text_channel(message, guild)
+        try:
+            vc = None
+            if hasattr(self.bot, "_vc_get_client"):
+                vc = self.bot._vc_get_client(guild, target)
+            if vc and vc.is_connected():
+                if getattr(getattr(vc, "channel", None), "id", None) != getattr(
+                    target, "id", None
+                ):
+                    await vc.move_to(target)
+            else:
+                if not hasattr(self.bot, "_vc_connect_channel"):
+                    return "Error: voice connect is not available on this bot"
+                vc = await self.bot._vc_connect_channel(target)
+            listening = False
+            if hasattr(self.bot, "_vc_start_listening") and guild is not None:
+                listening = await self.bot._vc_start_listening(
+                    guild, text_channel, target
+                )
+            return (
+                f"Joined #{getattr(target, 'name', target.id)} "
+                f"(listening: {bool(listening)})"
+            )
+        except Exception as e:
+            return f"Error joining voice: {e}"
+
+
+class VcStatusTool(Tool):
+    """Show Maxwell's current voice channel and who else is there."""
+
+    def get_description(self):
+        return (
+            "Show whether you are in a voice channel and who else is there. "
+            "No params. Uses the current server when possible."
+        )
+
+    async def execute(self, message: Message, **kwargs) -> str:
+        guild = getattr(message, "guild", None)
+        clients = list(getattr(self.bot, "voice_clients", None) or [])
+        if guild is not None:
+            clients = [c for c in clients if getattr(c, "guild", None) == guild] or clients
+        vc = next((c for c in clients if getattr(c, "is_connected", lambda: False)()), None)
+        if vc is None or not vc.is_connected():
+            extra = ""
+            if guild is not None:
+                occupied = []
+                for ch in getattr(guild, "voice_channels", []) or []:
+                    members = [
+                        getattr(m, "display_name", str(getattr(m, "id", "?")))
+                        for m in (getattr(ch, "members", None) or [])
+                    ]
+                    if members:
+                        occupied.append(
+                            f"#{getattr(ch, 'name', ch.id)}: {', '.join(members[:8])}"
+                        )
+                if occupied:
+                    extra = "\nOccupied channels:\n- " + "\n- ".join(occupied[:8])
+            return "Not connected to a voice channel." + extra
+        channel = getattr(vc, "channel", None)
+        members = list(getattr(channel, "members", None) or [])
+        names = [
+            getattr(m, "display_name", str(getattr(m, "id", "?"))) for m in members[:15]
+        ]
+        listening = False
+        if hasattr(self.bot, "_vc_is_listening"):
+            listening = bool(self.bot._vc_is_listening(vc))
+        return (
+            f"Connected to #{getattr(channel, 'name', getattr(channel, 'id', '?'))} "
+            f"in {getattr(getattr(channel, 'guild', None), 'name', '?')} "
+            f"(listening: {listening})\n"
+            f"Members ({len(members)}): {', '.join(names) or '(empty)'}"
+        )
+
+
+class VcWhereTool(Tool):
+    """Find which voice channel a user is in."""
+
+    def get_description(self):
+        return (
+            "Find whether a user is in a voice channel and which one. "
+            "Params: user_id (required, numeric id or mention)."
+        )
+
+    async def execute(self, message: Message, user_id: str | None = None, **kwargs) -> str:
+        cleaned = re.sub(r"[^0-9]", "", str(user_id or ""))
+        if not cleaned:
+            return "Error: user_id is required"
+        member, channel = _find_member_voice(
+            self.bot, int(cleaned), getattr(message, "guild", None)
+        )
+        if channel is None:
+            return f"User {cleaned} is not in a voice channel I can see."
+        others = [
+            getattr(m, "display_name", str(getattr(m, "id", "?")))
+            for m in (getattr(channel, "members", None) or [])
+            if str(getattr(m, "id", "")) != cleaned
+        ][:8]
+        extra = f" with {', '.join(others)}" if others else ""
+        return (
+            f"{getattr(member, 'display_name', cleaned)} is in "
+            f"#{getattr(channel, 'name', channel.id)} "
+            f"({getattr(getattr(channel, 'guild', None), 'name', '?')}){extra}"
+        )
 
 
 class LeaveVcTool(Tool):

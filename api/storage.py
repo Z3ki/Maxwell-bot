@@ -186,3 +186,7 @@ def _context_path() -> Path:
 
 def _llm_traces_path() -> Path:
     return _data_dir() / "llm_traces.json"
+
+
+def _inbox_path() -> Path:
+    return _data_dir() / "inbox.json"

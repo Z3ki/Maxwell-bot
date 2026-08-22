@@ -27,6 +27,7 @@ from api.storage import (
     _context_cleanup_state_path,
     _context_path,
     _control_path,
+    _inbox_path,
     _load,
     _load_for_write,
     _memory_text_path,
@@ -453,6 +454,12 @@ def _load_context_cleanup_status():
         "passes_total": state.get("passes_total", 0),
         "log": entries[-20:],
     }
+
+
+def _load_inbox():
+    data = _safe_object(_load(_inbox_path()))
+    items = data.get("items", [])
+    return [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
 
 
 def _load_commands():

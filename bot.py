@@ -215,7 +215,10 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     ForwardMessageTool,
     HDImageGeneratorTool,
     ImageGeneratorTool,
+    InboxActTool,
+    InboxListTool,
     JoinServerTool,
+    JoinVcTool,
     LeaveServerTool,
     LeaveVcTool,
     ListAdminServersTool,
@@ -240,6 +243,8 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     TypingTool,
     UpdateBasePersonalityTool,
     UpdateServerPromptTool,
+    VcStatusTool,
+    VcWhereTool,
     WaitTool,
     WebSearchTool,
     YouTubeTool,
@@ -261,6 +266,7 @@ from control_defaults import (  # noqa: E402
     parse_bool,
 )
 import guild_onboarding  # noqa: E402
+from inbox import InboxStore, apply_inbox_action  # noqa: E402
 from providers import (  # noqa: E402
     MIME_MAP,
     OllamaProvider,
@@ -402,6 +408,21 @@ def _web_result_snippet(content: str, title: str, limit: int = 280) -> str:
             i += 1
         text = "\n".join(lines[i:])
     return text.strip()[:limit]
+
+
+def _owner_audio_input_enabled(owner) -> bool:
+    """Whether audio should be extracted and forwarded to the model.
+
+    Dashboard ``process_audio`` wins when present. Otherwise fall back to
+    ``ENABLE_AUDIO_INPUT``. Defaulting the extract paths to False while the
+    env/control defaults are True is how a clip could be fetched and then
+    silently dropped before the provider ever saw it.
+    """
+    control = getattr(owner, "_control", None) or {}
+    if isinstance(control, dict) and "process_audio" in control:
+        return bool(control.get("process_audio"))
+    cfg = getattr(owner, "config", None)
+    return bool(getattr(cfg, "ENABLE_AUDIO_INPUT", False))
 
 
 def _message_created_at_iso(message) -> str:
@@ -2007,6 +2028,8 @@ TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "email_read_inbox",
     "email_get_message",
     "email_search",
+    "inbox_list",
+    "inbox_act",
 }
 
 # Jailbreak / freedom-mode. OFF per server unless an admin runs `,jailbreak on`.
@@ -2471,7 +2494,7 @@ class MaxwellBot(commands.Bot):
             fallback_api_key=self.config.OLLAMA_FALLBACK_API_KEY,
             fallback_disable_reasoning=self.config.OLLAMA_FALLBACK_DISABLE_REASONING,
             retry_attempts=self.config.OLLAMA_RETRY_ATTEMPTS,
-            enable_audio_input=self.config.ENABLE_AUDIO_INPUT,
+            enable_audio_input=_owner_audio_input_enabled(self),
             vision_base_url=self.config.OLLAMA_VISION_BASE_URL,
             vision_model=self.config.OLLAMA_VISION_MODEL,
             vision_api_key=self.config.OLLAMA_VISION_API_KEY,
@@ -2580,11 +2603,11 @@ class MaxwellBot(commands.Bot):
                     fallback_api_key=self.config.OLLAMA_FALLBACK_API_KEY,
                     fallback_disable_reasoning=self.config.OLLAMA_FALLBACK_DISABLE_REASONING,
                     retry_attempts=self.config.OLLAMA_RETRY_ATTEMPTS,
-                    enable_audio_input=self.config.ENABLE_AUDIO_INPUT,
+                    enable_audio_input=_owner_audio_input_enabled(self),
                 )
             else:
                 provider = cached
-            # Await init so the first tick after a build (or after a transient
+            # Await init so the first tick after a build (or after a transient)
             # failure) doesn't race the /models probe. Guarded so it never raises.
             try:
                 await provider.initialize()
@@ -2694,7 +2717,7 @@ class MaxwellBot(commands.Bot):
                     fallback_api_key=self.config.OLLAMA_FALLBACK_API_KEY,
                     fallback_disable_reasoning=self.config.OLLAMA_FALLBACK_DISABLE_REASONING,
                     retry_attempts=self.config.OLLAMA_RETRY_ATTEMPTS,
-                    enable_audio_input=self.config.ENABLE_AUDIO_INPUT,
+                    enable_audio_input=_owner_audio_input_enabled(self),
                 )
             else:
                 provider = cached
@@ -2797,6 +2820,7 @@ class MaxwellBot(commands.Bot):
         self.rem_store = RemStore(
             self.config.DATA_DIR, run_history=self.config.REM_RUN_HISTORY
         )
+        self.inbox = InboxStore(self.config.DATA_DIR)
 
     def _setup_tools(self):
         # Every tool is gated by an ENABLE_* env var so a fresh install
@@ -2864,6 +2888,11 @@ class MaxwellBot(commands.Bot):
         self._reasoning_backfill = ReasoningLogTool(self)
         self.tools["send_meme"] = SendMemeTool(self)
         self.tools["send_media"] = SendMediaTool(self)
+        self.tools["inbox_list"] = InboxListTool(self)
+        self.tools["inbox_act"] = InboxActTool(self)
+        self.tools["join_vc"] = JoinVcTool(self)
+        self.tools["vc_status"] = VcStatusTool(self)
+        self.tools["vc_where"] = VcWhereTool(self)
         self.tools["leave_vc"] = LeaveVcTool(self)
         # Email tools (local Postfix + Dovecot). Set ENABLE_EMAIL_TOOLS=false
         # to skip all four registrations. If enabled but MAXWELL_EMAIL_PASSWORD
@@ -3089,6 +3118,10 @@ class MaxwellBot(commands.Bot):
             logger.info(f"Logged in as {self.bot_name} ({self.user.id})")
         logger.info(f"Connected to {len(self.guilds)} guilds")
         self._load_emojis()
+        try:
+            await self.inbox.seed_from_bot(self)
+        except Exception as e:
+            logger.warning("Inbox seed failed: %s", e)
         await self._save_discord_state()
 
     async def _discord_state_loop(self):
@@ -3155,12 +3188,88 @@ class MaxwellBot(commands.Bot):
             else {},
             "guilds": guilds,
             "dms": dms,
+            "friends": self._friends_snapshot(),
         }
         await asyncio.to_thread(
             _atomic_json_write_sync,
             Path(self.config.DATA_DIR) / "discord_state.json",
             payload,
         )
+
+    def _friends_snapshot(self) -> dict:
+        incoming: list[dict] = []
+        outgoing: list[dict] = []
+        friends: list[dict] = []
+        for rel in getattr(self, "relationships", None) or []:
+            user = getattr(rel, "user", None)
+            uid = str(getattr(user, "id", "") or "")
+            name = (
+                getattr(user, "display_name", None)
+                or getattr(user, "name", None)
+                or uid
+                or "?"
+            )
+            row = {"id": uid, "name": str(name)}
+            typ = str(getattr(getattr(rel, "type", None), "name", "") or "")
+            if typ == "incoming_request":
+                incoming.append(row)
+            elif typ == "outgoing_request":
+                outgoing.append(row)
+            elif typ == "friend":
+                friends.append(row)
+        return {
+            "incoming_count": len(incoming),
+            "outgoing_count": len(outgoing),
+            "friend_count": len(friends),
+            "incoming": incoming[:8],
+            "friends": friends[:8],
+        }
+
+    async def _append_inbox_dynamic(self, dynamic_parts: list[str]) -> None:
+        store = getattr(self, "inbox", None)
+        if store is None:
+            return
+        try:
+            text = store.render_planner(await store.load_items())
+        except Exception:
+            return
+        if text:
+            dynamic_parts.append(text)
+
+    async def on_relationship_add(self, relationship):
+        try:
+            await self.inbox.ingest_relationship(relationship, event="add")
+        except Exception as e:
+            logger.warning("Inbox relationship_add failed: %s", e)
+
+    async def on_relationship_update(self, before, after):
+        try:
+            await self.inbox.ingest_relationship(after, event="update", before=before)
+        except Exception as e:
+            logger.warning("Inbox relationship_update failed: %s", e)
+
+    async def on_relationship_remove(self, relationship):
+        try:
+            await self.inbox.ingest_relationship(relationship, event="remove")
+        except Exception as e:
+            logger.warning("Inbox relationship_remove failed: %s", e)
+
+    async def on_group_join(self, channel, user):
+        me = self.user
+        if me is None or getattr(user, "id", None) != me.id:
+            return
+        name = getattr(channel, "name", None) or "group DM"
+        try:
+            await self.inbox.add_notice(
+                kind="group_dm",
+                summary=f"You were added to {name}",
+                actor_id=str(getattr(channel, "id", "") or ""),
+                actor_name=str(name),
+                actions=["dismiss"],
+                item_id=f"group_{getattr(channel, 'id', '')}",
+            )
+        except Exception as e:
+            logger.warning("Inbox group_join notice failed: %s", e)
 
     def _load_emojis(self):
         self._guild_emojis = {}
@@ -5811,6 +5920,17 @@ class MaxwellBot(commands.Bot):
                 logger.debug("auto-onboard owner DM failed: %s", e)
         except Exception as e:
             logger.warning("auto-onboard error for %s: %s", guild.name, e)
+        try:
+            await self.inbox.add_notice(
+                kind="guild_join",
+                summary=f"Joined server {guild.name}",
+                actor_id=str(getattr(guild, "id", "") or ""),
+                actor_name=str(getattr(guild, "name", "") or ""),
+                actions=["dismiss"],
+                item_id=f"guild_{getattr(guild, 'id', '')}",
+            )
+        except Exception as e:
+            logger.debug("Inbox guild_join notice failed: %s", e)
 
     async def _load_rem_control(self):
         try:
@@ -6436,6 +6556,7 @@ class MaxwellBot(commands.Bot):
                 self._ai_concurrency = control["ai_concurrency"]
                 self._notify_ai_waiters()
             self._control = control
+            self._sync_audio_input_flags()
             # 2026-07-22: the old global progress_messages re-apply is gone —
             # progress is now per-server via _progress_servers / the env
             # baseline. bot_control.json may still contain a stale
@@ -6445,6 +6566,14 @@ class MaxwellBot(commands.Bot):
             logger.info("Loaded dashboard control settings")
         except Exception as e:
             logger.error(f"Failed to load control settings: {e}")
+
+    def _sync_audio_input_flags(self) -> None:
+        """Keep every provider's audio flag in lockstep with process_audio."""
+        enabled = _owner_audio_input_enabled(self)
+        for attr in ("ai_provider", "autonomy_provider", "aux_provider"):
+            provider = getattr(self, attr, None)
+            if provider is not None:
+                provider.enable_audio_input = enabled
 
     async def _control_reload_loop(self):
         while True:
@@ -6985,6 +7114,13 @@ class MaxwellBot(commands.Bot):
                             cmd["result"] = (
                                 "context cleanup engine removed (RAG memory active)"
                             )
+                        elif typ == "inbox_act":
+                            cmd["result"] = await apply_inbox_action(
+                                self,
+                                action=str(cmd.get("action") or ""),
+                                item_id=str(cmd.get("item_id") or ""),
+                                user_id=str(cmd.get("user_id") or ""),
+                            )
                         else:
                             cmd["result"] = "unknown command"
                     except Exception as e:
@@ -7470,7 +7606,7 @@ class MaxwellBot(commands.Bot):
 
     async def _extract_media(self, message) -> tuple[list[str], list[dict]]:
         proc_img = bool(self._control.get("process_images", True))
-        proc_aud = bool(self._control.get("process_audio", False))
+        proc_aud = _owner_audio_input_enabled(self)
         # If neither images nor audio processing, skip all binary media collection.
         # (process_audio / ENABLE_AUDIO_INPUT controls audio input to the model)
         if not proc_img and not proc_aud:
@@ -7773,9 +7909,7 @@ class MaxwellBot(commands.Bot):
 
                 # Extract audio track only if process_audio (omni audio input) is enabled.
                 # This prevents sending audio to non-omni or when user disabled audio models.
-                proc_aud = bool(
-                    (getattr(self, "_control", None) or {}).get("process_audio", False)
-                )
+                proc_aud = _owner_audio_input_enabled(self)
                 if proc_aud:
                     audio_path = tmp_path / "audio.wav"
                     audio_cmd = [
@@ -8358,7 +8492,7 @@ class MaxwellBot(commands.Bot):
         fetching, never what it is.
         """
         proc_img = bool(self._control.get("process_images", True))
-        proc_aud = bool(self._control.get("process_audio", False))
+        proc_aud = _owner_audio_input_enabled(self)
         if not proc_img and not proc_aud:
             return []
         skip = skip_urls or set()
@@ -11052,6 +11186,9 @@ class MaxwellBot(commands.Bot):
                 "Multimodal: images/audio/video are in the payload (oldest→newest). "
                 "Inspect them; don't claim you can't see/hear them unless none were sent."
             )
+        append_inbox = getattr(self, "_append_inbox_dynamic", None)
+        if callable(append_inbox):
+            await append_inbox(dynamic_parts)
         # 2026-07-21: explicit memory-scope reminder. Short-term (the
         # user/assistant turns that follow the system message) is
         # scoped to THIS channel only — you do NOT share per-channel
@@ -11683,6 +11820,9 @@ class MaxwellBot(commands.Bot):
 
         await self._telegram_append_cross_context(dynamic_parts, text, user_id)
         await self._telegram_append_rag(dynamic_parts, text, tg_chan_id, chat_id)
+        append_inbox = getattr(self, "_append_inbox_dynamic", None)
+        if callable(append_inbox):
+            await append_inbox(dynamic_parts)
 
         tool_prompt = self._tool_system_prompt("telegram")
         if tool_prompt:
@@ -11954,9 +12094,7 @@ class MaxwellBot(commands.Bot):
         audio = message.get("audio")
         tg_media = []
 
-        proc_aud = bool(
-            self._control.get("process_audio", self.config.ENABLE_AUDIO_INPUT)
-        )
+        proc_aud = _owner_audio_input_enabled(self)
         if (voice or audio) and not proc_aud:
             # Audio input disabled (omni model toggle); ignore audio/voice from TG but keep text.
             voice = None

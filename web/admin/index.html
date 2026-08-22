@@ -659,6 +659,7 @@
           <section id="overview" class="panel"></section>
           <section id="commands" class="panel"></section>
           <section id="discord" class="panel"></section>
+          <section id="inbox" class="panel"></section>
           <section id="llm" class="panel"></section>
           <section id="rem" class="panel"></section>
           <section id="autonomy" class="panel"></section>
@@ -697,6 +698,7 @@
         autonomyGoals: [],
         cleanup: null,
         pm2: [],
+        inbox: [],
         traces: [],
         logs: "",
         timer: null,
@@ -709,6 +711,7 @@
         ["overview", "Overview"],
         ["commands", "Commands"],
         ["discord", "Discord"],
+        ["inbox", "Inbox"],
         ["llm", "LLM"],
         ["rem", "REM"],
         ["autonomy", "Autonomy"],
@@ -868,6 +871,7 @@
             commands,
             channels,
             discord,
+            inbox,
             rem,
             remRuns,
             autonomyStatus,
@@ -890,6 +894,7 @@
             api("/api/commands"),
             api("/api/channels"),
             api("/api/discord/state"),
+            api("/api/inbox"),
             api("/api/rem/status"),
             api("/api/rem/runs"),
             api("/api/autonomy/status"),
@@ -922,6 +927,11 @@
               discord && typeof discord === "object"
                 ? discord
                 : { guilds: [], dms: [] },
+            inbox: Array.isArray(inbox?.items)
+              ? inbox.items
+              : Array.isArray(inbox)
+                ? inbox
+                : [],
             rem,
             remRuns: Array.isArray(remRuns) ? remRuns : [],
             autonomyStatus: autonomyStatus || null,
@@ -974,6 +984,7 @@
         overview();
         commands();
         discord();
+        inbox();
         llm();
         rem();
         autonomy();
@@ -1022,6 +1033,12 @@
           ["DMs", (S.discord.dms || []).length],
           ["Context", S.context.length],
           ["Commands", S.commands.length],
+          [
+            "Inbox",
+            (S.inbox || []).filter(
+              (i) => i && (i.state === "unread" || i.state === "read"),
+            ).length,
+          ],
         ]
           .map(
             (x) =>
@@ -1123,6 +1140,60 @@
               );
               toast("Removed");
               loadAll();
+            }),
+        );
+      }
+
+      function inbox() {
+        const friends = S.discord.friends || {};
+        const items = (S.inbox || []).slice().reverse();
+        const actionable = items.filter(
+          (i) => i && (i.state === "unread" || i.state === "read"),
+        );
+        const actBtn = (item, action, label, cls) =>
+          `<button class="btn small ${cls}" data-inbox-id="${esc(item.id)}" data-inbox-act="${action}">${label}</button>`;
+        $("inbox").innerHTML =
+          `<div class="grid two" style="margin-top:12px"><div class="card"><h3>Actionable (${actionable.length})</h3><p class="muted">Friend requests and notices. Accept/decline is queued for the bot — the API never talks to Discord.</p><div class="list">${
+            actionable
+              .map((i) => {
+                const acts = (i.actions || []).map((a) => String(a).toLowerCase());
+                const buttons = [
+                  acts.includes("accept")
+                    ? actBtn(i, "accept", "Accept", "green")
+                    : "",
+                  acts.includes("decline")
+                    ? actBtn(i, "decline", "Decline", "red")
+                    : "",
+                  actBtn(i, "dismiss", "Dismiss", ""),
+                ]
+                  .filter(Boolean)
+                  .join("");
+                return `<div class="item"><b>${esc(i.kind || "notice")}</b> ${esc(i.actor_name || "")}<div class="muted">${esc(i.summary || "")}</div><div class="mono muted">${esc(i.id)} · ${esc(i.state)}</div><div class="row" style="margin-top:6px">${buttons}</div></div>`;
+              })
+              .join("") || '<div class="muted">Inbox is empty.</div>'
+          }</div></div><div class="card"><h3>Friends snapshot</h3><p class="muted">Compact view from the running client. Not the full friends list.</p><div class="item"><b>${esc(friends.incoming_count ?? 0)} incoming</b><div class="muted">${esc(friends.outgoing_count ?? 0)} outgoing · ${esc(friends.friend_count ?? 0)} friends</div></div><div class="list">${
+            (friends.incoming || [])
+              .map(
+                (u) =>
+                  `<div class="item"><b>${esc(u.name)}</b><div class="mono muted">${esc(u.id)}</div></div>`,
+              )
+              .join("") || '<div class="muted">No incoming requests in snapshot.</div>'
+          }</div><div class="list" style="margin-top:8px">${
+            (friends.friends || [])
+              .slice(0, 8)
+              .map(
+                (u) =>
+                  `<div class="item"><b>${esc(u.name)}</b><div class="mono muted">${esc(u.id)}</div></div>`,
+              )
+              .join("") || '<div class="muted">No friends in snapshot yet.</div>'
+          }</div></div></div>`;
+        document.querySelectorAll("[data-inbox-act]").forEach(
+          (b) =>
+            (b.onclick = async () => {
+              await queue("inbox_act", {
+                item_id: b.dataset.inboxId,
+                action: b.dataset.inboxAct,
+              });
             }),
         );
       }

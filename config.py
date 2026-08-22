@@ -197,9 +197,11 @@ class Config:
         "OLLAMA_RETRY_ATTEMPTS", 3, min_value=1, max_value=10
     )
 
-    # Toggle for "omni" (audio+vision capable) model input. Off by default:
-    # most models 400 on audio parts, so this is opt-in per install.
-    ENABLE_AUDIO_INPUT = _feature_env("ENABLE_AUDIO_INPUT", default=False)
+    # Toggle for "omni" (audio+vision capable) model input. On by default:
+    # Gemini behind the current proxy transcribes wav/mp3; endpoints that
+    # 400 on input_audio fall back to text-only via the media-incapable path.
+    # Dashboard process_audio can still turn it off at runtime.
+    ENABLE_AUDIO_INPUT = _feature_env("ENABLE_AUDIO_INPUT", default=True)
 
     # -------------------------------------------------------------------------
     # Optional features (true / false / auto — see the module docstring).
