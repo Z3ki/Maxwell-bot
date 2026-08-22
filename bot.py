@@ -6809,11 +6809,31 @@ class MaxwellBot(commands.Bot):
                             await ch.send(cmd["content"])
                             cmd["result"] = "sent"
                         elif typ == "send_dm":
-                            user = self.get_user(
-                                _safe_int(cmd["user_id"])
-                            ) or await self.fetch_user(_safe_int(cmd["user_id"]))
-                            await user.send(cmd["content"])
-                            cmd["result"] = "dm sent"
+                            uid = _safe_int(cmd.get("user_id"))
+                            user = self.get_user(uid) if uid else None
+                            if user is None and uid:
+                                try:
+                                    user = await self.fetch_user(uid)
+                                except Exception as e:
+                                    logger.warning("send_dm failed to fetch user %s: %s", uid, e)
+                                    user = None
+                            if user is None:
+                                cmd["result"] = f"error: user {cmd.get('user_id')} not found"
+                                cmd["status"] = "failed"
+                            else:
+                                try:
+                                    dm_channel = getattr(user, "dm_channel", None)
+                                    if dm_channel is None:
+                                        dm_channel = await user.create_dm()
+                                    await dm_channel.send(cmd["content"])
+                                    cmd["result"] = "dm sent"
+                                    cmd["status"] = "done"
+                                except discord.Forbidden as f_err:
+                                    cmd["result"] = f"error: forbidden (user has DMs disabled or blocked bot): {f_err}"
+                                    cmd["status"] = "failed"
+                                except Exception as dm_err:
+                                    cmd["result"] = f"error: {dm_err}"
+                                    cmd["status"] = "failed"
                         elif typ == "set_presence":
                             status_map = {
                                 "online": discord.Status.online,
