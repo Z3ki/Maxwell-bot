@@ -59,7 +59,7 @@ DATA_DIR = Path(os.getenv("DATA_DIR", APP_ROOT / "data"))
 # use a fresh connection per request with check_same_thread=False so we never
 # share a cursor across the aiohttp event-loop's thread pool.
 RAG_DB_PATH = DATA_DIR / "maxwell_rag.db"
-RAG_EMBED_MODEL = "qwen3-embedding:0.6b"
+RAG_EMBED_MODEL = os.getenv("MAXWELL_EMBED_MODEL", os.getenv("EMBED_MODEL", "qwen3-embedding:0.6b"))
 
 
 def _rag_db() -> sqlite3.Connection:

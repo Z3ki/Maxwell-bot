@@ -1208,10 +1208,12 @@
           "reply_mentions",
           "tools_enabled",
           "store_memory",
+          "long_term_memory_enabled",
           "cross_context_enabled",
           "cross_context_extract_enabled",
           "process_images",
           "process_audio",
+          "rag_web_search_enabled",
         ];
         $("controls").innerHTML =
           `<div class="grid two" style="margin-top:12px"><div class="card"><h3>Runtime Switches</h3>${bools.map((k) => `<label class="switchline"><span>${esc(k.replaceAll("_", " "))}</span><span class="switch"><input data-bool="${k}" type="checkbox" ${S.control[k] ? "checked" : ""}><span class="knob"></span></span></label>`).join("")}<button id="saveSwitch" class="btn primary">Save switches</button></div><div class="card"><h3>Tools</h3>${S.tools.map((t) => `<label class="switchline"><span class="mono">${esc(t)}</span><span class="switch"><input data-tool="${esc(t)}" type="checkbox" ${!(S.control.disabled_tools || []).includes(t) ? "checked" : ""}><span class="knob"></span></span></label>`).join("")}<button id="saveTools" class="btn primary">Save tools</button></div></div><div class="card" style="margin-top:12px"><h3>Base Personality</h3><textarea id="persona" class="field">${esc(S.control.base_personality || "")}</textarea><button id="savePersona" class="btn primary">Save personality</button></div><div class="card" style="margin-top:12px"><h3>Autonomy Blacklists (Channels &amp; Servers)</h3><p class="muted">Separate from general blocked/allowed. Autonomy skips these servers (guilds) and channels. Use ,autonomy blacklist in chat or edit here. IDs only.</p><div class="row"><span class="muted" style="width:140px;flex:0 0 auto">Blocked channels</span><input id="abChannels" class="field" placeholder="123456789, 987654321" value="${esc((S.control.autonomy_blocked_channels || []).join(", "))}"></div><div class="row" style="margin-top:6px"><span class="muted" style="width:140px;flex:0 0 auto">Blocked servers</span><input id="abServers" class="field" placeholder="guild-id-1, guild-id-2" value="${esc((S.control.autonomy_blocked_servers || []).join(", "))}"></div><button id="saveAutonomyBlack" class="btn primary" style="margin-top:8px">Save autonomy blacklists</button><div class="muted" style="margin-top:4px;font-size:11px">After save, autonomy will respect immediately on next tick. Use raw or ,autonomy blacklist for quick edits too.</div></div>`;
@@ -1263,8 +1265,9 @@
         const embedded = ragStats.embedded || 0;
         const pending = totalVec - embedded;
         const embedPct = totalVec > 0 ? Math.round((embedded / totalVec) * 100) : 0;
+        const modelName = ragStats.embed_model || "qwen3-embedding:0.6b";
         $("memory").innerHTML =
-          `<div class="card" style="margin-top:12px"><h3>RAG Vector Memory</h3><div class="list"><div class="item"><b>Embedding model</b><span class="mono muted">qwen3-embedding:0.6b (1024-dim)</span></div><div class="item"><b>Total vectors</b><span>${totalVec}</span></div><div class="item"><b>Embedded</b><span>${embedded} / ${totalVec} (${embedPct}%)</span></div>${pending > 0 ? `<div class="item"><b>Pending</b><span style="color:var(--yellow)">${pending} vectors awaiting embedding</span></div>` : ""}<div class="item"><b>Messages</b><span>${ragStats.messages || 0} across ${ragStats.channel_count || 0} channels</span></div><div class="item"><b>Long-term facts</b><span>${ragStats.ltm || 0}</span></div><div class="item"><b>Shared context</b><span>${ragStats.context || 0}</span></div></div></div><div class="card" style="margin-top:12px"><h3>Add Memory</h3><textarea id="newmem" class="field"></textarea><button id="addmem" class="btn primary">Add</button></div><div class="card" style="margin-top:12px"><h3>Long-Term Memory</h3><div class="table"><table><thead><tr><th>ID</th><th>Content</th><th></th></tr></thead><tbody>${S.memory.map((m) => { const id = String(m.id ?? ""); return `<tr><td class="mono" title="${esc(id)}">${esc(sid(id))}</td><td><textarea class="field" data-mem="${esc(id)}">${esc(m.content)}</textarea></td><td><button class="btn small" data-save-mem="${esc(id)}">Save</button> <button class="btn small red" data-del-mem="${esc(id)}">Delete</button></td></tr>`; }).join("")}</tbody></table></div></div>`;
+          `<div class="card" style="margin-top:12px"><h3>RAG Vector Memory</h3><div class="list"><div class="item"><b>Embedding model</b><span class="mono muted">${esc(modelName)}</span></div><div class="item"><b>Total vectors</b><span>${totalVec}</span></div><div class="item"><b>Embedded</b><span>${embedded} / ${totalVec} (${embedPct}%)</span></div>${pending > 0 ? `<div class="item"><b>Pending</b><span style="color:var(--yellow)">${pending} vectors awaiting embedding</span></div>` : ""}<div class="item"><b>Messages</b><span>${ragStats.messages || 0} across ${ragStats.channel_count || 0} channels</span></div><div class="item"><b>Long-term facts</b><span>${ragStats.ltm || 0}</span></div><div class="item"><b>Shared context</b><span>${ragStats.context || 0}</span></div></div></div><div class="card" style="margin-top:12px"><h3>Add Memory</h3><textarea id="newmem" class="field" placeholder="Fact to store into RAG long-term memory"></textarea><button id="addmem" class="btn primary">Add</button></div><div class="card" style="margin-top:12px"><h3>Long-Term Memory Facts</h3><div class="table"><table><thead><tr><th>ID</th><th>Content</th><th></th></tr></thead><tbody>${S.memory.map((m) => { const id = String(m.id ?? ""); return `<tr><td class="mono" title="${esc(id)}">${esc(sid(id))}</td><td><textarea class="field" data-mem="${esc(id)}">${esc(m.content)}</textarea></td><td><button class="btn small" data-save-mem="${esc(id)}">Save</button> <button class="btn small red" data-del-mem="${esc(id)}">Delete</button></td></tr>`; }).join("")}</tbody></table></div></div>`;
         $("addmem").onclick = async () => {
           await api("/api/memory", {
             method: "POST",
@@ -1321,10 +1324,10 @@
         const logEntries = (c.log || []).slice().reverse();
         $("context").innerHTML =
           `<div class="card" style="margin-top:12px"><h3>Cross-context</h3><p class="muted">Inject relevant facts from other channels/users/guilds into the prompt. Turn off to keep the bot's context strictly local to the current channel.</p><label class="switchline"><span>Cross-context enabled</span><span class="switch"><input id="ctxCrossToggle" type="checkbox" ${S.control.cross_context_enabled !== false ? "checked" : ""}><span class="knob"></span></span></label></div><div class="card" style="margin-top:12px">
-    <h3>Context Cleanup Agent</h3>
-    <p class="muted">The Context Cleanup Agent has been replaced by the RAG vector memory system. Memory cleanup is now automatic — the SQLite vector store handles deduplication, pruning, and semantic search without a separate janitor process.</p>
-    <div class="item">${badge("removed", "bad")} ${badge("RAG active", "ok")}
-      <div class="muted">The old context_cleanup.py engine is no longer imported or running.</div>
+    <h3>RAG Automatic Pruning</h3>
+    <p class="muted">Shared context facts and channel history are automatically managed in the SQLite vector database with deterministic deduplication and relevance scoring.</p>
+    <div class="item">${badge("RAG active", "ok")}
+      <div class="muted">All context queries route dynamically through embeddings.</div>
     </div>
   </div>
   <div class="card" style="margin-top:12px">

@@ -294,7 +294,7 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "text": _str("Text to speak"),
             "language": _str("Language name or code (e.g. english, spanish)"),
             "voice": _str(
-                "TTS voice name (tiktok or mommy). Omit for the default voice."
+                "TTS voice name (tiktok, mommy, or espanol/spanish). Omit for the default voice."
             ),
         },
         ["text"],

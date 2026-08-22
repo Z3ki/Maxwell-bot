@@ -4784,7 +4784,7 @@ class MaxwellBot(commands.Bot):
             "Reply directly to what they said. No reasoning, no "
             "chain-of-thought, no meta-commentary, no narrating what you're doing."
             "\nOptional: start your reply with [voice=NAME] to pick your TTS voice "
-            "(choices: tiktok, mommy). Defaults to tiktok if you don't specify."
+            "(choices: tiktok, mommy, espanol/spanish). Defaults to tiktok if you don't specify."
         )
         if self._control.get("vc_response_mode", "always") == "addressed":
             wakes = self._control.get("vc_wake_words", ["maxwell"]) or ["maxwell"]

@@ -15,11 +15,15 @@ from bot_tools import (
 def test_fish_reference_id_resolves_named_voices(monkeypatch):
     monkeypatch.setenv("TTS_FISH_REFERENCE_ID_TIKTOK", "id-tiktok")
     monkeypatch.setenv("TTS_FISH_REFERENCE_ID_MOMMY", "id-mommy")
+    monkeypatch.setenv("TTS_FISH_REFERENCE_ID_ESPANOL", "id-espanol")
     monkeypatch.setenv("TTS_FISH_REFERENCE_ID", "id-default")
 
     assert _fish_reference_id("tiktok") == "id-tiktok"
     assert _fish_reference_id("TikTok") == "id-tiktok"  # case-insensitive
     assert _fish_reference_id("mommy") == "id-mommy"
+    assert _fish_reference_id("espanol") == "id-espanol"
+    assert _fish_reference_id("español") == "id-espanol"
+    assert _fish_reference_id("spanish") == "id-espanol"
     # Unknown/empty voice falls back to the legacy default.
     assert _fish_reference_id("britney") == "id-default"
     assert _fish_reference_id("") == "id-default"
@@ -29,6 +33,7 @@ def test_fish_reference_id_resolves_named_voices(monkeypatch):
 def test_fish_reference_id_falls_back_to_hardcoded_default(monkeypatch):
     monkeypatch.delenv("TTS_FISH_REFERENCE_ID_TIKTOK", raising=False)
     monkeypatch.delenv("TTS_FISH_REFERENCE_ID_MOMMY", raising=False)
+    monkeypatch.delenv("TTS_FISH_REFERENCE_ID_ESPANOL", raising=False)
     monkeypatch.delenv("TTS_FISH_REFERENCE_ID", raising=False)
 
     assert _fish_reference_id("tiktok") == FISH_REFERENCE_DEFAULT

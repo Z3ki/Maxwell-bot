@@ -220,6 +220,9 @@ async def _synthesize_fish_tts(
 FISH_REFERENCE_ENV = {
     "tiktok": "TTS_FISH_REFERENCE_ID_TIKTOK",
     "mommy": "TTS_FISH_REFERENCE_ID_MOMMY",
+    "espanol": "TTS_FISH_REFERENCE_ID_ESPANOL",
+    "español": "TTS_FISH_REFERENCE_ID_ESPANOL",
+    "spanish": "TTS_FISH_REFERENCE_ID_ESPANOL",
 }
 
 # Hardcoded fallback when no TTS_FISH_REFERENCE_ID* env var is set at all.
