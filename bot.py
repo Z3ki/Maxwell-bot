@@ -3525,11 +3525,27 @@ class MaxwellBot(commands.Bot):
             # or "the image above" has nothing to attach. This is the fix for
             # "the bot can't see sent media in channels if it's not pinged".
             if self._control.get("process_images", True) and (
-                message.attachments or getattr(message, "embeds", None)
+                message.attachments
+                or getattr(message, "embeds", None)
+                # An image posted as a bare link is just as much "media in
+                # the channel" as an upload; without this it never entered
+                # visual memory and a later "what was that pic" had nothing
+                # to attach.
+                or self._media_link_refs(getattr(message, "content", ""))
             ):
                 try:
                     _imgs, bg_media = await self._extract_media(message)
                     bg_media.extend(await self._extract_embeds(message))
+                    bg_media.extend(
+                        await self._extract_linked_media(
+                            message,
+                            skip_urls={
+                                str(item.get("url"))
+                                for item in bg_media
+                                if item.get("url")
+                            },
+                        )
+                    )
                     if bg_media:
                         self._cache_media_context(channel_id, bg_media)
                 except Exception as e:
@@ -7456,7 +7472,7 @@ class MaxwellBot(commands.Bot):
         proc_img = bool(self._control.get("process_images", True))
         proc_aud = bool(self._control.get("process_audio", False))
         # If neither images nor audio processing, skip all binary media collection.
-        # (process_audio / ENABLE_AUDIO_INPUT controls "omni" audio input to models; now defaults to off)
+        # (process_audio / ENABLE_AUDIO_INPUT controls audio input to the model)
         if not proc_img and not proc_aud:
             return [], []
         images = []
@@ -7508,7 +7524,7 @@ class MaxwellBot(commands.Bot):
                     )
                 )
                 filename = attachment.filename
-                # Respect process_audio (the "omni audio model" toggle) — skip pure audio attachments
+                # Respect process_audio (the audio-input toggle) — skip pure audio attachments
                 # if disabled. Video may still yield image frames even if audio track skipped later.
                 if mime.startswith("audio/") and not proc_aud:
                     continue
@@ -8299,29 +8315,79 @@ class MaxwellBot(commands.Bot):
             logger.info(f"Extracted text from {len(text_blocks)} embed(s)")
         return media
 
-    async def _extract_gif_links(self, message) -> list[dict]:
-        urls = re.findall(r"https?://[^\s<>()]+", message.content or "")
-        gif_urls = []
-        for url in urls:
-            cleaned = url.rstrip(".,;!?)\"'")
-            path = urlparse(cleaned).path.lower()
-            if path.endswith(".gif"):
-                gif_urls.append(cleaned)
-        if not gif_urls:
+    # Extensions worth pulling out of a bare link in message text. Video is
+    # deliberately absent: the video path wants ffmpeg frame extraction
+    # (_extract_media), not a raw video_url part that half the endpoints
+    # reject outright.
+    _LINK_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
+    _LINK_AUDIO_EXTS = frozenset({".mp3", ".wav", ".ogg", ".m4a", ".flac"})
+
+    @classmethod
+    def _media_link_refs(cls, content: str | None) -> list[tuple[str, str]]:
+        """(url, ext) for every image/audio link in message text, deduped."""
+        refs: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for raw in re.findall(r"https?://[^\s<>()]+", content or ""):
+            url = raw.rstrip(".,;!?)\"'").rstrip(">")
+            ext = Path(urlparse(url).path).suffix.lower()
+            if ext not in cls._LINK_IMAGE_EXTS and ext not in cls._LINK_AUDIO_EXTS:
+                continue
+            if url in seen:
+                continue
+            seen.add(url)
+            refs.append((url, ext))
+        return refs
+
+    async def _extract_linked_media(
+        self, message, skip_urls: set[str] | None = None
+    ) -> list[dict]:
+        """Pull media posted as a bare link instead of an upload.
+
+        Discord only unfurls *some* links into embeds, and never audio ones, so
+        a plain `https://host/cat.png` or `.../clip.mp3` in message text was
+        invisible to the model — it could read the URL but never see or hear
+        what was behind it. Whatever Discord did unfurl is already covered by
+        _extract_embeds; `skip_urls` keeps us from downloading it a second time
+        and attaching the same image twice.
+
+        Images and audio are gated separately so a linked clip still comes
+        through on a bot that has image processing switched off, and vice
+        versa. Everything goes through _download_embed_media, which enforces
+        _is_safe_url (no SSRF into the host network), the size cap, and a
+        real content-type check — the extension only decides what is worth
+        fetching, never what it is.
+        """
+        proc_img = bool(self._control.get("process_images", True))
+        proc_aud = bool(self._control.get("process_audio", False))
+        if not proc_img and not proc_aud:
+            return []
+        skip = skip_urls or set()
+        wanted = [
+            (url, ext)
+            for url, ext in self._media_link_refs(getattr(message, "content", ""))
+            if url not in skip
+            and (
+                (ext in self._LINK_IMAGE_EXTS and proc_img)
+                or (ext in self._LINK_AUDIO_EXTS and proc_aud)
+            )
+        ]
+        if not wanted:
             return []
         max_size = self._max_media_bytes()
         media = []
         message_id = getattr(message, "id", None)
-        for idx, url in enumerate(gif_urls[:5], 1):
+        for idx, (url, ext) in enumerate(wanted[:5], 1):
             item = await self._download_embed_media(
-                url, f"linked-gif-{idx}.gif", max_size, message_id
+                url, f"linked-media-{idx}{ext}", max_size, message_id
             )
             if item:
-                item["source"] = "gif_link"
+                item["source"] = "link"
                 # The media item already carries url= from
                 # _download_embed_media; keep it explicitly sourced.
                 item["url"] = url
                 media.append(item)
+        if media:
+            logger.info(f"Extracted {len(media)} linked media item(s) from message text")
         return media
 
     def _cache_media_context(self, channel_id: str, media: list[dict]):
@@ -8692,7 +8758,20 @@ class MaxwellBot(commands.Bot):
             _images, media = await self._extract_media(message)
             if bool(self._control.get("process_images", True)):
                 media.extend(await self._extract_embeds(message))
-                media.extend(await self._extract_gif_links(message))
+            # Linked media gates images and audio separately, so it runs
+            # outside the process_images check — a linked clip should still
+            # land when only audio input is on. Embed downloads already
+            # carry their source URL; skip those so an unfurled image is
+            # not fetched and attached twice.
+            media.extend(
+                await self._extract_linked_media(
+                    message,
+                    skip_urls={
+                        str(item.get("url")) for item in media if item.get("url")
+                    },
+                )
+            )
+            if bool(self._control.get("process_images", True)):
                 grid = await self._maybe_emoji_grid(message, channel_id)
                 if grid is not None:
                     media.append(grid)

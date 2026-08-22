@@ -62,7 +62,10 @@ DEFAULT_CONTROL = {
     "reaction_replies": True,
     "per_user_cooldown_seconds": 1.5,
     "process_images": True,
-    "process_audio": False,
+    # Audio input to the model. Off for years because the "omni" audio
+    # models were not reachable; the Gemini models behind the current proxy
+    # transcribe audio fine (verified on 3.7-flash and 3-pro), so this is on.
+    "process_audio": True,
     "max_image_size_mb": 10,
     # When True, the `sleep` tool and `,sleep` command can put the bot
     # into a 1-60 minute sleep window where incoming pings/DMs get a
