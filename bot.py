@@ -3263,14 +3263,13 @@ class MaxwellBot(commands.Bot):
         if watching:
             lines.append(
                 "Conversation watch is on in this room. You are still in this "
-                "conversation. People here may keep talking without pinging you."
+                "conversation. Keep talking here even if nobody @s you."
             )
         if getattr(message, "_watch_followup", False):
             lines.append(
-                "Soft follow-up: they did not @ you or reply to you this time. "
-                "Speak only if they are talking to you. "
-                "If they are talking to someone else, or only mentioning you, "
-                "no_response — do not jump in."
+                "Soft follow-up: they did not @ you or Discord-reply this time, "
+                "but this line is still for you. Answer it. "
+                "no_response only if they are plainly talking to someone else."
             )
         return lines
 
@@ -11755,9 +11754,9 @@ class MaxwellBot(commands.Bot):
             dynamic_parts.extend(watch_prompt(message, channel_id))
         elif getattr(message, "_watch_followup", False):
             dynamic_parts.append(
-                "Soft follow-up: they did not @ you or reply to you this time. "
-                "Speak only if this line is clearly for you. "
-                "Otherwise no_response — do not jump into ambient chat."
+                "Soft follow-up: they did not @ you or Discord-reply this time, "
+                "but this line is still for you. Answer it. "
+                "no_response only if they are plainly talking to someone else."
             )
         # JAILBREAK: inject at the END of the system message for recency bias.
         # This is the strongest position — the last instructions carry the

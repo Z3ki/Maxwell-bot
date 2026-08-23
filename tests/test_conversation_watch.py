@@ -266,11 +266,15 @@ def test_watch_prompt_tells_him_the_room_is_on_watch():
         MaxwellBot._arm_conversation_watch(bot, msg.channel.id)
         lines = MaxwellBot._conversation_watch_prompt(bot, msg, msg.channel.id)
         assert any("Conversation watch is on in this room" in line for line in lines)
+        assert any("Keep talking here" in line for line in lines)
         assert all("Soft follow-up" not in line for line in lines)
         msg._watch_followup = True
         lines = MaxwellBot._conversation_watch_prompt(bot, msg, msg.channel.id)
         assert any("Conversation watch is on in this room" in line for line in lines)
         assert any("Soft follow-up" in line for line in lines)
+        assert any("Answer it" in line for line in lines)
+        assert all("Speak only if" not in line for line in lines)
+        assert all("do not jump in" not in line for line in lines)
 
     asyncio.run(run())
 
