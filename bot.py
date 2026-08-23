@@ -2108,8 +2108,8 @@ MAXWELL_BASE_KNOWLEDGE = (
 # per-server and so prefix-caching can reuse it.
 DISCORD_CHAT_PROTOCOL = (
     "History in <previous_conversation> is background only. Reply only to "
-    "[RESPOND TO THIS] with NEW content — never echo, replay, or answer older "
-    "turns or other speakers who didn't ping you.\n"
+    "[RESPOND TO THIS]. Don't answer older turns or other speakers who "
+    "didn't ping you.\n"
     "Ping with exactly <@USER_ID> — no backticks, no markdown, no @Name(id).\n"
     "User lines are `Name(id): text`; your past lines are `[Maxwell] text`. "
     "Attribute by ID, never by a similar nickname. If unsure who said it, say so.\n"
@@ -3765,9 +3765,8 @@ class MaxwellBot(commands.Bot):
             lines.append(
                 "Conversation watch is on in this room. You can talk without "
                 "an @, but default to no_response. Only speak if someone is "
-                "talking to you, asking you something, or you have a genuinely "
-                "new point. Stay silent for lol/ok/side talk, people talking "
-                "about you to someone else, or repeating the same joke."
+                "talking to you or asking you something. Stay silent for "
+                "lol/ok/side talk or people talking about you to someone else."
             )
             directed = False
             reply_other = False
@@ -10911,8 +10910,6 @@ class MaxwellBot(commands.Bot):
             ),
         )
         max_out_tokens = getattr(self.config, "OLLAMA_MAX_TOKENS", 200000) or 200000
-        if self._is_short_live_turn(message, content):
-            max_out_tokens = min(int(max_out_tokens), 4096)
         try:
             # MESSAGE_CREATE can precede Discord's unfurl by a few hundred
             # milliseconds. Refresh once before extracting so a direct ping
