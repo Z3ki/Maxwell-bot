@@ -60,13 +60,9 @@ DEFAULT_CONTROL = {
     # Hard @ / reply-to-Maxwell still go out immediately.
     "conversation_watch_debounce_seconds": 1,
     "reply_to_bots": False,
-    # When False, reactions on the bot's own messages are swallowed
-    # silently (logged + deduped) — no fake_message, no LLM turn, and
-    # crucially no 'XYZ reacted to your message with …' status posted in
-    # the channel. Reactions are not text and shouldn't kick off a
-    # generation. Default off so channel reactions don't spam noise,
-    # opt-in via dashboard control if you want emoji-aware replies.
-    "reaction_replies": True,
+    # Unused for starting turns. Reactions are stored on the message and
+    # shown in context; they never kick off a live reply.
+    "reaction_replies": False,
     "per_user_cooldown_seconds": 1.5,
     "process_images": True,
     # Audio input to the model. Off for years because the "omni" audio

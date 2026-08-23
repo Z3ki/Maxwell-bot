@@ -295,6 +295,7 @@ from utils import (  # fd-safe, single source of truth  # noqa: E402
     _coerce_utc_datetime,
     _safe_int,
     _spawn_background,
+    format_reactions_annotation,
     render_discord_context_text,
 )
 
@@ -2411,8 +2412,10 @@ class MaxwellBot(commands.Bot):
         # value here would have made every read site below default to the
         # global state instead of the per-server set.
         self._control_mtime = 0
-        self._reaction_seen: set[str] = set()  # "{message_id}:{emoji}" dedup
+        self._reaction_seen: set[str] = set()  # unused leftover; reactions are context now
         self._reaction_seen_order: list[str] = []
+        self._message_reactions: dict[str, list[dict]] = {}
+        self._message_reactions_order: list[str] = []
         self._recorded_rem_msg_ids: set[int] = (
             set()
         )  # "message_id" dedup for REM events
@@ -3040,32 +3043,6 @@ class MaxwellBot(commands.Bot):
             ),
         }
 
-    # Talking TO him, not ABOUT him. A bare "maxwell" in someone else's
-    # sentence ("they don't have access to maxwell") is not a ping.
-    # Trailing vocatives ("dont be like him max", "SAY SOMETHING MAXWELl")
-    # count as address; ABOUT is checked first and still wins those cases.
-    _WATCH_ADDRESS_RE = re.compile(
-        r"(?i)"
-        r"^(?:hey |yo |ok |okay |hi |hello |oi )?(maxwell|max|clanker)\b"
-        r"|"
-        r"\b(maxwell|max|clanker)[,:]?\s+"
-        r"(can you|could you|would you|will you|do you|are you|did you|"
-        r"what|why|how|say|tell|come|stop|help|please|you\b)"
-        r"|"
-        r"(?:say something|answer(?: me)?|talk|speak|reply|respond)\s+"
-        r"(maxwell|max|clanker)\b"
-        r"|"
-        r"\b(maxwell|max|clanker)\s*[.!?…]*\s*$"
-    )
-    _WATCH_ABOUT_RE = re.compile(
-        r"(?i)\b("
-        r"access to (maxwell|max|clanker)|"
-        r"(about|without|for) (maxwell|max|clanker)|"
-        r"(have|has|had|got|give|gave|get) (access to )?(maxwell|max|clanker)|"
-        r"(maxwell|max|clanker) (is|isn'?t|was|wasn'?t|does|doesn'?t|can'?t|won'?t)"
-        r")\b"
-    )
-
     def _message_addresses_self(self, message) -> bool:
         """True if this message is directed at Maxwell (DM, user mention, @everyone/@here, role mention, or reply)."""
         if self._directly_addressed(message):
@@ -3111,15 +3088,8 @@ class MaxwellBot(commands.Bot):
         return bool(others) and not me
 
     def _watch_followup_is_directed(self, message) -> bool:
-        """Watch/soft lines only count if they are aimed at him, not about him."""
-        if self._replying_to_other(message):
-            return False
-        if self._addressing_someone_else(message):
-            return False
-        text = str(getattr(message, "content", "") or "")
-        if self._WATCH_ABOUT_RE.search(text):
-            return False
-        return bool(self._WATCH_ADDRESS_RE.search(text))
+        """Any human line he would see. No word list — he decides whether to speak."""
+        return self._should_live_reply(message)
 
     def _reply_parent(self, message):
         return getattr(getattr(message, "reference", None), "resolved", None)
@@ -3134,13 +3104,113 @@ class MaxwellBot(commands.Bot):
             return False
         return getattr(parent.author, "id", None) == getattr(author, "id", None)
 
+    _MAX_REACTION_MESSAGES = 500
+    _MAX_REACTORS_PER_MESSAGE = 40
+
+    def _remember_reaction_message(self, message_id: str) -> None:
+        mid = str(message_id or "").strip()
+        if not mid:
+            return
+        store = getattr(self, "_message_reactions", None)
+        order = getattr(self, "_message_reactions_order", None)
+        if store is None:
+            self._message_reactions = {}
+            store = self._message_reactions
+        if order is None:
+            self._message_reactions_order = []
+            order = self._message_reactions_order
+        if mid in store:
+            with contextlib.suppress(ValueError):
+                order.remove(mid)
+        else:
+            store[mid] = []
+        order.append(mid)
+        while len(order) > self._MAX_REACTION_MESSAGES:
+            old = order.pop(0)
+            store.pop(old, None)
+
+    def _record_message_reaction(self, message, user, emoji, *, added: bool = True) -> list[dict]:
+        mid = str(getattr(message, "id", "") or "")
+        if not mid:
+            return []
+        uid = str(getattr(user, "id", "") or "")
+        name = str(
+            getattr(user, "display_name", None)
+            or getattr(user, "name", None)
+            or uid
+        )
+        mark = str(emoji or "")[:120]
+        if not mark:
+            return []
+        self._remember_reaction_message(mid)
+        rows = list(self._message_reactions.get(mid) or [])
+        if added:
+            if not any(
+                row.get("user_id") == uid and row.get("emoji") == mark for row in rows
+            ):
+                rows.append({"emoji": mark, "user_id": uid, "user_name": name})
+                if len(rows) > self._MAX_REACTORS_PER_MESSAGE:
+                    rows = rows[-self._MAX_REACTORS_PER_MESSAGE :]
+        else:
+            rows = [
+                row
+                for row in rows
+                if not (row.get("user_id") == uid and row.get("emoji") == mark)
+            ]
+        self._message_reactions[mid] = rows
+        return rows
+
+    def _reactions_annotation_for(self, target) -> str:
+        mid = ""
+        stored: list[dict] = []
+        discord_msg = None
+        if isinstance(target, dict):
+            mid = str(target.get("message_id") or target.get("id") or "")
+            raw = target.get("reactions")
+            if isinstance(raw, list):
+                stored = [item for item in raw if isinstance(item, dict)]
+        else:
+            mid = str(getattr(target, "id", "") or "")
+            discord_msg = target
+        overlay = (getattr(self, "_message_reactions", None) or {}).get(mid)
+        if overlay:
+            stored = list(overlay)
+        if stored:
+            return format_reactions_annotation(stored)
+        if discord_msg is None:
+            return ""
+        counts: list[dict] = []
+        for reaction in list(getattr(discord_msg, "reactions", None) or []):
+            mark = str(getattr(reaction, "emoji", "") or "")
+            if not mark:
+                continue
+            try:
+                count = int(getattr(reaction, "count", 0) or 0)
+            except (TypeError, ValueError):
+                count = 0
+            counts.append({"emoji": mark, "count": count or 1})
+        return format_reactions_annotation(counts)
+
+    async def _persist_message_reactions(self, message_id: str, rows: list[dict]) -> None:
+        mem = getattr(self, "memory", None)
+        merge = getattr(mem, "merge_message_metadata", None) if mem is not None else None
+        if not callable(merge):
+            return
+        with contextlib.suppress(Exception):
+            await merge(str(message_id), {"reactions": list(rows)})
+
     def _render_reply_parent(self, message, parent) -> str:
         channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
-        return render_discord_context_text(
+        rendered = render_discord_context_text(
             parent,
             getattr(parent, "content", "") or "",
             known_users=(getattr(self, "_recent_users", None) or {}).get(channel_id, {}),
         )
+        annotate = getattr(self, "_reactions_annotation_for", None)
+        reactions = annotate(parent) if callable(annotate) else ""
+        if reactions:
+            return f"{rendered}\n{reactions}" if rendered else reactions
+        return rendered
 
     def _reply_parent_context_lines(self, message) -> list[str]:
         """Full parent payload when they ping him off a reply, especially their own."""
@@ -3263,31 +3333,26 @@ class MaxwellBot(commands.Bot):
         if watching:
             lines.append(
                 "Conversation watch is on in this room. You are still in this "
-                "conversation. You can keep talking without an @ — you do not "
-                "have to take every line."
+                "conversation. Every line is shown to you. Reply if you want "
+                "to. Use no_response if you do not — they may be talking to "
+                "someone else, or you may have nothing to add."
             )
         if getattr(message, "_watch_followup", False):
             lines.append(
                 "Soft follow-up: they did not @ you or Discord-reply this time. "
-                "Reply if you have something new. no_response is fine if you "
-                "would just repeat the same roast or they are talking to someone else."
+                "You decide whether to speak. no_response is a valid choice."
             )
         return lines
 
     def _should_live_reply(self, message) -> bool:
-        """Hard ping always. Watch / @everyone / role only if it looks for him."""
+        """Hard ping always. During watch, every human line — he decides."""
         if self._directly_addressed(message):
             return True
-        if self._replying_to_other(message):
-            return False
         author = getattr(message, "author", None)
         channel = getattr(message, "channel", None)
         if author is None or channel is None or getattr(author, "bot", False):
             return False
-        watching = self._conversation_watch_active(getattr(channel, "id", ""))
-        if not watching and not self._soft_addressed(message):
-            return False
-        return self._watch_followup_is_directed(message)
+        return self._conversation_watch_active(getattr(channel, "id", ""))
 
     async def _arm_watch_from_own_message(self, message) -> None:
         """Any post from Maxwell keeps that whole room on watch."""
@@ -3366,31 +3431,12 @@ class MaxwellBot(commands.Bot):
         )
         if not bucket:
             return
-        latest = bucket.get("latest")
-        target = bucket.get("latest_directed")
+        target = bucket.get("latest") or bucket.get("latest_directed")
         if target is None:
             return
-        if latest is not None and latest is not target:
-            latest_text = str(getattr(latest, "content", "") or "")
-            if (
-                self._replying_to_other(latest)
-                or self._addressing_someone_else(latest)
-                or self._WATCH_ABOUT_RE.search(latest_text)
-            ):
-                logger.info(
-                    "Watch debounce: skip %s, room moved on after the ping",
-                    channel_id,
-                )
-                return
-            if self._should_live_reply(latest):
-                target = latest
-        if not (
-            self._directly_addressed(target) or self._watch_followup_is_directed(target)
-        ):
-            return
         content = (
-            bucket.get("content")
-            or getattr(target, "content", "")
+            getattr(target, "content", "")
+            or bucket.get("content")
             or "look at this"
         )
         with contextlib.suppress(Exception):
@@ -4067,10 +4113,7 @@ class MaxwellBot(commands.Bot):
             # an LLM turn — so RAG keeps every message but the bot doesn't
             # burn provider calls replying to every rapid-fire text.
             if cooldown_for_reply and not message.author.bot:
-                directed = self._directly_addressed(
-                    message
-                ) or self._watch_followup_is_directed(message)
-                if not directed:
+                if not self._should_live_reply(message):
                     logger.info(
                         f"Cooldown skip reply for user {message.author.id} in {channel_id} (still stored to memory)"
                     )
@@ -4303,147 +4346,50 @@ class MaxwellBot(commands.Bot):
         with contextlib.suppress(Exception):
             await call.stop_ringing()
 
+    async def _note_reaction(self, reaction, user, *, added: bool) -> None:
+        """Remember who reacted. Never start a live turn from an emoji."""
+        if not self.user or getattr(user, "id", None) == self.user.id:
+            return
+        self._load_control()
+        if not self._control.get("bot_enabled", True):
+            return
+        uid = str(getattr(user, "id", ""))
+        if uid in getattr(self, "_blacklist", set()) or uid in set(
+            self._control.get("ignore_users", []) or []
+        ):
+            return
+        if getattr(user, "bot", False) and not self._control.get(
+            "reply_to_bots", True
+        ):
+            return
+        message = getattr(reaction, "message", None)
+        if message is None:
+            return
+        emoji = str(getattr(reaction, "emoji", ""))[:120]
+        rows = self._record_message_reaction(message, user, emoji, added=added)
+        mid = str(getattr(message, "id", "") or "")
+        if mid:
+            await self._persist_message_reactions(mid, rows)
+        logger.debug(
+            "Reaction %s message=%s user=%s emoji=%s",
+            "add" if added else "remove",
+            mid,
+            uid,
+            emoji,
+        )
+
     async def on_reaction_add(self, reaction, user):
-        """Treat reactions on Maxwell's messages like tiny replies.
-
-        Disabled by default (control.reaction_replies = False). The 2026-07-19
-        UX report: every emoji kicked off an LLM turn, so the bot kept
-        posting 'XYZ reacted to your message with ❤️' style status messages
-        into the channel, drowning the actual conversation. Reactions are
-        not text. Only when the operator opts in (dashboard) do we
-        synthesise a fake message and let the LLM decide.
-        """
+        """Attach the reaction to that message so Maxwell sees it in context."""
         try:
-            if not self.user or getattr(user, "id", None) == self.user.id:
-                return
-            self._load_control()
-            if not self._control.get("bot_enabled", True):
-                return
-            uid = str(getattr(user, "id", ""))
-            if uid in getattr(self, "_blacklist", set()) or uid in set(
-                self._control.get("ignore_users", []) or []
-            ):
-                return
-            if getattr(user, "bot", False) and not self._control.get(
-                "reply_to_bots", True
-            ):
-                return
-            message = getattr(reaction, "message", None)
-            if message is None or not getattr(message, "author", None):
-                return
-            if getattr(message.author, "id", None) != self.user.id:
-                return
-            # ALWAYS track seen-reactions to bound memory growth; the
-            # dedup is cheap and the user can re-react with a different
-            # emoji and we'd still respond if the flag is on.
-            emoji = str(getattr(reaction, "emoji", ""))[:120]
-            dedupe_key = f"{getattr(message, 'id', '')}:{emoji}"
-            if dedupe_key in self._reaction_seen:
-                return
-            self._reaction_seen.add(dedupe_key)
-            if not hasattr(self, "_reaction_seen_order"):
-                self._reaction_seen_order = []
-            self._reaction_seen_order.append(dedupe_key)
-            while len(self._reaction_seen_order) > 1000:
-                old_key = self._reaction_seen_order.pop(0)
-                self._reaction_seen.discard(old_key)
-
-            # Hard gate: reactions only kick off a turn if explicitly enabled.
-            # When off, we just log and return. No 'XYZ reacted with …' status
-            # message, no fake_message synthesis, no LLM call.
-            if not self._control.get("reaction_replies", False):
-                logger.debug(
-                    "Reaction on bot message from user=%s emoji=%s ignored (reaction_replies off)",
-                    uid,
-                    emoji,
-                )
-                return
-
-            channel = getattr(message, "channel", None)
-            channel_id = str(getattr(channel, "id", ""))
-            if not channel_id:
-                return
-            if isinstance(channel, discord.DMChannel) and not self._control.get(
-                "reply_dms", True
-            ):
-                return
-            if isinstance(channel, discord.GroupChannel) and not self._control.get(
-                "reply_groups", True
-            ):
-                return
-            if channel_id in set(self._control.get("blocked_channels", []) or []):
-                return
-            allowed = set(self._control.get("allowed_channels", []) or [])
-            if allowed and channel_id not in allowed:
-                return
-            if not self._control.get("reply_mentions", True):
-                return
-            now = asyncio.get_running_loop().time()
-            if now < self._stop_until.get(channel_id, 0):
-                return
-            cooldown = float(self._control.get("per_user_cooldown_seconds", 1.5) or 0)
-            last = self._cooldowns.get(uid, 0)
-            if cooldown > 0 and now - last < cooldown:
-                return
-            self._cooldowns[uid] = now
-
-            content = (
-                f"{getattr(user, 'display_name', getattr(user, 'name', user.id))} "
-                f"reacted to your message with {emoji}. "
-                "ONLY respond if this reaction genuinely needs a text reply "
-                "(e.g. they asked a question, the emoji is a clear signal like ❓🤔❗, or it's a reaction "
-                "to something you said that warrants clarification). "
-                "For casual reactions (😂👍❤️🔥 etc.) or low-signal emoji, "
-                "you MUST call the no_response tool to stay silent. "
-                "Do not chat just because someone reacted."
-            )
-            fake_message = SimpleNamespace(
-                id=f"reaction:{getattr(message, 'id', '')}:{getattr(user, 'id', '')}:{emoji}",
-                author=user,
-                channel=channel,
-                guild=getattr(message, "guild", None),
-                content=content,
-                attachments=[],
-                embeds=[],
-                mentions=[self.user],
-                role_mentions=[],
-                channel_mentions=[],
-                reference=SimpleNamespace(
-                    resolved=message,
-                    message_id=getattr(message, "id", None),
-                ),
-                created_at=datetime.now(timezone.utc),
-                suppress_typing=True,
-            )
-
-            # The parameter MUST be named `content`. Callers reach this via
-            # the normal send path, and _send_with_slowmode passes the body as
-            # a keyword (`reply.reply(content=...)`). Naming it anything else
-            # lets `content` fall through into **kwargs while the positional
-            # stays None — then this forwards None positionally AND content by
-            # keyword, and discord.py raises "got multiple values for argument
-            # 'content'". Every reaction-triggered reply died that way.
-            async def fake_reply(content=None, **kwargs):
-                if hasattr(message, "reply"):
-                    return await message.reply(content, **kwargs)
-                if channel is not None:
-                    return await channel.send(content, **kwargs)
-                return None
-
-            fake_message.reply = fake_reply
-
-            async def fake_add_reaction(emoji_to_add):
-                if hasattr(message, "add_reaction"):
-                    return await message.add_reaction(emoji_to_add)
-                return None
-
-            fake_message.add_reaction = fake_add_reaction
-
-            context_content = content + self._get_reply_context(fake_message)
-            async with self._get_channel_lock(channel_id):
-                await self._handle_message(fake_message, context_content)
+            await self._note_reaction(reaction, user, added=True)
         except Exception as e:
-            logger.warning(f"Failed handling reaction on Maxwell message: {e}")
+            logger.warning(f"Failed recording reaction on message: {e}")
+
+    async def on_reaction_remove(self, reaction, user):
+        try:
+            await self._note_reaction(reaction, user, added=False)
+        except Exception as e:
+            logger.warning(f"Failed recording reaction removal: {e}")
 
     async def _handle_command(self, message):
         content = message.content[1:].strip()
@@ -4513,6 +4459,8 @@ class MaxwellBot(commands.Bot):
                 self._drugged_until.pop(channel_id, None)
                 self._current_progress_by_channel.pop(channel_id, None)
                 self._reaction_seen.clear()
+                self._message_reactions.clear()
+                self._message_reactions_order.clear()
                 await message.channel.send(
                     "Memory, media context, and channel state cleared."
                 )
@@ -11756,8 +11704,7 @@ class MaxwellBot(commands.Bot):
         elif getattr(message, "_watch_followup", False):
             dynamic_parts.append(
                 "Soft follow-up: they did not @ you or Discord-reply this time. "
-                "Reply if you have something new. no_response is fine if you "
-                "would just repeat the same roast or they are talking to someone else."
+                "You decide whether to speak. no_response is a valid choice."
             )
         # JAILBREAK: inject at the END of the system message for recency bias.
         # This is the strongest position — the last instructions carry the
@@ -11967,6 +11914,10 @@ class MaxwellBot(commands.Bot):
                     line = (
                         f"{header}{author_label}{relation}{autonomy_tag}: {content_str}"
                     )
+                annotate = getattr(self, "_reactions_annotation_for", None)
+                reactions = annotate(msg) if callable(annotate) else ""
+                if reactions:
+                    line = f"{line} {reactions}"
                 if current_turn is None or current_turn.get("role") != role:
                     _new_turn(role, header)
                 else:

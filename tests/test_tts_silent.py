@@ -210,32 +210,18 @@ def test_email_tools_need_followup():
     )
 
 
-def test_reaction_on_maxwell_message_invokes_handler():
-    class NoopAsyncLock:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
+def test_reaction_on_maxwell_message_does_not_invoke_handler():
     calls = []
-    replies = []
     maxwell_user = SimpleNamespace(id=42, display_name="Maxwell", bot=True)
     reacting_user = SimpleNamespace(
         id=99, display_name="alice", name="alice", bot=False
     )
-    channel = SimpleNamespace(id=123)
     original = SimpleNamespace(
         id=777,
         author=maxwell_user,
-        channel=channel,
+        channel=SimpleNamespace(id=123),
         guild=SimpleNamespace(id=9),
     )
-
-    async def original_reply(content=None, **kwargs):
-        replies.append((content, kwargs))
-
-    original.reply = original_reply
     reaction = SimpleNamespace(message=original, emoji="😂")
 
     async def handle_message(message, content):
@@ -244,41 +230,25 @@ def test_reaction_on_maxwell_message_invokes_handler():
     bot = SimpleNamespace(
         user=maxwell_user,
         _load_control=lambda: None,
-        _control={
-            "bot_enabled": True,
-            "reply_to_bots": True,
-            "blocked_channels": [],
-            "allowed_channels": [],
-            "reply_mentions": True,
-            "per_user_cooldown_seconds": 0,
-            # reactions-on-maxwell-messages only kick off a turn when this
-            # is on; the on_reaction_add gate added per the 2026-07-19 UX
-            # report (every emoji was firing an LLM turn) returns early
-            # otherwise. The test exercises the full path so we opt in.
-            "reaction_replies": True,
-        },
+        _control={"bot_enabled": True, "reply_to_bots": True, "ignore_users": []},
         _blacklist=set(),
-        _cooldowns={},
-        _stop_until={},
-        _reaction_seen=set(),
-        _get_channel_lock=lambda channel_id: NoopAsyncLock(),
-        _get_reply_context=lambda message: "\nReplied-to message: Maxwell said hi",
+        _message_reactions={},
+        _message_reactions_order=[],
+        memory=None,
+        _MAX_REACTION_MESSAGES=MaxwellBot._MAX_REACTION_MESSAGES,
+        _MAX_REACTORS_PER_MESSAGE=MaxwellBot._MAX_REACTORS_PER_MESSAGE,
         _handle_message=handle_message,
     )
+    bot._remember_reaction_message = MaxwellBot._remember_reaction_message.__get__(bot)
+    bot._record_message_reaction = MaxwellBot._record_message_reaction.__get__(bot)
+    bot._persist_message_reactions = MaxwellBot._persist_message_reactions.__get__(bot)
+    bot._note_reaction = MaxwellBot._note_reaction.__get__(bot)
 
     asyncio.run(MaxwellBot.on_reaction_add(bot, reaction, reacting_user))
 
-    assert len(calls) == 1
-    message, content = calls[0]
-    assert "reacted to your message with 😂" in content
-    assert "Replied-to message: Maxwell said hi" in content
-    assert message.author is reacting_user
-    assert message.reference.resolved is original
-    assert message.mentions == [maxwell_user]
-    assert message.suppress_typing is True
-
-    asyncio.run(message.reply("hi"))
-    assert replies == [("hi", {})]
+    assert calls == []
+    assert bot._message_reactions["777"][0]["emoji"] == "😂"
+    assert bot._message_reactions["777"][0]["user_name"] == "alice"
 
 
 def test_dispatch_native_runs_nonterminal_tool():

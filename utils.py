@@ -573,6 +573,44 @@ def render_discord_context_text(message: Any, content: str | None = None, known_
 _render_discord_context_text = render_discord_context_text
 
 
+def format_reactions_annotation(entries: list | None) -> str:
+    """Turn reaction rows into `[reactions: 😂 alice, bob; 👍×2]` for prompts."""
+    if not entries:
+        return ""
+    grouped: dict[str, list[str]] = {}
+    counts: dict[str, int] = {}
+    order: list[str] = []
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        emoji = str(item.get("emoji") or "").strip()
+        if not emoji:
+            continue
+        if emoji not in grouped:
+            grouped[emoji] = []
+            counts[emoji] = 0
+            order.append(emoji)
+        name = str(item.get("user_name") or item.get("name") or "").strip()
+        if name and name not in grouped[emoji]:
+            grouped[emoji].append(name)
+        try:
+            counts[emoji] += max(1, int(item.get("count") or 1))
+        except (TypeError, ValueError):
+            counts[emoji] += 1
+    bits: list[str] = []
+    for emoji in order:
+        names = grouped[emoji][:12]
+        if names:
+            bits.append(f"{emoji} {', '.join(names)}")
+        elif counts[emoji] > 1:
+            bits.append(f"{emoji}×{counts[emoji]}")
+        else:
+            bits.append(emoji)
+    if not bits:
+        return ""
+    return "[reactions: " + "; ".join(bits) + "]"
+
+
 # --- Cross-process file locking (Linux fcntl; best-effort elsewhere) ---
 # Used to reduce lost-update races on shared JSONs between bot and api processes
 # (bot_commands.json, autonomy state, rem state, etc.). Not a full DB, but

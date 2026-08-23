@@ -1468,6 +1468,7 @@ class RAGMemoryManager:
             "guild_name",
             "edited_at",
             "pinned",
+            "reactions",
         }
         metadata = {
             k: v for k, v in message.items() if k in meta_keys and v is not None
@@ -1761,6 +1762,31 @@ class RAGMemoryManager:
             (str(context_id),),
         )
         return cursor.rowcount > 0
+
+    async def merge_message_metadata(self, message_id: str, patch: dict) -> bool:
+        """Merge keys into an existing transcript row without reordering it."""
+        mid = str(message_id or "").strip()
+        if not mid or not isinstance(patch, dict):
+            return False
+        async with self._lock:
+            row = self._db.execute(
+                "SELECT metadata FROM vectors WHERE id=?",
+                (mid,),
+            ).fetchone()
+            if row is None:
+                return False
+            try:
+                meta = json.loads(row["metadata"] or "{}")
+            except Exception:
+                meta = {}
+            if not isinstance(meta, dict):
+                meta = {}
+            meta.update(patch)
+            self._db.execute(
+                "UPDATE vectors SET metadata=? WHERE id=?",
+                (json.dumps(meta, ensure_ascii=False, default=str), mid),
+            )
+            return True
 
     async def update_shared_context(self, context_id: str, updates: dict) -> bool:
         sets = []
