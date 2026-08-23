@@ -31,6 +31,7 @@ def _bot(*, watch_seconds=180, debounce_seconds=0.05):
     bot._arm_conversation_watch = MaxwellBot._arm_conversation_watch.__get__(bot)
     bot._conversation_watch_active = MaxwellBot._conversation_watch_active.__get__(bot)
     bot._conversation_watch_prompt = MaxwellBot._conversation_watch_prompt.__get__(bot)
+    bot._watch_burst_prompt_lines = MaxwellBot._watch_burst_prompt_lines.__get__(bot)
     bot._message_addresses_self = MaxwellBot._message_addresses_self.__get__(bot)
     bot._directly_addressed = MaxwellBot._directly_addressed.__get__(bot)
     bot._content_without_self_mention = MaxwellBot._content_without_self_mention.__get__(
@@ -286,6 +287,7 @@ def test_watch_prompt_lets_him_decide():
         assert any("Conversation watch is on in this room" in line for line in lines)
         assert any("can talk without an @" in line for line in lines)
         assert any("default to no_response" in line for line in lines)
+        assert any("current thread" in line for line in lines)
         assert all("Soft follow-up" not in line for line in lines)
         msg._watch_followup = True
         lines = MaxwellBot._conversation_watch_prompt(bot, msg, msg.channel.id)
@@ -346,6 +348,28 @@ def test_watch_debounce_collapses_a_burst_into_one_reply():
         assert handled == []
         await asyncio.sleep(0.25)
         assert handled == ["lol"]
+        assert len(getattr(second, "_watch_burst", []) or []) == 2
+
+    asyncio.run(run())
+
+
+def test_watch_prompt_includes_the_quiet_burst():
+    bot = _bot()
+    first = _plain_followup(content="hey maxwell what was that file")
+    first.id = 1
+    second = _plain_followup(content="lol")
+    second.id = 2
+    second._watch_followup = True
+    second._watch_burst = [first, second]
+
+    async def run():
+        MaxwellBot._arm_conversation_watch(bot, second.channel.id)
+        text = "\n".join(
+            MaxwellBot._conversation_watch_prompt(bot, second, second.channel.id)
+        )
+        assert "Quiet burst in this room" in text
+        assert "hey maxwell what was that file" in text
+        assert "stay on it" in text.lower()
 
     asyncio.run(run())
 

@@ -3764,9 +3764,12 @@ class MaxwellBot(commands.Bot):
         if watching:
             lines.append(
                 "Conversation watch is on in this room. You can talk without "
-                "an @, but default to no_response. Only speak if someone is "
-                "talking to you or asking you something. Stay silent for "
-                "lol/ok/side talk or people talking about you to someone else."
+                "an @, but default to no_response. The transcript is THIS "
+                "channel's current thread — stay on it. Only speak if someone "
+                "is talking to you or asking you something in that exchange. "
+                "Stay silent for lol/ok/side talk, people talking about you "
+                "to someone else, or a new topic you are not in. Don't bring "
+                "up other rooms or old topics that aren't in this conversation."
             )
             directed = False
             reply_other = False
@@ -3803,16 +3806,44 @@ class MaxwellBot(commands.Bot):
         if getattr(message, "_watch_followup", False):
             lines.append(
                 "Soft follow-up: they did not @ you or Discord-reply this time. "
-                "Default is no_response. Speak only if this line is for you or "
-                "needs you. To Discord-reply to an earlier line, send_message "
+                "Default is no_response. Speak only if this line continues the "
+                "exchange with you in this room. If the room moved on, stay "
+                "silent. To Discord-reply to an earlier line, send_message "
                 "with reply_to as a short quote or name, like nah or alice — "
                 "not an id."
             )
+        burst_lines = self._watch_burst_prompt_lines(message)
+        if burst_lines:
+            lines.extend(burst_lines)
         typer = getattr(self, "_typing_prompt_lines", None)
         if callable(typer):
             with contextlib.suppress(Exception):
                 lines.extend(typer(channel_id) or [])
         return lines
+
+    def _watch_burst_prompt_lines(self, message) -> list[str]:
+        """Quiet-window lines so watch isn't answering the last 'lol' in a vacuum."""
+        burst = list(getattr(message, "_watch_burst", None) or [])
+        if len(burst) < 2:
+            return []
+        rendered: list[str] = []
+        for item in burst[-12:]:
+            author = getattr(item, "author", None)
+            name = str(
+                getattr(author, "display_name", None)
+                or getattr(author, "name", None)
+                or "someone"
+            ).strip() or "someone"
+            text = " ".join(str(getattr(item, "content", "") or "").split())[:240]
+            if text:
+                rendered.append(f"{name}: {text}")
+        if len(rendered) < 2:
+            return []
+        return [
+            "Quiet burst in this room (oldest→newest). This is the current "
+            "moment — stay on it. The last line is [RESPOND TO THIS]:\n"
+            + "\n".join(rendered)
+        ]
 
     def _should_live_reply(self, message) -> bool:
         """Hard ping always. During watch, every human line — he decides."""
@@ -3869,6 +3900,15 @@ class MaxwellBot(commands.Bot):
             bucket = {}
             debounce[cid] = bucket
         bucket["latest"] = message
+        burst = list(bucket.get("burst") or [])
+        last = burst[-1] if burst else None
+        last_id = getattr(last, "id", None) if last is not None else None
+        this_id = getattr(message, "id", None)
+        if last is None or this_id is None or this_id != last_id:
+            burst.append(message)
+        if len(burst) > 24:
+            burst = burst[-24:]
+        bucket["burst"] = burst
         if directed:
             bucket["latest_directed"] = message
             bucket["content"] = content
@@ -3924,6 +3964,7 @@ class MaxwellBot(commands.Bot):
         content = getattr(target, "content", "") or bucket.get("content") or ""
         with contextlib.suppress(Exception):
             target._watch_followup = True
+            target._watch_burst = list(bucket.get("burst") or [])
         lock = self._get_channel_lock(str(channel_id))
         try:
             await asyncio.wait_for(lock.acquire(), timeout=self._watch_lock_timeout())
@@ -13251,7 +13292,9 @@ class MaxwellBot(commands.Bot):
         dynamic_parts.append(
             f"User: {message.author.display_name} ({message.author.id}, {user_kind}) | {local_now.strftime('%a %b %d %I:%M %p')} AST | Channel: #{channel_name} ({channel_id}, {channel_kind})"
         )
-        if self._control.get("long_term_memory_enabled", True):
+        if self._control.get("long_term_memory_enabled", True) and not self._is_short_live_turn(
+            message, user_message
+        ):
             try:
                 # RAG: use semantic search to find the most relevant memories
                 # instead of just dumping the last N entries. This means the
@@ -13430,7 +13473,9 @@ class MaxwellBot(commands.Bot):
                     )
             except Exception as e:
                 logger.warning(f"Failed to load long-term memory: {e}")
-        if self._control.get("cross_context_enabled", True):
+        if self._control.get("cross_context_enabled", True) and not self._is_short_live_turn(
+            message, user_message
+        ):
             try:
                 facts = await self.memory.get_relevant_shared_context(
                     user_id=str(message.author.id),
@@ -13590,7 +13635,10 @@ class MaxwellBot(commands.Bot):
                 ),
             )
             if self._is_short_live_turn(message, user_message):
-                count = min(count, 20)
+                # Watch/ambient turns still need the current thread. 20 lines
+                # cuts off the exchange and he riffs on the last 'lol'. Keep
+                # this-channel transcript; skip RAG/cross-context instead.
+                count = min(count, 120)
             current_message_id = getattr(message, "id", None)
             # Slide the history window in BLOCKS, not one message per turn.
             # `memory[-count:]` drops exactly one old turn every time a new
