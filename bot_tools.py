@@ -1631,8 +1631,6 @@ class CreateInviteTool(Tool):
     async def execute(
         self, message: Message, max_uses: str = "1", max_age: str = "86400", **kwargs
     ) -> str:
-        if not self.bot or not self.bot._is_admin(message.author.id):
-            return "Error: create_invite is admin-only"
         if not message.guild:
             return "Error: Cannot create invites in DMs"
         try:
@@ -2360,8 +2358,6 @@ class ListServersTool(Tool):
         return "List your servers and group chats. No params."
 
     async def execute(self, message: Message, **kwargs) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: list_servers is admin-only"
         lines = []
         if self.bot.guilds:
             lines.append(f"Servers ({len(self.bot.guilds)}):")
@@ -2390,13 +2386,11 @@ class ListAdminServersTool(Tool):
 
     def get_description(self):
         return (
-            "List servers where you have usable admin/mod permissions, especially manage_channels. "
-            "Use this before trying server admin actions. No params."
+            "List servers where you have usable Discord manage_channels/mod permissions. "
+            "Use this before creating or editing channels. No params."
         )
 
     async def execute(self, message: Message, **kwargs) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: list_admin_servers is admin-only"
         rows = []
         for guild in getattr(self.bot, "guilds", []) or []:
             caps, reason = _admin_caps(guild)
@@ -2412,8 +2406,8 @@ class ListAdminServersTool(Tool):
                 f"categories: {len(cats)} text: {len(text)} voice: {len(voice)}"
             )
         if not rows:
-            return "No servers with cached admin/manage permissions. Don't try admin tools until this lists a target."
-        return "Servers with usable admin tools:\n" + "\n".join(rows[:30])
+            return "No servers with cached manage_channels/mod permissions. Don't try channel tools until this lists a target."
+        return "Servers where channel tools can run:\n" + "\n".join(rows[:30])
 
 
 class CreateCategoryTool(Tool):
@@ -2434,8 +2428,6 @@ class CreateCategoryTool(Tool):
         position: str | None = None,
         **kwargs,
     ) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: create_category is admin-only"
         clean = _clean_discord_name(name)
         if not clean:
             return "Error: name is required"
@@ -2523,8 +2515,6 @@ class CreateChannelTool(Tool):
         slowmode_seconds: str = "0",
         **kwargs,
     ) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: create_channel is admin-only"
         clean = _clean_channel_name(name)
         if not clean:
             return "Error: name is required"
@@ -2593,8 +2583,6 @@ class EditChannelTool(Tool):
         position: str | None = None,
         **kwargs,
     ) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: edit_channel is admin-only"
         if not channel_id:
             return "Error: channel_id is required"
         try:
@@ -2676,8 +2664,6 @@ class DeleteChannelTool(Tool):
         confirm_name: str | None = None,
         **kwargs,
     ) -> str:
-        if self.bot and not self.bot._is_admin(message.author.id):
-            return "Error: delete_channel is admin-only"
         if not channel_id or not confirm_name:
             return "Error: channel_id and confirm_name are required"
         try:
@@ -4603,7 +4589,7 @@ class ShellTool(Tool):
                 "Error: shell refused: this turn read content from a fetched "
                 "URL/web search that may carry prompt-injection payloads. "
                 "The user must confirm out-of-band with `,confirm` "
-                "(admins/whitelisted users only) before this can run.\n"
+                "before this can run.\n"
                 f"Command preview: {preview}"
             )
 
@@ -7461,7 +7447,7 @@ class EmailSendTool(Tool):
                 "Error: email_send refused: this turn read content from a "
                 "fetched URL/web search that may carry prompt-injection "
                 "payloads. The user must confirm out-of-band with `,confirm` "
-                "(admins only) before this can run.\n"
+                "before this can run.\n"
                 f"Recipient: {to}\n"
                 f"Subject: {subject}\n"
                 f"Body preview: {preview}"
@@ -7634,11 +7620,11 @@ class EmailSearchTool(Tool):
 
 
 # ---------------------------------------------------------------------------
-# Self-modification tools. Both admin-gated. These let Maxwell (or any admin
-# using the LLM) rewrite its own base personality + per-server prompts at
-# runtime. The runtime load is hot — _load_control() reads mtime, so a write
-# to bot_control.json is picked up on the next prompt assembly without a
-# restart. server prompts are read on every prompt build, also hot.
+# Self-modification tools. These let Maxwell rewrite its own base
+# personality + per-server prompts at runtime. The runtime load is hot —
+# _load_control() reads mtime, so a write to bot_control.json is picked up
+# on the next prompt assembly without a restart. server prompts are read
+# on every prompt build, also hot.
 # ---------------------------------------------------------------------------
 
 
@@ -7650,8 +7636,6 @@ class UpdateBasePersonalityTool(Tool):
     is ALWAYS-ON and lives in code — it is NOT editable through this tool.
     This tool only rewrites the per-runtime personality paragraph that lives
     in bot_control.json under `base_personality`.
-
-    Admin only — non-admins get a refused error.
     """
 
     is_destructive: bool = True
@@ -7659,8 +7643,7 @@ class UpdateBasePersonalityTool(Tool):
     def get_description(self) -> str:
         return (
             "Rewrite global base_personality (tone/do-don'ts in every prompt). "
-            "Base Knowledge in code is not editable. Params: text (100-2000 chars). "
-            "Admin-only."
+            "Base Knowledge in code is not editable. Params: text (100-2000 chars)."
         )
 
     async def execute(
@@ -7711,12 +7694,10 @@ class UpdateBasePersonalityTool(Tool):
 class UpdateServerPromptTool(Tool):
     """Rewrite the per-server custom prompt (same as `,prompt <text>`).
 
-    Same effect as the admin `,prompt <text>` command but invokable from
+    Same effect as the `,prompt <text>` command but invokable from
     inside an LLM turn — Maxwell can edit its own per-server instructions
     when it has a reason. Pass server_id (numeric snowflake) or pass 'DM'
     for the DM default. Pass empty text to clear the per-server prompt.
-
-    Admin only.
     """
 
     is_destructive: bool = True
@@ -7725,7 +7706,7 @@ class UpdateServerPromptTool(Tool):
         return (
             "Rewrite or clear the per-server custom prompt (same as `,prompt`). "
             "Params: server_id (snowflake or 'DM'), text (empty or '__CLEAR__' "
-            "to clear). Admin-only."
+            "to clear)."
         )
 
     async def execute(

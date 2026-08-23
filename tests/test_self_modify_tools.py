@@ -1,11 +1,10 @@
 """Tests for UpdateBasePersonalityTool and UpdateServerPromptTool.
 
-These tools let Maxwell (or any admin via LLM) rewrite its own base
-personality paragraph and per-server prompts at runtime. Both are
-admin-gated. Tests cover:
+These tools let Maxwell rewrite its own base personality paragraph and
+per-server prompts at runtime. Anyone can call them. Tests cover:
 
-- non-admin call: refused, no write
-- admin call, valid text: writes to bot_control.json atomically
+- non-admin call: writes
+- valid text: writes to bot_control.json atomically
 - empty/too-short/too-long text: rejected with clear error
 - server prompt set + clear + DM target
 - the live config reflects the new text immediately

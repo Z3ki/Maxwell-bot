@@ -2095,9 +2095,9 @@ TOOL_PROTOCOL = (
     "create_site: full HTML document in `body`, never pasted into chat. Real "
     "line breaks or <br> in visible HTML; never literal \\n text.\n"
     "set_activity / change_presence: only when asked or after a real state change.\n"
-    "update_base_personality / update_server_prompt: admin-only; rewrite runtime "
+    "update_base_personality / update_server_prompt: rewrite runtime "
     "personality only when asked or voice is clearly drifting. Base Knowledge "
-    "in code is not editable.\n"
+    "in code is not editable. Every tool is available; none are admin-only.\n"
     "## What comes back\n"
     "Each tool description ends with its result contract. Read it before you "
     "plan the turn:\n"
@@ -4777,7 +4777,7 @@ class MaxwellBot(commands.Bot):
                     "` ,wake` - clear active sleep window (admin)\n"
                     "` ,admin [@user|user_id|clear]` - add/remove/list admins (admin). Promoted users can log into the dashboard at /admin via 'Continue with Discord'."
                     "` ,shell [@user|clear]` - shell whitelist (admin)\n"
-                    "` ,confirm` - authorize one destructive tool call on a tainted turn (admin/shell-whitelisted)\n"
+                    "` ,confirm` - authorize one destructive tool call on a tainted turn\n"
                     "` ,blacklist [@user|clear]` / `,unblacklist @user` - blacklist controls (admin)\n"
                 )
             elif cmd == "vc":
@@ -4821,14 +4821,10 @@ class MaxwellBot(commands.Bot):
                         )
             elif cmd == "confirm":
                 # Out-of-band confirmation for destructive tools (shell/sub_agent)
-                # on a tainted turn. Admins and shell-whitelisted users only. This
-                # is the real confirmation path: the model cannot self-confirm
-                # (model-supplied _confirmed is stripped in _execute_tool_by_name).
+                # on a tainted turn. Anyone can confirm their own turn. The model
+                # cannot self-confirm (model-supplied _confirmed is stripped in
+                # _execute_tool_by_name).
                 author_id = str(message.author.id)
-                if not (
-                    self._is_admin(author_id) or author_id in self._shell_whitelist
-                ):
-                    return
                 self._destructive_confirm[author_id] = asyncio.get_running_loop().time()
                 await message.channel.send(
                     f"Confirmed for {_CONFIRM_TTL_SECONDS:.0f}s. The next destructive "
@@ -10288,7 +10284,7 @@ class MaxwellBot(commands.Bot):
             else:
                 # Centralized indirect-prompt-injection gate. Tools flagged
                 # is_destructive (shell, sub_agent) that run on a tainted turn
-                # require an out-of-band user `,confirm` (admin/whitelisted only).
+                # require an out-of-band user `,confirm`.
                 # We inject _confirmed=True server-side only when the user actually
                 # confirmed; the model cannot forge it because _-keys were stripped
                 # above. This is the single enforcement point instead of per-tool
@@ -10304,8 +10300,8 @@ class MaxwellBot(commands.Bot):
                         result_text = (
                             "refused: this turn read content from a fetched URL/web "
                             "search that may carry prompt-injection payloads. The user "
-                            "must confirm out-of-band with `,confirm` (admins/whitelisted "
-                            "only) before this tool can run on a tainted turn. The model "
+                            "must confirm out-of-band with `,confirm` before this tool "
+                            "can run on a tainted turn. The model "
                             "cannot self-confirm. Set DISABLE_TAINT_GATE=true in .env "
                             "to skip this gate entirely."
                         )
