@@ -37,6 +37,22 @@ def test_ignores_non_media_and_video_links():
     assert refs("https://e.com/v.mp4 https://e.com/doc.pdf https://e.com/page") == []
 
 
+def test_tenor_and_giphy_pages_count_as_gifs():
+    tenor = "https://tenor.com/view/cat-dancing-gif-12345678"
+    giphy = "https://giphy.com/gifs/funny-cat-abcXYZ"
+    assert refs(f"lol {tenor}") == [(tenor, ".gif")]
+    assert refs(giphy) == [(giphy, ".gif")]
+    assert refs("https://i.imgur.com/abc123.gifv") == [
+        ("https://i.imgur.com/abc123.gifv", ".gif")
+    ]
+
+
+def test_plain_website_still_ignored():
+    assert refs("https://tenor.com") == []
+    assert refs("https://imgur.com/gallery/cats") == []
+    assert refs("https://example.com/blog/post") == []
+
+
 def test_strips_trailing_punctuation_and_angle_brackets():
     assert refs("see https://example.com/a.jpg.") == [
         ("https://example.com/a.jpg", ".jpg")

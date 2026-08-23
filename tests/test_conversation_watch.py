@@ -5,9 +5,10 @@ from types import SimpleNamespace
 
 from autonomy import _reply_relation_bit
 from bot import MaxwellBot
+from control_defaults import DEFAULT_CONTROL
 
 
-def _bot(*, watch_seconds=120, debounce_seconds=0.05):
+def _bot(*, watch_seconds=180, debounce_seconds=0.05):
     bot = SimpleNamespace(
         _control={
             "conversation_watch_seconds": watch_seconds,
@@ -84,6 +85,14 @@ def _plain_followup(
         guild=SimpleNamespace(me=None, get_member=lambda _uid: None),
         reference=reference,
     )
+
+
+def test_watch_default_is_three_minutes():
+    assert DEFAULT_CONTROL["conversation_watch_seconds"] == 180
+    missing = SimpleNamespace(_control={})
+    assert MaxwellBot._conversation_watch_seconds(missing) == 180.0
+    garbage = SimpleNamespace(_control={"conversation_watch_seconds": "nope"})
+    assert MaxwellBot._conversation_watch_seconds(garbage) == 180.0
 
 
 def test_ambient_outside_watch_is_ignored():

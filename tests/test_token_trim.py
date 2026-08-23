@@ -125,8 +125,12 @@ def test_disabled_tools_still_hidden():
     assert "youtube" not in names
     assert "send_message" in names
     prompt = MaxwellBot._tool_system_prompt(bot, "discord", message=_msg("wyd"), content="wyd")
-    assert "shell" not in prompt
-    assert "youtube" not in prompt
+    # Catalog must not list disabled tools. TOOL_PROTOCOL may still mention
+    # shell as a send_file delivery method (`files=`) — that is not offering
+    # the tool.
+    catalog = prompt.split("## Tool contract")[0]
+    assert "shell" not in catalog
+    assert "youtube" not in catalog
 
 
 def test_short_live_turn_for_watch_followup_not_hard_ping():

@@ -199,12 +199,15 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     "create_site": _obj(
         {
             "name": _str("Short slug: lowercase, numbers, hyphens"),
-            "title": _str("Site title / headline"),
+            "title": _str(
+                "Site title for listing/metadata — not a required on-page heading"
+            ),
             "body": _str(
-                "FULL HTML document (DOCTYPE through closing tags). "
-                "Prefer this over stuffing HTML into chat. In visible HTML text "
-                "use real line breaks or <br>, never literal \\n; keep \\n only "
-                "inside intentional JavaScript/CSS strings."
+                "FULL HTML document (DOCTYPE through closing tags). Served as-is: "
+                "no restyle or layout template. Invent a new look each time unless "
+                "the user specified one. Prefer this over stuffing HTML into chat. "
+                "In visible HTML text use real line breaks or <br>, never literal "
+                "\\n; keep \\n only inside intentional JavaScript/CSS strings."
             ),
             "encoding": _str("text (default) or base64 for exact bytes"),
             "images": _str("Optional JSON list of local image paths to include"),
@@ -271,6 +274,15 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         {
             "url": _str("URL to fetch"),
             "max_length": _int("Optional max characters of returned text"),
+        },
+        ["url"],
+    ),
+    "see_image": _obj(
+        {
+            "url": _str(
+                "Image or GIF URL to look at: a direct jpg/png/gif/webp, "
+                "a Discord CDN link, or a Tenor/Giphy/imgur GIF page"
+            )
         },
         ["url"],
     ),
@@ -425,6 +437,7 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "list_sites",
         "web_search",
         "fetch_url",
+        "see_image",
         "youtube",
         "shell",
         "sub_agent",

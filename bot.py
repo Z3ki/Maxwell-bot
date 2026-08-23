@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import aiohttp
 import discord
@@ -229,6 +229,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     ReactTool,
     ReasoningLogTool,
     SearchMessagesTool,
+    SeeImageTool,
     SendFileTool,
     SendMediaTool,
     SendMemeTool,
@@ -249,6 +250,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     WebSearchTool,
     YouTubeTool,
     forget_shell_progress,
+    _IMAGE_FETCH_UA,
     _get_shared_session,
     _is_safe_url,
     _read_response_limited,
@@ -297,6 +299,7 @@ from utils import (  # fd-safe, single source of truth  # noqa: E402
     _safe_int,
     _spawn_background,
     format_reactions_annotation,
+    is_gif_page_url,
     render_discord_context_text,
 )
 
@@ -2016,6 +2019,7 @@ TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "no_response",
     "shell",
     "fetch_url",
+    "see_image",
     "youtube",
     "send_file",
     "send_meme",
@@ -2075,10 +2079,92 @@ DISCORD_CHAT_PROTOCOL = (
     "Ping with exactly <@USER_ID> — no backticks, no markdown, no @Name(id).\n"
     "User lines are `Name(id): text`; your past lines are `[Maxwell] text`. "
     "Attribute by ID, never by a similar nickname. If unsure who said it, say so.\n"
+    "Your public name in this room is the per-turn 'Your name here' line "
+    "(guild nick if set, otherwise your account name).\n"
     "Match the channel. Discord markdown when it helps. Lowercase-natural. "
     "No asterisk actions, no 'as an AI'. Official server: https://discord.gg/RGnXrTmWBu "
     "— share it when someone asks where to find you."
 )
+
+
+def _live_self_member(user, guild):
+    """Bot's guild Member, if this turn has a guild. Never cached by us."""
+    if guild is None:
+        return None
+    me = getattr(guild, "me", None)
+    if me is not None:
+        return me
+    uid = getattr(user, "id", None)
+    getter = getattr(guild, "get_member", None)
+    if uid is None or not callable(getter):
+        return None
+    with contextlib.suppress(Exception):
+        member = getter(uid)
+        if member is not None:
+            return member
+    with contextlib.suppress(Exception):
+        member = getter(int(uid))
+        if member is not None:
+            return member
+    return None
+
+
+def _live_account_name(user, bot_name: str | None = None) -> str:
+    """Global display name / username, not a guild nick."""
+    name = str(
+        getattr(user, "display_name", None)
+        or getattr(user, "name", None)
+        or bot_name
+        or "Maxwell"
+    ).strip()
+    return name or "Maxwell"
+
+
+def _live_self_name(user, guild=None, bot_name: str | None = None) -> tuple[str, str]:
+    """People-facing name for this room, read live from the guild member.
+
+    Returns (name, source) where source is ``nick`` or ``account``. Guild nick
+    wins when set; otherwise global display name / username. DMs have no nick.
+    """
+    account = _live_account_name(user, bot_name)
+    member = _live_self_member(user, guild)
+    if member is None:
+        return account, "account"
+    nick = str(getattr(member, "nick", None) or "").strip()
+    if nick:
+        return nick, "nick"
+    shown = str(
+        getattr(member, "display_name", None)
+        or getattr(member, "name", None)
+        or account
+    ).strip()
+    return shown or account, "account"
+
+
+def _live_self_identity_line(user, guild=None, bot_name: str | None = None) -> str:
+    """One prompt line: current name in this server (or account name in DMs)."""
+    name, source = _live_self_name(user, guild, bot_name)
+    account = _live_account_name(user, bot_name)
+    if guild is None:
+        return (
+            f"Your name here: {name} (account name; this chat has no server nickname)."
+        )
+    guild_name = str(getattr(guild, "name", None) or "this server").strip() or (
+        "this server"
+    )
+    if source == "nick":
+        account_bit = (
+            f" Account name: {account}." if account and account != name else ""
+        )
+        return (
+            f"Your name here: {name} (server nickname in {guild_name}). "
+            f"People in this server see you as {name}.{account_bit}"
+        )
+    return (
+        f"Your name here: {name} (no server nickname in {guild_name}; "
+        f"this is your account name)."
+    )
+
 
 # Shared tool-use contract (native + XML). Tool catalogs live in tools= (native)
 # or the Available tools list (XML). Don't repeat per-tool schemas here.
@@ -2086,6 +2172,11 @@ TOOL_PROTOCOL = (
     "## Tool contract\n"
     "If the user asks you to do, make, send, search, fetch, run, edit, or "
     "react, call the matching tool. Never describe an action instead of doing it.\n"
+    "Look things up. If you are unsure, the topic is current (news, scores, "
+    "prices, versions, people, pages), or they asked you to check — call "
+    "web_search first, then fetch_url for a specific page. Do not guess from "
+    "training data. Skip lookup only for banter, opinions, and things you "
+    "already fetched this turn.\n"
     "Visible replies go through send_message (or no_response to stay silent). "
     "Do not also write the same text as raw assistant content.\n"
     "Default: helper tools first (they finish before terminals), then ONE "
@@ -2094,7 +2185,8 @@ TOOL_PROTOCOL = (
     "Files the user should receive must be attached via send_file or shell `files=`. "
     "A filesystem path is not delivery.\n"
     "create_site: full HTML document in `body`, never pasted into chat. Real "
-    "line breaks or <br> in visible HTML; never literal \\n text.\n"
+    "line breaks or <br> in visible HTML; never literal \\n text. Full visual "
+    "freedom — invent a new look each time; no house style unless the user asked.\n"
     "set_activity / change_presence: only when asked or after a real state change.\n"
     "update_base_personality / update_server_prompt: rewrite runtime "
     "personality only when asked or voice is clearly drifting. Base Knowledge "
@@ -3051,6 +3143,7 @@ class MaxwellBot(commands.Bot):
             self.tools["sub_agent"] = SubAgentTool(self)
         if self.config.ENABLE_FETCH_URL:
             self.tools["fetch_url"] = FetchUrlTool(self)
+        self.tools["see_image"] = SeeImageTool(self)
         if self.config.ENABLE_YOUTUBE:
             self.tools["youtube"] = YouTubeTool(self)
         self.tools["send_file"] = SendFileTool(self)
@@ -3441,12 +3534,12 @@ class MaxwellBot(commands.Bot):
 
     def _conversation_watch_seconds(self) -> float:
         raw = (getattr(self, "_control", None) or {}).get(
-            "conversation_watch_seconds", 120
+            "conversation_watch_seconds", 180
         )
         try:
             return max(0.0, min(float(raw), 3600.0))
         except (TypeError, ValueError):
-            return 120.0
+            return 180.0
 
     def _arm_conversation_watch(self, channel_id) -> None:
         seconds = self._conversation_watch_seconds()
@@ -5400,8 +5493,15 @@ class MaxwellBot(commands.Bot):
             if "Discord style:" in base_style
             else "short, casual, easygoing and kind."
         )
+        identity = _live_self_identity_line(
+            getattr(self, "user", None), guild, getattr(self, "bot_name", None)
+        )
+        live_name, _src = _live_self_name(
+            getattr(self, "user", None), guild, getattr(self, "bot_name", None)
+        )
         sys_msg = (
-            f"You are Maxwell in a Discord voice call. Speaker: {user.display_name}. Context: {guild_name}.\n"
+            f"You are Maxwell in a Discord voice call. {identity} "
+            f"Speaker: {user.display_name}. Context: {guild_name}.\n"
             f"Style: {style_bits}\n"
             "Reply in 1-2 short sentences — the way you'd actually talk out loud, not type. "
             "Plain text only: no markdown, no emojis, no asterisks, no lists, no code, no tool tags. "
@@ -5413,9 +5513,11 @@ class MaxwellBot(commands.Bot):
             "(choices: tiktok, mommy, espanol/spanish). Defaults to tiktok if you don't specify."
         )
         if self._control.get("vc_response_mode", "always") == "addressed":
-            wakes = self._control.get("vc_wake_words", ["maxwell"]) or ["maxwell"]
+            wakes = list(self._control.get("vc_wake_words", ["maxwell"]) or ["maxwell"])
+            if live_name and all(str(w).lower() != live_name.lower() for w in wakes):
+                wakes.append(live_name)
             sys_msg += (
-                f" Only answer if they are talking to you (Maxwell) or the transcript "
+                f" Only answer if they are talking to you ({live_name}) or the transcript "
                 f"contains a wake word from {wakes} (ASR may garble the name). "
                 "Otherwise output exactly __NO_RESPONSE__."
             )
@@ -8543,7 +8645,10 @@ class MaxwellBot(commands.Bot):
         try:
             with tempfile.TemporaryDirectory(prefix="maxwell-gif-") as tmp:
                 tmp_path = Path(tmp)
-                input_path = tmp_path / "input.gif"
+                suffix = Path(filename).suffix.lower()
+                if suffix not in {".gif", ".mp4", ".webm", ".webp"}:
+                    suffix = ".gif"
+                input_path = tmp_path / f"input{suffix}"
                 output_path = tmp_path / "gif-sheet.jpg"
                 input_path.write_bytes(blob)
                 cmd = [
@@ -8886,45 +8991,159 @@ class MaxwellBot(commands.Bot):
 
         return media
 
-    async def _download_embed_media(
-        self, url: str, filename: str, max_size: int, message_id
-    ) -> dict | None:
-        if not _is_safe_url(url):
-            logger.warning(f"Skipping unsafe embed media URL: {url[:120]}")
-            return None
-        ext = Path(urlparse(url).path).suffix.lower()
+    _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+    _MAX_MEDIA_REDIRECTS = 3
+    _META_TAG_RE = re.compile(r"<meta\s+[^>]*>", re.I)
+    _META_ATTR_RE = re.compile(
+        r"""([^\s=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"""
+    )
+
+    @staticmethod
+    def _is_gif_page_url(url: str) -> bool:
+        return is_gif_page_url(url)
+
+    @classmethod
+    def _og_media_urls(cls, html_text: str) -> list[str]:
+        """og:image / og:video (and twitter: equivalents) in document order."""
+        images: list[str] = []
+        videos: list[str] = []
+        for tag in cls._META_TAG_RE.findall(html_text or ""):
+            attrs: dict[str, str] = {}
+            for match in cls._META_ATTR_RE.finditer(tag):
+                attrs[match.group(1).lower()] = (
+                    match.group(2) or match.group(3) or match.group(4) or ""
+                )
+            prop = (attrs.get("property") or attrs.get("name") or "").lower()
+            content = html.unescape(attrs.get("content") or "").strip()
+            if not content:
+                continue
+            if prop in {
+                "og:image",
+                "og:image:url",
+                "twitter:image",
+                "twitter:image:src",
+            }:
+                images.append(content)
+            elif prop in {"og:video", "og:video:url", "twitter:player:stream"}:
+                videos.append(content)
+        return images + videos
+
+    async def _fetch_public_payload(
+        self, url: str, max_size: int
+    ) -> tuple[str, str, bytes] | None:
+        """GET a public URL, following a few SSRF-checked redirects.
+
+        Returns (final_url, mime, blob) or None. Each hop is re-checked with
+        _is_safe_url so a public page cannot bounce us onto link-local metadata.
+        """
+        current = url
         try:
             session = await _get_shared_session()
-            async with session.get(
-                url,
-                timeout=aiohttp.ClientTimeout(total=20, connect=8),
-                allow_redirects=False,
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning(
-                        f"Skipping embed media {url[:120]}: HTTP {resp.status}"
-                    )
+            for _hop in range(self._MAX_MEDIA_REDIRECTS + 1):
+                if not _is_safe_url(current):
+                    logger.warning(f"Skipping unsafe embed media URL: {current[:120]}")
                     return None
-                content_type = (
-                    (resp.headers.get("Content-Type") or "")
-                    .split(";", 1)[0]
-                    .strip()
-                    .lower()
-                )
-                mime = content_type or MIME_MAP.get(ext, "")
-                if not mime.startswith(("image/", "video/", "audio/")):
-                    logger.warning(
-                        f"Skipping embed media {url[:120]}: unsupported mime {mime or 'unknown'}"
+                async with session.get(
+                    current,
+                    timeout=aiohttp.ClientTimeout(total=20, connect=8),
+                    allow_redirects=False,
+                    headers={
+                        "User-Agent": _IMAGE_FETCH_UA,
+                        "Accept": "image/*,video/*,text/html;q=0.8,*/*;q=0.5",
+                    },
+                ) as resp:
+                    if resp.status in self._REDIRECT_STATUSES:
+                        loc = resp.headers.get("Location")
+                        if not loc:
+                            logger.warning(
+                                f"Skipping embed media {current[:120]}: "
+                                "redirect with no Location"
+                            )
+                            return None
+                        current = urljoin(current, loc)
+                        continue
+                    if resp.status != 200:
+                        logger.warning(
+                            f"Skipping embed media {current[:120]}: HTTP {resp.status}"
+                        )
+                        return None
+                    content_type = (
+                        (resp.headers.get("Content-Type") or "")
+                        .split(";", 1)[0]
+                        .strip()
+                        .lower()
                     )
-                    return None
-                blob = await _read_response_limited(resp, max_size)
+                    blob = await _read_response_limited(resp, max_size)
+                    return current, content_type, blob
+            logger.warning(f"Skipping embed media {url[:120]}: too many redirects")
+            return None
         except Exception as e:
             logger.warning(f"Failed to download embed media {url[:120]}: {e}")
             return None
+
+    async def _download_embed_media(
+        self, url: str, filename: str, max_size: int, message_id, *, _depth: int = 0
+    ) -> dict | None:
+        if _depth > 2:
+            return None
+        if not _is_safe_url(url):
+            logger.warning(f"Skipping unsafe embed media URL: {url[:120]}")
+            return None
+        fetched = await self._fetch_public_payload(url, max_size)
+        if not fetched:
+            return None
+        final_url, mime, blob = fetched
+        ext = (
+            Path(urlparse(final_url).path).suffix.lower()
+            or Path(urlparse(url).path).suffix.lower()
+        )
+        if not mime:
+            mime = MIME_MAP.get(ext, "")
+        host = (urlparse(final_url).hostname or urlparse(url).hostname or "").lower()
+        gif_host = (
+            self._is_gif_page_url(url)
+            or self._is_gif_page_url(final_url)
+            or host.endswith(("tenor.com", "giphy.com", "gph.is", "klipy.com"))
+        )
+        if mime.startswith("text/html") or (mime.startswith("text/") and gif_host):
+            if _depth >= 2 or not gif_host:
+                logger.warning(
+                    f"Skipping embed media {url[:120]}: unsupported mime "
+                    f"{mime or 'unknown'}"
+                )
+                return None
+            html_text = blob.decode("utf-8", errors="replace")
+            for candidate in self._og_media_urls(html_text):
+                abs_url = urljoin(final_url, candidate)
+                if not _is_safe_url(abs_url) or abs_url in {url, final_url}:
+                    continue
+                item = await self._download_embed_media(
+                    abs_url, filename, max_size, message_id, _depth=_depth + 1
+                )
+                if item:
+                    # Keep the URL the user posted, not the resolved CDN hop.
+                    item["url"] = url
+                    return item
+            logger.warning(f"Skipping gif page {url[:120]}: no usable og:image")
+            return None
+        if not mime.startswith(("image/", "video/", "audio/")):
+            logger.warning(
+                f"Skipping embed media {url[:120]}: unsupported mime {mime or 'unknown'}"
+            )
+            return None
         if not mime:
             mime = MIME_MAP.get(ext, "application/octet-stream")
+        anim_name = filename if Path(filename).suffix else f"{filename}{ext or '.gif'}"
         if mime == "image/gif" or ext == ".gif":
-            normalized = await self._normalize_gif(blob, filename, max_size)
+            normalized = await self._normalize_gif(blob, anim_name, max_size)
+            if normalized:
+                blob, mime, filename = normalized
+        elif mime.startswith("video/") and gif_host:
+            normalized = await self._normalize_gif(
+                blob,
+                filename if Path(filename).suffix else f"{filename}.mp4",
+                max_size,
+            )
             if normalized:
                 blob, mime, filename = normalized
         is_image = mime.startswith("image/")
@@ -9035,7 +9254,11 @@ class MaxwellBot(commands.Bot):
             url = raw.rstrip(".,;!?)\"'").rstrip(">")
             ext = Path(urlparse(url).path).suffix.lower()
             if ext not in cls._LINK_IMAGE_EXTS and ext not in cls._LINK_AUDIO_EXTS:
-                continue
+                # Tenor/Giphy picker links have no file extension.
+                if cls._is_gif_page_url(url):
+                    ext = ".gif"
+                else:
+                    continue
             if url in seen:
                 continue
             seen.add(url)
@@ -9178,6 +9401,10 @@ class MaxwellBot(commands.Bot):
         if getattr(ref, "attachments", None) or getattr(ref, "stickers", None):
             return getattr(ref, "id", None)
         if getattr(ref, "embeds", None):
+            return getattr(ref, "id", None)
+        # A Tenor/Giphy picker message is often just a page URL — no upload
+        # and sometimes no embed yet. Still treat a reply to it as "that gif".
+        if MaxwellBot._media_link_refs(getattr(ref, "content", "")):
             return getattr(ref, "id", None)
         return None
 
@@ -9586,8 +9813,6 @@ class MaxwellBot(commands.Bot):
             ):
                 try:
                     q = MaxwellBot._extract_search_query(content)
-                    if len(MaxwellBot._plain_user_text(content)) < 8:
-                        q = ""
                     if q:
                         search_res = await self.tools["web_search"].execute(
                             message, query=q, max_results="5"
@@ -11220,7 +11445,10 @@ class MaxwellBot(commands.Bot):
                 "Do not put tool markup in visible text and do not invent "
                 "XML tags like <tool:name>. Visible replies go through "
                 "send_message (or no_response). Each call needs `reasoning` first "
-                "(~280 chars, why, plain text only).\n" + catalog
+                "(~280 chars, why, plain text only). "
+                "Look things up with web_search / fetch_url when you are unsure "
+                "or the topic is current; do not guess from training data.\n"
+                + catalog
             )
         else:
             descriptions = [
@@ -11237,8 +11465,10 @@ class MaxwellBot(commands.Bot):
                 "<tool:name>\n<param>value</param>\n</tool:name>\n"
                 "Do not invent tags beyond the schema above."
             )
-        if native:
-            return header
+        # TOOL_PROTOCOL is the behavioral contract (when to search, helper
+        # tools first, result loop). Native tools= already carries per-tool
+        # descriptions, but dropping this block meant Maxwell never saw
+        # "search / fetch instead of guessing".
         return header + "\n\n" + TOOL_PROTOCOL
 
     @staticmethod
@@ -11275,75 +11505,134 @@ class MaxwellBot(commands.Bot):
             if t not in stop
         }
 
+    _CASUAL_ONLY_RE = re.compile(
+        r"^(?:lol+|lmao+|lmfao+|rofl+|wym|wyd|wsg|gm+|gn+|ok(?:ay)?|k+|yeah|"
+        r"yep|nah|sup|hi+|hey+|yo+|thanks?|ty|np)[\s?!.]*$",
+        re.I,
+    )
+    _EXPLICIT_LOOKUP_RE = re.compile(
+        r"(?i)(?:"
+        r"look(?:\s+it|\s+this|\s+that)?\s+up"
+        r"|search\s+(?:for|the\s+web|the\s+internet|online|that|this|it)"
+        r"|web\s*search"
+        r"|google(?:\s+it|\s+this|\s+that|\s+for|\s+\S{2,})"
+        r"|find\s+out"
+        r"|check\s+(?:online|the\s+web)"
+        r"|on\s+the\s+(?:web|internet)"
+        r"|look\s+online"
+        r")"
+    )
+    _LOOKUP_PREFIX_RE = re.compile(
+        r"(?i)^(?:hey[, ]+|please\s+|can you\s+|could you\s+)?"
+        r"(?:look(?:\s+it|\s+this|\s+that)?\s+up|search\s+for|"
+        r"google(?:\s+for)?|find\s+out)\s*[:\-]?\s*"
+    )
+    _CURRENT_INFO_PHRASES = (
+        "new model",
+        "latest model",
+        "just released",
+        "newly released",
+        "released today",
+        "this week",
+        "this morning",
+        "last night",
+        "frontier",
+        "new llm",
+        "new ai model",
+        "gpt-5",
+        "claude 4",
+        "gemini 2",
+        "llama 4",
+        "new grok",
+        "model drop",
+        "announced",
+        "launch",
+        "update on",
+        "what's new",
+        "whats new",
+        "current version of",
+        "who won",
+        "what's the score",
+        "whats the score",
+        "final score",
+        "box score",
+        "stock price",
+        "share price",
+        "price of",
+        "weather in",
+        "weather today",
+        "what's the weather",
+        "whats the weather",
+        "the forecast",
+        "news about",
+        "breaking news",
+        "out now",
+        "is it out",
+        "did they announce",
+    )
+    _AI_TOPIC_WORDS = (
+        "gpt",
+        "claude",
+        "gemini",
+        "llama",
+        "grok",
+        "mistral",
+        "qwen",
+        "deepseek",
+        "model",
+        "llm",
+        "hugging face",
+        "openai",
+        "anthropic",
+        "xai",
+        "meta ai",
+        "benchmark",
+        "paper",
+        "release",
+    )
+    _RECENCY_WORDS = (
+        "latest",
+        "new",
+        "recent",
+        "today",
+        "tonight",
+        "announced",
+        "released",
+        "2025",
+        "2026",
+        "january",
+        "february",
+        "march",
+        "april",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    )
+
     @staticmethod
     def _needs_up_to_date_info(text: str) -> bool:
-        """Code-driven detection for when the bot should proactively look up current info
-        instead of guessing or relying only on memory. Triggered for recent events,
-        new model questions, etc. This ensures it uses the most available up-to-date
-        sources (web_search, feeds via memory) when the topic is fresh or uncertain.
-        Not a prompt instruction — pure runtime logic.
+        """When the bot should proactively search instead of guessing.
+
+        Fires on explicit lookup intent and current-event / fresh-topic
+        signals. Does not fire on banter like "lol" even if a glued reply
+        blob mentions a model drop. Not a prompt instruction — runtime logic.
         """
         if not text:
             return False
         t = MaxwellBot._plain_user_text(text).lower()
-        if not t:
+        if not t or MaxwellBot._CASUAL_ONLY_RE.match(t):
             return False
-        # Strong signals for needing live/recent lookup
-        strong = [
-            "new model",
-            "latest model",
-            "just released",
-            "newly released",
-            "released today",
-            "this week",
-            "frontier",
-            "new llm",
-            "new ai model",
-            "gpt-5",
-            "claude 4",
-            "gemini 2",
-            "llama 4",
-            "new grok",
-            "model drop",
-            "announced",
-            "launch",
-            "update on",
-            "what's new",
-            "current version of",
-        ]
-        if any(s in t for s in strong):
+        if MaxwellBot._EXPLICIT_LOOKUP_RE.search(t):
             return True
-        # AI/LLM topic + recency words
-        ai_keywords = [
-            "gpt",
-            "claude",
-            "gemini",
-            "llama",
-            "grok",
-            "mistral",
-            "qwen",
-            "deepseek",
-            "model",
-            "llm",
-            "hugging face",
-            "openai",
-            "anthropic",
-            "xai",
-            "meta ai",
-            "benchmark",
-            "paper",
-            "release",
-        ]
-        recency = ["latest", "new", "recent", "today", "now", "just", "2026", "july"]
-        has_ai = any(k in t for k in ai_keywords)
-        has_recency = any(r in t for r in recency)
-        if has_ai and has_recency:
+        if any(s in t for s in MaxwellBot._CURRENT_INFO_PHRASES):
             return True
-        # Direct "search for" or "look up" intent on facts
-        return bool(
-            ("search" in t or "look up" in t or "find out" in t)
-            and ("about" in t or "the new" in t)
-        )
+        has_ai = any(k in t for k in MaxwellBot._AI_TOPIC_WORDS)
+        has_recency = any(r in t for r in MaxwellBot._RECENCY_WORDS)
+        return bool(has_ai and has_recency)
 
     @staticmethod
     def _plain_user_text(text: str) -> str:
@@ -11360,13 +11649,14 @@ class MaxwellBot(commands.Bot):
     def _extract_search_query(text: str) -> str:
         """Turn user question into a good search query for up-to-date info."""
         t = MaxwellBot._plain_user_text(text)
+        t = MaxwellBot._LOOKUP_PREFIX_RE.sub("", t).strip()
         if len(t) > 120:
             cut = t[:120]
             t = cut.rsplit(" ", 1)[0] or cut
-        if t and not any(
-            w in t.lower() for w in ["2026", "july", "august", "latest", "new"]
-        ):
-            t += " 2026"
+        year = str(datetime.now(timezone.utc).year)
+        markers = MaxwellBot._RECENCY_WORDS + (year,)
+        if t and not any(w in t.lower() for w in markers):
+            t += f" {year}"
         return t
 
     @classmethod
@@ -11499,7 +11789,8 @@ class MaxwellBot(commands.Bot):
         # appended to `system_parts` below) is stable across consecutive
         # messages in the same server — same tools, same personality, same
         # custom prompt. Anything that changes on EVERY call (timestamp, RAG
-        # search results, cross-context facts, the live user/channel line)
+        # search results, cross-context facts, the live user/channel line,
+        # and the live 'Your name here' identity line)
         # goes into `dynamic_parts` instead, which is emitted as its own
         # system message AFTER the transcript. Providers that do automatic
         # prefix-based caching (DeepSeek, Moonshot/Qwen via Ollama cloud,
@@ -11545,6 +11836,16 @@ class MaxwellBot(commands.Bot):
                 "group"
                 if isinstance(message.channel, discord.GroupChannel)
                 else "guild"
+            )
+        )
+        # Live guild nick (or account name in DMs). Read from guild.me each
+        # turn so a set_nickname / manual nick change is visible on the next
+        # call; do not stash this on the bot.
+        dynamic_parts.append(
+            _live_self_identity_line(
+                getattr(self, "user", None),
+                getattr(message, "guild", None),
+                getattr(self, "bot_name", None),
             )
         )
         dynamic_parts.append(
@@ -11976,8 +12277,14 @@ class MaxwellBot(commands.Bot):
                 # mis-detected as a user turn and rendered as "Maxwell: <bot
                 # words>", which the model then read as a user statement.
                 self_display = self.user.display_name if self.user else self.bot_name
+                live_self, _src = _live_self_name(
+                    self.user,
+                    getattr(message, "guild", None),
+                    self.bot_name,
+                )
+                self_names = {n for n in (self_display, self.bot_name, live_self) if n}
                 is_self = bool(self_user_id and author_id == self_user_id) or (
-                    not author_id and author in {self_display, self.bot_name}
+                    not author_id and author in self_names
                 )
                 if is_self:
                     role = "assistant"
@@ -12421,6 +12728,9 @@ class MaxwellBot(commands.Bot):
             MAXWELL_BASE_KNOWLEDGE
             + "\n\nAnswer only the latest Telegram message. Match energy — short in, short out.",
             f"Core personality: {self._get_personality()}\nLimit: 500 chars.",
+            _live_self_identity_line(
+                getattr(self, "user", None), None, getattr(self, "bot_name", None)
+            ),
             f"User: {user_name} ({user_id}) | Telegram connection",
         ]
         # Prompt-cache friendliness: static content goes in `system_parts`

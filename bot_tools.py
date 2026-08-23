@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import aiofiles
 import aiohttp
@@ -46,6 +46,8 @@ from tool_schemas import (
 from utils import (  # single source of truth, fd-safe
     FileLock,
     _atomic_json_write_sync,
+    is_direct_image_url,
+    is_gif_page_url,
 )
 
 try:
@@ -2367,7 +2369,10 @@ class SetNicknameTool(Tool):
     """Change the bot's own nickname in the server"""
 
     def get_description(self):
-        return "Change your nickname in this server. Params: nickname (required, 'reset' to remove)."
+        return (
+            "Change your nickname in this server (that becomes your name here). "
+            "Params: nickname (required, 'reset' to remove)."
+        )
 
     async def execute(
         self, message: Message, nickname: str | None = None, **kwargs
@@ -2383,8 +2388,13 @@ class SetNicknameTool(Tool):
                 return "Error: bot member is not cached"
             await me.edit(nick=nick)
             if nick:
-                return f"Nickname changed to '{nickname}'"
-            return "Nickname removed"
+                return (
+                    f"Nickname changed to '{nickname}'. "
+                    f"Your name in this server is now {nickname}."
+                )
+            return (
+                "Nickname removed. Your name in this server is your account name again."
+            )
         except discord.Forbidden:
             return "Error: I don't have permission to change my nickname here"
         except Exception as e:
@@ -3012,7 +3022,11 @@ class CreateSiteTool(Tool):
     def get_description(self):
         return (
             f"Create a temporary website at {self.base_url}/<name> (auto-deletes in 24h). "
-            "Params: name (slug), title, body (complete HTML document with inline CSS/JS; "
+            "Full visual freedom: invent a new design each time (layout, type, color, "
+            "density, motion). Do not reuse a house style or clone a previous site "
+            "unless the user asked for a specific look. "
+            "Params: name (slug), title (listing/metadata, not a required on-page heading), "
+            "body (complete HTML document; CSS/JS inline or from https CDNs; "
             "real line breaks or <br> in visible text, never literal \\n), "
             "encoding (text|base64). Generate images in a prior turn and paste CDN URLs "
             "into the HTML — don't batch image_generator with create_site. "
@@ -3425,6 +3439,9 @@ class ListSitesTool(Tool):
 _WEB_REPLY_CTX_RE = re.compile(r"\[Latest message replies to[^\]]*\]", re.IGNORECASE)
 
 
+_WEB_SNIPPET_CHARS = 400
+
+
 def _sanitize_web_query(query: str | None) -> str:
     """Drop Discord reply-context glue so searches stay on the user's words."""
     q = str(query or "")
@@ -3436,13 +3453,38 @@ def _sanitize_web_query(query: str | None) -> str:
     return " ".join(q.split()).strip()[:160]
 
 
+def _normalize_web_hit(raw: Any) -> dict[str, str]:
+    """ddgs engines mix `href`/`url` and `body`/`excerpt`; one shape for us."""
+    r = raw if isinstance(raw, dict) else {}
+    href = str(r.get("href") or r.get("url") or r.get("link") or "").strip()
+    body = str(
+        r.get("body") or r.get("excerpt") or r.get("content") or r.get("snippet") or ""
+    ).strip()
+    title = str(r.get("title") or "No title").strip() or "No title"
+    return {"title": title, "href": href, "body": body}
+
+
+def _format_web_hits(hits: list[dict[str, str]]) -> str:
+    lines = []
+    for i, r in enumerate(hits, 1):
+        title = r.get("title") or "No title"
+        href = r.get("href") or ""
+        body = (r.get("body") or "")[:_WEB_SNIPPET_CHARS]
+        lines.append(f"{i}. {title}\n   {href}\n   {body}".rstrip())
+    return "\n\n".join(lines)
+
+
 class WebSearchTool(Tool):
     """Search the web using DuckDuckGo"""
 
     def get_description(self):
         return (
-            "Search the web. Use proactively for factual/recent info you're not 100% certain about. "
-            "Don't search for casual conversation. Params: query (required), max_results (optional, default 5, max 10)."
+            "Search the live web. Default to this when you are unsure, the "
+            "topic changes (news, scores, prices, versions, people), or they "
+            "asked you to check — do not guess from memory. Skip only pure "
+            "banter with nothing to look up. After a hit, fetch_url the page "
+            "if you need more than the snippet. Params: query (required), "
+            "max_results (optional, default 5, max 10)."
         )
 
     async def execute(
@@ -3450,6 +3492,7 @@ class WebSearchTool(Tool):
         message: Message,
         query: str | None = None,
         max_results: str = "5",
+        engine: str | None = None,
         **kwargs,
     ) -> str:
         query = _sanitize_web_query(query)
@@ -3473,6 +3516,10 @@ class WebSearchTool(Tool):
         except (ValueError, TypeError):
             limit = 5
 
+        backend = str(engine or "auto").strip() or "auto"
+        if not re.fullmatch(r"[a-z0-9_.,-]+", backend, flags=re.I):
+            backend = "auto"
+
         # Web search returns untrusted content. Mark the current turn as
         # tainted so subsequent destructive tools (shell, sub_agent) prompt
         # for confirmation. This is the second line of defense against
@@ -3482,17 +3529,24 @@ class WebSearchTool(Tool):
 
         try:
             loop = asyncio.get_running_loop()
-            # Bound the search: DDGS uses sync requests internally with no
-            # timeout, so a hung endpoint would block this tool and occupy a
-            # default-executor thread indefinitely.
+            # Bound the search: DDGS uses sync requests internally with a
+            # short per-engine wait, so a hung backend would still occupy a
+            # default-executor thread. Outer wait_for is the hard cap.
             results = await asyncio.wait_for(
                 loop.run_in_executor(
-                    None, lambda: list(ddgs_cls().text(query, max_results=limit))
+                    None,
+                    lambda: list(
+                        ddgs_cls(timeout=20).text(
+                            query, max_results=limit, backend=backend
+                        )
+                    ),
                 ),
                 timeout=30,
             )
 
-            if not results:
+            hits = [_normalize_web_hit(r) for r in (results or [])]
+            hits = [h for h in hits if h["href"] or h["body"]]
+            if not hits:
                 return f"No results found for '{query}'"
 
             # ─── persist to RAG (operator feature 2026-08-09) ───
@@ -3516,7 +3570,7 @@ class WebSearchTool(Tool):
                         guild_id = str(message.guild.id)
                     n = await memory.store_web_results(
                         query=query,
-                        results=list(results),
+                        results=list(hits),
                         guild_id=guild_id,
                     )
                     if n:
@@ -3526,15 +3580,15 @@ class WebSearchTool(Tool):
             except Exception as e:
                 logger.debug(f"web_search RAG persistence skipped: {e}")
 
-            lines = []
-            for i, r in enumerate(results, 1):
-                title = r.get("title", "No title")
-                href = r.get("href", "")
-                body = r.get("body", "")[:200]
-                lines.append(f"{i}. {title}\n   {href}\n   {body}")
-            return "\n\n".join(lines)
+            return _format_web_hits(hits)
         except Exception as e:
             logger.error(f"Web search error: {e}")
+            err = str(e).strip() or type(e).__name__
+            # ddgs raises DDGSException("No results found.") instead of
+            # returning []. Treat that as empty, not a tool failure — otherwise
+            # the circuit breaker opens and the model learns search is broken.
+            if re.search(r"no results", err, re.I):
+                return f"No results found for '{query}'"
             return f"Error searching: {e}"
 
 
@@ -5408,6 +5462,66 @@ class SubAgentTool(Tool):
         lines.append(outcome.strip())
         return "\n".join(lines)
 
+
+_FETCH_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_MAX_FETCH_REDIRECTS = 5
+_FETCH_HEADERS = {
+    "User-Agent": _IMAGE_FETCH_UA,
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "application/json,text/plain;q=0.8,*/*;q=0.5"
+    ),
+}
+
+
+async def _fetch_public_url(
+    url: str,
+    *,
+    max_bytes: int,
+    timeout: float = 30.0,
+) -> tuple[str, str, bytes]:
+    """GET a public URL, following a few SSRF-checked redirects.
+
+    Each hop is re-checked with `_is_safe_url`. The shared session's
+    `_SafeResolver` also refuses DNS that lands on private/link-local IPs.
+    Returns `(final_url, content_type, body)`. Raises ValueError with a
+    user-facing message on refusal, HTTP errors, or timeout.
+    """
+    current = url
+    try:
+        session = await _get_shared_session()
+        for _hop in range(_MAX_FETCH_REDIRECTS + 1):
+            if not _is_safe_url(current):
+                raise ValueError("Cannot fetch from private/internal URLs")
+            async with session.get(
+                current,
+                timeout=aiohttp.ClientTimeout(total=timeout),
+                allow_redirects=False,
+                headers=_FETCH_HEADERS,
+            ) as resp:
+                if resp.status in _FETCH_REDIRECT_STATUSES:
+                    loc = resp.headers.get("Location")
+                    if not loc:
+                        raise ValueError(f"HTTP {resp.status}")
+                    current = urljoin(current, loc)
+                    continue
+                if resp.status != 200:
+                    raise ValueError(f"HTTP {resp.status}")
+                content_type = resp.headers.get("Content-Type", "") or ""
+                raw = await _read_response_limited(resp, max_bytes)
+                return current, content_type, raw
+        raise ValueError("too many redirects")
+    except ValueError:
+        raise
+    except asyncio.TimeoutError as e:
+        raise ValueError(f"timed out fetching {url}") from e
+    except Exception as e:
+        msg = str(e)
+        if "blocked unsafe" in msg.lower():
+            raise ValueError("Cannot fetch from private/internal URLs") from e
+        raise ValueError(msg) from e
+
+
 class FetchUrlTool(Tool):
     """Fetch and extract text content from a URL"""
 
@@ -5416,8 +5530,12 @@ class FetchUrlTool(Tool):
 
     def get_description(self):
         return (
-            "Fetch a URL and return readable text. Handles HTML, JSON, plain text. "
-            "Params: url (required), max_length (optional, default 15000)."
+            "Fetch a public http(s) URL and return readable text (HTML, JSON, "
+            "plain). Use after web_search when a snippet is thin, or whenever "
+            "they gave a specific page to read. Not for private/internal URLs. "
+            "Images and GIFs (including Tenor/Giphy pages): see_image. "
+            "YouTube: youtube. Params: url (required), max_length (optional, "
+            "default 15000)."
         )
 
     async def execute(
@@ -5433,6 +5551,14 @@ class FetchUrlTool(Tool):
         if not _is_safe_url(url):
             return "Error: Cannot fetch from private/internal URLs"
 
+        # Direct images and GIF-host pages: attach pixels, don't decode binary
+        # as text. fetch_url used to return mojibake and the model still
+        # couldn't see the picture.
+        if SeeImageTool.looks_visual(url) and self.bot is not None:
+            visual = await SeeImageTool(self.bot).execute(message, url=url)
+            if visual and not str(visual).startswith("Error"):
+                return visual
+
         # Mark this turn as tainted: the URL is operator-supplied but its
         # *content* is untrusted and may include prompt-injection payloads
         # designed to steer the model into proposing shell / sub_agent calls.
@@ -5445,18 +5571,26 @@ class FetchUrlTool(Tool):
             max_len = self.MAX_CONTENT
 
         try:
-            session = await _get_shared_session()
-            async with session.get(
-                url, timeout=aiohttp.ClientTimeout(total=30), allow_redirects=False
-            ) as resp:
-                if resp.status != 200:
-                    return f"Error: HTTP {resp.status}"
-                content_type = resp.headers.get("Content-Type", "")
-                raw = await _read_response_limited(resp, self.MAX_BYTES)
+            url, content_type, raw = await _fetch_public_url(
+                url, max_bytes=self.MAX_BYTES
+            )
+        except ValueError as e:
+            msg = str(e)
+            if msg.startswith("Cannot fetch"):
+                return f"Error: {msg}"
+            if msg.startswith("HTTP") or msg.startswith("timed out"):
+                return f"Error: {msg}"
+            return f"Error fetching URL: {msg}"
         except asyncio.TimeoutError:
             return f"Error: timed out fetching {url}"
         except Exception as e:
             return f"Error fetching URL: {e}"
+
+        mime = (content_type or "").split(";", 1)[0].strip().lower()
+        if mime.startswith("image/") and self.bot is not None:
+            return await SeeImageTool(self.bot).result_from_blob(
+                raw, mime, url, message
+            )
 
         try:
             if "json" in content_type or url.endswith(".json"):
@@ -5509,6 +5643,121 @@ class FetchUrlTool(Tool):
             text = text[:max_len] + "\n... (truncated)"
 
         return text
+
+
+class SeeImageTool(Tool):
+    """Download an image/GIF URL and attach it as vision on the next turn."""
+
+    def get_description(self):
+        return (
+            "Look at an image or GIF by URL and attach it to your next turn so "
+            "you can actually see it. Use for Tenor/Giphy/imgur GIF pages, "
+            "Discord CDN links, or any direct jpg/png/gif/webp that was not "
+            "already attached to the message. Prefer this over fetch_url for "
+            "pictures. Params: url (required)."
+        )
+
+    @classmethod
+    def looks_visual(cls, url: str) -> bool:
+        return is_gif_page_url(url) or is_direct_image_url(url)
+
+    async def result_from_blob(
+        self,
+        blob: bytes,
+        mime: str,
+        url: str,
+        message: Message | None = None,
+        filename: str = "",
+    ) -> str:
+        if not blob:
+            return "Error: empty image"
+        ext = Path(urlparse(url).path).suffix.lower() or {
+            "image/jpeg": ".jpg",
+            "image/png": ".png",
+            "image/gif": ".gif",
+            "image/webp": ".webp",
+            "video/mp4": ".mp4",
+            "video/webm": ".webm",
+        }.get(mime, ".bin")
+        filename = filename or f"see-image{ext}"
+        max_size = 10 * 1024 * 1024
+        if self.bot is not None and hasattr(self.bot, "_max_media_bytes"):
+            with contextlib.suppress(Exception):
+                max_size = self.bot._max_media_bytes()
+        if (
+            self.bot is not None
+            and hasattr(self.bot, "_normalize_gif")
+            and (
+                mime in {"image/gif", "video/mp4", "video/webm"}
+                or ext in {".gif", ".mp4", ".webm"}
+            )
+        ):
+            normalized = await self.bot._normalize_gif(blob, filename, max_size)
+            if normalized:
+                blob, mime, filename = normalized
+        if not mime.startswith("image/"):
+            return (
+                f"Error: URL was {mime or 'unknown type'}, not an image I can look at"
+            )
+        encoded = base64.b64encode(blob).decode("ascii")
+        if (
+            self.bot is not None
+            and message is not None
+            and hasattr(self.bot, "_cache_media_context")
+            and hasattr(self.bot, "_media_item")
+        ):
+            with contextlib.suppress(Exception):
+                channel_id = str(
+                    getattr(getattr(message, "channel", None), "id", "") or ""
+                )
+                item = self.bot._media_item(
+                    b64=encoded,
+                    mime_type=mime,
+                    filename=filename,
+                    is_image=True,
+                    message_id=getattr(message, "id", None),
+                    source="see_image",
+                    url=url,
+                )
+                if channel_id:
+                    self.bot._cache_media_context(channel_id, [item])
+        return (
+            f"Attached {filename} ({mime}) for visual inspection.\n"
+            f"Source: {url}\n"
+            f"__IMAGE_B64__{encoded}__END_IMAGE_B64__"
+        )
+
+    async def execute(
+        self, message: Message, url: str | None = None, **kwargs
+    ) -> str:
+        if not url:
+            return "Error: url is required"
+        if not _is_safe_url(url):
+            return "Error: Cannot fetch from private/internal URLs"
+        control = getattr(self.bot, "_control", None) or {}
+        if not bool(control.get("process_images", True)):
+            return "Error: image processing is disabled"
+        if self.bot is None or not hasattr(self.bot, "_download_embed_media"):
+            return "Error: see_image is unavailable"
+        max_size = 10 * 1024 * 1024
+        if hasattr(self.bot, "_max_media_bytes"):
+            with contextlib.suppress(Exception):
+                max_size = self.bot._max_media_bytes()
+        item = await self.bot._download_embed_media(
+            url, "see-image", max_size, getattr(message, "id", None)
+        )
+        if not item or not item.get("b64"):
+            return f"Error: could not load an image from {url}"
+        channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
+        if channel_id and hasattr(self.bot, "_cache_media_context"):
+            with contextlib.suppress(Exception):
+                self.bot._cache_media_context(channel_id, [item])
+        return (
+            f"Attached {item.get('filename', 'image')} ({item.get('mime_type')}) "
+            f"for visual inspection.\n"
+            f"Source: {item.get('url') or url}\n"
+            f"__IMAGE_B64__{item['b64']}__END_IMAGE_B64__"
+        )
 
 
 class YouTubeTool(Tool):

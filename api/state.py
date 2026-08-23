@@ -171,7 +171,7 @@ def _sanitize_control(control):
         0, min(out["per_user_cooldown_seconds"], 3600)
     )
     out["conversation_watch_seconds"] = max(
-        0, min(_safe_int(out.get("conversation_watch_seconds") or 120, 120), 3600)
+        0, min(_safe_int(out.get("conversation_watch_seconds") or 180, 180), 3600)
     )
     try:
         _watch_debounce = float(

@@ -13,6 +13,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,39 @@ MEDIA_URL_RE = re.compile(
     r"https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%\-]+\.(?:png|jpe?g|gif|webp|mp4|webm|mov|mkv|mp3|ogg|wav|flac|m4a|aac)(?:[?#][A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%\-]*)?",
     re.IGNORECASE,
 )
+
+# Discord GIF picker / Tenor / Giphy / imgur .gifv — page URLs, not a file ext.
+# These used to reach the model as plain text so it could read the link but
+# never see the animation.
+GIF_PAGE_URL_RE = re.compile(
+    r"https?://(?:www\.)?(?:"
+    r"(?:(?:media\d*|c)\.)?tenor\.com/[^\s<>\"']+"
+    r"|giphy\.com/(?:gifs|media|embed|clips)/[^\s<>\"']+"
+    r"|i\.giphy\.com/[^\s<>\"']+"
+    r"|media\d*\.giphy\.com/[^\s<>\"']+"
+    r"|gph\.is/[^\s<>\"']+"
+    r"(?:(?:media|cdn)\.)?klipy\.com/[^\s<>\"']+"
+    r"|i\.imgur\.com/[A-Za-z0-9]+\.gifv"
+    r"|imgur\.com/[A-Za-z0-9]+\.gifv"
+    r")",
+    re.IGNORECASE,
+)
+
+_DIRECT_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".gifv"})
+
+
+def is_gif_page_url(url: str) -> bool:
+    """True for Tenor/Giphy/klipy/imgur-gifv pages (no .gif required)."""
+    return bool(GIF_PAGE_URL_RE.match(str(url or "").strip()))
+
+
+def is_direct_image_url(url: str) -> bool:
+    """True when the path ends in a still/animated image extension."""
+    try:
+        path = urlparse(str(url or "")).path.lower()
+    except Exception:
+        return False
+    return Path(path).suffix in _DIRECT_IMAGE_EXTS
 
 # Human-readable labels for Discord system message types (welcome messages,
 # joins, boosts, pins, etc.). Anything unmapped falls back to the enum name.
@@ -349,6 +383,12 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
             "flac": "audio", "m4a": "audio", "aac": "audio",
         }.get(ext, "file")
         found.append((kind, u))
+    for m in GIF_PAGE_URL_RE.finditer(raw_content):
+        u = m.group(0).rstrip(".,;:!?)]}")
+        if u in seen:
+            continue
+        seen.add(u)
+        found.append(("gif", u))
     for kind, u in found[:5]:
         parts.append(f"[media URL: {kind} {u}]")
 
