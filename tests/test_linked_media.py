@@ -26,15 +26,35 @@ def test_picks_up_image_and_audio_links():
 
 @pytest.mark.parametrize(
     "ext",
-    [".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp3", ".wav", ".ogg", ".m4a", ".flac"],
+    [
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".webp",
+        ".mp3",
+        ".wav",
+        ".ogg",
+        ".m4a",
+        ".flac",
+        ".aac",
+        ".mp4",
+        ".webm",
+        ".mov",
+    ],
 )
 def test_every_supported_extension_is_recognised(ext):
     assert refs(f"https://e.com/file{ext}") == [(f"https://e.com/file{ext}", ext)]
 
 
-def test_ignores_non_media_and_video_links():
-    # Video wants ffmpeg frame extraction, not a raw video_url part.
-    assert refs("https://e.com/v.mp4 https://e.com/doc.pdf https://e.com/page") == []
+def test_ignores_non_media_but_recognizes_video_links():
+    assert refs("https://e.com/v.mp4 https://e.com/doc.pdf https://e.com/page") == [
+        ("https://e.com/v.mp4", ".mp4")
+    ]
+
+
+def test_youtube_is_not_stolen_by_generic_video_path():
+    assert refs("https://www.youtube.com/video.mp4 https://youtu.be/watch.mp4") == []
 
 
 def test_tenor_and_giphy_pages_count_as_gifs():
@@ -100,15 +120,18 @@ def _harness(control):
 
     async def _download(url, filename, max_size, message_id):
         calls.append((url, filename))
-        return {"b64": "AAA", "mime_type": "image/png", "filename": filename}
+        mime = "video/mp4" if url.endswith((".mp4", ".webm", ".mov")) else "image/png"
+        return {"b64": "AAA=", "mime_type": mime, "filename": filename, "url": url}
 
     fake = types.SimpleNamespace(
         _control=control,
+        config=types.SimpleNamespace(ENABLE_VIDEO_INPUT=True),
         _max_media_bytes=lambda: 10 * 1024 * 1024,
         _download_embed_media=_download,
         _media_link_refs=MaxwellBot._media_link_refs,
         _LINK_IMAGE_EXTS=MaxwellBot._LINK_IMAGE_EXTS,
         _LINK_AUDIO_EXTS=MaxwellBot._LINK_AUDIO_EXTS,
+        _LINK_VIDEO_EXTS=MaxwellBot._LINK_VIDEO_EXTS,
     )
     return fake, calls
 
@@ -191,3 +214,72 @@ def test_items_are_tagged_with_source_and_url():
     assert media[0]["source"] == "link"
     assert media[0]["url"] == "https://e.com/a.png"
     assert media[0]["filename"] == "linked-media-1.png"
+
+
+def test_video_link_is_downloaded_and_reduced_to_provider_safe_derivatives():
+    fake, calls = _harness({"process_images": True, "process_audio": True})
+
+    async def _derive(item, max_size, *, source_prefix):
+        assert item["url"] == "https://e.com/clip.mp4"
+        assert source_prefix == "link_video"
+        return [
+            {
+                "b64": "ZnJhbWU=",
+                "mime_type": "image/jpeg",
+                "filename": "clip-frame.jpg",
+                "is_image": True,
+                "message_id": 4242,
+            }
+        ]
+
+    fake._extract_video_item_derivatives = _derive
+    media = asyncio.run(
+        MaxwellBot._extract_linked_media(
+            fake, _FakeMessage("https://e.com/clip.mp4")
+        )
+    )
+
+    assert [url for url, _ in calls] == ["https://e.com/clip.mp4"]
+    assert media and media[0]["is_image"] is True
+    assert media[0]["url"] == "https://e.com/clip.mp4"
+
+
+def test_video_link_can_keep_audio_when_images_are_disabled():
+    fake, calls = _harness({"process_images": False, "process_audio": True})
+    seen = {}
+
+    async def _derive(item, max_size, *, source_prefix):
+        seen["include"] = fake._control["process_images"]
+        return [
+            {
+                "b64": "UkFXX0FVRElP",
+                "mime_type": "audio/wav",
+                "filename": "clip-audio.wav",
+                "is_image": False,
+                "message_id": 4242,
+            }
+        ]
+
+    fake._extract_video_item_derivatives = _derive
+    media = asyncio.run(
+        MaxwellBot._extract_linked_media(
+            fake, _FakeMessage("https://e.com/clip.mp4")
+        )
+    )
+
+    assert [url for url, _ in calls] == ["https://e.com/clip.mp4"]
+    assert seen["include"] is False
+    assert media[0]["mime_type"] == "audio/wav"
+
+
+def test_video_link_is_skipped_when_video_input_is_disabled():
+    fake, calls = _harness({"process_images": True, "process_audio": True})
+    fake.config.ENABLE_VIDEO_INPUT = False
+    media = asyncio.run(
+        MaxwellBot._extract_linked_media(
+            fake, _FakeMessage("https://e.com/clip.mp4")
+        )
+    )
+
+    assert calls == []
+    assert media == []

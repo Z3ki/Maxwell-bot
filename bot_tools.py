@@ -1570,10 +1570,10 @@ class SetActivityTool(Tool):
 
 class SleepTool(Tool):
     """Take a sleep window. While sleeping the bot won't dispatch
-    LLM turns — anyone who pings or DMs gets a 'max is sleeping,
-    back in Xm' notification (deduped per user). The 2026-07-19 user
-    directive: the bot kept spamming goodnight/goodbye in chat; a
-    real sleep window is the structural fix. Use this when the
+    LLM turns — the triggering channel gets a 'max is sleeping,
+    back in Xm' notice (deduped per user, never a DM). The 2026-07-19
+    user directive: the bot kept spamming goodnight/goodbye in chat;
+    a real sleep window is the structural fix. Use this when the
     conversation is genuinely winding down — not as a generic
     goodbye."""
 
@@ -1583,9 +1583,9 @@ class SleepTool(Tool):
     def get_description(self):
         return (
             "Sleep 1-60 minutes (default 30). While asleep, LLM turns are skipped "
-            "and pings/DMs get one 'max is sleeping' notice. Use only at a real "
-            "end-of-conversation, not as a goodbye. Calling again resets the window. "
-            "Params: duration_minutes."
+            "and the triggering channel gets one 'max is sleeping' notice. Use only "
+            "at a real end-of-conversation, not as a goodbye. Calling again resets "
+            "the window. Params: duration_minutes."
         )
 
     async def execute(
@@ -1605,7 +1605,10 @@ class SleepTool(Tool):
             n = 60
         if self.bot is None:
             return "Error: bot not attached, cannot sleep"
-        return self.bot.set_sleep(n)
+        result = self.bot.set_sleep(n)
+        if asyncio.iscoroutine(result):
+            return await result
+        return result
 
 
 class ClearSleepTool(Tool):
@@ -1625,7 +1628,10 @@ class ClearSleepTool(Tool):
     async def execute(self, message: Message, **kwargs) -> str:
         if self.bot is None:
             return "Error: bot not attached"
-        return self.bot.clear_sleep()
+        result = self.bot.clear_sleep()
+        if asyncio.iscoroutine(result):
+            return await result
+        return result
 
 
 class WaitTool(Tool):
@@ -5534,6 +5540,7 @@ class FetchUrlTool(Tool):
             "plain). Use after web_search when a snippet is thin, or whenever "
             "they gave a specific page to read. Not for private/internal URLs. "
             "Images and GIFs (including Tenor/Giphy pages): see_image. "
+            "Direct videos: see_video. Audio/video bytes are media, not text. "
             "YouTube: youtube. Params: url (required), max_length (optional, "
             "default 15000)."
         )
@@ -5558,6 +5565,21 @@ class FetchUrlTool(Tool):
             visual = await SeeImageTool(self.bot).execute(message, url=url)
             if visual and not str(visual).startswith("Error"):
                 return visual
+            # A visual URL must never fall through to the text decoder, even
+            # when image processing is disabled or the download failed.
+            return visual or f"Error: could not load an image from {url}"
+        # Direct video links need ffmpeg frame extraction just like uploaded
+        # videos. Never let the text fetcher fall through to raw.decode() for
+        # an mp4/webm/mov payload.
+        if (
+            SeeVideoTool.looks_video(url)
+            and self.bot is not None
+            and hasattr(self.bot, "_download_embed_media")
+        ):
+            visual = await SeeVideoTool(self.bot).execute(message, url=url)
+            if visual and not str(visual).startswith("Error"):
+                return visual
+            return visual or f"Error: could not load video from {url}"
 
         # Mark this turn as tainted: the URL is operator-supplied but its
         # *content* is untrusted and may include prompt-injection payloads
@@ -5587,9 +5609,23 @@ class FetchUrlTool(Tool):
             return f"Error fetching URL: {e}"
 
         mime = (content_type or "").split(";", 1)[0].strip().lower()
-        if mime.startswith("image/") and self.bot is not None:
-            return await SeeImageTool(self.bot).result_from_blob(
-                raw, mime, url, message
+        if mime.startswith("image/"):
+            if self.bot is not None:
+                return await SeeImageTool(self.bot).result_from_blob(
+                    raw, mime, url, message
+                )
+            return "Error: URL contains image media, not readable text; use see_image"
+        url_ext = Path(urlparse(url).path).suffix.lower()
+        if mime.startswith("video/") or url_ext in SeeVideoTool.VIDEO_EXTS:
+            if self.bot is not None:
+                return await SeeVideoTool(self.bot).result_from_blob(
+                    raw, mime or "video/mp4", url, message
+                )
+            return "Error: URL contains video media, not readable text; use see_video"
+        if mime.startswith("audio/") or url_ext in SeeVideoTool.AUDIO_EXTS:
+            return (
+                "Error: URL contains audio media, not readable text. "
+                "Attach or post the audio URL so Maxwell can hear it."
             )
 
         try:
@@ -5671,6 +5707,9 @@ class SeeImageTool(Tool):
     ) -> str:
         if not blob:
             return "Error: empty image"
+        control = getattr(self.bot, "_control", None) or {}
+        if not parse_bool(control.get("process_images"), True):
+            return "Error: image processing is disabled"
         ext = Path(urlparse(url).path).suffix.lower() or {
             "image/jpeg": ".jpg",
             "image/png": ".png",
@@ -5735,7 +5774,7 @@ class SeeImageTool(Tool):
         if not _is_safe_url(url):
             return "Error: Cannot fetch from private/internal URLs"
         control = getattr(self.bot, "_control", None) or {}
-        if not bool(control.get("process_images", True)):
+        if not parse_bool(control.get("process_images"), True):
             return "Error: image processing is disabled"
         if self.bot is None or not hasattr(self.bot, "_download_embed_media"):
             return "Error: see_image is unavailable"
@@ -5757,6 +5796,174 @@ class SeeImageTool(Tool):
             f"for visual inspection.\n"
             f"Source: {item.get('url') or url}\n"
             f"__IMAGE_B64__{item['b64']}__END_IMAGE_B64__"
+        )
+
+
+class SeeVideoTool(Tool):
+    """Download a video URL and attach ffmpeg-derived frames for vision."""
+
+    VIDEO_EXTS = frozenset({".mp4", ".webm", ".mov", ".mkv", ".avi"})
+    AUDIO_EXTS = frozenset({".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac"})
+
+    def get_description(self):
+        return (
+            "Look at a direct video URL by extracting representative frames "
+            "with ffmpeg, and include its audio when audio input is enabled. "
+            "Use for mp4/webm/mov links or video embeds. YouTube links belong "
+            "to youtube, not this tool. Params: url (required)."
+        )
+
+    @classmethod
+    def looks_video(cls, url: str) -> bool:
+        try:
+            parsed = urlparse(str(url or ""))
+            if parsed.scheme not in {"http", "https"}:
+                return False
+            # Keep the dedicated YouTube tool authoritative even if a pasted
+            # URL has an unusual path suffix.
+            host = (parsed.hostname or "").lower()
+            if host in {
+                "youtu.be",
+                "youtube.com",
+                "youtube-nocookie.com",
+            } or host.endswith((".youtube.com", ".youtube-nocookie.com")):
+                return False
+            return Path(parsed.path).suffix.lower() in cls.VIDEO_EXTS
+        except Exception:
+            return False
+
+    def _audio_enabled(self) -> bool:
+        control = getattr(self.bot, "_control", None) or {}
+        if isinstance(control, dict) and "process_audio" in control:
+            return parse_bool(control.get("process_audio"), False)
+        return parse_bool(
+            getattr(getattr(self.bot, "config", None), "ENABLE_AUDIO_INPUT", False),
+            False,
+        )
+
+    def _max_size(self) -> int:
+        max_size = 10 * 1024 * 1024
+        if self.bot is not None and hasattr(self.bot, "_max_media_bytes"):
+            with contextlib.suppress(Exception):
+                max_size = self.bot._max_media_bytes()
+        return max_size
+
+    async def result_from_blob(
+        self,
+        blob: bytes,
+        mime: str,
+        url: str,
+        message: Message | None = None,
+        filename: str = "",
+    ) -> str:
+        if not blob:
+            return "Error: empty video"
+        if self.bot is None or not hasattr(
+            self.bot, "_extract_video_derivatives"
+        ):
+            return "Error: see_video is unavailable"
+        control = getattr(self.bot, "_control", None) or {}
+        if not parse_bool(
+            getattr(getattr(self.bot, "config", None), "ENABLE_VIDEO_INPUT", True),
+            True,
+        ):
+            return "Error: video input is disabled"
+        process_images = parse_bool(control.get("process_images"), True)
+        if not process_images and not self._audio_enabled():
+            return "Error: image and audio processing are disabled"
+        max_size = self._max_size()
+        if len(blob) > max_size:
+            return "Error: video exceeds the configured media size limit"
+        name = filename or f"see-video{Path(urlparse(url).path).suffix or '.mp4'}"
+        derived = await self.bot._extract_video_derivatives(
+            blob,
+            name,
+            getattr(message, "id", None),
+            max_size,
+            source_url=url,
+            include_frames=process_images,
+            source_prefix="see_video",
+        )
+        if not derived:
+            return f"Error: could not extract frames/audio from {url}"
+        if self.bot is not None and message is not None:
+            channel_id = str(
+                getattr(getattr(message, "channel", None), "id", "") or ""
+            )
+            if channel_id and hasattr(self.bot, "_cache_media_context"):
+                with contextlib.suppress(Exception):
+                    self.bot._cache_media_context(
+                        channel_id,
+                        [item for item in derived if item.get("is_image")],
+                    )
+        lines = [
+            f"Extracted {sum(1 for item in derived if item.get('is_image'))} "
+            f"video frame(s) from {url}."
+        ]
+        if any(
+            str(item.get("mime_type") or "").startswith("audio/")
+            for item in derived
+        ):
+            lines.append("An audio track was extracted for audio-capable input.")
+        for item in derived:
+            if item.get("is_image") and item.get("b64"):
+                lines.append(
+                    f"__IMAGE_B64__{item['b64']}__END_IMAGE_B64__"
+                )
+            elif (
+                str(item.get("mime_type") or "").startswith("audio/")
+                and item.get("b64")
+            ):
+                # Tool follow-up parsing turns this into an input_audio media
+                # part; keep the marker out of the user-facing transcript.
+                lines.append(
+                    f"__AUDIO_B64__{item['b64']}__END_AUDIO_B64__"
+                )
+        return "\n".join(lines)
+
+    async def execute(
+        self, message: Message, url: str | None = None, **kwargs
+    ) -> str:
+        if not url:
+            return "Error: url is required"
+        if not _is_safe_url(url):
+            return "Error: Cannot fetch from private/internal URLs"
+        # The transcript/frame extractor handles YouTube URLs and has access
+        # to yt-dlp/cookies; generic ffmpeg fetching must never steal them.
+        try:
+            from bot_tools import YouTubeTool
+
+            if YouTubeTool._is_youtube_url(url):
+                return "Error: use youtube for YouTube links"
+        except Exception:
+            pass
+        control = getattr(self.bot, "_control", None) or {}
+        if not parse_bool(control.get("process_images"), True) and not self._audio_enabled():
+            return "Error: image and audio processing are disabled"
+        if self.bot is None or not hasattr(self.bot, "_download_embed_media"):
+            return "Error: see_video is unavailable"
+        max_size = self._max_size()
+        item = await self.bot._download_embed_media(
+            url,
+            "see-video" + (Path(urlparse(url).path).suffix or ".mp4"),
+            max_size,
+            getattr(message, "id", None),
+        )
+        if not item or not item.get("b64"):
+            return f"Error: could not load a video from {url}"
+        mime = str(item.get("mime_type") or "")
+        if not mime.startswith("video/"):
+            return f"Error: URL was {mime or 'unknown type'}, not a video"
+        try:
+            blob = base64.b64decode(item["b64"], validate=True)
+        except (ValueError, TypeError):
+            return "Error: downloaded video was invalid"
+        return await self.result_from_blob(
+            blob,
+            mime,
+            url,
+            message,
+            filename=str(item.get("filename") or ""),
         )
 
 

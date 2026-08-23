@@ -26,6 +26,7 @@ from urllib.parse import urljoin, urlparse
 import aiohttp
 import discord
 from discord.ext import commands
+from discord.utils import MISSING
 
 try:
     if os.environ.get("ENABLE_VC", "true").strip().lower() in {
@@ -230,6 +231,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     ReasoningLogTool,
     SearchMessagesTool,
     SeeImageTool,
+    SeeVideoTool,
     SendFileTool,
     SendMediaTool,
     SendMemeTool,
@@ -358,6 +360,11 @@ MAX_VISUAL_MEMORY_IMAGES = 5
 # Keep visual carryover short. Long-lived image payloads make the model randomly
 # talk about old screenshots in unrelated replies. That bug is creepy as hell.
 MEDIA_CONTEXT_USES = 2
+# Discord may deliver MESSAGE_CREATE before the embed unfurl. Give a directly
+# addressed media turn a short chance to observe that preview before the first
+# provider request; the edit handler remains the durable fallback for previews
+# that arrive later.
+LATE_EMBED_WAIT_SECONDS = 0.6
 VISUAL_REFERENCE_RE = re.compile(
     r"(?i)\b("
     r"image|img|picture|pic|photo|screenshot|screen ?shot|attachment|media|"
@@ -425,9 +432,9 @@ def _owner_audio_input_enabled(owner) -> bool:
     """
     control = getattr(owner, "_control", None) or {}
     if isinstance(control, dict) and "process_audio" in control:
-        return bool(control.get("process_audio"))
+        return parse_bool(control.get("process_audio"), False)
     cfg = getattr(owner, "config", None)
-    return bool(getattr(cfg, "ENABLE_AUDIO_INPUT", False))
+    return parse_bool(getattr(cfg, "ENABLE_AUDIO_INPUT", False), False)
 
 
 def _message_created_at_iso(message) -> str:
@@ -2020,6 +2027,7 @@ TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "shell",
     "fetch_url",
     "see_image",
+    "see_video",
     "youtube",
     "send_file",
     "send_meme",
@@ -2423,6 +2431,12 @@ class MaxwellBot(commands.Bot):
         ] = {}  # channel_id -> {user_id: name}
         self._custom_status = None
         self._current_game = None
+        # Intended Discord status (online/idle/dnd/invisible). Sleep
+        # overlays discord.Status.idle on top of this without clobbering
+        # it, then change_presence restores _current_status on wake.
+        self._current_status = discord.Status.online
+        self._sleep_wake_task: asyncio.Task | None = None
+        self._sleep_presence_overlay = False
         self._cooldowns: dict[str, float] = {}
         # channel_id -> monotonic expiry. After a real exchange, the whole
         # room stays on watch so a follow-up does not need another @.
@@ -2487,6 +2501,19 @@ class MaxwellBot(commands.Bot):
         self._guild_emojis: dict[str, dict[str, str]] = {}
         self._guild_stickers: dict[str, dict[str, str]] = {}
         self._media_context: dict[str, list[dict]] = {}
+        # Latest Discord message snapshots keyed by message id. MESSAGE_UPDATE
+        # can arrive after the original turn has started, so keep the newest
+        # object around for reply-parent/context refreshes without starting a
+        # second answer.
+        self._message_snapshots: dict[str, Any] = {}
+        # Per-message edit fingerprints suppress duplicate cached+raw update
+        # events and repeated identical embed mutations. The value is
+        # (message_fingerprint, media_fingerprint, monotonic_timestamp).
+        self._message_update_state: dict[str, tuple[str, str, float]] = {}
+        # In-flight turns use this to notice an embed/media refresh before the
+        # provider request is sent. Updates after generation starts are still
+        # retained in _message_snapshots and visual memory for the next turn.
+        self._inflight_context: dict[str, dict[str, Any]] = {}
         # channel_id -> emoji-grid cache key already shown there. Keyed by the
         # grid's content hash, so a guild adding an emoji re-shows the sheet
         # instead of Maxwell running on a stale one.
@@ -3144,6 +3171,7 @@ class MaxwellBot(commands.Bot):
         if self.config.ENABLE_FETCH_URL:
             self.tools["fetch_url"] = FetchUrlTool(self)
         self.tools["see_image"] = SeeImageTool(self)
+        self.tools["see_video"] = SeeVideoTool(self)
         if self.config.ENABLE_YOUTUBE:
             self.tools["youtube"] = YouTubeTool(self)
         self.tools["send_file"] = SendFileTool(self)
@@ -3189,6 +3217,55 @@ class MaxwellBot(commands.Bot):
         if self._custom_status:
             activities.append(self._custom_status)
         return activities
+
+    def _sleep_window_active(self) -> bool:
+        """True while a sleep deadline is in the future. No auto-clear."""
+        until = float(getattr(self, "_sleep_until", 0.0) or 0.0)
+        if until <= 0:
+            return False
+        try:
+            now = asyncio.get_running_loop().time()
+        except RuntimeError:
+            return False
+        return now < until
+
+    async def _push_presence(self, **kwargs):
+        """Send presence to Discord. Tests replace this to avoid super()."""
+        return await super().change_presence(**kwargs)
+
+    async def change_presence(
+        self,
+        *,
+        activity=MISSING,
+        activities=MISSING,
+        status=MISSING,
+        afk=MISSING,
+        idle_since=MISSING,
+        edit_settings=True,
+    ):
+        overlay = bool(getattr(self, "_sleep_presence_overlay", False))
+        if status is not MISSING and status is not None and not overlay:
+            self._current_status = status
+        if not overlay and self._sleep_window_active():
+            status = discord.Status.idle
+        pusher = getattr(self, "_push_presence", None)
+        if callable(pusher):
+            return await pusher(
+                activity=activity,
+                activities=activities,
+                status=status,
+                afk=afk,
+                idle_since=idle_since,
+                edit_settings=edit_settings,
+            )
+        return await super().change_presence(
+            activity=activity,
+            activities=activities,
+            status=status,
+            afk=afk,
+            idle_since=idle_since,
+            edit_settings=edit_settings,
+        )
 
     # Maxwell's GitHub repo creation date — his literal birthday
     _BIRTHDAY = datetime(2026, 5, 21, tzinfo=timezone.utc)
@@ -3339,7 +3416,13 @@ class MaxwellBot(commands.Bot):
         return self._should_live_reply(message)
 
     def _reply_parent(self, message):
-        return getattr(getattr(message, "reference", None), "resolved", None)
+        reference = getattr(message, "reference", None)
+        resolved = getattr(reference, "resolved", None) if reference else None
+        message_id = getattr(reference, "message_id", None) if reference else None
+        snapshot = (getattr(self, "_message_snapshots", None) or {}).get(
+            str(message_id or getattr(resolved, "id", "") or "")
+        )
+        return snapshot or resolved
 
     def _replying_to_own_message(self, message) -> bool:
         """True when this Discord reply's parent is from the same person."""
@@ -3498,7 +3581,13 @@ class MaxwellBot(commands.Bot):
 
     def _reply_meta_from_message(self, message) -> dict:
         """Who this Discord message is a reply to, plus a short quote."""
-        ref = getattr(getattr(message, "reference", None), "resolved", None)
+        reference = getattr(message, "reference", None)
+        ref = getattr(reference, "resolved", None) if reference else None
+        ref_id = getattr(reference, "message_id", None) if reference else None
+        snapshot = (getattr(self, "_message_snapshots", None) or {}).get(
+            str(ref_id or getattr(ref, "id", "") or "")
+        )
+        ref = snapshot or ref
         if not ref or not hasattr(ref, "author"):
             return {}
         channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
@@ -3847,6 +3936,12 @@ class MaxwellBot(commands.Bot):
         except Exception as e:
             logger.warning("Inbox seed failed: %s", e)
         await self._save_discord_state()
+        if self._sleep_window_active():
+            await self._apply_sleep_presence(asleep=True)
+        else:
+            current = getattr(self, "status", None)
+            if current is not None:
+                self._current_status = current
 
     async def _discord_state_loop(self):
         while True:
@@ -4055,6 +4150,666 @@ class MaxwellBot(commands.Bot):
             text, self._guild_emojis.get(str(guild.id), {})
         )
 
+    def _message_memory_content(self, message) -> str:
+        """Render the current Discord payload for transcript storage.
+
+        Discord edits can add embeds, attachments, or stickers without
+        changing ``content``. Keep the same structured annotations used by the
+        normal MESSAGE_CREATE path so an edited row replaces the old text
+        instead of leaving the model with contradictory snapshots.
+        """
+        memory_content = str(getattr(message, "content", "") or "")
+        attachments = list(getattr(message, "attachments", None) or [])
+        if attachments:
+            attachment_names = []
+            for attachment in attachments[:5]:
+                content_type = (
+                    getattr(attachment, "content_type", None) or "unknown"
+                )
+                attachment_names.append(
+                    f"{getattr(attachment, 'filename', 'attachment')} "
+                    f"({content_type})"
+                )
+            memory_content = (
+                f"{memory_content} [attachments: {', '.join(attachment_names)}]"
+            ).strip()
+        embeds = list(getattr(message, "embeds", None) or [])
+        if embeds:
+            embed_titles = []
+            for embed in embeds[:3]:
+                title = (
+                    getattr(embed, "title", None)
+                    or getattr(embed, "description", None)
+                    or getattr(embed, "url", None)
+                    or "embed"
+                )
+                embed_titles.append(str(title)[:120])
+            memory_content = (
+                f"{memory_content} [embeds: {'; '.join(embed_titles)}]"
+            ).strip()
+        if (
+            not memory_content
+            and (
+                attachments
+                or embeds
+                or list(getattr(message, "stickers", None) or [])
+                or list(getattr(message, "components", None) or [])
+                or getattr(message, "poll", None) is not None
+            )
+        ):
+            memory_content = "[media attached]"
+        return render_discord_context_text(
+            message,
+            memory_content,
+            known_users=(
+                getattr(self, "_recent_users", None) or {}
+            ).get(
+                str(getattr(getattr(message, "channel", None), "id", "") or ""),
+                {},
+            ),
+        )
+
+    def _message_memory_item(self, message, *, edited: bool = False) -> dict:
+        """Build one idempotent transcript row from the latest message state."""
+        author = getattr(message, "author", None)
+        item = {
+            "author": getattr(author, "display_name", "System")
+            if author is not None
+            else "System",
+            "author_id": str(getattr(author, "id", "system"))
+            if author is not None
+            else "system",
+            "author_is_bot": bool(getattr(author, "bot", False))
+            if author is not None
+            else False,
+            "content": self._message_memory_content(message),
+            "message_id": str(getattr(message, "id", "") or ""),
+            "timestamp": _message_created_at_iso(message),
+        }
+        mentions = list(getattr(message, "mentions", None) or [])
+        if mentions:
+            item["mentions"] = [
+                {
+                    "id": str(getattr(user, "id", "") or ""),
+                    "name": getattr(
+                        user, "display_name", str(getattr(user, "id", "") or "")
+                    ),
+                }
+                for user in mentions[:10]
+            ]
+        reply_builder = getattr(self, "_reply_meta_from_message", None)
+        reply_meta = reply_builder(message) if callable(reply_builder) else {}
+        if reply_meta:
+            item.update(reply_meta)
+        if edited:
+            item["edited_at"] = datetime.now(timezone.utc).isoformat()
+        return item
+
+    @staticmethod
+    def _raw_update_data(payload) -> dict:
+        data = getattr(payload, "data", None)
+        if isinstance(data, dict):
+            return data
+        if isinstance(payload, dict):
+            return payload
+        return {}
+
+    @staticmethod
+    def _raw_update_namespace(value):
+        if isinstance(value, dict):
+            return SimpleNamespace(
+                **{str(key): MaxwellBot._raw_update_namespace(val) for key, val in value.items()}
+            )
+        if isinstance(value, list):
+            return [MaxwellBot._raw_update_namespace(item) for item in value]
+        return value
+
+    async def _message_from_raw_update(self, payload):
+        """Resolve a RawMessageUpdateEvent even when Discord evicted its cache."""
+        data = self._raw_update_data(payload)
+        cached = getattr(payload, "cached_message", None)
+        if cached is not None and not data:
+            return cached
+        message_id = str(
+            getattr(payload, "message_id", None)
+            or data.get("id")
+            or ""
+        )
+        channel_id = str(
+            getattr(payload, "channel_id", None)
+            or data.get("channel_id")
+            or ""
+        )
+        channel = getattr(cached, "channel", None)
+        getter = getattr(self, "get_channel", None)
+        if channel_id and callable(getter):
+            with contextlib.suppress(Exception):
+                channel = getter(int(channel_id))
+            if channel is None:
+                with contextlib.suppress(Exception):
+                    channel = getter(channel_id)
+        if channel is None:
+            private_channels = getattr(self, "private_channels", None) or []
+            channel = next(
+                (
+                    item
+                    for item in private_channels
+                    if str(getattr(item, "id", "")) == channel_id
+                ),
+                None,
+            )
+        fetch = getattr(channel, "fetch_message", None)
+        if cached is None and callable(fetch) and message_id:
+            with contextlib.suppress(Exception):
+                fetched = await asyncio.wait_for(
+                    fetch(int(message_id)), timeout=4.0
+                )
+                if fetched is not None:
+                    return fetched
+        # A raw update is usually a partial object. This fallback is still
+        # useful for updating an existing memory row and its embed cache when
+        # the channel fetch is temporarily unavailable. Merge it with the
+        # last known snapshot; Discord's payload may contain only ``embeds``,
+        # and treating omitted fields as empty would erase the old transcript.
+        previous = cached or (getattr(self, "_message_snapshots", None) or {}).get(
+            message_id
+        )
+
+        def _field(name, default=None):
+            if name in data:
+                return self._raw_update_namespace(data.get(name))
+            return getattr(previous, name, default) if previous is not None else default
+
+        author_data = data.get("author") if "author" in data else None
+        author = self._raw_update_namespace(author_data) if author_data else getattr(
+            previous, "author", None
+        )
+        if author is None or not getattr(author, "id", None):
+            author = SimpleNamespace(id="", display_name="unknown", bot=False)
+        guild = getattr(channel, "guild", None)
+        if channel is None and previous is not None:
+            channel = getattr(previous, "channel", None)
+        guild = getattr(channel, "guild", None) or getattr(previous, "guild", None)
+        embeds = _field("embeds", []) or []
+        attachments = _field("attachments", []) or []
+        if "sticker_items" in data:
+            stickers = self._raw_update_namespace(data.get("sticker_items") or [])
+        elif "stickers" in data:
+            stickers = self._raw_update_namespace(data.get("stickers") or [])
+        else:
+            stickers = list(getattr(previous, "stickers", None) or [])
+        return SimpleNamespace(
+            id=message_id,
+            channel=channel
+            or SimpleNamespace(id=channel_id, guild=guild, name="unknown"),
+            guild=guild,
+            author=author,
+            content=str(_field("content", "") or ""),
+            embeds=embeds,
+            attachments=attachments,
+            stickers=stickers,
+            mentions=_field("mentions", []) or [],
+            role_mentions=_field("role_mentions", []) or [],
+            mention_everyone=bool(_field("mention_everyone", False)),
+            reference=_field("reference"),
+            components=_field("components", []) or [],
+            poll=_field("poll"),
+        )
+
+    @classmethod
+    def _message_update_fingerprint(cls, message) -> str:
+        """Stable full-state key for cached/raw MESSAGE_UPDATE deduplication."""
+        embeds = []
+        for embed in list(getattr(message, "embeds", None) or [])[:5]:
+            embeds.append(
+                {
+                    "text": cls._embed_text(embed),
+                    "url": str(getattr(embed, "url", "") or ""),
+                    "media": cls._embed_media_urls(embed),
+                    "type": str(getattr(embed, "type", "") or ""),
+                }
+            )
+        attachments = []
+        for attachment in list(getattr(message, "attachments", None) or [])[:5]:
+            attachments.append(
+                {
+                    "id": str(getattr(attachment, "id", "") or ""),
+                    "filename": str(getattr(attachment, "filename", "") or ""),
+                    "url": str(getattr(attachment, "url", "") or ""),
+                    "content_type": str(
+                        getattr(attachment, "content_type", "") or ""
+                    ),
+                    "size": str(getattr(attachment, "size", "") or ""),
+                }
+            )
+        stickers = []
+        for sticker in list(getattr(message, "stickers", None) or [])[:3]:
+            stickers.append(
+                {
+                    "id": str(getattr(sticker, "id", "") or ""),
+                    "name": str(getattr(sticker, "name", "") or ""),
+                    "url": str(getattr(sticker, "url", "") or ""),
+                }
+            )
+        payload = {
+            "content": str(getattr(message, "content", "") or ""),
+            "embeds": embeds,
+            "attachments": attachments,
+            "stickers": stickers,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+
+    @classmethod
+    def _message_media_fingerprint(cls, message) -> str:
+        """Key only data that can require a binary media download."""
+        media_urls = []
+        for embed in list(getattr(message, "embeds", None) or [])[:5]:
+            media_urls.extend(cls._embed_media_urls(embed))
+        attachments = [
+            (
+                str(getattr(item, "filename", "") or ""),
+                str(getattr(item, "url", "") or ""),
+                str(getattr(item, "content_type", "") or ""),
+                str(getattr(item, "size", "") or ""),
+            )
+            for item in list(getattr(message, "attachments", None) or [])[:5]
+        ]
+        stickers = [
+            (
+                str(getattr(item, "name", "") or ""),
+                str(getattr(item, "url", "") or ""),
+            )
+            for item in list(getattr(message, "stickers", None) or [])[:3]
+        ]
+        payload = {
+            "embeds": media_urls,
+            "attachments": attachments,
+            "stickers": stickers,
+            "links": cls._media_link_refs(getattr(message, "content", "")),
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+
+    def _message_update_allowed(self, message) -> bool:
+        author = getattr(message, "author", None)
+        author_id = str(getattr(author, "id", "") or "")
+        if not author_id:
+            return False
+        admin_check = getattr(self, "_is_admin", None)
+        is_admin = bool(admin_check(author_id)) if callable(admin_check) else False
+        ignored_users = {
+            str(value)
+            for value in (self._control.get("ignore_users", []) or [])
+        }
+        blacklist = {
+            str(value) for value in (getattr(self, "_blacklist", set()) or set())
+        }
+        if author_id and (
+            author_id in blacklist or author_id in ignored_users
+        ) and not is_admin:
+            return False
+        channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
+        if not channel_id:
+            return False
+        blocked_channels = {
+            str(value)
+            for value in (self._control.get("blocked_channels", []) or [])
+        }
+        if channel_id in blocked_channels:
+            return False
+        allowed = {
+            str(value)
+            for value in (self._control.get("allowed_channels", []) or [])
+        }
+        return not allowed or channel_id in allowed
+
+    def _replace_media_context_for_message(
+        self, channel_id: str, message_id, media: list[dict]
+    ) -> None:
+        """Replace, rather than append, visuals belonging to an edited message."""
+        if getattr(self, "_media_context", None) is None:
+            self._media_context = {}
+        mid = str(message_id or "")
+        cached = list(self._media_context.get(channel_id, []) or [])
+        if mid:
+            cached = [
+                item
+                for item in cached
+                if str(item.get("message_id", "")) != mid
+            ]
+        if cached:
+            self._media_context[channel_id] = cached
+        else:
+            self._media_context.pop(channel_id, None)
+        if media:
+            cache = getattr(self, "_cache_media_context", None)
+            if callable(cache):
+                cache(channel_id, media)
+
+    async def _extract_context_media(self, message) -> list[dict]:
+        """Extract current media for an edit without ever producing a reply."""
+        media: list[dict] = []
+        _images, current = await self._extract_media(message)
+        media.extend(current)
+        media.extend(await self._extract_embeds(message))
+        media.extend(
+            await self._extract_linked_media(
+                message,
+                skip_urls={
+                    str(item.get("url"))
+                    for item in media
+                    if item.get("url")
+                },
+            )
+        )
+        return media
+
+    def _inflight_for_message(self, message_id: str) -> list[dict]:
+        found = []
+        for state in list(
+            (getattr(self, "_inflight_context", None) or {}).values()
+        ):
+            if message_id in set(state.get("message_ids") or set()):
+                found.append(state)
+        return found
+
+    def _begin_inflight_context(self, message, content: str) -> dict[str, Any]:
+        """Register a turn so a late MESSAGE_UPDATE can refresh its context."""
+        mid = str(getattr(message, "id", "") or "")
+        state: dict[str, Any] = {
+            "message": message,
+            "content": str(content or ""),
+            "root_message_id": mid,
+            "message_ids": {mid} if mid else set(),
+            "media": [],
+            "latest_message": None,
+            "latest_content": None,
+            "latest_media": None,
+            "version": 0,
+            "seen_version": 0,
+            "update_event": asyncio.Event(),
+            "generation_started": False,
+        }
+        if mid:
+            self._inflight_context[mid] = state
+        return state
+
+    def _end_inflight_context(self, state: dict[str, Any] | None) -> None:
+        if not state:
+            return
+        store = getattr(self, "_inflight_context", None) or {}
+        for key, value in list(store.items()):
+            if value is state:
+                store.pop(key, None)
+
+    async def _wait_for_late_embeds(self, message, content: str):
+        """Fetch one fresh Discord snapshot before a media turn starts."""
+        if getattr(message, "embeds", None):
+            return message
+        if not self._media_link_refs(content):
+            return message
+        channel = getattr(message, "channel", None)
+        fetch = getattr(channel, "fetch_message", None)
+        message_id = getattr(message, "id", None)
+        if not callable(fetch) or message_id is None:
+            # Cached Message objects can be updated in place by discord.py while
+            # this coroutine yields, so the caller still re-reads its fields.
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.sleep(min(0.25, LATE_EMBED_WAIT_SECONDS))
+            return message
+        try:
+            await asyncio.sleep(min(0.25, LATE_EMBED_WAIT_SECONDS))
+            refreshed = await asyncio.wait_for(
+                fetch(message_id), timeout=max(0.1, LATE_EMBED_WAIT_SECONDS - 0.25)
+            )
+            return refreshed or message
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return message
+
+    async def _apply_inflight_refresh(
+        self,
+        state: dict[str, Any],
+        message,
+        content: str,
+        media: list[dict],
+        active_media: list[dict],
+        media_summary: str,
+        messages: list[dict],
+    ):
+        """Use a completed late edit before the provider request is sent."""
+        event = state.get("update_event")
+        if event is not None and state.get("version", 0) <= state.get(
+            "seen_version", 0
+        ):
+            # Do not add latency to ordinary text turns. Media/link turns
+            # already get _wait_for_late_embeds above.
+            return message, content, media, active_media, media_summary, messages
+        latest = state.get("latest_message")
+        latest_media = state.get("latest_media")
+        if latest is None or latest_media is None:
+            return message, content, media, active_media, media_summary, messages
+        refresh_version = state.get("version", 0)
+        message = latest
+        content = str(getattr(latest, "content", "") or "")
+        media = list(latest_media)
+        current_images = [item for item in media if item.get("is_image")]
+        channel_id = str(getattr(getattr(latest, "channel", None), "id", "") or "")
+        cached_media = []
+        reply_media_id = self._reply_media_message_id(
+            latest, getattr(self, "_message_snapshots", None)
+        )
+        if reply_media_id is not None:
+            cached_media = self._get_media_context(
+                channel_id, message_id=reply_media_id
+            )
+        elif self._should_use_cached_media_context(latest, content) and (
+            not current_images or self._should_mix_cached_with_current(content)
+        ):
+            cached_media = self._get_media_context(channel_id)
+        active_media = current_images + cached_media + self._current_binary_media(media)
+        media_summary = self._format_media_summary(media, active_media)
+        state["message"] = message
+        state["content"] = content
+        state["media"] = list(media)
+        state["active_media"] = list(active_media)
+        state["seen_version"] = state.get("version", 0)
+        messages = await self._build_messages(
+            latest,
+            content,
+            has_media=bool(active_media),
+            media_summary=media_summary,
+        )
+        if state.get("version", 0) != refresh_version:
+            # Another edit landed while RAG/history was rebuilding. Re-read
+            # the newest state instead of marking that update as consumed
+            # while returning a stale prompt.
+            return await self._apply_inflight_refresh(
+                state,
+                message,
+                content,
+                media,
+                active_media,
+                media_summary,
+                messages,
+            )
+        logger.info(
+            "Applied late message update to in-flight turn message=%s",
+            getattr(latest, "id", "?"),
+        )
+        return message, content, media, active_media, media_summary, messages
+
+    async def _refresh_edited_message(self, message, *, before=None) -> bool:
+        """Refresh memory/media for MESSAGE_UPDATE, never dispatch a reply."""
+        if message is None:
+            return False
+        snapshots = getattr(self, "_message_snapshots", None)
+        if snapshots is None:
+            snapshots = {}
+            self._message_snapshots = snapshots
+        update_state = getattr(self, "_message_update_state", None)
+        if update_state is None:
+            update_state = {}
+            self._message_update_state = update_state
+        mid = str(getattr(message, "id", "") or "")
+        if not mid or not self._message_update_allowed(message):
+            return False
+        full_fp = self._message_update_fingerprint(message)
+        media_fp = self._message_media_fingerprint(message)
+        now = time.monotonic()
+        previous = update_state.get(mid)
+        if previous and previous[0] == full_fp:
+            snapshots[mid] = message
+            return False
+        snapshots[mid] = message
+        update_state[mid] = (full_fp, media_fp, now)
+        if len(update_state) > 1000:
+            cutoff = now - 3600
+            update_state = {
+                key: value
+                for key, value in update_state.items()
+                if value[2] > cutoff
+            }
+            self._message_update_state = update_state
+            self._message_snapshots = {
+                key: value
+                for key, value in snapshots.items()
+                if key in update_state
+            }
+            snapshots = self._message_snapshots
+
+        channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
+        author = getattr(message, "author", None)
+        update_users = getattr(self, "_update_recent_users", None)
+        if author is not None:
+            if callable(update_users):
+                with contextlib.suppress(Exception):
+                    update_users(channel_id, author)
+        for user in list(getattr(message, "mentions", None) or []):
+            if callable(update_users):
+                with contextlib.suppress(Exception):
+                    update_users(channel_id, user)
+        if self._control.get("store_memory", True) and getattr(self, "memory", None):
+            with contextlib.suppress(Exception):
+                await self.add_message_to_memory(
+                    channel_id,
+                    self._message_memory_item(message, edited=True),
+                    message,
+                )
+
+        media: list[dict] = []
+        media_changed = previous is None or previous[1] != media_fp
+        media_refresh_ok = True
+        if media_changed:
+            try:
+                media = await self._extract_context_media(message)
+            except Exception:
+                media_refresh_ok = False
+                logger.warning(
+                    "Edited-message media refresh failed for %s", mid, exc_info=True
+                )
+            latest_state = update_state.get(mid)
+            if latest_state and latest_state[0] != full_fp:
+                # A newer MESSAGE_UPDATE won while this one was downloading.
+                # Do not let the slower, stale extraction overwrite its cache
+                # or notify an in-flight turn.
+                return True
+            # Even when processing is now disabled, remove stale visuals for
+            # this message; do not leave an old embed attached to later turns.
+            old_cached = any(
+                str(item.get("message_id", "")) == mid
+                for item in (getattr(self, "_media_context", {}).get(channel_id, []) or [])
+            )
+            if media_refresh_ok and (
+                parse_bool(self._control.get("process_images"), True) or old_cached
+            ):
+                self._replace_media_context_for_message(channel_id, mid, media)
+        latest_state = update_state.get(mid)
+        if latest_state and latest_state[0] != full_fp:
+            # A newer update may have superseded this handler even when no
+            # binary media needed downloading.
+            return True
+
+        # A watch debounce may already have queued this message without
+        # acquiring the channel lock yet. Replace that pending target so the
+        # eventual single reply uses the edited text/object instead of the
+        # stale MESSAGE_CREATE snapshot.
+        for bucket in (getattr(self, "_watch_debounce", None) or {}).values():
+            for key in ("latest", "latest_directed"):
+                queued = bucket.get(key)
+                if str(getattr(queued, "id", "") or "") == mid:
+                    bucket[key] = message
+                    if key == "latest_directed":
+                        bucket["content"] = str(
+                            getattr(message, "content", "") or ""
+                        )
+
+        for state in self._inflight_for_message(mid):
+            state_media = list(state.get("media") or [])
+            is_root = mid == str(state.get("root_message_id") or "")
+            if is_root:
+                if media_changed and media_refresh_ok:
+                    state["media"] = list(media)
+                state["message"] = message
+                state["content"] = str(getattr(message, "content", "") or "")
+                state["latest_message"] = message
+                state["latest_content"] = state["content"]
+                state["latest_media"] = list(state.get("media") or state_media)
+            else:
+                # A reply's parent is part of the in-flight context, but it
+                # must not replace the message Maxwell is answering. Refresh
+                # the parent's media in the turn payload and let
+                # _reply_parent() resolve its newest snapshot when rebuilding
+                # the prompt.
+                if media_changed and media_refresh_ok:
+                    state_media = [
+                        item
+                        for item in state_media
+                        if str(item.get("message_id", "")) != mid
+                    ]
+                    state_media.extend(media)
+                    state["media"] = state_media
+                state["latest_message"] = state.get("message")
+                state["latest_content"] = state.get("content", "")
+                state["latest_media"] = list(state.get("media") or state_media)
+            state["version"] = int(state.get("version", 0)) + 1
+            event = state.get("update_event")
+            if event is not None:
+                event.set()
+        return True
+
+    async def on_message_edit(self, before, after):
+        """Keep transcript/visual context current without answering the edit."""
+        try:
+            loader = getattr(self, "_load_control", None)
+            if callable(loader) and getattr(self, "config", None) is not None:
+                with contextlib.suppress(Exception):
+                    loader()
+            await self._refresh_edited_message(after, before=before)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Failed to process Discord message edit", exc_info=True)
+
+    async def on_raw_message_edit(self, payload):
+        """Handle embeds for messages not present in discord.py's cache."""
+        try:
+            loader = getattr(self, "_load_control", None)
+            if callable(loader) and getattr(self, "config", None) is not None:
+                with contextlib.suppress(Exception):
+                    loader()
+            message = await self._message_from_raw_update(payload)
+            if message is not None:
+                await self._refresh_edited_message(message)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Failed to process raw Discord message edit", exc_info=True)
+
     async def on_message(self, message):
         try:
             self._load_control()
@@ -4113,6 +4868,7 @@ class MaxwellBot(commands.Bot):
         has_content = bool(message.content)
         has_attachment = bool(message.attachments)
         has_embed = bool(getattr(message, "embeds", None))
+        has_sticker = bool(getattr(message, "stickers", None))
 
         cooldown = float(self._control.get("per_user_cooldown_seconds", 1.5) or 0)
         last = self._cooldowns.get(str(message.author.id), 0)
@@ -4138,25 +4894,17 @@ class MaxwellBot(commands.Bot):
             self._update_recent_users(channel_id, u)
 
         if self.user and message.author.id == self.user.id:
-            if message.content and self._control.get("store_memory", True):
+            if (
+                (message.content or has_attachment or has_embed or has_sticker)
+                and self._control.get("store_memory", True)
+            ):
                 # Dedup contract: memory.add_to_channel_memory dedups by message_id,
                 # so an autonomy-force-recorded post (same message_id) only merges
                 # metadata here — its autonomy tag/reason are preserved.
                 try:
                     await self.add_message_to_memory(
                         channel_id,
-                        {
-                            "author": self.bot_name,
-                            "author_id": str(self.user.id),
-                            "author_is_bot": True,
-                            "content": render_discord_context_text(
-                                message,
-                                message.content,
-                                known_users=self._recent_users.get(channel_id, {}),
-                            ),
-                            "message_id": str(message.id),
-                            "timestamp": _message_created_at_iso(message),
-                        },
+                        self._message_memory_item(message),
                         message,
                     )
                     self._update_recent_users(channel_id, self.user)
@@ -4178,7 +4926,7 @@ class MaxwellBot(commands.Bot):
             # sees it as context.
             return
 
-        if not has_content and not has_attachment and not has_embed:
+        if not has_content and not has_attachment and not has_embed and not has_sticker:
             return
 
         # Resolve the referenced message before acquiring the channel lock so
@@ -4352,14 +5100,34 @@ class MaxwellBot(commands.Bot):
             # ping never enters visual memory, so a later ping about "this"
             # or "the image above" has nothing to attach. This is the fix for
             # "the bot can't see sent media in channels if it's not pinged".
-            if self._control.get("process_images", True) and (
-                message.attachments
-                or getattr(message, "embeds", None)
-                # An image posted as a bare link is just as much "media in
-                # the channel" as an upload; without this it never entered
-                # visual memory and a later "what was that pic" had nothing
-                # to attach.
-                or self._media_link_refs(getattr(message, "content", ""))
+            channel_obj = getattr(message, "channel", None)
+            reply_path_enabled = (
+                (
+                    isinstance(channel_obj, discord.DMChannel)
+                    and self._control.get("reply_dms", True)
+                )
+                or (
+                    isinstance(channel_obj, discord.GroupChannel)
+                    and self._control.get("reply_groups", True)
+                )
+                or (
+                    getattr(message, "guild", None) is not None
+                    and self._control.get("reply_mentions", True)
+                )
+            )
+            if (
+                parse_bool(self._control.get("process_images"), True)
+                and not (reply_path_enabled and self._should_live_reply(message))
+                and (
+                    message.attachments
+                    or getattr(message, "embeds", None)
+                    or getattr(message, "stickers", None)
+                    # An image posted as a bare link is just as much "media in
+                    # the channel" as an upload; without this it never entered
+                    # visual memory and a later "what was that pic" had nothing
+                    # to attach.
+                    or self._media_link_refs(getattr(message, "content", ""))
+                )
             ):
                 try:
                     _imgs, bg_media = await self._extract_media(message)
@@ -4853,7 +5621,7 @@ class MaxwellBot(commands.Bot):
                     return
                 arg = (args or "").strip().lower()
                 if arg in {"off", "stop", "clear", "wake"}:
-                    msg = self.clear_sleep()
+                    msg = await self.clear_sleep()
                     await message.channel.send(msg)
                 elif arg in {"status", "time"}:
                     sleeping, secs = self._is_sleeping()
@@ -4869,7 +5637,7 @@ class MaxwellBot(commands.Bot):
                         match = re.fullmatch(r"(\d{1,3})", arg)
                         if match:
                             minutes = max(1, min(_safe_int(match.group(1), 1), 60))
-                    msg = self.set_sleep(minutes)
+                    msg = await self.set_sleep(minutes)
                     await message.channel.send(
                         f"sleeping for {minutes}m. pings will get a 'max is sleeping' note"
                     )
@@ -4878,7 +5646,7 @@ class MaxwellBot(commands.Bot):
                 if not self._is_admin(message.author.id):
                     await message.channel.send("not authorized")
                     return
-                msg = self.clear_sleep()
+                msg = await self.clear_sleep()
                 await message.channel.send(msg)
             elif cmd == "jailbreak":
                 server_id = str(message.guild.id) if message.guild else "DM"
@@ -8273,7 +9041,7 @@ class MaxwellBot(commands.Bot):
         return sent
 
     async def _extract_media(self, message) -> tuple[list[str], list[dict]]:
-        proc_img = bool(self._control.get("process_images", True))
+        proc_img = parse_bool(self._control.get("process_images"), True)
         proc_aud = _owner_audio_input_enabled(self)
         # If neither images nor audio processing, skip all binary media collection.
         # (process_audio / ENABLE_AUDIO_INPUT controls audio input to the model)
@@ -8341,28 +9109,32 @@ class MaxwellBot(commands.Bot):
                     if normalized:
                         blob, mime, filename = normalized
                 if mime.startswith("video/"):
-                    # ENABLE_VIDEO_INPUT=false in .env skips ffmpeg frame
-                    # extraction. The video still flows through as a media
-                    # attachment; the model just doesn't get the JPEG frames.
-                    # Skip derivative extraction entirely; the original
-                    # blob gets appended as a media item further down.
-                    if getattr(self.config, "ENABLE_VIDEO_INPUT", True):
-                        normalized = await self._normalize_video(
-                            blob, attachment.filename, max_size
-                        )
-                        if normalized:
-                            blob, mime, filename = normalized
-                        derived = await self._extract_video_derivatives(
-                            blob,
-                            filename,
-                            getattr(message, "id", None),
-                            max_size,
-                            source_url=getattr(attachment, "url", "") or "",
-                        )
-                        for derived_item in derived:
-                            if derived_item.get("is_image"):
-                                images.append(derived_item["b64"])
-                            media.append(derived_item)
+                    # Do not leak raw video_url parts when video input is
+                    # disabled; providers reject those on the wire.
+                    if not parse_bool(
+                        getattr(self.config, "ENABLE_VIDEO_INPUT", True), True
+                    ):
+                        continue
+                    normalized = await self._normalize_video(
+                        blob, attachment.filename, max_size
+                    )
+                    if normalized:
+                        blob, mime, filename = normalized
+                    derived = await self._extract_video_derivatives(
+                        blob,
+                        filename,
+                        getattr(message, "id", None),
+                        max_size,
+                        source_url=getattr(attachment, "url", "") or "",
+                        include_frames=proc_img,
+                    )
+                    for derived_item in derived:
+                        if derived_item.get("is_image"):
+                            images.append(derived_item["b64"])
+                        media.append(derived_item)
+                    # Providers reject raw video_url parts; derivatives are
+                    # the complete provider-safe representation.
+                    continue
                 is_image = ext in image_exts or mime.startswith("image/")
                 text = ""
                 b64 = ""
@@ -8518,9 +9290,15 @@ class MaxwellBot(commands.Bot):
         message_id,
         max_size: int,
         source_url: str = "",
+        *,
+        include_frames: bool | None = None,
+        source_prefix: str = "",
     ) -> list[dict]:
         """Extract representative frames and audio track from video for reliable model coverage."""
         results = []
+        if include_frames is None:
+            control = getattr(self, "_control", None) or {}
+            include_frames = parse_bool(control.get("process_images"), True)
         suffix = Path(filename).suffix.lower() or ".mp4"
         try:
             with tempfile.TemporaryDirectory(prefix="maxwell-vderiv-") as tmp:
@@ -8529,51 +9307,56 @@ class MaxwellBot(commands.Bot):
                 video_path.write_bytes(blob)
 
                 # Extract frames at 2fps, capped at 6 frames max and 15s duration
-                frame_pattern = str(tmp_path / "frame-%03d.jpg")
-                frame_cmd = [
-                    *self._ffmpeg_input_argv(video_path),
-                    "-t",
-                    "15",
-                    "-vf",
-                    "fps=2,scale='min(768,iw)':-2",
-                    "-frames:v",
-                    "6",
-                    frame_pattern,
-                ]
-                proc = await asyncio.create_subprocess_exec(
-                    *frame_cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                try:
-                    _stdout, stderr = await asyncio.wait_for(
-                        proc.communicate(), timeout=30
+                if include_frames:
+                    frame_pattern = str(tmp_path / "frame-%03d.jpg")
+                    frame_cmd = [
+                        *self._ffmpeg_input_argv(video_path),
+                        "-t",
+                        "15",
+                        "-vf",
+                        "fps=2,scale='min(768,iw)':-2",
+                        "-frames:v",
+                        "6",
+                        frame_pattern,
+                    ]
+                    proc = await asyncio.create_subprocess_exec(
+                        *frame_cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
                     )
-                except asyncio.TimeoutError as _exc:
-                    proc.kill()
-                    await proc.wait()
-                    logger.warning(f"Video frame extraction timed out for {filename}")
-                    stderr = b"timeout"
-                if proc.returncode == 0:
-                    for frame_path in sorted(tmp_path.glob("frame-*.jpg")):
-                        frame_blob = frame_path.read_bytes()
-                        if len(frame_blob) > max_size:
-                            continue
-                        results.append(
-                            self._media_item(
-                                b64=base64.b64encode(frame_blob).decode("utf-8"),
-                                mime_type="image/jpeg",
-                                filename=f"{filename}-{frame_path.stem}.jpg",
-                                is_image=True,
-                                message_id=message_id,
-                                source="video_frame",
-                                url=source_url,
-                            )
+                    try:
+                        _stdout, stderr = await asyncio.wait_for(
+                            proc.communicate(), timeout=30
                         )
-                else:
-                    logger.warning(
-                        f"Video frame extraction failed for {filename}: {stderr.decode(errors='replace')[-300:]}"
-                    )
+                    except asyncio.TimeoutError as _exc:
+                        proc.kill()
+                        await proc.wait()
+                        logger.warning(f"Video frame extraction timed out for {filename}")
+                        stderr = b"timeout"
+                    if proc.returncode == 0:
+                        for frame_path in sorted(tmp_path.glob("frame-*.jpg")):
+                            frame_blob = frame_path.read_bytes()
+                            if len(frame_blob) > max_size:
+                                continue
+                            results.append(
+                                self._media_item(
+                                    b64=base64.b64encode(frame_blob).decode("utf-8"),
+                                    mime_type="image/jpeg",
+                                    filename=f"{filename}-{frame_path.stem}.jpg",
+                                    is_image=True,
+                                    message_id=message_id,
+                                    source=(
+                                        f"{source_prefix}_frame"
+                                        if source_prefix
+                                        else "video_frame"
+                                    ),
+                                    url=source_url,
+                                )
+                            )
+                    else:
+                        logger.warning(
+                            f"Video frame extraction failed for {filename}: {stderr.decode(errors='replace')[-300:]}"
+                        )
 
                 # Extract audio track only if process_audio (omni audio input) is enabled.
                 # This prevents sending audio to non-omni or when user disabled audio models.
@@ -8619,7 +9402,11 @@ class MaxwellBot(commands.Bot):
                                     filename=f"{filename}-audio.wav",
                                     is_image=False,
                                     message_id=message_id,
-                                    source="video_audio",
+                                    source=(
+                                        f"{source_prefix}_audio"
+                                        if source_prefix
+                                        else "video_audio"
+                                    ),
                                     url=source_url,
                                 )
                             )
@@ -9126,13 +9913,13 @@ class MaxwellBot(commands.Bot):
                     return item
             logger.warning(f"Skipping gif page {url[:120]}: no usable og:image")
             return None
+        if not mime:
+            mime = MIME_MAP.get(ext, "application/octet-stream")
         if not mime.startswith(("image/", "video/", "audio/")):
             logger.warning(
                 f"Skipping embed media {url[:120]}: unsupported mime {mime or 'unknown'}"
             )
             return None
-        if not mime:
-            mime = MIME_MAP.get(ext, "application/octet-stream")
         anim_name = filename if Path(filename).suffix else f"{filename}{ext or '.gif'}"
         if mime == "image/gif" or ext == ".gif":
             normalized = await self._normalize_gif(blob, anim_name, max_size)
@@ -9162,11 +9949,64 @@ class MaxwellBot(commands.Bot):
             url=url,
         )
 
+    async def _extract_video_item_derivatives(
+        self,
+        item: dict,
+        max_size: int,
+        *,
+        source_prefix: str,
+    ) -> list[dict]:
+        """Turn a downloaded video item into provider-safe frames/audio.
+
+        Providers used by Maxwell intentionally do not receive ``video_url``
+        parts. Keep that incompatibility at the ingestion boundary: linked
+        videos and embed videos are decoded with ffmpeg and only their
+        representative JPEG frames / optional audio track continue downstream.
+        """
+        if not isinstance(item, dict):
+            return []
+        encoded = str(item.get("b64") or "")
+        if not encoded:
+            return []
+        if not parse_bool(
+            getattr(getattr(self, "config", None), "ENABLE_VIDEO_INPUT", True),
+            True,
+        ):
+            return []
+        try:
+            blob = base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError):
+            logger.warning(
+                "Skipping invalid base64 video item %s",
+                item.get("filename", "video"),
+            )
+            return []
+        if not blob:
+            return []
+        return await self._extract_video_derivatives(
+            blob,
+            str(item.get("filename") or "video.mp4"),
+            item.get("message_id"),
+            max_size,
+            source_url=str(item.get("url") or ""),
+            include_frames=parse_bool(
+                (getattr(self, "_control", None) or {}).get("process_images"),
+                True,
+            ),
+            source_prefix=source_prefix,
+        )
+
     async def _extract_embeds(self, message) -> list[dict]:
         embeds = list(getattr(message, "embeds", []) or [])
         if not embeds:
             return []
         max_size = self._max_media_bytes()
+        proc_img = parse_bool(self._control.get("process_images"), True)
+        proc_aud = _owner_audio_input_enabled(self)
+        video_input_enabled = parse_bool(
+            getattr(getattr(self, "config", None), "ENABLE_VIDEO_INPUT", True),
+            True,
+        )
         media = []
         text_blocks = []
         message_id = getattr(message, "id", None)
@@ -9191,11 +10031,17 @@ class MaxwellBot(commands.Bot):
             if _YouTubeTool._is_youtube_url(embed_url):
                 continue
             embed_has_image = False
-            pending_video = []
+            pending_video: list[dict] = []
             for label, url in embed_media_urls:
-                if media_count >= 5:
+                if media_count >= 5 and not (label == "video" and proc_aud):
                     break
                 if _YouTubeTool._is_youtube_url(url):
+                    continue
+                if label in {"image", "thumbnail"} and not proc_img:
+                    continue
+                if label == "video" and (
+                    not video_input_enabled or not (proc_img or proc_aud)
+                ):
                     continue
                 ext = Path(urlparse(url).path).suffix.lower()
                 filename = f"embed-{idx}-{label}{ext or ''}"
@@ -9205,22 +10051,53 @@ class MaxwellBot(commands.Bot):
                 if not item:
                     continue
                 mime = str(item.get("mime_type") or "")
-                if mime.startswith("video/"):
+                # A gif/klipy video URL can already have been normalized to a
+                # JPEG contact sheet by _download_embed_media. It is still a
+                # fallback video visual, not a real embed thumbnail.
+                if label == "video":
                     pending_video.append(item)
+                    continue
+                if mime.startswith("video/"):
+                    if not video_input_enabled:
+                        continue
+                    pending_video.append(item)
+                    continue
+                if media_count >= 5:
                     continue
                 media.append(item)
                 media_count += 1
-                if mime.startswith("image/"):
+                if label in {"image", "thumbnail"} and mime.startswith("image/"):
                     embed_has_image = True
-            # GIF/klipy embeds ship a thumbnail + mp4. OpenCode Go rejects
-            # video_url, so keep the thumbnail and drop the video when we
-            # already have an image from this embed.
+            # GIF/klipy embeds ship a thumbnail + mp4. Keep the thumbnail when
+            # it is a real visual; otherwise derive the video. A provider may
+            # reject raw video_url parts, so never pass an un-derived video
+            # item downstream.
             if not embed_has_image:
                 for item in pending_video:
-                    if media_count >= 5:
+                    if media_count >= 5 and not proc_aud:
                         break
-                    media.append(item)
-                    media_count += 1
+                    mime = str(item.get("mime_type") or "")
+                    if mime.startswith("video/"):
+                        derived = await self._extract_video_item_derivatives(
+                            item,
+                            max_size,
+                            source_prefix="embed_video",
+                        )
+                        for derived_item in derived:
+                            if media_count >= 5 and derived_item.get("is_image"):
+                                continue
+                            if derived_item.get("is_image") and not proc_img:
+                                continue
+                            if (
+                                not derived_item.get("is_image")
+                                and not proc_aud
+                            ):
+                                continue
+                            media.append(derived_item)
+                            media_count += 1
+                    elif mime.startswith("image/") and proc_img:
+                        media.append(item)
+                        media_count += 1
         if text_blocks:
             media.insert(
                 0,
@@ -9238,22 +10115,33 @@ class MaxwellBot(commands.Bot):
             logger.info(f"Extracted text from {len(text_blocks)} embed(s)")
         return media
 
-    # Extensions worth pulling out of a bare link in message text. Video is
-    # deliberately absent: the video path wants ffmpeg frame extraction
-    # (_extract_media), not a raw video_url part that half the endpoints
-    # reject outright.
+    # Extensions worth pulling out of a bare link in message text. Videos are
+    # fetched too, but _extract_linked_media immediately runs them through
+    # ffmpeg; a raw video_url part is rejected by several provider endpoints.
     _LINK_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
-    _LINK_AUDIO_EXTS = frozenset({".mp3", ".wav", ".ogg", ".m4a", ".flac"})
+    _LINK_AUDIO_EXTS = frozenset(
+        {".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac"}
+    )
+    _LINK_VIDEO_EXTS = frozenset({".mp4", ".webm", ".mov", ".mkv", ".avi"})
 
     @classmethod
     def _media_link_refs(cls, content: str | None) -> list[tuple[str, str]]:
-        """(url, ext) for every image/audio link in message text, deduped."""
+        """(url, ext) for every supported direct media link in message text."""
         refs: list[tuple[str, str]] = []
         seen: set[str] = set()
         for raw in re.findall(r"https?://[^\s<>()]+", content or ""):
             url = raw.rstrip(".,;!?)\"'").rstrip(">")
+            # YouTube links have a dedicated transcript/frame extractor. Do
+            # not let a path that happens to end in .mp4 enter the generic
+            # download/ffmpeg path.
+            if YouTubeTool._is_youtube_url(url):
+                continue
             ext = Path(urlparse(url).path).suffix.lower()
-            if ext not in cls._LINK_IMAGE_EXTS and ext not in cls._LINK_AUDIO_EXTS:
+            if (
+                ext not in cls._LINK_IMAGE_EXTS
+                and ext not in cls._LINK_AUDIO_EXTS
+                and ext not in cls._LINK_VIDEO_EXTS
+            ):
                 # Tenor/Giphy picker links have no file extension.
                 if cls._is_gif_page_url(url):
                     ext = ".gif"
@@ -9271,24 +10159,26 @@ class MaxwellBot(commands.Bot):
         """Pull media posted as a bare link instead of an upload.
 
         Discord only unfurls *some* links into embeds, and never audio ones, so
-        a plain `https://host/cat.png` or `.../clip.mp3` in message text was
-        invisible to the model — it could read the URL but never see or hear
-        what was behind it. Whatever Discord did unfurl is already covered by
+        a plain image, clip, or video URL in message text was invisible to the
+        model. Whatever Discord did unfurl is already covered by
         _extract_embeds; `skip_urls` keeps us from downloading it a second time
-        and attaching the same image twice.
+        and attaching the same media twice.
 
-        Images and audio are gated separately so a linked clip still comes
-        through on a bot that has image processing switched off, and vice
-        versa. Everything goes through _download_embed_media, which enforces
-        _is_safe_url (no SSRF into the host network), the size cap, and a
-        real content-type check — the extension only decides what is worth
-        fetching, never what it is.
+        Images, audio, and video are gated separately. Everything goes through
+        _download_embed_media, which enforces _is_safe_url (no SSRF into the
+        host network), the size cap, and a real content-type check — the
+        extension only decides what is worth fetching, never what it is.
         """
-        proc_img = bool(self._control.get("process_images", True))
+        proc_img = parse_bool(self._control.get("process_images"), True)
         proc_aud = _owner_audio_input_enabled(self)
         if not proc_img and not proc_aud:
             return []
         skip = skip_urls or set()
+        video_exts = getattr(self, "_LINK_VIDEO_EXTS", MaxwellBot._LINK_VIDEO_EXTS)
+        video_input_enabled = parse_bool(
+            getattr(getattr(self, "config", None), "ENABLE_VIDEO_INPUT", True),
+            True,
+        )
         wanted = [
             (url, ext)
             for url, ext in self._media_link_refs(getattr(message, "content", ""))
@@ -9296,6 +10186,11 @@ class MaxwellBot(commands.Bot):
             and (
                 (ext in self._LINK_IMAGE_EXTS and proc_img)
                 or (ext in self._LINK_AUDIO_EXTS and proc_aud)
+                or (
+                    ext in video_exts
+                    and video_input_enabled
+                    and (proc_img or proc_aud)
+                )
             )
         ]
         if not wanted:
@@ -9308,11 +10203,25 @@ class MaxwellBot(commands.Bot):
                 url, f"linked-media-{idx}{ext}", max_size, message_id
             )
             if item:
-                item["source"] = "link"
-                # The media item already carries url= from
-                # _download_embed_media; keep it explicitly sourced.
                 item["url"] = url
-                media.append(item)
+                mime = str(item.get("mime_type") or "").lower()
+                if mime.startswith("video/"):
+                    # The provider layer intentionally drops raw video_url
+                    # parts. Keep only ffmpeg derivatives so a bare video
+                    # link is as useful as an uploaded video.
+                    derived = await self._extract_video_item_derivatives(
+                        item,
+                        max_size,
+                        source_prefix="link_video",
+                    )
+                    for derived_item in derived:
+                        derived_item["url"] = url
+                    media.extend(derived)
+                else:
+                    item["source"] = "link"
+                    # The media item already carries url= from
+                    # _download_embed_media; keep it explicitly sourced.
+                    media.append(item)
         if media:
             logger.info(f"Extracted {len(media)} linked media item(s) from message text")
         return media
@@ -9394,8 +10303,12 @@ class MaxwellBot(commands.Bot):
         )
 
     @staticmethod
-    def _reply_media_message_id(message):
-        ref = getattr(getattr(message, "reference", None), "resolved", None)
+    def _reply_media_message_id(message, snapshots=None):
+        reference = getattr(message, "reference", None)
+        ref = getattr(reference, "resolved", None) if reference else None
+        ref_id = getattr(reference, "message_id", None) if reference else None
+        if snapshots:
+            ref = snapshots.get(str(ref_id or getattr(ref, "id", "") or ""), ref)
         if ref is None:
             return None
         if getattr(ref, "attachments", None) or getattr(ref, "stickers", None):
@@ -9540,10 +10453,11 @@ class MaxwellBot(commands.Bot):
 
     # ---- sleep gate ----
     # The bot can take a 1-60 minute sleep window via the `sleep` tool
-    # or the `,sleep` admin command. While sleeping, incoming pings/DMs
-    # get a single "Max is sleeping, back in Xm" notice (deduped per
-    # user) and the LLM dispatch is skipped. The wake is automatic
-    # when the monotonic deadline passes.
+    # or the `,sleep` admin command. While sleeping, the triggering
+    # channel gets a single "Max is sleeping, back in Xm" notice
+    # (deduped per user) and the LLM dispatch is skipped. Never DM
+    # the user about sleep. The wake is automatic when the monotonic
+    # deadline passes.
 
     def _is_sleeping(self) -> tuple[bool, int]:
         """Return (sleeping, seconds_remaining). Auto-clears expired
@@ -9555,10 +10469,16 @@ class MaxwellBot(commands.Bot):
         if now >= self._sleep_until:
             self._sleep_until = 0.0
             self._sleep_notified_at.clear()
+            cancel = getattr(self, "_cancel_sleep_wake", None)
+            if callable(cancel):
+                cancel()
+            schedule = getattr(self, "_schedule_sleep_presence", None)
+            if callable(schedule):
+                schedule(asleep=False)
             return False, 0
         return True, int(self._sleep_until - now)
 
-    def set_sleep(self, duration_minutes: int) -> str:
+    async def set_sleep(self, duration_minutes: int) -> str:
         """Set a sleep window. Max 60 minutes (clamped). Returns a
         human-readable confirmation for the model/command to relay.
         2026-07-19: this is the structural replacement for the bot's
@@ -9574,15 +10494,118 @@ class MaxwellBot(commands.Bot):
         self._sleep_until = now + duration_minutes * 60
         # Clear the dedup so the wake-up notice is fresh.
         self._sleep_notified_at.clear()
+        arm = getattr(self, "_arm_sleep_wake", None)
+        if callable(arm):
+            arm()
+        apply = getattr(self, "_apply_sleep_presence", None)
+        if callable(apply):
+            result = apply(asleep=True)
+            if asyncio.iscoroutine(result):
+                await result
         return f"sleeping for {duration_minutes}m"
 
-    def clear_sleep(self) -> str:
+    async def clear_sleep(self) -> str:
         """Cancel any active sleep window. Idempotent."""
         if self._sleep_until <= 0:
             return "not sleeping"
         self._sleep_until = 0.0
         self._sleep_notified_at.clear()
+        cancel = getattr(self, "_cancel_sleep_wake", None)
+        if callable(cancel):
+            cancel()
+        apply = getattr(self, "_apply_sleep_presence", None)
+        if callable(apply):
+            result = apply(asleep=False)
+            if asyncio.iscoroutine(result):
+                await result
         return "sleep cleared, awake now"
+
+    def _cancel_sleep_wake(self) -> None:
+        task = getattr(self, "_sleep_wake_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._sleep_wake_task = None
+
+    def _arm_sleep_wake(self) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._cancel_sleep_wake()
+        wake = getattr(self, "_sleep_wake_when_due", None)
+        if not callable(wake):
+            return
+        self._sleep_wake_task = loop.create_task(wake())
+
+    async def _sleep_wake_when_due(self) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+            while True:
+                until = float(getattr(self, "_sleep_until", 0.0) or 0.0)
+                if until <= 0:
+                    return
+                remaining = until - loop.time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(remaining)
+            if self._sleep_until > 0:
+                self._sleep_until = 0.0
+                self._sleep_notified_at.clear()
+                await self._apply_sleep_presence(asleep=False)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Sleep wake task failed: %s", e)
+
+    def _schedule_sleep_presence(self, *, asleep: bool) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        apply = getattr(self, "_apply_sleep_presence", None)
+        if not callable(apply):
+            return
+
+        async def _run() -> None:
+            try:
+                await apply(asleep=asleep)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                logger.debug("Sleep presence update failed: %s", e)
+
+        loop.create_task(_run())
+
+    async def _apply_sleep_presence(self, *, asleep: bool) -> None:
+        """Idle overlay while sleeping; restore _current_status on wake.
+
+        Uses change_presence so activity/custom status stay on the same
+        stack. Overlay mode avoids writing idle into _current_status.
+        """
+        changer = getattr(self, "change_presence", None)
+        if not callable(changer):
+            return
+        builder = getattr(self, "_build_activities", None)
+        activities = builder() if callable(builder) else []
+        self._sleep_presence_overlay = True
+        try:
+            if asleep:
+                await changer(
+                    status=discord.Status.idle,
+                    activities=activities,
+                    edit_settings=False,
+                )
+            else:
+                status = getattr(self, "_current_status", None) or discord.Status.online
+                await changer(
+                    status=status,
+                    activities=activities,
+                    edit_settings=bool(getattr(self, "_custom_status", None)),
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Sleep presence update failed: %s", e)
+        finally:
+            self._sleep_presence_overlay = False
 
     def _format_sleep_remaining(self, seconds_remaining: int) -> str:
         """Format the 'back in Xm Ys' string. Always non-zero; if the
@@ -9600,13 +10623,12 @@ class MaxwellBot(commands.Bot):
         message should be swallowed by the sleep gate.
 
         When sleeping:
-          - skip the per-message dedup if the user hasn't been notified
-            in the last 5 minutes (so a long sleep doesn't spam once
-            per ping).
-          - try to DM the user with the remaining time; if DMs are
-            closed, post in the channel instead.
+          - notify once per 5 minutes per user (so a long sleep
+            doesn't spam one line per ping).
+          - post the remaining-time notice in the triggering message's
+            channel. Never DM. Never open a DM as fallback.
           - log the swallow at INFO so the audit trail shows why no
-            reply went out.
+            LLM reply went out.
         """
         if not self._control.get("enable_sleep", True):
             return True
@@ -9627,26 +10649,11 @@ class MaxwellBot(commands.Bot):
             f"max is sleeping rn, back in ~{remaining}. "
             "drop a message and i'll see it when i wake up."
         )
-        # Prefer DM; fall back to channel send if DMs are closed.
-        sent = False
-        try:
-            author = message.author
-            if author and not getattr(author, "bot", False):
-                dm = getattr(author, "dm_channel", None)
-                if dm is None:
-                    dm = await author.create_dm()
-                if dm is not None:
-                    with contextlib.suppress(Exception):
-                        await dm.send(body)
-                        sent = True
-        except Exception as e:  # noqa: BLE001
-            logger.debug("Sleep DM to %s failed: %s", uid, e)
-        if not sent:
-            with contextlib.suppress(Exception):
-                await message.channel.send(
-                    body,
-                    reference=message if hasattr(message, "id") else None,
-                )
+        with contextlib.suppress(Exception):
+            await message.channel.send(
+                body,
+                reference=message if hasattr(message, "id") else None,
+            )
         logger.info(
             "Sleep gate: dropped message from uid=%s in channel=%s (back in %s)",
             uid,
@@ -9659,14 +10666,15 @@ class MaxwellBot(commands.Bot):
         content = content or message.content
         channel_id = str(message.channel.id)
         # Sleep gate: when the bot is in a sleep window, abort the
-        # dispatch, send the user a one-shot DM (or channel note when
-        # DMs are closed) saying "Max is sleeping, back in Xm", and
-        # return. Dedups per user so a 30-min sleep doesn't spam 40
-        # notifications when someone pings the bot 40 times. The 2026-
-        # 07-19 user report: the bot kept spamming goodnight/goodbye
-        # in chat; a real sleep window is the structural fix.
+        # dispatch, send a one-shot notice in the triggering channel
+        # saying "Max is sleeping, back in Xm", and return. Never DM.
+        # Dedups per user so a 30-min sleep doesn't spam 40 lines
+        # when someone pings 40 times. The 2026-07-19 user report:
+        # the bot kept spamming goodnight/goodbye in chat; a real
+        # sleep window is the structural fix.
         if not await self._check_sleep_gate(message):
             return
+        turn_context = self._begin_inflight_context(message, content)
         live_typing = await self._enter_live_typing(message)
         author = getattr(message, "author", None)
         if (
@@ -9695,9 +10703,35 @@ class MaxwellBot(commands.Bot):
         if self._is_short_live_turn(message, content):
             max_out_tokens = min(int(max_out_tokens), 4096)
         try:
+            # MESSAGE_CREATE can precede Discord's unfurl by a few hundred
+            # milliseconds. Refresh once before extracting so a direct ping
+            # gets the thumbnail/embed in its first provider request.
+            refreshed_message = await self._wait_for_late_embeds(message, content)
+            if refreshed_message is not message:
+                message = refreshed_message
+                content = str(getattr(message, "content", "") or "")
+                turn_context["message"] = message
+                turn_context["content"] = content
+                turn_context["message_ids"].add(
+                    str(getattr(message, "id", "") or "")
+                )
+                if (
+                    not turn_context.get("version")
+                    and self._control.get("store_memory", True)
+                    and getattr(
+                        self, "memory", None
+                    )
+                ):
+                    with contextlib.suppress(Exception):
+                        await self.add_message_to_memory(
+                            str(getattr(message.channel, "id", channel_id)),
+                            self._message_memory_item(message, edited=True),
+                            message,
+                        )
             _images, media = await self._extract_media(message)
-            if bool(self._control.get("process_images", True)):
-                media.extend(await self._extract_embeds(message))
+            # Embed text remains useful even when image processing is off;
+            # _extract_embeds gates only the binary downloads.
+            media.extend(await self._extract_embeds(message))
             # Linked media gates images and audio separately, so it runs
             # outside the process_images check — a linked clip should still
             # land when only audio input is on. Embed downloads already
@@ -9711,7 +10745,7 @@ class MaxwellBot(commands.Bot):
                     },
                 )
             )
-            if bool(self._control.get("process_images", True)):
+            if parse_bool(self._control.get("process_images"), True):
                 grid = await self._maybe_emoji_grid(message, channel_id)
                 if grid is not None:
                     media.append(grid)
@@ -9721,8 +10755,7 @@ class MaxwellBot(commands.Bot):
                 or self._replying_to_own_message(message)
             ):
                 _pimgs, parent_media = await self._extract_media(parent)
-                if bool(self._control.get("process_images", True)):
-                    parent_media.extend(await self._extract_embeds(parent))
+                parent_media.extend(await self._extract_embeds(parent))
                 parent_media.extend(
                     await self._extract_linked_media(
                         parent,
@@ -9740,12 +10773,17 @@ class MaxwellBot(commands.Bot):
                         len(parent_media),
                         getattr(parent, "id", "?"),
                     )
+                parent_id = str(getattr(parent, "id", "") or "")
+                if parent_id:
+                    turn_context["message_ids"].add(parent_id)
         except Exception as e:
             logger.warning(f"Media extraction failed: {e}")
             media = []
         current_images = [item for item in media if item.get("is_image")]
         cached_media = []
-        reply_media_id = self._reply_media_message_id(message)
+        reply_media_id = self._reply_media_message_id(
+            message, getattr(self, "_message_snapshots", None)
+        )
         if reply_media_id is not None:
             cached_media = self._get_media_context(
                 channel_id, message_id=reply_media_id
@@ -9758,7 +10796,35 @@ class MaxwellBot(commands.Bot):
         # otherwise normal chat gets polluted by yesterday's meme/screenshot.
         active_media = current_images + cached_media + self._current_binary_media(media)
         media_summary = self._format_media_summary(media, active_media)
-        self._cache_media_context(channel_id, media)
+        # If MESSAGE_UPDATE refreshed this turn while its original extraction
+        # was in flight, that extraction is stale. Let the edit handler's
+        # replacement remain authoritative for subsequent turns.
+        if not turn_context.get("version"):
+            self._cache_media_context(channel_id, media)
+        message_id = str(getattr(message, "id", "") or "")
+        if message_id and not turn_context.get("version"):
+            self._message_snapshots[message_id] = message
+            self._message_update_state[message_id] = (
+                self._message_update_fingerprint(message),
+                self._message_media_fingerprint(message),
+                time.monotonic(),
+            )
+            if len(self._message_update_state) > 1000:
+                cutoff = time.monotonic() - 3600
+                self._message_update_state = {
+                    key: value
+                    for key, value in self._message_update_state.items()
+                    if value[2] > cutoff
+                }
+                self._message_snapshots = {
+                    key: value
+                    for key, value in self._message_snapshots.items()
+                    if key in self._message_update_state
+                }
+        turn_context["message"] = message
+        turn_context["content"] = content
+        turn_context["media"] = list(media)
+        turn_context["active_media"] = list(active_media)
 
         # Auto-invoke the youtube tool for YouTube links so the model
         # gets transcript/frames even when it wouldn't emit a tool call
@@ -9840,12 +10906,50 @@ class MaxwellBot(commands.Bot):
             (pre_tool_results, pre_tool_images), messages = await asyncio.gather(
                 _run_pre_tools(), _build_msgs()
             )
+            seen_version_before = turn_context.get("seen_version", 0)
+            (
+                message,
+                content,
+                media,
+                active_media,
+                media_summary,
+                messages,
+            ) = await self._apply_inflight_refresh(
+                turn_context,
+                message,
+                content,
+                media,
+                active_media,
+                media_summary,
+                messages,
+            )
+            if turn_context.get("seen_version", 0) != seen_version_before:
+                # The first pre-tool pass may have inspected the old text or
+                # parent while an edit arrived. Refresh those results too so
+                # an old YouTube/search answer is not injected into the new
+                # prompt.
+                pre_tool_results, pre_tool_images = await _run_pre_tools()
+            turn_context["message"] = message
+            turn_context["content"] = content
+            turn_context["media"] = list(media)
+            turn_context["active_media"] = list(active_media)
+            if turn_context.get("version") and message_id:
+                # The refresh may have raced the initial MESSAGE_CREATE path.
+                # Persist the post-refresh object so a later reply-parent
+                # lookup cannot regress to the stale create snapshot.
+                self._message_snapshots[message_id] = message
+                self._message_update_state[message_id] = (
+                    self._message_update_fingerprint(message),
+                    self._message_media_fingerprint(message),
+                    time.monotonic(),
+                )
         except Exception as e:
             logger.error(f"Failed to build messages: {e}\n{traceback.format_exc()}")
             self._replying_channels.discard(channel_id)
             if self._active_requests.get(channel_id) is current_task:
                 self._active_requests.pop(channel_id, None)
                 self._active_request_user.pop(channel_id, None)
+            self._end_inflight_context(turn_context)
             await self._exit_live_typing(live_typing)
             return
         if pre_tool_results:
@@ -9995,6 +11099,7 @@ class MaxwellBot(commands.Bot):
                 )
 
         try:
+            turn_context["generation_started"] = True
             platform = MaxwellBot._message_tool_platform(self, message)
             openai_tools = self._build_openai_tools(
                 platform, message=message, content=content
@@ -10110,6 +11215,7 @@ class MaxwellBot(commands.Bot):
             )
             all_tool_results = []
             all_tool_images = []
+            all_tool_media = []
             # Accumulate multi-iteration history so intermediate tool results
             # are not discarded on the next follow-up turn.
             conversation_tail: list[dict] = []
@@ -10143,6 +11249,9 @@ class MaxwellBot(commands.Bot):
                     getattr(self, "_last_native_followup_messages", None) or []
                 )
                 all_tool_results.extend(tool_results)
+                all_tool_media.extend(
+                    list(getattr(self, "_last_native_tool_media", None) or [])
+                )
                 # Cap image growth across iterations (keep newest frames).
                 all_tool_images.extend(iter_images)
                 if len(all_tool_images) > 12:
@@ -10240,7 +11349,7 @@ class MaxwellBot(commands.Bot):
                         followup = await self.ai_provider.generate_response(
                             result_messages,
                             images=followup_images,
-                            media=[],
+                            media=all_tool_media,
                             timeout=ai_timeout,
                             max_tokens=max_out_tokens,
                             tools=provider_tools,
@@ -10560,6 +11669,7 @@ class MaxwellBot(commands.Bot):
                 except discord.Forbidden as _exc:
                     pass
         finally:
+            self._end_inflight_context(turn_context)
             await self._exit_live_typing(live_typing)
             # Safety net: walk every progress object this turn ever created
             # and stop() anything still alive, so we never leave an orphan
@@ -10792,6 +11902,8 @@ class MaxwellBot(commands.Bot):
         """Execute OpenAI-style native tool_calls from the provider."""
         tool_results: list[str] = []
         tool_images: list[str] = []
+        tool_media: list[dict] = []
+        self._last_native_tool_media = []
         self._last_native_followup_messages = []
         response = strip_model_artifact_leaks(response or "", strip_pipe_markers=False)
         # Strip any accidental XML tags if the model dual-emitted
@@ -11174,15 +12286,37 @@ class MaxwellBot(commands.Bot):
         # only attach the decoded image as vision. Also cap each
         # tool result at 32KB to keep context size bounded.
         _IMG_RE = re.compile(r"__IMAGE_B64__([A-Za-z0-9+/=\s]+)__END_IMAGE_B64__")
+        _AUDIO_RE = re.compile(
+            r"__AUDIO_B64__([A-Za-z0-9+/=\s]+)__END_AUDIO_B64__"
+        )
         _MAX_TOOL_RESULT_CHARS = 32_000
+        seen_images: set[str] = set()
+        seen_audio: set[str] = set()
         for tr in list(result_by_id.values()) + list(tool_results):
             for m in _IMG_RE.finditer(tr):
                 raw = m.group(1).replace("\n", "").replace(" ", "")
-                if len(raw) < 5_000_000:
+                if len(raw) < 5_000_000 and raw not in seen_images:
+                    seen_images.add(raw)
                     tool_images.append(raw)
+            for m in _AUDIO_RE.finditer(tr):
+                raw = m.group(1).replace("\n", "").replace(" ", "")
+                if len(raw) < 5_000_000 and raw not in seen_audio:
+                    seen_audio.add(raw)
+                    tool_media.append(
+                        {
+                            "b64": raw,
+                            "mime_type": "audio/wav",
+                            "filename": "tool-audio.wav",
+                            "is_image": False,
+                            "is_text": False,
+                            "source": "tool",
+                            "message_id": getattr(message, "id", None),
+                            "url": "",
+                        }
+                    )
 
         def _truncate_tool_result(tr: str) -> str:
-            tr = _IMG_RE.sub("", tr).strip()
+            tr = _IMG_RE.sub("", _AUDIO_RE.sub("", tr)).strip()
             if len(tr) > _MAX_TOOL_RESULT_CHARS:
                 half = _MAX_TOOL_RESULT_CHARS // 2
                 return f"{tr[:half]}\n\n[...truncated {len(tr) - _MAX_TOOL_RESULT_CHARS} chars...]\n\n{tr[-half:]}"
@@ -11209,6 +12343,7 @@ class MaxwellBot(commands.Bot):
                 }
             )
         self._last_native_followup_messages = followup_msgs
+        self._last_native_tool_media = tool_media
         # Return results in original emission order, paired by tool_call_id.
         truncated_results = [truncated_by_id.get(c["id"], "") for c in calls]
         tool_results = truncated_results
@@ -11242,6 +12377,7 @@ class MaxwellBot(commands.Bot):
         get scrubbed instead of shown to the user.
         """
         self._last_native_followup_messages = []
+        self._last_native_tool_media = []
         if native_tool_calls:
             return await MaxwellBot._process_native_tool_calls(
                 self,

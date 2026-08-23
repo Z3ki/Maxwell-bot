@@ -1,7 +1,8 @@
 """Tests for the sleep gate / SleepTool / ClearSleepTool.
 
 The 2026-07-19 user request: add a sleep feature (max 1 hour) so
-pings during the window get a 'max is sleeping, back in Xm' notice.
+pings during the window get a 'max is sleeping, back in Xm' notice
+in the triggering channel (never a DM).
 These tests pin the contract:
 
   1. set_sleep() clamps duration to 1-60 minutes.
@@ -11,9 +12,12 @@ These tests pin the contract:
   5. _check_sleep_gate() returns False (block dispatch) when sleeping.
   6. _check_sleep_gate() returns True (allow dispatch) when not sleeping.
   7. _check_sleep_gate() returns True when control flag is off.
-  8. _check_sleep_gate() DM-dedup: same user only gets one notice per
-     5 minutes.
+  8. _check_sleep_gate() channel-dedup: same user only gets one notice
+     per 5 minutes; create_dm is never called.
   9. SleepTool.execute enforces the 1-60m server-side cap.
+ 10. Sleep start sets Discord presence to idle; sleep end restores
+     _current_status. A change_presence during sleep stays idle on
+     Discord but is kept for restore.
 """
 
 import asyncio
@@ -21,6 +25,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+
+import discord
 
 # Make sure the repo root is on sys.path so the test can import
 # `tool_progress`, `bot_tools`, and `bot` without an installed package.
@@ -33,29 +39,30 @@ import bot_tools  # noqa: E402
 
 class FakeMessage:
     """Minimal stand-in for a discord.Message used in the sleep-gate
-    tests. Tracks DM sends so we can assert per-user dedup."""
+    tests. Tracks channel sends and would-be DMs so we can assert
+    per-user channel dedup and that create_dm is never used."""
 
     def __init__(self, uid="111", channel_id="222", platform="discord"):
         self.author = SimpleNamespace(
             id=int(uid),
             display_name=f"user{uid}",
             bot=False,
-            dm_channel=None,
+            dm_channel=SimpleNamespace(send=AsyncMock()),
+            create_dm=AsyncMock(),
         )
+        sent: list = []
+
+        async def send(content, **kwargs):
+            sent.append(content)
+
         self.channel = SimpleNamespace(
             id=int(channel_id),
-            sent=[],
+            sent=sent,
+            send=send,
         )
         self.id = int(uid) + 1000
         self.tool_platform = platform
         self.content = "hi"
-
-    async def reply(self, content, **kwargs):
-        # The bot's _check_sleep_gate uses channel.send with a
-        # reference, NOT reply — so reply isn't strictly required for
-        # these tests, but we implement it for completeness.
-        self.channel.sent.append(("reply", content))
-        return SimpleNamespace(content=content, edit=AsyncMock(), delete=AsyncMock())
 
 
 class FakeBot:
@@ -239,3 +246,155 @@ def test_sleep_tool_with_real_bot_helpers():
     )
     sleeping, _ = bot._is_sleeping()
     assert sleeping is True
+
+
+def _gate_bot():
+    from bot import MaxwellBot
+
+    bot = SimpleNamespace(
+        _control={"enable_sleep": True},
+        _sleep_until=0.0,
+        _sleep_notified_at={},
+    )
+    bot._is_sleeping = MaxwellBot._is_sleeping.__get__(bot)
+    bot.set_sleep = MaxwellBot.set_sleep.__get__(bot)
+    bot._format_sleep_remaining = MaxwellBot._format_sleep_remaining.__get__(bot)
+    bot._check_sleep_gate = MaxwellBot._check_sleep_gate.__get__(bot)
+    return bot
+
+
+def test_sleep_gate_posts_in_channel_not_dm():
+    async def scenario():
+        bot = _gate_bot()
+        await bot.set_sleep(10)
+        msg = FakeMessage()
+        proceed = await bot._check_sleep_gate(msg)
+        assert proceed is False
+        assert len(msg.channel.sent) == 1
+        assert "sleeping" in msg.channel.sent[0]
+        assert "back in" in msg.channel.sent[0]
+        msg.author.create_dm.assert_not_called()
+        msg.author.dm_channel.send.assert_not_called()
+        proceed2 = await bot._check_sleep_gate(msg)
+        assert proceed2 is False
+        assert len(msg.channel.sent) == 1
+
+    asyncio.run(scenario())
+
+
+def test_sleep_gate_allows_when_awake():
+    async def scenario():
+        bot = _gate_bot()
+        msg = FakeMessage()
+        assert await bot._check_sleep_gate(msg) is True
+        assert msg.channel.sent == []
+
+    asyncio.run(scenario())
+
+
+def test_sleep_gate_disabled_by_control_flag():
+    async def scenario():
+        bot = _gate_bot()
+        await bot.set_sleep(10)
+        bot._control["enable_sleep"] = False
+        msg = FakeMessage()
+        assert await bot._check_sleep_gate(msg) is True
+        assert msg.channel.sent == []
+
+    asyncio.run(scenario())
+
+
+def _presence_bot():
+    from bot import MaxwellBot
+
+    bot = SimpleNamespace(
+        _control={"enable_sleep": True},
+        _sleep_until=0.0,
+        _sleep_notified_at={},
+        _current_status=discord.Status.online,
+        _custom_status=None,
+        _current_game=None,
+        _sleep_wake_task=None,
+        _sleep_presence_overlay=False,
+    )
+    bot._push_presence = AsyncMock()
+    bot._build_activities = MaxwellBot._build_activities.__get__(bot)
+    bot._sleep_window_active = MaxwellBot._sleep_window_active.__get__(bot)
+    bot.change_presence = MaxwellBot.change_presence.__get__(bot)
+    bot._apply_sleep_presence = MaxwellBot._apply_sleep_presence.__get__(bot)
+    bot._schedule_sleep_presence = MaxwellBot._schedule_sleep_presence.__get__(bot)
+    bot._arm_sleep_wake = MaxwellBot._arm_sleep_wake.__get__(bot)
+    bot._cancel_sleep_wake = MaxwellBot._cancel_sleep_wake.__get__(bot)
+    bot._sleep_wake_when_due = MaxwellBot._sleep_wake_when_due.__get__(bot)
+    bot.set_sleep = MaxwellBot.set_sleep.__get__(bot)
+    bot.clear_sleep = MaxwellBot.clear_sleep.__get__(bot)
+    bot._is_sleeping = MaxwellBot._is_sleeping.__get__(bot)
+    return bot
+
+
+def _last_status(bot):
+    assert bot._push_presence.await_args_list, "expected a presence push"
+    return bot._push_presence.await_args.kwargs["status"]
+
+
+def test_sleep_sets_idle_and_clear_restores_status():
+    async def scenario():
+        bot = _presence_bot()
+        try:
+            assert await bot.set_sleep(10) == "sleeping for 10m"
+            assert bot._current_status is discord.Status.online
+            assert _last_status(bot) is discord.Status.idle
+            assert await bot.clear_sleep() == "sleep cleared, awake now"
+            assert _last_status(bot) is discord.Status.online
+        finally:
+            bot._cancel_sleep_wake()
+
+    asyncio.run(scenario())
+
+
+def test_sleep_restores_pre_sleep_idle():
+    async def scenario():
+        bot = _presence_bot()
+        bot._current_status = discord.Status.idle
+        try:
+            await bot.set_sleep(5)
+            assert _last_status(bot) is discord.Status.idle
+            await bot.clear_sleep()
+            assert _last_status(bot) is discord.Status.idle
+        finally:
+            bot._cancel_sleep_wake()
+
+    asyncio.run(scenario())
+
+
+def test_sleep_idle_wins_but_keeps_presence_change_for_restore():
+    async def scenario():
+        bot = _presence_bot()
+        try:
+            await bot.set_sleep(10)
+            bot._push_presence.reset_mock()
+            await bot.change_presence(status=discord.Status.dnd)
+            assert bot._current_status is discord.Status.dnd
+            assert _last_status(bot) is discord.Status.idle
+            await bot.clear_sleep()
+            assert _last_status(bot) is discord.Status.dnd
+        finally:
+            bot._cancel_sleep_wake()
+
+    asyncio.run(scenario())
+
+
+def test_sleep_expiry_restores_presence():
+    async def scenario():
+        bot = _presence_bot()
+        try:
+            await bot.set_sleep(10)
+            bot._sleep_until = asyncio.get_running_loop().time() - 1
+            sleeping, _ = bot._is_sleeping()
+            assert sleeping is False
+            await asyncio.sleep(0)
+            assert _last_status(bot) is discord.Status.online
+        finally:
+            bot._cancel_sleep_wake()
+
+    asyncio.run(scenario())

@@ -1232,8 +1232,10 @@ class RAGMemoryManager:
             ch = _hashlib.sha256(_strip_for_embedding(text).encode("utf-8")).hexdigest()
             self._db.execute(
                 "UPDATE vectors SET embedding=? WHERE id=? AND "
-                "(content_hash=? OR content_hash='' OR content_hash IS NULL)",
-                (blob, row_id, ch),
+                "(content_hash=? OR "
+                "(content_hash='' AND content=?) OR "
+                "(content_hash IS NULL AND content=?))",
+                (blob, row_id, ch, str(text or "")[:8000], str(text or "")[:8000]),
             )
             return True
         return False
@@ -1506,14 +1508,35 @@ class RAGMemoryManager:
         # doesn't pollute user-message RAG results.
         kind = "bot_output" if source == "bot" else "message"
 
+        # MESSAGE_UPDATE uses the real Discord message id. Give that exact row
+        # precedence over content-hash deduplication so an edited message
+        # cannot leave its old text in the transcript (or silently collapse
+        # into a different message that happens to have the new same text).
+        # The normal idempotent create path still remains cheap: only an
+        # existing row with this exact id is removed before the usual hash
+        # collision check.
+        exact = self._db.execute(
+            "SELECT id FROM vectors WHERE id=? AND channel_id=? "
+            "AND kind IN ('message', 'bot_output') LIMIT 1",
+            (msg_id, channel_id),
+        ).fetchone()
+        if exact:
+            self._db.execute("DELETE FROM vectors WHERE id=?", (msg_id,))
+
         # Dedupe by (channel_id, content_hash). If a row already exists
         # with the same hash in this channel, just refresh its source/metadata
-        # and bail — no new row, no re-embed.
+        # and bail — no new row, no re-embed. An edited message is different:
+        # preserve its exact Discord id even if another message already has
+        # the new text. A blank hash intentionally bypasses the partial
+        # unique index, and _embed_and_store accepts it after the insert.
         existing = self._db.execute(
             "SELECT id FROM vectors WHERE channel_id=? AND content_hash=? "
             "AND id != ? LIMIT 1",
             (channel_id, content_hash, msg_id),
         ).fetchone()
+        if existing and message.get("edited_at"):
+            content_hash = ""
+            existing = None
         if existing:
             # Refresh the row in place — but bump created_at so repeated
             # identical messages (e.g. the bot saying "ok" twice) stay at

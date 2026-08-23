@@ -71,9 +71,10 @@ DEFAULT_CONTROL = {
     "process_audio": True,
     "max_image_size_mb": 10,
     # When True, the `sleep` tool and `,sleep` command can put the bot
-    # into a 1-60 minute sleep window where incoming pings/DMs get a
-    # one-shot "max is sleeping, back in Xm" notification. Default ON
-    # so the 2026-07-19 'goodnight spam' complaint has a real off-switch.
+    # into a 1-60 minute sleep window where the triggering channel gets
+    # a one-shot "max is sleeping, back in Xm" notice (never a DM).
+    # Default ON so the 2026-07-19 'goodnight spam' complaint has a
+    # real off-switch.
     # Operators who want the bot to always be available can flip this
     # to False in dashboard.
     "enable_sleep": True,
@@ -235,6 +236,7 @@ KNOWN_TOOLS = [
     "shell",
     "fetch_url",
     "see_image",
+    "see_video",
     "youtube",
     "send_file",
     "send_message",

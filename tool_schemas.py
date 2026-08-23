@@ -286,6 +286,15 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         },
         ["url"],
     ),
+    "see_video": _obj(
+        {
+            "url": _str(
+                "Direct mp4/webm/mov video URL to inspect with ffmpeg-derived "
+                "frames; use youtube for YouTube links"
+            )
+        },
+        ["url"],
+    ),
     "youtube": _obj(
         {
             "url": _str(
@@ -438,6 +447,7 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "web_search",
         "fetch_url",
         "see_image",
+        "see_video",
         "youtube",
         "shell",
         "sub_agent",
