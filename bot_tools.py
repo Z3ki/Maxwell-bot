@@ -3815,7 +3815,9 @@ class SendMessageTool(Tool):
             "Send a message to the current chat. Default: one call per turn with the full reply. "
             "You can call this more than once if you actually want separate Discord messages; do not split a normal reply. "
             "Content supports Discord markdown: **bold**, *italic*, `code`, ```code blocks```, > quotes, bullet lists. "
-            "Params: content (required), reply (optional bool, default true), "
+            "Params: content (required), reply (optional bool, default true — pass "
+            "false in a live back-and-forth where it is obvious who you are "
+            "answering; quoting every line is noise), "
             "reply_to (optional short quote or who said it, like nah or alice — not an id)."
         )
 

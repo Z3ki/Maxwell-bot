@@ -227,7 +227,14 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     "send_message": _obj(
         {
             "content": _str("Message text (Discord markdown OK)"),
-            "reply": _bool("Whether to Discord-reply (default true)"),
+            "reply": _bool(
+                "Discord-reply, i.e. the quoted-parent UI. Default true. Pass "
+                "false in a live back-and-forth where it is already obvious "
+                "who you are answering — quoting every single line is noise "
+                "no real person makes. Keep it on when the room has moved on, "
+                "several people are talking at once, or you are answering an "
+                "older line."
+            ),
             "reply_to": _str(
                 "Optional short quote or who said it, like nah or alice. Not an id."
             ),
