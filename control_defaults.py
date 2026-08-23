@@ -59,8 +59,6 @@ DEFAULT_CONTROL = {
     # Watch follow-ups wait this long for more lines, then one reply.
     # Hard @ / reply-to-Maxwell still go out immediately.
     "conversation_watch_debounce_seconds": 1,
-    # After Maxwell talks, skip another watch turn for this long unless pinged.
-    "conversation_watch_reply_cooldown_seconds": 12,
     "reply_to_bots": False,
     # Unused for starting turns. Reactions are stored on the message and
     # shown in context; they never kick off a live reply.
