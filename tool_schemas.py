@@ -223,7 +223,10 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     "send_message": _obj(
         {
             "content": _str("Message text (Discord markdown OK)"),
-            "reply": _bool("Whether to reply to the triggering message (default true)"),
+            "reply": _bool("Whether to Discord-reply (default true)"),
+            "reply_to": _str(
+                "Optional short quote or who said it, like nah or alice. Not an id."
+            ),
         },
         ["content"],
     ),

@@ -3460,6 +3460,147 @@ async def _tool_reply_typing(bot, message, content: str = ""):
     yield
 
 
+_REPLY_HINT_NONE = {"no", "none", "false", "off", "0"}
+_REPLY_HINT_THIS = {"this", "here", "current", "latest", "last", "them"}
+_REPLY_HINT_PREV = {"previous", "earlier", "before", "prev"}
+_REPLY_BOOL_WORDS = {"true", "false", "yes", "no", "on", "off", "0", "1"}
+
+
+def normalize_reply_hint(value) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def score_reply_candidate(hint: str, *, author: str = "", content: str = "") -> int:
+    """How well a recent line matches a short quote or name. No ids."""
+    hint_n = normalize_reply_hint(hint)
+    if not hint_n:
+        return 0
+    author_n = normalize_reply_hint(author)
+    content_n = normalize_reply_hint(content)
+    content_n = re.sub(r"^\[at [^\]]+\]\s*", "", content_n)
+    if "(" in author_n:
+        author_n = author_n.split("(", 1)[0].strip()
+    score = 0
+    if len(hint_n) <= 3:
+        if content_n == hint_n:
+            return 100
+        if re.search(rf"\b{re.escape(hint_n)}\b", content_n):
+            score = 80
+        if author_n == hint_n:
+            score = max(score, 75)
+        return score
+    if content_n == hint_n:
+        score = 100
+    elif content_n.startswith(hint_n):
+        score = 85
+    elif hint_n in content_n:
+        score = 60 + min(20, int(20 * len(hint_n) / max(len(content_n), 1)))
+    if author_n == hint_n or author_n.startswith(hint_n + " "):
+        score = max(score, 75)
+    elif hint_n in author_n:
+        score = max(score, 55)
+    return score
+
+
+def _message_author_label(message) -> str:
+    author = getattr(message, "author", None)
+    if author is None:
+        return ""
+    return str(
+        getattr(author, "display_name", None)
+        or getattr(author, "name", None)
+        or getattr(author, "id", "")
+        or ""
+    )
+
+
+async def _iter_recent_channel_messages(message, bot=None, limit: int = 40):
+    channel = getattr(message, "channel", None)
+    seen: set[str] = set()
+    history = getattr(channel, "history", None)
+    if callable(history):
+        try:
+            async for msg in history(limit=limit):
+                mid = getattr(msg, "id", None)
+                if mid is not None:
+                    seen.add(str(mid))
+                yield msg
+        except Exception:
+            pass
+    mem = getattr(bot, "memory", None) if bot is not None else None
+    getter = getattr(mem, "get_channel_memory", None) if mem is not None else None
+    fetch = getattr(channel, "fetch_message", None)
+    if not callable(getter) or not callable(fetch):
+        return
+    cid = str(getattr(channel, "id", "") or "")
+    if not cid:
+        return
+    try:
+        rows = await getter(cid)
+    except Exception:
+        return
+    for row in reversed(list(rows or [])):
+        if not isinstance(row, dict):
+            continue
+        mid = str(row.get("message_id") or "")
+        if not mid or mid in seen:
+            continue
+        try:
+            msg = await fetch(int(mid))
+        except Exception:
+            continue
+        if msg is not None:
+            seen.add(mid)
+            yield msg
+
+
+async def resolve_send_reply_target(message, reply=True, reply_to=None, bot=None):
+    """Pick which Discord message to reply to from a quote or name."""
+    hint = reply_to
+    use_reply = reply
+    if hint is None and isinstance(reply, str):
+        raw = str(reply).strip()
+        if raw and normalize_reply_hint(raw) not in _REPLY_BOOL_WORDS:
+            hint = raw
+            use_reply = True
+    hint_n = normalize_reply_hint(hint)
+    reply_on = parse_bool(use_reply, True)
+    if hint_n in _REPLY_HINT_NONE:
+        return None
+    if not reply_on and not hint_n:
+        return None
+    if not hint_n or hint_n in _REPLY_HINT_THIS:
+        return message
+
+    recent: list[Any] = []
+    async for msg in _iter_recent_channel_messages(message, bot=bot):
+        recent.append(msg)
+    if not recent:
+        recent = [message]
+
+    if hint_n in _REPLY_HINT_PREV:
+        trigger_id = getattr(message, "id", None)
+        for msg in recent:
+            if getattr(msg, "id", None) != trigger_id:
+                return msg
+        return message
+
+    best = None
+    best_score = 0
+    for msg in recent:
+        score = score_reply_candidate(
+            hint_n,
+            author=_message_author_label(msg),
+            content=str(getattr(msg, "content", "") or ""),
+        )
+        if score > best_score:
+            best_score = score
+            best = msg
+    if best is not None and best_score >= 55:
+        return best
+    return message
+
+
 class SendMessageTool(Tool):
     """Send a reply to the current message with Discord markdown formatting."""
 
@@ -3468,7 +3609,8 @@ class SendMessageTool(Tool):
             "Send a message to the current chat. Default: one call per turn with the full reply. "
             "You can call this more than once if you actually want separate Discord messages; do not split a normal reply. "
             "Content supports Discord markdown: **bold**, *italic*, `code`, ```code blocks```, > quotes, bullet lists. "
-            "Params: content (required), reply (optional bool, default true)."
+            "Params: content (required), reply (optional bool, default true), "
+            "reply_to (optional short quote or who said it, like nah or alice — not an id)."
         )
 
     @staticmethod
@@ -3489,7 +3631,12 @@ class SendMessageTool(Tool):
         return chunks or [""]
 
     async def execute(
-        self, message: Message, content: str | None = None, reply: bool = True, **kwargs
+        self,
+        message: Message,
+        content: str | None = None,
+        reply: bool = True,
+        reply_to: str | None = None,
+        **kwargs,
     ) -> str:
         text = str(content or "").strip()
         if not text:
@@ -3507,7 +3654,14 @@ class SendMessageTool(Tool):
             chunks = self._chunks(text)
             if not chunks and stickers:
                 chunks = [""]
-            use_reply = str(reply).lower() not in {"0", "false", "no", "off"}
+            target = await resolve_send_reply_target(
+                message,
+                reply=reply,
+                reply_to=reply_to if reply_to is not None else kwargs.get("reply_to"),
+                bot=self.bot,
+            )
+            use_reply = target is not None
+            reply_to_message = target if target is not None else message
             async with _tool_reply_typing(self.bot, message, text):
                 for i, chunk in enumerate(chunks):
                     chunk_stickers = stickers if i == 0 else None
@@ -3515,9 +3669,9 @@ class SendMessageTool(Tool):
                         if i == 0 and use_reply:
                             try:
                                 if chunk_stickers:
-                                    await message.reply(chunk, stickers=chunk_stickers)
+                                    await reply_to_message.reply(chunk, stickers=chunk_stickers)
                                 else:
-                                    await message.reply(chunk)
+                                    await reply_to_message.reply(chunk)
                             except (discord.NotFound, discord.HTTPException) as exc:
                                 code = getattr(exc, "code", None)
                                 parent_gone = isinstance(exc, discord.NotFound) or code in {

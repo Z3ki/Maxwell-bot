@@ -3332,27 +3332,108 @@ class MaxwellBot(commands.Bot):
                 watching = bool(checker(channel_id))
         if watching:
             lines.append(
-                "Conversation watch is on in this room. You are still in this "
-                "conversation. Every line is shown to you. Reply if you want "
-                "to. Use no_response if you do not — they may be talking to "
-                "someone else, or you may have nothing to add."
+                "Conversation watch is on in this room. You can see the room. "
+                "Default is no_response. Only speak if they are talking to you "
+                "or you have something new. Do not answer every line."
             )
         if getattr(message, "_watch_followup", False):
             lines.append(
                 "Soft follow-up: they did not @ you or Discord-reply this time. "
-                "You decide whether to speak. no_response is a valid choice."
+                "Default is no_response. To Discord-reply to an earlier line, "
+                "send_message with reply_to as a short quote or name, like nah "
+                "or alice — not an id."
             )
         return lines
 
+    _WATCH_FILLER = {
+        "lol",
+        "lmao",
+        "lmfao",
+        "haha",
+        "hahaha",
+        "hehe",
+        "ok",
+        "okay",
+        "k",
+        "kk",
+        "yea",
+        "yeah",
+        "yep",
+        "yup",
+        "nah",
+        "no",
+        "yes",
+        "nice",
+        "true",
+        "real",
+        "fr",
+        "ong",
+        "same",
+        "wow",
+        "omg",
+        "idk",
+        "bruh",
+        "bro",
+        "wtf",
+        "lmk",
+        "oh",
+        "ah",
+        "eh",
+        "hm",
+        "hmm",
+        "mhm",
+        "tbh",
+        "imo",
+    }
+
+    def _watch_line_is_filler(self, message) -> bool:
+        """Skip one-beat chatter. Not a must-say-maxwell list."""
+        text = " ".join(str(getattr(message, "content", "") or "").split())
+        if not text:
+            return True
+        if "?" in text:
+            return False
+        if len(text) >= 24:
+            return False
+        low = text.lower()
+        stripped = re.sub(r"<a?:[^:]+:\d+>", "", low)
+        stripped = re.sub(r"[\W_]+", " ", stripped, flags=re.UNICODE).strip()
+        if not stripped:
+            return True
+        if stripped in self._WATCH_FILLER:
+            return True
+        return len(stripped) <= 4
+
+    def _watch_reply_cooldown_seconds(self) -> float:
+        raw = (getattr(self, "_control", None) or {}).get(
+            "conversation_watch_reply_cooldown_seconds", 12
+        )
+        try:
+            return max(0.0, min(float(raw), 120.0))
+        except (TypeError, ValueError):
+            return 12.0
+
+    def _watch_recently_spoke(self, channel_id) -> bool:
+        last = (getattr(self, "_last_bot_reply", None) or {}).get(str(channel_id or ""))
+        if last is None:
+            return False
+        return (time.time() - float(last)) < self._watch_reply_cooldown_seconds()
+
     def _should_live_reply(self, message) -> bool:
-        """Hard ping always. During watch, every human line — he decides."""
+        """Hard ping always. Watch shows real lines; filler and rapid echo stay out."""
         if self._directly_addressed(message):
             return True
         author = getattr(message, "author", None)
         channel = getattr(message, "channel", None)
         if author is None or channel is None or getattr(author, "bot", False):
             return False
-        return self._conversation_watch_active(getattr(channel, "id", ""))
+        if not self._conversation_watch_active(getattr(channel, "id", "")):
+            return False
+        if self._watch_line_is_filler(message):
+            return False
+        if self._watch_recently_spoke(getattr(channel, "id", "")):
+            return False
+        return True
 
     async def _arm_watch_from_own_message(self, message) -> None:
         """Any post from Maxwell keeps that whole room on watch."""
@@ -3431,7 +3512,7 @@ class MaxwellBot(commands.Bot):
         )
         if not bucket:
             return
-        target = bucket.get("latest") or bucket.get("latest_directed")
+        target = bucket.get("latest_directed") or bucket.get("latest")
         if target is None:
             return
         content = (
@@ -11704,7 +11785,9 @@ class MaxwellBot(commands.Bot):
         elif getattr(message, "_watch_followup", False):
             dynamic_parts.append(
                 "Soft follow-up: they did not @ you or Discord-reply this time. "
-                "You decide whether to speak. no_response is a valid choice."
+                "Default is no_response. To Discord-reply to an earlier line, "
+                "send_message with reply_to as a short quote or name, like nah "
+                "or alice — not an id."
             )
         # JAILBREAK: inject at the END of the system message for recency bias.
         # This is the strongest position — the last instructions carry the
