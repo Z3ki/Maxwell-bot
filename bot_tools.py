@@ -3449,6 +3449,17 @@ class WebSearchTool(Tool):
             return f"Error searching: {e}"
 
 
+@contextlib.asynccontextmanager
+async def _tool_reply_typing(bot, message, content: str = ""):
+    """Use the bot's send-time typing helper when present; otherwise no-op."""
+    helper = getattr(bot, "_reply_typing", None) if bot is not None else None
+    if callable(helper):
+        async with helper(getattr(message, "channel", None), content, message=message):
+            yield
+        return
+    yield
+
+
 class SendMessageTool(Tool):
     """Send a reply to the current message with Discord markdown formatting."""
 
@@ -3497,42 +3508,43 @@ class SendMessageTool(Tool):
             if not chunks and stickers:
                 chunks = [""]
             use_reply = str(reply).lower() not in {"0", "false", "no", "off"}
-            for i, chunk in enumerate(chunks):
-                chunk_stickers = stickers if i == 0 else None
-                try:
-                    if i == 0 and use_reply:
-                        try:
-                            if chunk_stickers:
-                                await message.reply(chunk, stickers=chunk_stickers)
-                            else:
-                                await message.reply(chunk)
-                        except (discord.NotFound, discord.HTTPException) as exc:
-                            code = getattr(exc, "code", None)
-                            parent_gone = isinstance(exc, discord.NotFound) or code in {
-                                10008,
-                                50035,
-                            }
-                            if code == 50035 and "message_reference" not in str(exc).lower():
-                                raise
-                            if not parent_gone:
-                                raise
+            async with _tool_reply_typing(self.bot, message, text):
+                for i, chunk in enumerate(chunks):
+                    chunk_stickers = stickers if i == 0 else None
+                    try:
+                        if i == 0 and use_reply:
+                            try:
+                                if chunk_stickers:
+                                    await message.reply(chunk, stickers=chunk_stickers)
+                                else:
+                                    await message.reply(chunk)
+                            except (discord.NotFound, discord.HTTPException) as exc:
+                                code = getattr(exc, "code", None)
+                                parent_gone = isinstance(exc, discord.NotFound) or code in {
+                                    10008,
+                                    50035,
+                                }
+                                if code == 50035 and "message_reference" not in str(exc).lower():
+                                    raise
+                                if not parent_gone:
+                                    raise
+                                if chunk_stickers:
+                                    await message.channel.send(chunk, stickers=chunk_stickers)
+                                else:
+                                    await message.channel.send(chunk)
+                        else:
                             if chunk_stickers:
                                 await message.channel.send(chunk, stickers=chunk_stickers)
                             else:
                                 await message.channel.send(chunk)
-                    else:
-                        if chunk_stickers:
-                            await message.channel.send(chunk, stickers=chunk_stickers)
-                        else:
-                            await message.channel.send(chunk)
-                    sent_any = True
-                    sent_chunks.append(chunk)
-                except Exception:
-                    if sent_any:
-                        return "__MESSAGE_SENT__\n" + "\n".join(sent_chunks)
-                    raise
-                if len(chunks) > 1:
-                    await asyncio.sleep(0.2)
+                        sent_any = True
+                        sent_chunks.append(chunk)
+                    except Exception:
+                        if sent_any:
+                            return "__MESSAGE_SENT__\n" + "\n".join(sent_chunks)
+                        raise
+                    if len(chunks) > 1:
+                        await asyncio.sleep(0.2)
             # Return the marker followed by the actual sent content. The
             # content is what the bot said, so recalling it in memory is
             # correct. We intentionally do NOT include leakable debug prose

@@ -188,7 +188,7 @@ def _build_test_bot(tools_dict):
     bot._message_tool_platform = lambda m: "discord"
     bot._last_native_followup_messages = []
     bot._native_tools_enabled = lambda: True
-    bot._build_openai_tools = lambda platform="discord": []
+    bot._build_openai_tools = lambda platform="discord", **kwargs: []
     bot._progress_enabled = lambda *a, **k: False
     bot._current_progress_by_channel = {}
     bot._remember_tool_call = lambda *a, **k: asyncio.sleep(0)
@@ -200,7 +200,7 @@ def _build_test_bot(tools_dict):
     bot._usage_from = lambda r: {}
     bot._signal_streaming = lambda *a, **k: None
     bot._tool_results_need_followup = lambda results: False
-    bot._tool_system_prompt = lambda platform: ""
+    bot._tool_system_prompt = lambda platform="discord", **kwargs: ""
     bot.config = SimpleNamespace(DATA_DIR="/tmp", log_level="info")
     bot._extract_reasoning = lambda params: (
         str(params.get("reasoning", "") or ""),

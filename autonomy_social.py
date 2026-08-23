@@ -49,10 +49,14 @@ FLOOR_HANDLED = "HANDLED"      # the live reply path already answered the newest
 FLOOR_COOLDOWN = "COOLDOWN"    # Maxwell spoke very recently; too soon to start again
 FLOOR_BUSY = "BUSY"            # other people are mid-exchange and not talking to him
 FLOOR_ADDRESSED = "ADDRESSED"  # someone is waiting on Maxwell and nothing has answered
-FLOOR_OPEN = "OPEN"            # normal room, his turn is available
+FLOOR_OPEN = "OPEN"            # recent chatter, but not aimed at him
 FLOOR_IDLE = "IDLE"            # quiet room, nothing in flight
 
 #: States in which an unprompted message is Maxwell's to send.
+#: OPEN is allowed: an active room he has not been in is fair to join.
+#: HOLDING/COOLDOWN still block rooms where he was just active.
+#: BUSY stays closed so he does not talk over two people mid-exchange.
+#: IDLE still lets him start something after the room has gone quiet.
 FLOOR_OPEN_STATES = frozenset({FLOOR_ADDRESSED, FLOOR_OPEN, FLOOR_IDLE})
 
 #: Ordering used when the planner has to pick a room: someone waiting beats a
@@ -69,10 +73,10 @@ FLOOR_HINTS = {
     FLOOR_REPLYING: "you are already answering here right now — do not send a second message",
     FLOOR_HOLDING: "you spoke last and nobody has replied yet — wait for them, don't talk to yourself",
     FLOOR_HANDLED: "your live reply already covered the newest message here",
-    FLOOR_COOLDOWN: "you just spoke here — too soon to start something new",
+    FLOOR_COOLDOWN: "you posted here via autonomy recently — wait before starting something new",
     FLOOR_BUSY: "other people are mid-exchange and not talking to you — let them finish",
     FLOOR_ADDRESSED: "someone is waiting on you here and nothing has answered them yet",
-    FLOOR_OPEN: "normal room, nobody mid-thought — speaking here is fine if you have something",
+    FLOOR_OPEN: "the room is active and you have not been in it — fine to join if you actually want to",
     FLOOR_IDLE: "quiet for a while — fine to start something if you actually want to",
 }
 
@@ -92,16 +96,17 @@ class FloorSettings:
     again is a property of the conversation, not of how often Maxwell wakes up.
     """
 
-    #: After Maxwell's own last visible line, how long before an *unprompted*
-    #: new line is reasonable. Being addressed bypasses this.
-    cooldown_seconds: float = 90.0
+    #: After an *autonomy* post in this room, how long before another
+    #: unprompted line is allowed. Live replies do not start this window.
+    #: Being addressed bypasses it.
+    cooldown_seconds: float = 300.0
     #: How long Maxwell keeps holding the floor after speaking into silence.
     #: Past this the room has plainly moved on and a fresh start is fair.
     hold_release_seconds: float = 1800.0
     #: Window in which several messages from several people counts as an
     #: exchange in progress.
     mid_flow_seconds: float = 45.0
-    mid_flow_min_messages: int = 3
+    mid_flow_min_messages: int = 2
     #: Silence past this and the room reads as idle rather than active.
     idle_after_seconds: float = 600.0
 
@@ -239,19 +244,6 @@ def floor_message_from_discord(
             if str(getattr(user, "id", "") or "") == bot_id:
                 addresses_self = True
                 break
-        # Check @everyone / @here
-        if not addresses_self and getattr(message, "mention_everyone", False):
-            addresses_self = True
-        # Check role mentions
-        if not addresses_self:
-            guild = getattr(message, "guild", None)
-            if guild and bot_user:
-                me = getattr(guild, "me", None) or (guild.get_member(getattr(bot_user, "id", 0)) if hasattr(guild, "get_member") else None)
-                if me:
-                    bot_roles = set(getattr(me, "roles", []) or [])
-                    msg_roles = set(getattr(message, "role_mentions", []) or [])
-                    if bot_roles & msg_roles:
-                        addresses_self = True
         if not addresses_self and reply is not None:
             reply_author = getattr(reply, "author", None)
             if str(getattr(reply_author, "id", "") or "") == bot_id:
@@ -260,7 +252,9 @@ def floor_message_from_discord(
     return FloorMessage(
         created_at=_aware(getattr(message, "created_at", None)),
         is_self=is_self,
-        is_bot=bool(getattr(author, "bot", False)),
+        is_bot=bool(
+            getattr(author, "bot", False) or getattr(message, "webhook_id", None)
+        ),
         addresses_self=addresses_self,
         author_id=author_id,
     )
@@ -278,6 +272,7 @@ def read_floor(
     now: datetime | None = None,
     is_replying: bool = False,
     last_bot_reply_ts: Any = None,
+    last_autonomy_ts: Any = None,
     settings: FloorSettings | None = None,
     label: str = "",
 ) -> FloorVerdict:
@@ -319,10 +314,19 @@ def read_floor(
         # Nothing visible — but "I can't see the room" is not the same as "the
         # room is empty". If the main path replied here recently, that's real
         # evidence of a live conversation the history window just missed.
+        empty_auto_dt = _epoch_to_dt(last_autonomy_ts)
+        if empty_auto_dt is not None:
+            since_auto = (now - empty_auto_dt).total_seconds()
+            if 0 <= since_auto < settings.cooldown_seconds:
+                return verdict(
+                    FLOOR_COOLDOWN, f"autonomy posted here {_ago(since_auto)}"
+                )
+        # Live reply not yet in the history window — a short race, not the
+        # 5-minute autonomy cooldown.
         empty_reply_dt = _epoch_to_dt(last_bot_reply_ts)
         if empty_reply_dt is not None:
             since_reply = (now - empty_reply_dt).total_seconds()
-            if 0 <= since_reply < settings.cooldown_seconds:
+            if 0 <= since_reply < 90.0:
                 return verdict(
                     FLOOR_COOLDOWN, f"you replied here {_ago(since_reply)}"
                 )
@@ -331,26 +335,16 @@ def read_floor(
     newest = dated[-1]
     silence = max(0.0, (now - newest.created_at).total_seconds())  # type: ignore[operator]
 
-    # Two different notions of "when did Maxwell last speak", and conflating
-    # them is a real bug rather than a nicety.
-    #
-    # `last_self_msg_dt` is what's actually visible in the room, and it's what
-    # decides which inbound messages are still unanswered.
-    #
-    # `last_self_dt` also folds in `_last_bot_reply`, the in-memory stamp for a
-    # reply the main path sent that may not have landed in the history window
-    # yet. That one drives the cooldown — but it must NOT truncate the pending
-    # scan, or a ping the live path just answered reads as "you spoke recently"
-    # instead of "that's already handled". Both block, so the gate is right
-    # either way; the state string is what the planner reads, so it has to be
-    # the true one.
+    # Two clocks, kept apart on purpose:
+    # `last_self_msg_dt` is what's visible in the room (live or autonomy)
+    # and decides which inbound pings are still unanswered.
+    # `last_autonomy_dt` is the unprompted-post cooldown — live replies
+    # do not start it. `_last_bot_reply` is only for HANDLED / the empty
+    # history race, not for "was he active in this channel".
     self_times = [m.created_at for m in dated if m.is_self and m.created_at]
     last_self_msg_dt = max(self_times, default=None)
     last_reply_dt = _epoch_to_dt(last_bot_reply_ts)
-    last_self_dt = max(
-        [dt for dt in (last_self_msg_dt, last_reply_dt) if dt is not None],
-        default=None,
-    )
+    last_autonomy_dt = _epoch_to_dt(last_autonomy_ts)
 
     # 2. Maxwell spoke last and the room hasn't answered. This is the exact
     #    shape of "the bot randomly barged into its own conversation": the
@@ -400,22 +394,45 @@ def read_floor(
             )
         return verdict(FLOOR_ADDRESSED, f"waiting since {_ago(waited)}", silence)
 
-    # 4. Nobody is waiting. From here on, speaking is Maxwell starting
-    #    something — so the ordinary politeness rules apply.
-    if last_self_dt is not None:
-        since_self = max(0.0, (now - last_self_dt).total_seconds())
-        if since_self < settings.cooldown_seconds:
+    # 4. Nobody is waiting. Stay out only if *autonomy* posted here recently.
+    #    A live ping-reply does not count — he can still join an active room
+    #    he has not autonomy-posted into.
+    if last_autonomy_dt is not None:
+        since_auto = max(0.0, (now - last_autonomy_dt).total_seconds())
+        if since_auto < settings.cooldown_seconds:
             return verdict(
                 FLOOR_COOLDOWN,
-                f"you spoke here {_ago(since_self)}, inside the {int(settings.cooldown_seconds)}s cooldown",
+                f"autonomy posted here {_ago(since_auto)}, inside the {int(settings.cooldown_seconds)}s cooldown",
                 silence,
             )
 
-    # 6. Quiet room vs live room. Both are open; the distinction only shapes
-    #    what's natural to say.
+    # 5. Other people are mid-exchange and not talking to him. This used
+    #    to fall through as OPEN, which is how autonomy talked over two
+    #    humans who were already in a conversation.
+    recent = [
+        m
+        for m in dated
+        if m.created_at is not None
+        and (now - m.created_at).total_seconds() <= settings.mid_flow_seconds
+        and not m.is_self
+    ]
+    authors = {m.author_id for m in recent if m.author_id}
+    if (
+        len(recent) >= settings.mid_flow_min_messages
+        and len(authors) >= 2
+    ):
+        return verdict(
+            FLOOR_BUSY,
+            f"{len(authors)} people mid-exchange in the last {int(settings.mid_flow_seconds)}s",
+            silence,
+        )
+
+    # 6. Recent chatter he was not part of is still his to join. Quiet
+    #    rooms can still get a fresh start. HOLDING/COOLDOWN already
+    #    covered the case where he was just active here.
     if silence >= settings.idle_after_seconds:
         return verdict(FLOOR_IDLE, f"quiet for {_duration(silence)}", silence)
-    return verdict(FLOOR_OPEN, f"last message {_ago(silence)}, nobody mid-thought", silence)
+    return verdict(FLOOR_OPEN, f"last message {_ago(silence)}, not aimed at you", silence)
 
 
 def _duration(seconds: float) -> str:

@@ -576,11 +576,21 @@ def test_build_messages_caps_tool_history_outside_recent_count():
         _drugged_until={},
         _guild_emojis={},
         _recent_users={},
-        _tool_system_prompt=lambda: "",
+        _conversation_watch={},
+        _tool_system_prompt=lambda *args, **kwargs: "",
         bot_name="Maxwell",
         memory=memory,
-        user=SimpleNamespace(display_name="Maxwell"),
+        user=SimpleNamespace(display_name="Maxwell", id=1),
     )
+    bot._reply_parent = MaxwellBot._reply_parent.__get__(bot)
+    bot._replying_to_own_message = MaxwellBot._replying_to_own_message.__get__(bot)
+    bot._render_reply_parent = MaxwellBot._render_reply_parent.__get__(bot)
+    bot._reply_parent_context_lines = MaxwellBot._reply_parent_context_lines.__get__(
+        bot
+    )
+    bot._directly_addressed = MaxwellBot._directly_addressed.__get__(bot)
+    bot._conversation_watch_active = MaxwellBot._conversation_watch_active.__get__(bot)
+    bot._is_short_live_turn = MaxwellBot._is_short_live_turn.__get__(bot)
     message = SimpleNamespace(
         author=SimpleNamespace(bot=False, display_name="alice", id=456),
         channel=SimpleNamespace(id=123),
@@ -754,11 +764,21 @@ def test_build_messages_has_single_formatting_instruction():
         _drugged_until={},
         _guild_emojis={},
         _recent_users={},
-        _tool_system_prompt=lambda: "",
+        _conversation_watch={},
+        _tool_system_prompt=lambda *args, **kwargs: "",
         bot_name="Maxwell",
         memory=memory,
-        user=SimpleNamespace(display_name="Maxwell"),
+        user=SimpleNamespace(display_name="Maxwell", id=1),
     )
+    bot._reply_parent = MaxwellBot._reply_parent.__get__(bot)
+    bot._replying_to_own_message = MaxwellBot._replying_to_own_message.__get__(bot)
+    bot._render_reply_parent = MaxwellBot._render_reply_parent.__get__(bot)
+    bot._reply_parent_context_lines = MaxwellBot._reply_parent_context_lines.__get__(
+        bot
+    )
+    bot._directly_addressed = MaxwellBot._directly_addressed.__get__(bot)
+    bot._conversation_watch_active = MaxwellBot._conversation_watch_active.__get__(bot)
+    bot._is_short_live_turn = MaxwellBot._is_short_live_turn.__get__(bot)
     message = SimpleNamespace(
         author=SimpleNamespace(bot=False, display_name="alice", id=456),
         channel=SimpleNamespace(id=123),

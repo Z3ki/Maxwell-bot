@@ -92,10 +92,135 @@ def _poll_text(poll) -> str:
     return out
 
 
+def _iter_components(root: Any):
+    """Walk Discord layout/action-row trees and yield leaf-ish children."""
+    stack = []
+    comps = getattr(root, "components", None)
+    if comps is None and hasattr(root, "children"):
+        comps = getattr(root, "children", None)
+    if comps is None and isinstance(root, (list, tuple)):
+        comps = root
+    if comps:
+        stack.extend(list(comps))
+    seen = 0
+    while stack and seen < 40:
+        item = stack.pop(0)
+        seen += 1
+        yield item
+        kids = getattr(item, "children", None) or getattr(item, "components", None)
+        if kids:
+            stack.extend(list(kids))
+        accessory = getattr(item, "accessory", None)
+        if accessory is not None:
+            stack.append(accessory)
+
+
+def _describe_component(comp: Any) -> str | None:
+    """One compact button/select/text line, or None for layout wrappers."""
+    options = list(getattr(comp, "options", []) or [])
+    placeholder = str(getattr(comp, "placeholder", "") or "").strip()
+    if options or placeholder:
+        labels = []
+        for opt in options[:6]:
+            label = str(
+                getattr(opt, "label", None) or getattr(opt, "value", None) or ""
+            ).strip()
+            if label:
+                labels.append(label[:40])
+        bit = placeholder or "menu"
+        if labels:
+            bit += ": " + ", ".join(labels)
+        return f"select {bit}"
+
+    label = str(getattr(comp, "label", "") or "").strip()
+    url = str(getattr(comp, "url", "") or "").strip()
+    custom_id = str(getattr(comp, "custom_id", "") or "").strip()
+    emoji = getattr(comp, "emoji", None)
+    emoji_txt = ""
+    if emoji is not None:
+        emoji_txt = str(
+            getattr(emoji, "name", None) or getattr(emoji, "id", "") or ""
+        ).strip()
+    if label or url or (custom_id and not getattr(comp, "children", None)):
+        name = label or emoji_txt or "button"
+        if url:
+            return f"link {name} <{url}>"
+        return f"button {name}"
+
+    content = str(getattr(comp, "content", "") or "").strip()
+    if content:
+        return f"text {content[:80]}"
+    return None
+
+
+def _component_annotations(message: Any) -> list[str]:
+    bits = []
+    seen: set[str] = set()
+    for comp in _iter_components(message):
+        desc = _describe_component(comp)
+        if not desc or desc in seen:
+            continue
+        seen.add(desc)
+        bits.append(desc)
+        if len(bits) >= 12:
+            break
+    if not bits:
+        return []
+    return ["[components: " + "; ".join(bits) + "]"]
+
+
+def _attachment_is_voice(att: Any) -> bool:
+    checker = getattr(att, "is_voice_message", None)
+    if callable(checker):
+        with contextlib.suppress(Exception):
+            return bool(checker())
+    return getattr(att, "duration", None) is not None and getattr(
+        att, "waveform", None
+    ) is not None
+
+
+def _attachment_annotation(att: Any) -> str:
+    name = str(getattr(att, "filename", "") or "file")
+    ctype = str(getattr(att, "content_type", "") or "").split(";")[0].lower()
+    lower = name.lower()
+    if _attachment_is_voice(att):
+        dur = getattr(att, "duration", None)
+        extra = f" {float(dur):.0f}s" if dur else ""
+        return f"[voice message:{extra} {name}]"
+    if ctype.startswith("image/") or lower.endswith(
+        (".png", ".jpg", ".jpeg", ".gif", ".webp")
+    ):
+        return f"[image: {name}]"
+    if ctype.startswith("audio/") or lower.endswith(
+        (".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac")
+    ):
+        return f"[audio: {name}]"
+    if ctype.startswith("video/") or lower.endswith((".mp4", ".webm", ".mov", ".mkv")):
+        return f"[video: {name}]"
+    return f"[file: {name}]"
+
+
+def message_has_visible_payload(message: Any) -> bool:
+    """True when a Discord message carries anything Maxwell should remember."""
+    if str(getattr(message, "content", "") or "").strip():
+        return True
+    if list(getattr(message, "attachments", None) or []):
+        return True
+    if list(getattr(message, "embeds", None) or []):
+        return True
+    if list(getattr(message, "stickers", None) or []):
+        return True
+    if list(getattr(message, "components", None) or []):
+        return True
+    if getattr(message, "poll", None) is not None:
+        return True
+    return False
+
+
 def _render_message_annotations(message: Any, raw_content: str = "") -> str:
     """Extra structured context Discord messages carry outside plain content:
-    polls, app-command invocations, system/welcome events, embeds, and direct
-    media URLs in the text. Returns annotation lines (joined), or ''.
+    polls, app commands, system events, embeds, attachments, buttons/selects,
+    and direct media URLs. Returns annotation lines (joined), or ''.
     """
     parts: list[str] = []
 
@@ -123,7 +248,17 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
         if names:
             parts.append("[sticker: " + ", ".join(names) + "]")
 
-    inter = getattr(message, "interaction", None)
+    for att in list(getattr(message, "attachments", None) or [])[:5]:
+        try:
+            parts.append(_attachment_annotation(att))
+        except Exception:
+            continue
+
+    parts.extend(_component_annotations(message))
+
+    inter = getattr(message, "interaction", None) or getattr(
+        message, "interaction_metadata", None
+    )
     if inter is not None:
         try:
             name = getattr(inter, "name", None) or ""
@@ -162,10 +297,10 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
             ea = getattr(e, "author", None)
             aname = str(getattr(ea, "name", "")) if ea is not None else ""
             fields = []
-            for f in list(getattr(e, "fields", []) or [])[:5]:
+            for f in list(getattr(e, "fields", []) or [])[:8]:
                 try:
                     fn = str(getattr(f, "name", "") or "")
-                    fv = str(getattr(f, "value", "") or "")[:120]
+                    fv = str(getattr(f, "value", "") or "")[:160]
                     fields.append(f"{fn}: {fv}")
                 except Exception:
                     continue
@@ -173,6 +308,12 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
             thumb = getattr(e, "thumbnail", None)
             img_url = str(getattr(img, "url", "") or "") if img is not None else ""
             thumb_url = str(getattr(thumb, "url", "") or "") if thumb is not None else ""
+            footer = getattr(e, "footer", None)
+            footer_text = (
+                str(getattr(footer, "text", "") or "").strip()
+                if footer is not None
+                else ""
+            )
             line = "[embed:"
             if title:
                 line += f" {title[:200]}"
@@ -184,6 +325,8 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
                 line += f" <{url}>"
             if fields:
                 line += " | " + "; ".join(fields)
+            if footer_text:
+                line += f" | footer: {footer_text[:120]}"
             if img_url or thumb_url:
                 line += f" | image: {img_url or thumb_url}"
             parts.append(line + "]")

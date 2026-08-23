@@ -490,6 +490,7 @@ class RemEventLog:
                     "reply_to_author": str(raw.get("reply_to_author") or "")[:120],
                     "reply_to_author_id": str(raw.get("reply_to_author_id") or ""),
                     "reply_to_self": bool(raw.get("reply_to_self", False)),
+                    "reply_to_content": str(raw.get("reply_to_content") or "")[:240],
                     "auto_mode": bool(raw.get("auto_mode", False)),
                     "id": str(raw.get("id") or ""),
                     "kind": str(raw.get("kind") or role),
@@ -628,8 +629,15 @@ class RAGMemoryManager:
         self._embed_suppressed_failures = 0
         self._init_db()
 
+    def _embed_endpoint_paused(self) -> bool:
+        return time.monotonic() < self._embed_endpoint_down_until
+
     def _spawn(self, coro) -> asyncio.Task | None:
         """Create a bounded, tracked background task for embed work."""
+        if self._embed_endpoint_paused():
+            with contextlib.suppress(Exception):
+                coro.close()
+            return None
         if len(self._embed_tasks) >= MAX_BACKGROUND_EMBED_TASKS:
             # The row remains embedding=NULL and can be picked up by a later
             # maintenance pass. Dropping work here is safer than allowing a
@@ -1449,6 +1457,7 @@ class RAGMemoryManager:
             "reply_to_author",
             "reply_to_author_id",
             "reply_to_self",
+            "reply_to_content",
             "is_tool",
             "tool_name",
             "tool_params",

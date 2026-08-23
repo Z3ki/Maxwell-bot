@@ -13,6 +13,7 @@ from autonomy import (
     _planner_system_prompt,
     _truncate,
 )
+from autonomy_social import FLOOR_ADDRESSED, FLOOR_COOLDOWN, FLOOR_IDLE, FLOOR_OPEN
 
 
 class DummyTool:
@@ -1105,9 +1106,76 @@ def test_planner_prompt_is_not_silence_first():
     assert "often nothing" not in lowered
     assert "quiet hour" not in lowered
     assert "silence is the default" not in lowered
-    assert "you do not need a mention" in lowered
+    assert "addressed means someone is waiting" in lowered
+    assert "idle means the room has been quiet" in lowered
     assert "omit reply_to_message_id" in lowered
-    assert "no reply" in lowered
     assert "inbox_act" in lowered
     assert "join_vc" in lowered
     assert '"kind":"do_nothing","reason":"..."' not in prompt.replace(" ", "")
+
+
+def test_planner_work_pending_skips_stale_idle_and_cooldown():
+    stale = SimpleNamespace(state=FLOOR_IDLE, silence_seconds=10_000)
+    cool = SimpleNamespace(state=FLOOR_COOLDOWN, silence_seconds=5)
+    none_silence = SimpleNamespace(state=FLOOR_IDLE, silence_seconds=None)
+    assert (
+        AutonomyEngine._planner_work_pending(
+            [stale, cool, none_silence], inbox_pending=False, has_goals=False
+        )
+        is False
+    )
+
+
+def test_planner_work_pending_on_addressed_or_fresh_idle():
+    addressed = SimpleNamespace(state=FLOOR_ADDRESSED, silence_seconds=3)
+    fresh = SimpleNamespace(state=FLOOR_IDLE, silence_seconds=60)
+    open_room = SimpleNamespace(state=FLOOR_OPEN, silence_seconds=40)
+    assert (
+        AutonomyEngine._planner_work_pending(
+            [addressed], inbox_pending=False, has_goals=False
+        )
+        is True
+    )
+    assert (
+        AutonomyEngine._planner_work_pending(
+            [fresh], inbox_pending=False, has_goals=False
+        )
+        is True
+    )
+    assert (
+        AutonomyEngine._planner_work_pending(
+            [open_room], inbox_pending=False, has_goals=False
+        )
+        is True
+    )
+
+
+def test_planner_work_pending_on_inbox_or_goals():
+    stale = SimpleNamespace(state=FLOOR_IDLE, silence_seconds=10_000)
+    assert (
+        AutonomyEngine._planner_work_pending(
+            [stale], inbox_pending=True, has_goals=False
+        )
+        is True
+    )
+    assert (
+        AutonomyEngine._planner_work_pending(
+            [stale], inbox_pending=False, has_goals=True
+        )
+        is True
+    )
+
+
+def test_should_call_planner_skips_quiet_rooms(tmp_path):
+    engine = _engine(tmp_path)
+    engine._floor_verdicts = {
+        "D1": SimpleNamespace(state=FLOOR_IDLE, silence_seconds=10_000),
+        "G1": SimpleNamespace(state=FLOOR_COOLDOWN, silence_seconds=5),
+    }
+
+    assert asyncio.run(engine._should_call_planner()) is False
+
+    engine._floor_verdicts = {
+        "G1": SimpleNamespace(state=FLOOR_ADDRESSED, silence_seconds=2),
+    }
+    assert asyncio.run(engine._should_call_planner()) is True

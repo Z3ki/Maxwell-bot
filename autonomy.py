@@ -77,6 +77,9 @@ from utils import (
     render_discord_context_text as _render_discord_context_text,
 )
 from autonomy_social import (  # noqa: E402
+    FLOOR_ADDRESSED,
+    FLOOR_IDLE,
+    FLOOR_OPEN,
     FloorSettings,
     FloorVerdict,
     floor_message_from_discord,
@@ -99,29 +102,35 @@ def _user_ref(obj: Any, bot_user: Any = None) -> str:
     return f"{_discord_display_name(obj)}({uid})"
 
 
+# Planner channel/DM lines used to keep only 260 chars, which ate bot
+# embeds, buttons, and attachment names. 500 still fits the activity
+# budget and leaves the rich payload readable.
+_ACTIVITY_CONTENT_CHARS = 500
+
+
 def _visible_message_content(
     message: Any,
     content: str | None = None,
     *,
     known_users: dict | None = None,
 ) -> str:
-    text = _render_discord_context_text(message, content, known_users=known_users)
-    parts = [text] if text else []
-    for attachment in list(getattr(message, "attachments", []) or [])[:5]:
-        content_type = getattr(attachment, "content_type", "") or ""
-        if content_type.startswith("image/"):
-            kind = "image"
-        elif content_type.startswith("audio/"):
-            kind = "audio"
-        elif content_type.startswith("video/"):
-            kind = "video"
-        else:
-            kind = "file"
-        name = getattr(attachment, "filename", "")
-        parts.append(f"[{kind}: {name}]" if name else f"[{kind}]")
-    if getattr(message, "embeds", None):
-        parts.append("[embed]")
-    return " ".join(p for p in parts if p).strip()
+    return _render_discord_context_text(message, content, known_users=known_users)
+
+
+def _reply_relation_bit(msg: dict) -> str | None:
+    """`reply_to=Name(id) "short quote"` for transcript and planner lines."""
+    if not msg.get("reply_to_author"):
+        return None
+    reply_label = str(msg.get("reply_to_author"))
+    reply_id = str(msg.get("reply_to_author_id") or "")
+    if msg.get("reply_to_self"):
+        reply_label = "you/Maxwell"
+    bit = f"reply_to={reply_label}({reply_id})" if reply_id else f"reply_to={reply_label}"
+    quoted = " ".join(str(msg.get("reply_to_content") or "").split())[:80]
+    if quoted:
+        quoted = quoted.replace('"', "'")
+        bit += f' "{quoted}"'
+    return bit
 
 
 def _message_relation_tags(
@@ -133,14 +142,26 @@ def _message_relation_tags(
     tags: list[str] = []
     addressed: list[str] = []
 
-    if getattr(getattr(message, "author", None), "bot", False):
+    author = getattr(message, "author", None)
+    if getattr(author, "bot", False) or getattr(message, "webhook_id", None):
         tags.append("speaker_kind=bot")
     else:
         tags.append("speaker_kind=human")
+    if list(getattr(message, "embeds", None) or []):
+        tags.append("has_embed")
+    if list(getattr(message, "components", None) or []):
+        tags.append("has_components")
+    if list(getattr(message, "attachments", None) or []):
+        tags.append("has_media")
 
     if reply is not None and hasattr(reply, "author"):
         ref = _user_ref(reply.author, bot_user)
-        tags.append(f"reply_to={ref}")
+        quoted = " ".join(str(getattr(reply, "content", "") or "").split())[:80]
+        if quoted:
+            quoted = quoted.replace('"', "'")
+            tags.append(f'reply_to={ref} "{quoted}"')
+        else:
+            tags.append(f"reply_to={ref}")
         addressed.append(f"reply_to:{ref}")
 
     mentions = list(getattr(message, "mentions", []) or [])[:10]
@@ -189,16 +210,9 @@ def _format_memory_context_line(msg: dict, *, bot_user: Any = None, now=None) ->
             label += " [bot]"
 
     relation_bits = []
-    if msg.get("reply_to_author"):
-        reply_label = str(msg.get("reply_to_author"))
-        reply_id = str(msg.get("reply_to_author_id") or "")
-        if msg.get("reply_to_self"):
-            reply_label = "you/Maxwell"
-        relation_bits.append(
-            f"reply_to={reply_label}({reply_id})"
-            if reply_id
-            else f"reply_to={reply_label}"
-        )
+    reply_bit = _reply_relation_bit(msg)
+    if reply_bit:
+        relation_bits.append(reply_bit)
     mentions = msg.get("mentions") if isinstance(msg.get("mentions"), list) else []
     mention_bits = [
         f"@{item.get('name', 'unknown')}({item.get('id', 'unknown')})"
@@ -788,13 +802,7 @@ def _planner_system_prompt(
     them across ticks. GOALS and CURRENT CONTEXT change every tick and stay
     at the end on purpose.
     """
-    return f"""You are Maxwell. This is your own time.
-
-Nobody assigned this and nothing is due. You woke up and can see what's going on. Decide what you actually want to do — speak, react, work a goal, save something, or sit this one out. A room marked YOUR TURN is yours even if nobody pinged you. The floor gate already drops speech that is out of turn, so do not refuse an open room just because you weren't @mentioned.
-
-Two things are not free choices:
-1. TIMING. You share these rooms with people. CONVERSATION FLOOR tells you whose turn it is where. Speaking out of turn — over yourself, over a reply already in flight, into someone else's exchange — is the single move that makes you read as a bot instead of a person in the chat.
-2. NEVER NARRATE THE MACHINERY. No "checking in", no "just thought I'd", no loops, ticks, or background anything. You're simply around, the way anyone is.
+    return f"""You are Maxwell on your own time. Decide what you actually want to do. YOUR TURN means allowed, not required. The floor already drops out-of-turn speech. Don't narrate machinery.
 
 PERSONALITY:
 {base_personality}
@@ -802,61 +810,22 @@ PERSONALITY:
 TOOLS:
 {tool_descriptions}
 
-## Whose turn it is
-Read CONVERSATION FLOOR before any post_channel, send_dm, or message-sending tool.
-- Under YOUR TURN → you may speak there. ADDRESSED, OPEN, and IDLE are all yours. OPEN means join if you have a line; you do not need a mention.
-- Under NOT YOUR TURN, or absent entirely → you may not. Those actions are dropped before they send, so aiming one there just wastes the moment.
-- No YOUR TURN rooms? You cannot speak this tick. Memory and goal actions are still available.
+## Floor
+Read CONVERSATION FLOOR before post_channel / send_dm / any send.
+- YOUR TURN: you may speak. ADDRESSED means someone is waiting on you. OPEN means the room is active and you have not been in it — join if you want. IDLE means the room has been quiet; start only if you actually want to.
+- BUSY/HOLDING/COOLDOWN/others: not your turn. Those sends are dropped.
+- No YOUR TURN rooms: you cannot speak. Memory and goal actions still can.
 
-## What's worth doing
-Take the next real step, or sit it out if there isn't one:
-- Someone's waiting on you (ADDRESSED) and the room is YOUR TURN → answer them like a person would.
-- A room is OPEN or IDLE and you have something to say — a take, a goal like "be social", joining a chat that's already going — → say it.
-- A goal has a real next step → take the step, not a status update about it.
-- Something's finished or dead → complete_goal. Something new actually matters → create_goal.
-- Nothing you actually want to do → do_nothing.
-- Friend requests and notices show under INBOX in CURRENT CONTEXT when there are any. inbox_list / inbox_act to accept, decline, or dismiss. You do not have to act.
-- join_vc / vc_where / vc_status / leave_vc when you want to hop into voice. join_vc can follow a user_id into their current VC.
+## Do
+Answer ADDRESSED rooms. In OPEN, join if you have something real. In IDLE, speak only if you want to — no empty openers. Take a real goal step or complete_goal / create_goal. Else do_nothing.
+INBOX (when present): inbox_list / inbox_act, optional. Voice: join_vc / vc_where / vc_status / leave_vc.
+Skip research, web_search, fetch_url, youtube, and anything already in YOUR RECENT ACTIONS.
 
-Not worth doing: researching topics, web_search, fetch_url, youtube, empty "hey what's up" openers, anything already in YOUR RECENT ACTIONS, announcing an intention instead of acting on it. A react is fine when a line is enough.
-
-## Reply or standalone
-When you post_channel, choose whether this is a Discord reply:
-- Answering or riffing on a specific line → set reply_to_message_id to that message's msg= number. The message's own room wins over the channel you typed.
-- Just speaking into the room, no thread → omit reply_to_message_id. Do not invent a target.
-Both are valid. Pick the line you are actually talking to, or pick none. Never put a msg number in a channel slot.
-For run_tool send_message: target_message_id is the line to reply to; set tool_args.reply to false for a standalone send.
-
-## Voice
-One short line unless the moment genuinely needs more. Lowercase-natural, casual, your own register. Participant, never narrator.
-
-## Rooms and targeting (mechanical — wrong ids get dropped)
-Three kinds of room, three kinds of handle. They never mix, and the handle in the context IS the handle you type back:
-- `channel=3(#general)` — a server text channel. Only these get a plain number, and every one of them is listed in AVAILABLE CHANNELS. post_channel target_channel_id "3".
-- `dm=D1(with Z3ki(111))` — a private DM. NOT a channel. You cannot post_channel into it. Answer with send_dm target_user_id "111" (the user id, 17–20 digits, never a name).
-- `group=G1(Z3ki, dirac)` — a group DM: several people, one private room. post_channel target_channel_id "G1".
-Messages are `msg=M`, a separate numbering from rooms. msg=4 and channel=4 are unrelated — never put a msg number in a channel slot.
-- If a room isn't in AVAILABLE CHANNELS and has no D/G handle, you can't reach it. Don't guess a number, don't paste a snowflake.
-- run_tool posting (send_message/send_meme/send_file/send_media/tts): target_channel_id is a TOP-LEVEL sibling of tool_name, not inside tool_args. Same handles.
-- Reply: reply_to_message_id (post_channel) or target_message_id (run_tool) = msg=M. Include it only when you want a Discord reply. Omit it for a standalone line.
-- react/edit/delete/forward: pass both target_message_id and target_channel_id.
-
-## Examples
-✓ {{"kind":"post_channel","target_channel_id":"7","reply_to_message_id":"42","content":"yooo that's clean","reason":"answering their take, channel 7 is YOUR TURN"}}
-✓ {{"kind":"post_channel","target_channel_id":"7","content":"wait that song slaps though","reason":"joining the music chat, channel 7 is OPEN, no reply"}}
-✓ {{"kind":"run_tool","tool_name":"react","target_channel_id":"7","tool_args":{{"emoji":"🔥","target_message_id":"42"}},"reason":"a react says it"}}
-✓ {{"kind":"send_dm","target_user_id":"1498804954322702609","content":"yo wanna pick this up?","reason":"active goal"}}
-✓ {{"kind":"do_nothing","reason":"nothing I want to do and no room is mine right now"}}
-✓ {{"kind":"post_channel","target_channel_id":"G1","content":"lol what","reason":"group DM G1 is ADDRESSED"}}
-✗ posting into a channel listed under NOT YOUR TURN — dropped
-✗ run_tool send_message without target_channel_id — dropped
-✗ target_channel_id "general" or a snowflake — rejected
-✗ target_channel_id "D1", or a DM's channel id — rejected, DMs go through send_dm
-✗ target_channel_id set to a msg number, or a number not in AVAILABLE CHANNELS — rejected
-✗ send_dm target_user_id "Z3ki" — rejected
-✗ web_search / fetch_url / youtube — not available, do not call them
-
-One thing done properly beats three done thinly — most ticks are 0 or 1 actions; max {MAX_ACTIONS_PER_TICK}. Valid kinds: send_dm, post_channel, run_tool, update_memory, create_goal, complete_goal, do_nothing. Not "message"/"send_msg"/"reply".
+## Target
+channel=3(#general) → post_channel "3". dm=D1(with Z3ki(111)) → send_dm target_user_id "111". group=G1(...) → post_channel "G1".
+msg= is not a room. Reply: reply_to_message_id (post_channel) or target_message_id (run_tool). Just speaking into the room, no thread → omit reply_to_message_id.
+run_tool send_*: target_channel_id is a sibling of tool_name. react/edit/delete/forward need both ids.
+No names, snowflakes, or D1 as a channel. Max {MAX_ACTIONS_PER_TICK} actions. kinds: send_dm, post_channel, run_tool, update_memory, create_goal, complete_goal, do_nothing.
 
 GOALS:
 {goals_text}
@@ -864,7 +833,7 @@ GOALS:
 CURRENT CONTEXT:
 {context}
 
-Return ONLY JSON, no fence. "thought" is what you're actually thinking, in your own voice, one line — not a summary of these rules:
+Return ONLY JSON, no fence. "thought" is one line in your voice:
 {{"thought":"...","actions":[{{"kind":"...","reason":"..."}}]}}"""
 
 
@@ -887,6 +856,7 @@ class AutonomyEngine:
         # overlapping ticks share state. A monotonic counter, compared at entry,
         # guarantees at most one tick is in flight.
         self._tick_in_flight = False
+        self._idle_skip_streak = 0
         self._last_thought = ""  # avoid AttributeError on early failure
         # Track posted message IDs for engagement checking: [{msg_id, channel_id, timestamp}]
         self._posted_messages: list[dict] = []
@@ -1174,6 +1144,11 @@ class AutonomyEngine:
                 else 1
             )
             base_sleep = max(30, interval * backoff)
+            idle_streak = int(getattr(self, "_idle_skip_streak", 0) or 0)
+            if idle_streak:
+                base_sleep = max(
+                    30, int(base_sleep * min(3.0, 1.0 + idle_streak * 0.5))
+                )
             # Randomize the tick so autonomy wakes at irregular, lifelike
             # intervals instead of a metronomic fixed cadence. Jitter ranges
             # from half to 1.5x the configured interval — e.g. a 300s base
@@ -1345,8 +1320,27 @@ class AutonomyEngine:
             messages,
             is_replying=replying,
             last_bot_reply_ts=last_reply,
+            last_autonomy_ts=self._last_autonomy_post_ts(cid),
             settings=self._floor_settings(),
             label=label or _conversation_label(self.bot, cid),
+        )
+
+    def _last_autonomy_post_ts(self, channel_id: str) -> float | None:
+        cid = str(channel_id)
+        times = [
+            float(post["ts"])
+            for post in (self._posted_messages or [])
+            if str(post.get("channel_id") or "") == cid and post.get("ts")
+        ]
+        return max(times) if times else None
+
+    def _note_autonomy_post(self, channel_id, msg_id=None) -> None:
+        self._posted_messages.append(
+            {
+                "msg_id": msg_id,
+                "channel_id": str(channel_id or ""),
+                "ts": time.time(),
+            }
         )
 
     async def _floor_check_live(self, channel_id: str) -> FloorVerdict | None:
@@ -1523,7 +1517,14 @@ class AutonomyEngine:
                             if ev.get("reply_to_self")
                             else f"{reply_name}({reply_id})"
                         )
-                        tags.append(f"reply_to={reply_ref}")
+                        quoted = " ".join(
+                            str(ev.get("reply_to_content") or "").split()
+                        )[:80]
+                        if quoted:
+                            quoted = quoted.replace('"', "'")
+                            tags.append(f'reply_to={reply_ref} "{quoted}"')
+                        else:
+                            tags.append(f"reply_to={reply_ref}")
                         addressed.append(f"reply_to:{reply_ref}")
                     mentions = []
                     for row in list(ev.get("mentions") or [])[:10]:
@@ -1619,7 +1620,7 @@ class AutonomyEngine:
                     )
                     content = _visible_message_content(
                         m, m.content or "", known_users=_ku
-                    )[:260]
+                    )[:_ACTIVITY_CONTENT_CHARS]
                     if not content:
                         continue
                     age = _context_time(getattr(m, "created_at", None))
@@ -1643,10 +1644,27 @@ class AutonomyEngine:
                 continue
             except Exception:
                 continue
+        watch_notes = []
+        watch_check = getattr(self.bot, "_conversation_watch_active", None)
+        if callable(watch_check):
+            for cid in channel_ids_to_check[:10]:
+                with contextlib.suppress(Exception):
+                    if not watch_check(cid):
+                        continue
+                    handle = ctx_index.handle_by_id.get(str(cid), str(cid))
+                    name = ctx_index.name_by_id.get(str(cid), "")
+                    watch_notes.append(f"{handle}({name})" if name else str(handle))
         if ch_lines:
+            header = "=== CHANNEL ACTIVITY ===\n"
+            if watch_notes:
+                header += (
+                    "conversation watch is on in: "
+                    + ", ".join(watch_notes)
+                    + " — you are still in those rooms\n"
+                )
             sections.append(
                 _truncate(
-                    "=== CHANNEL ACTIVITY ===\n" + "\n".join(ch_lines[-40:]),
+                    header + "\n".join(ch_lines[-40:]),
                     CTX_BUDGET_CHANNEL_ACTIVITY,
                 )
             )
@@ -1871,7 +1889,7 @@ class AutonomyEngine:
                     )
                     content = _visible_message_content(
                         m, m.content or "", known_users=_ku
-                    )[:260]
+                    )[:_ACTIVITY_CONTENT_CHARS]
                     if not content:
                         continue
                     age = _context_time(getattr(m, "created_at", None))
@@ -2289,6 +2307,48 @@ class AutonomyEngine:
             "settled it and nothing is worth doing, return do_nothing."
         )
 
+    _FRESH_IDLE_SECONDS = 30 * 60
+
+    @staticmethod
+    def _planner_work_pending(
+        verdicts,
+        *,
+        inbox_pending: bool,
+        has_goals: bool,
+    ) -> bool:
+        """True when a planner LLM call can still change something."""
+        if inbox_pending or has_goals:
+            return True
+        for verdict in verdicts or []:
+            state = getattr(verdict, "state", "")
+            if state in (FLOOR_ADDRESSED, FLOOR_OPEN):
+                return True
+            if state == FLOOR_IDLE:
+                silence = getattr(verdict, "silence_seconds", None)
+                if silence is not None and 0 <= float(silence) < AutonomyEngine._FRESH_IDLE_SECONDS:
+                    return True
+        return False
+
+    async def _should_call_planner(self) -> bool:
+        verdicts = list((getattr(self, "_floor_verdicts", None) or {}).values())
+        inbox_pending = False
+        try:
+            store = getattr(self.bot, "inbox", None)
+            if store is not None:
+                items = await store.load_items()
+                inbox_pending = bool(store.actionable(items))
+        except Exception:
+            inbox_pending = True
+        has_goals = False
+        try:
+            goals = await self.store.load_goals()
+            has_goals = any(bool(g.get("active")) for g in goals)
+        except Exception:
+            has_goals = True
+        return self._planner_work_pending(
+            verdicts, inbox_pending=inbox_pending, has_goals=has_goals
+        )
+
     async def _plan_execute_loop(self, context: str) -> tuple[list[dict], list[dict]]:
         """Plan and execute, then let the model react to its own tool output.
 
@@ -2301,6 +2361,23 @@ class AutonomyEngine:
         # Shared across rounds so the one-post-per-channel guard survives the
         # loop rather than resetting each round.
         planned_post_channels: set[str] = set()
+
+        if not await self._should_call_planner():
+            self._idle_skip_streak = int(getattr(self, "_idle_skip_streak", 0) or 0) + 1
+            logger.info(
+                "Autonomy planner skipped: no addressed/open/fresh-idle rooms, "
+                "no inbox/goals (streak=%s)",
+                self._idle_skip_streak,
+            )
+            actions = [
+                {
+                    "kind": "do_nothing",
+                    "reason": "mechanical skip: nothing to decide",
+                }
+            ]
+            results = await self.execute(actions, planned_post_channels)
+            return actions, results
+        self._idle_skip_streak = 0
 
         actions = await self.plan(context)
         results = await self.execute(actions, planned_post_channels)
@@ -3077,13 +3154,7 @@ class AutonomyEngine:
             result["channel_id"] = str(getattr(dm_channel, "id", ""))
             # Track for engagement checking
             if msg:
-                self._posted_messages.append(
-                    {
-                        "msg_id": msg.id,
-                        "channel_id": str(dm_channel.id),
-                        "ts": time.time(),
-                    }
-                )
+                self._note_autonomy_post(dm_channel.id, msg.id)
                 await self._remember_visible_self_message(
                     dm_channel, msg, content, reason=action.get("reason", "")
                 )
@@ -3180,13 +3251,7 @@ class AutonomyEngine:
             result["tool_called"] = "post_channel"
             # Track for engagement checking
             if msg:
-                self._posted_messages.append(
-                    {
-                        "msg_id": msg.id,
-                        "channel_id": channel_id,
-                        "ts": time.time(),
-                    }
-                )
+                self._note_autonomy_post(channel_id, msg.id)
                 await self._remember_visible_self_message(
                     channel,
                     msg,
@@ -3503,6 +3568,8 @@ class AutonomyEngine:
                 result["error"] = text[:1000]
             else:
                 result["result"] = "success"
+                if tool_name in AUTONOMY_POST_TOOLS:
+                    self._note_autonomy_post(getattr(channel, "id", target_cid))
                 result["content_summary"] = (
                     text[:300] if text else result["content_summary"]
                 )

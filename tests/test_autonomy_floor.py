@@ -134,11 +134,42 @@ def test_ping_that_predates_his_own_last_line_does_not_count():
 
 
 def test_cooldown_blocks_an_unprompted_restart():
-    # He spoke 30s ago, someone else has since said something not aimed at
-    # him. Nobody is waiting, so this is him starting a new thread — too soon.
-    verdict = _read([_msg(30, is_self=True), _msg(10, author="user1")])
+    # Autonomy posted 30s ago; someone else has since said something not
+    # aimed at him. The 5-minute autonomy window is still open.
+    verdict = _read(
+        [_msg(30, is_self=True), _msg(10, author="user1")],
+        last_autonomy_ts=(NOW - timedelta(seconds=30)).timestamp(),
+    )
     assert verdict.state == FLOOR_COOLDOWN
     assert verdict.may_speak is False
+
+
+def test_autonomy_cooldown_expires_after_five_minutes():
+    settings = FloorSettings(cooldown_seconds=300)
+    recent = _read(
+        [_msg(60, is_self=True), _msg(10, author="user1")],
+        last_autonomy_ts=(NOW - timedelta(seconds=120)).timestamp(),
+        settings=settings,
+    )
+    assert recent.state == FLOOR_COOLDOWN
+    expired = _read(
+        [_msg(400, is_self=True), _msg(10, author="user1")],
+        last_autonomy_ts=(NOW - timedelta(seconds=301)).timestamp(),
+        settings=settings,
+    )
+    assert expired.state == FLOOR_OPEN
+    assert expired.may_speak is True
+
+
+def test_live_reply_does_not_start_the_autonomy_cooldown():
+    # A ping-reply is not an autonomy post. If the room is active after that,
+    # he may still join.
+    verdict = _read(
+        [_msg(30, is_self=True), _msg(10, author="user1")],
+        last_bot_reply_ts=(NOW - timedelta(seconds=20)).timestamp(),
+    )
+    assert verdict.state == FLOOR_OPEN
+    assert verdict.may_speak is True
 
 
 def test_cooldown_does_not_apply_when_someone_is_waiting():
@@ -147,30 +178,36 @@ def test_cooldown_does_not_apply_when_someone_is_waiting():
     assert verdict.may_speak is True
 
 
-def test_legacy_reply_ts_alone_triggers_cooldown():
-    # No self message in the window at all — only the in-memory reply stamp.
+def test_legacy_reply_ts_alone_does_not_block_an_active_room():
+    # Live-path stamp with someone else talking is not an autonomy cooldown.
     verdict = _read(
         [_msg(10, author="user1")],
         last_bot_reply_ts=(NOW - timedelta(seconds=20)).timestamp(),
-    )
-    assert verdict.state == FLOOR_COOLDOWN
-
-
-def test_busy_when_two_people_are_mid_exchange():
-    # BUSY restriction was removed so active exchanges remain OPEN.
-    verdict = _read(
-        [_msg(30, author="a"), _msg(20, author="b"), _msg(5, author="a")]
     )
     assert verdict.state == FLOOR_OPEN
     assert verdict.may_speak is True
 
 
+def test_busy_when_two_people_are_mid_exchange():
+    verdict = _read(
+        [_msg(30, author="a"), _msg(20, author="b"), _msg(5, author="a")]
+    )
+    assert verdict.state == FLOOR_BUSY
+    assert verdict.may_speak is False
+
+
 def test_one_person_talking_to_themselves_is_not_busy():
     # Three messages, but one author. That's someone thinking out loud, not a
-    # conversation to interrupt.
+    # two-person exchange. He was not in this room, so OPEN is his to join.
     verdict = _read(
         [_msg(30, author="a"), _msg(20, author="a"), _msg(5, author="a")]
     )
+    assert verdict.state == FLOOR_OPEN
+    assert verdict.may_speak is True
+
+
+def test_open_room_is_joinable_when_he_was_not_in_it():
+    verdict = _read([_msg(60, author="a")])
     assert verdict.state == FLOOR_OPEN
     assert verdict.may_speak is True
 
@@ -245,6 +282,15 @@ def test_adapter_detects_mention_reply_and_self():
         author=SimpleNamespace(id=7, bot=False), mentions=[], created_at=ts
     )
     assert floor_message_from_discord(plain, bot_user=BOT).addresses_self is False
+
+    everyone = SimpleNamespace(
+        author=SimpleNamespace(id=7, bot=False),
+        mentions=[],
+        mention_everyone=True,
+        role_mentions=["mods"],
+        created_at=ts,
+    )
+    assert floor_message_from_discord(everyone, bot_user=BOT).addresses_self is False
 
     replied = floor_message_from_discord(
         plain, bot_user=BOT, reply=SimpleNamespace(author=SimpleNamespace(id=42))

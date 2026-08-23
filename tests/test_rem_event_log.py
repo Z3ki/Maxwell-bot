@@ -40,6 +40,7 @@ def test_rem_event_log_record_drain_cap_and_strip_reasoning(tmp_path):
                 "reply_to_author": "Maxwell",
                 "reply_to_author_id": "bot",
                 "reply_to_self": True,
+                "reply_to_content": "hey there",
             }
         )
         events = await log.drain_slice(None)
@@ -49,6 +50,7 @@ def test_rem_event_log_record_drain_cap_and_strip_reasoning(tmp_path):
         assert events[1]["reply_to_message_id"] == "222"
         assert events[1]["reply_to_author_id"] == "bot"
         assert events[1]["reply_to_self"] is True
+        assert events[1]["reply_to_content"] == "hey there"
         assert "secret" not in events[0]["content"]
         assert await log.size() == 2
         await log.flush()

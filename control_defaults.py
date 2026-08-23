@@ -52,6 +52,13 @@ DEFAULT_CONTROL = {
     "reply_dms": False,
     "reply_groups": False,
     "reply_mentions": True,
+    # After a mention/reply (or after Maxwell posts in a room), keep
+    # watching that whole channel so a directed follow-up does not need
+    # another @ or Discord reply. 0 disables the watch.
+    "conversation_watch_seconds": 120,
+    # Watch follow-ups wait this long for more lines, then one reply.
+    # Hard @ / reply-to-Maxwell still go out immediately.
+    "conversation_watch_debounce_seconds": 1,
     "reply_to_bots": False,
     # When False, reactions on the bot's own messages are swallowed
     # silently (logged + deduped) — no fake_message, no LLM turn, and
@@ -152,17 +159,16 @@ DEFAULT_CONTROL = {
     # Off means the planner still sees the room read but execute() stops
     # enforcing it: a debugging escape hatch, not a mode to run in.
     "autonomy_floor_enabled": True,
-    # Quiet window after Maxwell's own last line before an *unprompted* new one.
-    # Being addressed bypasses it. Tuned to conversational rhythm, not to the
-    # tick interval — politeness is a property of the room, not of the clock.
-    "autonomy_floor_cooldown_seconds": 90,
+    # Quiet window after an *autonomy* post before another unprompted line.
+    # Live replies do not start this window. Being addressed bypasses it.
+    "autonomy_floor_cooldown_seconds": 300,
     # How long he keeps holding the floor after speaking into silence. Past this
     # the room has plainly moved on and starting something fresh is fair.
     "autonomy_floor_hold_release_seconds": 1800,
     # Several messages from several people inside this window = an exchange in
     # progress; cutting in is what makes a bot feel like an interruption.
     "autonomy_floor_mid_flow_seconds": 45,
-    "autonomy_floor_mid_flow_messages": 3,
+    "autonomy_floor_mid_flow_messages": 2,
     # Silence past this and the room reads as idle rather than active.
     "autonomy_floor_idle_seconds": 600,
     "context_cleanup_enabled": True,  # background context janitor (dedupe/merge/remove weird shared-context facts)

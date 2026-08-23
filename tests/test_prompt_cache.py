@@ -27,7 +27,7 @@ class FakeMemory:
 
 
 def _bot(memory):
-    return SimpleNamespace(
+    bot = SimpleNamespace(
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
         _control={
             "base_personality": "test",
@@ -42,11 +42,22 @@ def _bot(memory):
         _drugged_until={},
         _guild_emojis={},
         _recent_users={},
-        _tool_system_prompt=lambda: "",
+        _conversation_watch={},
+        _tool_system_prompt=lambda *args, **kwargs: "",
         bot_name="Maxwell",
         memory=memory,
-        user=SimpleNamespace(display_name="Maxwell"),
+        user=SimpleNamespace(display_name="Maxwell", id=1),
     )
+    bot._reply_parent = MaxwellBot._reply_parent.__get__(bot)
+    bot._replying_to_own_message = MaxwellBot._replying_to_own_message.__get__(bot)
+    bot._render_reply_parent = MaxwellBot._render_reply_parent.__get__(bot)
+    bot._reply_parent_context_lines = MaxwellBot._reply_parent_context_lines.__get__(
+        bot
+    )
+    bot._directly_addressed = MaxwellBot._directly_addressed.__get__(bot)
+    bot._conversation_watch_active = MaxwellBot._conversation_watch_active.__get__(bot)
+    bot._is_short_live_turn = MaxwellBot._is_short_live_turn.__get__(bot)
+    return bot
 
 
 def _message():

@@ -170,6 +170,16 @@ def _sanitize_control(control):
     out["per_user_cooldown_seconds"] = max(
         0, min(out["per_user_cooldown_seconds"], 3600)
     )
+    out["conversation_watch_seconds"] = max(
+        0, min(_safe_int(out.get("conversation_watch_seconds") or 120, 120), 3600)
+    )
+    try:
+        _watch_debounce = float(
+            out.get("conversation_watch_debounce_seconds") or 1
+        )
+    except (TypeError, ValueError):
+        _watch_debounce = 1.0
+    out["conversation_watch_debounce_seconds"] = max(0.05, min(_watch_debounce, 5.0))
     out["max_image_size_mb"] = max(1, min(out["max_image_size_mb"], 25))
     out["ai_timeout_seconds"] = max(10, min(out["ai_timeout_seconds"], 7200))
     out["tool_iteration_timeout_seconds"] = max(
@@ -188,7 +198,7 @@ def _sanitize_control(control):
     # (0 everywhere) or wedge autonomy silent for a day.
     out["autonomy_floor_cooldown_seconds"] = max(
         0,
-        min(_safe_int(out.get("autonomy_floor_cooldown_seconds") or 90, 90), 3600),
+        min(_safe_int(out.get("autonomy_floor_cooldown_seconds") or 300, 300), 3600),
     )
     out["autonomy_floor_hold_release_seconds"] = max(
         60,
@@ -203,7 +213,7 @@ def _sanitize_control(control):
     )
     out["autonomy_floor_mid_flow_messages"] = max(
         2,
-        min(_safe_int(out.get("autonomy_floor_mid_flow_messages") or 3, 3), 20),
+        min(_safe_int(out.get("autonomy_floor_mid_flow_messages") or 2, 2), 20),
     )
     out["autonomy_floor_idle_seconds"] = max(
         60,
