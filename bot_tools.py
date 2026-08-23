@@ -1650,7 +1650,8 @@ class WaitTool(Tool):
         return (
             "Pause this tool batch (`wait`) for `seconds` (float, default 2, max 10). "
             "Turn stays open. For spacing separate send_messages only — not "
-            "to chunk a normal reply. Distinct from sleep (minutes, ends dispatch)."
+            "to chunk a normal reply. If someone is typing, wait for them to send. "
+            "Distinct from sleep (minutes, ends dispatch)."
         )
 
     async def execute(

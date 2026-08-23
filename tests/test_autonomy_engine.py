@@ -1263,6 +1263,7 @@ def test_planner_prompt_is_not_silence_first():
     assert "silence is the default" not in lowered
     assert "addressed means someone is waiting" in lowered
     assert "idle means the room has been quiet" in lowered
+    assert "typing means someone is composing" in lowered
     assert "omit reply_to_message_id" in lowered
     assert "inbox_act" in lowered
     assert "join_vc" in lowered

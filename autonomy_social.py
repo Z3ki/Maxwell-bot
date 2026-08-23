@@ -48,6 +48,7 @@ FLOOR_HOLDING = "HOLDING"      # Maxwell spoke last; nobody has answered yet
 FLOOR_HANDLED = "HANDLED"      # the live reply path already answered the newest ping
 FLOOR_COOLDOWN = "COOLDOWN"    # Maxwell spoke very recently; too soon to start again
 FLOOR_BUSY = "BUSY"            # other people are mid-exchange and not talking to him
+FLOOR_TYPING = "TYPING"        # someone is composing a message in this room right now
 FLOOR_ADDRESSED = "ADDRESSED"  # someone is waiting on Maxwell and nothing has answered
 FLOOR_OPEN = "OPEN"            # recent chatter, but not aimed at him
 FLOOR_IDLE = "IDLE"            # quiet room, nothing in flight
@@ -75,6 +76,7 @@ FLOOR_HINTS = {
     FLOOR_HANDLED: "your live reply already covered the newest message here",
     FLOOR_COOLDOWN: "you posted here via autonomy recently — wait before starting something new",
     FLOOR_BUSY: "other people are mid-exchange and not talking to you — let them finish",
+    FLOOR_TYPING: "someone is typing here — wait for them to send, don't talk over them",
     FLOOR_ADDRESSED: "someone is waiting on you here and nothing has answered them yet",
     FLOOR_OPEN: "the room is active and you have not been in it — fine to join if you actually want to",
     FLOOR_IDLE: "quiet for a while — fine to start something if you actually want to",
@@ -275,6 +277,7 @@ def read_floor(
     last_autonomy_ts: Any = None,
     settings: FloorSettings | None = None,
     label: str = "",
+    typing_names: Sequence[str] | None = None,
 ) -> FloorVerdict:
     """Decide whether Maxwell may speak unprompted in this channel.
 
@@ -305,6 +308,12 @@ def read_floor(
     #    message now lands on top of one that's still being written.
     if is_replying:
         return verdict(FLOOR_REPLYING, "main reply path is generating here")
+
+    names = [str(n).strip() for n in (typing_names or []) if str(n).strip()]
+    if names:
+        who = ", ".join(names[:5])
+        verb = "is" if len(names) == 1 else "are"
+        return verdict(FLOOR_TYPING, f"{who} {verb} typing")
 
     dated = sorted(
         (m for m in messages if m.created_at is not None),

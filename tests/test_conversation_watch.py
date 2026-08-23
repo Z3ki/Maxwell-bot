@@ -16,6 +16,10 @@ def _bot(*, watch_seconds=120, debounce_seconds=0.05):
         _conversation_watch={},
         _watch_debounce={},
         _channel_locks={},
+        _typing_users={},
+        _blacklist=set(),
+        _replying_channels=set(),
+        _recent_users={},
         user=SimpleNamespace(id=1382894657624866889),
     )
     bot._conversation_watch_seconds = MaxwellBot._conversation_watch_seconds.__get__(
@@ -50,6 +54,16 @@ def _bot(*, watch_seconds=120, debounce_seconds=0.05):
     bot._get_channel_lock = MaxwellBot._get_channel_lock.__get__(bot)
     bot._channel_lock_timeout = MaxwellBot._channel_lock_timeout.__get__(bot)
     bot._track_task = lambda task: task
+    bot._update_recent_users = MaxwellBot._update_recent_users.__get__(bot)
+    bot._prune_typing = MaxwellBot._prune_typing.__get__(bot)
+    bot._note_typing = MaxwellBot._note_typing.__get__(bot)
+    bot._clear_typing = MaxwellBot._clear_typing.__get__(bot)
+    bot._typing_in_channel = MaxwellBot._typing_in_channel.__get__(bot)
+    bot._typing_channel_ids = MaxwellBot._typing_channel_ids.__get__(bot)
+    bot._typing_prompt_lines = MaxwellBot._typing_prompt_lines.__get__(bot)
+    bot._TYPING_TTL_SECONDS = MaxwellBot._TYPING_TTL_SECONDS
+    bot._TYPING_WAIT_CAP_SECONDS = MaxwellBot._TYPING_WAIT_CAP_SECONDS
+    bot._TYPING_WAIT_STEP_SECONDS = MaxwellBot._TYPING_WAIT_STEP_SECONDS
     return bot
 
 
@@ -375,3 +389,35 @@ def test_bare_ping_with_an_attachment_is_not_empty():
     msg.mentions = [bot.user]
     msg.attachments = [SimpleNamespace(filename="pic.png")]
     assert MaxwellBot._is_bare_ping(bot, msg) is False
+
+
+def test_watch_prompt_names_who_is_typing():
+    bot = _bot()
+    msg = _plain_followup()
+    channel = msg.channel
+    user = SimpleNamespace(
+        id=1471821513824014480, display_name="Z3ki", name="z3ki", bot=False
+    )
+    MaxwellBot._note_typing(bot, channel, user)
+    lines = MaxwellBot._conversation_watch_prompt(bot, msg, channel.id)
+    assert any("Z3ki(1471821513824014480) is typing" in line for line in lines)
+    assert any("Wait for them to send" in line for line in lines)
+    MaxwellBot._clear_typing(bot, channel.id, user.id)
+    assert MaxwellBot._conversation_watch_prompt(bot, msg, channel.id) == []
+
+
+def test_typing_expires_and_ignores_self_and_bots():
+    bot = _bot()
+    channel = SimpleNamespace(id=1506001126426808511)
+    human = SimpleNamespace(id=7, display_name="Alice", name="alice", bot=False)
+    MaxwellBot._note_typing(bot, channel, human)
+    assert MaxwellBot._typing_in_channel(bot, channel.id)[0]["name"] == "Alice"
+    MaxwellBot._note_typing(
+        bot, channel, SimpleNamespace(id=bot.user.id, display_name="Maxwell", bot=False)
+    )
+    MaxwellBot._note_typing(
+        bot, channel, SimpleNamespace(id=99, display_name="Botty", bot=True)
+    )
+    assert [p["id"] for p in MaxwellBot._typing_in_channel(bot, channel.id)] == ["7"]
+    bot._typing_users[str(channel.id)]["7"]["expires_at"] = 0
+    assert MaxwellBot._typing_in_channel(bot, channel.id) == []

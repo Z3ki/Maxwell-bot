@@ -80,6 +80,7 @@ from autonomy_social import (  # noqa: E402
     FLOOR_ADDRESSED,
     FLOOR_IDLE,
     FLOOR_OPEN,
+    FLOOR_REPLYING,
     FloorSettings,
     FloorVerdict,
     floor_message_from_discord,
@@ -530,6 +531,7 @@ CTX_BUDGET_LTM = 800
 CTX_BUDGET_SHARED = 600
 CTX_BUDGET_CHANNELS_MAP = 1600  # bumped from 800 — enriched with topic/recency
 CTX_BUDGET_INBOX = 500
+CTX_BUDGET_TYPING = 800
 
 # Research tools are never available to the unattended tick. Curiosity-as-a-
 # drive turned every quiet interval into web_search + update_memory on random
@@ -815,7 +817,7 @@ TOOLS:
 ## Floor
 Read CONVERSATION FLOOR before post_channel / send_dm / any send.
 - YOUR TURN: you may speak. ADDRESSED means someone is waiting on you. OPEN means the room is active and you have not been in it — join if you want. IDLE means the room has been quiet; start only if you actually want to.
-- BUSY/HOLDING/COOLDOWN/others: not your turn. Those sends are dropped.
+- BUSY/HOLDING/COOLDOWN/TYPING/others: not your turn. Those sends are dropped. TYPING means someone is composing a message — wait for them.
 - No YOUR TURN rooms: you cannot speak. Memory and goal actions still can.
 
 ## Do
@@ -1062,6 +1064,14 @@ class AutonomyEngine:
                     if checker(cid):
                         add_channel_id(cid)
                 else:
+                    add_channel_id(cid)
+        with contextlib.suppress(Exception):
+            listing = getattr(self.bot, "_typing_channel_ids", None)
+            if callable(listing):
+                for cid in listing():
+                    add_channel_id(cid)
+            else:
+                for cid in getattr(self.bot, "_typing_users", None) or {}:
                     add_channel_id(cid)
         with contextlib.suppress(Exception):
             last = getattr(self.bot, "_last_bot_reply", None) or {}
@@ -1423,7 +1433,26 @@ class AutonomyEngine:
             last_autonomy_ts=self._last_autonomy_post_ts(cid),
             settings=self._floor_settings(),
             label=label or _conversation_label(self.bot, cid),
+            typing_names=self._typing_names(cid),
         )
+
+    def _typing_names(self, channel_id: str) -> list[str]:
+        """Display names of humans currently typing in this room."""
+        getter = getattr(self.bot, "_typing_in_channel", None)
+        if not callable(getter):
+            return []
+        people = []
+        with contextlib.suppress(Exception):
+            people = getter(channel_id) or []
+        names: list[str] = []
+        for person in people:
+            if isinstance(person, dict):
+                name = str(person.get("name") or "user").strip() or "user"
+                uid = str(person.get("id") or "").strip()
+                names.append(f"{name}({uid})" if uid else name)
+            elif person:
+                names.append(str(person))
+        return names
 
     def _last_autonomy_post_ts(self, channel_id: str) -> float | None:
         cid = str(channel_id)
@@ -1490,6 +1519,11 @@ class AutonomyEngine:
             # at. Never return None here: that would silently drop the
             # mid-reply check, which is the one guard that must hold even with
             # zero visibility into the room.
+            verdict = self._read_floor_for(cid, [])
+        # Live Discord history can miss a TYPING_START that arrived while
+        # the planner was thinking. Re-read against current typing so we
+        # don't talk over someone who started composing after the fetch.
+        if verdict.state != FLOOR_REPLYING and self._typing_names(cid):
             verdict = self._read_floor_for(cid, [])
         return verdict
 
@@ -2129,6 +2163,36 @@ class AutonomyEngine:
                     verdicts.append(verdict)
             sections[floor_slot] = render_floor_section(verdicts)
             logger.info("Autonomy %s", summarize_floor(verdicts))
+            typing_lines = []
+            seen_typing: set[str] = set()
+            listing = getattr(self.bot, "_typing_channel_ids", None)
+            typing_cids: list[str] = []
+            if callable(listing):
+                with contextlib.suppress(Exception):
+                    typing_cids = [str(cid) for cid in listing() or []]
+            else:
+                typing_cids = [str(cid) for cid in (getattr(self.bot, "_typing_users", None) or {})]
+            for cid in list(dict.fromkeys([*typing_cids, *floor_snapshots])):
+                names = self._typing_names(cid)
+                if not names or cid in seen_typing:
+                    continue
+                seen_typing.add(cid)
+                handle = ctx_index.handle_by_id.get(cid, cid)
+                room_name = ctx_index.name_by_id.get(cid, "")
+                room = f"{handle}({room_name})" if room_name else str(handle)
+                who = ", ".join(names[:5])
+                verb = "is" if len(names) == 1 else "are"
+                typing_lines.append(
+                    f"{who} {verb} typing in {room} — wait for them to send"
+                )
+            if typing_lines:
+                sections.insert(
+                    floor_slot + 1,
+                    _truncate(
+                        "=== PEOPLE TYPING ===\n" + "\n".join(typing_lines),
+                        CTX_BUDGET_TYPING,
+                    ),
+                )
         except Exception as e:
             # Failing open here would defeat the point: if the room can't be
             # read, the honest answer is that no room is confirmed open.

@@ -22,6 +22,7 @@ from autonomy_social import (
     FLOOR_IDLE,
     FLOOR_OPEN,
     FLOOR_REPLYING,
+    FLOOR_TYPING,
     FloorMessage,
     FloorSettings,
     floor_message_from_discord,
@@ -64,6 +65,24 @@ def test_empty_room_is_idle_and_open():
     verdict = _read([])
     assert verdict.state == FLOOR_IDLE
     assert verdict.may_speak is True
+
+
+def test_someone_typing_closes_the_floor():
+    verdict = _read([_msg(30, author="alice")], typing_names=["Alice(7)"])
+    assert verdict.state == FLOOR_TYPING
+    assert verdict.may_speak is False
+    assert "Alice(7)" in verdict.reason
+    assert "typing" in verdict.reason
+
+
+def test_replying_beats_typing():
+    verdict = _read(
+        [_msg(5, addresses=True)],
+        is_replying=True,
+        typing_names=["Alice(7)"],
+    )
+    assert verdict.state == FLOOR_REPLYING
+    assert verdict.may_speak is False
 
 
 def test_maxwell_spoke_last_holds_the_floor():
@@ -769,3 +788,42 @@ def test_dm_labels_omit_the_channel_snowflake(tmp_path):
     assert "dm=D1" in floor
     assert "send_dm target_user_id=1416565530504200254" in floor
     assert "channel=D1" not in floor
+
+
+def test_execute_drops_a_post_while_someone_is_typing(tmp_path):
+    channel = _Channel(history=[_hist(20, author_id=7)])
+    bot = _gate_bot(tmp_path, channel)
+    bot._typing_in_channel = lambda cid: (
+        [{"id": "7", "name": "Alice"}] if str(cid) == "100" else []
+    )
+    engine = AutonomyEngine(bot)
+
+    results = asyncio.run(
+        engine.execute(
+            [{"kind": "post_channel", "target_channel_id": "100", "content": "hey"}]
+        )
+    )
+
+    assert results[0]["result"] == "skipped"
+    assert FLOOR_TYPING in results[0]["content_summary"]
+    assert channel.sent == []
+
+
+def test_gather_context_lists_who_is_typing(tmp_path):
+    channel = _CtxChannel(messages=[_ctx_msg(555, 30, author_id=7)])
+    bot = _ctx_bot(tmp_path, channel)
+    bot._typing_in_channel = lambda cid: (
+        [{"id": "7", "name": "Alice"}] if str(cid) == "100" else []
+    )
+    bot._typing_channel_ids = lambda: ["100"]
+    engine = AutonomyEngine(bot)
+    engine.store = _CtxStore()
+
+    context = asyncio.run(engine.gather_context())
+
+    assert "=== PEOPLE TYPING ===" in context
+    assert "Alice(7)" in context
+    assert "typing" in context
+    assert engine._floor_verdicts["100"].state == FLOOR_TYPING
+    assert engine._floor_verdicts["100"].may_speak is False
+    assert "NOT YOUR TURN" in context

@@ -2338,6 +2338,11 @@ class MaxwellBot(commands.Bot):
         # channel_id -> pending watch follow-up. Wait a beat so a burst of
         # lines becomes one reply instead of one LLM turn per message.
         self._watch_debounce: dict[str, dict] = {}
+        # channel_id -> user_id -> {name, expires_at}. Discord TYPING_START
+        # lasts ~10s and refreshes while they keep composing. Live replies
+        # and autonomy read this so Maxwell can wait instead of talking over
+        # someone mid-sentence.
+        self._typing_users: dict[str, dict[str, dict]] = {}
         self._active_requests: dict[str, asyncio.Task] = {}
         self._active_request_user: dict[str, str] = {}
         # Per-channel current progress. Under load many channels can
@@ -2502,6 +2507,118 @@ class MaxwellBot(commands.Bot):
             if name:
                 return str(name)
         return None
+
+    _TYPING_TTL_SECONDS = 10.0
+    _TYPING_WAIT_CAP_SECONDS = 8.0
+    _TYPING_WAIT_STEP_SECONDS = 0.4
+
+    def _prune_typing(self, channel_id=None) -> None:
+        """Drop expired typing rows. Optional channel_id limits the sweep."""
+        now = time.monotonic()
+        store = getattr(self, "_typing_users", None)
+        if not isinstance(store, dict):
+            self._typing_users = {}
+            return
+        keys = [str(channel_id)] if channel_id is not None else list(store)
+        for cid in keys:
+            room = store.get(str(cid))
+            if not isinstance(room, dict):
+                store.pop(str(cid), None)
+                continue
+            for uid, row in list(room.items()):
+                try:
+                    exp = float((row or {}).get("expires_at") or 0)
+                except (TypeError, ValueError):
+                    exp = 0.0
+                if exp <= now:
+                    room.pop(uid, None)
+            if not room:
+                store.pop(str(cid), None)
+
+    def _note_typing(self, channel, user) -> None:
+        """Record that this user started (or refreshed) typing in channel."""
+        if channel is None or user is None:
+            return
+        uid = str(getattr(user, "id", "") or "")
+        cid = str(getattr(channel, "id", "") or "")
+        if not uid or not cid:
+            return
+        me = getattr(self, "user", None)
+        if me is not None and uid == str(getattr(me, "id", "")):
+            return
+        if getattr(user, "bot", False):
+            return
+        if uid in (getattr(self, "_blacklist", None) or set()):
+            return
+        ignored = set((getattr(self, "_control", None) or {}).get("ignore_users", []) or [])
+        if uid in ignored:
+            return
+        # discord.py-self can attribute Maxwell's own DM typing to the
+        # other person. While we are generating a reply there, ignore it.
+        if cid in (getattr(self, "_replying_channels", None) or set()):
+            if isinstance(channel, discord.DMChannel):
+                return
+        name = (
+            getattr(user, "display_name", None)
+            or getattr(user, "name", None)
+            or uid
+        )
+        store = getattr(self, "_typing_users", None)
+        if not isinstance(store, dict):
+            self._typing_users = {}
+            store = self._typing_users
+        room = store.setdefault(cid, {})
+        room[uid] = {
+            "name": str(name),
+            "expires_at": time.monotonic() + self._TYPING_TTL_SECONDS,
+        }
+        updater = getattr(self, "_update_recent_users", None)
+        if callable(updater):
+            with contextlib.suppress(Exception):
+                updater(cid, user)
+        if len(store) > 80:
+            self._prune_typing()
+
+    def _clear_typing(self, channel_id, user_id) -> None:
+        cid = str(channel_id or "")
+        uid = str(user_id or "")
+        if not cid or not uid:
+            return
+        store = getattr(self, "_typing_users", None) or {}
+        room = store.get(cid)
+        if isinstance(room, dict):
+            room.pop(uid, None)
+            if not room:
+                store.pop(cid, None)
+
+    def _typing_in_channel(self, channel_id) -> list[dict]:
+        """Humans currently typing in this room, newest refresh last."""
+        self._prune_typing(channel_id)
+        room = (getattr(self, "_typing_users", None) or {}).get(str(channel_id or ""))
+        if not isinstance(room, dict):
+            return []
+        people = []
+        for uid, row in room.items():
+            name = str((row or {}).get("name") or uid)
+            people.append({"id": str(uid), "name": name})
+        return people
+
+    def _typing_channel_ids(self) -> list[str]:
+        self._prune_typing()
+        return [cid for cid, room in (getattr(self, "_typing_users", None) or {}).items() if room]
+
+    def _typing_prompt_lines(self, channel_id) -> list[str]:
+        people = self._typing_in_channel(channel_id)
+        if not people:
+            return []
+        bits = [f"{p['name']}({p['id']})" for p in people[:6]]
+        who = ", ".join(bits)
+        verb = "is" if len(people) == 1 else "are"
+        return [
+            f"{who} {verb} typing in this room right now. Wait for them to send "
+            "— don't talk over them. Prefer wait or no_response unless they "
+            "already asked you something that needs an immediate answer."
+        ]
 
     async def _user_label(self, uid: str, *, guild=None) -> str:
         """`DisplayName (id)` for commands. Falls back to the id if unknown."""
@@ -3383,6 +3500,10 @@ class MaxwellBot(commands.Bot):
                 "with reply_to as a short quote or name, like nah or alice — "
                 "not an id."
             )
+        typer = getattr(self, "_typing_prompt_lines", None)
+        if callable(typer):
+            with contextlib.suppress(Exception):
+                lines.extend(typer(channel_id) or [])
         return lines
 
     def _should_live_reply(self, message) -> bool:
@@ -3467,6 +3588,23 @@ class MaxwellBot(commands.Bot):
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
             return
+        typer = getattr(self, "_typing_in_channel", None)
+        extra = 0.0
+        cap = float(getattr(self, "_TYPING_WAIT_CAP_SECONDS", 8.0) or 8.0)
+        step_n = float(getattr(self, "_TYPING_WAIT_STEP_SECONDS", 0.4) or 0.4)
+        while extra < cap:
+            people = []
+            if callable(typer):
+                with contextlib.suppress(Exception):
+                    people = typer(channel_id) or []
+            if not people:
+                break
+            step = min(step_n, cap - extra)
+            try:
+                await asyncio.sleep(step)
+            except asyncio.CancelledError:
+                return
+            extra += step
         bucket = (getattr(self, "_watch_debounce", None) or {}).pop(
             str(channel_id), None
         )
@@ -3830,6 +3968,11 @@ class MaxwellBot(commands.Bot):
         except Exception as e:
             logger.error(f"Failed to load control in on_message: {e}")
             return
+        with contextlib.suppress(Exception):
+            self._clear_typing(
+                getattr(getattr(message, "channel", None), "id", ""),
+                getattr(getattr(message, "author", None), "id", ""),
+            )
         # Each fresh user turn starts un-tainted. The taint flag is set by
         # fetch_url / web_search when they return untrusted content, and is
         # consulted by destructive tools (shell, sub_agent) to gate execution.
@@ -4408,6 +4551,13 @@ class MaxwellBot(commands.Bot):
             uid,
             emoji,
         )
+
+    async def on_typing(self, channel, user, when):
+        """Discord TYPING_START — someone is composing in a room we can see."""
+        try:
+            self._note_typing(channel, user)
+        except Exception:
+            logger.debug("Failed recording typing", exc_info=True)
 
     async def on_reaction_add(self, reaction, user):
         """Attach the reaction to that message so Maxwell sees it in context."""
