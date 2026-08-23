@@ -538,10 +538,32 @@ CTX_BUDGET_TYPING = 800
 # engine trivia. Extra denials: AUTONOMY_DISABLED_TOOLS=shell,delete_channel
 # Dashboard tools_enabled / disabled_tools still apply on top of this.
 AUTONOMY_RESEARCH_TOOLS = frozenset({"web_search", "fetch_url", "youtube"})
-AUTONOMY_DISABLED_TOOLS = AUTONOMY_RESEARCH_TOOLS | frozenset(
-    t.strip()
-    for t in os.getenv("AUTONOMY_DISABLED_TOOLS", "").split(",")
-    if t.strip()
+# Unattended ticks must not kick/ban/timeout/purge or reshape a server.
+AUTONOMY_DESTRUCTIVE_TOOLS = frozenset(
+    {
+        "kick_member",
+        "ban_member",
+        "unban_member",
+        "timeout_member",
+        "purge_messages",
+        "delete_channel",
+        "manage_role",
+        "voice_mod",
+        "lock_channel",
+        "set_channel_permissions",
+        "edit_server",
+        "manage_emoji",
+        "set_member_nickname",
+    }
+)
+AUTONOMY_DISABLED_TOOLS = (
+    AUTONOMY_RESEARCH_TOOLS
+    | AUTONOMY_DESTRUCTIVE_TOOLS
+    | frozenset(
+        t.strip()
+        for t in os.getenv("AUTONOMY_DISABLED_TOOLS", "").split(",")
+        if t.strip()
+    )
 )
 
 

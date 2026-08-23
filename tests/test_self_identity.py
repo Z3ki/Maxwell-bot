@@ -150,6 +150,7 @@ def test_build_messages_injects_guild_nick_into_dynamic_context():
     volatile = _volatile(messages)
     assert "Your name here: Sparky" in volatile
     assert "server nickname in Cool Guild" in volatile
+    assert "Your Discord access in Cool Guild" in volatile
     assert "Your name here: Sparky" not in static
     # Core identity is still Maxwell; the nick is the server-facing name.
     assert "You are Maxwell" in static
@@ -179,6 +180,7 @@ def test_build_messages_dm_uses_account_name():
     volatile = _volatile(messages)
     assert "Your name here: Maxwell" in volatile
     assert "no server nickname" in volatile
+    assert "Your Discord access" not in volatile
 
 
 def test_build_messages_reads_live_nick_each_turn():

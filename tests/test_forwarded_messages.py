@@ -183,6 +183,7 @@ def _media_bot():
         _recent_users={},
     )
     bot._max_media_bytes = MaxwellBot._max_media_bytes.__get__(bot)
+    bot._read_attachment_bytes = MaxwellBot._read_attachment_bytes.__get__(bot)
     return bot
 
 
@@ -198,6 +199,46 @@ def test_extract_media_reads_forwarded_attachments():
 
     bot = _media_bot()
     msg = _forwarded_message(snapshot=_snapshot(attachments=[_Att()]))
+    images, media = asyncio.run(MaxwellBot._extract_media(bot, msg))
+    assert images
+    assert media[0]["filename"] == "cat.png"
+    assert media[0]["source"] == "forward"
+
+
+def test_extract_media_fetches_snapshot_attachment_without_read(monkeypatch):
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+
+    class _Resp:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a):
+            return None
+
+    class _Session:
+        def get(self, url, **_kwargs):
+            assert "cdn.discordapp.com" in url
+            return _Resp()
+
+    async def fake_session():
+        return _Session()
+
+    async def fake_limited(_resp, _max_bytes):
+        return png
+
+    monkeypatch.setattr("bot._get_shared_session", fake_session)
+    monkeypatch.setattr("bot._read_response_limited", fake_limited)
+
+    bot = _media_bot()
+    att = SimpleNamespace(
+        filename="cat.png",
+        content_type="image/png",
+        size=4,
+        url="https://cdn.discordapp.com/cat.png",
+    )
+    msg = _forwarded_message(snapshot=_snapshot(attachments=[att]))
     images, media = asyncio.run(MaxwellBot._extract_media(bot, msg))
     assert images
     assert media[0]["filename"] == "cat.png"

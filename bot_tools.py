@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 import aiofiles
 import aiohttp
@@ -641,48 +641,458 @@ def _guild_me(guild):
     return getattr(guild, "me", None) or getattr(guild, "self_member", None)
 
 
-def _admin_caps(guild) -> tuple[set[str], str]:
-    me = _guild_me(guild)
+# Discord permission names that unlock server mod/admin tools. Basic send/view
+# flags stay out so the model is not told it is a "mod" just for chatting.
+_MOD_PERM_NAMES = (
+    "administrator",
+    "manage_guild",
+    "manage_channels",
+    "manage_roles",
+    "manage_messages",
+    "manage_nicknames",
+    "manage_webhooks",
+    "manage_expressions",
+    "manage_emojis",
+    "manage_emojis_and_stickers",
+    "manage_events",
+    "manage_threads",
+    "kick_members",
+    "ban_members",
+    "moderate_members",
+    "mute_members",
+    "deafen_members",
+    "move_members",
+    "view_audit_log",
+    "mention_everyone",
+    "pin_messages",
+    "create_instant_invite",
+    "create_expressions",
+)
+
+_PERM_ALIASES = {
+    "manage_emojis": "manage_expressions",
+    "manage_emojis_and_stickers": "manage_expressions",
+    "manage_expressions": "manage_expressions",
+}
+
+# Which tools a detected perm actually unlocks. administrator is handled as all.
+_CAP_TOOLS: dict[str, tuple[str, ...]] = {
+    "manage_channels": (
+        "create_category",
+        "create_channel",
+        "edit_channel",
+        "delete_channel",
+        "lock_channel",
+        "set_channel_permissions",
+    ),
+    "kick_members": ("kick_member",),
+    "ban_members": ("ban_member", "unban_member", "list_bans"),
+    "moderate_members": ("timeout_member",),
+    "manage_roles": (
+        "manage_role",
+        "lock_channel",
+        "set_channel_permissions",
+    ),
+    "manage_messages": ("purge_messages", "delete_message", "pin_message"),
+    "pin_messages": ("pin_message",),
+    "manage_nicknames": ("set_member_nickname",),
+    "mute_members": ("voice_mod",),
+    "deafen_members": ("voice_mod",),
+    "move_members": ("voice_mod",),
+    "manage_guild": ("edit_server",),
+    "view_audit_log": ("audit_log",),
+    "manage_expressions": ("manage_emoji",),
+    "create_instant_invite": ("create_invite",),
+}
+
+_ALL_MOD_TOOLS = tuple(
+    dict.fromkeys(name for names in _CAP_TOOLS.values() for name in names)
+)
+_SNOWFLAKE_RE = re.compile(r"(\d{15,22})")
+_DURATION_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhd])?\s*$", re.I)
+
+
+def _canon_perm(name: str) -> str:
+    return _PERM_ALIASES.get(name, name)
+
+
+def _admin_caps(guild, me=None) -> tuple[set[str], str]:
+    me = me or _guild_me(guild)
     if not me:
         return set(), "bot member is not cached"
     perms = getattr(me, "guild_permissions", None)
     if not perms:
         return set(), "permissions are not cached"
-    caps = set()
+    caps: set[str] = set()
     if getattr(perms, "administrator", False):
-        caps.update(
-            {
-                "administrator",
-                "manage_channels",
-                "manage_roles",
-                "manage_guild",
-                "manage_messages",
-                "kick_members",
-                "ban_members",
-            }
-        )
-    else:
-        for name in (
-            "manage_channels",
-            "manage_roles",
-            "manage_guild",
-            "manage_messages",
-            "kick_members",
-            "ban_members",
-        ):
-            if getattr(perms, name, False):
-                caps.add(name)
+        caps.add("administrator")
+        caps.update(_canon_perm(n) for n in _MOD_PERM_NAMES if n != "administrator")
+        return caps, ""
+    for name in _MOD_PERM_NAMES:
+        if getattr(perms, name, False):
+            caps.add(_canon_perm(name))
     return caps, ""
 
 
 def _has_guild_cap(guild, cap: str) -> bool:
     caps, _reason = _admin_caps(guild)
-    return "administrator" in caps or cap in caps
+    return "administrator" in caps or cap in caps or _canon_perm(cap) in caps
+
+
+def _tools_for_caps(caps: set[str]) -> list[str]:
+    if "administrator" in caps:
+        return list(_ALL_MOD_TOOLS)
+    found: list[str] = []
+    seen: set[str] = set()
+    for cap, names in _CAP_TOOLS.items():
+        if cap not in caps:
+            continue
+        for name in names:
+            if name not in seen:
+                seen.add(name)
+                found.append(name)
+    return found
+
+
+def _missing_cap(guild, cap: str) -> str:
+    if _has_guild_cap(guild, cap):
+        return ""
+    name = getattr(guild, "name", "this server")
+    return (
+        f"Error: I do not have {cap}/admin in {name}. "
+        "Run list_admin_servers to see roles, perms, and which tools I can use."
+    )
+
+
+def _mod_reason(message) -> str:
+    return f"Maxwell admin tool requested by {getattr(message, 'author', '?')}"
+
+
+def _parse_snowflake(value) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        try:
+            return int(text)
+        except ValueError:
+            return None
+    match = _SNOWFLAKE_RE.search(text)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _parse_duration_seconds(value, default: int | None = None) -> int | None:
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    if text in {"0", "off", "none", "clear", "remove", "stop", "undo"}:
+        return 0
+    match = _DURATION_RE.match(text)
+    if not match:
+        try:
+            return max(0, int(float(text)))
+        except (TypeError, ValueError):
+            return None
+    amount = float(match.group(1))
+    unit = (match.group(2) or "s").lower()
+    return int(amount * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit])
+
+
+def _member_top_position(member) -> int:
+    top = getattr(member, "top_role", None)
+    if top is not None:
+        return int(getattr(top, "position", 0) or 0)
+    roles = list(getattr(member, "roles", None) or [])
+    if not roles:
+        return 0
+    return max(int(getattr(role, "position", 0) or 0) for role in roles)
+
+
+def _named_roles(me, guild) -> list:
+    roles = list(getattr(me, "roles", None) or [])
+    roles.sort(key=lambda role: int(getattr(role, "position", 0) or 0), reverse=True)
+    everyone_id = getattr(guild, "id", None)
+    named = []
+    for role in roles:
+        is_default = False
+        checker = getattr(role, "is_default", None)
+        if callable(checker):
+            with contextlib.suppress(Exception):
+                is_default = bool(checker())
+        if is_default or getattr(role, "id", None) == everyone_id:
+            continue
+        named.append(role)
+    return named
+
+
+def _role_label(role) -> str:
+    name = getattr(role, "name", None) or "role"
+    rid = getattr(role, "id", "?")
+    pos = getattr(role, "position", "?")
+    return f"{name} ({rid}, pos {pos})"
+
+
+def _guild_access_line(guild) -> str:
+    """One prompt line: roles, elevated perms, and which mod tools can run."""
+    if guild is None:
+        return ""
+    name = str(getattr(guild, "name", None) or "this server").strip() or "this server"
+    gid = getattr(guild, "id", "?")
+    me = _guild_me(guild)
+    caps, reason = _admin_caps(guild, me)
+    roles = _named_roles(me, guild) if me else []
+    role_txt = ", ".join(getattr(r, "name", "role") for r in roles[:8]) or "@everyone"
+    if reason and not caps:
+        return (
+            f"Your Discord access in {name} ({gid}): could not read "
+            f"member/permissions ({reason})."
+        )
+    if "administrator" in caps:
+        return (
+            f"Your Discord access in {name} ({gid}): roles={role_txt} | "
+            "perms=administrator | tools=all guild mod tools (channels, roles, "
+            "kick, ban, timeout, purge, voice, emoji, server, audit log)"
+        )
+    if not caps:
+        return (
+            f"Your Discord access in {name} ({gid}): roles={role_txt} | "
+            "perms=none | no kick/ban/channel/role tools here — "
+            "list_admin_servers shows servers where you do."
+        )
+    tools = _tools_for_caps(caps)
+    return (
+        f"Your Discord access in {name} ({gid}): roles={role_txt} | "
+        f"perms={', '.join(sorted(caps))} | "
+        f"tools={', '.join(tools) if tools else 'none'}"
+    )
+
+
+def _guild_access_detail(guild) -> str:
+    me = _guild_me(guild)
+    caps, reason = _admin_caps(guild, me)
+    name = getattr(guild, "name", "server")
+    gid = getattr(guild, "id", "?")
+    lines = [f"{name} (ID: {gid})"]
+    if me is None:
+        lines.append(f"  member: not cached ({reason or 'unknown'})")
+        return "\n".join(lines)
+    top = getattr(me, "top_role", None)
+    lines.append(
+        f"  top role: {_role_label(top) if top else 'none'} | "
+        f"hierarchy pos { _member_top_position(me)}"
+    )
+    roles = _named_roles(me, guild)
+    if roles:
+        bits = []
+        for role in roles[:12]:
+            role_perms = getattr(role, "permissions", None)
+            granted = []
+            if role_perms is not None:
+                if getattr(role_perms, "administrator", False):
+                    granted = ["administrator"]
+                else:
+                    granted = [
+                        _canon_perm(n)
+                        for n in _MOD_PERM_NAMES
+                        if n != "administrator" and getattr(role_perms, n, False)
+                    ]
+                    granted = list(dict.fromkeys(granted))
+            extra = f" grants {', '.join(granted)}" if granted else " (cosmetic / no extra mod perms)"
+            bits.append(f"{_role_label(role)}{extra}")
+        lines.append("  roles: " + "; ".join(bits))
+    else:
+        lines.append("  roles: @everyone only")
+    if reason and not caps:
+        lines.append(f"  perms: none ({reason})")
+    elif "administrator" in caps:
+        lines.append("  perms: administrator (every guild mod tool)")
+    else:
+        lines.append(
+            "  perms: " + (", ".join(sorted(caps)) if caps else "none")
+        )
+    tools = _tools_for_caps(caps)
+    lines.append("  tools: " + (", ".join(tools) if tools else "none"))
+    channels = list(getattr(guild, "channels", []) or [])
+    cats = [ch for ch in channels if isinstance(ch, discord.CategoryChannel)]
+    text = [ch for ch in channels if isinstance(ch, discord.TextChannel)]
+    voice = [ch for ch in channels if isinstance(ch, discord.VoiceChannel)]
+    lines.append(
+        f"  channels: categories {len(cats)} text {len(text)} voice {len(voice)}"
+    )
+    return "\n".join(lines)
+
+
+def _moderation_block(guild, me, target, *, action: str) -> str:
+    if target is None or me is None:
+        return "Error: member is unavailable"
+    my_id = getattr(me, "id", None)
+    their_id = getattr(target, "id", None)
+    if their_id is not None and their_id == my_id and action in {
+        "kick",
+        "ban",
+        "timeout",
+        "voice",
+        "nick",
+    }:
+        return f"Error: I cannot {action} myself"
+    owner_id = getattr(guild, "owner_id", None) or getattr(
+        getattr(guild, "owner", None), "id", None
+    )
+    if owner_id is not None and their_id == owner_id:
+        return f"Error: I cannot {action} the server owner"
+    if _member_top_position(target) >= _member_top_position(me):
+        shown = getattr(target, "display_name", None) or their_id
+        return (
+            f"Error: {shown}'s top role is equal or higher than mine "
+            f"(role hierarchy). I cannot {action} them."
+        )
+    return ""
+
+
+def _find_role(guild, spec):
+    if guild is None:
+        return None, "Error: no server"
+    rid = _parse_snowflake(spec)
+    roles = list(getattr(guild, "roles", []) or [])
+    getter = getattr(guild, "get_role", None)
+    if rid is not None:
+        role = None
+        if callable(getter):
+            role = getter(rid)
+        if role is None:
+            role = next((r for r in roles if getattr(r, "id", None) == rid), None)
+        if role is None:
+            return None, f"Error: role {spec} not found"
+        return role, ""
+    wanted = str(spec or "").strip().lstrip("@").lower()
+    if not wanted:
+        return None, "Error: role_id or role_name is required"
+    matches = [
+        r for r in roles if str(getattr(r, "name", "")).lower() == wanted
+    ]
+    if len(matches) == 1:
+        return matches[0], ""
+    if len(matches) > 1:
+        return None, f"Error: multiple roles named '{spec}', use role_id"
+    return None, f"Error: role '{spec}' not found"
+
+
+async def _resolve_member(guild, spec):
+    if guild is None:
+        return None, "Error: no server"
+    uid = _parse_snowflake(spec)
+    getter = getattr(guild, "get_member", None)
+    fetch = getattr(guild, "fetch_member", None)
+    if uid is not None:
+        member = getter(uid) if callable(getter) else None
+        if member is None and callable(fetch):
+            try:
+                member = await fetch(uid)
+            except discord.NotFound:
+                return None, f"Error: user {uid} is not in {getattr(guild, 'name', 'this server')}"
+            except discord.Forbidden:
+                return None, f"Error: cannot fetch members in {getattr(guild, 'name', 'this server')}"
+            except Exception as exc:
+                return None, f"Error fetching member: {exc}"
+        if member is None:
+            return None, f"Error: user {uid} is not in {getattr(guild, 'name', 'this server')}"
+        return member, ""
+    wanted = str(spec or "").strip().lstrip("@").lower()
+    if not wanted:
+        return None, "Error: user_id is required"
+    members = list(getattr(guild, "members", []) or [])
+    matches = []
+    for member in members:
+        names = {
+            str(getattr(member, "name", "") or "").lower(),
+            str(getattr(member, "display_name", "") or "").lower(),
+            str(getattr(member, "global_name", "") or "").lower(),
+            str(getattr(member, "nick", "") or "").lower(),
+        }
+        names.discard("")
+        if wanted in names:
+            matches.append(member)
+    if len(matches) == 1:
+        return matches[0], ""
+    if len(matches) > 1:
+        return None, f"Error: multiple members match '{spec}', use user_id"
+    return None, (
+        f"Error: member '{spec}' not found in cache; use their numeric user id"
+    )
+
+
+def _permissions_from_names(raw) -> "discord.Permissions | None":
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    perms = discord.Permissions.none()
+    unknown = []
+    for part in text.split(","):
+        key = part.strip().lower().replace(" ", "_")
+        if not key:
+            continue
+        key = _canon_perm(key)
+        if not hasattr(perms, key):
+            unknown.append(key)
+            continue
+        try:
+            setattr(perms, key, True)
+        except Exception:
+            unknown.append(key)
+    if unknown and not any(getattr(perms, n, False) for n, _v in perms):
+        return None
+    return perms
+
+
+def _colour_from_text(raw):
+    text = str(raw or "").strip().lstrip("#")
+    if not text:
+        return None
+    try:
+        return discord.Colour(int(text, 16))
+    except (TypeError, ValueError):
+        return None
 
 
 def _channel_label(channel) -> str:
     name = getattr(channel, "name", None) or str(getattr(channel, "id", "unknown"))
     return f"#{name} ({getattr(channel, 'id', '?')})"
+
+
+async def _get_guild_channel(bot, channel_id):
+    cid = _parse_snowflake(channel_id)
+    if cid is None:
+        return None, f"Error: invalid channel_id: {channel_id}"
+    channel = bot.get_channel(cid)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(cid)
+        except Exception as exc:
+            return None, f"Error finding channel: {exc}"
+    if not getattr(channel, "guild", None):
+        return None, "Error: channel is not in a server"
+    return channel, ""
+
+
+def _parse_overwrite_pairs(raw) -> dict:
+    parsed: dict = {}
+    for part in str(raw or "").split(","):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        name = key.strip().lower().replace(" ", "_")
+        flag = value.strip().lower()
+        if not name:
+            continue
+        if flag in {"true", "allow", "yes", "1", "on"}:
+            parsed[name] = True
+        elif flag in {"false", "deny", "no", "0", "off"}:
+            parsed[name] = False
+        elif flag in {"none", "inherit", "reset", "clear"}:
+            parsed[name] = None
+    return parsed
 
 
 # ── Permanent public image persistence ──────────────────────────────
@@ -747,9 +1157,137 @@ class ImageGeneratorTool(Tool):
     ) -> str:
         if not prompt:
             return "Error: prompt parameter is required"
-        if not self.bot.config.NVIDIA_API_KEY:
-            return "Error: image generation is not configured (missing NVIDIA_API_KEY)"
-        return await self._nvidia_generate(message, prompt)
+        nvidia_key = (getattr(self.bot.config, "NVIDIA_API_KEY", "") or "").strip()
+        last_error = ""
+        if nvidia_key:
+            result = await self._nvidia_generate(message, prompt)
+            if not str(result).startswith("Error"):
+                return result
+            last_error = str(result)
+            logger.warning(
+                "NVIDIA image generation failed (%s); falling back to Pollinations",
+                last_error[:240],
+            )
+        else:
+            logger.info(
+                "NVIDIA_API_KEY unset; using Pollinations for image_generator"
+            )
+        fallback = await self._pollinations_generate(message, prompt)
+        if not str(fallback).startswith("Error"):
+            return fallback
+        return last_error or fallback
+
+    async def _deliver_generated_image(
+        self, message: Message, prompt: str, image_bytes: bytes, *, prefix: str
+    ) -> str:
+        local_path, perm_url = _persist_public_image(
+            self.bot, image_bytes, prefix=prefix
+        )
+        file = File(BytesIO(image_bytes), filename="generated_image.png")
+        sent_msg = None
+        self._signal_streaming(message)
+        try:
+            sent_msg = await message.channel.send(file=file)
+        except discord.Forbidden:
+            logger.warning(
+                f"Cannot send image in {message.channel.id} — missing permissions"
+            )
+            return "Error: Cannot send image — missing permissions"
+        cdn_url = None
+        if sent_msg and sent_msg.attachments:
+            cdn_url = sent_msg.attachments[0].url
+        await self.bot.memory.add_to_channel_memory(
+            str(message.channel.id),
+            {
+                "author": "Tool",
+                "content": f"Generated image: {prompt[:200]}",
+                "is_tool": True,
+            },
+        )
+        result = f"Image sent to chat: {prompt[:100]}"
+        if cdn_url:
+            result += f"\nImage URL: {cdn_url}"
+        if perm_url:
+            result += (
+                f"\nPermanent URL: {perm_url} "
+                "(never expires — use this in websites, <img> tags, or curl)"
+            )
+        if local_path:
+            result += (
+                f"\nLocal path: {local_path} "
+                f'(pass to create_site as images=[{{"path": "{local_path}"}}] '
+                "to bundle it into a site)"
+            )
+        result += "\nLook at the image you just posted. If it looks good, mention the URL or use it for the site. "
+        result += "If it looks bad, call image_generator again with an improved prompt. "
+        result += "If you were generating this for a site, call create_site NOW (in your next response) with the URL embedded in the body — do not call create_site before image_generator returns this URL."
+        return result
+
+    async def _pollinations_generate(self, message: Message, prompt: str) -> str:
+        model = (
+            str(getattr(self.bot.config, "POLLINATIONS_MODEL", "flux") or "flux").strip()
+            or "flux"
+        )
+        seed = random.randint(0, 999999)
+        url = (
+            "https://image.pollinations.ai/prompt/"
+            f"{quote(prompt[:1500], safe='')}"
+            f"?width=1024&height=1024&nologo=true&model={quote(model, safe='')}"
+            f"&seed={seed}"
+        )
+        session = await _get_shared_session()
+        try:
+            async with session.get(
+                url,
+                headers={"User-Agent": _IMAGE_FETCH_UA, "Accept": "image/*"},
+                timeout=aiohttp.ClientTimeout(total=90),
+                allow_redirects=True,
+            ) as response:
+                if response.status != 200:
+                    body = await response.text()
+                    logger.error(
+                        "Pollinations image error: %s - %s",
+                        response.status,
+                        body[:300],
+                    )
+                    return (
+                        f"Error generating image: Pollinations returned {response.status}."
+                    )
+                ctype = (
+                    (response.headers.get("Content-Type") or "")
+                    .split(";")[0]
+                    .strip()
+                    .lower()
+                )
+                raw = await _read_response_limited(response, 12 * 1024 * 1024)
+        except asyncio.TimeoutError:
+            return "Error: Pollinations image generation timed out."
+        except Exception as e:
+            logger.warning("Pollinations image error: %s", e)
+            return f"Error generating image: {e}"
+        looks_like_image = bool(
+            raw
+            and (
+                raw.startswith(b"\x89PNG")
+                or raw.startswith(b"\xff\xd8\xff")
+                or raw.startswith(b"GIF8")
+                or raw.startswith(b"RIFF")
+                or ctype.startswith("image/")
+            )
+        )
+        if not looks_like_image:
+            logger.error(
+                "Pollinations returned non-image payload (%s, %s bytes)",
+                ctype,
+                len(raw or b""),
+            )
+            return "Error: Pollinations did not return an image."
+        logger.info(
+            "Pollinations image generated successfully, size: %s bytes", len(raw)
+        )
+        return await self._deliver_generated_image(
+            message, prompt, raw, prefix="pollinations"
+        )
 
     async def _nvidia_generate(self, message: Message, prompt: str) -> str:
         api_key = self.bot.config.NVIDIA_API_KEY
@@ -828,56 +1366,9 @@ class ImageGeneratorTool(Tool):
                     logger.info(
                         f"NVIDIA image generated successfully, size: {len(image_bytes)} bytes"
                     )
-                    # Persist a permanent public copy — the Discord CDN URL
-                    # expires ~24h, which silently breaks any site that
-                    # embeds it. The stable URL survives and is curl-able.
-                    local_path, perm_url = _persist_public_image(
-                        self.bot, image_bytes, prefix="nvidia"
+                    return await self._deliver_generated_image(
+                        message, prompt, image_bytes, prefix="nvidia"
                     )
-                    # Send to Discord so the model can SEE it in chat
-                    file = File(BytesIO(image_bytes), filename="generated_image.png")
-                    sent_msg = None
-                    # Step aside for the live progress message before we
-                    # post the image — the user should see the artifact,
-                    # not "running image_generator" anymore.
-                    self._signal_streaming(message)
-                    try:
-                        sent_msg = await message.channel.send(file=file)
-                    except discord.Forbidden:
-                        logger.warning(
-                            f"Cannot send image in {message.channel.id} — missing permissions"
-                        )
-                        return "Error: Cannot send image — missing permissions"
-                    # Grab the Discord CDN URL
-                    cdn_url = None
-                    if sent_msg and sent_msg.attachments:
-                        cdn_url = sent_msg.attachments[0].url
-                    await self.bot.memory.add_to_channel_memory(
-                        str(message.channel.id),
-                        {
-                            "author": "Tool",
-                            "content": f"Generated image: {prompt[:200]}",
-                            "is_tool": True,
-                        },
-                    )
-                    result = f"Image sent to chat: {prompt[:100]}"
-                    if cdn_url:
-                        result += f"\nImage URL: {cdn_url}"
-                    if perm_url:
-                        result += (
-                            f"\nPermanent URL: {perm_url} "
-                            "(never expires — use this in websites, <img> tags, or curl)"
-                        )
-                    if local_path:
-                        result += (
-                            f"\nLocal path: {local_path} "
-                            f'(pass to create_site as images=[{{"path": "{local_path}"}}] '
-                            "to bundle it into a site)"
-                        )
-                    result += "\nLook at the image you just posted. If it looks good, mention the URL or use it for the site. "
-                    result += "If it looks bad, call image_generator again with an improved prompt. "
-                    result += "If you were generating this for a site, call create_site NOW (in your next response) with the URL embedded in the body — do not call create_site before image_generator returns this URL."
-                    return result
             except asyncio.TimeoutError:
                 logger.warning(
                     f"NVIDIA image timeout, attempt {attempt + 1}/{max_retries}"
@@ -1436,22 +1927,44 @@ class EditMessageTool(Tool):
 
 
 class DeleteMessageTool(Tool):
-    """Delete one of the bot's own messages"""
+    """Delete a message. Own messages always; others need manage_messages."""
 
     def get_description(self):
-        return "Delete your own message. Params: message_id (required)."
+        return (
+            "Delete a message. Your own messages always. Someone else's needs "
+            "manage_messages. Params: message_id (required), channel_id (optional, "
+            "defaults to the current channel)."
+        )
 
     async def execute(
-        self, message: Message, message_id: str | None = None, **kwargs
+        self,
+        message: Message,
+        message_id: str | None = None,
+        channel_id: str | None = None,
+        **kwargs,
     ) -> str:
         if not message_id:
             return "Error: message_id is required"
+        channel = getattr(message, "channel", None)
+        if channel_id:
+            channel, error = await _get_guild_channel(self.bot, channel_id)
+            if error:
+                return error
+        if channel is None or not hasattr(channel, "fetch_message"):
+            return "Error: channel is unavailable"
         try:
-            msg = await message.channel.fetch_message(int(message_id))
-            if msg.author.id != self.bot.user.id:
-                return "Error: I can only delete my own messages"
+            msg = await channel.fetch_message(int(str(message_id).strip()))
+            mine = self.bot.user and msg.author.id == self.bot.user.id
+            guild = getattr(channel, "guild", None)
+            if not mine:
+                if guild is None:
+                    return "Error: I can only delete my own messages here"
+                missing = _missing_cap(guild, "manage_messages")
+                if missing:
+                    return missing
             await msg.delete()
-            return f"Message {message_id} deleted"
+            who = "my" if mine else "that"
+            return f"Deleted {who} message {message_id}"
         except discord.NotFound:
             return f"Error: Message {message_id} not found"
         except discord.Forbidden:
@@ -2108,7 +2621,7 @@ class JoinServerTool(Tool):
         return result
 
 
-def _resolve_guild(guilds: list, target: str) -> tuple[Any, str]:
+def _find_guild(guilds: list, target: str) -> tuple[Any, str]:
     """Find one guild by ID, exact name, then unique partial name.
 
     Returns (guild, "") on a hit and (None, error_text) otherwise, so both
@@ -2167,7 +2680,7 @@ class ServerSetupTool(Tool):
     ) -> str:
         target = (server or "").strip()
         if target:
-            guild, err = _resolve_guild(list(self.bot.guilds or []), target)
+            guild, err = _find_guild(list(self.bot.guilds or []), target)
             if guild is None:
                 return err
         else:
@@ -2259,7 +2772,7 @@ class LeaveServerTool(Tool):
         if not target:
             return "Error: leave_server requires a server name or ID"
 
-        guild, err = _resolve_guild(list(self.bot.guilds or []), target)
+        guild, err = _find_guild(list(self.bot.guilds or []), target)
         if guild is None:
             return err
 
@@ -2505,28 +3018,51 @@ class ListAdminServersTool(Tool):
 
     def get_description(self):
         return (
-            "List servers where you have usable Discord manage_channels/mod permissions. "
-            "Use this before creating or editing channels. No params."
+            "Inspect Discord roles/permissions. Shows which of YOUR roles grant "
+            "mod/admin perms and which tools those unlock. No args: current "
+            "server first, then every server where you have elevated perms. "
+            "Params: guild_id (optional, one server in detail)."
         )
 
-    async def execute(self, message: Message, **kwargs) -> str:
-        rows = []
+    async def execute(
+        self, message: Message, guild_id: str | None = None, **kwargs
+    ) -> str:
+        current = getattr(message, "guild", None)
+        wanted = _parse_snowflake(guild_id)
+        if wanted is not None:
+            guild = self.bot.get_guild(wanted)
+            if guild is None:
+                return f"Error: I am not in server {guild_id} or it is not cached"
+            return _guild_access_detail(guild)
+
+        blocks = []
+        if current is not None:
+            blocks.append("This server:\n" + _guild_access_detail(current))
+        others = []
         for guild in getattr(self.bot, "guilds", []) or []:
-            caps, reason = _admin_caps(guild)
+            if current is not None and getattr(guild, "id", None) == getattr(
+                current, "id", None
+            ):
+                continue
+            caps, _reason = _admin_caps(guild)
             if not caps:
                 continue
-            channels = list(getattr(guild, "channels", []) or [])
-            cats = [ch for ch in channels if isinstance(ch, discord.CategoryChannel)]
-            text = [ch for ch in channels if isinstance(ch, discord.TextChannel)]
-            voice = [ch for ch in channels if isinstance(ch, discord.VoiceChannel)]
-            cap_text = ", ".join(sorted(caps)) if caps else reason
-            rows.append(
-                f"{guild.name} (ID: {guild.id}) | caps: {cap_text} | "
-                f"categories: {len(cats)} text: {len(text)} voice: {len(voice)}"
+            others.append(_guild_access_detail(guild))
+        if others:
+            blocks.append(
+                "Other servers with elevated perms:\n" + "\n\n".join(others[:20])
             )
-        if not rows:
-            return "No servers with cached manage_channels/mod permissions. Don't try channel tools until this lists a target."
-        return "Servers where channel tools can run:\n" + "\n".join(rows[:30])
+        if not blocks:
+            return (
+                "No cached Discord member/permissions. I cannot see roles in "
+                "any joined server right now."
+            )
+        if current is None and not others:
+            return (
+                "No servers with cached manage_channels/mod permissions. "
+                "Don't try kick/ban/channel/role tools until this lists a target."
+            )
+        return "\n\n".join(blocks)
 
 
 class CreateCategoryTool(Tool):
@@ -2811,6 +3347,826 @@ class DeleteChannelTool(Tool):
             return f"Error: Discord denied deleting {_channel_label(channel)}; missing manage_channels or role hierarchy issue"
         except Exception as e:
             return f"Error deleting channel: {e}"
+
+
+def _role_blocked(me, role) -> str:
+    if int(getattr(role, "position", 0) or 0) >= _member_top_position(me):
+        return (
+            f"Error: role {getattr(role, 'name', role)} is equal/higher than "
+            "my top role (hierarchy)"
+        )
+    return ""
+
+
+class KickMemberTool(Tool):
+    def get_description(self):
+        return (
+            "Kick a member from a server. Requires kick_members. "
+            "Params: user_id (required), reason (optional), guild_id (optional)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        user_id: str | None = None,
+        reason: str | None = None,
+        guild_id: str | None = None,
+        **kwargs,
+    ) -> str:
+        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        if error:
+            return error
+        missing = _missing_cap(guild, "kick_members")
+        if missing:
+            return missing
+        member, error = await _resolve_member(guild, user_id)
+        if error:
+            return error
+        blocked = _moderation_block(guild, _guild_me(guild), member, action="kick")
+        if blocked:
+            return blocked
+        try:
+            await member.kick(reason=_mod_reason(message) if not reason else str(reason)[:512])
+            return f"Kicked {member} ({member.id}) from {guild.name}"
+        except discord.Forbidden:
+            return f"Error: Discord denied kicking {member}; hierarchy or missing kick_members"
+        except Exception as e:
+            return f"Error kicking member: {e}"
+
+
+class BanMemberTool(Tool):
+    def get_description(self):
+        return (
+            "Ban a member. Requires ban_members. Params: user_id (required), "
+            "reason (optional), delete_message_seconds (optional 0-604800), "
+            "guild_id (optional)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        user_id: str | None = None,
+        reason: str | None = None,
+        delete_message_seconds: str = "0",
+        guild_id: str | None = None,
+        **kwargs,
+    ) -> str:
+        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        if error:
+            return error
+        missing = _missing_cap(guild, "ban_members")
+        if missing:
+            return missing
+        member, error = await _resolve_member(guild, user_id)
+        if error:
+            return error
+        blocked = _moderation_block(guild, _guild_me(guild), member, action="ban")
+        if blocked:
+            return blocked
+        try:
+            seconds = max(0, min(int(_parse_duration_seconds(delete_message_seconds, 0) or 0), 604800))
+        except (TypeError, ValueError):
+            seconds = 0
+        try:
+            await guild.ban(
+                member,
+                reason=_mod_reason(message) if not reason else str(reason)[:512],
+                delete_message_seconds=seconds,
+            )
+            return f"Banned {member} ({member.id}) from {guild.name}"
+        except TypeError:
+            try:
+                await guild.ban(
+                    member,
+                    reason=_mod_reason(message) if not reason else str(reason)[:512],
+                    delete_message_days=min(7, seconds // 86400),
+                )
+                return f"Banned {member} ({member.id}) from {guild.name}"
+            except Exception as e:
+                return f"Error banning member: {e}"
+        except discord.Forbidden:
+            return f"Error: Discord denied banning {member}; hierarchy or missing ban_members"
+        except Exception as e:
+            return f"Error banning member: {e}"
+
+
+class UnbanMemberTool(Tool):
+    def get_description(self):
+        return (
+            "Unban a user by id. Requires ban_members. "
+            "Params: user_id (required), reason (optional), guild_id (optional)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        user_id: str | None = None,
+        reason: str | None = None,
+        guild_id: str | None = None,
+        **kwargs,
+    ) -> str:
+        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        if error:
+            return error
+        missing = _missing_cap(guild, "ban_members")
+        if missing:
+            return missing
+        uid = _parse_snowflake(user_id)
+        if uid is None:
+            return "Error: user_id is required"
+        try:
+            await guild.unban(
+                discord.Object(id=uid),
+                reason=_mod_reason(message) if not reason else str(reason)[:512],
+            )
+            return f"Unbanned {uid} in {guild.name}"
+        except discord.NotFound:
+            return f"Error: user {uid} is not banned in {guild.name}"
+        except discord.Forbidden:
+            return f"Error: Discord denied unbanning {uid} in {guild.name}"
+        except Exception as e:
+            return f"Error unbanning member: {e}"
+
+
+class ListBansTool(Tool):
+    def get_description(self):
+        return (
+            "List banned users in a server. Requires ban_members. "
+            "Params: guild_id (optional), limit (optional, default 20)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        guild_id: str | None = None,
+        limit: str = "20",
+        **kwargs,
+    ) -> str:
+        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        if error:
+            return error
+        missing = _missing_cap(guild, "ban_members")
+        if missing:
+            return missing
+        try:
+            cap = max(1, min(int(limit or 20), 50))
+        except (TypeError, ValueError):
+            cap = 20
+        rows = []
+        try:
+            async for entry in guild.bans(limit=cap):
+                user = getattr(entry, "user", None) or entry
+                why = getattr(entry, "reason", None) or "no reason"
+                rows.append(f"{getattr(user, 'name', user)} ({getattr(user, 'id', '?')}): {why}")
+        except discord.Forbidden:
+            return f"Error: cannot list bans in {guild.name}"
+        except Exception as e:
+            return f"Error listing bans: {e}"
+        if not rows:
+            return f"No bans in {guild.name}"
+        return f"Bans in {guild.name} ({len(rows)}):\n" + "\n".join(rows)
+
+
+class TimeoutMemberTool(Tool):
+    def get_description(self):
+        return (
+            "Timeout or untimeout a member. Requires moderate_members. "
+            "Params: user_id (required), duration (e.g. 10m, 1h, 1d; 0/clear to remove), "
+            "reason (optional), guild_id (optional)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        user_id: str | None = None,
+        duration: str | None = None,
+        reason: str | None = None,
+        guild_id: str | None = None,
+        **kwargs,
+    ) -> str:
+        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        if error:
+            return error
+        missing = _missing_cap(guild, "moderate_members")
+        if missing:
+            return missing
+        member, error = await _resolve_member(guild, user_id)
+        if error:
+            return error
+        blocked = _moderation_block(guild, _guild_me(guild), member, action="timeout")
+        if blocked:
+            return blocked
+        seconds = _parse_duration_seconds(duration, None)
+        if seconds is None:
+            return "Error: duration like 10m, 1h, 2d, or 0/clear to remove"
+        until = None
+        if seconds > 0:
+            seconds = max(60, min(seconds, 28 * 86400))
+            until = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+        why = _mod_reason(message) if not reason else str(reason)[:512]
+        try:
+            if hasattr(member, "timeout"):
+                await member.timeout(until, reason=why)
+            else:
+                await member.edit(timed_out_until=until, reason=why)
+            if until is None:
+                return f"Removed timeout from {member} in {guild.name}"
+            return f"Timed out {member} in {guild.name} until {until.isoformat()}"
+        except discord.Forbidden:
+            return f"Error: Discord denied timing out {member}"
+        except Exception as e:
+            return f"Error timing out member: {e}"
+
+
+class ManageRoleTool(Tool):
+    def get_description(self):
+        return (
+            "Create/edit/delete roles or add/remove them on members. Requires manage_roles. "
+            "Params: action (list|create|edit|delete|add|remove), guild_id (optional), "
+            "name, role_id, user_id, color (hex), hoist, mentionable, permissions "
+            "(comma perm names), confirm_name (required to delete)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        action: str | None = None,
+        guild_id: str | None = None,
+        name: str | None = None,
+        role_id: str | None = None,
+        user_id: str | None = None,
+        color: str | None = None,
+        hoist: str | None = None,
+        mentionable: str | None = None,
+        permissions: str | None = None,
+        confirm_name: str | None = None,
+        **kwargs,
+    ) -> str:
+        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        if error:
+            return error
+        missing = _missing_cap(guild, "manage_roles")
+        if missing:
+            return missing
+        me = _guild_me(guild)
+        act = str(action or "list").strip().lower()
+        why = _mod_reason(message)
+        if act == "list":
+            roles = sorted(
+                list(getattr(guild, "roles", []) or []),
+                key=lambda r: int(getattr(r, "position", 0) or 0),
+                reverse=True,
+            )
+            lines = []
+            for role in roles[:40]:
+                lines.append(_role_label(role))
+            return f"Roles in {guild.name} ({len(roles)}):\n" + "\n".join(lines or ["none"])
+        if act == "create":
+            clean = _clean_discord_name(name)
+            if not clean:
+                return "Error: name is required to create a role"
+            kwargs_create = {"name": clean, "reason": why}
+            colour = _colour_from_text(color)
+            if colour is not None:
+                kwargs_create["colour"] = colour
+            perms = _permissions_from_names(permissions)
+            if perms is not None:
+                kwargs_create["permissions"] = perms
+            if hoist is not None:
+                kwargs_create["hoist"] = parse_bool(hoist, False)
+            if mentionable is not None:
+                kwargs_create["mentionable"] = parse_bool(mentionable, False)
+            try:
+                role = await guild.create_role(**kwargs_create)
+                return f"Created role {_role_label(role)} in {guild.name}"
+            except discord.Forbidden:
+                return f"Error: Discord denied creating a role in {guild.name}"
+            except Exception as e:
+                return f"Error creating role: {e}"
+        role, error = _find_role(guild, role_id or name)
+        if error:
+            return error
+        blocked = _role_blocked(me, role)
+        if blocked and act != "list":
+            return blocked
+        if act == "edit":
+            updates = {}
+            if name:
+                clean = _clean_discord_name(name)
+                if clean:
+                    updates["name"] = clean
+            colour = _colour_from_text(color)
+            if colour is not None:
+                updates["colour"] = colour
+            perms = _permissions_from_names(permissions)
+            if perms is not None:
+                updates["permissions"] = perms
+            if hoist is not None:
+                updates["hoist"] = parse_bool(hoist, False)
+            if mentionable is not None:
+                updates["mentionable"] = parse_bool(mentionable, False)
+            if not updates:
+                return "Error: provide a field to edit"
+            try:
+                await role.edit(**updates, reason=why)
+                return f"Edited role {_role_label(role)}: {', '.join(sorted(updates))}"
+            except discord.Forbidden:
+                return f"Error: Discord denied editing {role.name}"
+            except Exception as e:
+                return f"Error editing role: {e}"
+        if act == "delete":
+            actual = getattr(role, "name", "")
+            if str(confirm_name or "") != actual:
+                return f"Error: confirm_name must exactly match '{actual}'"
+            try:
+                label = _role_label(role)
+                await role.delete(reason=why)
+                return f"Deleted role {label} from {guild.name}"
+            except discord.Forbidden:
+                return f"Error: Discord denied deleting {actual}"
+            except Exception as e:
+                return f"Error deleting role: {e}"
+        if act in {"add", "remove"}:
+            member, error = await _resolve_member(guild, user_id)
+            if error:
+                return error
+            blocked = _moderation_block(guild, me, member, action="role")
+            if blocked:
+                return blocked
+            try:
+                if act == "add":
+                    await member.add_roles(role, reason=why)
+                    return f"Added {role.name} to {member} in {guild.name}"
+                await member.remove_roles(role, reason=why)
+                return f"Removed {role.name} from {member} in {guild.name}"
+            except discord.Forbidden:
+                return f"Error: Discord denied changing roles on {member}"
+            except Exception as e:
+                return f"Error changing roles: {e}"
+        return "Error: action must be list, create, edit, delete, add, or remove"
+
+
+class PurgeMessagesTool(Tool):
+    def get_description(self):
+        return (
+            "Bulk-delete recent messages in a channel. Requires manage_messages. "
+            "Params: limit (1-100, default 20), channel_id (optional), user_id (optional filter)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        limit: str = "20",
+        channel_id: str | None = None,
+        user_id: str | None = None,
+        **kwargs,
+    ) -> str:
+        channel = getattr(message, "channel", None)
+        if channel_id:
+            channel, error = await _get_guild_channel(self.bot, channel_id)
+            if error:
+                return error
+        guild = getattr(channel, "guild", None)
+        if guild is None:
+            return "Error: purge only works in servers"
+        missing = _missing_cap(guild, "manage_messages")
+        if missing:
+            return missing
+        if not hasattr(channel, "purge"):
+            return "Error: this channel type cannot be purged"
+        try:
+            cap = max(1, min(int(limit or 20), 100))
+        except (TypeError, ValueError):
+            return "Error: limit must be a number"
+        uid = _parse_snowflake(user_id)
+
+        def _check(msg):
+            if uid is None:
+                return True
+            return getattr(getattr(msg, "author", None), "id", None) == uid
+
+        try:
+            deleted = await channel.purge(limit=cap, check=_check, reason=_mod_reason(message))
+            return f"Purged {len(deleted)} messages in {_channel_label(channel)}"
+        except discord.Forbidden:
+            return f"Error: Discord denied purging {_channel_label(channel)}"
+        except Exception as e:
+            return f"Error purging messages: {e}"
+
+
+class PinMessageTool(Tool):
+    def get_description(self):
+        return (
+            "Pin or unpin a message. Needs pin_messages or manage_messages. "
+            "Params: message_id (required), channel_id (optional), unpin (optional bool)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        message_id: str | None = None,
+        channel_id: str | None = None,
+        unpin: str = "false",
+        **kwargs,
+    ) -> str:
+        if not message_id:
+            return "Error: message_id is required"
+        channel = getattr(message, "channel", None)
+        if channel_id:
+            channel, error = await _get_guild_channel(self.bot, channel_id)
+            if error:
+                return error
+        guild = getattr(channel, "guild", None)
+        if guild is None:
+            return "Error: pin only works in servers"
+        if not (
+            _has_guild_cap(guild, "pin_messages")
+            or _has_guild_cap(guild, "manage_messages")
+        ):
+            return _missing_cap(guild, "pin_messages")
+        try:
+            msg = await channel.fetch_message(int(str(message_id).strip()))
+            if parse_bool(unpin, False):
+                await msg.unpin(reason=_mod_reason(message))
+                return f"Unpinned message {message_id}"
+            await msg.pin(reason=_mod_reason(message))
+            return f"Pinned message {message_id}"
+        except discord.NotFound:
+            return f"Error: message {message_id} not found"
+        except discord.Forbidden:
+            return "Error: Discord denied pinning that message"
+        except Exception as e:
+            return f"Error pinning message: {e}"
+
+
+class SetMemberNicknameTool(Tool):
+    def get_description(self):
+        return (
+            "Change another member's nickname. Requires manage_nicknames. "
+            "Params: user_id (required), nickname (required, 'reset' to clear), guild_id (optional)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        user_id: str | None = None,
+        nickname: str | None = None,
+        guild_id: str | None = None,
+        **kwargs,
+    ) -> str:
+        if not nickname:
+            return "Error: nickname is required"
+        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        if error:
+            return error
+        missing = _missing_cap(guild, "manage_nicknames")
+        if missing:
+            return missing
+        member, error = await _resolve_member(guild, user_id)
+        if error:
+            return error
+        blocked = _moderation_block(guild, _guild_me(guild), member, action="nick")
+        if blocked:
+            return blocked
+        nick = None if str(nickname).strip().lower() == "reset" else str(nickname)[:32]
+        try:
+            await member.edit(nick=nick, reason=_mod_reason(message))
+            if nick:
+                return f"Set {member}'s nickname to {nick}"
+            return f"Cleared {member}'s nickname"
+        except discord.Forbidden:
+            return f"Error: Discord denied changing nickname for {member}"
+        except Exception as e:
+            return f"Error setting nickname: {e}"
+
+
+class VoiceModTool(Tool):
+    def get_description(self):
+        return (
+            "Server-mute, deafen, move, or disconnect a member in voice. "
+            "Params: action (mute|unmute|deafen|undeafen|move|disconnect), "
+            "user_id (required), channel_id (for move), guild_id (optional)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        action: str | None = None,
+        user_id: str | None = None,
+        channel_id: str | None = None,
+        guild_id: str | None = None,
+        **kwargs,
+    ) -> str:
+        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        if error:
+            return error
+        act = str(action or "").strip().lower()
+        cap = {
+            "mute": "mute_members",
+            "unmute": "mute_members",
+            "deafen": "deafen_members",
+            "undeafen": "deafen_members",
+            "move": "move_members",
+            "disconnect": "move_members",
+        }.get(act)
+        if not cap:
+            return "Error: action must be mute, unmute, deafen, undeafen, move, or disconnect"
+        missing = _missing_cap(guild, cap)
+        if missing:
+            return missing
+        member, error = await _resolve_member(guild, user_id)
+        if error:
+            return error
+        blocked = _moderation_block(guild, _guild_me(guild), member, action="voice")
+        if blocked:
+            return blocked
+        why = _mod_reason(message)
+        try:
+            if act == "mute":
+                await member.edit(mute=True, reason=why)
+                return f"Server-muted {member}"
+            if act == "unmute":
+                await member.edit(mute=False, reason=why)
+                return f"Unmuted {member}"
+            if act == "deafen":
+                await member.edit(deafen=True, reason=why)
+                return f"Server-deafened {member}"
+            if act == "undeafen":
+                await member.edit(deafen=False, reason=why)
+                return f"Undeafened {member}"
+            if act == "disconnect":
+                await member.edit(voice_channel=None, reason=why)
+                return f"Disconnected {member} from voice"
+            dest, error = await _get_guild_channel(self.bot, channel_id)
+            if error:
+                return error
+            if not isinstance(dest, discord.VoiceChannel):
+                return "Error: move requires a voice channel_id"
+            await member.edit(voice_channel=dest, reason=why)
+            return f"Moved {member} to {_channel_label(dest)}"
+        except discord.Forbidden:
+            return f"Error: Discord denied voice mod on {member}"
+        except Exception as e:
+            return f"Error in voice_mod: {e}"
+
+
+class LockChannelTool(Tool):
+    def get_description(self):
+        return (
+            "Lock or unlock a channel for @everyone (deny/allow send or connect). "
+            "Needs manage_channels or manage_roles. Params: channel_id (optional), "
+            "unlock (optional bool)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        channel_id: str | None = None,
+        unlock: str = "false",
+        **kwargs,
+    ) -> str:
+        channel = getattr(message, "channel", None)
+        if channel_id:
+            channel, error = await _get_guild_channel(self.bot, channel_id)
+            if error:
+                return error
+        guild = getattr(channel, "guild", None)
+        if guild is None:
+            return "Error: lock only works in servers"
+        if not (
+            _has_guild_cap(guild, "manage_channels")
+            or _has_guild_cap(guild, "manage_roles")
+        ):
+            return _missing_cap(guild, "manage_channels")
+        target = getattr(guild, "default_role", None)
+        if target is None:
+            return "Error: @everyone role is unavailable"
+        locked = not parse_bool(unlock, False)
+        try:
+            if isinstance(channel, discord.VoiceChannel):
+                await channel.set_permissions(
+                    target, connect=False if locked else None, reason=_mod_reason(message)
+                )
+            else:
+                await channel.set_permissions(
+                    target,
+                    send_messages=False if locked else None,
+                    reason=_mod_reason(message),
+                )
+            state = "Locked" if locked else "Unlocked"
+            return f"{state} {_channel_label(channel)} for @everyone"
+        except discord.Forbidden:
+            return f"Error: Discord denied locking {_channel_label(channel)}"
+        except Exception as e:
+            return f"Error locking channel: {e}"
+
+
+class SetChannelPermissionsTool(Tool):
+    def get_description(self):
+        return (
+            "Set or clear a channel permission overwrite for a role or member. "
+            "Needs manage_roles. Params: channel_id (required), target (role/user id "
+            "or 'everyone'), allow (comma perm=true/false/inherit), reset (bool)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        channel_id: str | None = None,
+        target: str | None = None,
+        allow: str | None = None,
+        reset: str = "false",
+        **kwargs,
+    ) -> str:
+        if not channel_id or not target:
+            return "Error: channel_id and target are required"
+        channel, error = await _get_guild_channel(self.bot, channel_id)
+        if error:
+            return error
+        guild = channel.guild
+        missing = _missing_cap(guild, "manage_roles")
+        if missing:
+            return missing
+        spec = str(target).strip().lower()
+        subject = None
+        if spec in {"everyone", "@everyone", "default"}:
+            subject = guild.default_role
+        if subject is None:
+            subject, _err = _find_role(guild, target)
+        if subject is None:
+            subject, error = await _resolve_member(guild, target)
+            if error and subject is None:
+                return f"Error: target '{target}' is not a role, member, or everyone"
+        why = _mod_reason(message)
+        try:
+            if parse_bool(reset, False):
+                await channel.set_permissions(subject, overwrite=None, reason=why)
+                return f"Cleared overwrites for {target} on {_channel_label(channel)}"
+            pairs = _parse_overwrite_pairs(allow)
+            if not pairs:
+                return "Error: provide allow like send_messages=false,view_channel=true"
+            await channel.set_permissions(subject, reason=why, **pairs)
+            return f"Updated overwrites for {target} on {_channel_label(channel)}: {pairs}"
+        except discord.Forbidden:
+            return f"Error: Discord denied editing overwrites on {_channel_label(channel)}"
+        except Exception as e:
+            return f"Error setting channel permissions: {e}"
+
+
+class EditServerTool(Tool):
+    def get_description(self):
+        return (
+            "Edit the server name or description. Requires manage_guild. "
+            "Params: name (optional), description (optional), guild_id (optional)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        name: str | None = None,
+        description: str | None = None,
+        guild_id: str | None = None,
+        **kwargs,
+    ) -> str:
+        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        if error:
+            return error
+        missing = _missing_cap(guild, "manage_guild")
+        if missing:
+            return missing
+        updates = {}
+        if name:
+            clean = _clean_discord_name(name)
+            if clean:
+                updates["name"] = clean
+        if description is not None:
+            updates["description"] = str(description)[:120]
+        if not updates:
+            return "Error: provide name or description"
+        try:
+            await guild.edit(**updates, reason=_mod_reason(message))
+            return f"Edited {guild.name}: {', '.join(sorted(updates))}"
+        except discord.Forbidden:
+            return f"Error: Discord denied editing {guild.name}"
+        except Exception as e:
+            return f"Error editing server: {e}"
+
+
+class AuditLogTool(Tool):
+    def get_description(self):
+        return (
+            "Read recent audit-log entries. Requires view_audit_log. "
+            "Params: guild_id (optional), limit (optional, default 10)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        guild_id: str | None = None,
+        limit: str = "10",
+        **kwargs,
+    ) -> str:
+        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        if error:
+            return error
+        missing = _missing_cap(guild, "view_audit_log")
+        if missing:
+            return missing
+        try:
+            cap = max(1, min(int(limit or 10), 25))
+        except (TypeError, ValueError):
+            cap = 10
+        rows = []
+        try:
+            async for entry in guild.audit_logs(limit=cap):
+                actor = getattr(getattr(entry, "user", None), "name", "?")
+                action = getattr(getattr(entry, "action", None), "name", entry.action)
+                target = getattr(entry, "target", None)
+                rows.append(f"{actor} {action} {target}")
+        except discord.Forbidden:
+            return f"Error: cannot read audit log in {guild.name}"
+        except Exception as e:
+            return f"Error reading audit log: {e}"
+        if not rows:
+            return f"No audit-log entries in {guild.name}"
+        return f"Audit log for {guild.name}:\n" + "\n".join(rows)
+
+
+class ManageEmojiTool(Tool):
+    def get_description(self):
+        return (
+            "List, create, or delete custom emojis. Requires manage_expressions. "
+            "Params: action (list|create|delete), name, url (image for create), "
+            "emoji_id or name (for delete), guild_id (optional)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        action: str | None = None,
+        name: str | None = None,
+        url: str | None = None,
+        emoji_id: str | None = None,
+        guild_id: str | None = None,
+        **kwargs,
+    ) -> str:
+        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        if error:
+            return error
+        missing = _missing_cap(guild, "manage_expressions")
+        if missing:
+            return missing
+        act = str(action or "list").strip().lower()
+        emojis = list(getattr(guild, "emojis", []) or [])
+        if act == "list":
+            if not emojis:
+                return f"No custom emojis in {guild.name}"
+            return (
+                f"Emojis in {guild.name} ({len(emojis)}):\n"
+                + "\n".join(f":{e.name}: ({e.id})" for e in emojis[:40])
+            )
+        if act == "create":
+            clean = re.sub(r"[^A-Za-z0-9_]", "", str(name or ""))[:32]
+            if len(clean) < 2:
+                return "Error: emoji name must be 2-32 letters/numbers/underscore"
+            if not url or not _is_safe_url(url):
+                return "Error: a public image url is required"
+            try:
+                session = await _get_shared_session()
+                async with session.get(
+                    url, timeout=aiohttp.ClientTimeout(total=30), allow_redirects=False
+                ) as resp:
+                    if resp.status != 200:
+                        return f"Error: could not download image (status {resp.status})"
+                    image = await _read_response_limited(resp, 256 * 1024)
+                emoji = await guild.create_custom_emoji(
+                    name=clean, image=image, reason=_mod_reason(message)
+                )
+                return f"Created emoji :{emoji.name}: ({emoji.id}) in {guild.name}"
+            except discord.Forbidden:
+                return f"Error: Discord denied creating emoji in {guild.name}"
+            except Exception as e:
+                return f"Error creating emoji: {e}"
+        if act == "delete":
+            spec = str(emoji_id or name or "").strip().strip(":")
+            eid = _parse_snowflake(spec)
+            emoji = None
+            if eid is not None:
+                emoji = next((e for e in emojis if e.id == eid), None)
+            if emoji is None:
+                matches = [e for e in emojis if e.name.lower() == spec.lower()]
+                emoji = matches[0] if len(matches) == 1 else None
+            if emoji is None:
+                return f"Error: emoji '{spec}' not found"
+            try:
+                label = f":{emoji.name}: ({emoji.id})"
+                await emoji.delete(reason=_mod_reason(message))
+                return f"Deleted emoji {label} from {guild.name}"
+            except discord.Forbidden:
+                return f"Error: Discord denied deleting :{emoji.name}:"
+            except Exception as e:
+                return f"Error deleting emoji: {e}"
+        return "Error: action must be list, create, or delete"
 
 
 class ChangeAvatarTool(Tool):
@@ -3815,9 +5171,8 @@ class SendMessageTool(Tool):
             "Send a message to the current chat. Default: one call per turn with the full reply. "
             "You can call this more than once if you actually want separate Discord messages; do not split a normal reply. "
             "Content supports Discord markdown: **bold**, *italic*, `code`, ```code blocks```, > quotes, bullet lists. "
-            "Params: content (required), reply (optional bool, default true — pass "
-            "false in a live back-and-forth where it is obvious who you are "
-            "answering; quoting every line is noise), "
+            "Params: content (required), reply (optional bool, default true — Discord "
+            "quote-reply is on; pass false only for a standalone line with no quote), "
             "reply_to (optional short quote or who said it, like nah or alice — not an id)."
         )
 

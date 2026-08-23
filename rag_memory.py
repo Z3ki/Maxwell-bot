@@ -723,9 +723,25 @@ class RAGMemoryManager:
         ).fetchall():
             normalized = _strip_for_embedding(r["content"])
             h = _hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-            self._db.execute(
-                "UPDATE vectors SET content_hash=? WHERE id=?", (h, r["id"])
-            )
+            # Same text in the same channel/kind can already have a hashed
+            # row. The unique index on (kind, channel_id, content_hash)
+            # would abort startup if we stamped the duplicate too.
+            try:
+                self._db.execute(
+                    "UPDATE vectors SET content_hash=? WHERE id=? AND NOT EXISTS ("
+                    "  SELECT 1 FROM vectors AS other"
+                    "  WHERE other.id != vectors.id"
+                    "    AND other.kind = vectors.kind"
+                    "    AND other.channel_id = vectors.channel_id"
+                    "    AND other.content_hash = ?"
+                    ")",
+                    (h, r["id"], h),
+                )
+            except sqlite3.IntegrityError:
+                logger.warning(
+                    "Skipping duplicate content_hash backfill for vector %s",
+                    r["id"],
+                )
 
         # Backfill source for existing rows using the same heuristic
         # the new insert path uses.

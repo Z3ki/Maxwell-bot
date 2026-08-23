@@ -178,6 +178,35 @@ def test_fenced_example_is_not_dispatched():
     assert _recover(text) == ([], text)
 
 
+def test_json_only_fence_is_recovered():
+    """Grok wraps real tool JSON in a json fence; that is a call, not a quote."""
+    text = (
+        '```json\n{"name":"send_message","arguments":{"content":"nadie dijo eso"}}\n```'
+    )
+    calls, leftover = _recover(text)
+    assert calls == [("send_message", {"content": "nadie dijo eso"})]
+    assert leftover == ""
+
+
+def test_json_fence_with_extra_prose_is_not_a_call():
+    text = (
+        "the payload looks like:\n"
+        '```json\n{"name":"send_message","arguments":{"content":"hi"}}\n'
+        "not this though\n```"
+    )
+    assert _recover(text) == ([], text)
+
+
+def test_openai_typed_function_json_is_recovered():
+    text = (
+        '{"type":"function","function":{"name":"send_message",'
+        '"arguments":{"content":"hola"}}}'
+    )
+    calls, leftover = _recover(text)
+    assert calls == [("send_message", {"content": "hola"})]
+    assert leftover == ""
+
+
 def test_message_starting_with_a_param_word_is_not_a_ladder():
     """A tagless ladder needs bare key lines, not a word used in a sentence."""
     text = "content is king, reply when you can"

@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import hmac
 import html
+import inspect
 import io
 import json
 import logging
@@ -222,8 +223,23 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     JoinVcTool,
     LeaveServerTool,
     LeaveVcTool,
+    KickMemberTool,
+    BanMemberTool,
+    UnbanMemberTool,
     ListAdminServersTool,
+    ListBansTool,
     ListServersTool,
+    LockChannelTool,
+    ManageEmojiTool,
+    ManageRoleTool,
+    PinMessageTool,
+    PurgeMessagesTool,
+    SetChannelPermissionsTool,
+    SetMemberNicknameTool,
+    TimeoutMemberTool,
+    VoiceModTool,
+    EditServerTool,
+    AuditLogTool,
     ListSitesTool,
     LookupUserTool,
     NoResponseTool,
@@ -253,6 +269,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     YouTubeTool,
     forget_shell_progress,
     _IMAGE_FETCH_UA,
+    _guild_access_line,
     _get_shared_session,
     _is_safe_url,
     _read_response_limited,
@@ -1651,6 +1668,9 @@ def strip_tool_payload_leaks(text: str) -> str:
     cleaned = DOUBLE_WRAPPED_URL_RE.sub(r"\1", cleaned)
     cleaned = WRAPPED_URL_RE.sub(r"\1", cleaned)
     cleaned = TRANSCRIPT_MENTION_RE.sub(r"<@\1>", cleaned)
+    # After a fenced tool JSON body is stripped, the model often leaves
+    # ```json\n\n``` behind. Discord posted that empty fence as the reply.
+    cleaned = re.sub(r"(?:```|~~~)[^\n`~]{0,32}\s*(?:```|~~~)", "", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     if len(cleaned) < len(original) * 0.95 and logger.isEnabledFor(logging.DEBUG):
         # Significant sanitization happened; helps debug persistent leak issues without always logging.
@@ -2204,7 +2224,9 @@ TOOL_PROTOCOL = (
     "set_activity / change_presence: only when asked or after a real state change.\n"
     "update_base_personality / update_server_prompt: rewrite runtime "
     "personality only when asked or voice is clearly drifting. Base Knowledge "
-    "in code is not editable. Every tool is available; none are admin-only.\n"
+    "in code is not editable. Every tool is available; none are admin-only. "
+    "Discord kick/ban/channel/role tools still need matching Discord "
+    "permissions in that server; the per-turn access line lists what you can use.\n"
     "## What comes back\n"
     "Each tool description ends with its result contract. Read it before you "
     "plan the turn:\n"
@@ -3160,6 +3182,21 @@ class MaxwellBot(commands.Bot):
         self.tools["create_channel"] = CreateChannelTool(self)
         self.tools["edit_channel"] = EditChannelTool(self)
         self.tools["delete_channel"] = DeleteChannelTool(self)
+        self.tools["kick_member"] = KickMemberTool(self)
+        self.tools["ban_member"] = BanMemberTool(self)
+        self.tools["unban_member"] = UnbanMemberTool(self)
+        self.tools["list_bans"] = ListBansTool(self)
+        self.tools["timeout_member"] = TimeoutMemberTool(self)
+        self.tools["manage_role"] = ManageRoleTool(self)
+        self.tools["purge_messages"] = PurgeMessagesTool(self)
+        self.tools["pin_message"] = PinMessageTool(self)
+        self.tools["set_member_nickname"] = SetMemberNicknameTool(self)
+        self.tools["voice_mod"] = VoiceModTool(self)
+        self.tools["lock_channel"] = LockChannelTool(self)
+        self.tools["set_channel_permissions"] = SetChannelPermissionsTool(self)
+        self.tools["edit_server"] = EditServerTool(self)
+        self.tools["audit_log"] = AuditLogTool(self)
+        self.tools["manage_emoji"] = ManageEmojiTool(self)
         if self.config.ENABLE_AVATAR:
             self.tools["change_avatar"] = ChangeAvatarTool(self)
         if self.config.ENABLE_CREATE_SITE:
@@ -3322,6 +3359,50 @@ class MaxwellBot(commands.Bot):
             return max(3.0, min(float(raw), 60.0))
         except (TypeError, ValueError):
             return 15.0
+
+    def _watch_lock_timeout(self) -> float:
+        # Image gen / long tools hold the channel lock well past the 15s
+        # on_message fail-fast. Debounced follow-ups wait that out.
+        return max(self._channel_lock_timeout(), 90.0)
+
+    def _requeue_after_lock_timeout(self, message) -> None:
+        """Keep a live reply queued instead of dropping it while the room is busy."""
+        if message is None or not self._should_live_reply(message):
+            return
+        retries = int(getattr(message, "_lock_retry_count", 0) or 0)
+        if retries >= 4:
+            logger.warning(
+                "Channel lock retries exhausted for %s; dropping live reply",
+                getattr(getattr(message, "channel", None), "id", "?"),
+            )
+            return
+        with contextlib.suppress(Exception):
+            message._lock_retry_count = retries + 1
+        content = self._content_without_self_mention(
+            getattr(message, "content", "") or ""
+        )
+        self._queue_watch_reply(message, content, directed=True)
+
+    def _should_interrupt_inflight(self, message) -> bool:
+        """Cancel the in-flight turn only when THIS user hard-pings again.
+
+        Watch chatter used to match `_should_live_reply` and cancel image
+        generation / long tools mid-run.
+        """
+        if getattr(getattr(message, "author", None), "bot", False):
+            return False
+        if self.user is None:
+            return False
+        channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
+        active = (getattr(self, "_active_requests", None) or {}).get(channel_id)
+        if active is None or active.done() or active is asyncio.current_task():
+            return False
+        active_user = (getattr(self, "_active_request_user", None) or {}).get(
+            channel_id
+        )
+        if active_user != str(getattr(message.author, "id", "") or ""):
+            return False
+        return self._directly_addressed(message)
 
     def _get_telegram_chat_lock(self, chat_id) -> asyncio.Lock:
         key = str(chat_id)
@@ -3688,6 +3769,38 @@ class MaxwellBot(commands.Bot):
                 "new point. Stay silent for lol/ok/side talk, people talking "
                 "about you to someone else, or repeating the same joke."
             )
+            directed = False
+            reply_other = False
+            ping_other = False
+            with contextlib.suppress(Exception):
+                directed = bool(self._directly_addressed(message))
+            with contextlib.suppress(Exception):
+                reply_other = bool(self._replying_to_other(message))
+            if not reply_other:
+                ref = getattr(getattr(message, "reference", None), "resolved", None)
+                ref_id = getattr(getattr(ref, "author", None), "id", None)
+                me_id = getattr(getattr(self, "user", None), "id", None)
+                if ref_id is not None and me_id is not None and ref_id != me_id:
+                    reply_other = True
+            with contextlib.suppress(Exception):
+                ping_other = bool(self._addressing_someone_else(message))
+            if not directed:
+                if reply_other:
+                    lines.append(
+                        "This Discord message is a reply to someone else, not "
+                        "to you. Room chat — not a ping and not a Discord-reply "
+                        "to Maxwell."
+                    )
+                elif ping_other:
+                    lines.append(
+                        "They @ mentioned someone else, not you. This is not a "
+                        "ping to Maxwell."
+                    )
+                else:
+                    lines.append(
+                        "This was posted to the channel, not sent to you. No @, "
+                        "no Discord-reply to you — room chat, not a ping."
+                    )
         if getattr(message, "_watch_followup", False):
             lines.append(
                 "Soft follow-up: they did not @ you or Discord-reply this time. "
@@ -3814,9 +3927,13 @@ class MaxwellBot(commands.Bot):
             target._watch_followup = True
         lock = self._get_channel_lock(str(channel_id))
         try:
-            await asyncio.wait_for(lock.acquire(), timeout=self._channel_lock_timeout())
+            await asyncio.wait_for(lock.acquire(), timeout=self._watch_lock_timeout())
         except asyncio.TimeoutError:
-            logger.warning("Watch debounce: channel lock timeout for %s", channel_id)
+            logger.warning(
+                "Watch debounce: channel lock timeout for %s; requeueing",
+                channel_id,
+            )
+            self._requeue_after_lock_timeout(target)
             return
         try:
             logger.info(
@@ -4977,7 +5094,7 @@ class MaxwellBot(commands.Bot):
                 and active is not asyncio.current_task()
                 and not active.done()
                 and active_user == str(message.author.id)
-                and self._should_live_reply(message)
+                and self._should_interrupt_inflight(message)
             ):
                 logger.info(
                     f"Same-user interrupt: cancelling in-flight request for "
@@ -5031,6 +5148,7 @@ class MaxwellBot(commands.Bot):
                         },
                         message,
                     )
+            self._requeue_after_lock_timeout(message)
             return
         try:
             if self._control.get("store_memory", True):
@@ -9084,6 +9202,38 @@ class MaxwellBot(commands.Bot):
                     return items
         return items
 
+    async def _read_attachment_bytes(self, attachment, *, max_bytes: int) -> bytes:
+        """Read a Discord attachment, including forwarded snapshot stubs.
+
+        Snapshot attachments are often a SimpleNamespace with url/proxy_url
+        and no async read(). Fetch those over HTTP instead of crashing.
+        """
+        read = getattr(attachment, "read", None)
+        if callable(read):
+            blob = read()
+            if inspect.isawaitable(blob):
+                blob = await blob
+            return blob
+        url = str(
+            getattr(attachment, "url", None)
+            or getattr(attachment, "proxy_url", None)
+            or ""
+        ).strip()
+        if not url:
+            raise AttributeError(f"{type(attachment).__name__} has no read() or url")
+        session = await _get_shared_session()
+        timeout = aiohttp.ClientTimeout(total=30, connect=8)
+        async with session.get(
+            url,
+            headers={"User-Agent": _IMAGE_FETCH_UA},
+            timeout=timeout,
+        ) as resp:
+            if resp.status != 200:
+                raise RuntimeError(
+                    f"attachment fetch HTTP {resp.status} for {url[:80]}"
+                )
+            return await _read_response_limited(resp, max_bytes)
+
     async def _extract_media(self, message) -> tuple[list[str], list[dict]]:
         proc_img = parse_bool(self._control.get("process_images"), True)
         proc_aud = _owner_audio_input_enabled(self)
@@ -9112,23 +9262,26 @@ class MaxwellBot(commands.Bot):
             is_known_text = _is_text_attachment(attachment.filename, content_type)
             # Enforce absolute size limit for ALL attachments including text
             absolute_max = 50 * 1024 * 1024  # 50MB hard cap
-            if attachment.size > absolute_max:
+            att_size = int(getattr(attachment, "size", 0) or 0)
+            if att_size > absolute_max:
                 logger.warning(
-                    f"Skipping attachment {attachment.filename}: exceeds absolute limit ({attachment.size} bytes)"
+                    f"Skipping attachment {attachment.filename}: exceeds absolute limit ({att_size} bytes)"
                 )
                 continue
-            if attachment.size > max_size and not is_known_text:
+            if att_size > max_size and not is_known_text:
                 logger.warning(
-                    f"Skipping attachment {attachment.filename}: too large ({attachment.size} bytes)"
+                    f"Skipping attachment {attachment.filename}: too large ({att_size} bytes)"
                 )
                 continue
-            if is_known_text and attachment.size > TEXT_ATTACHMENT_MAX_BYTES:
+            if is_known_text and att_size > TEXT_ATTACHMENT_MAX_BYTES:
                 logger.warning(
-                    f"Skipping text attachment {attachment.filename}: too large ({attachment.size} bytes)"
+                    f"Skipping text attachment {attachment.filename}: too large ({att_size} bytes)"
                 )
                 continue
             try:
-                blob = await attachment.read()
+                blob = await self._read_attachment_bytes(
+                    attachment, max_bytes=max(att_size, max_size, 1)
+                )
                 is_text = is_known_text or (
                     not is_media
                     and _is_text_attachment(attachment.filename, content_type, blob)
@@ -11886,8 +12039,14 @@ class MaxwellBot(commands.Bot):
                         params = dict(params)
                         params["_confirmed"] = True
                 if not result_text:
+                    logger.info("Executing tool %s", name)
                     raw = await tool.execute(message, **params)
                     result_text = str(raw) if raw else "executed successfully"
+                    logger.info(
+                        "Tool %s finished: %s",
+                        name,
+                        result_text[:200].replace("\n", " "),
+                    )
                     if result_text.startswith(("Error", "Error:")):
                         self._tool_breaker.record_failure(name)
                     else:
@@ -13089,6 +13248,9 @@ class MaxwellBot(commands.Bot):
                 getattr(self, "bot_name", None),
             )
         )
+        access = _guild_access_line(getattr(message, "guild", None))
+        if access:
+            dynamic_parts.append(access)
         dynamic_parts.append(
             f"User: {message.author.display_name} ({message.author.id}, {user_kind}) | {local_now.strftime('%a %b %d %I:%M %p')} AST | Channel: #{channel_name} ({channel_id}, {channel_kind})"
         )

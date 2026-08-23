@@ -77,7 +77,10 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         ["message_id", "content"],
     ),
     "delete_message": _obj(
-        {"message_id": _str("Message ID to delete")},
+        {
+            "message_id": _str("Message ID to delete"),
+            "channel_id": _str("Optional channel ID if not the current channel"),
+        },
         ["message_id"],
     ),
     "change_presence": _obj(
@@ -158,7 +161,11 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     ),
     "typing": _obj({}),
     "list_servers": _obj({}),
-    "list_admin_servers": _obj({}),
+    "list_admin_servers": _obj(
+        {
+            "guild_id": _str("Optional server ID for one-server detail"),
+        }
+    ),
     "create_category": _obj(
         {
             "name": _str("Category name"),
@@ -192,6 +199,131 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "confirm_name": _str("Exact name confirmation"),
         },
         ["channel_id", "confirm_name"],
+    ),
+    "kick_member": _obj(
+        {
+            "user_id": _str("User ID or @mention to kick"),
+            "reason": _str("Optional audit-log reason"),
+            "guild_id": _str("Optional server ID"),
+        },
+        ["user_id"],
+    ),
+    "ban_member": _obj(
+        {
+            "user_id": _str("User ID or @mention to ban"),
+            "reason": _str("Optional audit-log reason"),
+            "delete_message_seconds": _str("Optional 0-604800 seconds of messages to delete"),
+            "guild_id": _str("Optional server ID"),
+        },
+        ["user_id"],
+    ),
+    "unban_member": _obj(
+        {
+            "user_id": _str("User ID to unban"),
+            "reason": _str("Optional audit-log reason"),
+            "guild_id": _str("Optional server ID"),
+        },
+        ["user_id"],
+    ),
+    "list_bans": _obj(
+        {
+            "guild_id": _str("Optional server ID"),
+            "limit": _int("Max bans to list (default 20)"),
+        }
+    ),
+    "timeout_member": _obj(
+        {
+            "user_id": _str("User ID or @mention"),
+            "duration": _str("e.g. 10m, 1h, 1d; 0/clear to remove"),
+            "reason": _str("Optional audit-log reason"),
+            "guild_id": _str("Optional server ID"),
+        },
+        ["user_id", "duration"],
+    ),
+    "manage_role": _obj(
+        {
+            "action": _str("list | create | edit | delete | add | remove"),
+            "guild_id": _str("Optional server ID"),
+            "name": _str("Role name (create/edit/lookup)"),
+            "role_id": _str("Role ID"),
+            "user_id": _str("Member for add/remove"),
+            "color": _str("Optional hex color"),
+            "hoist": _bool("Display separately"),
+            "mentionable": _bool("Allow @role mentions"),
+            "permissions": _str("Comma-separated Discord permission names"),
+            "confirm_name": _str("Exact role name required to delete"),
+        },
+        ["action"],
+    ),
+    "purge_messages": _obj(
+        {
+            "limit": _int("How many recent messages to delete (1-100, default 20)"),
+            "channel_id": _str("Optional channel ID"),
+            "user_id": _str("Optional author filter"),
+        }
+    ),
+    "pin_message": _obj(
+        {
+            "message_id": _str("Message ID to pin or unpin"),
+            "channel_id": _str("Optional channel ID"),
+            "unpin": _bool("True to unpin instead of pin"),
+        },
+        ["message_id"],
+    ),
+    "set_member_nickname": _obj(
+        {
+            "user_id": _str("Member to nick"),
+            "nickname": _str("New nickname, or reset to clear"),
+            "guild_id": _str("Optional server ID"),
+        },
+        ["user_id", "nickname"],
+    ),
+    "voice_mod": _obj(
+        {
+            "action": _str("mute | unmute | deafen | undeafen | move | disconnect"),
+            "user_id": _str("Member in voice"),
+            "channel_id": _str("Voice channel ID for move"),
+            "guild_id": _str("Optional server ID"),
+        },
+        ["action", "user_id"],
+    ),
+    "lock_channel": _obj(
+        {
+            "channel_id": _str("Optional channel ID (defaults to current)"),
+            "unlock": _bool("True to unlock"),
+        }
+    ),
+    "set_channel_permissions": _obj(
+        {
+            "channel_id": _str("Channel ID"),
+            "target": _str("Role ID, user ID, or everyone"),
+            "allow": _str("Comma pairs like send_messages=false,view_channel=true"),
+            "reset": _bool("True to clear that overwrite"),
+        },
+        ["channel_id", "target"],
+    ),
+    "edit_server": _obj(
+        {
+            "name": _str("New server name"),
+            "description": _str("New server description"),
+            "guild_id": _str("Optional server ID"),
+        }
+    ),
+    "audit_log": _obj(
+        {
+            "guild_id": _str("Optional server ID"),
+            "limit": _int("Entries to read (default 10)"),
+        }
+    ),
+    "manage_emoji": _obj(
+        {
+            "action": _str("list | create | delete"),
+            "name": _str("Emoji name"),
+            "url": _str("Public image URL for create"),
+            "emoji_id": _str("Emoji ID for delete"),
+            "guild_id": _str("Optional server ID"),
+        },
+        ["action"],
     ),
     "change_avatar": _obj(
         {"url": _str("Direct image URL (jpg/png/gif/webp)")},
@@ -228,12 +360,10 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         {
             "content": _str("Message text (Discord markdown OK)"),
             "reply": _bool(
-                "Discord-reply, i.e. the quoted-parent UI. Default true. Pass "
-                "false in a live back-and-forth where it is already obvious "
-                "who you are answering — quoting every single line is noise "
-                "no real person makes. Keep it on when the room has moved on, "
-                "several people are talking at once, or you are answering an "
-                "older line."
+                "Discord quote-reply (the quoted-parent UI). Default true. "
+                "Pass false only for a standalone line with no quote. Keep it "
+                "on when the room has moved on, several people are talking, "
+                "or you are answering an older line."
             ),
             "reply_to": _str(
                 "Optional short quote or who said it, like nah or alice. Not an id."
@@ -464,6 +594,21 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "create_channel",
         "edit_channel",
         "delete_channel",
+        "kick_member",
+        "ban_member",
+        "unban_member",
+        "list_bans",
+        "timeout_member",
+        "manage_role",
+        "purge_messages",
+        "pin_message",
+        "set_member_nickname",
+        "voice_mod",
+        "lock_channel",
+        "set_channel_permissions",
+        "edit_server",
+        "audit_log",
+        "manage_emoji",
         "send_file",
         "send_meme",
         "send_media",
@@ -816,7 +961,14 @@ def _bare_arg_call_re(names: frozenset) -> re.Pattern:
 
 _NAME_ATTR_RE = re.compile(r"""\bname\s*=\s*['"]([^'"]+)['"]""", re.IGNORECASE)
 _BARE_NAME_LINE_RE = re.compile(r"^\s*([A-Za-z_][\w.]*)\s*$")
-_JSON_OPEN_RE = re.compile(r'\{\s*"(?:name|tool|tool_name|function)"\s*:', re.IGNORECASE)
+# `type` is first on OpenAI-shaped dumps (`{"type":"function","name":…}` /
+# `{"type":"function","function":{…}}`). Still decoded by _args_from_json_obj,
+# which ignores objects that have no tool name.
+_JSON_OPEN_RE = re.compile(
+    r'\{\s*"(?:name|tool|tool_name|function|type)"\s*:',
+    re.IGNORECASE,
+)
+_JSON_FENCE_LANGS = frozenset({"", "json", "jsonc", "json5"})
 
 
 def _fenced_spans(text: str) -> list[tuple[int, int]]:
@@ -826,6 +978,53 @@ def _fenced_spans(text: str) -> list[tuple[int, int]]:
 
 def _inside(pos: int, spans: list[tuple[int, int]]) -> bool:
     return any(start <= pos < end for start, end in spans)
+
+
+def _json_only_fence_span(
+    text: str, json_start: int, json_end: int, fences: list[tuple[int, int]]
+) -> tuple[int, int] | None:
+    """Fence span if this JSON object is the entire fenced body.
+
+    Models (Grok especially) wrap a real tool-call JSON object in `````json``.
+    Skipping that fence left the sanitizer to strip the object and post an
+    empty `````json`` block to Discord. XML/tool markup inside a fence is
+    still ignored — only a fence whose body is exactly one tool JSON counts.
+    """
+    json_body = text[json_start:json_end].strip()
+    if not json_body:
+        return None
+    for fence_start, fence_end in fences:
+        if not (fence_start <= json_start and json_end <= fence_end):
+            continue
+        block = text[fence_start:fence_end]
+        if block.startswith("```"):
+            mark = "```"
+        elif block.startswith("~~~"):
+            mark = "~~~"
+        else:
+            continue
+        rest = block[len(mark) :]
+        if rest.endswith(mark):
+            rest = rest[: -len(mark)]
+        lang, sep, body = rest.partition("\n")
+        if not sep:
+            body = lang
+            lang = ""
+            stripped = body.lstrip()
+            lowered = stripped.lower()
+            for prefix in ("jsonc", "json5", "json"):
+                if lowered.startswith(prefix):
+                    after = stripped[len(prefix) :].lstrip()
+                    if after.startswith("{"):
+                        lang = prefix
+                        body = after
+                    break
+        if lang.strip().lower() not in _JSON_FENCE_LANGS:
+            return None
+        if body.strip() != json_body:
+            return None
+        return fence_start, fence_end
+    return None
 
 
 def _clean_tool_name(name: str) -> str:
@@ -1026,8 +1225,11 @@ def recover_text_tool_calls(
     dispatch path a native call takes. ``leftover_text`` is the response with
     the recovered markup removed — the prose the model wrote around the call.
 
-    Only names in ``known_names`` are recovered. Anything inside a fenced code
-    block is skipped: a model quoting tool syntax is not calling a tool.
+    Only names in ``known_names`` are recovered. XML/tool markup inside a
+    fenced code block is skipped (quoting syntax is not a call). A fence
+    whose body is exactly one tool-call JSON object is recovered — Grok
+    wraps real calls in ``json`` fences, and skipping those left Discord
+    an empty fence after the sanitizer ate the object.
     """
     import json
 
@@ -1103,8 +1305,16 @@ def recover_text_tool_calls(
         if parsed is None:
             continue
         decoded = _args_from_json_obj(parsed[0])
-        if decoded:
-            _add(match.start(), parsed[1], decoded[0], decoded[1])
+        if not decoded:
+            continue
+        start, end = match.start(), parsed[1]
+        wrapped = _json_only_fence_span(raw, start, end, fences)
+        if wrapped:
+            name = _clean_tool_name(decoded[0])
+            if name and (allowed is None or name.lower() in allowed):
+                found.append((wrapped[0], wrapped[1], name, decoded[1]))
+            continue
+        _add(start, end, decoded[0], decoded[1])
 
     # Drop overlaps (a <tool_call> wrapper and the JSON inside it both match),
     # keeping the outermost span so the wrapper is removed from the text too.

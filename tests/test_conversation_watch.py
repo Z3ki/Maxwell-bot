@@ -21,6 +21,8 @@ def _bot(*, watch_seconds=180, debounce_seconds=0.05):
         _blacklist=set(),
         _replying_channels=set(),
         _recent_users={},
+        _active_requests={},
+        _active_request_user={},
         user=SimpleNamespace(id=1382894657624866889),
     )
     bot._conversation_watch_seconds = MaxwellBot._conversation_watch_seconds.__get__(
@@ -54,6 +56,13 @@ def _bot(*, watch_seconds=180, debounce_seconds=0.05):
     bot._maybe_live_reply = MaxwellBot._maybe_live_reply.__get__(bot)
     bot._get_channel_lock = MaxwellBot._get_channel_lock.__get__(bot)
     bot._channel_lock_timeout = MaxwellBot._channel_lock_timeout.__get__(bot)
+    bot._watch_lock_timeout = MaxwellBot._watch_lock_timeout.__get__(bot)
+    bot._requeue_after_lock_timeout = MaxwellBot._requeue_after_lock_timeout.__get__(
+        bot
+    )
+    bot._should_interrupt_inflight = MaxwellBot._should_interrupt_inflight.__get__(
+        bot
+    )
     bot._track_task = lambda task: task
     bot._update_recent_users = MaxwellBot._update_recent_users.__get__(bot)
     bot._prune_typing = MaxwellBot._prune_typing.__get__(bot)
@@ -288,6 +297,37 @@ def test_watch_prompt_lets_him_decide():
     asyncio.run(run())
 
 
+def test_watch_prompt_says_channel_posts_are_room_chat():
+    bot = _bot()
+    msg = _plain_followup(content="lol")
+
+    async def run():
+        MaxwellBot._arm_conversation_watch(bot, msg.channel.id)
+        lines = MaxwellBot._conversation_watch_prompt(bot, msg, msg.channel.id)
+        text = " ".join(lines).lower()
+        assert "posted to the channel" in text
+        assert "not a ping" in text
+        parent = SimpleNamespace(
+            id=11,
+            author=SimpleNamespace(id=99, display_name="Alice"),
+            content="hello",
+        )
+        reply = _plain_followup(
+            content="yeah",
+            reference=SimpleNamespace(resolved=parent, message_id=11),
+        )
+        lines = MaxwellBot._conversation_watch_prompt(bot, reply, reply.channel.id)
+        text = " ".join(lines).lower()
+        assert "reply to someone else" in text
+        ping = _plain_followup(content="hey")
+        ping.mentions = [SimpleNamespace(id=99, display_name="Alice")]
+        lines = MaxwellBot._conversation_watch_prompt(bot, ping, ping.channel.id)
+        text = " ".join(lines).lower()
+        assert "mentioned someone else" in text
+
+    asyncio.run(run())
+
+
 def test_watch_debounce_collapses_a_burst_into_one_reply():
     bot = _bot()
     handled = []
@@ -379,6 +419,42 @@ def test_channel_lock_fails_fast_under_load():
     assert MaxwellBot._channel_lock_timeout(bot) == 60.0
     bot._control["channel_lock_timeout_seconds"] = 1
     assert MaxwellBot._channel_lock_timeout(bot) == 3.0
+    assert MaxwellBot._watch_lock_timeout(bot) == 90.0
+
+
+def test_watch_chatter_does_not_interrupt_inflight():
+    bot = _bot()
+    fake = SimpleNamespace(done=lambda: False)
+
+    async def run():
+        chatter = _plain_followup(content="lol")
+        cid = str(chatter.channel.id)
+        bot._active_requests[cid] = fake
+        bot._active_request_user[cid] = str(chatter.author.id)
+        MaxwellBot._arm_conversation_watch(bot, chatter.channel.id)
+        ping = _plain_followup(content=f"<@{bot.user.id}> make it a cat")
+        ping.mentions = [bot.user]
+        assert MaxwellBot._should_live_reply(bot, chatter) is True
+        assert MaxwellBot._should_interrupt_inflight(bot, chatter) is False
+        assert MaxwellBot._should_interrupt_inflight(bot, ping) is True
+
+    asyncio.run(run())
+
+
+def test_lock_timeout_requeues_a_live_reply():
+    bot = _bot()
+    queued = []
+    bot._queue_watch_reply = lambda msg, content, directed=True: queued.append(
+        (content, directed)
+    )
+
+    async def run():
+        msg = _plain_followup(content="make an image of a cat")
+        MaxwellBot._arm_conversation_watch(bot, msg.channel.id)
+        MaxwellBot._requeue_after_lock_timeout(bot, msg)
+
+    asyncio.run(run())
+    assert queued == [("make an image of a cat", True)]
 
 
 def test_bare_mention_is_a_ping_with_no_text():

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from bot import TOOL_PROTOCOL
 from bot_tools import (
+    BanMemberTool,
     CreateInviteTool,
     ListAdminServersTool,
     ListServersTool,
@@ -14,6 +15,10 @@ from bot_tools import (
     CreateChannelTool,
     EditChannelTool,
     DeleteChannelTool,
+    KickMemberTool,
+    ManageRoleTool,
+    PurgeMessagesTool,
+    TimeoutMemberTool,
 )
 
 
@@ -34,6 +39,11 @@ def test_tool_descriptions_do_not_say_admin_only():
         CreateChannelTool,
         EditChannelTool,
         DeleteChannelTool,
+        KickMemberTool,
+        BanMemberTool,
+        TimeoutMemberTool,
+        ManageRoleTool,
+        PurgeMessagesTool,
     ):
         desc = cls(bot).get_description().lower()
         assert "admin-only" not in desc

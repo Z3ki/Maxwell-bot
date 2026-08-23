@@ -170,6 +170,15 @@ def test_strip_tool_payload_leaks_unwraps_openai_text_part():
     )
 
 
+def test_strip_tool_payload_leaks_drops_empty_json_fence():
+    leaked = (
+        '```json\n{"name":"send_message","arguments":{"content":"x"}}\n```'
+    )
+    assert strip_tool_payload_leaks(leaked) == ""
+    assert strip_tool_payload_leaks("```json\n\n```") == ""
+    assert strip_tool_payload_leaks("look:\n```json\n\n```\noops") == "look:\n\noops"
+
+
 # ---- reasoning param injection on every tool schema ----
 
 
