@@ -11083,18 +11083,6 @@ class MaxwellBot(commands.Bot):
             return False, tools
         return custom, None
 
-    _LIVE_CORE_TOOLS = frozenset(
-        {
-            "send_message",
-            "no_response",
-            "react",
-            "send_file",
-            "send_media",
-            "wait",
-            "typing",
-        }
-    )
-
     def _is_short_live_turn(self, message, content: str | None = None) -> bool:
         text = str(content if content is not None else getattr(message, "content", "") or "")
         if getattr(message, "_watch_followup", False):
@@ -11105,62 +11093,16 @@ class MaxwellBot(commands.Bot):
             return True
         return len(text.strip()) < 80 and not self._directly_addressed(message)
 
-    def _live_tool_names(self, message, content: str, platform: str) -> set[str]:
-        """Core chat tools always; specialized tools only when the line asks."""
-        names = set(self._LIVE_CORE_TOOLS)
-        text = str(content or getattr(message, "content", "") or "")
-        lower = text.lower()
-        packs = (
-            (r"youtube|youtu\.be|\byt\b", ("youtube",)),
-            (
-                r"https?://|search|google|look up|look it up|fetch|"
-                r"\bweather\b|\bwiki\b|\bwho is\b",
-                ("web_search", "fetch_url"),
-            ),
-            (r"\b(site|website|html|landing page)\b", ("create_site", "list_sites")),
-            (r"\b(shell|run this|terminal|ssh)\b", ("shell",)),
-            (r"\bemail\b", ("email_send", "email_read_inbox", "email_get_message", "email_search")),
-            (r"\b(vc|voice chat|join (the )?call|hop on)\b", ("join_vc", "vc_status", "vc_where", "leave_vc")),
-            (r"\b(image|draw|picture|generate)\b", ("image_generator", "hd_image")),
-            (r"\b(tts|speak this|read this|voice note)\b", ("tts",)),
-            (r"\b(inbox|friend request)\b", ("inbox_list", "inbox_act")),
-            (r"\b(meme)\b", ("send_meme",)),
-            (r"\b(find (the )?message|search (the )?chat|scroll back)\b", ("search_messages",)),
-        )
-        for pattern, extras in packs:
-            if re.search(pattern, lower):
-                names.update(extras)
-        addressed = (
-            True if message is None else self._directly_addressed(message)
-        )
-        if addressed and len(text) >= 80:
-            names.update(
-                {
-                    "web_search",
-                    "fetch_url",
-                    "search_messages",
-                    "lookup_user",
-                    "youtube",
-                    "create_site",
-                    "list_sites",
-                    "send_meme",
-                    "tts",
-                }
-            )
-        compatible = MaxwellBot._compatible_tool_names(self, platform)
-        return {n for n in names if n in compatible}
-
     def _build_openai_tools(
         self, platform: str = "discord", *, message=None, content: str | None = None
     ) -> list[dict]:
         if not self.tools or not self._native_tools_enabled():
             return []
+        # message/content kept for call-site compatibility. Live turns get the
+        # full registered catalog; dashboard disabled_tools still applies.
+        _ = (message, content)
         disabled = set(self._control.get("disabled_tools", []) or [])
         compatible = MaxwellBot._compatible_tool_names(self, platform)
-        if message is not None or content:
-            compatible = compatible & self._live_tool_names(
-                message, content or "", platform
-            )
         return build_openai_tools(
             self.tools, allowed_names=compatible, disabled_names=disabled
         )
@@ -11170,6 +11112,7 @@ class MaxwellBot(commands.Bot):
     ) -> str:
         if not self.tools or not self._control.get("tools_enabled", True):
             return ""
+        _ = (message, content)
         disabled = set(self._control.get("disabled_tools", []) or [])
         compatible = MaxwellBot._compatible_tool_names(self, platform)
         names = [
@@ -11177,9 +11120,6 @@ class MaxwellBot(commands.Bot):
             for name, _tool in self.tools.items()
             if name in compatible and name not in disabled
         ]
-        if message is not None or content:
-            live = self._live_tool_names(message, content or "", platform)
-            names = [name for name in names if name in live]
         if not names:
             return ""
         # Group the catalog by result contract instead of dumping one flat

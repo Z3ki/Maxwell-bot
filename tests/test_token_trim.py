@@ -58,9 +58,8 @@ def _live_bot(extra_tools=None):
         _emoji_grid_shown={},
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
     )
-    bot._LIVE_CORE_TOOLS = MaxwellBot._LIVE_CORE_TOOLS
     bot._compatible_tool_names = MaxwellBot._compatible_tool_names.__get__(bot)
-    bot._live_tool_names = MaxwellBot._live_tool_names.__get__(bot)
+    bot._native_tools_enabled = MaxwellBot._native_tools_enabled.__get__(bot)
     bot._directly_addressed = MaxwellBot._directly_addressed.__get__(bot)
     bot._conversation_watch_active = MaxwellBot._conversation_watch_active.__get__(bot)
     bot._is_short_live_turn = MaxwellBot._is_short_live_turn.__get__(bot)
@@ -80,41 +79,54 @@ def _msg(content, *, mentions=None, watch_followup=False):
     return msg
 
 
-def test_live_tool_names_core_only_for_wyd():
-    bot = _live_bot()
-    names = MaxwellBot._live_tool_names(bot, _msg("wyd"), "wyd", "discord")
-    assert names == set(MaxwellBot._LIVE_CORE_TOOLS) & set(bot.tools)
-    assert "youtube" not in names
-    assert "web_search" not in names
-
-
-def test_live_tool_names_adds_youtube_on_url():
-    bot = _live_bot()
-    content = "check https://youtu.be/dQw4w9WgXcQ"
-    names = MaxwellBot._live_tool_names(bot, _msg(content), content, "discord")
-    assert "youtube" in names
-    assert "send_message" in names
-
-
-def test_live_tool_names_hard_ping_long_line_gets_helpers():
-    bot = _live_bot()
-    me = bot.user
-    content = "hey can you look around and tell me what this whole thing is about " * 2
-    names = MaxwellBot._live_tool_names(
-        bot, _msg(content, mentions=[me]), content, "discord"
+def _tool_names(bot, message, content, platform="discord"):
+    payload = MaxwellBot._build_openai_tools(
+        bot, platform, message=message, content=content
     )
+    return {item["function"]["name"] for item in payload}
+
+
+def test_live_turn_offers_every_registered_tool():
+    bot = _live_bot()
+    content = "Can you run a debugger on YOUR machine?"
+    names = _tool_names(bot, _msg(content, mentions=[bot.user]), content)
+    assert names == set(bot.tools)
+    assert "shell" in names
+    assert "youtube" in names
     assert "web_search" in names
+    assert "sub_agent" not in names  # not registered on this stub
+
+
+def test_short_watch_line_still_offers_full_catalog():
+    bot = _live_bot()
+    names = _tool_names(bot, _msg("wyd"), "wyd")
+    assert names == set(bot.tools)
+    assert "shell" in names
     assert "youtube" in names
 
 
-def test_tool_prompt_trims_to_live_core_on_short_line():
+def test_tool_prompt_lists_full_catalog_on_live_turn():
     bot = _live_bot()
     msg = _msg("wyd")
     prompt = MaxwellBot._tool_system_prompt(bot, "discord", message=msg, content="wyd")
     assert "send_message" in prompt
-    assert "youtube" not in prompt
+    assert "youtube" in prompt
+    assert "shell" in prompt
     full = MaxwellBot._tool_system_prompt(bot, "discord")
     assert "youtube" in full
+    assert "shell" in full
+
+
+def test_disabled_tools_still_hidden():
+    bot = _live_bot()
+    bot._control["disabled_tools"] = ["shell", "youtube"]
+    names = _tool_names(bot, _msg("wyd"), "wyd")
+    assert "shell" not in names
+    assert "youtube" not in names
+    assert "send_message" in names
+    prompt = MaxwellBot._tool_system_prompt(bot, "discord", message=_msg("wyd"), content="wyd")
+    assert "shell" not in prompt
+    assert "youtube" not in prompt
 
 
 def test_short_live_turn_for_watch_followup_not_hard_ping():
