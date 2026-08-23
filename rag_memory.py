@@ -1354,6 +1354,20 @@ class RAGMemoryManager:
 
     # ─── channel memory (short-term) ──────────────────────────────
 
+    async def list_recent_channel_ids(self, limit: int = 20) -> list[str]:
+        """Channel ids with the newest short-term memory, newest first."""
+        try:
+            cap = max(1, min(int(limit), 80))
+        except (TypeError, ValueError):
+            cap = 20
+        rows = self._db.execute(
+            "SELECT channel_id FROM vectors "
+            "WHERE kind IN ('message', 'bot_output') AND channel_id != '' "
+            "GROUP BY channel_id ORDER BY MAX(created_at) DESC LIMIT ?",
+            (cap,),
+        ).fetchall()
+        return [str(row["channel_id"]) for row in rows if row["channel_id"]]
+
     async def get_channel_memory(self, channel_id: str) -> list[dict]:
         """Return recent messages for a channel, oldest first.
 

@@ -35,6 +35,9 @@ class FakeMemory:
     async def get_channel_memory(self, channel_id):
         return list(self.channel_rows.get(str(channel_id), []))
 
+    async def list_recent_channel_ids(self, limit=20):
+        return list(self.channel_rows.keys())[:limit]
+
 
 def _engine(tmp_path, *, auto_channels=None, tools=None, control=None):
     bot = SimpleNamespace(
@@ -553,6 +556,158 @@ def test_gather_context_uses_numbered_channels_and_messages(tmp_path):
     assert "msg=1" in context
     assert "  1: #general" in context
     assert "100" not in context.split("=== AVAILABLE CHANNELS")[1].split("===")[0]
+
+
+def test_gather_context_keeps_every_active_room(tmp_path):
+    class Store:
+        async def load_goals(self):
+            return []
+
+        async def load_state(self):
+            return {}
+
+        async def load_log(self):
+            return []
+
+    class RemLog:
+        async def drain_slice(self, since):
+            return []
+
+    class HistoryMessage:
+        def __init__(self, mid, text):
+            self.id = mid
+            self.content = text
+            self.created_at = datetime.now()
+            self.author = SimpleNamespace(
+                id=7,
+                display_name="Alice",
+                name="alice",
+                bot=False,
+            )
+            self.mentions = []
+            self.reference = None
+            self.attachments = []
+            self.embeds = []
+
+    class Channel:
+        def __init__(self, cid, name, text):
+            self.id = cid
+            self.name = name
+            self.topic = ""
+            self._text = text
+
+        async def history(self, limit=12):
+            for msg in [HistoryMessage(self.id * 10, self._text)]:
+                yield msg
+
+    rooms = [
+        Channel(100 + i, f"room{i}", f"line from room {i}")
+        for i in range(12)
+    ]
+    by_id = {ch.id: ch for ch in rooms}
+
+    bot = SimpleNamespace(
+        config=SimpleNamespace(DATA_DIR=str(tmp_path)),
+        _auto_channels={str(ch.id) for ch in rooms},
+        _control={"bot_enabled": True},
+        tools={},
+        user=SimpleNamespace(id=42, display_name="Maxwell", name="Maxwell"),
+        guilds=[
+            SimpleNamespace(
+                id=1,
+                text_channels=rooms,
+                me=SimpleNamespace(),
+            )
+        ],
+        private_channels=[],
+        rem_log=RemLog(),
+        memory=None,
+        get_channel=lambda channel_id: by_id.get(int(channel_id)),
+        fetch_channel=None,
+        _conversation_watch={},
+        _last_bot_reply={},
+        _recent_users={},
+    )
+    for ch in rooms:
+        ch.permissions_for = lambda _me: SimpleNamespace(send_messages=True)
+    engine = AutonomyEngine(bot)
+    engine.store = Store()
+
+    context = asyncio.run(engine.gather_context())
+    activity = context.split("=== CHANNEL ACTIVITY ===")[1].split("===")[0]
+    assert "line from room 0" in activity
+    assert "line from room 11" in activity
+
+
+def test_gather_context_reads_watch_rooms_outside_auto_channels(tmp_path):
+    class Store:
+        async def load_goals(self):
+            return []
+
+        async def load_state(self):
+            return {}
+
+        async def load_log(self):
+            return []
+
+    class RemLog:
+        async def drain_slice(self, since):
+            return []
+
+    class HistoryMessage:
+        id = 777
+        content = "hey from the watch room"
+        created_at = datetime.now()
+        author = SimpleNamespace(
+            id=7,
+            display_name="Alice",
+            name="alice",
+            bot=False,
+        )
+        mentions = []
+        reference = None
+        attachments = []
+        embeds = []
+
+    class Channel:
+        id = 200
+        name = "watchroom"
+        topic = ""
+
+        async def history(self, limit=12):
+            for msg in [HistoryMessage()]:
+                yield msg
+
+    channel = Channel()
+    bot = SimpleNamespace(
+        config=SimpleNamespace(DATA_DIR=str(tmp_path)),
+        _auto_channels=set(),
+        _control={"bot_enabled": True},
+        tools={},
+        user=SimpleNamespace(id=42, display_name="Maxwell", name="Maxwell"),
+        guilds=[
+            SimpleNamespace(
+                id=1,
+                text_channels=[channel],
+                me=SimpleNamespace(),
+            )
+        ],
+        private_channels=[],
+        rem_log=RemLog(),
+        memory=None,
+        get_channel=lambda channel_id: channel if int(channel_id) == 200 else None,
+        fetch_channel=None,
+        _conversation_watch={"200": 1e18},
+        _conversation_watch_active=lambda cid: str(cid) == "200",
+        _last_bot_reply={},
+        _recent_users={},
+    )
+    channel.permissions_for = lambda _me: SimpleNamespace(send_messages=True)
+    engine = AutonomyEngine(bot)
+    engine.store = Store()
+
+    context = asyncio.run(engine.gather_context())
+    assert "hey from the watch room" in context
 
 
 def test_gather_context_includes_normal_channel_memory(tmp_path):

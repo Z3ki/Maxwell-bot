@@ -44,6 +44,7 @@ def _bot(*, watch_seconds=120, debounce_seconds=0.05):
     bot._flush_watch_reply = MaxwellBot._flush_watch_reply.__get__(bot)
     bot._maybe_live_reply = MaxwellBot._maybe_live_reply.__get__(bot)
     bot._get_channel_lock = MaxwellBot._get_channel_lock.__get__(bot)
+    bot._channel_lock_timeout = MaxwellBot._channel_lock_timeout.__get__(bot)
     bot._track_task = lambda task: task
     return bot
 
@@ -248,14 +249,14 @@ def test_watch_prompt_lets_him_decide():
         lines = MaxwellBot._conversation_watch_prompt(bot, msg, msg.channel.id)
         assert any("Conversation watch is on in this room" in line for line in lines)
         assert any("can talk without an @" in line for line in lines)
-        assert any("no_response" in line for line in lines)
+        assert any("default to no_response" in line for line in lines)
         assert all("Soft follow-up" not in line for line in lines)
         msg._watch_followup = True
         lines = MaxwellBot._conversation_watch_prompt(bot, msg, msg.channel.id)
-        assert any("speak if it's worth it" in line for line in lines)
+        assert any("Default is no_response" in line for line in lines)
         assert any("reply_to" in line for line in lines)
         assert all("Answer it" not in line for line in lines)
-        assert all("Default is no_response" not in line for line in lines)
+        assert all("speak if it's worth it" not in line for line in lines)
 
     asyncio.run(run())
 
@@ -342,3 +343,12 @@ def test_reply_relation_includes_quote():
         }
     )
     assert self_bit == 'reply_to=you/Maxwell(1) "hey"'
+
+
+def test_channel_lock_fails_fast_under_load():
+    bot = _bot()
+    assert MaxwellBot._channel_lock_timeout(bot) == 15.0
+    bot._control["channel_lock_timeout_seconds"] = 120
+    assert MaxwellBot._channel_lock_timeout(bot) == 60.0
+    bot._control["channel_lock_timeout_seconds"] = 1
+    assert MaxwellBot._channel_lock_timeout(bot) == 3.0

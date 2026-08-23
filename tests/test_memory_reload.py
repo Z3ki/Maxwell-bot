@@ -63,6 +63,7 @@ def test_channel_memory_add_and_get(tmp_path):
         assert len(mem) == 1
         assert mem[0]["author"] == "Alice"
         assert mem[0]["content"] == "hello world"
+        assert await mgr.list_recent_channel_ids() == ["chan1"]
 
     _run(run())
 

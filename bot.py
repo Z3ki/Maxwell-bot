@@ -3015,6 +3015,16 @@ class MaxwellBot(commands.Bot):
             self._channel_locks[channel_id] = asyncio.Lock()
         return self._channel_locks[channel_id]
 
+    def _channel_lock_timeout(self) -> float:
+        """Fail fast under load instead of parking a room for two minutes."""
+        raw = (getattr(self, "_control", None) or {}).get(
+            "channel_lock_timeout_seconds", 15
+        )
+        try:
+            return max(3.0, min(float(raw), 60.0))
+        except (TypeError, ValueError):
+            return 15.0
+
     def _get_telegram_chat_lock(self, chat_id) -> asyncio.Lock:
         key = str(chat_id)
         lock = self._telegram_chat_locks.get(key)
@@ -3332,17 +3342,19 @@ class MaxwellBot(commands.Bot):
                 watching = bool(checker(channel_id))
         if watching:
             lines.append(
-                "Conversation watch is on in this room. You are still in this "
-                "conversation and can talk without an @. Jump in when you have "
-                "something to say. Use no_response if they are talking to each "
-                "other, it's just chatter, or you would only repeat yourself."
+                "Conversation watch is on in this room. You can talk without "
+                "an @, but default to no_response. Only speak if someone is "
+                "talking to you, asking you something, or you have a genuinely "
+                "new point. Stay silent for lol/ok/side talk, people talking "
+                "about you to someone else, or repeating the same joke."
             )
         if getattr(message, "_watch_followup", False):
             lines.append(
                 "Soft follow-up: they did not @ you or Discord-reply this time. "
-                "Same rule — speak if it's worth it, otherwise no_response. "
-                "To put the Discord reply on an earlier line, send_message with "
-                "reply_to as a short quote or name, like nah or alice — not an id."
+                "Default is no_response. Speak only if this line is for you or "
+                "needs you. To Discord-reply to an earlier line, send_message "
+                "with reply_to as a short quote or name, like nah or alice — "
+                "not an id."
             )
         return lines
 
@@ -3445,7 +3457,7 @@ class MaxwellBot(commands.Bot):
             target._watch_followup = True
         lock = self._get_channel_lock(str(channel_id))
         try:
-            await asyncio.wait_for(lock.acquire(), timeout=120.0)
+            await asyncio.wait_for(lock.acquire(), timeout=self._channel_lock_timeout())
         except asyncio.TimeoutError:
             logger.warning("Watch debounce: channel lock timeout for %s", channel_id)
             return
@@ -3963,7 +3975,7 @@ class MaxwellBot(commands.Bot):
         _lock_acquired = False
         try:
             # Fail closed: never process the same channel unlocked (double replies / races).
-            await asyncio.wait_for(_lock.acquire(), timeout=120.0)
+            await asyncio.wait_for(_lock.acquire(), timeout=self._channel_lock_timeout())
             _lock_acquired = True
         except asyncio.TimeoutError as _exc:
             logger.warning(
@@ -11706,9 +11718,10 @@ class MaxwellBot(commands.Bot):
         elif getattr(message, "_watch_followup", False):
             dynamic_parts.append(
                 "Soft follow-up: they did not @ you or Discord-reply this time. "
-                "Same rule — speak if it's worth it, otherwise no_response. "
-                "To put the Discord reply on an earlier line, send_message with "
-                "reply_to as a short quote or name, like nah or alice — not an id."
+                "Default is no_response. Speak only if this line is for you or "
+                "needs you. To Discord-reply to an earlier line, send_message "
+                "with reply_to as a short quote or name, like nah or alice — "
+                "not an id."
             )
         # JAILBREAK: inject at the END of the system message for recency bias.
         # This is the strongest position — the last instructions carry the

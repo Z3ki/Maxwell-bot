@@ -517,11 +517,13 @@ AUTONOMY_POST_TOOLS = frozenset(
     }
 )
 
-# Per-section context budgets (sum ~8800, bumped for enriched channel map)
+# Per-section context budgets. Channel activity used to be 2800 chars and
+# a global last-40-lines slice, so later rooms vanished. Keep rooms intact
+# and give the planner enough space to actually see them.
 CTX_BUDGET_GOALS = 800
 CTX_BUDGET_RECENT_EVENTS = 2000
-CTX_BUDGET_CHANNEL_ACTIVITY = 2800
-CTX_BUDGET_CHANNEL_MEMORY = 2200
+CTX_BUDGET_CHANNEL_ACTIVITY = 8000
+CTX_BUDGET_CHANNEL_MEMORY = 4000
 CTX_BUDGET_RECENT_ACTIONS = 1200
 CTX_BUDGET_DM_HISTORY = 1200
 CTX_BUDGET_LTM = 800
@@ -1015,6 +1017,98 @@ class AutonomyEngine:
                 channels.append(cid)
         return channels
 
+    def _activity_channel_limit(self) -> int:
+        raw = (getattr(self.bot, "_control", None) or {}).get(
+            "autonomy_activity_channels", 20
+        )
+        try:
+            return max(4, min(int(raw), 40))
+        except (TypeError, ValueError):
+            return 20
+
+    def _activity_history_limit(self) -> int:
+        raw = (getattr(self.bot, "_control", None) or {}).get(
+            "autonomy_activity_messages", 25
+        )
+        try:
+            return max(8, min(int(raw), 50))
+        except (TypeError, ValueError):
+            return 25
+
+    async def _collect_activity_channel_ids(self, events) -> list[str]:
+        """Rooms the planner should actually read this tick.
+
+        Auto-channels alone miss watch rooms, recent live replies, and
+        anywhere people have been talking. Events first so the busy rooms
+        survive the activity budget.
+        """
+        channel_ids_to_check: list[str] = []
+        seen_channel_ids: set[str] = set()
+
+        def add_channel_id(raw_cid):
+            cid = re.sub(r"[^0-9]", "", str(raw_cid or ""))
+            if cid and cid not in seen_channel_ids:
+                seen_channel_ids.add(cid)
+                channel_ids_to_check.append(cid)
+
+        with contextlib.suppress(Exception):
+            for ev in reversed(events or []):
+                add_channel_id(ev.get("channel_id"))
+        with contextlib.suppress(Exception):
+            watch = getattr(self.bot, "_conversation_watch", None) or {}
+            checker = getattr(self.bot, "_conversation_watch_active", None)
+            for cid in list(watch):
+                if callable(checker):
+                    if checker(cid):
+                        add_channel_id(cid)
+                else:
+                    add_channel_id(cid)
+        with contextlib.suppress(Exception):
+            last = getattr(self.bot, "_last_bot_reply", None) or {}
+            for cid, _ts in sorted(last.items(), key=lambda kv: kv[1], reverse=True):
+                add_channel_id(cid)
+        with contextlib.suppress(Exception):
+            for cid in getattr(self.bot, "_recent_users", None) or {}:
+                add_channel_id(cid)
+        with contextlib.suppress(Exception):
+            for cid in self._auto_channel_candidates():
+                add_channel_id(cid)
+        with contextlib.suppress(Exception):
+            memory = getattr(self.bot, "memory", None)
+            lister = getattr(memory, "list_recent_channel_ids", None)
+            if callable(lister):
+                for cid in await lister(limit=self._activity_channel_limit()):
+                    add_channel_id(cid)
+        return channel_ids_to_check[: self._activity_channel_limit()]
+
+    async def _load_channel_history(
+        self, cid: str
+    ) -> tuple[str, Any, list] | None:
+        """Discord I/O only. Caller formats so the context index stays serial."""
+        if not self._channel_allowed(cid):
+            return None
+        try:
+            ch = None
+            with contextlib.suppress(Exception):
+                ch = cast(Any, self.bot.get_channel(int(cid)))
+            if ch is None:
+                ch = cast(Any, await self._fetch_channel_cached(cid))
+            if ch is None or not hasattr(ch, "history"):
+                return None
+            limit = self._activity_history_limit()
+            messages: list = []
+
+            async def _pull():
+                async for m in ch.history(limit=limit):
+                    messages.append(m)
+
+            await asyncio.wait_for(_pull(), timeout=8)
+            return cid, ch, messages
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+            return None
+        except Exception:
+            return None
+
     def _channel_allowed(self, channel_id: str) -> bool:
         """Check if autonomy should interact with this channel.
 
@@ -1196,6 +1290,12 @@ class AutonomyEngine:
                 # Clear per-tick transient state so a tick that died before
                 # _log_tick cannot leak a reflection stamp into the next one.
                 self._reflect_pending_persist = False
+                # `_tick_in_flight` already blocks overlapping ticks. Do not
+                # hold `_lock` across Discord history / LLM — live replies
+                # and dashboard writes would sit behind a long tick.
+                if acquired:
+                    self._lock.release()
+                    acquired = False
                 try:
                     # gather_context does many Discord history fetches + up to 3
                     # youtube fetches with no per-call timeout; one hung fetch
@@ -1571,40 +1671,38 @@ class AutonomyEngine:
             sections.append(f"=== RECENT CONVERSATIONS ===\n(error: {e})")
 
         # 4. Channel activity (what's happening right now?)
-        channel_ids_to_check = []
-        seen_channel_ids = set()
+        # Events, watch, recent replies, then auto-channels / memory — not
+        # just the first 10 auto rooms. Fetch in parallel, keep each room
+        # as its own block so a busy #general does not erase the others.
+        channel_ids_to_check = await self._collect_activity_channel_ids(events)
 
-        def add_channel_id(raw_cid):
-            cid = re.sub(r"[^0-9]", "", str(raw_cid or ""))
-            if cid and cid not in seen_channel_ids:
-                seen_channel_ids.add(cid)
-                channel_ids_to_check.append(cid)
+        sem = asyncio.Semaphore(8)
 
-        # New event channels first. If somebody pinged/replied, this is the room
-        # where context matters. Sets made this random before; random context is
-        # how you get bot improv jazz.
-        with contextlib.suppress(Exception):
-            for ev in reversed(events or []):
-                add_channel_id(ev.get("channel_id"))
-        with contextlib.suppress(Exception):
-            for cid in self._auto_channel_candidates():
-                add_channel_id(cid)
+        async def _bounded_history(cid: str):
+            async with sem:
+                return await self._load_channel_history(cid)
+
+        loaded = await asyncio.gather(
+            *[_bounded_history(cid) for cid in channel_ids_to_check],
+            return_exceptions=True,
+        )
+        history_by_id: dict[str, tuple[Any, list]] = {}
+        for item in loaded:
+            if isinstance(item, Exception) or not item:
+                continue
+            cid, ch, messages = item
+            history_by_id[cid] = (ch, messages)
 
         ch_lines = []
+        room_blocks = []
         ref_cache: dict[tuple[str, str], Any] = {}
-        for cid in channel_ids_to_check[:10]:
-            if not self._channel_allowed(cid):
+        for cid in channel_ids_to_check:
+            pair = history_by_id.get(cid)
+            if not pair:
                 continue
+            ch, messages = pair
             try:
-                ch = cast(Any, self.bot.get_channel(int(cid)))
-                if ch is None:
-                    try:
-                        ch = cast(Any, await self.bot.fetch_channel(int(cid)))
-                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                        continue
-                if ch is None or not hasattr(ch, "history"):
-                    continue
-                messages = [m async for m in ch.history(limit=12)]
+                room_lines = []
                 for m in reversed(messages):
                     _cid = str(getattr(ch, "id", "") or "")
                     _ku = (getattr(self.bot, "_recent_users", {}) or {}).get(_cid, {})
@@ -1637,9 +1735,14 @@ class AutonomyEngine:
                     )[1]
                     msg_idx = ctx_index.add_message(msg_id, _cid) if msg_id else 0
                     author = _user_ref(getattr(m, "author", None), self.bot.user)
-                    ch_lines.append(
-                        f'time={age} {ch_label} msg={msg_idx} speaker={author} {tag_text} content="{content}"'
+                    line = (
+                        f'time={age} {ch_label} msg={msg_idx} speaker={author} '
+                        f'{tag_text} content="{content}"'
                     )
+                    room_lines.append(line)
+                    ch_lines.append(line)
+                if room_lines:
+                    room_blocks.append("\n".join(room_lines))
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 continue
             except Exception:
@@ -1647,14 +1750,14 @@ class AutonomyEngine:
         watch_notes = []
         watch_check = getattr(self.bot, "_conversation_watch_active", None)
         if callable(watch_check):
-            for cid in channel_ids_to_check[:10]:
+            for cid in channel_ids_to_check:
                 with contextlib.suppress(Exception):
                     if not watch_check(cid):
                         continue
                     handle = ctx_index.handle_by_id.get(str(cid), str(cid))
                     name = ctx_index.name_by_id.get(str(cid), "")
                     watch_notes.append(f"{handle}({name})" if name else str(handle))
-        if ch_lines:
+        if room_blocks:
             header = "=== CHANNEL ACTIVITY ===\n"
             if watch_notes:
                 header += (
@@ -1664,7 +1767,7 @@ class AutonomyEngine:
                 )
             sections.append(
                 _truncate(
-                    header + "\n".join(ch_lines[-40:]),
+                    header + "\n\n".join(room_blocks),
                     CTX_BUDGET_CHANNEL_ACTIVITY,
                 )
             )
@@ -1705,7 +1808,7 @@ class AutonomyEngine:
                 ),
             )
             if memory and hasattr(memory, "get_channel_memory"):
-                for cid in reversed(channel_ids_to_check[:8]):
+                for cid in reversed(channel_ids_to_check):
                     if not self._channel_allowed(cid):
                         continue
                     rows = await memory.get_channel_memory(cid)
@@ -1769,7 +1872,7 @@ class AutonomyEngine:
                 sections.append(
                     _truncate_keep_tail(
                         "=== RECENT CONTEXT MEMORY (same continuity normal Maxwell sees; background only) ===\n"
-                        + "\n".join(mem_lines[-80:]),
+                        + "\n".join(mem_lines),
                         memory_budget,
                     )
                 )
