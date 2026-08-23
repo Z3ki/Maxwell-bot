@@ -770,6 +770,65 @@ def test_build_messages_has_single_formatting_instruction():
     asyncio.run(run())
 
 
+def test_bare_ping_prompt_uses_room_context_not_look_at_this():
+    memory = FakeMemory()
+    bot = SimpleNamespace(
+        _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
+        _control={
+            "base_personality": "test",
+            "cross_context_enabled": False,
+            "emoji_context_enabled": False,
+            "long_term_memory_enabled": False,
+            "memory_context_budget": 30000,
+            "memory_history_messages": 20,
+            "music_context_enabled": False,
+            "tools_enabled": False,
+        },
+        _drugged_until={},
+        _guild_emojis={},
+        _recent_users={},
+        _conversation_watch={},
+        _tool_system_prompt=lambda *args, **kwargs: "",
+        bot_name="Maxwell",
+        memory=memory,
+        user=SimpleNamespace(display_name="Maxwell", id=1),
+    )
+    bot._reply_parent = MaxwellBot._reply_parent.__get__(bot)
+    bot._replying_to_own_message = MaxwellBot._replying_to_own_message.__get__(bot)
+    bot._render_reply_parent = MaxwellBot._render_reply_parent.__get__(bot)
+    bot._reply_parent_context_lines = MaxwellBot._reply_parent_context_lines.__get__(
+        bot
+    )
+    bot._directly_addressed = MaxwellBot._directly_addressed.__get__(bot)
+    bot._content_without_self_mention = MaxwellBot._content_without_self_mention.__get__(
+        bot
+    )
+    bot._is_bare_ping = MaxwellBot._is_bare_ping.__get__(bot)
+    bot._conversation_watch_active = MaxwellBot._conversation_watch_active.__get__(bot)
+    bot._is_short_live_turn = MaxwellBot._is_short_live_turn.__get__(bot)
+    message = SimpleNamespace(
+        author=SimpleNamespace(bot=False, display_name="alice", id=456),
+        channel=SimpleNamespace(id=123),
+        guild=SimpleNamespace(id=1, name="g"),
+        id=789,
+        mentions=[bot.user],
+        reference=None,
+        attachments=[],
+        stickers=[],
+        embeds=[],
+        content="<@1>",
+    )
+
+    async def run():
+        messages = await MaxwellBot._build_messages(bot, message, "")
+        blob = "\n".join(m["content"] for m in messages)
+        assert "look at this" not in blob.lower()
+        assert "pinged you with no extra text" in blob
+        assert "Read the conversation" in blob
+
+    asyncio.run(run())
+
+
 def test_cached_media_context_requires_latest_visual_reference():
     message = SimpleNamespace(reference=None)
 

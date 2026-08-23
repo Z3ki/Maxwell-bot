@@ -3077,6 +3077,28 @@ class MaxwellBot(commands.Bot):
             return getattr(resolved.author, "id", None) == self.user.id
         return False
 
+    def _content_without_self_mention(self, content: str | None) -> str:
+        text = str(content or "")
+        uid = getattr(self.user, "id", None)
+        if uid is not None:
+            text = re.sub(rf"<@!?{uid}>", "", text)
+        return text.strip()
+
+    def _is_bare_ping(self, message, content: str | None = None) -> bool:
+        """True when they @ him / reply / DM with no extra words or media."""
+        if not self._directly_addressed(message):
+            return False
+        text = self._content_without_self_mention(
+            content if content is not None else getattr(message, "content", "")
+        )
+        if text:
+            return False
+        if getattr(message, "attachments", None) or getattr(message, "stickers", None):
+            return False
+        if getattr(message, "embeds", None):
+            return False
+        return True
+
     def _soft_addressed(self, message) -> bool:
         """@everyone / @here / a role Maxwell has — not a personal ping."""
         if getattr(message, "mention_everyone", False):
@@ -3497,11 +3519,7 @@ class MaxwellBot(commands.Bot):
         if target is None:
             self._kick_watch_next(cid)
             return
-        content = (
-            getattr(target, "content", "")
-            or bucket.get("content")
-            or "look at this"
-        )
+        content = getattr(target, "content", "") or bucket.get("content") or ""
         with contextlib.suppress(Exception):
             target._watch_followup = True
         kinds = getattr(self, "_active_request_kind", None)
@@ -4208,7 +4226,7 @@ class MaxwellBot(commands.Bot):
                 if self._control.get("reply_dms", True):
                     await self._handle_message(
                         message,
-                        message.content or "look at this",
+                        self._content_without_self_mention(message.content),
                     )
                 return
 
@@ -4217,7 +4235,7 @@ class MaxwellBot(commands.Bot):
                     self._touch_watch_debounce(message)
                     return
                 await self._maybe_live_reply(
-                    message, message.content or "look at this"
+                    message, self._content_without_self_mention(message.content)
                 )
                 return
 
@@ -4225,19 +4243,11 @@ class MaxwellBot(commands.Bot):
                 if not self._control.get("reply_mentions", True):
                     self._touch_watch_debounce(message)
                     return
-                clean = (
-                    re.sub(rf"<@!?{self.user.id}>", "", message.content).strip()
-                    if self.user
-                    else message.content
-                )
-                # 2026-08-02 (Z3ki): allow Maxwell to respond to bare pings
-                # with no message attached. Previously a `return` here
-                # silently swallowed `<@Maxwell>` with no text, attachments,
-                # or embeds. Now fall through to _handle_message so the bot
-                # produces a reply (and the user gets a reaction / ack /
-                # whatever the model decides is appropriate for an empty
-                # user message).
-                await self._maybe_live_reply(message, clean or "look at this")
+                clean = self._content_without_self_mention(message.content)
+                # Bare @Maxwell with no extra text: still a turn. Do not
+                # invent "look at this" — he should read the room (and any
+                # reply-parent) and answer from that.
+                await self._maybe_live_reply(message, clean)
         finally:
             if _lock_acquired:
                 _lock.release()
@@ -12128,10 +12138,19 @@ class MaxwellBot(commands.Bot):
         # attributed the latest message to whoever spoke last in history
         # (the "X said that but it was actually Y" bug). Keeping the label on
         # every live line fixes the misattribution.
+        checker = getattr(self, "_is_bare_ping", None)
+        if callable(checker) and checker(message, user_message):
+            latest_text = latest_text or "(no text — just a ping)"
         user_parts = [
             f"You are talking to {author_label}. Answer this person, not other people in the history.",
             f"[RESPOND TO THIS] {author_label}: {latest_text}",
         ]
+        if callable(checker) and checker(message, user_message):
+            user_parts.append(
+                "They pinged you with no extra text. Read the conversation "
+                "and anything they replied to, then respond from that context. "
+                "Do not assume they asked you to look at an image or do a task."
+            )
         mention_names = [
             f"{getattr(user, 'display_name', str(getattr(user, 'id', 'unknown')))}({getattr(user, 'id', 'unknown')})"
             for user in (message.mentions or [])

@@ -30,6 +30,10 @@ def _bot(*, watch_seconds=120, debounce_seconds=0.05):
     bot._conversation_watch_prompt = MaxwellBot._conversation_watch_prompt.__get__(bot)
     bot._message_addresses_self = MaxwellBot._message_addresses_self.__get__(bot)
     bot._directly_addressed = MaxwellBot._directly_addressed.__get__(bot)
+    bot._content_without_self_mention = MaxwellBot._content_without_self_mention.__get__(
+        bot
+    )
+    bot._is_bare_ping = MaxwellBot._is_bare_ping.__get__(bot)
     bot._soft_addressed = MaxwellBot._soft_addressed.__get__(bot)
     bot._reply_meta_from_message = MaxwellBot._reply_meta_from_message.__get__(bot)
     bot._replying_to_other = MaxwellBot._replying_to_other.__get__(bot)
@@ -417,3 +421,22 @@ def test_channel_lock_fails_fast_under_load():
     assert MaxwellBot._channel_lock_timeout(bot) == 60.0
     bot._control["channel_lock_timeout_seconds"] = 1
     assert MaxwellBot._channel_lock_timeout(bot) == 3.0
+
+
+def test_bare_mention_is_a_ping_with_no_text():
+    bot = _bot()
+    msg = _plain_followup(content=f"<@{bot.user.id}>")
+    msg.mentions = [bot.user]
+    assert MaxwellBot._content_without_self_mention(bot, msg.content) == ""
+    assert MaxwellBot._is_bare_ping(bot, msg) is True
+    assert MaxwellBot._is_bare_ping(bot, msg, "") is True
+    msg.content = f"<@{bot.user.id}> hey"
+    assert MaxwellBot._is_bare_ping(bot, msg) is False
+
+
+def test_bare_ping_with_an_attachment_is_not_empty():
+    bot = _bot()
+    msg = _plain_followup(content=f"<@{bot.user.id}>")
+    msg.mentions = [bot.user]
+    msg.attachments = [SimpleNamespace(filename="pic.png")]
+    assert MaxwellBot._is_bare_ping(bot, msg) is False
