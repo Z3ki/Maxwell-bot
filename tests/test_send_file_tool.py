@@ -3,34 +3,56 @@ import base64
 
 from bot_tools import SendFileTool
 from bot_tools import ShellTool
+from bot_tools import SendMessageTool
 from bot_tools import ReasoningLogTool
+from bot_tools import forget_shell_progress
+
+
+class FakePosted:
+    def __init__(self, content):
+        self.content = content
+        self.deleted = False
+        self.edits = []
+
+    async def edit(self, content=None, **kwargs):
+        self.content = content
+        self.edits.append(content)
+
+    async def delete(self):
+        self.deleted = True
 
 
 class FakeMessage:
     def __init__(self):
         self.files = []
         self.replies = []
+
         class FakeChannel:
             def __init__(self, outer):
                 self.outer = outer
+                self.id = 99
+                self.sent = []
+
             async def send(self, content=None, file=None, **kwargs):
-                self.outer.replies.append(content)
                 if file is not None:
                     self.outer.files.append(file)
+                posted = FakePosted(content)
+                self.sent.append(posted)
+                self.outer.replies.append(content)
+                return posted
+
         self.channel = FakeChannel(self)
+
         class FakeAuthor:
             id = "1325265045600600135"
+
         self.author = FakeAuthor()
 
     async def send(self, content=None, file=None, **kwargs):
-        self.replies.append(content)
-        if file is not None:
-            self.files.append(file)
+        return await self.channel.send(content=content, file=file, **kwargs)
 
     async def reply(self, content=None, file=None, **kwargs):
-        self.replies.append(content)
-        if file is not None:
-            self.files.append(file)
+        return await self.channel.send(content=content, file=file, **kwargs)
 
 
 def test_send_file_tool_sends_text_file():
@@ -69,18 +91,24 @@ def test_shell_tool_runs_without_author_gate():
     class FakeBot:
         def _is_admin(self, user_id):
             return True
+
     tool = ShellTool(bot=FakeBot())
     message = FakeMessage()
 
     async def run():
-        # Set up a fake container runner in ShellTool to bypass docker exec in unit tests
-        async def fake_run_shell(command):
+        async def fake_run_shell(command, on_progress=None):
+            assert len(message.channel.sent) == 1
+            assert "$ printf hi" in message.channel.sent[0].content
             return b"hi", b"", 0
+
         tool._run_shell_command = fake_run_shell
 
         result = await tool.execute(message, command="printf hi")
         assert result == "__SHELL_SENT__\n$ printf hi\nhi"
         assert len(message.files) == 0
+        assert len(message.channel.sent) == 1
+        assert "$ printf hi" in message.channel.sent[0].content
+        assert "hi" in message.channel.sent[0].content
 
     asyncio.run(run())
 
@@ -95,7 +123,7 @@ def test_shell_tool_truncates_channel_preview_to_300_chars():
     blob = ("line of shell output\n" * 80).encode()
 
     async def run():
-        async def fake_run_shell(command):
+        async def fake_run_shell(command, on_progress=None):
             return blob, b"", 0
 
         tool._run_shell_command = fake_run_shell
@@ -103,12 +131,129 @@ def test_shell_tool_truncates_channel_preview_to_300_chars():
         assert result.startswith("__SHELL_SENT__\n")
         assert "line of shell output" in result
         assert len(result) > 300
-        assert len(message.replies) == 1
-        posted = message.replies[0]
-        assert posted.startswith("```ansi\n")
-        inner = posted[len("```ansi\n") : -len("\n```")]
+        assert len(message.channel.sent) == 1
+        posted = message.channel.sent[0]
+        assert posted.content.startswith("```ansi\n")
+        inner = posted.content[len("```ansi\n") : -len("\n```")]
         assert len(inner) <= 300
         assert "truncated for channel" in inner
+
+    asyncio.run(run())
+
+
+def test_same_turn_shell_calls_update_one_progress_message():
+    class FakeBot:
+        def _is_admin(self, user_id):
+            return True
+
+    tool = ShellTool(bot=FakeBot())
+    message = FakeMessage()
+
+    async def run():
+        async def fake_run_shell(command, on_progress=None):
+            return command.encode(), b"", 0
+
+        tool._run_shell_command = fake_run_shell
+        await tool.execute(message, command="date")
+        await tool.execute(message, command="uname")
+        assert len(message.channel.sent) == 1
+        posted = message.channel.sent[0]
+        assert "$ date" in posted.content
+        assert "$ uname" in posted.content
+        assert posted.edits
+        assert not posted.deleted
+        forget_shell_progress(tool.bot, message)
+        assert not posted.deleted
+
+    asyncio.run(run())
+
+
+def test_shell_progress_edits_while_command_runs():
+    class FakeBot:
+        def _is_admin(self, user_id):
+            return True
+
+    tool = ShellTool(bot=FakeBot())
+    message = FakeMessage()
+
+    async def run():
+        async def fake_run_shell(command, on_progress=None):
+            if on_progress is not None:
+                await on_progress(b"", b"", 0.0)
+                await on_progress(b"downloading 1/3\n", b"", 1.4)
+                await on_progress(b"downloading 1/3\n2/3\n", b"", 2.6)
+            return b"downloading 1/3\n2/3\ndone\n", b"", 0
+
+        tool._run_shell_command = fake_run_shell
+        result = await tool.execute(message, command="fetch.sh")
+        assert len(message.channel.sent) == 1
+        posted = message.channel.sent[0]
+        edited = "\n".join(posted.edits)
+        assert "… running" in edited
+        assert "downloading" in edited
+        assert "… running" not in posted.content
+        assert "done" in posted.content
+        assert result.endswith("done")
+
+    asyncio.run(run())
+
+
+def test_new_user_message_gets_a_fresh_shell_progress_message():
+    class FakeBot:
+        def _is_admin(self, user_id):
+            return True
+
+    tool = ShellTool(bot=FakeBot())
+    first = FakeMessage()
+    second = FakeMessage()
+    second.channel = first.channel
+
+    async def run():
+        async def fake_run_shell(command, on_progress=None):
+            return command.encode(), b"", 0
+
+        tool._run_shell_command = fake_run_shell
+        await tool.execute(first, command="date")
+        await tool.execute(second, command="uname")
+        assert len(first.channel.sent) == 2
+        posted_first, posted_second = first.channel.sent
+        assert "$ date" in posted_first.content
+        assert "$ uname" in posted_second.content
+        assert posted_first is not posted_second
+        assert not posted_first.deleted
+        assert not posted_second.deleted
+
+    asyncio.run(run())
+
+
+def test_send_message_leaves_shell_progress():
+    class FakeBot:
+        def _is_admin(self, user_id):
+            return True
+
+        def _render_custom_emojis(self, text, guild):
+            return text
+
+        def _extract_stickers_from_text(self, text, guild):
+            return text, []
+
+    bot = FakeBot()
+    shell = ShellTool(bot=bot)
+    send = SendMessageTool(bot=bot)
+    message = FakeMessage()
+
+    async def run():
+        async def fake_run_shell(command, on_progress=None):
+            return b"ok", b"", 0
+
+        shell._run_shell_command = fake_run_shell
+        await shell.execute(message, command="pwd")
+        posted = message.channel.sent[0]
+        assert not posted.deleted
+        result = await send.execute(message, content="done")
+        assert result.startswith("__MESSAGE_SENT__")
+        assert not posted.deleted
+        assert len(message.channel.sent) == 2
 
     asyncio.run(run())
 

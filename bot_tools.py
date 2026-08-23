@@ -376,14 +376,16 @@ def _clean_channel_name(value: str | None) -> str:
     return text[:100]
 
 
-# Bash heredoc opener. Models almost always write the redirect on the same
-# line as the delimiter (`cat << 'EOF' > file.py`); a here-string (`<<<`)
-# is not a heredoc. Optional `<<-` (tab-stripped body) is accepted.
-_HEREDOC_DELIM_RE = re.compile(
+# Bash heredoc opener at an unquoted `<<`. Models almost always write the
+# redirect on the same line as the delimiter (`cat << 'EOF' > file.py`); a
+# here-string (`<<<`) is not a heredoc. Optional `<<-` (tab-stripped body)
+# is accepted. Callers must only apply this at unquoted `<<` positions —
+# a raw substring/regex search false-positives on `python3 -c "...<<Main"`.
+_HEREDOC_OPENER_RE = re.compile(
     r"""
-    (?<!<)<<(?!<)
+    <<(?!<)
     -?
-    \s*
+    [ \t]*
     (?:
         '([A-Za-z_][A-Za-z0-9_-]*)'
       | "([A-Za-z_][A-Za-z0-9_-]*)"
@@ -394,12 +396,126 @@ _HEREDOC_DELIM_RE = re.compile(
 )
 
 
+def _heredoc_token(match: re.Match) -> str:
+    return match.group(1) or match.group(2) or match.group(3)
+
+
+def _line_bounds(text: str, idx: int) -> tuple[int, int]:
+    start = text.rfind("\n", 0, idx) + 1
+    end = text.find("\n", idx)
+    if end < 0:
+        end = len(text)
+    return start, end
+
+
+def _heredoc_closer_span(
+    command: str, body_start: int, delimiter: str
+) -> tuple[bool, int | None, int]:
+    """Return `(closed, closer_line_start, index_after_heredoc)`."""
+    n = len(command)
+    if body_start >= n:
+        return False, None, n
+    pos = body_start
+    while pos <= n:
+        nl = command.find("\n", pos)
+        line_end = n if nl < 0 else nl
+        if command[pos:line_end].strip() == delimiter:
+            after = n if nl < 0 else nl + 1
+            return True, pos, after
+        if nl < 0:
+            return False, None, n
+        pos = nl + 1
+    return False, None, n
+
+
+def _scan_bash_heredocs(command: str) -> tuple[list[dict[str, Any]], bool]:
+    """Find real bash heredocs, ignoring `<<` inside quotes or comments.
+
+    Single quotes, double quotes, and `#` comments are not heredoc contexts.
+    Here-strings (`<<<`) are skipped. Once an opener is accepted, its body is
+    literal text (so `<<` inside the body does not open a nested heredoc).
+    """
+    text = str(command or "")
+    n = len(text)
+    i = 0
+    in_single = False
+    in_double = False
+    blocks: list[dict[str, Any]] = []
+    saw_unparsed = False
+
+    while i < n:
+        c = text[i]
+
+        if in_single:
+            if c == "'":
+                in_single = False
+            i += 1
+            continue
+
+        if in_double:
+            if c == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if c == '"':
+                in_double = False
+            i += 1
+            continue
+
+        # Unquoted command text (including inside backticks / $()).
+        if c == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if c == "'":
+            in_single = True
+            i += 1
+            continue
+        if c == '"':
+            in_double = True
+            i += 1
+            continue
+        if c == "#" and (i == 0 or text[i - 1] in " \t\n;&|(){}"):
+            nl = text.find("\n", i)
+            i = n if nl < 0 else nl
+            continue
+        if c == "<" and i + 1 < n and text[i + 1] == "<":
+            if i + 2 < n and text[i + 2] == "<":
+                i += 3
+                continue
+            match = _HEREDOC_OPENER_RE.match(text, i)
+            line_start, line_end = _line_bounds(text, i)
+            opener_text = text[line_start:line_end].strip()
+            if not match:
+                saw_unparsed = True
+                i += 2
+                continue
+            delimiter = _heredoc_token(match)
+            body_start = n if line_end >= n else line_end + 1
+            closed, closer_start, after = _heredoc_closer_span(
+                text, body_start, delimiter
+            )
+            blocks.append(
+                {
+                    "delimiter": delimiter,
+                    "opener_text": opener_text,
+                    "body_start": body_start,
+                    "closer_start": closer_start,
+                    "after": after,
+                    "closed": closed,
+                }
+            )
+            i = after
+            continue
+        i += 1
+
+    return blocks, saw_unparsed
+
+
 def _heredoc_delimiter(line: str) -> str | None:
     """Return the heredoc delimiter token if `line` opens a heredoc."""
-    m = _HEREDOC_DELIM_RE.search(line)
-    if not m:
+    blocks, _ = _scan_bash_heredocs(line)
+    if not blocks:
         return None
-    return m.group(1) or m.group(2) or m.group(3)
+    return str(blocks[0]["delimiter"])
 
 
 def _strip_heredoc_blocks(command: str) -> str:
@@ -412,25 +528,25 @@ def _strip_heredoc_blocks(command: str) -> str:
     command, not the body. Stripping the body lets us validate the remaining
     (non-heredoc) parts as a single line.
     """
+    text = str(command or "")
+    blocks, _ = _scan_bash_heredocs(text)
+    if not blocks:
+        return text.rstrip("\n")
     out: list[str] = []
-    i = 0
-    lines = command.split("\n")
-    while i < len(lines):
-        line = lines[i]
-        delimiter = _heredoc_delimiter(line)
-        if delimiter:
-            out.append(line)
-            i += 1
-            while i < len(lines):
-                if lines[i].strip() == delimiter:
-                    out.append(lines[i])
-                    i += 1
-                    break
-                i += 1
-            continue
-        out.append(line)
-        i += 1
-    return "\n".join(out).rstrip("\n")
+    prev = 0
+    for block in blocks:
+        body_start = int(block["body_start"])
+        out.append(text[prev:body_start])
+        if block["closed"]:
+            closer_start = int(block["closer_start"])
+            after = int(block["after"])
+            out.append(text[closer_start:after])
+            prev = after
+        else:
+            prev = len(text)
+            break
+    out.append(text[prev:])
+    return "".join(out).rstrip("\n")
 
 
 def _unterminated_heredoc_error(command: str) -> str | None:
@@ -439,29 +555,15 @@ def _unterminated_heredoc_error(command: str) -> str | None:
     Return a targeted hint when a heredoc was never closed so the caller
     is told exactly what to fix.
     """
-    lines = str(command or "").split("\n")
-    opener: str | None = None  # the delimiter token, when inside a heredoc body
-    opener_text = ""
-    saw_unparsed_opener = False
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if opener is None:
-            delimiter = _heredoc_delimiter(line)
-            if delimiter:
-                opener = delimiter
-                opener_text = line.strip()
-            elif "<<" in line and "<<<" not in line:
-                saw_unparsed_opener = True
-        else:
-            if line.strip() == opener:
-                opener = None
-        i += 1
-    if opener is not None:
-        return (
-            f"heredoc opened with `{opener_text}` but never closed — add a final "
-            f"line containing exactly `{opener}` (nothing else, no trailing text)"
-        )
+    blocks, saw_unparsed_opener = _scan_bash_heredocs(command)
+    for block in blocks:
+        if not block["closed"]:
+            opener = str(block["delimiter"])
+            opener_text = str(block["opener_text"])
+            return (
+                f"heredoc opened with `{opener_text}` but never closed — add a final "
+                f"line containing exactly `{opener}` (nothing else, no trailing text)"
+            )
     if saw_unparsed_opener:
         return (
             "could not parse the heredoc opener — use `cat << 'EOF' > file` "
@@ -3587,6 +3689,63 @@ async def resolve_send_reply_target(message, reply=True, reply_to=None, bot=None
     return message
 
 
+class _ShellProgressTurn:
+    """One Discord `$ cmd` message for a single user-message turn."""
+
+    __slots__ = ("posted", "parts", "lock", "last_flush_at")
+
+    def __init__(self) -> None:
+        self.posted = None
+        self.parts: list[str] = []
+        self.lock = asyncio.Lock()
+        self.last_flush_at = 0.0
+
+
+def _shell_progress_turn_key(message) -> str:
+    """Key shell progress by channel + triggering user message (one turn)."""
+    channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
+    message_id = str(getattr(message, "id", "") or "")
+    if not message_id:
+        message_id = str(id(message))
+    return f"{channel_id}:{message_id}"
+
+
+def _shell_progress_store(bot, message) -> dict:
+    owner = bot if bot is not None else message
+    store = getattr(owner, "_shell_progress_by_turn", None)
+    if store is None:
+        store = {}
+        owner._shell_progress_by_turn = store
+    return store
+
+
+def _get_shell_progress_turn(bot, message) -> _ShellProgressTurn:
+    store = _shell_progress_store(bot, message)
+    key = _shell_progress_turn_key(message)
+    sess = store.get(key)
+    if sess is None:
+        sess = _ShellProgressTurn()
+        store[key] = sess
+    return sess
+
+
+def forget_shell_progress(bot, message) -> None:
+    """Drop this turn's in-memory shell-progress session.
+
+    The Discord message is left in the channel; a later user message is a
+    new turn and posts a fresh shell progress message.
+    """
+    if message is None:
+        return
+    key = _shell_progress_turn_key(message)
+    for owner in (bot, message):
+        if owner is None:
+            continue
+        store = getattr(owner, "_shell_progress_by_turn", None)
+        if store:
+            store.pop(key, None)
+
+
 class SendMessageTool(Tool):
     """Send a reply to the current message with Discord markdown formatting."""
 
@@ -4412,7 +4571,9 @@ class ShellTool(Tool):
                 return "blocked dangerous shell pattern"
         return None
 
-    async def _run_shell_command(self, command: str):
+    _PROGRESS_TICK_SECONDS = 0.8
+
+    async def _run_shell_command(self, command: str, on_progress=None):
         sanitized = self._normalize_command(command)
         validation_error = self._validate_command(sanitized)
         if validation_error:
@@ -4435,11 +4596,58 @@ class ShellTool(Tool):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+            stdout_buf = bytearray()
+            stderr_buf = bytearray()
+            started = time.monotonic()
+            last_tick = 0.0
+
+            async def _emit(force: bool = False) -> None:
+                nonlocal last_tick
+                if on_progress is None:
+                    return
+                now = time.monotonic()
+                if not force and last_tick and now - last_tick < self._PROGRESS_TICK_SECONDS:
+                    return
+                last_tick = now
+                with contextlib.suppress(Exception):
+                    await on_progress(
+                        bytes(stdout_buf),
+                        bytes(stderr_buf),
+                        now - started,
+                    )
+
+            async def _pump(stream, buf: bytearray) -> None:
+                if stream is None:
+                    return
+                while True:
+                    chunk = await stream.read(4096)
+                    if not chunk:
+                        break
+                    buf.extend(chunk)
+                    await _emit()
+
+            async def _heartbeat() -> None:
+                try:
+                    while True:
+                        await asyncio.sleep(self._PROGRESS_TICK_SECONDS)
+                        if proc.returncode is not None:
+                            return
+                        await _emit()
+                except asyncio.CancelledError:
+                    return
+
+            beat = asyncio.create_task(_heartbeat())
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=self._timeout_seconds()
+                await _emit(force=True)
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        _pump(proc.stdout, stdout_buf),
+                        _pump(proc.stderr, stderr_buf),
+                        proc.wait(),
+                    ),
+                    timeout=self._timeout_seconds(),
                 )
-                return stdout, stderr, proc.returncode
+                return bytes(stdout_buf), bytes(stderr_buf), proc.returncode
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
@@ -4451,6 +4659,9 @@ class ShellTool(Tool):
                     await proc.wait()
                 raise
             finally:
+                beat.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await beat
                 # Belt-and-suspenders: ensure no zombie if communicate didn't finish.
                 if proc.returncode is None:
                     try:
@@ -4476,85 +4687,97 @@ class ShellTool(Tool):
         parts.extend(s for s in suffixes if s)
         return "\n".join(parts)
 
-    async def _send_ansi_chunks(self, message: Message, text: str) -> None:
-        """Send `text` as one or more ```ansi codeblocks, each ≤2000 chars.
+    def _shell_running_text(
+        self, command: str, stdout: bytes, stderr: bytes, elapsed: float
+    ) -> str:
+        secs = int(elapsed)
+        status = "… running" if secs < 1 else f"… running {secs}s"
+        out = stdout.decode(errors="replace").strip()
+        err = stderr.decode(errors="replace").strip()
+        body = out
+        if err:
+            body = f"{body}\n[stderr] {err}" if body else f"[stderr] {err}"
+        if body:
+            return self._shell_echo_text(command, status, body)
+        return self._shell_echo_text(command, status)
 
-        If a previous update message or live progress message exists in the channel,
-        edit that message instead of spamming new messages.
+    def _truncate_shell_preview(self, text: str, limit: int) -> str:
+        """Keep `$ cmd` / running status plus the newest tail when truncating."""
+        notice = "\n... (truncated for channel)"
+        if limit <= 0 or len(text) <= limit:
+            return text
+        keep = max(0, limit - len(notice))
+        if keep <= 0:
+            return notice[-limit:]
+        first_nl = text.find("\n")
+        header_end = first_nl if first_nl >= 0 else min(len(text), keep)
+        if first_nl >= 0:
+            second_nl = text.find("\n", first_nl + 1)
+            second = text[first_nl + 1 : second_nl if second_nl >= 0 else len(text)]
+            if second.startswith("… "):
+                header_end = second_nl if second_nl >= 0 else len(text)
+        header = text[:header_end]
+        body = text[header_end:]
+        if len(header) >= keep:
+            return header[:keep] + notice
+        room = keep - len(header)
+        if len(body) <= room:
+            return header + body
+        return header + notice + body[-room:]
 
-        Discord rejects (400 Invalid Form Body, 50035) any message over 2000
-        chars. The ```ansi\n...\n``` wrapper is 13 chars (8 for the opener
-        `` ```ansi\n`` + 5 for the closer `` \n``` ``) and we leave an
-        extra few chars of headroom in case a future change tacks on a
-        leading space, a language hint, or a trailing newline. Each chunk
-        body is therefore capped at 1980 to stay safely under the limit.
-        Without that headroom the chunker silently produced 2001-char
-        messages that 400'd (see the 19:16 error flood in the bot log).
-        Splits on newlines where possible so output stays readable.
-        """
+    def _format_ansi_message(self, text: str) -> str:
+        """Wrap truncated shell text in one ```ansi block under Discord's 2000 cap."""
         wrapper = 13  # len("```ansi\n") + len("\n```")
-        headroom = 7  # safety margin for tweaks / stray whitespace
+        headroom = 7
         limit = 2000 - wrapper - headroom
         max_chars = self._channel_max_chars()
-        if max_chars and len(text) > max_chars:
-            notice = "\n... (truncated for channel)"
-            keep = max(0, max_chars - len(notice))
-            text = text[:keep] + notice
-        chunks: list[str] = []
-        remaining = text
-        while remaining:
-            if len(remaining) <= limit:
-                chunks.append(remaining)
-                break
-            cut = remaining.rfind("\n", 0, limit)
-            if cut <= 0:
-                cut = limit
-            chunks.append(remaining[:cut])
-            remaining = remaining[cut:].lstrip("\n")
-        if len(chunks) > self._CHANNEL_MAX_CHUNKS:
-            notice = "\n... (truncated for channel)"
-            chunks = chunks[: self._CHANNEL_MAX_CHUNKS]
-            last = chunks[-1]
-            room = max(0, limit - len(notice))
-            chunks[-1] = last[:room] + notice
+        if max_chars:
+            text = self._truncate_shell_preview(text, max_chars)
+        if len(text) > limit:
+            text = self._truncate_shell_preview(text, limit)
+        safe = text.replace("```", "'''")
+        return f"```ansi\n{safe}\n```"
 
-        chan_key = str(getattr(getattr(message, "channel", None), "id", id(message)))
-        for i, chunk in enumerate(chunks):
-            safe = chunk.replace("```", "'''")
-            formatted = f"```ansi\n{safe}\n```"
+    async def _flush_shell_progress_unlocked(
+        self, message: Message, sess: _ShellProgressTurn
+    ) -> None:
+        rendered = "\n\n".join(part for part in sess.parts if part)
+        formatted = self._format_ansi_message(rendered)
+        if sess.posted is None:
+            sess.posted = await message.channel.send(formatted)
+            sess.last_flush_at = time.monotonic()
+            return
+        if getattr(sess.posted, "content", None) == formatted:
+            return
+        edit = getattr(sess.posted, "edit", None)
+        if not callable(edit):
+            sess.posted = await message.channel.send(formatted)
+            sess.last_flush_at = time.monotonic()
+            return
+        try:
+            await edit(content=formatted)
+            sess.last_flush_at = time.monotonic()
+        except Exception:
+            # Rate-limits / transient Discord errors: keep the existing
+            # message and let the next tick retry. Do not post a second dump.
+            return
 
-            target_msg = None
-            if i == 0:
-                # 1. Try reusing the live progress message if posted
-                progress = self._get_channel_progress(message)
-                if progress is not None:
-                    posted = getattr(progress, "_posted", None)
-                    if posted is not None and hasattr(posted, "edit"):
-                        target_msg = posted
-                # 2. Try reusing a previous shell message in this channel
-                if target_msg is None and hasattr(self, "_last_shell_msg_by_channel"):
-                    target_msg = self._last_shell_msg_by_channel.get(chan_key)
+    async def _begin_shell_progress(self, message: Message, text: str):
+        sess = _get_shell_progress_turn(self.bot, message)
+        async with sess.lock:
+            slot = len(sess.parts)
+            sess.parts.append(text)
+            await self._flush_shell_progress_unlocked(message, sess)
+            return sess, slot
 
-            edited = False
-            if target_msg is not None:
-                try:
-                    await target_msg.edit(content=formatted)
-                    edited = True
-                    if not hasattr(self, "_last_shell_msg_by_channel"):
-                        self._last_shell_msg_by_channel = {}
-                    self._last_shell_msg_by_channel[chan_key] = target_msg
-                except Exception:
-                    edited = False
-
-            if not edited:
-                sent = await message.channel.send(formatted)
-                if not hasattr(self, "_last_shell_msg_by_channel"):
-                    self._last_shell_msg_by_channel = {}
-                if sent is not None and hasattr(sent, "edit"):
-                    self._last_shell_msg_by_channel[chan_key] = sent
-
-            if len(chunks) > 1 and i < len(chunks) - 1:
-                await asyncio.sleep(0.3)
+    async def _finish_shell_progress(
+        self, message: Message, sess: _ShellProgressTurn, slot: int, text: str
+    ) -> None:
+        async with sess.lock:
+            while len(sess.parts) <= slot:
+                sess.parts.append("")
+            sess.parts[slot] = text
+            await self._flush_shell_progress_unlocked(message, sess)
 
     async def execute(
         self,
@@ -4593,21 +4816,46 @@ class ShellTool(Tool):
                 f"Command preview: {preview}"
             )
 
+        sess = None
+        slot = None
         try:
-            stdout, stderr, exit_code = await self._run_shell_command(normalized)
+            sess, slot = await self._begin_shell_progress(
+                message, self._shell_echo_text(normalized)
+            )
+        except Exception:
+            sess, slot = None, None
+        self._signal_streaming(message)
+
+        async def _publish(text: str) -> None:
+            if sess is not None and slot is not None:
+                await self._finish_shell_progress(message, sess, slot, text)
+                return
+            with contextlib.suppress(Exception):
+                await message.channel.send(self._format_ansi_message(text))
+
+        async def _on_progress(stdout_b, stderr_b, elapsed) -> None:
+            if sess is None or slot is None:
+                return
+            await self._finish_shell_progress(
+                message,
+                sess,
+                slot,
+                self._shell_running_text(normalized, stdout_b, stderr_b, elapsed),
+            )
+
+        try:
+            stdout, stderr, exit_code = await self._run_shell_command(
+                normalized, on_progress=_on_progress
+            )
         except asyncio.TimeoutError:
             text = self._shell_echo_text(
                 normalized, f"\u23f1 Timed out after {self._timeout_seconds()}s"
             )
-            # Even the error path posts its own message — tell the live
-            # progress line to step aside so we don't show both.
-            self._signal_streaming(message)
-            await self._send_ansi_chunks(message, text)
+            await _publish(text)
             return f"__SHELL_SENT__\n{text}"
         except Exception as e:
             text = self._shell_echo_text(normalized, f"\u274c Error: {e}")
-            self._signal_streaming(message)
-            await self._send_ansi_chunks(message, text)
+            await _publish(text)
             return f"__SHELL_SENT__\n{text}"
 
         out = stdout.decode(errors="replace")
@@ -4630,8 +4878,7 @@ class ShellTool(Tool):
             combined = combined[:max_out] + "\n... (truncated)"
 
         text = self._shell_echo_text(normalized, combined)
-        self._signal_streaming(message)
-        await self._send_ansi_chunks(message, text)
+        await _publish(text)
 
         result = f"__SHELL_SENT__\n{text}"
 

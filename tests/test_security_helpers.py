@@ -108,6 +108,24 @@ class TestShellToolValidation:
         cmd = "cat <<'EOF' > test.py\nprint('hello')\nEOF\npython3 test.py"
         assert tool._validate_command(cmd) is None
 
+    def test_ignores_double_lt_inside_quotes(self):
+        # Quoted `<<Token` is not a bash heredoc. A raw substring scan used to
+        # treat `python3 -c "...<<Main"` as `<<Main` and demand a closer.
+        tool = ShellTool(None)  # type: ignore[arg-type]
+        cmd = """python3 -c "if '<<Main>$' in data:
+    print(1)
+"
+"""
+        assert tool._validate_command(cmd) is None
+        assert tool._validate_command("echo '<<EOF'\necho still-ok") is None
+        assert tool._validate_command('echo "<<EOF"\necho still-ok') is None
+        assert tool._validate_command("cat <<< Main\necho hi") is None
+        assert tool._validate_command("# cat << 'EOF'\necho hi") is None
+        mixed = """python3 -c "print('<<Main>')" <<'PY'
+print(1)
+PY"""
+        assert tool._validate_command(mixed) is None
+
     def test_command_arg_accepts_cmd_alias(self):
         assert ShellTool._command_arg(command="ls") == "ls"
         assert ShellTool._command_arg(command=None, cmd="pwd") == "pwd"

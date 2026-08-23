@@ -248,6 +248,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     WaitTool,
     WebSearchTool,
     YouTubeTool,
+    forget_shell_progress,
     _get_shared_session,
     _is_safe_url,
     _read_response_limited,
@@ -2337,12 +2338,8 @@ class MaxwellBot(commands.Bot):
         # channel_id -> pending watch follow-up. Wait a beat so a burst of
         # lines becomes one reply instead of one LLM turn per message.
         self._watch_debounce: dict[str, dict] = {}
-        # Directed message waiting until the current watch turn in that room
-        # finishes, so another ping cannot steal or cancel it.
-        self._watch_next: dict[str, tuple] = {}
         self._active_requests: dict[str, asyncio.Task] = {}
         self._active_request_user: dict[str, str] = {}
-        self._active_request_kind: dict[str, str] = {}
         # Per-channel current progress. Under load many channels can
         # have tool batches in flight concurrently; a single bot-wide
         # attribute would let channel B's run_one clobber channel A's,
@@ -2351,6 +2348,10 @@ class MaxwellBot(commands.Bot):
         # ``self._current_progress``; see _process_native_tool_calls
         # ``run_one`` for the per-channel keying.
         self._current_progress_by_channel: dict[str, Any] = {}
+        # One live `$ cmd` Discord message per user-message turn. Edited in
+        # place for later shell calls on that turn; left in the channel when
+        # the turn ends. The next user message posts a new one.
+        self._shell_progress_by_turn: dict[str, Any] = {}
         self._stop_until: dict[str, float] = {}
         self._drugged_until: dict[str, float] = {}
         # Global sleep state. The bot is one entity — at most one sleep
@@ -3416,38 +3417,6 @@ class MaxwellBot(commands.Bot):
         if task is not None and not task.done():
             task.cancel()
 
-    def _watch_turn_pending(self, channel_id) -> bool:
-        cid = str(channel_id or "")
-        if cid in (getattr(self, "_watch_debounce", None) or {}):
-            return True
-        return (getattr(self, "_active_request_kind", None) or {}).get(cid) == "watch"
-
-    def _watch_author_id(self, channel_id) -> str:
-        bucket = (getattr(self, "_watch_debounce", None) or {}).get(
-            str(channel_id or "")
-        )
-        target = (bucket or {}).get("latest_directed") or (bucket or {}).get("latest")
-        return str(getattr(getattr(target, "author", None), "id", "") or "")
-
-    def _queue_watch_followup_after(self, message, content: str) -> None:
-        """Hold another ping until the current watch turn in this room finishes."""
-        cid = str(getattr(getattr(message, "channel", None), "id", "") or "")
-        if not cid:
-            return
-        nxt = getattr(self, "_watch_next", None)
-        if nxt is None:
-            self._watch_next = {}
-            nxt = self._watch_next
-        nxt[cid] = (message, content)
-
-    def _kick_watch_next(self, channel_id) -> None:
-        cid = str(channel_id or "")
-        item = (getattr(self, "_watch_next", None) or {}).pop(cid, None)
-        if not item:
-            return
-        message, content = item
-        self._queue_watch_reply(message, content or "", directed=True)
-
     def _queue_watch_reply(
         self, message, content: str, *, directed: bool | None = None
     ) -> None:
@@ -3472,20 +3441,8 @@ class MaxwellBot(commands.Bot):
             debounce[cid] = bucket
         bucket["latest"] = message
         if directed:
-            current = bucket.get("latest_directed")
-            current_uid = str(
-                getattr(getattr(current, "author", None), "id", "") or ""
-            )
-            incoming_uid = str(
-                getattr(getattr(message, "author", None), "id", "") or ""
-            )
-            if current is None or not current_uid or current_uid == incoming_uid:
-                bucket["latest_directed"] = message
-                bucket["content"] = content
-            else:
-                # Another person talking to him must not steal this turn.
-                self._queue_watch_followup_after(message, content)
-                return
+            bucket["latest_directed"] = message
+            bucket["content"] = content
         old = bucket.get("task")
         if old is not None and not old.done():
             old.cancel()
@@ -3510,61 +3467,42 @@ class MaxwellBot(commands.Bot):
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
             return
-        cid = str(channel_id)
-        bucket = (getattr(self, "_watch_debounce", None) or {}).pop(cid, None)
+        bucket = (getattr(self, "_watch_debounce", None) or {}).pop(
+            str(channel_id), None
+        )
         if not bucket:
-            self._kick_watch_next(cid)
             return
         target = bucket.get("latest_directed") or bucket.get("latest")
         if target is None:
-            self._kick_watch_next(cid)
             return
         content = getattr(target, "content", "") or bucket.get("content") or ""
         with contextlib.suppress(Exception):
             target._watch_followup = True
-        kinds = getattr(self, "_active_request_kind", None)
-        if kinds is None:
-            self._active_request_kind = {}
-            kinds = self._active_request_kind
-        kinds[cid] = "watch"
+        lock = self._get_channel_lock(str(channel_id))
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=self._channel_lock_timeout())
+        except asyncio.TimeoutError:
+            logger.warning("Watch debounce: channel lock timeout for %s", channel_id)
+            return
         try:
             logger.info(
                 "Watch debounce: one reply in %s after %.1fs quiet",
-                cid,
+                channel_id,
                 delay,
             )
             await self._handle_message(target, content)
         finally:
-            if kinds.get(cid) == "watch":
-                kinds.pop(cid, None)
-            self._kick_watch_next(cid)
+            lock.release()
 
     async def _maybe_live_reply(self, message, content: str) -> None:
         """Hard ping now. Watch follow-ups wait 1s and collapse into one turn."""
-        cid = str(getattr(getattr(message, "channel", None), "id", "") or "")
-        incoming = str(getattr(getattr(message, "author", None), "id", "") or "")
         if self._directly_addressed(message):
-            if self._watch_turn_pending(cid):
-                owner = self._watch_author_id(cid)
-                if (
-                    (getattr(self, "_active_request_kind", None) or {}).get(cid)
-                    == "watch"
-                    or (owner and incoming != owner)
-                ):
-                    self._queue_watch_followup_after(message, content)
-                    return
-                self._queue_watch_reply(message, content, directed=True)
-                return
-            self._cancel_watch_debounce(cid)
+            self._cancel_watch_debounce(
+                getattr(getattr(message, "channel", None), "id", "")
+            )
             await self._handle_message(message, content)
             return
         if self._should_live_reply(message):
-            if (getattr(self, "_active_request_kind", None) or {}).get(cid) == "watch":
-                self._queue_watch_followup_after(message, content)
-                return
-            if cid in (getattr(self, "_watch_debounce", None) or {}):
-                self._touch_watch_debounce(message)
-                return
             self._queue_watch_reply(message, content, directed=True)
             return
         self._touch_watch_debounce(message)
@@ -4037,8 +3975,6 @@ class MaxwellBot(commands.Bot):
                 and not active.done()
                 and active_user == str(message.author.id)
                 and self._should_live_reply(message)
-                and (getattr(self, "_active_request_kind", None) or {}).get(channel_id)
-                != "watch"
             ):
                 logger.info(
                     f"Same-user interrupt: cancelling in-flight request for "
@@ -9345,12 +9281,6 @@ class MaxwellBot(commands.Bot):
     async def _handle_message(self, message, content: str | None = None):
         content = content or message.content
         channel_id = str(message.channel.id)
-        if getattr(message, "_watch_followup", False):
-            kinds = getattr(self, "_active_request_kind", None)
-            if kinds is None:
-                self._active_request_kind = {}
-                kinds = self._active_request_kind
-            kinds[channel_id] = "watch"
         # Sleep gate: when the bot is in a sleep window, abort the
         # dispatch, send the user a one-shot DM (or channel note when
         # DMs are closed) saying "Max is sleeping, back in Xm", and
@@ -10267,6 +10197,8 @@ class MaxwellBot(commands.Bot):
                 with contextlib.suppress(Exception):
                     await _prog.stop()
             active_progresses.clear()
+            with contextlib.suppress(Exception):
+                forget_shell_progress(self, message)
             # Drop this channel's entry from the per-channel progress
             # dict so it doesn't accumulate over the bot's lifetime
             # under load. The next message in this channel will
@@ -10279,13 +10211,6 @@ class MaxwellBot(commands.Bot):
             if self._active_requests.get(channel_id) is current_task:
                 self._active_requests.pop(channel_id, None)
                 self._active_request_user.pop(channel_id, None)
-            if (
-                getattr(message, "_watch_followup", False)
-                and (getattr(self, "_active_request_kind", None) or {}).get(channel_id)
-                == "watch"
-            ):
-                self._active_request_kind.pop(channel_id, None)
-            self._kick_watch_next(channel_id)
             self._tick_media_context(channel_id)
             # Channel is no longer in-flight; record that the bot just replied
             # here so autonomy can avoid re-engaging a conversation it already

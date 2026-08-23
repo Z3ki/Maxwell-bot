@@ -15,11 +15,7 @@ def _bot(*, watch_seconds=120, debounce_seconds=0.05):
         },
         _conversation_watch={},
         _watch_debounce={},
-        _watch_next={},
         _channel_locks={},
-        _active_requests={},
-        _active_request_user={},
-        _active_request_kind={},
         user=SimpleNamespace(id=1382894657624866889),
     )
     bot._conversation_watch_seconds = MaxwellBot._conversation_watch_seconds.__get__(
@@ -47,12 +43,6 @@ def _bot(*, watch_seconds=120, debounce_seconds=0.05):
     )
     bot._watch_debounce_seconds = MaxwellBot._watch_debounce_seconds.__get__(bot)
     bot._cancel_watch_debounce = MaxwellBot._cancel_watch_debounce.__get__(bot)
-    bot._watch_turn_pending = MaxwellBot._watch_turn_pending.__get__(bot)
-    bot._watch_author_id = MaxwellBot._watch_author_id.__get__(bot)
-    bot._queue_watch_followup_after = MaxwellBot._queue_watch_followup_after.__get__(
-        bot
-    )
-    bot._kick_watch_next = MaxwellBot._kick_watch_next.__get__(bot)
     bot._queue_watch_reply = MaxwellBot._queue_watch_reply.__get__(bot)
     bot._touch_watch_debounce = MaxwellBot._touch_watch_debounce.__get__(bot)
     bot._flush_watch_reply = MaxwellBot._flush_watch_reply.__get__(bot)
@@ -292,12 +282,12 @@ def test_watch_debounce_collapses_a_burst_into_one_reply():
         await MaxwellBot._maybe_live_reply(bot, second, second.content)
         assert handled == []
         await asyncio.sleep(0.25)
-        assert handled == ["hey maxwell"]
+        assert handled == ["lol"]
 
     asyncio.run(run())
 
 
-def test_watch_debounce_does_not_let_an_aside_steal_the_turn():
+def test_watch_debounce_still_shows_an_aside():
     bot = _bot()
     handled = []
 
@@ -315,7 +305,7 @@ def test_watch_debounce_does_not_let_an_aside_steal_the_turn():
         await MaxwellBot._maybe_live_reply(bot, ping, ping.content)
         await MaxwellBot._maybe_live_reply(bot, aside, aside.content)
         await asyncio.sleep(0.25)
-        assert handled == ["hey maxwell"]
+        assert handled == ["that's why they don't have access to maxwell"]
 
     asyncio.run(run())
 
@@ -334,61 +324,6 @@ def test_hard_ping_does_not_wait_for_watch_debounce():
         msg.mentions = [bot.user]
         await MaxwellBot._maybe_live_reply(bot, msg, msg.content)
         assert handled == ["now"]
-
-    asyncio.run(run())
-
-
-def test_other_persons_ping_does_not_steal_a_pending_watch():
-    bot = _bot()
-    handled = []
-
-    async def handle(message, content=None):
-        handled.append(getattr(message, "content", ""))
-
-    bot._handle_message = handle
-
-    async def run():
-        MaxwellBot._arm_conversation_watch(bot, 1506001126426808511)
-        first = _plain_followup(content="hey maxwell")
-        other = _plain_followup(content="yo max", author_id=99, display_name="Alice")
-        other.mentions = [bot.user]
-        await MaxwellBot._maybe_live_reply(bot, first, first.content)
-        await MaxwellBot._maybe_live_reply(bot, other, other.content)
-        await asyncio.sleep(0.3)
-        assert handled[0] == "hey maxwell"
-        assert "yo max" in handled
-        assert handled[0] != "yo max"
-
-    asyncio.run(run())
-
-
-def test_inflight_watch_is_not_cancelled_by_another_ping():
-    bot = _bot()
-    cancelled = []
-
-    class FakeTask:
-        def __init__(self):
-            self._done = False
-
-        def done(self):
-            return self._done
-
-        def cancel(self):
-            cancelled.append("yes")
-            self._done = True
-
-    async def run():
-        cid = "1506001126426808511"
-        task = FakeTask()
-        bot._active_requests[cid] = task
-        bot._active_request_user[cid] = "1471821513824014480"
-        bot._active_request_kind[cid] = "watch"
-        MaxwellBot._arm_conversation_watch(bot, cid)
-        ping = _plain_followup(content="hey again")
-        ping.mentions = [bot.user]
-        await MaxwellBot._maybe_live_reply(bot, ping, ping.content)
-        assert cancelled == []
-        assert cid in bot._watch_next
 
     asyncio.run(run())
 
