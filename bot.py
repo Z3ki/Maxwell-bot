@@ -291,6 +291,7 @@ from tool_schemas import (  # noqa: E402
     elide_tool_calls_for_history,
     message_chars,
     normalize_native_tool_calls,
+    recover_text_tool_calls,
     result_contract,
     trim_tool_tail,
 )
@@ -11177,6 +11178,16 @@ class MaxwellBot(commands.Bot):
             finally:
                 await self._release_ai_slot()
             native_calls = self._native_calls_from(response)
+            # Token usage rides on the ProviderResult, so read it BEFORE the
+            # recovery below can replace `response` with a plain string.
+            usage = self._usage_from(response)
+            if usage:
+                self._token_tracker.record(usage)
+            # No native tool_calls, but the model may have written the call
+            # into the visible text instead. Recover it so it actually runs
+            # instead of being posted to the channel as raw markup.
+            if not native_calls:
+                native_calls, response = self._recover_text_tool_calls(response)
             # If the model returned tool calls, hand the generation progress off
             # to the tool dispatch so the same Discord message transitions from
             # "working on it…" to "tool_name: reasoning" and gets deleted when
@@ -11188,10 +11199,6 @@ class MaxwellBot(commands.Bot):
                 with contextlib.suppress(Exception):
                     await gen_progress.stop()
                 gen_progress = None
-            # Track token usage from provider
-            usage = self._usage_from(response)
-            if usage:
-                self._token_tracker.record(usage)
             if (not response or not str(response).strip()) and not native_calls:
                 logger.warning(f"Empty response from provider for channel {channel_id}")
                 if self._control.get("error_replies", True):
@@ -11368,6 +11375,10 @@ class MaxwellBot(commands.Bot):
                     if usage:
                         self._token_tracker.record(usage)
                     pending_native = self._native_calls_from(followup)
+                    if not pending_native:
+                        pending_native, followup = self._recover_text_tool_calls(
+                            followup
+                        )
                     # Hand off the followup progress to the next dispatch iteration
                     # so the same message transitions to the tool name/reasoning.
                     # If no tool calls, KEEP the progress alive so the final
@@ -12420,6 +12431,37 @@ class MaxwellBot(commands.Bot):
             return []
         return self._consume_native_tool_calls()
 
+    def _recover_text_tool_calls(self, response) -> tuple[list, str]:
+        """Rescue a tool call the model wrote as visible text.
+
+        We only ever ask for native ``tools=``, but models keep answering in
+        their own text dialect instead (GLM ``<tool_call>`` + ``<arg_key>``,
+        Qwen ``<function=…>``, DeepSeek DSML ``<invoke>``, bare JSON). Both
+        old outcomes were wrong: a dialect the scrubber knew was deleted and
+        the turn went silent, and one it did not know was posted to the
+        channel as a raw parameter dump. Recovering the call instead means it
+        RUNS — send_message actually sends.
+
+        Returns ``(raw_calls, visible_text)``; the text has the recovered
+        markup removed.
+        """
+        text = str(response or "")
+        if not text.strip() or not self._control.get("tools_enabled", True):
+            return [], text
+        try:
+            calls, leftover = recover_text_tool_calls(text, KNOWN_TOOL_NAMES)
+        except Exception:
+            logger.exception("Text tool-call recovery failed; keeping raw text")
+            return [], text
+        if not calls:
+            return [], text
+        logger.warning(
+            "Recovered %d text-form tool call(s) the model wrote as content: %s",
+            len(calls),
+            ", ".join(c["function"]["name"] for c in calls),
+        )
+        return calls, leftover
+
     def _usage_from(self, response) -> dict:
         """Race-free token-usage extraction (see ``_native_calls_from``)."""
         usage = getattr(response, "usage", None)
@@ -12578,8 +12620,9 @@ class MaxwellBot(commands.Bot):
             header = (
                 "## Tools\n"
                 "Use the provider's native function/tool calling API. "
-                "Do not put tool markup in visible text and do not invent "
-                "XML tags like <tool:name>. Visible replies go through "
+                "A call written into the reply text is not a call — never "
+                "hand-write tool markup, tags, or argument JSON. "
+                "Visible replies go through "
                 "send_message (or no_response). Each call needs `reasoning` first "
                 "(~280 chars, why, plain text only). "
                 "Look things up with web_search / fetch_url when you are unsure "
@@ -13944,6 +13987,10 @@ class MaxwellBot(commands.Bot):
             await self._release_ai_slot()
 
         tg_native_calls = self._native_calls_from(response_text)
+        if not tg_native_calls:
+            tg_native_calls, response_text = self._recover_text_tool_calls(
+                response_text
+            )
         if (
             not response_text or not str(response_text).strip()
         ) and not tg_native_calls:
@@ -14499,6 +14546,8 @@ class MaxwellBot(commands.Bot):
                     tools=tg_openai_tools or None,
                 )
                 pending_native = self._native_calls_from(followup)
+                if not pending_native:
+                    pending_native, followup = self._recover_text_tool_calls(followup)
                 if (followup and str(followup).strip()) or pending_native:
                     response_text = (followup or "").strip()
                     followup_turn_ran = True

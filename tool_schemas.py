@@ -7,6 +7,7 @@ come from the live tool instances at request time so they stay in sync with
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -699,6 +700,444 @@ def normalize_native_tool_calls(raw_calls: list | None) -> list[dict[str, Any]]:
             }
         )
     return normalized
+
+
+# ── text-form tool-call recovery ─────────────────────────────────────────
+# Native `tools=` is the only dispatch protocol we ask for, but models still
+# hand the call back as ORDINARY TEXT instead of a tool_calls entry. Every
+# family does it in its own dialect:
+#
+#   GLM / Kimi     <tool_call>send_message
+#                  <arg_key>content</arg_key><arg_value>hola</arg_value>
+#   Qwen / vLLM    <function=send_message><parameter=content>hola</parameter>
+#   DeepSeek DSML  <invoke name="send_message"><parameter name="content">…
+#   gpt-oss        to=functions.send_message …{"content": "hola"}
+#   bare JSON      {"name": "send_message", "arguments": {"content": "hola"}}
+#
+# Before this module the only handling was defensive scrubbing, and both of
+# its outcomes were bad: a dialect the scrubber knew got deleted (the reply
+# vanished and the turn went silent), and a dialect it did not know got
+# posted to the channel verbatim — the user reading a raw parameter dump
+# ("reasoning … content … reply true") instead of the message.
+#
+# Recovery beats scrubbing: parse the leaked markup back into a real tool
+# call so it EXECUTES. send_message actually sends, shell actually runs, and
+# whatever prose surrounded the markup survives as the leftover text.
+
+_RECOVERY_MAX_CALLS = 8
+
+_FENCE_RE = re.compile(r"```.*?(?:```|$)|~~~.*?(?:~~~|$)", re.DOTALL)
+
+# One (key, value) pair inside a leaked call body, per dialect.
+_PAIR_PATTERNS: tuple[re.Pattern, ...] = (
+    # GLM-4.x / Kimi K2
+    re.compile(
+        r"<arg_key>\s*(.*?)\s*</arg_key>\s*<arg_value>(.*?)(?:</arg_value>|$)",
+        re.DOTALL | re.IGNORECASE,
+    ),
+    # Qwen / vLLM "<parameter=key>"
+    re.compile(
+        r"<parameter\s*=\s*([A-Za-z_]\w*)\s*>(.*?)(?:</parameter\s*>|$)",
+        re.DOTALL | re.IGNORECASE,
+    ),
+    # Anthropic-style and DeepSeek DSML '<…parameter name="key" …>'
+    re.compile(
+        r"<[^<>]*parameter[^<>]*\bname\s*=\s*[\"']([^\"']+)[\"'][^<>]*>"
+        r"(.*?)(?:</[^<>]*parameter[^<>]*>|$)",
+        re.DOTALL | re.IGNORECASE,
+    ),
+    # '<arg>key</arg>value</arg>'
+    re.compile(
+        r"<arg>\s*([A-Za-z_]\w*)\s*</arg>(.*?)(?:</arg>|$)",
+        re.DOTALL | re.IGNORECASE,
+    ),
+)
+
+_TOOL_CALL_BLOCK_RE = re.compile(
+    r"<tool_call\b[^>]*>(.*?)(?:</tool_call\s*>|$)", re.DOTALL | re.IGNORECASE
+)
+_FUNCTION_EQ_RE = re.compile(
+    r"<function\s*=\s*([A-Za-z_][\w.]*)\s*>(.*?)(?:</function\s*>|$)",
+    re.DOTALL | re.IGNORECASE,
+)
+_INVOKE_RE = re.compile(
+    r"<[^<>]*invoke\b[^<>]*\bname\s*=\s*[\"']([^\"']+)[\"'][^<>]*>"
+    r"(.*?)(?:</[^<>]*invoke[^<>]*>|$)",
+    re.DOTALL | re.IGNORECASE,
+)
+# gpt-oss / harmony. Kept deliberately flat: the obvious pattern (an optional
+# repeated "<|token|>" prefix glued to the name) nests quantifiers and takes
+# seconds to fail on a reply that is mostly pipes. The header before the name
+# is walked back separately, over a bounded window, so the leftover text is
+# not a stray "<|channel|>commentary".
+_HARMONY_RE = re.compile(r"\bto\s*=\s*functions?\.([A-Za-z_]\w*)", re.IGNORECASE)
+_HARMONY_LEAD_RE = re.compile(r"<\|[^|<>]{0,32}\|>[^<>|]{0,32}$")
+_HARMONY_LEAD_WINDOW = 96
+
+
+def _harmony_call_start(text: str, pos: int) -> int:
+    """Start of the "<|start|>assistant<|channel|>commentary " header at pos."""
+    start = pos
+    for _ in range(6):
+        window = max(0, start - _HARMONY_LEAD_WINDOW)
+        match = _HARMONY_LEAD_RE.search(text, window, start)
+        if match is None or match.end() != start:
+            break
+        start = match.start()
+    return start
+
+
+# "send_message<arg>content</arg>hola</arg>" — a bare tool name glued to
+# <arg> pairs, with no wrapper tag to find it by. Built per known-name set.
+_BARE_ARG_BODY = r"((?:<arg>\s*[A-Za-z_]\w*\s*</arg>.*?</arg>)+)"
+_bare_arg_cache: dict[frozenset, re.Pattern] = {}
+
+
+def _bare_arg_call_re(names: frozenset) -> re.Pattern:
+    cached = _bare_arg_cache.get(names)
+    if cached is None:
+        alt = "|".join(
+            re.escape(n) for n in sorted(names, key=len, reverse=True)
+        ) or r"(?!x)x"
+        cached = re.compile(
+            rf"(?<![A-Za-z0-9_])({alt})\s*{_BARE_ARG_BODY}",
+            re.DOTALL | re.IGNORECASE,
+        )
+        _bare_arg_cache[names] = cached
+    return cached
+
+
+_NAME_ATTR_RE = re.compile(r"""\bname\s*=\s*['"]([^'"]+)['"]""", re.IGNORECASE)
+_BARE_NAME_LINE_RE = re.compile(r"^\s*([A-Za-z_][\w.]*)\s*$")
+_JSON_OPEN_RE = re.compile(r'\{\s*"(?:name|tool|tool_name|function)"\s*:', re.IGNORECASE)
+
+
+def _fenced_spans(text: str) -> list[tuple[int, int]]:
+    """Character ranges covered by fenced code blocks (never tool calls)."""
+    return [(m.start(), m.end()) for m in _FENCE_RE.finditer(text)]
+
+
+def _inside(pos: int, spans: list[tuple[int, int]]) -> bool:
+    return any(start <= pos < end for start, end in spans)
+
+
+def _clean_tool_name(name: str) -> str:
+    """Strip the wrappers providers put around a function name."""
+    cleaned = str(name or "").strip().strip("\"'")
+    for prefix in ("functions.", "tool_", "tools.", "namespace."):
+        if cleaned.lower().startswith(prefix):
+            cleaned = cleaned[len(prefix) :]
+    return cleaned.strip()
+
+
+def _balanced_json_object(text: str, start: int) -> tuple[Any, int] | None:
+    """Parse the JSON object beginning at ``start``; return (value, end)."""
+    import json
+
+    depth = 0
+    in_str = False
+    escaped = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start : i + 1]), i + 1
+                except (ValueError, TypeError):
+                    return None
+    return None
+
+
+def _args_from_json_obj(obj: Any) -> tuple[str, dict[str, Any]] | None:
+    """Pull (name, arguments) out of a decoded tool-call JSON object."""
+    if not isinstance(obj, dict):
+        return None
+    lowered = {str(k).lower(): v for k, v in obj.items()}
+    if isinstance(lowered.get("function"), dict):
+        inner = _args_from_json_obj(lowered["function"])
+        if inner:
+            return inner
+    name = ""
+    for key in ("name", "tool", "tool_name", "function"):
+        value = lowered.get(key)
+        if isinstance(value, str) and value.strip():
+            name = value
+            break
+    if not name:
+        return None
+    args: Any = {}
+    for key in ("arguments", "parameters", "args", "input"):
+        if key in lowered:
+            args = lowered[key]
+            break
+    if isinstance(args, str):
+        args = _decode_tool_arguments(args)
+    if not isinstance(args, dict):
+        args = {}
+    return _clean_tool_name(name), dict(args)
+
+
+def _pairs_from_body(body: str, name: str) -> dict[str, Any]:
+    """Decode one leaked call body into an arguments dict.
+
+    Dialects are tried in order and the FIRST one that yields any pair wins,
+    so a body carrying both ``<arg_key>`` pairs and stray angle brackets in a
+    value does not get shredded by the looser patterns below it.
+    """
+    for pattern in _PAIR_PATTERNS:
+        found = pattern.findall(body)
+        if found:
+            return {
+                str(key).strip(): value.strip()
+                for key, value in found
+                if str(key).strip()
+            }
+    match = _JSON_OPEN_RE.search(body) or re.search(r"\{", body)
+    if match:
+        parsed = _balanced_json_object(body, match.start())
+        if parsed is not None:
+            decoded = _args_from_json_obj(parsed[0])
+            if decoded:
+                return decoded[1]
+            if isinstance(parsed[0], dict):
+                return dict(parsed[0])
+    # Last dialect: the tool's own parameter names used as XML tags,
+    # e.g. "<content>hola</content>". Only names the schema declares are
+    # accepted, so prose in angle brackets cannot invent an argument.
+    props = dict((TOOL_PARAMETERS.get(name) or {}).get("properties") or {})
+    props.setdefault("reasoning", REASONING_PARAM)
+    args: dict[str, Any] = {}
+    for key in props:
+        tag = re.search(
+            rf"<{re.escape(key)}\s*>(.*?)(?:</{re.escape(key)}\s*>|$)",
+            body,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if tag:
+            args[key] = tag.group(1).strip()
+    return args
+
+
+def _coerce_args(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Cast string values to the JSON types the schema declares.
+
+    A recovered call arrives as text, so ``reply`` is the string ``"true"``
+    and ``max_results`` is ``"5"``. Tools take those through kwargs, where a
+    non-empty string is truthy — ``reply="false"`` would Discord-reply.
+    """
+    props = dict((TOOL_PARAMETERS.get(name) or {}).get("properties") or {})
+    out: dict[str, Any] = {}
+    for key, value in args.items():
+        declared = props.get(key)
+        kind = str((declared or {}).get("type") or "")
+        if not isinstance(value, str) or not kind:
+            out[key] = value
+            continue
+        text = value.strip()
+        if kind == "boolean":
+            lowered = text.lower()
+            if lowered in {"true", "yes", "1", "on"}:
+                out[key] = True
+                continue
+            if lowered in {"false", "no", "0", "off"}:
+                out[key] = False
+                continue
+        elif kind in {"integer", "number"}:
+            try:
+                out[key] = int(text) if kind == "integer" else float(text)
+                continue
+            except (TypeError, ValueError):
+                pass
+        out[key] = value
+    return out
+
+
+# Keys of a leaked send_message whose tags were eaten before we saw the text
+# (a markdown renderer, a scrubber, a client that swallows angle brackets),
+# leaving a bare "key\nvalue" ladder as the visible reply.
+_TAGLESS_KEYS = ("reasoning", "content", "reply", "reply_to")
+
+
+def _recover_tagless_kv(text: str) -> tuple[str, dict[str, Any]] | None:
+    """Recover a send_message whose markup was stripped down to key lines.
+
+    Deliberately narrow: the text must OPEN on a bare parameter-name line and
+    carry at least two of them including ``content``. A real reply that opens
+    with a line reading only "reasoning" and later a line reading only
+    "content" is not a thing anyone types.
+    """
+    lines = str(text or "").split("\n")
+    first = next((i for i, line in enumerate(lines) if line.strip()), None)
+    if first is None or lines[first].strip().lower() not in _TAGLESS_KEYS:
+        return None
+    args: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in lines[first:]:
+        key = line.strip().lower()
+        if key in _TAGLESS_KEYS and key not in args:
+            current = key
+            args[current] = []
+            continue
+        if current is None:
+            return None
+        args[current].append(line)
+    if len(args) < 2 or "content" not in args:
+        return None
+    joined = {key: "\n".join(value).strip() for key, value in args.items()}
+    if not joined.get("content"):
+        return None
+    return "send_message", joined
+
+
+def _iter_gated(pattern: re.Pattern, text: str, lowered: str, marker: str):
+    """Run ``pattern`` only when a cheap literal marker is present."""
+    if marker not in lowered:
+        return ()
+    return pattern.finditer(text)
+
+
+def recover_text_tool_calls(
+    text: str, known_names: Any = None
+) -> tuple[list[dict[str, Any]], str]:
+    """Parse tool calls a model wrote as visible text.
+
+    Returns ``(raw_calls, leftover_text)``. ``raw_calls`` are in the provider's
+    own ``tool_calls`` shape, so callers can feed them straight into the same
+    dispatch path a native call takes. ``leftover_text`` is the response with
+    the recovered markup removed — the prose the model wrote around the call.
+
+    Only names in ``known_names`` are recovered. Anything inside a fenced code
+    block is skipped: a model quoting tool syntax is not calling a tool.
+    """
+    import json
+
+    raw = str(text or "")
+    if not raw.strip():
+        return [], raw
+    allowed = {str(n).lower() for n in (known_names or ())} or None
+    # Recovery runs on every reply the provider did not attach tool_calls to —
+    # which is most of them. Cheap substring gates keep an ordinary chat
+    # message from paying for six regex scans it can never match.
+    lowered = raw.lower()
+    fences = _fenced_spans(raw) if "```" in raw or "~~~" in raw else []
+
+    found: list[tuple[int, int, str, dict[str, Any]]] = []
+
+    def _add(start: int, end: int, name: str, args: dict[str, Any]) -> None:
+        name = _clean_tool_name(name)
+        if not name or _inside(start, fences):
+            return
+        if allowed is not None and name.lower() not in allowed:
+            return
+        found.append((start, end, name, args))
+
+    for match in _iter_gated(_TOOL_CALL_BLOCK_RE, raw, lowered, "<tool_call"):
+        body = match.group(1)
+        name_attr = _NAME_ATTR_RE.search(match.group(0)[: match.group(0).find(">") + 1])
+        name = name_attr.group(1) if name_attr else ""
+        if not name:
+            # "<tool_call>send_message\n<arg_key>…" — the name is whatever
+            # leads the body, before the first tag or line break. Both the
+            # newline-separated and the glued form show up in the wild.
+            lead = re.split(r"[<\n]", body.lstrip(), 1)[0]
+            bare = _BARE_NAME_LINE_RE.match(lead)
+            name = bare.group(1) if bare else ""
+        if not name:
+            json_match = _JSON_OPEN_RE.search(body)
+            parsed = (
+                _balanced_json_object(body, json_match.start()) if json_match else None
+            )
+            decoded = _args_from_json_obj(parsed[0]) if parsed else None
+            if decoded:
+                _add(match.start(), match.end(), decoded[0], decoded[1])
+            continue
+        _add(match.start(), match.end(), name, _pairs_from_body(body, _clean_tool_name(name)))
+
+    for pattern, marker in ((_FUNCTION_EQ_RE, "<function"), (_INVOKE_RE, "invoke")):
+        for match in _iter_gated(pattern, raw, lowered, marker):
+            name = _clean_tool_name(match.group(1))
+            _add(match.start(), match.end(), name, _pairs_from_body(match.group(2), name))
+
+    if allowed and "<arg>" in lowered:
+        for match in _bare_arg_call_re(frozenset(allowed)).finditer(raw):
+            name = _clean_tool_name(match.group(1))
+            _add(match.start(), match.end(), name, _pairs_from_body(match.group(2), name))
+
+    for match in _iter_gated(_HARMONY_RE, raw, lowered, "functions."):
+        name = _clean_tool_name(match.group(1))
+        brace = raw.find("{", match.end())
+        parsed = _balanced_json_object(raw, brace) if brace != -1 else None
+        if parsed is None:
+            continue
+        args = parsed[0] if isinstance(parsed[0], dict) else {}
+        decoded = _args_from_json_obj(args)
+        _add(
+            _harmony_call_start(raw, match.start()),
+            parsed[1],
+            name,
+            decoded[1] if decoded else dict(args),
+        )
+
+    for match in _JSON_OPEN_RE.finditer(raw):
+        parsed = _balanced_json_object(raw, match.start())
+        if parsed is None:
+            continue
+        decoded = _args_from_json_obj(parsed[0])
+        if decoded:
+            _add(match.start(), parsed[1], decoded[0], decoded[1])
+
+    # Drop overlaps (a <tool_call> wrapper and the JSON inside it both match),
+    # keeping the outermost span so the wrapper is removed from the text too.
+    found.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+    kept: list[tuple[int, int, str, dict[str, Any]]] = []
+    for span in found:
+        if any(not (span[1] <= k[0] or span[0] >= k[1]) for k in kept):
+            continue
+        kept.append(span)
+        if len(kept) >= _RECOVERY_MAX_CALLS:
+            break
+    kept.sort(key=lambda item: item[0])
+
+    if not kept:
+        tagless = _recover_tagless_kv(raw)
+        if tagless is None:
+            return [], raw
+        name, args = tagless
+        if allowed is not None and name.lower() not in allowed:
+            return [], raw
+        kept = [(0, len(raw), name, args)]
+
+    leftover = raw
+    for start, end, _name, _args in reversed(kept):
+        leftover = leftover[:start] + leftover[end:]
+    leftover = re.sub(r"\n{3,}", "\n\n", leftover).strip()
+
+    calls: list[dict[str, Any]] = []
+    for i, (_start, _end, name, args) in enumerate(kept):
+        calls.append(
+            {
+                "id": f"recovered_{i}_{name}",
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(_coerce_args(name, args)),
+                },
+            }
+        )
+    return calls, leftover
 
 
 # ── tool-loop transcript bounds ──────────────────────────────────────────
