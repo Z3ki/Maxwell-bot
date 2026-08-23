@@ -303,6 +303,11 @@ from utils import (  # fd-safe, single source of truth  # noqa: E402
     _spawn_background,
     format_reactions_annotation,
     is_gif_page_url,
+    iter_message_payloads,
+    iter_message_snapshots,
+    message_combined_content,
+    message_has_visible_payload,
+    message_reference_is_forward,
     render_discord_context_text,
 )
 
@@ -3360,6 +3365,8 @@ class MaxwellBot(commands.Bot):
             return True
         if self.user in (getattr(message, "mentions", None) or []):
             return True
+        if message_reference_is_forward(message):
+            return False
         ref = getattr(message, "reference", None)
         resolved = getattr(ref, "resolved", None) if ref else None
         if resolved is not None and hasattr(resolved, "author"):
@@ -3385,6 +3392,8 @@ class MaxwellBot(commands.Bot):
         if getattr(message, "attachments", None) or getattr(message, "stickers", None):
             return False
         if getattr(message, "embeds", None):
+            return False
+        if iter_message_snapshots(message):
             return False
         return True
 
@@ -3417,6 +3426,8 @@ class MaxwellBot(commands.Bot):
         return self._should_live_reply(message)
 
     def _reply_parent(self, message):
+        if message_reference_is_forward(message):
+            return None
         reference = getattr(message, "reference", None)
         resolved = getattr(reference, "resolved", None) if reference else None
         message_id = getattr(reference, "message_id", None) if reference else None
@@ -3582,6 +3593,8 @@ class MaxwellBot(commands.Bot):
 
     def _reply_meta_from_message(self, message) -> dict:
         """Who this Discord message is a reply to, plus a short quote."""
+        if message_reference_is_forward(message):
+            return {}
         reference = getattr(message, "reference", None)
         ref = getattr(reference, "resolved", None) if reference else None
         ref_id = getattr(reference, "message_id", None) if reference else None
@@ -4160,7 +4173,7 @@ class MaxwellBot(commands.Bot):
         instead of leaving the model with contradictory snapshots.
         """
         memory_content = str(getattr(message, "content", "") or "")
-        attachments = list(getattr(message, "attachments", None) or [])
+        attachments = self._payload_attr_list(message, "attachments", 5)
         if attachments:
             attachment_names = []
             for attachment in attachments[:5]:
@@ -4174,7 +4187,7 @@ class MaxwellBot(commands.Bot):
             memory_content = (
                 f"{memory_content} [attachments: {', '.join(attachment_names)}]"
             ).strip()
-        embeds = list(getattr(message, "embeds", None) or [])
+        embeds = self._payload_attr_list(message, "embeds", 5)
         if embeds:
             embed_titles = []
             for embed in embeds[:3]:
@@ -4188,16 +4201,7 @@ class MaxwellBot(commands.Bot):
             memory_content = (
                 f"{memory_content} [embeds: {'; '.join(embed_titles)}]"
             ).strip()
-        if (
-            not memory_content
-            and (
-                attachments
-                or embeds
-                or list(getattr(message, "stickers", None) or [])
-                or list(getattr(message, "components", None) or [])
-                or getattr(message, "poll", None) is not None
-            )
-        ):
+        if not memory_content and message_has_visible_payload(message):
             memory_content = "[media attached]"
         return render_discord_context_text(
             message,
@@ -4355,13 +4359,16 @@ class MaxwellBot(commands.Bot):
             reference=_field("reference"),
             components=_field("components", []) or [],
             poll=_field("poll"),
+            message_snapshots=_field("message_snapshots")
+            or _field("snapshots")
+            or [],
         )
 
     @classmethod
     def _message_update_fingerprint(cls, message) -> str:
         """Stable full-state key for cached/raw MESSAGE_UPDATE deduplication."""
         embeds = []
-        for embed in list(getattr(message, "embeds", None) or [])[:5]:
+        for embed in cls._payload_attr_list(message, "embeds", 8):
             embeds.append(
                 {
                     "text": cls._embed_text(embed),
@@ -4371,7 +4378,7 @@ class MaxwellBot(commands.Bot):
                 }
             )
         attachments = []
-        for attachment in list(getattr(message, "attachments", None) or [])[:5]:
+        for attachment in cls._payload_attr_list(message, "attachments", 8):
             attachments.append(
                 {
                     "id": str(getattr(attachment, "id", "") or ""),
@@ -4384,7 +4391,7 @@ class MaxwellBot(commands.Bot):
                 }
             )
         stickers = []
-        for sticker in list(getattr(message, "stickers", None) or [])[:3]:
+        for sticker in cls._payload_attr_list(message, "stickers", 6):
             stickers.append(
                 {
                     "id": str(getattr(sticker, "id", "") or ""),
@@ -4393,7 +4400,8 @@ class MaxwellBot(commands.Bot):
                 }
             )
         payload = {
-            "content": str(getattr(message, "content", "") or ""),
+            "content": message_combined_content(message)
+            or str(getattr(message, "content", "") or ""),
             "embeds": embeds,
             "attachments": attachments,
             "stickers": stickers,
@@ -4406,7 +4414,7 @@ class MaxwellBot(commands.Bot):
     def _message_media_fingerprint(cls, message) -> str:
         """Key only data that can require a binary media download."""
         media_urls = []
-        for embed in list(getattr(message, "embeds", None) or [])[:5]:
+        for embed in cls._payload_attr_list(message, "embeds", 8):
             media_urls.extend(cls._embed_media_urls(embed))
         attachments = [
             (
@@ -4415,20 +4423,20 @@ class MaxwellBot(commands.Bot):
                 str(getattr(item, "content_type", "") or ""),
                 str(getattr(item, "size", "") or ""),
             )
-            for item in list(getattr(message, "attachments", None) or [])[:5]
+            for item in cls._payload_attr_list(message, "attachments", 8)
         ]
         stickers = [
             (
                 str(getattr(item, "name", "") or ""),
                 str(getattr(item, "url", "") or ""),
             )
-            for item in list(getattr(message, "stickers", None) or [])[:3]
+            for item in cls._payload_attr_list(message, "stickers", 6)
         ]
         payload = {
             "embeds": media_urls,
             "attachments": attachments,
             "stickers": stickers,
-            "links": cls._media_link_refs(getattr(message, "content", "")),
+            "links": cls._media_link_refs(message_combined_content(message)),
         }
         return hashlib.sha256(
             json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
@@ -4866,10 +4874,13 @@ class MaxwellBot(commands.Bot):
         if allowed and channel_id not in allowed:
             return
 
-        has_content = bool(message.content)
-        has_attachment = bool(message.attachments)
-        has_embed = bool(getattr(message, "embeds", None))
-        has_sticker = bool(getattr(message, "stickers", None))
+        payloads = iter_message_payloads(message)
+        has_content = any(
+            str(getattr(src, "content", "") or "").strip() for src in payloads
+        )
+        has_attachment = any(getattr(src, "attachments", None) for src in payloads)
+        has_embed = any(getattr(src, "embeds", None) for src in payloads)
+        has_sticker = any(getattr(src, "stickers", None) for src in payloads)
 
         cooldown = float(self._control.get("per_user_cooldown_seconds", 1.5) or 0)
         last = self._cooldowns.get(str(message.author.id), 0)
@@ -4927,7 +4938,13 @@ class MaxwellBot(commands.Bot):
             # sees it as context.
             return
 
-        if not has_content and not has_attachment and not has_embed and not has_sticker:
+        if (
+            not has_content
+            and not has_attachment
+            and not has_embed
+            and not has_sticker
+            and not message_reference_is_forward(message)
+        ):
             return
 
         # Resolve the referenced message before acquiring the channel lock so
@@ -4937,6 +4954,7 @@ class MaxwellBot(commands.Bot):
             message.reference
             and not message.reference.resolved
             and message.reference.message_id
+            and not message_reference_is_forward(message)
         ):
             try:
                 message.reference.resolved = await message.channel.fetch_message(
@@ -5119,16 +5137,7 @@ class MaxwellBot(commands.Bot):
             if (
                 parse_bool(self._control.get("process_images"), True)
                 and not (reply_path_enabled and self._should_live_reply(message))
-                and (
-                    message.attachments
-                    or getattr(message, "embeds", None)
-                    or getattr(message, "stickers", None)
-                    # An image posted as a bare link is just as much "media in
-                    # the channel" as an upload; without this it never entered
-                    # visual memory and a later "what was that pic" had nothing
-                    # to attach.
-                    or self._media_link_refs(getattr(message, "content", ""))
-                )
+                and self._message_carries_media(message)
             ):
                 try:
                     _imgs, bg_media = await self._extract_media(message)
@@ -6749,6 +6758,8 @@ class MaxwellBot(commands.Bot):
             message.reference, discord.MessageReference
         ):
             return ""
+        if message_reference_is_forward(message):
+            return ""
         ref = cast(Any, message.reference.resolved)
         if not ref or not hasattr(ref, "author"):
             return ""
@@ -6780,7 +6791,7 @@ class MaxwellBot(commands.Bot):
         parts = []
         for match in re.finditer(
             r"https?://open\.spotify\.com/(track|album|playlist|artist)/([a-zA-Z0-9]+)",
-            message.content or "",
+            message_combined_content(message) or "",
         ):
             parts.append(
                 f"[Spotify {match.group(1)}: open.spotify.com/{match.group(1)}/{match.group(2)}]"
@@ -7716,7 +7727,7 @@ class MaxwellBot(commands.Bot):
             r"<think\b[^>]*>.*?</think>", "", str(text), flags=re.IGNORECASE | re.DOTALL
         ).strip()
         parts = [text] if text else []
-        for attachment in list(getattr(message, "attachments", []) or [])[:5]:
+        for attachment in self._payload_attr_list(message, "attachments", 5):
             content_type = getattr(attachment, "content_type", "") or ""
             if content_type.startswith("image/"):
                 kind = "image"
@@ -7727,7 +7738,7 @@ class MaxwellBot(commands.Bot):
             else:
                 kind = "file"
             parts.append(f"[{kind}]")
-        if getattr(message, "embeds", None):
+        if any(getattr(src, "embeds", None) for src in iter_message_payloads(message)):
             parts.append("[embed]")
         return " ".join(p for p in parts if p).strip()
 
@@ -7980,13 +7991,16 @@ class MaxwellBot(commands.Bot):
             "cross_context_enabled", True
         ) or not self._control.get("cross_context_extract_enabled", True):
             return False
+        combined = message_combined_content(message)
         if (
-            not message.content
-            and not message.attachments
-            and not getattr(message, "embeds", None)
+            not combined
+            and not any(
+                getattr(src, "attachments", None) or getattr(src, "embeds", None)
+                for src in iter_message_payloads(message)
+            )
         ):
             return False
-        text = (message.content or "").lower()
+        text = combined.lower()
         triggers = (
             "important",
             "remember",
@@ -8173,13 +8187,19 @@ class MaxwellBot(commands.Bot):
 
     async def _extract_shared_context_fact(self, message):
         try:
-            text = (message.content or "").strip()
+            text = (message_combined_content(message) or "").strip()
             attachment_note = ""
-            if message.attachments:
-                names = [
-                    f"{a.filename} ({getattr(a, 'content_type', None) or 'unknown'})"
-                    for a in message.attachments[:5]
-                ]
+            names = []
+            for source in iter_message_payloads(message):
+                for a in list(getattr(source, "attachments", None) or [])[:5]:
+                    names.append(
+                        f"{a.filename} ({getattr(a, 'content_type', None) or 'unknown'})"
+                    )
+                    if len(names) >= 5:
+                        break
+                if len(names) >= 5:
+                    break
+            if names:
                 attachment_note = "\nAttachments/media present: " + ", ".join(names)
             embed_note = ""
             if getattr(message, "embeds", None):
@@ -9041,6 +9061,29 @@ class MaxwellBot(commands.Bot):
         self._mark_bot_sent(channel)
         return sent
 
+    def _message_carries_media(self, message) -> bool:
+        """True when this message or a forwarded snapshot has ingestible media."""
+        for source in iter_message_payloads(message):
+            if getattr(source, "attachments", None):
+                return True
+            if getattr(source, "embeds", None):
+                return True
+            if getattr(source, "stickers", None):
+                return True
+            if self._media_link_refs(getattr(source, "content", "")):
+                return True
+        return False
+
+    @staticmethod
+    def _payload_attr_list(message, name, cap: int) -> list:
+        items = []
+        for source in iter_message_payloads(message):
+            for item in list(getattr(source, name, None) or []):
+                items.append(item)
+                if len(items) >= cap:
+                    return items
+        return items
+
     async def _extract_media(self, message) -> tuple[list[str], list[dict]]:
         proc_img = parse_bool(self._control.get("process_images"), True)
         proc_aud = _owner_audio_input_enabled(self)
@@ -9053,7 +9096,10 @@ class MaxwellBot(commands.Bot):
         max_size = self._max_media_bytes()
         image_exts = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
         media_exts = set(MIME_MAP.keys())
-        for attachment in message.attachments:
+        wrapper_att_ids = {
+            id(item) for item in list(getattr(message, "attachments", None) or [])
+        }
+        for attachment in self._payload_attr_list(message, "attachments", 10):
             content_type = getattr(attachment, "content_type", None) or ""
             ext = (
                 "." + attachment.filename.rsplit(".", 1)[-1].lower()
@@ -9160,6 +9206,8 @@ class MaxwellBot(commands.Bot):
                     # sites instead of being blind to where it came from.
                     url=getattr(attachment, "url", "") or "",
                 )
+                if id(attachment) not in wrapper_att_ids:
+                    item["source"] = "forward"
                 media.append(item)
                 kind = "text" if text else "media"
                 logger.info(
@@ -9170,10 +9218,14 @@ class MaxwellBot(commands.Bot):
                     f"Failed to download attachment {attachment.filename}: {e}"
                 )
         if proc_img:
-            for item in await self._extract_sticker_emoji_media(message, max_size):
-                if item.get("is_image") and item.get("b64"):
-                    images.append(item["b64"])
-                media.append(item)
+            for source in iter_message_payloads(message):
+                for item in await self._extract_sticker_emoji_media(source, max_size):
+                    item["message_id"] = getattr(message, "id", None)
+                    if source is not message:
+                        item["source"] = item.get("source") or "forward"
+                    if item.get("is_image") and item.get("b64"):
+                        images.append(item["b64"])
+                    media.append(item)
         return images, media
 
     def _max_media_bytes(self) -> int:
@@ -9998,7 +10050,7 @@ class MaxwellBot(commands.Bot):
         )
 
     async def _extract_embeds(self, message) -> list[dict]:
-        embeds = list(getattr(message, "embeds", []) or [])
+        embeds = self._payload_attr_list(message, "embeds", 8)
         if not embeds:
             return []
         max_size = self._max_media_bytes()
@@ -10182,7 +10234,10 @@ class MaxwellBot(commands.Bot):
         )
         wanted = [
             (url, ext)
-            for url, ext in self._media_link_refs(getattr(message, "content", ""))
+            for url, ext in self._media_link_refs(
+                message_combined_content(message)
+                or str(getattr(message, "content", "") or "")
+            )
             if url not in skip
             and (
                 (ext in self._LINK_IMAGE_EXTS and proc_img)
@@ -10319,6 +10374,8 @@ class MaxwellBot(commands.Bot):
         # A Tenor/Giphy picker message is often just a page URL — no upload
         # and sometimes no embed yet. Still treat a reply to it as "that gif".
         if MaxwellBot._media_link_refs(getattr(ref, "content", "")):
+            return getattr(ref, "id", None)
+        if iter_message_snapshots(ref):
             return getattr(ref, "id", None)
         return None
 
@@ -10840,6 +10897,11 @@ class MaxwellBot(commands.Bot):
                 and "youtube" not in set(self._control.get("disabled_tools", []) or [])
             ):
                 yt_scan = content or ""
+                for snap in iter_message_snapshots(message):
+                    yt_scan += " " + str(getattr(snap, "content", "") or "")
+                    for embed in list(getattr(snap, "embeds", None) or [])[:3]:
+                        yt_scan += " " + str(getattr(embed, "url", "") or "")
+                        yt_scan += " " + str(getattr(embed, "description", "") or "")
                 parent = self._reply_parent(message)
                 if parent is not None:
                     yt_scan += " " + str(getattr(parent, "content", "") or "")

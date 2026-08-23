@@ -234,6 +234,80 @@ def _attachment_annotation(att: Any) -> str:
     return f"[file: {name}]"
 
 
+def iter_message_snapshots(message: Any) -> list:
+    """Discord forwards stash the original payload on snapshots, not attachments.
+
+    discord.py-self exposes ``message_snapshots``; some wrappers use ``snapshots``.
+    """
+    raw = getattr(message, "message_snapshots", None)
+    if raw is None:
+        raw = getattr(message, "snapshots", None)
+    if not raw:
+        return []
+    out = []
+    seen: set[int] = set()
+    for snap in raw:
+        if snap is None or snap is message:
+            continue
+        marker = id(snap)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        out.append(snap)
+    return out
+
+
+def iter_message_payloads(message: Any) -> list:
+    """The wrapping message plus any forwarded snapshots."""
+    return [message, *iter_message_snapshots(message)]
+
+
+def message_combined_content(message: Any) -> str:
+    """Plain text from the wrapper and every forwarded snapshot."""
+    parts = []
+    for source in iter_message_payloads(message):
+        text = str(getattr(source, "content", "") or "").strip()
+        if text:
+            parts.append(text)
+    return "\n".join(parts)
+
+
+def message_reference_is_forward(message: Any) -> bool:
+    """True for Discord's Forward action (not a reply)."""
+    if iter_message_snapshots(message):
+        return True
+    if getattr(getattr(message, "flags", None), "forwarded", False):
+        return True
+    ref = getattr(message, "reference", None)
+    if ref is None:
+        return False
+    rtype = getattr(ref, "type", None)
+    if rtype is None:
+        return False
+    name = str(getattr(rtype, "name", "") or "").lower()
+    if name == "forward":
+        return True
+    rendered = str(rtype).lower()
+    return rendered.endswith(".forward") or rendered == "forward"
+
+
+def _forward_origin_label(message: Any) -> str:
+    ref = getattr(message, "reference", None)
+    if ref is None:
+        return ""
+    bits = []
+    guild_id = getattr(ref, "guild_id", None)
+    channel_id = getattr(ref, "channel_id", None)
+    message_id = getattr(ref, "message_id", None)
+    if guild_id:
+        bits.append(f"server {guild_id}")
+    if channel_id:
+        bits.append(f"#{channel_id}")
+    if message_id:
+        bits.append(f"id {message_id}")
+    return " ".join(bits)
+
+
 def message_has_visible_payload(message: Any) -> bool:
     """True when a Discord message carries anything Maxwell should remember."""
     if str(getattr(message, "content", "") or "").strip():
@@ -248,6 +322,11 @@ def message_has_visible_payload(message: Any) -> bool:
         return True
     if getattr(message, "poll", None) is not None:
         return True
+    if message_reference_is_forward(message):
+        return True
+    for snap in iter_message_snapshots(message):
+        if message_has_visible_payload(snap):
+            return True
     return False
 
 
@@ -391,6 +470,20 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
         found.append(("gif", u))
     for kind, u in found[:5]:
         parts.append(f"[media URL: {kind} {u}]")
+
+    for snap in iter_message_snapshots(message)[:3]:
+        origin = _forward_origin_label(message)
+        snap_text = str(getattr(snap, "content", "") or "").strip()
+        header = "[forwarded message"
+        if origin:
+            header += f" from {origin}"
+        if snap_text:
+            header += f": {snap_text[:1500]}"
+        header += "]"
+        parts.append(header)
+        nested = _render_message_annotations(snap, raw_content=snap_text)
+        if nested:
+            parts.append(nested)
 
     return "\n".join(parts)
 
