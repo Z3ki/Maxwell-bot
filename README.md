@@ -404,11 +404,18 @@ The contract the app is held to:
 | | |
 |---|---|
 | Entry | `app.py`, listening on `0.0.0.0:$PORT` |
-| Installed | Python 3.12, flask, waitress, requests, stdlib (`sqlite3`, `json`, `urllib`). No pip at runtime. |
+| Installed | Python 3.12 + flask, waitress, fastapi, uvicorn, websockets, sqlalchemy, bcrypt, pyjwt, itsdangerous, requests, httpx, jinja2, pillow, stdlib |
+| Anything else | `packages=["redis==5.0.1"]` builds a per-site image |
+| WebSockets | Supported end to end — use **fastapi + uvicorn**, since waitress cannot do sockets. SSE and streaming responses work too. |
 | Writable | `/data` only, and only `/data` survives a restart — the database goes at `/data/app.db` |
 | Secrets | `env={...}`, stored outside the site directory, never served, never echoed back, read via `os.environ` |
 | Outbound | Allowed — this is where a key-carrying API call belongs |
-| Limits | 256MB, half a core, 128 pids, no capabilities, read-only root, unprivileged uid |
+| Limits | 256MB, half a core, 128 pids, 32MB uploads, no capabilities, read-only root, unprivileged uid |
+
+So a site can have real user accounts (bcrypt + JWT), a database it queries,
+and live multiplayer over WebSockets — the browser opens
+`new WebSocket(location.origin.replace("http", "ws") + "/bot/<slug>/api/ws")`
+and lands on the site's own server.
 
 How it is contained: code lives in `data/site_servers/<slug>/`, **outside the
 web root**, so source and secrets are never static files. Each site gets its own

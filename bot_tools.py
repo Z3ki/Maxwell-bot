@@ -5188,14 +5188,17 @@ class SiteServerTool(_SiteOwnedTool):
     def get_description(self):
         return (
             "Run a real backend server for one of your sites — your own Python, "
-            "your own routes, your own SQLite, your own secrets, in its own "
+            "your own routes, your own database, your own secrets, in its own "
             "sandboxed container reached at /bot/<name>/api/... "
-            "Use this over backend=true when the site needs server-side logic: "
-            "a hidden API key, real auth, computation, a database with queries. "
+            "Use this when the site needs server-side logic: user accounts and "
+            "login, WebSockets for multiplayer or live chat, a hidden API key, "
+            "anything a static page cannot enforce. "
             "action=write (files={\"app.py\": ...} then it starts), start, stop, "
             "restart, status, logs, read, env (set secrets), delete. "
-            "app.py must listen on 0.0.0.0:$PORT; flask, waitress, requests and "
-            "the stdlib are installed; only /data is writable and it persists. "
+            "app.py listens on 0.0.0.0:$PORT. flask+waitress for plain HTTP, "
+            "fastapi+uvicorn when you need WebSockets; sqlalchemy, bcrypt, pyjwt, "
+            "httpx, pillow are installed, packages=[...] adds more. Only /data is "
+            "writable and only /data persists. "
             "Write the page with create_site, the server with this."
         )
 
@@ -5206,6 +5209,7 @@ class SiteServerTool(_SiteOwnedTool):
         action: str = "status",
         files: Any = None,
         env: Any = None,
+        packages: Any = None,
         path: str | None = None,
         lines: int = 40,
         **kwargs,
@@ -5230,10 +5234,13 @@ class SiteServerTool(_SiteOwnedTool):
                     if env
                     else None
                 )
+                extra = await asyncio.to_thread(site_server.parse_packages, packages)
                 written = await asyncio.to_thread(
                     site_server.write_code, data_dir, slug, parsed
                 )
-                await site_server.start(data_dir, slug, env=new_env)
+                await site_server.start(
+                    data_dir, slug, env=new_env, packages=extra or None
+                )
                 await self._mark_server(slug, entry, True)
                 return (
                     f"Backend server live: {self.base_url}/{slug}/api/ "

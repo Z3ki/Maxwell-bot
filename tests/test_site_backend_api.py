@@ -16,6 +16,30 @@ import site_backend
 from api.auth import _needs_auth
 
 
+class FakeStreamResponse:
+    """Stands in for web.StreamResponse — preparing a real one needs a real
+    aiohttp request/transport, and what these tests care about is what the
+    proxy writes, in what order."""
+
+    def __init__(self, status=200):
+        self.status = status
+        self.headers = {}
+        self.written = b""
+        self._req = None
+
+    async def prepare(self, request):
+        self._req = request
+
+    async def write(self, chunk):
+        self.written += chunk
+        hook = getattr(self._req, "on_write", None)
+        if hook:
+            hook(chunk)
+
+    async def write_eof(self):
+        self.eof = True
+
+
 class _FakeContent:
     def __init__(self, body):
         self._raw = json.dumps(body).encode() if body is not None else b""
@@ -36,6 +60,8 @@ class FakeRequest:
         self.remote = "203.0.113.9"
         self.method = method
         self.path = path
+        self.on_write = None
+        self.content_length = None
 
     async def json(self):
         if self._body is None:
@@ -199,31 +225,32 @@ def test_proxy_only_ever_targets_loopback(data_dir, monkeypatch):
     seen = {}
     monkeypatch.setattr(api.site_server, "port_for", lambda dd, slug: 8801)
 
+    class FakeContent:
+        async def iter_chunked(self, n):
+            yield b'{"ok":'
+            yield b"true}"
+
     class FakeResp:
         status = 200
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", "Transfer-Encoding": "chunked"}
+        content = FakeContent()
 
-        async def read(self):
-            return b'{"ok":true}'
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
+        def release(self):
+            seen["released"] = True
 
     class FakeSession:
-        async def __aenter__(self):
-            return self
+        def __init__(self, **kw):
+            pass
 
-        async def __aexit__(self, *a):
-            return False
-
-        def request(self, method, url, **kw):
+        async def request(self, method, url, **kw):
             seen["method"], seen["url"], seen["headers"] = method, url, kw.get("headers")
             return FakeResp()
 
-    monkeypatch.setattr(api.aiohttp, "ClientSession", lambda **kw: FakeSession())
+        async def close(self):
+            seen["closed"] = True
+
+    monkeypatch.setattr(api.aiohttp, "ClientSession", FakeSession)
+    monkeypatch.setattr(api.web, "StreamResponse", FakeStreamResponse)
     resp = run(
         api.site_proxy(
             FakeRequest(
@@ -234,10 +261,87 @@ def test_proxy_only_ever_targets_loopback(data_dir, monkeypatch):
         )
     )
     assert resp.status == 200
-    assert seen["url"].startswith("http://127.0.0.1:8801/")
-    assert seen["url"].endswith("/notes/5?a=b") or "notes/5" in seen["url"]
+    assert seen["url"] == "http://127.0.0.1:8801/notes/5?q=x"
     # The backend is told where it really lives and who is really calling.
     assert seen["headers"]["X-Site-Slug"] == "guest"
     assert seen["headers"]["X-Forwarded-Prefix"] == "/bot/guest/api"
-    # Hop-by-hop headers must not be forwarded.
+    # Hop-by-hop headers must not be forwarded either way.
     assert "Host" not in seen["headers"]
+    assert "Transfer-Encoding" not in resp.headers
+    # The upstream connection is always handed back, streamed or not.
+    assert seen["released"] and seen["closed"]
+    assert resp.written == b'{"ok":true}'
+
+
+def test_proxy_streams_instead_of_buffering(data_dir, monkeypatch):
+    """SSE and long polling only work if chunks go out as they arrive."""
+    monkeypatch.setattr(api.site_server, "port_for", lambda dd, slug: 8801)
+    order = []
+
+    class FakeContent:
+        async def iter_chunked(self, n):
+            for i in range(3):
+                order.append(f"upstream{i}")
+                yield f"data: {i}\n\n".encode()
+
+    class FakeResp:
+        status = 200
+        headers = {"Content-Type": "text/event-stream"}
+        content = FakeContent()
+
+        def release(self):
+            pass
+
+    class FakeSession:
+        def __init__(self, **kw):
+            pass
+
+        async def request(self, *a, **kw):
+            return FakeResp()
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(api.aiohttp, "ClientSession", FakeSession)
+    monkeypatch.setattr(api.web, "StreamResponse", FakeStreamResponse)
+    req = FakeRequest(match={"slug": "guest", "path": "stream"})
+    req.on_write = lambda chunk: order.append("client")
+    resp = run(api.site_proxy(req))
+    assert resp.headers["Content-Type"] == "text/event-stream"
+    # Interleaved, not "read everything then write everything".
+    assert order == ["upstream0", "client", "upstream1", "client", "upstream2", "client"]
+
+
+def test_websocket_upgrade_takes_the_socket_path(data_dir, monkeypatch):
+    """Multiplayer depends on this branch being reached, not the HTTP one."""
+    monkeypatch.setattr(api.site_server, "port_for", lambda dd, slug: 8801)
+    called = {}
+
+    async def fake_ws(request, slug, target):
+        called["slug"], called["target"] = slug, target
+        return "ws-response"
+
+    monkeypatch.setattr(api, "_proxy_websocket", fake_ws)
+    req = FakeRequest(match={"slug": "guest", "path": "ws"}, method="GET")
+    req.headers["Upgrade"] = "websocket"
+    assert run(api.site_proxy(req)) == "ws-response"
+    assert called["slug"] == "guest"
+    assert called["target"] == "http://127.0.0.1:8801/ws"
+
+
+def test_websocket_on_a_site_with_no_backend_is_still_refused(data_dir, monkeypatch):
+    monkeypatch.setattr(api.site_server, "port_for", lambda dd, slug: None)
+    req = FakeRequest(match={"slug": "guest", "path": "ws"}, method="GET")
+    req.headers["Upgrade"] = "websocket"
+    resp = run(api.site_proxy(req))
+    assert resp.status == 404
+
+
+def test_oversize_upload_is_refused_before_streaming(data_dir, monkeypatch):
+    """Content-Length says no, so 40MB is never pulled through this process."""
+    monkeypatch.setattr(api.site_server, "port_for", lambda dd, slug: 8801)
+    req = FakeRequest(match={"slug": "guest", "path": "upload"}, method="POST")
+    req.content_length = api.SITE_UPLOAD_MAX + 1
+    resp = run(api.site_proxy(req))
+    assert resp.status == 413
+    assert "too large" in _payload(resp)["error"]

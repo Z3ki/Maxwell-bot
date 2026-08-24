@@ -388,9 +388,12 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "files": _str(
                 'Server source as JSON: {"app.py": "...", "helpers.py": "..."}. '
                 "app.py is the entry and must listen on 0.0.0.0:$PORT. flask, "
-                "waitress, requests and the stdlib (sqlite3, json, urllib) are "
-                "installed; there is no pip at runtime. Only /data is writable "
-                "and only /data survives a restart — put the database at "
+                "waitress, fastapi, uvicorn, websockets, sqlalchemy, bcrypt, "
+                "pyjwt, requests, httpx, jinja2, pillow and the stdlib are "
+                "installed. Use fastapi+uvicorn instead of flask+waitress when "
+                "the app needs WebSockets (multiplayer, live chat, anything "
+                "pushed to clients) — waitress cannot do sockets. Only /data is "
+                "writable and only /data survives a restart — put the database at "
                 "/data/app.db. Routes are served under /bot/<name>/api/, with "
                 "that prefix stripped: @app.get('/notes') answers at "
                 "/bot/<name>/api/notes."
@@ -399,6 +402,13 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 'Secrets and config as JSON: {"API_KEY": "sk-..."}. Held outside '
                 "the site directory, never served and never echoed back; read "
                 "them with os.environ. Setting env restarts the server."
+            ),
+            "packages": _str(
+                'Extra pip packages as a JSON list, e.g. ["redis==5.0.1"]. Only '
+                "needed for something outside the installed set (flask, waitress, "
+                "fastapi, uvicorn, websockets, sqlalchemy, bcrypt, pyjwt, requests, "
+                "httpx, jinja2, pillow). Builds a per-site image, so the first "
+                "deploy takes longer."
             ),
             "path": _str("For read: which server file (default app.py)"),
             "lines": _int("For logs: how many lines (default 40, max 200)"),

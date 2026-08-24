@@ -5,6 +5,7 @@ All API and data routes require Basic username/password auth by default.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -846,8 +847,105 @@ _SITE_PROXY_HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
 }
-SITE_PROXY_MAX_BODY = 2 * 1024 * 1024
-SITE_PROXY_TIMEOUT = 30
+# Uploads are bounded by the /bot sub-app's client_max_size, not by holding the
+# body in memory here. sock_read is a per-chunk idle limit, not a total: an SSE
+# stream that sends a heartbeat every 20s stays open forever, as it should.
+SITE_PROXY_READ_TIMEOUT = 120
+SITE_UPLOAD_MAX = 32 * 1024 * 1024
+SITE_WS_MAX_MSG = 4 * 1024 * 1024
+
+
+async def _proxy_websocket(request, slug: str, target: str):
+    """Pump a WebSocket both ways between the visitor and the site's app.
+
+    This is what multiplayer runs on: a browser opens a socket to
+    /bot/<slug>/api/ws, and it lands on the site's own server. Both directions
+    are relayed until either end hangs up.
+
+    Upstream is connected FIRST, on purpose. Preparing the client socket before
+    knowing whether the backend is even reachable turns every failure into an
+    accepted-then-closed connection, which the browser reports as a clean
+    close — an error the caller cannot tell from a normal hangup.
+    """
+    requested = [
+        p.strip()
+        for p in (request.headers.get("Sec-WebSocket-Protocol") or "").split(",")
+        if p.strip()
+    ]
+    headers = {
+        k: v
+        for k, v in request.headers.items()
+        if k.lower() not in _SITE_PROXY_HOP_HEADERS
+        and not k.lower().startswith("sec-websocket-")
+    }
+    headers["X-Forwarded-For"] = _get_client_ip(request)
+    headers["X-Forwarded-Prefix"] = f"/bot/{slug}/api"
+    headers["X-Site-Slug"] = slug
+
+    session = aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=None, sock_connect=10)
+    )
+    try:
+        upstream = await session.ws_connect(
+            target.replace("http://", "ws://", 1),
+            headers=headers,
+            protocols=requested,
+            max_msg_size=SITE_WS_MAX_MSG,
+            heartbeat=30,
+            autoclose=False,
+        )
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        await session.close()
+        logger.warning("site %s websocket upstream failed: %s", slug, e)
+        return _site_json({"error": "the site backend refused the websocket"}, 502)
+
+    # Mirror whatever subprotocol the backend actually chose.
+    chosen = upstream.protocol
+    client = web.WebSocketResponse(
+        heartbeat=30,
+        max_msg_size=SITE_WS_MAX_MSG,
+        protocols=[chosen] if chosen else (),
+    )
+    if not client.can_prepare(request).ok:
+        await upstream.close()
+        await session.close()
+        return _site_json({"error": "not a websocket request"}, 400)
+    await client.prepare(request)
+
+    async def pump(src, dst, direction):
+        try:
+            async for msg in src:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    await dst.send_str(msg.data)
+                elif msg.type == aiohttp.WSMsgType.BINARY:
+                    await dst.send_bytes(msg.data)
+                elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING):
+                    break
+                elif msg.type == aiohttp.WSMsgType.ERROR:
+                    logger.warning("site %s ws %s error: %s", slug, direction, src.exception())
+                    break
+        except Exception as e:
+            # Never silent: a bug in here used to look exactly like a browser
+            # closing the tab.
+            logger.warning("site %s ws %s pump failed: %r", slug, direction, e)
+        finally:
+            # One side hanging up ends the other; nothing is left half-open.
+            with contextlib.suppress(Exception):
+                await dst.close()
+
+    try:
+        await asyncio.gather(
+            pump(client, upstream, "client->backend"),
+            pump(upstream, client, "backend->client"),
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            await upstream.close()
+        with contextlib.suppress(Exception):
+            await session.close()
+        with contextlib.suppress(Exception):
+            await client.close()
+    return client
 
 
 async def site_proxy(request):
@@ -866,11 +964,12 @@ async def site_proxy(request):
     if request.query_string:
         target += "?" + request.query_string
 
-    body = None
-    if request.can_read_body:
-        body = await request.content.read(SITE_PROXY_MAX_BODY + 1)
-        if len(body) > SITE_PROXY_MAX_BODY:
-            return _site_json({"error": "request body too large"}, 413)
+    # WebSocket upgrade: hand off to the socket pump and never come back here.
+    if (
+        request.headers.get("Upgrade", "").lower() == "websocket"
+        and request.method == "GET"
+    ):
+        return await _proxy_websocket(request, slug, target)
 
     headers = {
         k: v
@@ -882,32 +981,60 @@ async def site_proxy(request):
     headers["X-Forwarded-Prefix"] = f"/bot/{slug}/api"
     headers["X-Site-Slug"] = slug
 
+    # Reject an oversize upload from its Content-Length instead of streaming
+    # 40MB only to fail mid-body — which surfaced as a confusing 502.
+    declared = request.content_length or 0
+    if declared > SITE_UPLOAD_MAX:
+        return _site_json(
+            {"error": f"upload too large (max {SITE_UPLOAD_MAX // (1024 * 1024)}MB)"},
+            413,
+        )
+    # The body is streamed rather than buffered, so an upload is bounded by the
+    # route's client_max_size instead of this process's memory.
+    body = request.content if request.can_read_body else None
+
+    # No total timeout: an SSE stream or a slow download is a legitimate long
+    # response. sock_read still kills a backend that stops sending mid-body.
+    timeout = aiohttp.ClientTimeout(
+        total=None, sock_connect=10, sock_read=SITE_PROXY_READ_TIMEOUT
+    )
+    session = aiohttp.ClientSession(timeout=timeout, auto_decompress=False)
     try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=SITE_PROXY_TIMEOUT)
-        ) as session:
-            async with session.request(
-                request.method, target, headers=headers, data=body,
-                allow_redirects=False,
-            ) as upstream:
-                payload = await upstream.read()
-                out = web.Response(
-                    body=payload,
-                    status=upstream.status,
-                    headers={
-                        k: v
-                        for k, v in upstream.headers.items()
-                        if k.lower() not in _SITE_PROXY_HOP_HEADERS
-                        and k.lower() != "content-encoding"
-                    },
-                )
-                out.headers["Access-Control-Allow-Origin"] = "*"
-                return out
+        upstream = await session.request(
+            request.method, target, headers=headers, data=body,
+            allow_redirects=False,
+        )
     except asyncio.TimeoutError:
+        await session.close()
         return _site_json({"error": "the site backend timed out"}, 504)
     except aiohttp.ClientError as e:
+        await session.close()
         logger.warning("site backend %s unreachable: %s", slug, e)
         return _site_json({"error": "the site backend is not responding"}, 502)
+
+    try:
+        # Stream the response through chunk by chunk. Buffering it whole would
+        # break Server-Sent Events and long polling (the reply would only
+        # arrive once the stream ended) and would hold a big download in RAM.
+        out = web.StreamResponse(status=upstream.status)
+        for key, value in upstream.headers.items():
+            if key.lower() in _SITE_PROXY_HOP_HEADERS:
+                continue
+            out.headers[key] = value
+        out.headers["Access-Control-Allow-Origin"] = "*"
+        await out.prepare(request)
+        async for chunk in upstream.content.iter_chunked(65536):
+            await out.write(chunk)
+        await out.write_eof()
+        return out
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        logger.warning("site backend %s died mid-response: %s", slug, e)
+        with contextlib.suppress(Exception):
+            await out.write_eof()
+        return out
+    finally:
+        upstream.release()
+        await session.close()
 
 
 # ---------- Runtime controls ----------
@@ -2157,8 +2284,14 @@ app.router.add_options("/api/site/{slug}/kv/bump", _options_handler)
 app.router.add_options("/api/site/{slug}/items/{name}", _options_handler)
 # Public, unauthenticated: a site's own backend server, reached through Caddy
 # at /bot/<slug>/api/*. Every method, because the site defines its own routes.
-app.router.add_route("*", "/bot/{slug}/api", site_proxy)
-app.router.add_route("*", "/bot/{slug}/api/{path:.*}", site_proxy)
+# It lives in a sub-app purely so file uploads get a 32MB ceiling without
+# raising the 256KB limit that protects every admin route. The parent app's
+# auth middleware still runs (see api.auth._needs_auth, which exempts exactly
+# this path shape).
+site_app = web.Application(client_max_size=SITE_UPLOAD_MAX)
+site_app.router.add_route("*", "/{slug}/api", site_proxy)
+site_app.router.add_route("*", "/{slug}/api/{path:.*}", site_proxy)
+app.add_subapp("/bot/", site_app)
 app.router.add_put("/api/control", control_put)
 app.router.add_delete("/api/control", control_reset)
 app.router.add_get("/api/llm/traces", llm_traces)

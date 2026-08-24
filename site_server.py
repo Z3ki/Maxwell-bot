@@ -44,6 +44,11 @@ logger = logging.getLogger(__name__)
 IMAGE = "maxwell-site-runtime"
 DOCKERFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docker", "site-runtime")
 CONTAINER_PREFIX = "maxwell-site-"
+# Deliberately NOT the same prefix as CONTAINER_PREFIX. When they matched, a
+# per-site image and its container shared one identifier, and `docker inspect`
+# went on finding the image after the container was removed — so the
+# wait-for-removal loop span for its full timeout on every deploy.
+IMAGE_PREFIX = "maxwell-siteimg-"
 CONTAINER_PORT = 8000
 
 # Ports handed to site backends. Loopback only — the public path is the proxy.
@@ -195,8 +200,10 @@ async def _remove_container(slug: str) -> None:
     """
     name = container_name(slug)
     await _docker("rm", "-f", name, timeout=30)
-    for _ in range(40):  # ~8s
-        code, _out, _err = await _docker("inspect", "-f", "{{.Id}}", name, timeout=10)
+    for _ in range(100):  # ~20s — docker can be slow while a build is running
+        code, _out, _err = await _docker(
+            "inspect", "--type", "container", "-f", "{{.Id}}", name, timeout=10
+        )
         if code != 0:
             return
         await asyncio.sleep(0.2)
@@ -256,6 +263,67 @@ def parse_files(files: Any) -> dict[str, str]:
     return out
 
 
+# A site that needs something outside the baked-in toolkit gets a per-site
+# image built FROM the shared one. Pinned or bare names only — no flags, no
+# URLs, no git+ssh, nothing that turns a package list into a shell.
+PACKAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,60}(\[[A-Za-z0-9,_-]{1,40}\])?(==[A-Za-z0-9._-]{1,20})?$")
+MAX_PACKAGES = 15
+
+
+def parse_packages(packages: Any) -> list[str]:
+    if not packages:
+        return []
+    raw = packages
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            raw = [p.strip() for p in raw.replace("\n", ",").split(",")]
+    if not isinstance(raw, list):
+        raise SiteServerError("packages must be a list of pip names")
+    out = []
+    for item in raw:
+        name = str(item or "").strip()
+        if not name:
+            continue
+        if not PACKAGE_RE.match(name):
+            raise SiteServerError(
+                f"bad package {name!r} — use a plain pip name, optionally "
+                "pinned like 'redis==5.0.1'"
+            )
+        out.append(name)
+    if len(out) > MAX_PACKAGES:
+        raise SiteServerError(f"too many packages (max {MAX_PACKAGES})")
+    return out
+
+
+async def build_site_image(data_dir, slug: str, packages: list[str]) -> str:
+    """Image for one site: the shared runtime plus its extra packages."""
+    if not packages:
+        return IMAGE
+    await _ensure_image()
+    tag = IMAGE_PREFIX + _check_slug(slug)
+    build_dir = Path(data_dir) / "site_servers" / slug / "_build"
+    build_dir.mkdir(parents=True, exist_ok=True)
+    # Package names are validated above, so this cannot inject flags.
+    (build_dir / "Dockerfile").write_text(
+        f"FROM {IMAGE}\nUSER root\n"
+        f"RUN pip install --no-cache-dir {' '.join(packages)}\n"
+        "USER site\n",
+        encoding="utf-8",
+    )
+    code, _out, err = await _docker("build", "-t", tag, str(build_dir), timeout=600)
+    if code != 0:
+        raise SiteServerError(
+            "could not install those packages:\n" + (err.strip()[-600:] or "pip failed")
+        )
+    return tag
+
+
+async def _remove_site_image(slug: str) -> None:
+    await _docker("image", "rm", "-f", IMAGE_PREFIX + slug, timeout=60)
+
+
 def parse_env(env: Any) -> dict[str, str]:
     if not env:
         return {}
@@ -291,7 +359,7 @@ def write_code(data_dir, slug: str, files: dict[str, str]) -> list[str]:
     # Drop the previous source (never the _data dir) so a renamed module can't
     # linger and shadow the new one.
     for old in target.iterdir():
-        if old.name == "_data":
+        if old.name in {"_data", "_build"}:
             continue
         if old.is_dir():
             shutil.rmtree(old, ignore_errors=True)
@@ -328,7 +396,9 @@ def list_code(data_dir, slug: str) -> list[tuple[str, int]]:
         return []
     out = []
     for path in sorted(base.rglob("*")):
-        if path.is_file() and "_data" not in path.parts:
+        # _data is the app's database, _build is our generated Dockerfile —
+        # neither is source the model wrote, so neither belongs in the listing.
+        if path.is_file() and not {"_data", "_build"} & set(path.parts):
             with contextlib.suppress(OSError):
                 out.append((str(path.relative_to(base)), path.stat().st_size))
     return out
@@ -369,6 +439,8 @@ async def _wait_healthy(port: int, slug: str) -> str:
     while asyncio.get_running_loop().time() < deadline:
         code, out, _err = await _docker(
             "inspect",
+            "--type",
+            "container",
             "-f",
             "{{.State.Running}} {{.State.Restarting}} {{.RestartCount}} {{.State.ExitCode}}",
             container_name(slug),
@@ -392,7 +464,13 @@ async def _wait_healthy(port: int, slug: str) -> str:
     return last
 
 
-async def start(data_dir, slug: str, *, env: dict[str, str] | None = None) -> dict:
+async def start(
+    data_dir,
+    slug: str,
+    *,
+    env: dict[str, str] | None = None,
+    packages: list[str] | None = None,
+) -> dict:
     """(Re)launch the site's backend container. Returns its registry entry."""
     slug = _check_slug(slug)
     source = code_dir(data_dir, slug)
@@ -404,6 +482,9 @@ async def start(data_dir, slug: str, *, env: dict[str, str] | None = None) -> di
     previous = get_entry(data_dir, slug) or {}
     if env is None:
         env = {k: str(v) for k, v in (previous.get("env") or {}).items()}
+    if packages is None:
+        packages = list(previous.get("packages") or [])
+    image = await build_site_image(data_dir, slug, packages)
     port = int(previous.get("port") or 0) or _free_port(data_dir, slug)
 
     await _remove_container(slug)
@@ -436,7 +517,7 @@ async def start(data_dir, slug: str, *, env: dict[str, str] | None = None) -> di
     ]
     for key, value in (env or {}).items():
         args.extend(["-e", f"{key}={value}"])
-    args.append(IMAGE)
+    args.append(image)
 
     code, _out, err = await _docker(*args, timeout=60)
     if code != 0:
@@ -446,9 +527,11 @@ async def start(data_dir, slug: str, *, env: dict[str, str] | None = None) -> di
     entry = {
         "port": port,
         "env": env or {},
+        "packages": packages or [],
         "running": health == "ok",
         "health": health,
         "container": container_name(slug),
+        "image": image,
     }
     _write_entry(data_dir, slug, entry)
     if health != "ok":
@@ -483,6 +566,8 @@ async def destroy(data_dir, slug: str) -> None:
     with contextlib.suppress(SiteServerError, Exception):
         await _remove_container(slug)
     with contextlib.suppress(Exception):
+        await _remove_site_image(slug)
+    with contextlib.suppress(Exception):
         shutil.rmtree(code_dir(data_dir, slug), ignore_errors=True)
     with contextlib.suppress(Exception):
         _write_entry(data_dir, slug, None)
@@ -504,14 +589,17 @@ async def status(data_dir, slug: str) -> str:
     if not entry:
         return "no backend server for this site"
     code, out, _err = await _docker(
-        "inspect", "-f", "{{.State.Status}} {{.RestartCount}}", container_name(slug), timeout=15
+        "inspect", "--type", "container", "-f", "{{.State.Status}} {{.RestartCount}}",
+        container_name(slug), timeout=15,
     )
     live = out.strip() if code == 0 else "absent"
     files = ", ".join(f"{n} ({s}B)" for n, s in list_code(data_dir, slug)) or "no files"
     secrets = ", ".join(sorted(entry.get("env") or {})) or "none"
+    extra = ", ".join(entry.get("packages") or []) or "none (baked-in toolkit only)"
     return (
         f"container {live} on 127.0.0.1:{entry.get('port')} "
-        f"(public path /bot/{slug}/api/...)\nfiles: {files}\nenv: {secrets}"
+        f"(public path /bot/{slug}/api/...)\nfiles: {files}\nenv: {secrets}\n"
+        f"extra packages: {extra}"
     )
 
 
@@ -526,7 +614,8 @@ async def reconcile(data_dir) -> None:
         if not entry.get("running"):
             continue
         code, out, _err = await _docker(
-            "inspect", "-f", "{{.State.Running}}", container_name(slug), timeout=15
+            "inspect", "--type", "container", "-f", "{{.State.Running}}",
+            container_name(slug), timeout=15,
         )
         alive = code == 0 and out.strip() == "true"
         if alive:
@@ -578,13 +667,56 @@ def contract(slug: str) -> str:
         f"  Public path : /bot/{slug}/api/...  ->  your routes, with /bot/{slug}/api stripped.\n"
         f"                A route defined as /notes is reached at /bot/{slug}/api/notes.\n"
         "  Entry       : app.py, listening on 0.0.0.0:$PORT (the runtime sets PORT).\n"
-        "  Installed   : python 3.12, flask, waitress, requests, and the stdlib "
-        "(sqlite3, json, urllib). No pip at runtime.\n"
+        "  Installed   : python 3.12 + flask, waitress, fastapi, uvicorn, websockets, "
+        "sqlalchemy, bcrypt, pyjwt, itsdangerous, requests, httpx, jinja2, pillow, "
+        "and the stdlib (sqlite3, json, urllib). Anything else: pass packages=[...].\n"
+        "  WebSockets  : supported end to end — use FastAPI + uvicorn (waitress "
+        "cannot do sockets). This is how you build multiplayer, live chat, or "
+        "anything pushed to clients. SSE and streaming responses work too.\n"
         "  Writable    : /data only, and it persists. /app is read-only. Put the "
         "database at /data/app.db.\n"
         "  Secrets     : pass env={\"API_KEY\": \"...\"} — held outside the site "
         "directory, never served, never echoed back. Read with os.environ.\n"
         "  Outbound    : allowed, so this is where a key-carrying API call belongs.\n"
-        "  Limits      : 256MB, half a core, 128 processes, no capabilities.\n"
+        "  Limits      : 256MB, half a core, 128 processes, no capabilities, "
+        "32MB uploads.\n"
         "  Logs        : site_server(action=logs) — stdout/stderr, your prints included."
     )
+
+
+EXAMPLE_MULTIPLAYER = '''# Multiplayer / live chat: FastAPI + uvicorn, because waitress cannot do
+# WebSockets. The browser connects to  new WebSocket(
+#   location.origin.replace("http", "ws") + "/bot/<slug>/api/ws")
+import os, json, sqlite3
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+
+app = FastAPI()
+room: list[WebSocket] = []
+
+@app.websocket("/ws")
+async def ws(sock: WebSocket):
+    await sock.accept()
+    room.append(sock)
+    try:
+        while True:
+            msg = await sock.receive_text()
+            for peer in list(room):        # broadcast to everyone else
+                if peer is not sock:
+                    try:
+                        await peer.send_text(msg)
+                    except Exception:
+                        room.remove(peer)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if sock in room:
+            room.remove(sock)
+
+@app.get("/players")
+def players():
+    return {"connected": len(room)}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ["PORT"]))
+'''
