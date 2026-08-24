@@ -133,6 +133,73 @@ def test_recovers_several_calls_in_declared_order():
     assert [name for name, _ in calls] == ["web_search", "send_message"]
 
 
+def test_recovers_python_call_form():
+    """Verbatim from a channel: the whole dump was posted as the reply."""
+    calls, leftover = _recover(
+        "send_message(reasoning=shaiev is repeating my name suggestion so "
+        "i'll riff on it briefly in the same banter, content=quedó santo de "
+        "entrada pa, ya tenés el aura de profeta y de troll al mismo tiempo "
+        "jajajaj, reasoning=shaiev is repeating my name suggestion so i'll "
+        "riff on it briefly in the same banter)"
+    )
+    assert calls == [
+        (
+            "send_message",
+            {
+                "reasoning": (
+                    "shaiev is repeating my name suggestion so i'll riff on "
+                    "it briefly in the same banter"
+                ),
+                # The commas inside the value must not split it: splitting on
+                # every comma truncated the reply at "pa".
+                "content": (
+                    "quedó santo de entrada pa, ya tenés el aura de profeta "
+                    "y de troll al mismo tiempo jajajaj"
+                ),
+            },
+        )
+    ]
+    assert leftover == ""
+
+
+def test_a_repeated_key_keeps_the_first_value():
+    calls, _ = _recover("send_message(content=el bueno, content=el eco)")
+    assert calls[0][1]["content"] == "el bueno"
+
+
+def test_quoted_values_lose_their_quotes():
+    calls, _ = _recover('send_message(content="hola, que tal", reply=true)')
+    assert calls[0][1] == {"content": "hola, que tal", "reply": True}
+
+
+def test_a_smiley_does_not_close_the_call():
+    """Every one of his rooms is full of these."""
+    calls, leftover = _recover("send_message(reasoning=x, content=mira esto :) jaja)")
+    assert calls[0][1]["content"] == "mira esto :) jaja"
+    assert leftover == ""
+
+
+def test_nested_parens_in_a_value_survive():
+    calls, _ = _recover("send_message(content=mira (esto) y esto)")
+    assert calls[0][1]["content"] == "mira (esto) y esto"
+
+
+def test_an_unclosed_call_still_beats_posting_the_dump():
+    calls, _ = _recover("send_message(content=no cerro el parentesis")
+    assert calls[0][1]["content"] == "no cerro el parentesis"
+
+
+def test_a_paren_call_with_no_args_is_recovered():
+    calls, _ = _recover("no_response(reasoning=nothing here is for me)")
+    assert calls == [("no_response", {"reasoning": "nothing here is for me"})]
+
+
+def test_prose_around_a_paren_call_is_kept():
+    calls, leftover = _recover("bueno\nsend_message(content=ya va)\nlisto")
+    assert calls[0][1]["content"] == "ya va"
+    assert "bueno" in leftover and "listo" in leftover
+
+
 # ---- values arrive as text and must be cast to the declared type ----
 
 
@@ -162,6 +229,22 @@ def test_plain_reply_is_left_alone():
 
 def test_json_in_prose_is_not_a_tool_call():
     text = 'the config is {"name": "bob"} basically'
+    assert _recover(text) == ([], text)
+
+
+def test_a_function_call_in_prose_is_not_a_tool_call():
+    text = "i ran build(x=1) and it worked"
+    assert _recover(text) == ([], text)
+
+
+def test_naming_a_tool_in_prose_is_not_a_call():
+    text = "the function send_message is what posts stuff"
+    assert _recover(text) == ([], text)
+
+
+def test_a_paren_call_with_undeclared_keys_only_is_ignored():
+    """Keys must be real parameters, so prose can't invent arguments."""
+    text = "send_message(frobnicate=1)"
     assert _recover(text) == ([], text)
 
 

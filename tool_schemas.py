@@ -1254,6 +1254,95 @@ def _pairs_from_body(body: str, name: str) -> dict[str, Any]:
     return args
 
 
+# The Python-call dialect: ``send_message(reasoning=…, content=…)``. Models
+# emit it constantly, nothing recovered it, so the whole parameter dump landed
+# in the channel as the visible reply.
+#
+# Two things make it awkward, and both show up in every real example:
+#   * values are unquoted and full of commas — "content=quedó santo pa, ya
+#     tenés el aura" is ONE value, so splitting on commas truncates the reply
+#     mid-sentence;
+#   * keys repeat — the model likes to restate `reasoning` after `content`.
+# So a comma only ends a value when a DECLARED parameter name and `=` follow
+# it, and the first occurrence of a key wins.
+_PAREN_ARG_KEY_RE = re.compile(r"([A-Za-z_]\w*)\s*=")
+_paren_call_cache: dict[frozenset, re.Pattern] = {}
+
+
+def _paren_call_re(names: frozenset) -> re.Pattern:
+    cached = _paren_call_cache.get(names)
+    if cached is None:
+        alt = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True)) or r"(?!x)x"
+        # The name must open the call and be followed immediately by
+        # "key=", so ordinary prose containing "(" never matches.
+        cached = re.compile(
+            rf"(?<![A-Za-z0-9_])({alt})\s*\(\s*(?=[A-Za-z_]\w*\s*=)",
+            re.IGNORECASE,
+        )
+        _paren_call_cache[names] = cached
+    return cached
+
+
+# ":)", ";-)", "=)" and friends. A smiley inside a value is not a closing
+# paren, and Maxwell's rooms are full of them — without this, "content=mira
+# esto :) jaja" gets cut to "mira esto :".
+_EMOTICON_CLOSE_RE = re.compile(r"[:;=xX8]-?\)$")
+
+
+def _balanced_paren_end(text: str, start: int) -> int:
+    """Index just past the ``)`` closing the ``(`` at ``start``.
+
+    Falls back to the end of the text when the model never closed it, which
+    is better than dropping the call and posting the dump.
+    """
+    depth = 0
+    for i in range(start, len(text)):
+        ch = text[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if _EMOTICON_CLOSE_RE.search(text[max(0, i - 2) : i + 1]):
+                continue
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return len(text)
+
+
+def _strip_wrapping_quotes(value: str) -> str:
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        return text[1:-1]
+    return text
+
+
+def _pairs_from_paren_body(interior: str, name: str) -> dict[str, Any]:
+    """Split ``key=value, key=value`` where values may contain commas."""
+    props = dict((TOOL_PARAMETERS.get(name) or {}).get("properties") or {})
+    props.setdefault("reasoning", REASONING_PARAM)
+    marks: list[tuple[int, int, str]] = []
+    for match in _PAREN_ARG_KEY_RE.finditer(interior):
+        key = match.group(1)
+        if key not in props:
+            continue
+        before = interior[: match.start()].rstrip()
+        # A key only starts a new argument at the very front or right after
+        # the comma that ended the previous one. Anything else is a "x=y"
+        # that happens to live inside a value.
+        if before and not before.endswith(","):
+            continue
+        marks.append((match.start(), match.end(), key))
+    args: dict[str, Any] = {}
+    for index, (_start, value_at, key) in enumerate(marks):
+        end = marks[index + 1][0] if index + 1 < len(marks) else len(interior)
+        value = interior[value_at:end].strip().rstrip(",").strip()
+        # First occurrence wins: the trailing repeat is the model echoing
+        # itself, and the leading one is what it actually reasoned with.
+        if key not in args:
+            args[key] = _strip_wrapping_quotes(value)
+    return args
+
+
 def _coerce_args(name: str, args: dict[str, Any]) -> dict[str, Any]:
     """Cast string values to the JSON types the schema declares.
 
@@ -1401,6 +1490,19 @@ def recover_text_tool_calls(
         for match in _bare_arg_call_re(frozenset(allowed)).finditer(raw):
             name = _clean_tool_name(match.group(1))
             _add(match.start(), match.end(), name, _pairs_from_body(match.group(2), name))
+
+    # send_message(reasoning=…, content=…) — a call written as a Python call.
+    if allowed and "(" in raw and "=" in raw:
+        for match in _paren_call_re(frozenset(allowed)).finditer(raw):
+            name = _clean_tool_name(match.group(1))
+            open_paren = raw.find("(", match.end(1))
+            if open_paren == -1:
+                continue
+            end = _balanced_paren_end(raw, open_paren)
+            interior = raw[open_paren + 1 : end - 1 if raw[end - 1 : end] == ")" else end]
+            args = _pairs_from_paren_body(interior, name)
+            if args:
+                _add(match.start(), end, name, args)
 
     for match in _iter_gated(_HARMONY_RE, raw, lowered, "functions."):
         name = _clean_tool_name(match.group(1))
