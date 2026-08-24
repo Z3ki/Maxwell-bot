@@ -1211,15 +1211,10 @@ class ImageGeneratorTool(Tool):
         return result
 
     async def _pollinations_generate(self, message: Message, prompt: str) -> str:
-        model = (
-            str(
-                getattr(
-                    self.bot.config, "POLLINATIONS_MODEL", "MarcosFRG/lucid-origin"
-                )
-                or "MarcosFRG/lucid-origin"
-            ).strip()
-            or "MarcosFRG/lucid-origin"
-        )
+        # Model comes solely from config — which reads POLLINATIONS_MODEL from
+        # .env (config default applies only when unset). No hardcoded fallback
+        # here so we never silently shift models across code edits.
+        model = str(getattr(self.bot.config, "POLLINATIONS_MODEL", "") or "").strip()
         seed = random.randint(0, 999999)
         url = (
             "https://image.pollinations.ai/prompt/"
