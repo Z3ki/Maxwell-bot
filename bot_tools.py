@@ -1145,11 +1145,11 @@ def _persist_public_image(
 
 
 class ImageGeneratorTool(Tool):
-    """Fast image generation using NVIDIA Flux"""
+    """Fast image generation using Pollinations (SDXL-Lightning)."""
 
     def get_description(self):
         return (
-            "Generate an AI image (~4s) — the DEFAULT image tool, text-to-image only. "
+            "Generate an AI image (~2-5s) — the DEFAULT image tool, text-to-image only. "
             "It CANNOT take an input image: to edit/modify/restyle an existing image, use hd_image. "
             "Params: prompt (required). Posts the image to chat with a CDN URL you can reuse in sites."
         )
@@ -1159,25 +1159,10 @@ class ImageGeneratorTool(Tool):
     ) -> str:
         if not prompt:
             return "Error: prompt parameter is required"
-        nvidia_key = (getattr(self.bot.config, "NVIDIA_API_KEY", "") or "").strip()
-        last_error = ""
-        if nvidia_key:
-            result = await self._nvidia_generate(message, prompt)
-            if not str(result).startswith("Error"):
-                return result
-            last_error = str(result)
-            logger.warning(
-                "NVIDIA image generation failed (%s); falling back to Pollinations",
-                last_error[:240],
-            )
-        else:
-            logger.info(
-                "NVIDIA_API_KEY unset; using Pollinations for image_generator"
-            )
-        fallback = await self._pollinations_generate(message, prompt)
-        if not str(fallback).startswith("Error"):
-            return fallback
-        return last_error or fallback
+        # Pollinations is the primary generator — keyless, fast, always up.
+        # The long-dead NVIDIA Flux route was dropped (it hung ~6 min per
+        # request before timing out).
+        return await self._pollinations_generate(message, prompt)
 
     async def _deliver_generated_image(
         self, message: Message, prompt: str, image_bytes: bytes, *, prefix: str
@@ -1227,8 +1212,13 @@ class ImageGeneratorTool(Tool):
 
     async def _pollinations_generate(self, message: Message, prompt: str) -> str:
         model = (
-            str(getattr(self.bot.config, "POLLINATIONS_MODEL", "flux") or "flux").strip()
-            or "flux"
+            str(
+                getattr(
+                    self.bot.config, "POLLINATIONS_MODEL", "MarcosFRG/sdxl-lightning"
+                )
+                or "MarcosFRG/sdxl-lightning"
+            ).strip()
+            or "MarcosFRG/sdxl-lightning"
         )
         seed = random.randint(0, 999999)
         url = (
@@ -1290,117 +1280,6 @@ class ImageGeneratorTool(Tool):
         return await self._deliver_generated_image(
             message, prompt, raw, prefix="pollinations"
         )
-
-    async def _nvidia_generate(self, message: Message, prompt: str) -> str:
-        api_key = self.bot.config.NVIDIA_API_KEY
-        api_url = self.bot.config.NVIDIA_IMAGE_URL
-        payload = {
-            "prompt": prompt,
-            "mode": "base",
-            "cfg_scale": 3.5,
-            "width": 1024,
-            "height": 1024,
-            "seed": random.randint(0, 1000000),
-            "steps": 20,
-        }
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
-        session = await _get_shared_session()
-        max_retries = 3
-        last_error = None
-        for attempt in range(max_retries):
-            try:
-                async with session.post(
-                    api_url,
-                    json=payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=120),
-                ) as response:
-                    if response.status == 429:
-                        last_error = "Error: NVIDIA image generation rate limited. Try again later."
-                        logger.warning(
-                            f"NVIDIA image rate limited, retry {attempt + 1}/{max_retries}"
-                        )
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep((attempt + 1) * 10)
-                            continue
-                        break
-                    if 500 <= response.status < 600:
-                        error_text = await response.text()
-                        last_error = f"Error generating image: NVIDIA returned {response.status}."
-                        logger.warning(
-                            f"NVIDIA image server error {response.status}, retry {attempt + 1}/{max_retries}: {error_text[:200]}"
-                        )
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep((attempt + 1) * 15)
-                            continue
-                        break
-                    if response.status != 200:
-                        error_text = await response.text()
-                        logger.error(
-                            f"NVIDIA image error: {response.status} - {error_text[:500]}"
-                        )
-                        last_error = f"Error generating image: API returned status {response.status}. Try again later."
-                        break
-                    data = await response.json()
-                    if "artifacts" not in data or not data["artifacts"]:
-                        logger.error(
-                            f"NVIDIA image response missing artifacts: {list(data.keys())}"
-                        )
-                        last_error = "Error: No image data in response"
-                        break
-                    artifact = data["artifacts"][0]
-                    image_b64 = artifact.get("base64")
-                    finish_reason = artifact.get("finishReason")
-                    if finish_reason != "SUCCESS" or not image_b64:
-                        logger.error(
-                            f"NVIDIA image artifact issue: finishReason={finish_reason}, base64_present={bool(image_b64)}"
-                        )
-                        if finish_reason == "CONTENT_FILTERED":
-                            last_error = "Error: Image was filtered by safety guardrails. Try a different prompt."
-                        else:
-                            last_error = "Error: No base64 image data in response"
-                        break
-                    image_bytes = base64.b64decode(image_b64)
-                    logger.info(
-                        f"NVIDIA image generated successfully, size: {len(image_bytes)} bytes"
-                    )
-                    return await self._deliver_generated_image(
-                        message, prompt, image_bytes, prefix="nvidia"
-                    )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    f"NVIDIA image timeout, attempt {attempt + 1}/{max_retries}"
-                )
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(5)
-                    continue
-                last_error = "Error: Image generation timed out after retries"
-                break
-            except aiohttp.ClientError as e:
-                logger.warning(
-                    f"NVIDIA image connection error (attempt {attempt + 1}/{max_retries}): {e}"
-                )
-                if "Server disconnected" in str(e) or "Connection" in str(e):
-                    session = await _recreate_shared_session()
-                last_error = (
-                    "Error generating image: connection failed. Try again later."
-                )
-                if attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 10
-                    await asyncio.sleep(wait_time)
-                    continue
-                break
-            except Exception as e:
-                logger.error(f"NVIDIA image generation error: {e}")
-                last_error = f"Error generating image: {e}"
-                break
-        if last_error:
-            return last_error
-        return "Error: Image generation failed after retries"
 
 
 def _sniff_image_mime(raw: bytes) -> str:

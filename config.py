@@ -386,7 +386,9 @@ class Config:
     )
     CAPTCHA_FALLBACK_USER_ID = os.getenv("CAPTCHA_FALLBACK_USER_ID", "").strip()
 
-    POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "flux")
+    # image_generator runs on Pollinations. SDXL-Lightning is fast (~1-2s) and
+    # high quality; the old default (flux) was both slower and less consistent.
+    POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "MarcosFRG/sdxl-lightning")
 
     NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
     NVIDIA_IMAGE_URL = os.getenv(
