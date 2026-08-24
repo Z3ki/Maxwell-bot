@@ -195,6 +195,7 @@ def _patch_voice_recv_decoder():
 _patch_voice_recv_decoder()
 
 from autonomy import AutonomyEngine, _reply_relation_bit  # noqa: E402
+from concurrency_safety import ChannelWorkQueues, ToolConcurrency, loop_watchdog  # noqa: E402
 from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before these imports
     OWNER_IDS,
     ChangeAvatarTool,
@@ -2644,6 +2645,12 @@ class MaxwellBot(commands.Bot):
                 os.environ.get("MAXWELL_DAILY_TOKEN_BUDGET", "500000"), 500000
             )
         )
+        # Concurrency safety (see concurrency_safety.py): per-(guild, channel)
+        # serialized work queues and bounded per-tool-class semaphores. Built
+        # here so the types are known; the watchdog task is started/stopped in
+        # main() where the running event loop is available.
+        self.channel_queues: ChannelWorkQueues = ChannelWorkQueues()
+        self.tool_concurrency: ToolConcurrency = ToolConcurrency()
         self._setup_ai()
         self._setup_memory()
         self._setup_tools()
@@ -15169,6 +15176,9 @@ class MaxwellBot(commands.Bot):
 async def main():
     bot = MaxwellBot()
     _shutdown_called = False
+    # Start the event-loop watchdog. The channel work queues and tool gates are
+    # built once in MaxwellBot.__init__; stop the watchdog on shutdown below.
+    watchdog_task = asyncio.create_task(loop_watchdog(), name="loop-watchdog")
 
     def _request_shutdown(sig):
         nonlocal _shutdown_called
@@ -15194,6 +15204,14 @@ async def main():
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.remove_signal_handler(sig)
         logger.info("Shutting down Maxwell...")
+        # Stop the event-loop watchdog and drain the channel work queues so no
+        # handler keeps mutating shared state after the process starts exiting.
+        if not watchdog_task.done():
+            watchdog_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watchdog_task
+        with contextlib.suppress(Exception):
+            await bot.channel_queues.close()
         try:
             await bot.autonomy_engine.stop()
         except Exception as e:
