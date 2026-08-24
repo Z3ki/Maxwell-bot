@@ -207,8 +207,10 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     CreateSiteTool,
     DeleteChannelTool,
     DeleteMessageTool,
+    DeleteSiteTool,
     EditChannelTool,
     EditMessageTool,
+    EditSiteTool,
     EmailGetMessageTool,
     EmailReadInboxTool,
     EmailSearchTool,
@@ -242,6 +244,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     AuditLogTool,
     ListSitesTool,
     LookupUserTool,
+    MoreToolsTool,
     NoResponseTool,
     ReactTool,
     ReasoningLogTool,
@@ -301,7 +304,9 @@ from tool_registry import (  # noqa: E402 — reasoning now rides inside tool ca
     extract_reasoning,
     record_reasoning,
 )
+import site_backend  # noqa: E402
 from tool_schemas import (  # noqa: E402
+    CHAT_CORE_TOOL_NAMES,
     RESULT_TOOL_NAMES,
     build_openai_tools,
     contract_groups,
@@ -2047,6 +2052,8 @@ TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "typing",
     "tts",
     "create_site",
+    "edit_site",
+    "delete_site",
     "list_sites",
     "web_search",
     "no_response",
@@ -2244,6 +2251,33 @@ TOOL_PROTOCOL = (
     "Every tool call needs `reasoning` as the FIRST argument: one plain-English "
     "sentence (max ~280 chars) of WHY, not the artifact. Plain text only — no "
     "XML, JSON, or tags. The user sees it as the live thinking line."
+)
+
+
+# Chat-turn version of the contract above. Same rules, minus the sections that
+# only matter once the full catalog is attached (site building, presence,
+# personality edits, admin permissions). Ordinary conversation pays for this
+# block on every single message, so it stays short.
+LEAN_TOOL_PROTOCOL = (
+    "## Tool contract\n"
+    "This turn carries the short conversational tool set. If you want to DO "
+    "something that isn't in it — servers, moderation, roles, channels, files, "
+    "shell, sites, email, voice, status, memory — call more_tools and the next "
+    "turn has everything. Never describe an action instead of doing it.\n"
+    "Look things up. If you are unsure, the topic is current (news, scores, "
+    "prices, versions, people, pages), or they asked you to check — call "
+    "web_search first, then fetch_url for a specific page. Do not guess from "
+    "training data. Skip lookup only for banter and opinions.\n"
+    "Visible replies go through send_message (or no_response to stay silent). "
+    "Do not also write the same text as raw assistant content.\n"
+    "## What comes back\n"
+    "[returns output] — you get another turn with the result; never state it "
+    "before you see it. [returns nothing] — no extra turn, so put send_message "
+    "in the SAME batch. [ends the turn] — nothing after it runs.\n"
+    "## Reasoning\n"
+    "Every tool call needs `reasoning` as the FIRST argument: one plain-English "
+    "sentence (max ~280 chars) of WHY, not the artifact. Plain text only. "
+    "The user sees it as the live thinking line."
 )
 
 
@@ -3201,10 +3235,14 @@ class MaxwellBot(commands.Bot):
             self.tools["change_avatar"] = ChangeAvatarTool(self)
         if self.config.ENABLE_CREATE_SITE:
             self.tools["create_site"] = CreateSiteTool(self)
+            self.tools["edit_site"] = EditSiteTool(self)
+            self.tools["delete_site"] = DeleteSiteTool(self)
             self.tools["list_sites"] = ListSitesTool(self)
         if self.config.ENABLE_WEB_SEARCH:
             self.tools["web_search"] = WebSearchTool(self)
         self.tools["no_response"] = NoResponseTool(self)
+        # The escape hatch out of the lean chat tool set (see _lean_chat_turn).
+        self.tools["more_tools"] = MoreToolsTool(self)
         if self.config.ENABLE_SHELL:
             self.tools["shell"] = ShellTool(self)
         if self.config.ENABLE_SUBAGENT:
@@ -8867,13 +8905,28 @@ class MaxwellBot(commands.Bot):
             except Exception as e:
                 logger.error(f"Site cleanup error: {e}")
 
+    def _site_expired(self, entry: dict, now: float) -> bool:
+        """Per-site lifetime: permanent flag, then per-site ttl, then control."""
+        if entry.get("permanent"):
+            return False
+        ttl_hours = entry.get("ttl_hours")
+        if ttl_hours is None:
+            ttl_hours = self._control.get("site_ttl_hours", 24)
+        try:
+            ttl = float(ttl_hours or 0) * 3600.0
+        except (TypeError, ValueError):
+            ttl = 86400.0
+        if ttl <= 0:
+            return False
+        return now - float(entry.get("created_at", 0) or 0) > ttl
+
     async def _cleanup_sites(self):
         self._load_sites(quiet=True)
         base = Path(self.config.MAXWELL_SITE_DIR).resolve()
         now = datetime.now(timezone.utc).timestamp()
         expired = []
         for slug, data in list(self._sites.items()):
-            if now - float(data.get("created_at", 0) or 0) <= 86400:
+            if not self._site_expired(data, now):
                 continue
             try:
                 if not re.fullmatch(r"[a-z0-9-]{2,30}", slug):
@@ -8883,6 +8936,12 @@ class MaxwellBot(commands.Bot):
                 if (path == base or base in path.parents) and path.exists():
                     await asyncio.to_thread(shutil.rmtree, path)
                     logger.info(f"Deleted expired site {slug}")
+                # The site's server-side store goes with it, so a later site
+                # on the same slug never inherits the old one's data.
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(
+                        site_backend.destroy, self.config.DATA_DIR, slug
+                    )
             except Exception as e:
                 logger.error(f"Failed to delete site {slug}: {e}")
             expired.append(slug)
@@ -11521,6 +11580,7 @@ class MaxwellBot(commands.Bot):
             # #maxwell-the-bot 2026-08-02 with "Mat Dickie" / "you a fan"
             # — see PM2 out.log 01:25:17→28 for the canonical reproduction.
             followup_turn_ran = False
+            tools_expanded = False
             tool_results: list[str] = []
             for _iteration in range(max_iters):
                 if time.monotonic() > tool_deadline:
@@ -11535,6 +11595,21 @@ class MaxwellBot(commands.Bot):
                 )
                 first_dispatch_progress = None
                 pending_native = None
+                # more_tools sets _tools_expanded on the message. Rebuild the
+                # payload once so the follow-up turn actually carries the full
+                # catalog instead of the lean set this turn started with.
+                if getattr(message, "_tools_expanded", False) and not tools_expanded:
+                    tools_expanded = True
+                    openai_tools = self._build_openai_tools(
+                        platform, message=message, content=content
+                    )
+                    custom_tool_calls, provider_tools = self._select_tool_protocol(
+                        openai_tools
+                    )
+                    logger.info(
+                        "more_tools: reattached %d tools for follow-up",
+                        len(openai_tools or []),
+                    )
                 native_followup = list(
                     getattr(self, "_last_native_followup_messages", None) or []
                 )
@@ -12824,6 +12899,79 @@ class MaxwellBot(commands.Bot):
             return set(self.tools).intersection(TELEGRAM_COMPATIBLE_TOOL_NAMES)
         return set(self.tools)
 
+    # Words that mean the turn wants something DONE, not discussed. Any hit and
+    # the full catalog ships. Deliberately over-inclusive: a false positive
+    # costs tokens, a false negative costs the model a tool it needed.
+    _ACTION_TOOL_HINT_RE = re.compile(
+        r"(?i)\b("
+        r"make|build|create|generate|draw|render|design|code|write|program|"
+        r"deploy|publish|host|ship|"
+        r"site|website|webpage|web\s*page|page|html|css|landing|portfolio|"
+        r"dashboard|app|backend|api|server|"
+        r"edit|update|change|fix|patch|rewrite|redo|tweak|delete|remove|"
+        r"rename|move|clear|purge|wipe|reset|"
+        r"send|post|upload|attach|share|forward|dm|email|mail|inbox|"
+        r"ban|kick|mute|unmute|timeout|unban|warn|jail|"
+        r"role|roles|perm|perms|permission|channel|category|thread|invite|"
+        r"server|guild|nick|nickname|avatar|status|presence|activity|playing|"
+        r"emoji|sticker|poll|pin|pinned|"
+        r"run|exec|execute|shell|bash|script|command|install|"
+        r"file|files|attachment|download|"
+        r"vc|voice|call|join|leave|mic|speak|say\s+it|tts|"
+        r"sleep|nap|wake|"
+        r"remember|forget|memory|personality|prompt|"
+        r"agent|subagent|sub-agent|"
+        r"tool|tools"
+        r")\b"
+    )
+
+    def _lean_chat_turn(self, message, content: str | None = None) -> bool:
+        """True when this turn is plain conversation and can travel light.
+
+        A chat turn gets CHAT_CORE_TOOL_NAMES instead of the whole catalog —
+        roughly a tenth of the tool tokens. It stops being a chat turn the
+        moment the text asks for an action, the message carries a non-image
+        attachment, it is long enough to be a real request, or the model has
+        already called more_tools this turn.
+        """
+        if not parse_bool(self._control.get("lean_chat_tools", True), True):
+            return False
+        if getattr(message, "_tools_expanded", False):
+            return False
+        text = MaxwellBot._plain_user_text(
+            content if content is not None else getattr(message, "content", "") or ""
+        )
+        # A long message is a request, not banter, even without a verb we know.
+        if len(text) > 300:
+            return False
+        if MaxwellBot._ACTION_TOOL_HINT_RE.search(text):
+            return False
+        # Naming a tool is asking for it. Whole words only — "whatts up"
+        # should not count as a request for tts.
+        words = set(re.findall(r"[a-z0-9_]+", text.lower()))
+        if words & {n for n in self.tools if n not in CHAT_CORE_TOOL_NAMES}:
+            return False
+        for att in getattr(message, "attachments", None) or []:
+            ctype = str(getattr(att, "content_type", "") or "")
+            if not ctype.startswith(("image/", "video/", "audio/")):
+                return False
+        return True
+
+    def _turn_tool_names(
+        self, platform: str, message=None, content: str | None = None
+    ) -> set[str]:
+        """The tool names this specific turn is allowed to see."""
+        compatible = MaxwellBot._compatible_tool_names(self, platform)
+        disabled = set(self._control.get("disabled_tools", []) or [])
+        names = {n for n in compatible if n not in disabled}
+        if message is not None and MaxwellBot._lean_chat_turn(self, message, content):
+            lean = {n for n in names if n in CHAT_CORE_TOOL_NAMES}
+            # Never strip the turn down to nothing to say — if the core set
+            # somehow isn't registered, fall back to the full catalog.
+            if "send_message" in lean:
+                return lean
+        return names
+
     def _native_tools_enabled(self) -> bool:
         control = getattr(self, "_control", {}) or {}
         return bool(control.get("native_tool_calls", True)) and bool(
@@ -12865,30 +13013,27 @@ class MaxwellBot(commands.Bot):
     ) -> list[dict]:
         if not self.tools or not self._native_tools_enabled():
             return []
-        # message/content kept for call-site compatibility. Live turns get the
-        # full registered catalog; dashboard disabled_tools still applies.
-        _ = (message, content)
-        disabled = set(self._control.get("disabled_tools", []) or [])
-        compatible = MaxwellBot._compatible_tool_names(self, platform)
-        return build_openai_tools(
-            self.tools, allowed_names=compatible, disabled_names=disabled
-        )
+        # Chat turns carry the conversational subset; anything that asks for an
+        # action (or a more_tools call) gets the whole catalog. See
+        # _lean_chat_turn / _turn_tool_names.
+        allowed = MaxwellBot._turn_tool_names(self, platform, message, content)
+        return build_openai_tools(self.tools, allowed_names=allowed)
 
     def _tool_system_prompt(
         self, platform: str = "discord", *, message=None, content: str | None = None
     ) -> str:
         if not self.tools or not self._control.get("tools_enabled", True):
             return ""
-        _ = (message, content)
-        disabled = set(self._control.get("disabled_tools", []) or [])
-        compatible = MaxwellBot._compatible_tool_names(self, platform)
-        names = [
-            name
-            for name, _tool in self.tools.items()
-            if name in compatible and name not in disabled
-        ]
+        allowed = MaxwellBot._turn_tool_names(self, platform, message, content)
+        names = [name for name in self.tools if name in allowed]
         if not names:
             return ""
+        disabled = set(self._control.get("disabled_tools", []) or [])
+        lean = allowed != {
+            n
+            for n in MaxwellBot._compatible_tool_names(self, platform)
+            if n not in disabled
+        }
         # Group the catalog by result contract instead of dumping one flat
         # list. Same tokens, but the model reads "these hand output back,
         # those don't" as structure rather than having to remember it
@@ -12936,8 +13081,9 @@ class MaxwellBot(commands.Bot):
         # TOOL_PROTOCOL is the behavioral contract (when to search, helper
         # tools first, result loop). Native tools= already carries per-tool
         # descriptions, but dropping this block meant Maxwell never saw
-        # "search / fetch instead of guessing".
-        return header + "\n\n" + TOOL_PROTOCOL
+        # "search / fetch instead of guessing". Chat turns get the short
+        # version — the full one documents tools they aren't carrying.
+        return header + "\n\n" + (LEAN_TOOL_PROTOCOL if lean else TOOL_PROTOCOL)
 
     @staticmethod
     def _topic_tokens(text: str) -> set[str]:
@@ -13293,7 +13439,9 @@ class MaxwellBot(commands.Bot):
         else:
             self._drugged_until.pop(channel_id, None)
         local_now = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=-4)))
-        user_kind = "bot" if message.author.bot else "human"
+        user_kind = (
+            "bot" if getattr(getattr(message, "author", None), "bot", False) else "human"
+        )
         channel_name = getattr(message.channel, "name", None) or (
             "DM" if isinstance(message.channel, discord.DMChannel) else "unknown"
         )

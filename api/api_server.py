@@ -128,9 +128,12 @@ from api.config import (  # noqa: E402
     MAX_COMMANDS,
     MAX_PROMPT_CHARS,
 )
+import site_backend  # noqa: E402
+
 from api.auth import (  # noqa: E402
     _DISCORD_TOKENS,
     _auth_middleware_unless_login,
+    _get_client_ip,
     _has_admin_auth,
     _json_response,
     _load_admin_creds,
@@ -649,7 +652,183 @@ async def site_delete(request):
         return _json_response({"error": "not found"}, code)
     if site_dir.exists():
         await asyncio.to_thread(shutil.rmtree, site_dir)
+    # Drop the site's backend store too, or a slug reused later inherits the
+    # old site's guestbook.
+    await asyncio.to_thread(site_backend.destroy, DATA_DIR, slug)
     return _json_response({"ok": True})
+
+
+# ---------- Public site backend (no auth — a visitor's browser calls this) ----------
+# Static pages made by create_site get a server side here: named values and
+# append-only lists, same origin as the page, so a guestbook or a highscore
+# table is a fetch() away. Only sites created with backend=true are served,
+# everything is size-capped, and writes are rate-limited per IP because these
+# routes are deliberately unauthenticated. See site_backend.py.
+_SITE_RATE = site_backend.RateLimiter(rate=2.0, burst=40)
+_SITE_READ_RATE = site_backend.RateLimiter(rate=10.0, burst=120)
+
+
+def _site_json(data, status=200):
+    return web.json_response(
+        data,
+        status=status,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+def _site_backend_enabled(slug: str) -> bool:
+    """A store exists only for a site whose metadata opted into one."""
+    try:
+        sites = json.loads((DATA_DIR / "sites.json").read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+        return False
+    entry = sites.get(slug) if isinstance(sites, dict) else None
+    return bool(isinstance(entry, dict) and entry.get("backend"))
+
+
+async def _site_guard(request, write: bool):
+    """(slug, None) when the call may proceed, else (None, error response)."""
+    slug = _safe_site_slug(request.match_info.get("slug", ""))
+    if not slug:
+        return None, _site_json({"error": "bad slug"}, 404)
+    limiter = _SITE_RATE if write else _SITE_READ_RATE
+    if not limiter.allow(f"{_get_client_ip(request)}:{slug}"):
+        return None, _site_json({"error": "slow down"}, 429)
+    if not await asyncio.to_thread(_site_backend_enabled, slug):
+        return None, _site_json(
+            {"error": "this site has no backend (create it with backend=true)"}, 404
+        )
+    return slug, None
+
+
+async def _site_body(request):
+    try:
+        return await request.json(), None
+    except Exception:
+        return None, _site_json({"error": "invalid json"}, 400)
+
+
+def _site_error(exc: site_backend.SiteBackendError):
+    return _site_json({"error": exc.message}, exc.status)
+
+
+async def site_kv_get(request):
+    slug, err = await _site_guard(request, write=False)
+    if err:
+        return err
+    key = request.query.get("key")
+    try:
+        if key is None:
+            return _site_json(await asyncio.to_thread(site_backend.kv_get, DATA_DIR, slug))
+        value = await asyncio.to_thread(site_backend.kv_get, DATA_DIR, slug, key)
+    except site_backend.SiteBackendError as exc:
+        return _site_error(exc)
+    return _site_json({"key": key, "value": value})
+
+
+async def site_kv_put(request):
+    slug, err = await _site_guard(request, write=True)
+    if err:
+        return err
+    body, err = await _site_body(request)
+    if err:
+        return err
+    if not isinstance(body, dict) or "key" not in body:
+        return _site_json({"error": 'body must be {"key": ..., "value": ...}'}, 400)
+    try:
+        out = await asyncio.to_thread(
+            site_backend.kv_set, DATA_DIR, slug, body.get("key"), body.get("value")
+        )
+    except site_backend.SiteBackendError as exc:
+        return _site_error(exc)
+    return _site_json({"ok": True, **out})
+
+
+async def site_kv_bump(request):
+    slug, err = await _site_guard(request, write=True)
+    if err:
+        return err
+    body, err = await _site_body(request)
+    if err:
+        return err
+    if not isinstance(body, dict) or "key" not in body:
+        return _site_json({"error": 'body must be {"key": ..., "by": 1}'}, 400)
+    try:
+        value = await asyncio.to_thread(
+            site_backend.kv_bump, DATA_DIR, slug, body.get("key"), body.get("by", 1)
+        )
+    except site_backend.SiteBackendError as exc:
+        return _site_error(exc)
+    return _site_json({"ok": True, "key": body.get("key"), "value": value})
+
+
+async def site_kv_delete(request):
+    slug, err = await _site_guard(request, write=True)
+    if err:
+        return err
+    key = request.query.get("key", "")
+    try:
+        existed = await asyncio.to_thread(site_backend.kv_delete, DATA_DIR, slug, key)
+    except site_backend.SiteBackendError as exc:
+        return _site_error(exc)
+    return _site_json({"ok": True, "deleted": existed})
+
+
+async def site_items_get(request):
+    slug, err = await _site_guard(request, write=False)
+    if err:
+        return err
+    try:
+        items = await asyncio.to_thread(
+            site_backend.items_list,
+            DATA_DIR,
+            slug,
+            request.match_info.get("name", ""),
+            request.query.get("limit", 100),
+            request.query.get("after"),
+        )
+    except site_backend.SiteBackendError as exc:
+        return _site_error(exc)
+    return _site_json({"items": items})
+
+
+async def site_items_post(request):
+    slug, err = await _site_guard(request, write=True)
+    if err:
+        return err
+    body, err = await _site_body(request)
+    if err:
+        return err
+    try:
+        item = await asyncio.to_thread(
+            site_backend.items_add, DATA_DIR, slug, request.match_info.get("name", ""), body
+        )
+    except site_backend.SiteBackendError as exc:
+        return _site_error(exc)
+    return _site_json({"ok": True, "item": item})
+
+
+async def site_items_delete(request):
+    slug, err = await _site_guard(request, write=True)
+    if err:
+        return err
+    try:
+        removed = await asyncio.to_thread(
+            site_backend.items_delete,
+            DATA_DIR,
+            slug,
+            request.match_info.get("name", ""),
+            request.query.get("id"),
+            str(request.query.get("all", "")).lower() in {"1", "true", "yes"},
+        )
+    except site_backend.SiteBackendError as exc:
+        return _site_error(exc)
+    return _site_json({"ok": True, "removed": removed})
 
 
 # ---------- Runtime controls ----------
@@ -1886,6 +2065,17 @@ app.router.add_post("/api/auto_channels", auto_channel_post)
 app.router.add_delete("/api/auto_channels", auto_channel_del)
 app.router.add_put("/api/sites", site_update)
 app.router.add_delete("/api/sites", site_delete)
+# Public, unauthenticated (see _needs_auth): the generated site's own backend.
+app.router.add_get("/api/site/{slug}/kv", site_kv_get)
+app.router.add_put("/api/site/{slug}/kv", site_kv_put)
+app.router.add_post("/api/site/{slug}/kv/bump", site_kv_bump)
+app.router.add_delete("/api/site/{slug}/kv", site_kv_delete)
+app.router.add_get("/api/site/{slug}/items/{name}", site_items_get)
+app.router.add_post("/api/site/{slug}/items/{name}", site_items_post)
+app.router.add_delete("/api/site/{slug}/items/{name}", site_items_delete)
+app.router.add_options("/api/site/{slug}/kv", _options_handler)
+app.router.add_options("/api/site/{slug}/kv/bump", _options_handler)
+app.router.add_options("/api/site/{slug}/items/{name}", _options_handler)
 app.router.add_put("/api/control", control_put)
 app.router.add_delete("/api/control", control_reset)
 app.router.add_get("/api/llm/traces", llm_traces)

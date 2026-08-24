@@ -119,7 +119,8 @@ for videos that trigger YouTube bot checks. Never commit that file.
 - RAG vector memory: messages, long-term facts, and shared context entries are embedded through any OpenAI-compatible or Ollama embeddings endpoint and stored in a SQLite vector database. Semantic search retrieves the most relevant memories for each conversation — global across all channels and servers. With no embedder reachable the bot logs one line and falls back to recent-history context.
 - Opt-in REM "dreaming" pass that periodically consolidates recent visible traffic into long-term memory.
 - Web dashboard/admin API protected by HTTP Basic auth.
-- Temporary site hosting: generates HTML sites served under a configurable public URL.
+- Site building: `create_site` publishes a whole directory (index plus any CSS/JS/subpages/data files) byte-for-byte under a configurable public URL, `edit_site` patches a published site in place, `delete_site` takes it down. Pass `backend=true` and the page gets a real server side — named values and append-only lists at `/api/site/<slug>/`, same origin, no key — so a guestbook, counter, poll, or saved state is one `fetch()` away.
+- Lean chat turns: ordinary conversation ships a small conversational tool set instead of the whole catalog (~83% fewer tool tokens per message). Anything that asks for an action gets everything, and `more_tools` reopens the catalog mid-turn. Turn it off with `lean_chat_tools` in the dashboard.
 
 ## Sub-agent
 
@@ -143,6 +144,7 @@ bot_tools.py        Tool implementations
 providers.py        OpenAI-compatible provider wrapper
 config.py           Environment-backed configuration (incl. feature detection)
 rag_memory.py       RAG vector memory (SQLite + numpy + embeddings API)
+site_backend.py     Per-site datastore behind /api/site/<slug>/ (generated sites)
 doctor.py           Install check: what works, what doesn't, why
 setup.sh            One-command installer
 api/api_server.py   Dashboard and admin API server
@@ -203,7 +205,7 @@ present). Restart to re-detect. `python3 doctor.py` shows the resolved state.
 | `ENABLE_WEB_SEARCH` | `web_search` tool | the `ddgs` package |
 | `ENABLE_YOUTUBE` | `youtube` tool | the `yt-dlp` binary |
 | `ENABLE_FETCH_URL` | `fetch_url` tool | — |
-| `ENABLE_CREATE_SITE` | `create_site` / `list_sites` tools | — |
+| `ENABLE_CREATE_SITE` | `create_site` / `edit_site` / `delete_site` / `list_sites` tools | — |
 | `ENABLE_AVATAR` | `change_avatar` tool | — |
 | `ENABLE_EMAIL_TOOLS` | The four `email_*` tools | `MAXWELL_EMAIL_PASSWORD` set |
 | `ENABLE_SHELL` | `shell` tool (host access — only enable if you trust the model) | — |
@@ -339,6 +341,43 @@ All commands use the `,` prefix. Admin commands require the user to be in the ad
 | `,vc say <text>` | No | Speak text in VC with TTS |
 
 Live VC replies require `discord-ext-voice-recv`, `PyNaCl`, `ffmpeg`, and an audio-capable OpenAI-compatible provider.
+
+## Sites
+
+`create_site` writes a directory, not a single file. `body` is index.html;
+`files` is anything else — `{"style.css": "...", "app.js": "...",
+"about/index.html": "..."}` — and it is all served exactly as written, with no
+injected wrapper, house style, or meta tags. (Set `site_inject_csp` if your
+host serves generated pages without a CSP of its own.)
+
+`edit_site` changes a live site at the same URL: `list` its files, `read` one
+back, `write` a new one, `replace` an exact string inside one (the cheap way to
+fix a colour or a typo without resending the page), `delete` a file, `rename`
+the title, or `extend` its lifetime. `delete_site` removes the whole thing.
+Sites expire after `site_ttl_hours` (24 by default, `0` disables expiry);
+`permanent=true` opts one site out.
+
+### Site backends
+
+A site created with `backend=true` gets a datastore on the same origin, so
+page JavaScript can talk to it with a plain `fetch` — no key, no CORS:
+
+| Route | What it does |
+|---|---|
+| `GET /api/site/<slug>/kv` | every named value (`?key=NAME` for one) |
+| `PUT /api/site/<slug>/kv` | `{"key": ..., "value": ...}` |
+| `POST /api/site/<slug>/kv/bump` | `{"key": ..., "by": 1}` — atomic counter |
+| `DELETE /api/site/<slug>/kv?key=NAME` | drop a value |
+| `GET /api/site/<slug>/items/NAME` | list entries (`?limit=`, `?after=ID`) |
+| `POST /api/site/<slug>/items/NAME` | append an entry |
+| `DELETE /api/site/<slug>/items/NAME?id=ID` | remove one (`?all=1` for all) |
+
+These routes are **public by design** — a visitor's browser is the client, so
+they carry no admin credentials and are the only unauthenticated part of the
+API. Everything is bounded: 64KB per value, 1000 entries per list (oldest drop
+off), 1MB per site, and a per-IP token bucket on writes. Anyone with the URL
+can post, so don't put secrets in a site store and expect junk in open forms.
+Data lives in `data/site_data/<slug>.json` and dies with the site.
 
 ## Web and YouTube Tools
 

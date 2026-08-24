@@ -180,6 +180,8 @@ def _sanitize_control(control):
     except (TypeError, ValueError):
         _watch_debounce = 1.0
     out["conversation_watch_debounce_seconds"] = max(0.05, min(_watch_debounce, 5.0))
+    # 0 = sites never expire; otherwise a year is the ceiling.
+    out["site_ttl_hours"] = max(0, min(_safe_int(out.get("site_ttl_hours"), 24), 8760))
     out["max_image_size_mb"] = max(1, min(out["max_image_size_mb"], 25))
     out["ai_timeout_seconds"] = max(10, min(out["ai_timeout_seconds"], 7200))
     out["tool_iteration_timeout_seconds"] = max(

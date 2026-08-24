@@ -1,8 +1,10 @@
 """create_site must not herd Maxwell into a repeated house look.
 
-The tool writes whatever HTML/CSS/JS it is given (plus a security CSP meta).
-Prompt/schema text must tell the model it has visual freedom and must not
-require a palette, font, layout, or theme.
+The tool writes whatever HTML/CSS/JS it is given, byte for byte — no house
+skin, and no injected meta tags unless an operator turns `site_inject_csp` on
+(a CSP belongs to the host, and injecting one can only subtract from what the
+page was written to do). Prompt/schema text must tell the model it has visual
+freedom and must not require a palette, font, layout, or theme.
 """
 
 import asyncio
@@ -157,9 +159,11 @@ def test_create_site_writes_html_as_is_without_house_skin(tmp_path):
     assert "getElementById('c')" in dots
     assert "The Evening Post" not in dots
 
-    # Security CSP is injected; no visual house skin (Inter, dark theme, etc.).
-    assert "Content-Security-Policy" in paper
-    assert "Content-Security-Policy" in dots
+    # Nothing is injected by default: what the model wrote is what is served.
+    assert paper.startswith("<!DOCTYPE html>")
+    assert dots.startswith("<!DOCTYPE html>")
+    assert "Content-Security-Policy" not in paper
+    assert "Content-Security-Policy" not in dots
     for blob in (paper, dots):
         low = blob.lower()
         assert "fonts.googleapis.com" not in low
@@ -168,3 +172,23 @@ def test_create_site_writes_html_as_is_without_house_skin(tmp_path):
         # Must not wrap the model's page in extra chrome.
         assert "maxwell-site-shell" not in low
         assert 'id="maxwell-root"' not in low
+
+
+def test_site_inject_csp_is_opt_in(tmp_path):
+    """Operators without a CSP at the host layer can still get the meta tag."""
+    tool = _make_tool(tmp_path)
+    tool.bot._control["site_inject_csp"] = True
+    tool.bot.control["site_inject_csp"] = True
+
+    async def run():
+        return await tool.execute(
+            _author_message(), name="guarded", title="guarded", body=_CANVAS_TOY
+        )
+
+    assert asyncio.run(run()).startswith("Site created:")
+    page = (tmp_path / "public" / "bot" / "guarded" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    assert "Content-Security-Policy" in page
+    # Still the model's page, just with a policy in front of it.
+    assert "c45c26" in page

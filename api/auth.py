@@ -100,8 +100,18 @@ def _json_response(data, status=200):
     )
 
 
+# Public routes. /api/site/* is the datastore a generated site talks to from
+# a visitor's browser, so it cannot carry admin credentials by definition. It
+# is scoped to one slug's own data, size-capped and rate-limited in
+# site_backend.py, and only answers for sites created with backend=true.
+PUBLIC_PATH_PREFIXES = ("/api/site/",)
+
+
 def _needs_auth(request) -> bool:
-    """All requests need auth except OPTIONS preflight and /api/login."""
+    """All requests need auth except OPTIONS preflight, /api/login, and the
+    public per-site backend."""
+    if request.path.startswith(PUBLIC_PATH_PREFIXES):
+        return False
     return request.method != "OPTIONS"
 
 

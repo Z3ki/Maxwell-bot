@@ -93,6 +93,20 @@ DEFAULT_CONTROL = {
     "native_tool_calls": True,
     "tools_enabled": False,
     "create_site_quota_per_user": 50,
+    # Hours a generated site lives before the cleanup loop removes it.
+    # 0 = never expire. A site created with permanent=true (or extended via
+    # edit_site) ignores this. Used to be a hardcoded 86400 in two places.
+    "site_ttl_hours": 24,
+    # Inject a restrictive CSP <meta> into every generated page. Off by
+    # default: the page is the model's own document and the hosting layer is
+    # where a policy belongs — the meta tag could only ever subtract from what
+    # the page was written to do. Turn on if your static host sets no CSP for
+    # generated sites.
+    "site_inject_csp": False,
+    # Ship a small conversational tool set on ordinary chat turns and expand to
+    # the full catalog only when the turn actually asks for something (or the
+    # model calls more_tools). Saves the tokens ~60 tool schemas cost on "lol".
+    "lean_chat_tools": True,
     "disabled_tools": [],
     "ignore_users": [],
     "allowed_channels": [],
@@ -245,6 +259,8 @@ KNOWN_TOOLS = [
     "manage_emoji",
     "change_avatar",
     "create_site",
+    "edit_site",
+    "delete_site",
     "list_sites",
     "web_search",
     "no_response",
@@ -272,4 +288,5 @@ KNOWN_TOOLS = [
     "email_read_inbox",
     "email_get_message",
     "email_search",
+    "more_tools",
 ]

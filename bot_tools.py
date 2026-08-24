@@ -43,6 +43,7 @@ from tool_schemas import (
     normalize_native_tool_calls,
     trim_tool_tail,
 )
+import site_backend
 from utils import (  # single source of truth, fd-safe
     FileLock,
     _atomic_json_write_sync,
@@ -4308,8 +4309,218 @@ def _normalize_site_body_text_escapes(body: str) -> str:
     return "".join(out) if changed else body
 
 
+# ── site file plumbing ────────────────────────────────────────────────────
+# A site is a directory, not a single index.html. These helpers are what let
+# create_site/edit_site write a stylesheet, a second page, a JSON fixture, or
+# a service worker without any of it being special-cased in the tool bodies.
+
+SITE_MAX_FILES = 60
+SITE_MAX_TOTAL_BYTES = 12_000_000
+# Extensions a static host will serve as-is. Anything executable server-side
+# (.php, .cgi) is pointless here and only invites confusion about what runs.
+SITE_BLOCKED_SUFFIXES = {".php", ".php5", ".phtml", ".cgi", ".pl", ".jsp", ".asp", ".aspx"}
+
+
+def _safe_site_relpath(raw: Any) -> str | None:
+    """Normalize a model-supplied path into a safe relative path inside a site.
+
+    Returns None for anything that escapes, hides, or would not be served.
+    """
+    text = str(raw or "").strip().replace("\\", "/").lstrip("/")
+    if not text or len(text) > 200:
+        return None
+    parts = []
+    for part in text.split("/"):
+        part = part.strip()
+        if not part or part == ".":
+            continue
+        if part == ".." or part.startswith("."):
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9._ -]{1,80}", part):
+            return None
+        parts.append(part)
+    if not parts or len(parts) > 6:
+        return None
+    rel = "/".join(parts)
+    if Path(rel).suffix.lower() in SITE_BLOCKED_SUFFIXES:
+        return None
+    return rel
+
+
+def _site_child_path(site_dir: str, rel: str) -> Path | None:
+    """Resolve rel under site_dir, refusing anything that lands outside it."""
+    base = Path(site_dir).resolve()
+    try:
+        target = (base / rel).resolve()
+    except (OSError, ValueError):
+        return None
+    if target != base and base not in target.parents:
+        return None
+    return target
+
+
+def _decode_site_file(content: Any, encoding: str | None) -> tuple[bytes | None, str]:
+    """(bytes, '') or (None, error). base64 keeps exact bytes for binaries."""
+    mode = str(encoding or "text").strip().lower()
+    if mode in {"base64", "b64"}:
+        try:
+            return base64.b64decode(str(content), validate=True), ""
+        except Exception as e:
+            return None, f"bad base64: {e}"
+    if mode not in {"text", "utf8", "utf-8", ""}:
+        return None, "encoding must be text or base64"
+    if content is None:
+        return None, "missing content"
+    if not isinstance(content, str):
+        content = json.dumps(content, indent=2, ensure_ascii=False)
+    return content.encode("utf-8"), ""
+
+
+def _parse_site_files(files: Any) -> tuple[list[dict], str]:
+    """Accept the three shapes a model actually emits.
+
+    ``{"style.css": "..."}``, ``[{"path": ..., "content": ...}]``, or either of
+    those as a JSON string. Returns (entries, error).
+    """
+    if not files:
+        return [], ""
+    raw = files
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError as e:
+            return [], f"files must be JSON: {e}"
+    entries: list[dict] = []
+    if isinstance(raw, dict):
+        # {"path": "content"} — but tolerate a single {"path":..,"content":..}
+        if "path" in raw and ("content" in raw or "encoding" in raw):
+            raw = [raw]
+        else:
+            raw = [{"path": k, "content": v} for k, v in raw.items()]
+    if not isinstance(raw, list):
+        return [], "files must be an object or a list"
+    for item in raw:
+        if not isinstance(item, dict):
+            return [], "each file needs {path, content}"
+        rel = _safe_site_relpath(item.get("path") or item.get("name"))
+        if not rel:
+            return [], f"unsafe or unsupported file path: {item.get('path')!r}"
+        blob, err = _decode_site_file(item.get("content"), item.get("encoding"))
+        if err:
+            return [], f"{rel}: {err}"
+        entries.append({"path": rel, "bytes": blob})
+    if len(entries) > SITE_MAX_FILES:
+        return [], f"too many files ({len(entries)}, max {SITE_MAX_FILES})"
+    return entries, ""
+
+
+async def _write_site_file(site_dir: str, rel: str, blob: bytes) -> str:
+    """Atomic write of one file inside a site. Returns '' or an error."""
+    target = _site_child_path(site_dir, rel)
+    if target is None:
+        return f"{rel}: path escapes the site directory"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = str(target) + ".tmp"
+    try:
+        async with aiofiles.open(tmp, "wb") as f:
+            await f.write(blob)
+            await f.flush()
+        os.replace(tmp, target)
+    except Exception as e:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        return f"{rel}: write failed: {e}"
+    return ""
+
+
+def _site_tree(site_dir: str, limit: int = 60) -> list[tuple[str, int]]:
+    """(relative path, bytes) for everything in a site, sorted, index first."""
+    base = Path(site_dir)
+    out: list[tuple[str, int]] = []
+    if not base.is_dir():
+        return out
+    for path in sorted(base.rglob("*")):
+        if not path.is_file() or path.name.endswith(".tmp"):
+            continue
+        try:
+            rel = str(path.relative_to(base))
+            out.append((rel, path.stat().st_size))
+        except (ValueError, OSError):
+            continue
+        if len(out) >= limit:
+            break
+    out.sort(key=lambda item: (item[0] != "index.html", item[0]))
+    return out
+
+
+def _site_ttl_seconds(control: dict) -> float:
+    """0 means sites never expire. Default 24h, admin-tunable, not baked in."""
+    try:
+        hours = float(control.get("site_ttl_hours", 24) or 0)
+    except (TypeError, ValueError):
+        hours = 24.0
+    return max(0.0, hours) * 3600.0
+
+
+def site_expiry_label(entry: dict, control: dict) -> str:
+    """'6h 12m left' / 'permanent' — shared by list_sites and edit_site."""
+    if entry.get("permanent"):
+        return "permanent"
+    ttl = _site_ttl_seconds(control)
+    per_site = entry.get("ttl_hours")
+    if per_site is not None:
+        try:
+            ttl = max(0.0, float(per_site)) * 3600.0
+        except (TypeError, ValueError):
+            pass
+    if ttl <= 0:
+        return "permanent"
+    remaining = ttl - (
+        datetime.now(timezone.utc).timestamp() - float(entry.get("created_at", 0) or 0)
+    )
+    if remaining <= 0:
+        return "expiring now"
+    return f"{int(remaining // 3600)}h {int((remaining % 3600) // 60)}m left"
+
+
+# Optional hardening for operators whose static host does NOT set a CSP for
+# generated pages. Off by default: a meta tag injected into the model's own
+# document can only ever subtract from what the page was written to do, and
+# the hosting layer is where this belongs. Flip `site_inject_csp` on in the
+# dashboard if your deployment serves /bot without its own policy.
+SITE_CSP_META = (
+    '<meta http-equiv="Content-Security-Policy" '
+    'content="default-src https: data: blob:; '
+    "img-src https: data: blob:; "
+    "style-src 'unsafe-inline' https:; "
+    "script-src 'unsafe-inline' 'unsafe-eval' https:; "
+    "font-src https: data:; "
+    "connect-src https:; "
+    'media-src https: data: blob:;">'
+)
+
+
+def _inject_site_csp(body: str) -> str:
+    """Put SITE_CSP_META in the document head, unless the page set its own."""
+    if re.search(r"http-equiv\s*=\s*[\"']?Content-Security-Policy", body, re.IGNORECASE):
+        return body
+    if re.search(r"<head[^>]*>", body, re.IGNORECASE):
+        return re.sub(
+            r"(<head[^>]*>)", r"\1\n" + SITE_CSP_META, body, count=1, flags=re.IGNORECASE
+        )
+    if re.search(r"<html[^>]*>", body, re.IGNORECASE):
+        return re.sub(
+            r"(<html[^>]*>)",
+            r"\1\n<head>" + SITE_CSP_META + "</head>",
+            body,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    return "<head>" + SITE_CSP_META + "</head>\n" + body
+
+
 class CreateSiteTool(Tool):
-    """Create a temporary website under the configured public /bot path."""
+    """Publish a website — one page or a whole directory, static or backed."""
 
     MAX_CONTENT_SIZE = 3000000  # 3MB for big single-file 3D scenes, full movie recreations, complex interactive demos etc. (use base64 encoding in tool call for safety)
 
@@ -4381,17 +4592,28 @@ class CreateSiteTool(Tool):
             + "/bot"
         )
 
+    def _control(self) -> dict:
+        return (
+            getattr(self.bot, "control", {}) or getattr(self.bot, "_control", {}) or {}
+        )
+
     def get_description(self):
         return (
-            f"Create a temporary website at {self.base_url}/<name> (auto-deletes in 24h). "
+            f"Publish a site at {self.base_url}/<name>/. "
             "Full visual freedom: invent a new design each time (layout, type, color, "
             "density, motion). Do not reuse a house style or clone a previous site "
             "unless the user asked for a specific look. "
             "Params: name (slug), title (listing/metadata, not a required on-page heading), "
-            "body (complete HTML document; CSS/JS inline or from https CDNs; "
-            "real line breaks or <br> in visible text, never literal \\n), "
-            "encoding (text|base64). Generate images in a prior turn and paste CDN URLs "
+            "body (complete HTML document for index.html; served byte-for-byte), "
+            "files (extra files as {\"path\": \"content\"} — style.css, app.js, "
+            "about/index.html, data.json, anything), "
+            "backend (true for a live server-side store: named values + "
+            "append-only lists at /api/site/<name>/, same origin, no key — "
+            "use it for guestbooks, counters, saved state, submissions), "
+            "encoding (text|base64), permanent (true to skip auto-expiry). "
+            "Generate images in a prior turn and paste CDN URLs "
             "into the HTML — don't batch image_generator with create_site. "
+            "Use edit_site to change a published site instead of re-sending it whole. "
             "Never paste HTML into chat."
         )
 
@@ -4403,21 +4625,33 @@ class CreateSiteTool(Tool):
         body: str | None = None,
         encoding: str = "text",
         images: str | None = None,
+        files: Any = None,
+        backend: Any = None,
+        permanent: Any = None,
         **kwargs,
     ) -> str:
         # Available to everyone (non-admins too). Quota + ownership checks apply.
-        if not name or not title or body is None:
+        extra_files, files_err = _parse_site_files(files)
+        if files_err:
+            return f"Error: {files_err}"
+        has_index = any(f["path"] == "index.html" for f in extra_files)
+        if not name or not title or (body is None and not has_index):
             missing = []
             if not name:
                 missing.append("name")
             if not title:
                 missing.append("title")
-            if body is None:
-                missing.append("body")
-            return f"Error: missing required params — {', '.join(missing)}. All three (name, title, body) are needed to create a site."
+            if body is None and not has_index:
+                missing.append("body (or files with an index.html)")
+            return (
+                f"Error: missing required params — {', '.join(missing)}. "
+                "name + title + body are the minimum for a site."
+            )
 
         mode = str(encoding or "text").strip().lower()
-        if mode in {"base64", "b64"}:
+        if body is None:
+            body = ""
+        elif mode in {"base64", "b64"}:
             try:
                 body = base64.b64decode(str(body), validate=True).decode("utf-8")
             except Exception as e:
@@ -4457,9 +4691,7 @@ class CreateSiteTool(Tool):
                     "Pick a different name."
                 )
 
-        control = (
-            getattr(self.bot, "control", {}) or getattr(self.bot, "_control", {}) or {}
-        )
+        control = self._control()
         max_sites = int(control.get("create_site_quota_per_user", 10))
         active_user_sites = [s for s in sites.values() if s.get("user_id") == user_id]
         already_ours = (
@@ -4467,10 +4699,16 @@ class CreateSiteTool(Tool):
             and str(existing.get("user_id") or "") == user_id
         )
         if not already_ours and len(active_user_sites) >= max_sites:
-            return f"Error: site quota reached ({len(active_user_sites)}/{max_sites} active sites). Delete an old site first."
+            return (
+                f"Error: site quota reached ({len(active_user_sites)}/{max_sites} active sites). "
+                "Use delete_site on an old slug first, or edit_site to reuse one."
+            )
 
         if len(body) > self.MAX_CONTENT_SIZE:
             return f"Error: content too long ({len(body)} chars, max {self.MAX_CONTENT_SIZE})"
+        extra_bytes = sum(len(f["bytes"] or b"") for f in extra_files)
+        if len(body.encode("utf-8")) + extra_bytes > SITE_MAX_TOTAL_BYTES:
+            return f"Error: site too large (max {SITE_MAX_TOTAL_BYTES // 1000}KB across all files)"
 
         site_dir = os.path.join(self.base_dir, slug)
         created_new_dir = not os.path.isdir(site_dir)
@@ -4562,83 +4800,26 @@ class CreateSiteTool(Tool):
                     except Exception as e:
                         logger.warning(f"Failed to copy image {src_path}: {e}")
 
-            index_path = os.path.join(site_dir, "index.html")
-            # Inject a permissive CSP meta tag. The whole point of create_site is
-            # letting the model write complete, functional HTML pages with inline
-            # <script> and <style>, external CDN libraries (fonts, frameworks),
-            # and arbitrary images. The old CSP blocked script-src to 'self' only,
-            # which silently broke every JS-bearing page the tool was built to
-            # produce. Per the README security model, generated sites are arbitrary
-            # HTML served on a SEPARATE origin from admin pages, so XSS risk to
-            # admin credentials is already mitigated at the hosting layer.
-            # 'unsafe-inline' covers both script and style; data: URIs cover inline
-            # SVG/embedded assets; https: allows CDNs without listing each host.
-            if "<head" in body.lower():
-                head_match = re.search(r"<head[^>]*>", body, re.IGNORECASE)
-                if head_match and re.search(
-                    r"http-equiv\s*=\s*[\"']?Content-Security-Policy",
-                    body,
-                    re.IGNORECASE,
-                ):
-                    csp_meta = (
-                        ""  # page already declares its own CSP; don't double-inject
-                    )
-                else:
-                    csp_meta = (
-                        '<meta http-equiv="Content-Security-Policy" '
-                        'content="default-src https: data: blob:; '
-                        "img-src https: data: blob:; "
-                        "style-src 'unsafe-inline' https:; "
-                        "script-src 'unsafe-inline' 'unsafe-eval' https:; "
-                        "font-src https: data:; "
-                        "connect-src https:; "
-                        'media-src https: data: blob:;">'
-                    )
-                if csp_meta:
-                    body = re.sub(
-                        r"(<head[^>]*>)",
-                        r"\1\n" + csp_meta,
-                        body,
-                        count=1,
-                        flags=re.IGNORECASE,
-                    )
-            elif "<html" in body.lower():
-                csp_meta = (
-                    '<meta http-equiv="Content-Security-Policy" '
-                    'content="default-src https: data: blob:; '
-                    "img-src https: data: blob:; "
-                    "style-src 'unsafe-inline' https:; "
-                    "script-src 'unsafe-inline' 'unsafe-eval' https:; "
-                    "font-src https: data:; "
-                    "connect-src https:; "
-                    'media-src https: data: blob:;">'
-                )
-                body = re.sub(
-                    r"(<html[^>]*>)",
-                    r"\1\n<head>" + csp_meta + "</head>",
-                    body,
-                    count=1,
-                    flags=re.IGNORECASE,
-                )
-            else:
-                csp_meta = (
-                    '<meta http-equiv="Content-Security-Policy" '
-                    'content="default-src https: data: blob:; '
-                    "img-src https: data: blob:; "
-                    "style-src 'unsafe-inline' https:; "
-                    "script-src 'unsafe-inline' 'unsafe-eval' https:; "
-                    "font-src https: data:; "
-                    "connect-src https:; "
-                    'media-src https: data: blob:;">'
-                )
-                body = "<head>" + csp_meta + "</head>\n" + body
-            # Atomic write for the public HTML to avoid truncated/orphan sites on
-            # crash, OOM, or concurrent overwrite (reliability fix per persistence review).
-            tmp_path = index_path + ".tmp"
-            async with aiofiles.open(tmp_path, "w", encoding="utf-8") as f:
-                await f.write(body)
-                await f.flush()
-            os.replace(tmp_path, index_path)
+            # The page is served exactly as written. CSP belongs to the host
+            # (see SITE_CSP_META) — turn `site_inject_csp` on only if yours
+            # doesn't set one.
+            if body and parse_bool(control.get("site_inject_csp", False), False):
+                body = _inject_site_csp(body)
+
+            written: list[str] = []
+            if body:
+                err = await _write_site_file(site_dir, "index.html", body.encode("utf-8"))
+                if err:
+                    return f"Error creating site: {err}"
+                written.append("index.html")
+            for entry in extra_files:
+                err = await _write_site_file(site_dir, entry["path"], entry["bytes"] or b"")
+                if err:
+                    return f"Error creating site: {err}"
+                written.append(entry["path"])
+
+            wants_backend = parse_bool(backend, False)
+            is_permanent = parse_bool(permanent, False)
 
             # Commit the site metadata under a cross-process FileLock so a
             # concurrent create_site (or an API site_update/site_delete) can't
@@ -4652,6 +4833,8 @@ class CreateSiteTool(Tool):
                 "created_at": datetime.now(timezone.utc).timestamp(),
                 "title": title,
                 "path": site_dir,
+                "backend": wants_backend,
+                "permanent": is_permanent,
             }
             try:
                 committed = await asyncio.to_thread(
@@ -4677,6 +4860,11 @@ class CreateSiteTool(Tool):
                     "(owner/quota changed concurrently). Try again."
                 )
             result = f"Site created: {self.base_url}/{slug}/"
+            if len(written) > 1:
+                result += f"\nFiles: {', '.join(written)}"
+            if wants_backend:
+                result += "\n" + site_backend.client_guide(f"/api/site/{slug}")
+            result += f"\nLifetime: {site_expiry_label(site_entry, control)}."
             if image_urls:
                 result += f"\nEmbedded images ({len(image_urls)}):\n" + "\n".join(
                     f"  - {url}" for url in image_urls
@@ -4703,13 +4891,7 @@ class CreateSiteTool(Tool):
         creates.
         """
         path = Path(self.bot.config.DATA_DIR) / "sites.json"
-        max_sites = int(
-            (
-                getattr(self.bot, "control", {})
-                or getattr(self.bot, "_control", {})
-                or {}
-            ).get("create_site_quota_per_user", 10)
-        )
+        max_sites = int(self._control().get("create_site_quota_per_user", 10))
         with FileLock(path, timeout=15.0):
             sites = {}
             try:
@@ -4762,11 +4944,281 @@ class CreateSiteTool(Tool):
             raise
 
 
-class ListSitesTool(Tool):
-    """List your active temporary sites"""
+class _SiteOwnedTool(Tool):
+    """Shared lookup for tools that act on an already-published site."""
+
+    def __init__(self, bot):
+        super().__init__(bot)
+        self.base_dir = getattr(bot.config, "MAXWELL_SITE_DIR", "public/bot")
+        self.base_url = (
+            getattr(
+                bot.config, "MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com"
+            ).rstrip("/")
+            + "/bot"
+        )
+
+    def _control(self) -> dict:
+        return (
+            getattr(self.bot, "control", {}) or getattr(self.bot, "_control", {}) or {}
+        )
+
+    def _resolve(self, message: Message, name: str | None):
+        """(slug, entry, site_dir, None) or (None, None, None, error string)."""
+        slug = re.sub(r"[^a-z0-9-]", "-", str(name or "").lower().strip())[:30].strip("-")
+        if not slug:
+            return None, None, None, "Error: name is required (the site slug)."
+        if hasattr(self.bot, "_load_sites"):
+            self.bot._load_sites(quiet=True)
+        entry = (self.bot._sites or {}).get(slug)
+        if not isinstance(entry, dict):
+            return None, None, None, (
+                f"Error: no site named '{slug}'. Call list_sites to see the slugs you own."
+            )
+        owner = str(entry.get("user_id") or "")
+        if (
+            owner
+            and owner != str(message.author.id)
+            and not self.bot._is_admin(message.author.id)
+        ):
+            return None, None, None, f"Error: site '{slug}' belongs to someone else."
+        return slug, entry, os.path.join(self.base_dir, slug), None
+
+    def _save_entry(self, slug: str, entry: dict) -> None:
+        path = Path(self.bot.config.DATA_DIR) / "sites.json"
+        with FileLock(path, timeout=15.0):
+            sites = {}
+            try:
+                if path.exists():
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(data, dict):
+                        sites = {k: v for k, v in data.items() if isinstance(v, dict)}
+            except (json.JSONDecodeError, OSError, ValueError):
+                sites = dict(self.bot._sites or {})
+            if entry is None:
+                sites.pop(slug, None)
+            else:
+                sites[slug] = entry
+            _atomic_json_write_sync(path, sites)
+            self.bot._sites = sites
+            with contextlib.suppress(OSError):
+                self.bot._sites_mtime = path.stat().st_mtime
+
+
+class EditSiteTool(_SiteOwnedTool):
+    """Change a published site in place — a file, a line, or its settings."""
 
     def get_description(self):
-        return "List your active temporary websites. No params."
+        return (
+            "Edit a site you already published, at its existing URL. "
+            "action=list (files + sizes), read (one file back), write (replace or "
+            "add a file — path defaults to index.html), replace (swap the first "
+            "occurrence of `find` with `replace` in one file; the cheap way to "
+            "fix a typo, color, or line without resending the page), delete "
+            "(remove a file), rename (slug stays, `title` changes), backend "
+            "(on/off/status/clear the site's server-side store), extend (reset "
+            "the expiry clock; permanent=true to stop it expiring). "
+            "Params: name (slug), action, path, content, find, replace, title, "
+            "encoding (text|base64), backend, permanent. "
+            "Prefer this over re-running create_site for a tweak."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        name: str | None = None,
+        action: str = "list",
+        path: str | None = None,
+        content: Any = None,
+        find: str | None = None,
+        replace: str | None = None,
+        title: str | None = None,
+        encoding: str = "text",
+        backend: Any = None,
+        permanent: Any = None,
+        **kwargs,
+    ) -> str:
+        slug, entry, site_dir, err = self._resolve(message, name)
+        if err:
+            return err
+        act = str(action or "list").strip().lower()
+        url = f"{self.base_url}/{slug}/"
+
+        if act in {"list", "ls", "files", "status"}:
+            tree = _site_tree(site_dir)
+            if not tree:
+                return f"{url} has no files on disk (it may have expired)."
+            lines = [f"  • {rel} ({size} bytes)" for rel, size in tree]
+            out = f"{url}\n" + "\n".join(lines)
+            out += f"\nLifetime: {site_expiry_label(entry, self._control())}."
+            if entry.get("backend"):
+                out += "\nBackend: on — " + site_backend.summarize(
+                    self.bot.config.DATA_DIR, slug
+                )
+            return out
+
+        if act in {"read", "cat", "get"}:
+            rel = _safe_site_relpath(path or "index.html")
+            if not rel:
+                return f"Error: bad path {path!r}"
+            target = _site_child_path(site_dir, rel)
+            if target is None or not target.is_file():
+                return f"Error: {rel} not found in {slug}. Use action=list."
+            try:
+                text = target.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as e:
+                return f"Error reading {rel}: {e}"
+            if len(text) > 60000:
+                return (
+                    f"{rel} is {len(text)} chars — too big to return whole. "
+                    "Use action=replace with a `find` string to patch it."
+                )
+            return f"{rel} ({len(text)} chars):\n{text}"
+
+        if act in {"write", "put", "set", "update"}:
+            rel = _safe_site_relpath(path or "index.html")
+            if not rel:
+                return f"Error: bad path {path!r}"
+            blob, derr = _decode_site_file(content, encoding)
+            if derr:
+                return f"Error: {derr}"
+            if rel.endswith(".html") and str(encoding or "text").lower() in {
+                "text",
+                "utf8",
+                "utf-8",
+                "",
+            }:
+                blob = _normalize_site_body_text_escapes(
+                    blob.decode("utf-8", "replace")
+                ).encode("utf-8")
+            werr = await _write_site_file(site_dir, rel, blob or b"")
+            if werr:
+                return f"Error: {werr}"
+            return f"Wrote {rel} ({len(blob or b'')} bytes) → {url}"
+
+        if act in {"replace", "patch", "sub"}:
+            rel = _safe_site_relpath(path or "index.html")
+            if not rel:
+                return f"Error: bad path {path!r}"
+            if not find:
+                return "Error: replace needs `find` (the exact text to swap out)."
+            target = _site_child_path(site_dir, rel)
+            if target is None or not target.is_file():
+                return f"Error: {rel} not found in {slug}."
+            try:
+                text = target.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as e:
+                return f"Error reading {rel}: {e}"
+            if find not in text:
+                return (
+                    f"Error: `find` text is not in {rel} — it must match byte-for-byte. "
+                    "Use action=read to see the current file."
+                )
+            hits = text.count(find)
+            updated = text.replace(find, replace or "", 1)
+            werr = await _write_site_file(site_dir, rel, updated.encode("utf-8"))
+            if werr:
+                return f"Error: {werr}"
+            extra = f" ({hits - 1} more occurrence(s) left alone)" if hits > 1 else ""
+            return f"Patched {rel}{extra} → {url}"
+
+        if act in {"delete", "rm", "remove"}:
+            rel = _safe_site_relpath(path or "")
+            if not rel:
+                return "Error: delete needs a path. To remove the whole site use delete_site."
+            if rel == "index.html":
+                return "Error: refusing to delete index.html — write a new one instead."
+            target = _site_child_path(site_dir, rel)
+            if target is None or not target.is_file():
+                return f"Error: {rel} not found in {slug}."
+            try:
+                target.unlink()
+            except OSError as e:
+                return f"Error deleting {rel}: {e}"
+            return f"Deleted {rel} from {slug}."
+
+        if act in {"rename", "title", "retitle"}:
+            if not title:
+                return "Error: rename needs `title`."
+            entry = dict(entry)
+            entry["title"] = str(title)[:200]
+            await asyncio.to_thread(self._save_entry, slug, entry)
+            return f"Retitled {slug} → '{entry['title']}' ({url})"
+
+        if act in {"backend", "store", "data"}:
+            mode = str(backend if backend is not None else "status").strip().lower()
+            data_dir = self.bot.config.DATA_DIR
+            if mode in {"clear", "wipe", "reset"}:
+                await asyncio.to_thread(site_backend.wipe, data_dir, slug)
+                return f"Cleared the backend store for {slug}."
+            if mode in {"status", "", "none"}:
+                if not entry.get("backend"):
+                    return (
+                        f"{slug} has no backend. Turn it on with "
+                        "edit_site(action=backend, backend=true)."
+                    )
+                return f"{slug} backend: " + site_backend.summarize(data_dir, slug)
+            enabled = parse_bool(mode, False)
+            entry = dict(entry)
+            entry["backend"] = enabled
+            await asyncio.to_thread(self._save_entry, slug, entry)
+            if not enabled:
+                return f"Backend off for {slug} (data kept; /api/site/{slug} now 404s)."
+            return f"Backend on for {slug}.\n" + site_backend.client_guide(
+                f"/api/site/{slug}"
+            )
+
+        if act in {"extend", "renew", "keep"}:
+            entry = dict(entry)
+            entry["created_at"] = datetime.now(timezone.utc).timestamp()
+            if permanent is not None:
+                entry["permanent"] = parse_bool(permanent, False)
+            await asyncio.to_thread(self._save_entry, slug, entry)
+            return f"{slug}: {site_expiry_label(entry, self._control())} ({url})"
+
+        return (
+            f"Error: unknown action '{act}'. Use list, read, write, replace, "
+            "delete, rename, backend, or extend."
+        )
+
+
+class DeleteSiteTool(_SiteOwnedTool):
+    """Take a published site down."""
+
+    def get_description(self):
+        return (
+            "Delete a site you published: removes the files, the metadata, and "
+            "its backend store, and frees a slot against your site quota. "
+            "Params: name (slug). Irreversible — the URL 404s immediately."
+        )
+
+    async def execute(self, message: Message, name: str | None = None, **kwargs) -> str:
+        slug, entry, site_dir, err = self._resolve(message, name)
+        if err:
+            return err
+        base = Path(self.base_dir).resolve()
+        try:
+            target = Path(site_dir).resolve()
+        except (OSError, ValueError):
+            target = None
+        if target is not None and (base in target.parents) and target.is_dir():
+            await asyncio.to_thread(shutil.rmtree, target, True)
+        await asyncio.to_thread(self._save_entry, slug, None)
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(
+                site_backend.destroy, self.bot.config.DATA_DIR, slug
+            )
+        return f"Deleted site '{slug}' ({entry.get('title') or 'untitled'}). URL is gone."
+
+
+class ListSitesTool(Tool):
+    """List your published sites, with slug, lifetime, and backend state."""
+
+    def get_description(self):
+        return (
+            "List the sites you published: slug, URL, title, time left, and "
+            "whether each has a backend store. The slug is what edit_site and "
+            "delete_site take. No params."
+        )
 
     async def execute(self, message: Message, **kwargs) -> str:
         user_id = str(message.author.id)
@@ -4778,22 +5230,21 @@ class ListSitesTool(Tool):
         if not user_sites:
             return "You don't have any active sites."
 
+        control = (
+            getattr(self.bot, "control", {}) or getattr(self.bot, "_control", {}) or {}
+        )
+        base_url = getattr(
+            self.bot.config,
+            "MAXWELL_PUBLIC_BASE_URL",
+            "https://maxwell.example.com",
+        ).rstrip("/")
         lines = []
-        now = datetime.now(timezone.utc).timestamp()
         for slug, data in user_sites.items():
-            created = data.get("created_at", 0)
-            age = now - created
-            remaining = max(0, 86400 - age)
-            hours = int(remaining // 3600)
-            mins = int((remaining % 3600) // 60)
             title = data.get("title", "untitled")
-            base_url = getattr(
-                self.bot.config,
-                "MAXWELL_PUBLIC_BASE_URL",
-                "https://maxwell.example.com",
-            ).rstrip("/")
+            tail = " [backend]" if data.get("backend") else ""
             lines.append(
-                f"  • {base_url}/bot/{slug}/ — '{title}' ({hours}h {mins}m left)"
+                f"  • {slug} — {base_url}/bot/{slug}/ — '{title}' "
+                f"({site_expiry_label(data, control)}){tail}"
             )
         return "Your active sites:\n" + "\n".join(lines)
 
@@ -5394,6 +5845,47 @@ class NoResponseTool(Tool):
 
     async def execute(self, message: Message, **kwargs) -> str:
         return "__NO_RESPONSE__"
+
+
+class MoreToolsTool(Tool):
+    """Unlock the full tool catalog on a turn that started out conversational.
+
+    Ordinary chat turns ship a small tool set (see CHAT_CORE_TOOL_NAMES) so a
+    "lol" doesn't drag sixty schemas through the context window. When a turn
+    turns out to need something else, this is the door: it marks the turn as
+    expanded, returns the whole catalog, and the next turn has every tool
+    attached for real. One extra hop, only on the turns that need it.
+    """
+
+    def get_description(self):
+        return (
+            "Unlock your full tool set for this turn. This turn is carrying the "
+            "short conversational list; everything else — servers, moderation, "
+            "roles/channels, shell, sub_agent, sites, files, email, voice, "
+            "avatar/status, memory edits — is one call away. Call this the "
+            "moment you want to DO something you can't see a tool for, say what "
+            "you need in `need`, and the next turn has all of them."
+        )
+
+    async def execute(self, message: Message, need: str | None = None, **kwargs) -> str:
+        with contextlib.suppress(Exception):
+            message._tools_expanded = True
+        bot = self.bot
+        names = sorted(
+            n
+            for n in (getattr(bot, "tools", {}) or {})
+            if n != "more_tools"
+            and n not in set((getattr(bot, "_control", {}) or {}).get("disabled_tools", []) or [])
+        )
+        logger.info("more_tools: expanding catalog (need=%r)", str(need or "")[:120])
+        return (
+            "Full tool set attached for the rest of this turn"
+            + (f" (you asked for: {str(need)[:160]})" if need else "")
+            + ".\nAvailable now: "
+            + ", ".join(names)
+            + "\nCall the one you need — the schemas are on your next turn. "
+            "Don't call more_tools again."
+        )
 
 
 class SendFileTool(Tool):

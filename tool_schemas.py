@@ -336,16 +336,52 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 "Site title for listing/metadata — not a required on-page heading"
             ),
             "body": _str(
-                "FULL HTML document (DOCTYPE through closing tags). Served as-is: "
-                "no restyle or layout template. Invent a new look each time unless "
-                "the user specified one. Prefer this over stuffing HTML into chat. "
-                "In visible HTML text use real line breaks or <br>, never literal "
-                "\\n; keep \\n only inside intentional JavaScript/CSS strings."
+                "FULL HTML document (DOCTYPE through closing tags) for index.html. "
+                "Served as-is: no restyle or layout template. Invent a new look each "
+                "time unless the user specified one. Prefer this over stuffing HTML "
+                "into chat. In visible HTML text use real line breaks or <br>, never "
+                "literal \\n; keep \\n only inside intentional JavaScript/CSS strings."
+            ),
+            "files": _str(
+                'Optional extra files as JSON: {"style.css": "...", "app.js": "...", '
+                '"about/index.html": "..."}. Anything a static host serves — split a '
+                "big page up, add subpages, ship a data.json. Paths are relative to "
+                "the site root."
+            ),
+            "backend": _bool(
+                "Give the site a live server-side store (named values + append-only "
+                "lists) at /api/site/<name>/, same origin, no key needed. Turn it on "
+                "for guestbooks, counters, polls, leaderboards, saved state, form "
+                "submissions. The exact endpoints come back in the tool result."
+            ),
+            "permanent": _bool(
+                "Skip the auto-expiry clock so the site stays up until deleted"
             ),
             "encoding": _str("text (default) or base64 for exact bytes"),
             "images": _str("Optional JSON list of local image paths to include"),
         },
         ["name", "title", "body"],
+    ),
+    "edit_site": _obj(
+        {
+            "name": _str("Slug of the site to edit (see list_sites)"),
+            "action": _str(
+                "list | read | write | replace | delete | rename | backend | extend"
+            ),
+            "path": _str("File inside the site, default index.html"),
+            "content": _str("New file contents for write"),
+            "find": _str("For replace: exact existing text to swap out"),
+            "replace": _str("For replace: what to put there (empty string deletes it)"),
+            "title": _str("For rename: the new title"),
+            "encoding": _str("text (default) or base64 for write"),
+            "backend": _str("For backend: true | false | status | clear"),
+            "permanent": _bool("For extend: stop this site expiring"),
+        },
+        ["name", "action"],
+    ),
+    "delete_site": _obj(
+        {"name": _str("Slug of the site to delete")},
+        ["name"],
     ),
     "list_sites": _obj({}),
     "web_search": _obj(
@@ -376,6 +412,14 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     # above and tool_registry.record_reasoning). Plain chat goes through
     # send_message, which itself carries a reasoning field.
     "no_response": _obj({}),
+    "more_tools": _obj(
+        {
+            "need": _str(
+                "What you are trying to do, in a few words — 'ban a raider', "
+                "'read my email', 'run a script'. Used to point you at the right tool."
+            )
+        }
+    ),
     "send_file": _obj(
         {
             "filename": _str("File name with extension"),
@@ -581,6 +625,8 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "change_avatar",
         "list_servers",
         "create_site",
+        "edit_site",
+        "delete_site",
         "list_sites",
         "web_search",
         "fetch_url",
@@ -631,6 +677,34 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "set_activity",
         "update_base_personality",
         "update_server_prompt",
+        # more_tools hands the full catalog back and must get a turn to use it.
+        "more_tools",
+    }
+)
+
+# ── the conversational subset ─────────────────────────────────────────────
+# Most turns are chat: "lol", "wdym", "what do you think of X". Shipping ~60
+# tool schemas to answer those costs thousands of tokens per message and gives
+# the model a shelf of moderation and server-admin machinery it has no use for.
+# CHAT_CORE_TOOL_NAMES is what stays on an ordinary turn — talking, reacting,
+# looking things up, seeing what was posted. Anything else arrives the moment
+# the turn asks for it (see MaxwellBot._lean_chat_turn) or the moment the model
+# calls more_tools, which hands back the full catalog and another turn.
+CHAT_CORE_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "send_message",
+        "no_response",
+        "react",
+        "typing",
+        "wait",
+        "web_search",
+        "fetch_url",
+        "see_image",
+        "see_video",
+        "send_media",
+        "send_meme",
+        "image_generator",
+        "more_tools",
     }
 )
 
