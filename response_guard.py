@@ -11,7 +11,9 @@ _WORD = r"[\\w\\u00C0-\\u024F]+(?:['’][\\w\\u00C0-\\u024F]+)?"
 
 def _scrub_prose(text: str, *, max_ngram: int = 12) -> str:
     """Scrub repetition in prose; called only outside fenced code blocks."""
-    text = re.sub(r"(?i)(?:j[aeiou]|h(?:a|e)){3,}", lambda m: m.group(0)[:2], text)
+    laugh = r"(?:j[aeiou]|h(?:a|e))"
+    text = re.sub(rf"(?i)(?:{laugh}){{3,}}", lambda m: m.group(0)[:2], text)
+    text = re.sub(rf"(?i)(?:\\(\\s*{laugh}\\s*\\)\\s*){{3,}}", "ja ", text)
     text = re.sub(r"([!?.。，、！？…~])\\1{2,}", r"\\1\\1\\1", text)
     text = re.sub(r"([^\\s\\w])\\1{3,}", r"\\1\\1\\1", text)
     text = re.sub(rf"(?i)\\b({_WORD})\\s+\\1\\b", r"\\1", text)
