@@ -1,4 +1,4 @@
-"""image_generator: NVIDIA first, Pollinations if NVIDIA is down or filtered."""
+"""image_generator: Pollinations is the primary (and only) generator."""
 
 import asyncio
 from types import SimpleNamespace
@@ -49,41 +49,41 @@ def _tool(*, nvidia_key="nv-test"):
     return ImageGeneratorTool(bot)
 
 
-def test_falls_back_to_pollinations_when_nvidia_fails(monkeypatch):
+def test_execute_always_uses_pollinations(monkeypatch):
+    """execute() calls Pollinations directly; NVIDIA is never attempted."""
     tool = _tool()
-    message = _Message()
-    calls = []
-
-    async def nvidia_fail(self, message, prompt):
-        calls.append("nvidia")
-        return "Error: Image was filtered by safety guardrails. Try a different prompt."
-
-    async def pollinations_ok(self, message, prompt):
-        calls.append("pollinations")
-        return "Image sent to chat: a red fox"
-
-    monkeypatch.setattr(ImageGeneratorTool, "_nvidia_generate", nvidia_fail)
-    monkeypatch.setattr(ImageGeneratorTool, "_pollinations_generate", pollinations_ok)
-
-    result = asyncio.run(tool.execute(message, prompt="a red fox"))
-    assert calls == ["nvidia", "pollinations"]
-    assert result.startswith("Image sent to chat")
-
-
-def test_uses_pollinations_when_nvidia_key_missing(monkeypatch):
-    tool = _tool(nvidia_key="")
     message = _Message()
     calls = []
 
     async def nvidia_should_not_run(self, message, prompt):
         calls.append("nvidia")
-        raise AssertionError("NVIDIA should be skipped without a key")
+        raise AssertionError("NVIDIA must never be called (route removed)")
+
+    async def pollinations_ok(self, message, prompt):
+        calls.append("pollinations")
+        return "Image sent to chat: a red fox"
+
+    # Even if a stale NVIDIA method were present, execute() must not call it.
+    monkeypatch.setattr(
+        ImageGeneratorTool, "_nvidia_generate", nvidia_should_not_run, raising=False
+    )
+    monkeypatch.setattr(ImageGeneratorTool, "_pollinations_generate", pollinations_ok)
+
+    result = asyncio.run(tool.execute(message, prompt="a red fox"))
+    assert calls == ["pollinations"]
+    assert result.startswith("Image sent to chat")
+
+
+def test_execute_does_not_require_nvidia_key(monkeypatch):
+    """Pollinations is keyless; execute() works with no NVIDIA key."""
+    tool = _tool(nvidia_key="")
+    message = _Message()
+    calls = []
 
     async def pollinations_ok(self, message, prompt):
         calls.append("pollinations")
         return "Image sent to chat: a cat"
 
-    monkeypatch.setattr(ImageGeneratorTool, "_nvidia_generate", nvidia_should_not_run)
     monkeypatch.setattr(ImageGeneratorTool, "_pollinations_generate", pollinations_ok)
 
     result = asyncio.run(tool.execute(message, prompt="a cat"))
