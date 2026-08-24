@@ -205,3 +205,35 @@ def test_shared_context_accepts_budget_and_hides_expired_admin_facts(tmp_path):
         assert "secret admin fact" in admin_contents
 
     _run(run())
+
+
+def test_duplicate_content_hash_does_not_crash_init(tmp_path):
+    import time
+
+    mgr = RAGMemoryManager(str(tmp_path))
+    db = mgr._db
+    db.execute("DROP INDEX IF EXISTS idx_unique_content")
+    now = time.time()
+    for vid in ("dup-a", "dup-b"):
+        db.execute(
+            "INSERT INTO vectors (id, kind, channel_id, content, content_hash, "
+            "timestamp, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                vid,
+                "message",
+                "chan",
+                "same text",
+                "abc123",
+                "2026-01-01T00:00:00+00:00",
+                now,
+            ),
+        )
+    mgr._db.close()
+    reopened = RAGMemoryManager(str(tmp_path))
+    ids = [
+        row["id"]
+        for row in reopened._db.execute(
+            "SELECT id FROM vectors WHERE channel_id='chan' ORDER BY id"
+        ).fetchall()
+    ]
+    assert ids == ["dup-a"]

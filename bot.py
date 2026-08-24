@@ -4426,6 +4426,37 @@ class MaxwellBot(commands.Bot):
             return [MaxwellBot._raw_update_namespace(item) for item in value]
         return value
 
+    @staticmethod
+    def _coerce_raw_author(author, previous=None):
+        """Discord omits ``bot`` on human authors. Raw updates must still have it."""
+        prev_author = getattr(previous, "author", None) if previous is not None else None
+        if author is None or not getattr(author, "id", None):
+            author = prev_author
+        if author is None or not getattr(author, "id", None):
+            return SimpleNamespace(id="", display_name="unknown", bot=False)
+        bot_flag = bool(getattr(author, "bot", getattr(prev_author, "bot", False)))
+        display = (
+            getattr(author, "display_name", None)
+            or getattr(author, "global_name", None)
+            or getattr(author, "username", None)
+            or getattr(author, "name", None)
+            or getattr(prev_author, "display_name", None)
+            or "unknown"
+        )
+        with contextlib.suppress(Exception):
+            author.bot = bot_flag
+            if not getattr(author, "display_name", None):
+                author.display_name = display
+        if not hasattr(author, "bot"):
+            author = SimpleNamespace(
+                id=getattr(author, "id", ""),
+                display_name=display,
+                bot=bot_flag,
+                name=getattr(author, "name", None)
+                or getattr(author, "username", None),
+            )
+        return author
+
     async def _message_from_raw_update(self, payload):
         """Resolve a RawMessageUpdateEvent even when Discord evicted its cache."""
         data = self._raw_update_data(payload)
@@ -4486,8 +4517,7 @@ class MaxwellBot(commands.Bot):
         author = self._raw_update_namespace(author_data) if author_data else getattr(
             previous, "author", None
         )
-        if author is None or not getattr(author, "id", None):
-            author = SimpleNamespace(id="", display_name="unknown", bot=False)
+        author = self._coerce_raw_author(author, previous)
         guild = getattr(channel, "guild", None)
         if channel is None and previous is not None:
             channel = getattr(previous, "channel", None)

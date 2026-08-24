@@ -183,6 +183,18 @@ def test_build_messages_dm_uses_account_name():
     assert "Your Discord access" not in volatile
 
 
+def test_build_messages_author_without_bot_flag():
+    bot = _bot()
+    message = _message()
+    del message.author.bot
+
+    async def run():
+        return await MaxwellBot._build_messages(bot, message, "hey")
+
+    messages = asyncio.run(run())
+    assert messages
+
+
 def test_build_messages_reads_live_nick_each_turn():
     """A mid-session nick change must show up on the next _build_messages call."""
     me = SimpleNamespace(nick="Sparky", display_name="Sparky", name="maxwell", id=1)

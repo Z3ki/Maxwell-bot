@@ -793,6 +793,20 @@ class RAGMemoryManager:
         # share channel_id='' cannot INSERT OR REPLACE each other away.
         with contextlib.suppress(Exception):
             self._db.execute("DROP INDEX IF EXISTS idx_unique_content")
+        # Duplicate hashed rows block CREATE UNIQUE INDEX (and used to crash
+        # the hash backfill). Keep the oldest row per (kind, channel, hash).
+        with contextlib.suppress(Exception):
+            self._db.execute(
+                """
+                DELETE FROM vectors
+                WHERE content_hash != ''
+                  AND rowid NOT IN (
+                    SELECT MIN(rowid) FROM vectors
+                    WHERE content_hash != ''
+                    GROUP BY kind, channel_id, content_hash
+                  )
+                """
+            )
         with contextlib.suppress(Exception):
             self._db.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_content "

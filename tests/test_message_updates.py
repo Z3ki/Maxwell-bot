@@ -215,3 +215,22 @@ def test_raw_partial_update_merges_with_cached_message():
     assert merged.content == "keep this text"
     assert merged.embeds[0].title == "late preview"
     assert merged.author.id == 11
+    assert merged.author.bot is False
+
+
+def test_raw_author_without_bot_flag_is_human():
+    bot = _bot()
+    payload = SimpleNamespace(
+        cached_message=None,
+        message_id=202,
+        channel_id=22,
+        data={
+            "id": "202",
+            "channel_id": "22",
+            "content": "hello",
+            "author": {"id": "11", "username": "alice"},
+        },
+    )
+    merged = asyncio.run(MaxwellBot._message_from_raw_update(bot, payload))
+    assert merged.author.bot is False
+    assert merged.author.display_name == "alice"

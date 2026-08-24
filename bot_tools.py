@@ -5019,44 +5019,83 @@ def _message_author_label(message) -> str:
     )
 
 
+_CHANNEL_HISTORY_TIMEOUT = 2.5
+_FETCH_MESSAGE_TIMEOUT = 2.0
+
+
 async def _iter_recent_channel_messages(message, bot=None, limit: int = 40):
+    """Live Discord history only.
+
+    Do not fetch_message() every RAG/memory row. That path 429s Discord and
+    stalled send_message for ~50s in busy rooms.
+    """
+    del bot  # memory fallback is a single fetch in resolve_send_reply_target
     channel = getattr(message, "channel", None)
-    seen: set[str] = set()
     history = getattr(channel, "history", None)
-    if callable(history):
-        try:
-            async for msg in history(limit=limit):
-                mid = getattr(msg, "id", None)
-                if mid is not None:
-                    seen.add(str(mid))
-                yield msg
-        except Exception:
-            pass
-    mem = getattr(bot, "memory", None) if bot is not None else None
-    getter = getattr(mem, "get_channel_memory", None) if mem is not None else None
+    if not callable(history):
+        return
+    collected: list[Any] = []
+
+    async def _collect():
+        async for msg in history(limit=limit):
+            collected.append(msg)
+            if len(collected) >= limit:
+                break
+
+    try:
+        await asyncio.wait_for(_collect(), timeout=_CHANNEL_HISTORY_TIMEOUT)
+    except Exception:
+        pass
+    for msg in collected:
+        yield msg
+
+
+async def _fetch_channel_message(channel, message_id):
     fetch = getattr(channel, "fetch_message", None)
-    if not callable(getter) or not callable(fetch):
-        return
+    if not callable(fetch) or not message_id:
+        return None
+    try:
+        return await asyncio.wait_for(
+            fetch(int(message_id)), timeout=_FETCH_MESSAGE_TIMEOUT
+        )
+    except Exception:
+        return None
+
+
+async def _memory_reply_candidate(message, hint_n: str, bot=None):
+    """Score channel memory in-process, then fetch at most one Discord message."""
+    if not hint_n or bot is None:
+        return None
+    mem = getattr(bot, "memory", None)
+    getter = getattr(mem, "get_channel_memory", None) if mem is not None else None
+    channel = getattr(message, "channel", None)
     cid = str(getattr(channel, "id", "") or "")
-    if not cid:
-        return
+    if not callable(getter) or not cid:
+        return None
     try:
         rows = await getter(cid)
     except Exception:
-        return
+        return None
+    trigger_id = str(getattr(message, "id", "") or "")
+    best_row = None
+    best_score = 0
     for row in reversed(list(rows or [])):
         if not isinstance(row, dict):
             continue
         mid = str(row.get("message_id") or "")
-        if not mid or mid in seen:
+        if not mid or mid == trigger_id:
             continue
-        try:
-            msg = await fetch(int(mid))
-        except Exception:
-            continue
-        if msg is not None:
-            seen.add(mid)
-            yield msg
+        score = score_reply_candidate(
+            hint_n,
+            author=str(row.get("author") or ""),
+            content=str(row.get("content") or ""),
+        )
+        if score > best_score:
+            best_score = score
+            best_row = row
+    if best_row is None or best_score < 55:
+        return None
+    return await _fetch_channel_message(channel, best_row.get("message_id"))
 
 
 async def resolve_send_reply_target(message, reply=True, reply_to=None, bot=None):
@@ -5103,6 +5142,9 @@ async def resolve_send_reply_target(message, reply=True, reply_to=None, bot=None
             best = msg
     if best is not None and best_score >= 55:
         return best
+    remembered = await _memory_reply_candidate(message, hint_n, bot=bot)
+    if remembered is not None:
+        return remembered
     return message
 
 
@@ -5225,16 +5267,32 @@ class SendMessageTool(Tool):
             )
             use_reply = target is not None
             reply_to_message = target if target is not None else message
+            send_fn = (
+                getattr(self.bot, "_send_with_slowmode", None) if self.bot else None
+            )
             async with _tool_reply_typing(self.bot, message, text):
                 for i, chunk in enumerate(chunks):
                     chunk_stickers = stickers if i == 0 else None
                     try:
-                        if i == 0 and use_reply:
+                        extra = {}
+                        if chunk_stickers:
+                            extra["stickers"] = chunk_stickers
+                        if callable(send_fn):
+                            sent = await send_fn(
+                                message.channel,
+                                content=chunk,
+                                reply_to=(
+                                    reply_to_message
+                                    if (i == 0 and use_reply)
+                                    else None
+                                ),
+                                **extra,
+                            )
+                            if sent is None and not sent_any:
+                                return "Error: missing permissions to send message"
+                        elif i == 0 and use_reply:
                             try:
-                                if chunk_stickers:
-                                    await reply_to_message.reply(chunk, stickers=chunk_stickers)
-                                else:
-                                    await reply_to_message.reply(chunk)
+                                await reply_to_message.reply(chunk, **extra)
                             except (discord.NotFound, discord.HTTPException) as exc:
                                 code = getattr(exc, "code", None)
                                 parent_gone = isinstance(exc, discord.NotFound) or code in {
@@ -5245,15 +5303,9 @@ class SendMessageTool(Tool):
                                     raise
                                 if not parent_gone:
                                     raise
-                                if chunk_stickers:
-                                    await message.channel.send(chunk, stickers=chunk_stickers)
-                                else:
-                                    await message.channel.send(chunk)
+                                await message.channel.send(chunk, **extra)
                         else:
-                            if chunk_stickers:
-                                await message.channel.send(chunk, stickers=chunk_stickers)
-                            else:
-                                await message.channel.send(chunk)
+                            await message.channel.send(chunk, **extra)
                         sent_any = True
                         sent_chunks.append(chunk)
                     except Exception:

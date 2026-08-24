@@ -137,3 +137,63 @@ def test_send_message_reply_to_quote_not_id():
         assert prev is nah
 
     asyncio.run(run())
+
+
+def test_send_message_memory_fallback_fetches_once():
+    class MemChannel:
+        def __init__(self):
+            self.id = 99
+            self.fetched = []
+            self.by_id = {}
+
+        async def history(self, limit=40):
+            if False:
+                yield None
+
+        async def fetch_message(self, mid):
+            self.fetched.append(int(mid))
+            return self.by_id[int(mid)]
+
+    class Memory:
+        async def get_channel_memory(self, _cid):
+            rows = [
+                {"message_id": str(i), "author": "spam", "content": f"noise {i}"}
+                for i in range(200, 400)
+            ]
+            rows.append({"message_id": "2", "author": "Alice", "content": "nah"})
+            return rows
+
+    async def run():
+        channel = MemChannel()
+        latest = _HistMessage(3, "what?", "Z3ki", channel)
+        nah = _HistMessage(2, "nah", "Alice", channel)
+        channel.by_id = {2: nah, 3: latest}
+        bot = SimpleNamespace(memory=Memory())
+        target = await resolve_send_reply_target(
+            latest, reply_to="nah", bot=bot
+        )
+        assert target is nah
+        assert channel.fetched == [2]
+
+    asyncio.run(run())
+
+
+def test_send_message_uses_slowmode_helper_when_present():
+    calls = []
+
+    async def fake_send(channel, content=None, reply_to=None, **_kw):
+        calls.append((content, reply_to))
+        if reply_to is not None:
+            await reply_to.reply(content)
+        else:
+            await channel.send(content)
+        return SimpleNamespace(id=1)
+
+    async def run():
+        tool = SendMessageTool(SimpleNamespace(_send_with_slowmode=fake_send))
+        message = FakeMessage()
+        await tool.execute(message, content="hi")
+        assert calls == [("hi", message)]
+        assert message.replies == ["hi"]
+
+    asyncio.run(run())
