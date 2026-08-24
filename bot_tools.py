@@ -1214,11 +1214,11 @@ class ImageGeneratorTool(Tool):
         model = (
             str(
                 getattr(
-                    self.bot.config, "POLLINATIONS_MODEL", "MarcosFRG/sdxl-lightning"
+                    self.bot.config, "POLLINATIONS_MODEL", "MarcosFRG/lucid-origin"
                 )
-                or "MarcosFRG/sdxl-lightning"
+                or "MarcosFRG/lucid-origin"
             ).strip()
-            or "MarcosFRG/sdxl-lightning"
+            or "MarcosFRG/lucid-origin"
         )
         seed = random.randint(0, 999999)
         url = (
