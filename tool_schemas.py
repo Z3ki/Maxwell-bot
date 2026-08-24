@@ -379,6 +379,32 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         },
         ["name", "action"],
     ),
+    "site_server": _obj(
+        {
+            "name": _str("Slug of the site this backend belongs to"),
+            "action": _str(
+                "write | start | stop | restart | status | logs | read | env | delete"
+            ),
+            "files": _str(
+                'Server source as JSON: {"app.py": "...", "helpers.py": "..."}. '
+                "app.py is the entry and must listen on 0.0.0.0:$PORT. flask, "
+                "waitress, requests and the stdlib (sqlite3, json, urllib) are "
+                "installed; there is no pip at runtime. Only /data is writable "
+                "and only /data survives a restart — put the database at "
+                "/data/app.db. Routes are served under /bot/<name>/api/, with "
+                "that prefix stripped: @app.get('/notes') answers at "
+                "/bot/<name>/api/notes."
+            ),
+            "env": _str(
+                'Secrets and config as JSON: {"API_KEY": "sk-..."}. Held outside '
+                "the site directory, never served and never echoed back; read "
+                "them with os.environ. Setting env restarts the server."
+            ),
+            "path": _str("For read: which server file (default app.py)"),
+            "lines": _int("For logs: how many lines (default 40, max 200)"),
+        },
+        ["name", "action"],
+    ),
     "delete_site": _obj(
         {"name": _str("Slug of the site to delete")},
         ["name"],
@@ -627,6 +653,7 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "create_site",
         "edit_site",
         "delete_site",
+        "site_server",
         "list_sites",
         "web_search",
         "fetch_url",

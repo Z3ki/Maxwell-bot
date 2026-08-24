@@ -16,10 +16,21 @@ import site_backend
 from api.auth import _needs_auth
 
 
+class _FakeContent:
+    def __init__(self, body):
+        self._raw = json.dumps(body).encode() if body is not None else b""
+
+    async def read(self, n=-1):
+        return self._raw
+
+
 class FakeRequest:
     def __init__(self, body=None, query=None, match=None, method="GET", path="/api/site/x/kv"):
         self._body = body
         self.query = query or {}
+        self.query_string = "&".join(f"{k}={v}" for k, v in (query or {}).items())
+        self.can_read_body = body is not None
+        self.content = _FakeContent(body)
         self.match_info = match or {}
         self.headers = {}
         self.remote = "203.0.113.9"
@@ -168,3 +179,65 @@ def test_collections_ring_buffer_at_the_cap(data_dir, monkeypatch):
 def test_bad_json_body_is_a_400(data_dir):
     resp = run(api.site_kv_put(FakeRequest(None, match={"slug": "guest"})))
     assert resp.status == 400
+
+
+# ── the proxy in front of a site's own backend server ─────────────────────
+def test_proxy_refuses_when_no_backend_is_running(data_dir, monkeypatch):
+    monkeypatch.setattr(api.site_server, "port_for", lambda dd, slug: None)
+    resp = run(api.site_proxy(FakeRequest(match={"slug": "guest", "path": "notes"})))
+    assert resp.status == 404
+    assert "no backend server" in _payload(resp)["error"]
+
+
+def test_proxy_refuses_a_malformed_slug(data_dir):
+    resp = run(api.site_proxy(FakeRequest(match={"slug": "../../etc", "path": ""})))
+    assert resp.status == 404
+
+
+def test_proxy_only_ever_targets_loopback(data_dir, monkeypatch):
+    """The registry picks the destination — a slug can't steer it elsewhere."""
+    seen = {}
+    monkeypatch.setattr(api.site_server, "port_for", lambda dd, slug: 8801)
+
+    class FakeResp:
+        status = 200
+        headers = {"Content-Type": "application/json"}
+
+        async def read(self):
+            return b'{"ok":true}'
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def request(self, method, url, **kw):
+            seen["method"], seen["url"], seen["headers"] = method, url, kw.get("headers")
+            return FakeResp()
+
+    monkeypatch.setattr(api.aiohttp, "ClientSession", lambda **kw: FakeSession())
+    resp = run(
+        api.site_proxy(
+            FakeRequest(
+                match={"slug": "guest", "path": "notes/5"},
+                query={"q": "x"},
+                method="GET",
+            )
+        )
+    )
+    assert resp.status == 200
+    assert seen["url"].startswith("http://127.0.0.1:8801/")
+    assert seen["url"].endswith("/notes/5?a=b") or "notes/5" in seen["url"]
+    # The backend is told where it really lives and who is really calling.
+    assert seen["headers"]["X-Site-Slug"] == "guest"
+    assert seen["headers"]["X-Forwarded-Prefix"] == "/bot/guest/api"
+    # Hop-by-hop headers must not be forwarded.
+    assert "Host" not in seen["headers"]

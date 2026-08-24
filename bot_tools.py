@@ -44,6 +44,7 @@ from tool_schemas import (
     trim_tool_tail,
 )
 import site_backend
+import site_server
 from utils import (  # single source of truth, fd-safe
     FileLock,
     _atomic_json_write_sync,
@@ -5181,6 +5182,127 @@ class EditSiteTool(_SiteOwnedTool):
         )
 
 
+class SiteServerTool(_SiteOwnedTool):
+    """Give a site a real backend: its own Python server in its own container."""
+
+    def get_description(self):
+        return (
+            "Run a real backend server for one of your sites — your own Python, "
+            "your own routes, your own SQLite, your own secrets, in its own "
+            "sandboxed container reached at /bot/<name>/api/... "
+            "Use this over backend=true when the site needs server-side logic: "
+            "a hidden API key, real auth, computation, a database with queries. "
+            "action=write (files={\"app.py\": ...} then it starts), start, stop, "
+            "restart, status, logs, read, env (set secrets), delete. "
+            "app.py must listen on 0.0.0.0:$PORT; flask, waitress, requests and "
+            "the stdlib are installed; only /data is writable and it persists. "
+            "Write the page with create_site, the server with this."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        name: str | None = None,
+        action: str = "status",
+        files: Any = None,
+        env: Any = None,
+        path: str | None = None,
+        lines: int = 40,
+        **kwargs,
+    ) -> str:
+        slug, entry, _site_dir, err = self._resolve(message, name)
+        if err:
+            return err
+        data_dir = self.bot.config.DATA_DIR
+        act = str(action or "status").strip().lower()
+        try:
+            if act in {"write", "deploy", "code", "create"}:
+                if not files:
+                    return (
+                        "Error: write needs files, e.g. "
+                        'files={"app.py": "..."}.\n' + site_server.contract(slug)
+                    )
+                parsed = await asyncio.to_thread(site_server.parse_files, files)
+                if "app.py" not in parsed:
+                    return "Error: the entry file must be called app.py."
+                new_env = (
+                    await asyncio.to_thread(site_server.parse_env, env)
+                    if env
+                    else None
+                )
+                written = await asyncio.to_thread(
+                    site_server.write_code, data_dir, slug, parsed
+                )
+                await site_server.start(data_dir, slug, env=new_env)
+                await self._mark_server(slug, entry, True)
+                return (
+                    f"Backend server live: {self.base_url}/{slug}/api/ "
+                    f"(wrote {', '.join(written)})\n" + site_server.contract(slug)
+                )
+
+            if act in {"start", "restart", "reload"}:
+                await site_server.start(data_dir, slug)
+                await self._mark_server(slug, entry, True)
+                return f"Backend server running at {self.base_url}/{slug}/api/"
+
+            if act in {"stop", "pause"}:
+                existed = await site_server.stop(data_dir, slug)
+                await self._mark_server(slug, entry, False)
+                return (
+                    f"Stopped the backend for {slug} (code, data, and secrets kept)."
+                    if existed
+                    else f"{slug} had no backend server running."
+                )
+
+            if act in {"status", "info", "list"}:
+                return await site_server.status(data_dir, slug)
+
+            if act in {"logs", "log", "tail"}:
+                return f"{slug} backend logs:\n" + await site_server.logs(
+                    data_dir, slug, lines
+                )
+
+            if act in {"read", "cat"}:
+                return await asyncio.to_thread(
+                    site_server.read_code, data_dir, slug, path or "app.py"
+                )
+
+            if act in {"env", "secrets", "config"}:
+                if not env:
+                    current = (site_server.get_entry(data_dir, slug) or {}).get("env") or {}
+                    return (
+                        f"{slug} env: " + (", ".join(sorted(current)) or "none")
+                        + "\nValues are never shown. Pass env={...} to replace them."
+                    )
+                parsed_env = await asyncio.to_thread(site_server.parse_env, env)
+                await site_server.start(data_dir, slug, env=parsed_env)
+                await self._mark_server(slug, entry, True)
+                return (
+                    f"Set {len(parsed_env)} env var(s) on {slug} and restarted it: "
+                    + ", ".join(sorted(parsed_env))
+                )
+
+            if act in {"delete", "remove", "destroy"}:
+                await site_server.destroy(data_dir, slug)
+                await self._mark_server(slug, entry, False)
+                return f"Deleted the backend server for {slug} — code, database, and secrets."
+
+            return (
+                f"Error: unknown action '{act}'. Use write, start, stop, restart, "
+                "status, logs, read, env, or delete."
+            )
+        except site_server.SiteServerError as e:
+            return f"Error: {e}"
+
+    async def _mark_server(self, slug: str, entry: dict, on: bool) -> None:
+        """Record on the site itself that it has a server, for list_sites."""
+        updated = dict(entry or {})
+        if bool(updated.get("server")) == on:
+            return
+        updated["server"] = on
+        await asyncio.to_thread(self._save_entry, slug, updated)
+
+
 class DeleteSiteTool(_SiteOwnedTool):
     """Take a published site down."""
 
@@ -5207,6 +5329,9 @@ class DeleteSiteTool(_SiteOwnedTool):
             await asyncio.to_thread(
                 site_backend.destroy, self.bot.config.DATA_DIR, slug
             )
+        # Container, server code, database, and secrets go too.
+        with contextlib.suppress(Exception):
+            await site_server.destroy(self.bot.config.DATA_DIR, slug)
         return f"Deleted site '{slug}' ({entry.get('title') or 'untitled'}). URL is gone."
 
 
@@ -5241,7 +5366,12 @@ class ListSitesTool(Tool):
         lines = []
         for slug, data in user_sites.items():
             title = data.get("title", "untitled")
-            tail = " [backend]" if data.get("backend") else ""
+            marks = []
+            if data.get("server"):
+                marks.append("server")
+            elif data.get("backend"):
+                marks.append("store")
+            tail = f" [{', '.join(marks)}]" if marks else ""
             lines.append(
                 f"  • {slug} — {base_url}/bot/{slug}/ — '{title}' "
                 f"({site_expiry_label(data, control)}){tail}"

@@ -145,6 +145,7 @@ providers.py        OpenAI-compatible provider wrapper
 config.py           Environment-backed configuration (incl. feature detection)
 rag_memory.py       RAG vector memory (SQLite + numpy + embeddings API)
 site_backend.py     Per-site datastore behind /api/site/<slug>/ (generated sites)
+site_server.py      Per-site backend containers behind /bot/<slug>/api/
 doctor.py           Install check: what works, what doesn't, why
 setup.sh            One-command installer
 api/api_server.py   Dashboard and admin API server
@@ -378,6 +379,58 @@ API. Everything is bounded: 64KB per value, 1000 entries per list (oldest drop
 off), 1MB per site, and a per-IP token bucket on writes. Anyone with the URL
 can post, so don't put secrets in a site store and expect junk in open forms.
 Data lives in `data/site_data/<slug>.json` and dies with the site.
+
+### Real backend servers
+
+`backend=true` is a datastore: it remembers things, but it cannot run code,
+keep a secret, or enforce a rule. When a site needs an actual server —
+a hidden API key, real auth, computation, a database it queries — `site_server`
+gives it one:
+
+```
+site_server(name="mysite", action="write",
+            files={"app.py": "...flask app..."},
+            env={"WEATHER_KEY": "..."})
+```
+
+That writes the source, launches a container, and the site's routes are live at
+`/bot/mysite/api/...` — a route the app defines as `/notes` answers at
+`/bot/mysite/api/notes`. Other actions: `start`, `stop`, `restart`, `status`,
+`logs` (the app's own stdout/stderr, which is how it debugs itself), `read`,
+`env`, `delete`.
+
+The contract the app is held to:
+
+| | |
+|---|---|
+| Entry | `app.py`, listening on `0.0.0.0:$PORT` |
+| Installed | Python 3.12, flask, waitress, requests, stdlib (`sqlite3`, `json`, `urllib`). No pip at runtime. |
+| Writable | `/data` only, and only `/data` survives a restart — the database goes at `/data/app.db` |
+| Secrets | `env={...}`, stored outside the site directory, never served, never echoed back, read via `os.environ` |
+| Outbound | Allowed — this is where a key-carrying API call belongs |
+| Limits | 256MB, half a core, 128 pids, no capabilities, read-only root, unprivileged uid |
+
+How it is contained: code lives in `data/site_servers/<slug>/`, **outside the
+web root**, so source and secrets are never static files. Each site gets its own
+container from `maxwell-site-runtime` (`docker/site-runtime/`) with `--cap-drop
+ALL`, `--read-only`, no docker socket, no host filesystem, and its port
+published on `127.0.0.1` only — the sole public path is the proxy, which takes
+its destination from the registry, never from the request. `--restart
+unless-stopped` brings backends back after a reboot; the bot reconciles the
+registry on boot. Deleting or expiring a site destroys its container, code,
+database, and secrets.
+
+It is still a container running model-written code with outbound network
+access, so it is exactly as trusted as `ENABLE_SHELL` — treat it that way.
+
+Routing needs one line in your reverse proxy, **before** the static `/bot/*`
+rule (see `examples/`):
+
+```
+handle /bot/*/api/* {
+        reverse_proxy 127.0.0.1:8765
+}
+```
 
 ## Web and YouTube Tools
 

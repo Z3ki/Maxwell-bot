@@ -10,6 +10,7 @@ import contextlib
 import hmac
 import json
 import os
+import re
 import time
 from collections import defaultdict
 
@@ -100,17 +101,27 @@ def _json_response(data, status=200):
     )
 
 
-# Public routes. /api/site/* is the datastore a generated site talks to from
-# a visitor's browser, so it cannot carry admin credentials by definition. It
-# is scoped to one slug's own data, size-capped and rate-limited in
-# site_backend.py, and only answers for sites created with backend=true.
+# Public routes, both of them a generated site's own backend talking to a
+# visitor's browser — which cannot carry admin credentials by definition.
+#
+#   /api/site/<slug>/...   the built-in datastore (site_backend.py), scoped to
+#                          one slug, size-capped and rate-limited.
+#   /bot/<slug>/api/...    the site's own server, proxied to a container that
+#                          only that slug's registry row can name
+#                          (site_server.py). Caddy routes this path here.
+#
+# Neither can reach another slug's data, and nothing else on the API is
+# reachable through them.
 PUBLIC_PATH_PREFIXES = ("/api/site/",)
+PUBLIC_PATH_RE = re.compile(r"^/bot/[a-z0-9-]{2,30}/api(?:/|$)")
 
 
 def _needs_auth(request) -> bool:
     """All requests need auth except OPTIONS preflight, /api/login, and the
-    public per-site backend."""
+    public per-site backends."""
     if request.path.startswith(PUBLIC_PATH_PREFIXES):
+        return False
+    if PUBLIC_PATH_RE.match(request.path):
         return False
     return request.method != "OPTIONS"
 

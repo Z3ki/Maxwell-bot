@@ -259,6 +259,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     SetActivityTool,
     SetNicknameTool,
     ShellTool,
+    SiteServerTool,
     SleepTool,
     SubAgentTool,
     TtsTool,
@@ -305,6 +306,7 @@ from tool_registry import (  # noqa: E402 — reasoning now rides inside tool ca
     record_reasoning,
 )
 import site_backend  # noqa: E402
+import site_server  # noqa: E402
 from tool_schemas import (  # noqa: E402
     CHAT_CORE_TOOL_NAMES,
     RESULT_TOOL_NAMES,
@@ -2054,6 +2056,7 @@ TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "create_site",
     "edit_site",
     "delete_site",
+    "site_server",
     "list_sites",
     "web_search",
     "no_response",
@@ -3237,6 +3240,7 @@ class MaxwellBot(commands.Bot):
             self.tools["create_site"] = CreateSiteTool(self)
             self.tools["edit_site"] = EditSiteTool(self)
             self.tools["delete_site"] = DeleteSiteTool(self)
+            self.tools["site_server"] = SiteServerTool(self)
             self.tools["list_sites"] = ListSitesTool(self)
         if self.config.ENABLE_WEB_SEARCH:
             self.tools["web_search"] = WebSearchTool(self)
@@ -8898,6 +8902,12 @@ class MaxwellBot(commands.Bot):
             )
 
     async def _site_cleanup_loop(self):
+        # Site backend containers carry --restart unless-stopped, so docker
+        # brings them back on its own after a reboot. This pass only fixes the
+        # registry when one went away for good (prune, manual rm, a site
+        # deleted while the bot was down).
+        with contextlib.suppress(Exception):
+            await site_server.reconcile(self.config.DATA_DIR)
         while True:
             await asyncio.sleep(300)
             try:
@@ -8942,6 +8952,10 @@ class MaxwellBot(commands.Bot):
                     await asyncio.to_thread(
                         site_backend.destroy, self.config.DATA_DIR, slug
                     )
+                # And its backend container, code, database, and secrets — an
+                # expired site must not leave a server running.
+                with contextlib.suppress(Exception):
+                    await site_server.destroy(self.config.DATA_DIR, slug)
             except Exception as e:
                 logger.error(f"Failed to delete site {slug}: {e}")
             expired.append(slug)

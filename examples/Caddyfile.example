@@ -19,6 +19,14 @@ maxwell.example.com {
 		file_server
 	}
 
+	# A generated site's own backend server (site_server.py). This MUST come
+	# before anything that serves /bot/* as static files, or the file server
+	# answers 404 first. maxwell-api looks the slug up in its registry and
+	# proxies to that site's container on loopback.
+	handle /bot/*/api/* {
+		reverse_proxy 127.0.0.1:8765
+	}
+
 	# Prefer serving generated bot sites from a separate origin.
 	header /bot/* -X-Frame-Options
 

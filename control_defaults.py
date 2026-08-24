@@ -261,6 +261,7 @@ KNOWN_TOOLS = [
     "create_site",
     "edit_site",
     "delete_site",
+    "site_server",
     "list_sites",
     "web_search",
     "no_response",

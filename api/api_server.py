@@ -16,6 +16,7 @@ import time
 import uuid as _uuid
 from pathlib import Path
 
+import aiohttp
 from aiohttp import web
 
 logger = logging.getLogger("maxwell_api")
@@ -129,6 +130,7 @@ from api.config import (  # noqa: E402
     MAX_PROMPT_CHARS,
 )
 import site_backend  # noqa: E402
+import site_server  # noqa: E402
 
 from api.auth import (  # noqa: E402
     _DISCORD_TOKENS,
@@ -829,6 +831,83 @@ async def site_items_delete(request):
     except site_backend.SiteBackendError as exc:
         return _site_error(exc)
     return _site_json({"ok": True, "removed": removed})
+
+
+# ---------- Site backend servers (proxy to the per-site container) ----------
+# /bot/<slug>/api/<path> is the public face of a site's own server (see
+# site_server.py). Caddy sends that path here; we look the slug's loopback port
+# up in the registry and pass the request through with the prefix stripped, so
+# a route the site defines as /notes is reached at /bot/<slug>/api/notes.
+#
+# Only the registry can name a destination, and only ever 127.0.0.1 on a port
+# this process assigned — a slug cannot steer the proxy anywhere else.
+_SITE_PROXY_RATE = site_backend.RateLimiter(rate=20.0, burst=200)
+_SITE_PROXY_HOP_HEADERS = {
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
+}
+SITE_PROXY_MAX_BODY = 2 * 1024 * 1024
+SITE_PROXY_TIMEOUT = 30
+
+
+async def site_proxy(request):
+    slug = _safe_site_slug(request.match_info.get("slug", ""))
+    if not slug:
+        return _site_json({"error": "bad slug"}, 404)
+    if not _SITE_PROXY_RATE.allow(f"{_get_client_ip(request)}:{slug}"):
+        return _site_json({"error": "slow down"}, 429)
+    port = await asyncio.to_thread(site_server.port_for, DATA_DIR, slug)
+    if not port:
+        return _site_json(
+            {"error": "this site has no backend server running"}, 404
+        )
+    tail = request.match_info.get("path", "") or ""
+    target = f"http://127.0.0.1:{port}/{tail.lstrip('/')}"
+    if request.query_string:
+        target += "?" + request.query_string
+
+    body = None
+    if request.can_read_body:
+        body = await request.content.read(SITE_PROXY_MAX_BODY + 1)
+        if len(body) > SITE_PROXY_MAX_BODY:
+            return _site_json({"error": "request body too large"}, 413)
+
+    headers = {
+        k: v
+        for k, v in request.headers.items()
+        if k.lower() not in _SITE_PROXY_HOP_HEADERS
+    }
+    # The backend gets to know where it really is, and who is really calling.
+    headers["X-Forwarded-For"] = _get_client_ip(request)
+    headers["X-Forwarded-Prefix"] = f"/bot/{slug}/api"
+    headers["X-Site-Slug"] = slug
+
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=SITE_PROXY_TIMEOUT)
+        ) as session:
+            async with session.request(
+                request.method, target, headers=headers, data=body,
+                allow_redirects=False,
+            ) as upstream:
+                payload = await upstream.read()
+                out = web.Response(
+                    body=payload,
+                    status=upstream.status,
+                    headers={
+                        k: v
+                        for k, v in upstream.headers.items()
+                        if k.lower() not in _SITE_PROXY_HOP_HEADERS
+                        and k.lower() != "content-encoding"
+                    },
+                )
+                out.headers["Access-Control-Allow-Origin"] = "*"
+                return out
+    except asyncio.TimeoutError:
+        return _site_json({"error": "the site backend timed out"}, 504)
+    except aiohttp.ClientError as e:
+        logger.warning("site backend %s unreachable: %s", slug, e)
+        return _site_json({"error": "the site backend is not responding"}, 502)
 
 
 # ---------- Runtime controls ----------
@@ -2076,6 +2155,10 @@ app.router.add_delete("/api/site/{slug}/items/{name}", site_items_delete)
 app.router.add_options("/api/site/{slug}/kv", _options_handler)
 app.router.add_options("/api/site/{slug}/kv/bump", _options_handler)
 app.router.add_options("/api/site/{slug}/items/{name}", _options_handler)
+# Public, unauthenticated: a site's own backend server, reached through Caddy
+# at /bot/<slug>/api/*. Every method, because the site defines its own routes.
+app.router.add_route("*", "/bot/{slug}/api", site_proxy)
+app.router.add_route("*", "/bot/{slug}/api/{path:.*}", site_proxy)
 app.router.add_put("/api/control", control_put)
 app.router.add_delete("/api/control", control_reset)
 app.router.add_get("/api/llm/traces", llm_traces)

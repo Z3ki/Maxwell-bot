@@ -1,0 +1,590 @@
+"""Real backends for generated sites: one container per site.
+
+``site_backend.py`` gives a static page a place to keep things. This gives it a
+server — the site writes actual Python, it runs as its own process, and it owns
+its routes, its database, its secrets, and its outbound calls. Whatever backend
+it wants.
+
+The shape:
+
+* Code lives in ``DATA_DIR/site_servers/<slug>/`` — **outside** the web root, so
+  the source and any secrets are never served as static files.
+* Each site gets a container from the ``maxwell-site-runtime`` image: code
+  read-only at ``/app``, a private writable ``/data`` for its database, no
+  capabilities, half a core, 256MB, and a port published on 127.0.0.1 only.
+* Requests reach it at ``/bot/<slug>/api/...``, which the API server proxies to
+  that port (see ``site_proxy`` in api/api_server.py). Nothing else on the box
+  can be reached through that path, and the container's port is not exposed
+  publicly on its own.
+* ``--restart unless-stopped`` means a reboot or a docker restart brings every
+  site backend back without the bot having to do anything.
+
+Secrets go in as environment variables and stay in the registry file, which
+lives with the rest of the bot's data — never in the site directory, never in
+a tool result, never in ``read``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import logging
+import os
+import re
+import shutil
+import socket
+from pathlib import Path
+from typing import Any
+
+from utils import FileLock, _atomic_json_write_sync
+
+logger = logging.getLogger(__name__)
+
+IMAGE = "maxwell-site-runtime"
+DOCKERFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docker", "site-runtime")
+CONTAINER_PREFIX = "maxwell-site-"
+CONTAINER_PORT = 8000
+
+# Ports handed to site backends. Loopback only — the public path is the proxy.
+PORT_RANGE = range(8800, 8900)
+
+# Per-container limits. A site backend is a toy web service, not a workload.
+MEMORY = "256m"
+CPUS = "0.5"
+PIDS = "128"
+
+MAX_CODE_BYTES = 400_000
+MAX_FILES = 20
+MAX_ENV_KEYS = 25
+MAX_ENV_VALUE = 4_000
+START_TIMEOUT = 25.0
+
+ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+SLUG_RE = re.compile(r"^[a-z0-9-]{2,30}$")
+
+# Names a backend must not receive: PATH/HOME shape the runtime, and PORT is
+# ours to set.
+RESERVED_ENV = {"PATH", "HOME", "PORT", "PYTHONPATH", "LD_PRELOAD", "LD_LIBRARY_PATH"}
+
+
+class SiteServerError(Exception):
+    """Something the model can fix by calling again differently."""
+
+
+def _check_slug(slug: str) -> str:
+    if not SLUG_RE.match(str(slug or "")):
+        raise SiteServerError("bad site slug")
+    return str(slug)
+
+
+def container_name(slug: str) -> str:
+    return CONTAINER_PREFIX + _check_slug(slug)
+
+
+def code_dir(data_dir, slug: str) -> Path:
+    return Path(data_dir) / "site_servers" / _check_slug(slug)
+
+
+def state_dir(data_dir, slug: str) -> Path:
+    """The container's writable /data — its database lives here."""
+    return Path(data_dir) / "site_servers" / _check_slug(slug) / "_data"
+
+
+def registry_path(data_dir) -> Path:
+    return Path(data_dir) / "site_servers.json"
+
+
+# ── registry ──────────────────────────────────────────────────────────────
+def _read_registry(data_dir) -> dict[str, dict]:
+    try:
+        raw = json.loads(registry_path(data_dir).read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+        return {}
+    return {k: v for k, v in raw.items() if isinstance(v, dict)} if isinstance(raw, dict) else {}
+
+
+def get_entry(data_dir, slug: str) -> dict | None:
+    return _read_registry(data_dir).get(str(slug))
+
+
+def _write_entry(data_dir, slug: str, entry: dict | None) -> None:
+    path = registry_path(data_dir)
+    with FileLock(path, timeout=15.0):
+        reg = _read_registry(data_dir)
+        if entry is None:
+            reg.pop(slug, None)
+        else:
+            reg[slug] = entry
+        _atomic_json_write_sync(path, reg)
+
+
+def port_for(data_dir, slug: str) -> int | None:
+    """The loopback port a slug's backend listens on, for the proxy."""
+    entry = get_entry(data_dir, slug)
+    if not entry or not entry.get("running"):
+        return None
+    try:
+        return int(entry.get("port") or 0) or None
+    except (TypeError, ValueError):
+        return None
+
+
+def _free_port(data_dir, slug: str) -> int:
+    taken = {
+        int(e.get("port") or 0)
+        for s, e in _read_registry(data_dir).items()
+        if s != slug and e.get("port")
+    }
+    for port in PORT_RANGE:
+        if port in taken:
+            continue
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+        return port
+    raise SiteServerError("no free backend ports left — delete an unused site backend")
+
+
+# ── docker ────────────────────────────────────────────────────────────────
+async def _docker(*args: str, timeout: float = 30.0) -> tuple[int, str, str]:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise SiteServerError("docker is not installed or not on PATH") from exc
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.wait()
+        raise SiteServerError(f"docker did not respond within {timeout:.0f}s") from None
+    return (
+        proc.returncode or 0,
+        out.decode(errors="replace"),
+        err.decode(errors="replace"),
+    )
+
+
+async def _ensure_image() -> None:
+    code, _out, _err = await _docker("image", "inspect", IMAGE, timeout=20)
+    if code == 0:
+        return
+    logger.info("Building %s (first site backend on this host)", IMAGE)
+    code, _out, err = await _docker("build", "-t", IMAGE, DOCKERFILE_DIR, timeout=600)
+    if code != 0:
+        raise SiteServerError(f"could not build the site runtime image: {err.strip()[:300]}")
+
+
+async def _remove_container(slug: str) -> None:
+    """Remove the container and wait until it is really gone.
+
+    ``docker rm -f`` can return while removal is still settling, and a
+    container carrying --restart unless-stopped may be mid-restart when we ask.
+    Returning early let the next ``docker run`` hit a name conflict, and let
+    ``inspect`` read the OLD container's state — which produced confidently
+    wrong health diagnoses. So: ask, then confirm it is absent.
+    """
+    name = container_name(slug)
+    await _docker("rm", "-f", name, timeout=30)
+    for _ in range(40):  # ~8s
+        code, _out, _err = await _docker("inspect", "-f", "{{.Id}}", name, timeout=10)
+        if code != 0:
+            return
+        await asyncio.sleep(0.2)
+    logger.warning("Container %s did not disappear after rm -f", name)
+
+
+# ── code ──────────────────────────────────────────────────────────────────
+def _safe_rel(raw: Any) -> str | None:
+    text = str(raw or "").strip().replace("\\", "/").lstrip("/")
+    if not text or len(text) > 120:
+        return None
+    parts = []
+    for part in text.split("/"):
+        if not part or part == "." :
+            continue
+        if part == ".." or part.startswith(".") or part == "_data":
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,60}", part):
+            return None
+        parts.append(part)
+    if not parts or len(parts) > 3:
+        return None
+    return "/".join(parts)
+
+
+def parse_files(files: Any) -> dict[str, str]:
+    """Accept {"app.py": "..."} or [{"path":..,"content":..}], as elsewhere."""
+    raw = files
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise SiteServerError(f"files must be JSON: {e}") from None
+    if isinstance(raw, dict) and "path" in raw and "content" in raw:
+        raw = [raw]
+    if isinstance(raw, list):
+        pairs = [(i.get("path"), i.get("content")) for i in raw if isinstance(i, dict)]
+    elif isinstance(raw, dict):
+        pairs = list(raw.items())
+    else:
+        raise SiteServerError("files must be an object or a list of {path, content}")
+    out: dict[str, str] = {}
+    for path, content in pairs:
+        rel = _safe_rel(path)
+        if not rel:
+            raise SiteServerError(f"unsafe server file path: {path!r}")
+        if not rel.endswith((".py", ".txt", ".json", ".sql", ".html", ".css", ".js")):
+            raise SiteServerError(f"{rel}: server files must be .py/.json/.txt/.sql/.html/.css/.js")
+        out[rel] = content if isinstance(content, str) else json.dumps(content, indent=2)
+    if not out:
+        raise SiteServerError("no files given")
+    if len(out) > MAX_FILES:
+        raise SiteServerError(f"too many server files (max {MAX_FILES})")
+    total = sum(len(v.encode("utf-8")) for v in out.values())
+    if total > MAX_CODE_BYTES:
+        raise SiteServerError(f"server code too large ({total} bytes, max {MAX_CODE_BYTES})")
+    return out
+
+
+def parse_env(env: Any) -> dict[str, str]:
+    if not env:
+        return {}
+    raw = env
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise SiteServerError(f"env must be a JSON object: {e}") from None
+    if not isinstance(raw, dict):
+        raise SiteServerError("env must be an object of NAME: value")
+    out = {}
+    for key, value in raw.items():
+        key = str(key).strip()
+        if not ENV_KEY_RE.match(key):
+            raise SiteServerError(f"bad env name {key!r} — use UPPER_SNAKE_CASE")
+        if key in RESERVED_ENV:
+            raise SiteServerError(f"{key} is set by the runtime and cannot be overridden")
+        text = value if isinstance(value, str) else json.dumps(value)
+        if len(text) > MAX_ENV_VALUE:
+            raise SiteServerError(f"{key} is too long (max {MAX_ENV_VALUE} chars)")
+        out[key] = text
+    if len(out) > MAX_ENV_KEYS:
+        raise SiteServerError(f"too many env vars (max {MAX_ENV_KEYS})")
+    return out
+
+
+def write_code(data_dir, slug: str, files: dict[str, str]) -> list[str]:
+    """Replace the server's source. Returns the paths written."""
+    target = code_dir(data_dir, slug)
+    target.mkdir(parents=True, exist_ok=True)
+    state_dir(data_dir, slug).mkdir(parents=True, exist_ok=True)
+    # Drop the previous source (never the _data dir) so a renamed module can't
+    # linger and shadow the new one.
+    for old in target.iterdir():
+        if old.name == "_data":
+            continue
+        if old.is_dir():
+            shutil.rmtree(old, ignore_errors=True)
+        else:
+            with contextlib.suppress(OSError):
+                old.unlink()
+    written = []
+    for rel, content in files.items():
+        dest = (target / rel).resolve()
+        if target.resolve() not in dest.parents:
+            raise SiteServerError(f"{rel}: path escapes the server directory")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding="utf-8")
+        written.append(rel)
+    # /data is written by uid 10001 inside the container.
+    with contextlib.suppress(OSError):
+        os.chown(state_dir(data_dir, slug), 10001, 10001)
+    return sorted(written)
+
+
+def read_code(data_dir, slug: str, rel: str) -> str:
+    safe = _safe_rel(rel)
+    if not safe:
+        raise SiteServerError(f"bad path {rel!r}")
+    path = code_dir(data_dir, slug) / safe
+    if not path.is_file():
+        raise SiteServerError(f"{safe} is not in this site's server")
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def list_code(data_dir, slug: str) -> list[tuple[str, int]]:
+    base = code_dir(data_dir, slug)
+    if not base.is_dir():
+        return []
+    out = []
+    for path in sorted(base.rglob("*")):
+        if path.is_file() and "_data" not in path.parts:
+            with contextlib.suppress(OSError):
+                out.append((str(path.relative_to(base)), path.stat().st_size))
+    return out
+
+
+# ── lifecycle ─────────────────────────────────────────────────────────────
+async def _http_ping(port: int) -> str:
+    """'ok' when something upstream actually speaks HTTP on this port.
+
+    A plain TCP connect proves nothing: with ``-p`` published, docker-proxy
+    accepts the connection whether or not the container process is alive, so
+    the old connect-only check called a crash-looping backend healthy. Send a
+    real request and require a real status line back.
+    """
+    writer = None
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection("127.0.0.1", port), timeout=3
+        )
+        writer.write(b"GET / HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        await asyncio.wait_for(writer.drain(), timeout=3)
+        line = await asyncio.wait_for(reader.readline(), timeout=5)
+        # Any status counts — a 404 from the app is still the app answering.
+        return "ok" if line.startswith(b"HTTP/") else "no HTTP response"
+    except (OSError, asyncio.TimeoutError) as e:
+        return f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+    finally:
+        if writer is not None:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+
+
+async def _wait_healthy(port: int, slug: str) -> str:
+    """Poll until the backend answers, or say why it never did."""
+    deadline = asyncio.get_running_loop().time() + START_TIMEOUT
+    last = "timeout"
+    while asyncio.get_running_loop().time() < deadline:
+        code, out, _err = await _docker(
+            "inspect",
+            "-f",
+            "{{.State.Running}} {{.State.Restarting}} {{.RestartCount}} {{.State.ExitCode}}",
+            container_name(slug),
+            timeout=10,
+        )
+        if code != 0:
+            return "the container disappeared"
+        parts = out.split()
+        running, restarting = parts[0] == "true", parts[1] == "true"
+        restarts = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        exit_code = parts[3] if len(parts) > 3 else "?"
+        # --restart unless-stopped means a broken app flaps instead of staying
+        # dead, so a restart count is the signal that it is crash-looping.
+        if restarts > 0 or restarting:
+            return f"it keeps crashing on startup (exit code {exit_code})"
+        if running:
+            last = await _http_ping(port)
+            if last == "ok":
+                return "ok"
+        await asyncio.sleep(0.4)
+    return last
+
+
+async def start(data_dir, slug: str, *, env: dict[str, str] | None = None) -> dict:
+    """(Re)launch the site's backend container. Returns its registry entry."""
+    slug = _check_slug(slug)
+    source = code_dir(data_dir, slug)
+    if not (source / "app.py").is_file():
+        raise SiteServerError(
+            "no app.py for this site — write the server first (it must listen on 0.0.0.0:$PORT)"
+        )
+    await _ensure_image()
+    previous = get_entry(data_dir, slug) or {}
+    if env is None:
+        env = {k: str(v) for k, v in (previous.get("env") or {}).items()}
+    port = int(previous.get("port") or 0) or _free_port(data_dir, slug)
+
+    await _remove_container(slug)
+    # The port is reused across restarts, so wait for the old listener to
+    # actually stop answering. Without this the first health ping can be
+    # served by the container we just removed, and a broken replacement
+    # reports itself healthy.
+    for _ in range(20):
+        if await _http_ping(port) != "ok":
+            break
+        await asyncio.sleep(0.25)
+    args = [
+        "run", "-d",
+        "--name", container_name(slug),
+        "--label", f"maxwell.site={slug}",
+        "--restart", "unless-stopped",
+        "--memory", MEMORY,
+        "--cpus", CPUS,
+        "--pids-limit", PIDS,
+        "--security-opt", "no-new-privileges:true",
+        "--cap-drop", "ALL",
+        "--read-only",
+        "--tmpfs", "/tmp:rw,noexec,nosuid,size=32m",
+        "-p", f"127.0.0.1:{port}:{CONTAINER_PORT}",
+        "-v", f"{source.resolve()}:/app:ro",
+        "-v", f"{state_dir(data_dir, slug).resolve()}:/data:rw",
+        "-e", f"PORT={CONTAINER_PORT}",
+        "-e", f"SITE_SLUG={slug}",
+        "-e", f"SITE_BASE_PATH=/bot/{slug}/api",
+    ]
+    for key, value in (env or {}).items():
+        args.extend(["-e", f"{key}={value}"])
+    args.append(IMAGE)
+
+    code, _out, err = await _docker(*args, timeout=60)
+    if code != 0:
+        raise SiteServerError(f"could not start the backend: {err.strip()[:300]}")
+
+    health = await _wait_healthy(port, slug)
+    entry = {
+        "port": port,
+        "env": env or {},
+        "running": health == "ok",
+        "health": health,
+        "container": container_name(slug),
+    }
+    _write_entry(data_dir, slug, entry)
+    if health != "ok":
+        # Grab the logs BEFORE tearing it down — they are the only thing that
+        # tells the model what to fix. Then remove it, so a broken app is not
+        # left crash-looping forever holding a port.
+        tail = await logs(data_dir, slug, lines=30)
+        await _remove_container(slug)
+        raise SiteServerError(
+            f"the backend never came up: {health}.\n"
+            "It must listen on 0.0.0.0:$PORT and stay in the foreground.\n"
+            f"Its last output:\n{tail}"
+        )
+    return entry
+
+
+async def stop(data_dir, slug: str) -> bool:
+    """Stop and remove the container; keep the code, the data, and the env."""
+    slug = _check_slug(slug)
+    entry = get_entry(data_dir, slug)
+    await _remove_container(slug)
+    if entry:
+        entry = dict(entry)
+        entry["running"] = False
+        entry["health"] = "stopped"
+        _write_entry(data_dir, slug, entry)
+    return bool(entry)
+
+
+async def destroy(data_dir, slug: str) -> None:
+    """Site is gone: container, code, database, secrets, registry row."""
+    with contextlib.suppress(SiteServerError, Exception):
+        await _remove_container(slug)
+    with contextlib.suppress(Exception):
+        shutil.rmtree(code_dir(data_dir, slug), ignore_errors=True)
+    with contextlib.suppress(Exception):
+        _write_entry(data_dir, slug, None)
+
+
+async def logs(data_dir, slug: str, lines: int = 40) -> str:
+    lines = max(1, min(int(lines or 40), 200))
+    code, out, err = await _docker(
+        "logs", "--tail", str(lines), container_name(slug), timeout=20
+    )
+    if code != 0:
+        return "(no container — the backend is not running)"
+    text = (out + err).strip()
+    return text[-4000:] if text else "(no output yet)"
+
+
+async def status(data_dir, slug: str) -> str:
+    entry = get_entry(data_dir, slug)
+    if not entry:
+        return "no backend server for this site"
+    code, out, _err = await _docker(
+        "inspect", "-f", "{{.State.Status}} {{.RestartCount}}", container_name(slug), timeout=15
+    )
+    live = out.strip() if code == 0 else "absent"
+    files = ", ".join(f"{n} ({s}B)" for n, s in list_code(data_dir, slug)) or "no files"
+    secrets = ", ".join(sorted(entry.get("env") or {})) or "none"
+    return (
+        f"container {live} on 127.0.0.1:{entry.get('port')} "
+        f"(public path /bot/{slug}/api/...)\nfiles: {files}\nenv: {secrets}"
+    )
+
+
+async def reconcile(data_dir) -> None:
+    """On boot: drop registry rows whose container is gone for good.
+
+    Containers carry --restart unless-stopped, so docker brings them back by
+    itself. This only fixes the registry when one was removed out from under
+    us (docker prune, manual rm, a site deleted while the bot was down).
+    """
+    for slug, entry in list(_read_registry(data_dir).items()):
+        if not entry.get("running"):
+            continue
+        code, out, _err = await _docker(
+            "inspect", "-f", "{{.State.Running}}", container_name(slug), timeout=15
+        )
+        alive = code == 0 and out.strip() == "true"
+        if alive:
+            continue
+        if code != 0:
+            logger.info("Site backend %s has no container any more; clearing it", slug)
+            _write_entry(data_dir, slug, None)
+        else:
+            try:
+                await start(data_dir, slug)
+                logger.info("Restarted site backend %s", slug)
+            except SiteServerError as e:
+                logger.warning("Site backend %s would not restart: %s", slug, e)
+
+
+# ── what the model is told ────────────────────────────────────────────────
+EXAMPLE_APP = '''from flask import Flask, request, jsonify
+import sqlite3, os
+
+app = Flask(__name__)
+DB = "/data/app.db"          # only /data survives a restart
+
+def db():
+    conn = sqlite3.connect(DB)
+    conn.execute("CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, text TEXT)")
+    return conn
+
+@app.get("/notes")           # the page fetches /bot/<slug>/api/notes
+def list_notes():
+    rows = db().execute("SELECT id, text FROM notes ORDER BY id DESC").fetchall()
+    return jsonify([{"id": r[0], "text": r[1]} for r in rows])
+
+@app.post("/notes")
+def add_note():
+    conn = db()
+    conn.execute("INSERT INTO notes (text) VALUES (?)", (request.json["text"],))
+    conn.commit()
+    return jsonify(ok=True)
+
+from waitress import serve
+serve(app, host="0.0.0.0", port=int(os.environ["PORT"]))
+'''
+
+
+def contract(slug: str) -> str:
+    """The rules a site backend has to follow, handed back in tool results."""
+    return (
+        f"Backend server for {slug}:\n"
+        f"  Public path : /bot/{slug}/api/...  ->  your routes, with /bot/{slug}/api stripped.\n"
+        f"                A route defined as /notes is reached at /bot/{slug}/api/notes.\n"
+        "  Entry       : app.py, listening on 0.0.0.0:$PORT (the runtime sets PORT).\n"
+        "  Installed   : python 3.12, flask, waitress, requests, and the stdlib "
+        "(sqlite3, json, urllib). No pip at runtime.\n"
+        "  Writable    : /data only, and it persists. /app is read-only. Put the "
+        "database at /data/app.db.\n"
+        "  Secrets     : pass env={\"API_KEY\": \"...\"} — held outside the site "
+        "directory, never served, never echoed back. Read with os.environ.\n"
+        "  Outbound    : allowed, so this is where a key-carrying API call belongs.\n"
+        "  Limits      : 256MB, half a core, 128 processes, no capabilities.\n"
+        "  Logs        : site_server(action=logs) — stdout/stderr, your prints included."
+    )
