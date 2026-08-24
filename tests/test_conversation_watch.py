@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from autonomy import _reply_relation_bit
 from bot import MaxwellBot
+from concurrency_safety import KeyedLocks
 from control_defaults import DEFAULT_CONTROL
 
 
@@ -15,8 +16,9 @@ def _bot(*, watch_seconds=180, debounce_seconds=0.05):
             "conversation_watch_debounce_seconds": debounce_seconds,
         },
         _conversation_watch={},
+        _watch_states={},
         _watch_debounce={},
-        _channel_locks={},
+        _channel_locks=KeyedLocks(),
         _typing_users={},
         _blacklist=set(),
         _replying_channels=set(),
@@ -28,6 +30,10 @@ def _bot(*, watch_seconds=180, debounce_seconds=0.05):
     bot._conversation_watch_seconds = MaxwellBot._conversation_watch_seconds.__get__(
         bot
     )
+    bot._watch_state = MaxwellBot._watch_state.__get__(bot)
+    bot._watch_address_signal = MaxwellBot._watch_address_signal.__get__(bot)
+    bot._note_watch_message = MaxwellBot._note_watch_message.__get__(bot)
+    bot._note_watch_silence = MaxwellBot._note_watch_silence.__get__(bot)
     bot._arm_conversation_watch = MaxwellBot._arm_conversation_watch.__get__(bot)
     bot._conversation_watch_active = MaxwellBot._conversation_watch_active.__get__(bot)
     bot._conversation_watch_prompt = MaxwellBot._conversation_watch_prompt.__get__(bot)

@@ -2738,7 +2738,9 @@ class AutonomyEngine:
             ):
                 logger.info("Autonomy planner: provider not available, soft skip")
                 return [{"kind": "do_nothing", "reason": "provider not available"}]
-            await self.bot._acquire_ai_slot(timeout=timeout)
+            # Own fairness bucket: the planner is one long-running background
+            # tick and must not take turns against every live room.
+            await self.bot._acquire_ai_slot(timeout=timeout, key="autonomy")
             try:
                 # Pass the configured autonomy model as override so even the main
                 # provider runs a different model if autonomy_model is set.

@@ -544,8 +544,11 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     "inbox_list": _obj({}),
     "inbox_act": _obj(
         {
-            "action": _str("accept, decline, or dismiss"),
-            "item_id": _str("Inbox item id, e.g. friend_123"),
+            "action": _str(
+                "accept, decline, dismiss, or read (read demotes a notice "
+                "without clearing it)"
+            ),
+            "item_id": _str("Inbox item id, e.g. friend_123 or email_412"),
             "user_id": _str("Requester Discord id if item_id is omitted"),
         },
         ["action"],
@@ -610,7 +613,10 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     ),
     "email_get_message": _obj(
         {
-            "message_id": _str("Message id (from email_read_inbox or email_search)"),
+            "message_id": _str(
+                "IMAP uid, from email_read_inbox, email_search, or an inbox "
+                "email notice (412 and email_412 both work)"
+            ),
             "max_chars": _int("Max body characters to return (default 8000)"),
         },
         ["message_id"],

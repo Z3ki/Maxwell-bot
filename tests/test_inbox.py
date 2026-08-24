@@ -308,3 +308,88 @@ def test_new_tools_are_followup_and_have_schemas():
         assert _tool_results_need_followup([f"Tool {name}: ok"])
     assert "action" in TOOL_PARAMETERS["inbox_act"]["properties"]
     assert "user_id" in TOOL_PARAMETERS["vc_where"]["properties"]
+
+
+def _item(iid, kind, created, state="unread", **extra):
+    row = {
+        "id": iid,
+        "kind": kind,
+        "state": state,
+        "created_at": created,
+        "actor_id": "",
+        "actor_name": "someone",
+        "summary": f"{kind} {iid}",
+        "actions": ["dismiss"],
+        "payload": {},
+    }
+    row.update(extra)
+    return row
+
+
+def test_a_waiting_person_outranks_a_pile_of_mail(tmp_path):
+    """Mail arrives in bursts; a friend request must not be pushed out."""
+    store = InboxStore(str(tmp_path))
+    items = [
+        _item(f"email_{n}", "email", f"2026-08-24T10:{n:02d}:00Z") for n in range(20)
+    ]
+    items.append(_item("friend_9", "friend_request", "2026-08-24T09:00:00Z"))
+
+    ordered = store.planner_items(items)
+    assert ordered[0]["id"] == "friend_9"
+    # Mail is capped, so it cannot fill the tail on its own.
+    assert sum(1 for i in ordered if i["kind"] == "email") == 6
+
+
+def test_newest_first_within_a_kind(tmp_path):
+    store = InboxStore(str(tmp_path))
+    ordered = store.planner_items(
+        [
+            _item("email_1", "email", "2026-08-24T09:00:00Z"),
+            _item("email_2", "email", "2026-08-24T11:00:00Z"),
+            _item("email_3", "email", "2026-08-24T10:00:00Z"),
+        ]
+    )
+    assert [i["id"] for i in ordered] == ["email_2", "email_3", "email_1"]
+
+
+def test_marking_read_demotes_without_clearing(tmp_path):
+    store = InboxStore(str(tmp_path))
+
+    async def run():
+        await store.upsert(_item("email_1", "email", "2026-08-24T09:00:00Z"))
+        await store.upsert(_item("email_2", "email", "2026-08-24T11:00:00Z"))
+        assert await apply_inbox_action(
+            SimpleNamespace(inbox=store), action="read", item_id="email_2"
+        ) == "Marked email_2 read"
+        ordered = store.planner_items(await store.load_items())
+        # Still there, but the unread one now leads.
+        assert [i["id"] for i in ordered] == ["email_1", "email_2"]
+
+    asyncio.run(run())
+
+
+def test_accept_on_an_email_explains_itself(tmp_path):
+    store = InboxStore(str(tmp_path))
+
+    async def run():
+        await store.upsert(
+            _item("email_1", "email", "2026-08-24T09:00:00Z", actions=["read", "dismiss"])
+        )
+        out = await apply_inbox_action(
+            SimpleNamespace(inbox=store), action="accept", item_id="email_1"
+        )
+        assert "not valid for a email" in out
+        # It names the actions that would have worked.
+        assert "dismiss" in out and "read" in out
+
+    asyncio.run(run())
+
+
+def test_the_tail_stays_inside_its_budget(tmp_path):
+    store = InboxStore(str(tmp_path))
+    items = [
+        _item(f"n_{n}", f"kind{n}", f"2026-08-24T10:{n:02d}:00Z", summary="x" * 300)
+        for n in range(40)
+    ]
+    text = store.render_planner(items)
+    assert len(text) <= 900

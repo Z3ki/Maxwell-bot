@@ -10,6 +10,7 @@ import inspect
 import io
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -195,7 +196,15 @@ def _patch_voice_recv_decoder():
 _patch_voice_recv_decoder()
 
 from autonomy import AutonomyEngine, _reply_relation_bit  # noqa: E402
-from concurrency_safety import ChannelWorkQueues, ToolConcurrency, loop_watchdog  # noqa: E402
+import watch_policy  # noqa: E402
+from concurrency_safety import (  # noqa: E402
+    ChannelWorkQueues,
+    FairSemaphore,
+    KeyedLocks,
+    ToolConcurrency,
+    classify_tool,
+    loop_watchdog,
+)
 from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before these imports
     OWNER_IDS,
     ChangeAvatarTool,
@@ -293,6 +302,7 @@ from control_defaults import (  # noqa: E402
     parse_bool,
 )
 import guild_onboarding  # noqa: E402
+from email_inbox import EmailInboxPoller  # noqa: E402
 from inbox import InboxStore, apply_inbox_action  # noqa: E402
 from providers import (  # noqa: E402
     MIME_MAP,
@@ -386,6 +396,24 @@ logger = logging.getLogger(__name__)
 # How long an out-of-band `,confirm` authorizes one destructive tool call on a
 # tainted turn. Short + one-shot so a fetched page can't ride a stale confirm.
 _CONFIRM_TTL_SECONDS = 120.0
+
+# Ceiling on remembered per-room watch state. Eviction costs a room one
+# default-length watch window and nothing else.
+_MAX_WATCH_STATES = 300
+
+# Every one of these is keyed by channel or user and written on the hot path.
+# None of them had an eviction rule, so each was a slow leak proportional to
+# how many distinct rooms the bot had ever seen — which is exactly the number
+# that grows when he is in a lot of servers.
+_PER_CHANNEL_STATE_CAPS = {
+    "_cooldowns": 2000,
+    "_last_bot_reply": 1000,
+    "_last_bot_send": 1000,
+    "_recent_users": 500,
+    "_typing_users": 500,
+    "_active_request_user": 500,
+    "_current_progress_by_channel": 500,
+}
 
 MAX_VISUAL_MEMORY_IMAGES = 5
 # Keep visual carryover short. Long-lived image payloads make the model randomly
@@ -2465,7 +2493,9 @@ class MaxwellBot(commands.Bot):
         self.rem_prompt_body = load_rem_defaults()["prompt"]
         self._rem_running = False
         self.tools = {}
-        self._channel_locks: dict[str, asyncio.Lock] = {}
+        # Bounded: a plain dict here kept one Lock alive per channel the bot
+        # had ever seen, which across a few hundred servers only ever grows.
+        self._channel_locks = KeyedLocks(max_idle=256)
         self._telegram_chat_locks: dict[str, asyncio.Lock] = {}
         # Channels the bot is currently generating a reply for (in-flight).
         # Autonomy reads this to avoid posting into a channel mid-reply, which
@@ -2481,9 +2511,11 @@ class MaxwellBot(commands.Bot):
         # slowmode timer and get rate-limited (429) on a busy channel.
         self._last_bot_send: dict[str, float] = {}
         self._ai_concurrency = 2
-        self._ai_active = 0
-        self._ai_user_waiter_count = 0  # user-priority calls waiting for a slot
-        self._ai_cond = asyncio.Condition()
+        # Admission to the LLM slots. Fair across rooms: see FairSemaphore.
+        # A dozen servers talking at once now take turns instead of racing,
+        # so a burst in one guild can't hold both slots back to back while a
+        # quiet server's single question times out waiting.
+        self._ai_slots = FairSemaphore(self._ai_concurrency)
         # Per-call priority tracking. "user" calls (Discord/Telegram/VC replies)
         # outrank "background" calls (autonomy, intel, context_cleanup, REM) so a
         # slow upstream can't make the user wait behind a 60s background tick.
@@ -2507,6 +2539,18 @@ class MaxwellBot(commands.Bot):
         # channel_id -> monotonic expiry. After a real exchange, the whole
         # room stays on watch so a follow-up does not need another @.
         self._conversation_watch: dict[str, float] = {}
+        # channel_id -> watch_policy.WatchState. How each room is actually
+        # going: its pace, when he last spoke, whether anyone is answering
+        # him. The watch window and the debounce are derived from this rather
+        # than being the same two constants for every room.
+        self._watch_states: dict[str, Any] = {}
+        # channel_id -> monotonic time of that room's last context extraction,
+        # and the set of authors we have already extracted about. Both feed
+        # the extraction score: a room that just produced a fact has to clear
+        # a higher bar, and a voice we have never stored anything from clears
+        # a slightly lower one.
+        self._last_extract_at: dict[str, float] = {}
+        self._extracted_authors: set[str] = set()
         # channel_id -> pending watch follow-up. Wait a beat so a burst of
         # lines becomes one reply instead of one LLM turn per message.
         self._watch_debounce: dict[str, dict] = {}
@@ -3196,6 +3240,22 @@ class MaxwellBot(commands.Bot):
             self.config.DATA_DIR, run_history=self.config.REM_RUN_HISTORY
         )
         self.inbox = InboxStore(self.config.DATA_DIR)
+        # Mail is pull-only through the email_* tools, so an unread message is
+        # invisible until he thinks to look. The poller files new mail as inbox
+        # notices; it stays None when no mailbox password is configured.
+        self.mail_poller: EmailInboxPoller | None = None
+        if getattr(self.config, "ENABLE_EMAIL_TOOLS", False):
+            self.mail_poller = EmailInboxPoller(
+                self.inbox,
+                {
+                    "imap_host": getattr(self.config, "MAXWELL_IMAP_HOST", "127.0.0.1"),
+                    "imap_port": getattr(self.config, "MAXWELL_IMAP_PORT", 993),
+                    "user": getattr(self.config, "MAXWELL_EMAIL_USER", ""),
+                    "password": getattr(self.config, "MAXWELL_EMAIL_PASSWORD", ""),
+                },
+                data_dir=self.config.DATA_DIR,
+                interval=self._mail_poll_seconds(),
+            )
 
     def _setup_tools(self):
         # Every tool is gated by an ENABLE_* env var so a fresh install
@@ -3403,9 +3463,7 @@ class MaxwellBot(commands.Bot):
         await self.memory.add_to_channel_memory(channel_id, enriched)
 
     def _get_channel_lock(self, channel_id: str) -> asyncio.Lock:
-        if channel_id not in self._channel_locks:
-            self._channel_locks[channel_id] = asyncio.Lock()
-        return self._channel_locks[channel_id]
+        return self._channel_locks.get(channel_id)
 
     def _channel_lock_timeout(self) -> float:
         """Fail fast under load instead of parking a room for two minutes."""
@@ -3773,6 +3831,22 @@ class MaxwellBot(commands.Bot):
             return False
         return bool(meta.get("reply_to_author_id"))
 
+    def _mail_poll_seconds(self) -> float:
+        raw = (getattr(self, "_control", None) or {}).get(
+            "email_inbox_poll_seconds", 120
+        )
+        try:
+            # Floor of 30s: IMAP login is not free and mail is not urgent.
+            return max(30.0, min(float(raw), 3600.0))
+        except (TypeError, ValueError):
+            return 120.0
+
+    async def _mail_poll_loop(self) -> None:
+        poller = getattr(self, "mail_poller", None)
+        if poller is None:
+            return
+        await poller.run()
+
     def _conversation_watch_seconds(self) -> float:
         raw = (getattr(self, "_control", None) or {}).get(
             "conversation_watch_seconds", 180
@@ -3782,14 +3856,42 @@ class MaxwellBot(commands.Bot):
         except (TypeError, ValueError):
             return 180.0
 
+    def _watch_state(self, channel_id):
+        """Per-room watch memory, created on demand and bounded.
+
+        Rooms are evicted oldest-first once the registry is full; a room that
+        comes back simply starts fresh, which costs one default-length watch
+        window and nothing else.
+        """
+        cid = str(channel_id or "").strip()
+        states = getattr(self, "_watch_states", None)
+        if states is None:
+            self._watch_states = {}
+            states = self._watch_states
+        state = states.get(cid)
+        if state is None:
+            state = watch_policy.WatchState()
+            states[cid] = state
+            if len(states) > _MAX_WATCH_STATES:
+                for stale in list(states)[: len(states) - _MAX_WATCH_STATES // 2]:
+                    if stale != cid:
+                        states.pop(stale, None)
+        return state
+
     def _arm_conversation_watch(self, channel_id) -> None:
-        seconds = self._conversation_watch_seconds()
-        if seconds <= 0:
+        base = self._conversation_watch_seconds()
+        if base <= 0:
             return
         cid = str(channel_id or "").strip()
         if not cid:
             return
         now = asyncio.get_running_loop().time()
+        state = self._watch_state(cid)
+        # How long this room earns depends on how the room is going: a live
+        # exchange holds the watch longer than the configured base, a room
+        # that has ignored his last few turns holds it for much less. The
+        # configured value is the centre of that range, not a flat timer.
+        seconds = watch_policy.window_seconds(state, base, now)
         watch = getattr(self, "_conversation_watch", None)
         if watch is None:
             self._conversation_watch = {}
@@ -3797,6 +3899,87 @@ class MaxwellBot(commands.Bot):
         watch[cid] = now + seconds
         if len(watch) > 200:
             self._conversation_watch = {k: exp for k, exp in watch.items() if exp > now}
+        # _watch_states is deliberately NOT pruned alongside this. A room whose
+        # watch just expired is the likeliest to be re-armed in a minute, and
+        # its silent-streak history is exactly what should shape the next
+        # window. _watch_state bounds that registry on its own.
+
+    def _watch_address_signal(self, message) -> "watch_policy.AddressSignal":
+        """Read who this message is aimed at, from Discord metadata.
+
+        The one text-derived signal is whether his current display name shows
+        up — which follows a rename, because the names come from the live
+        client, not from a list in the source.
+        """
+        signal = watch_policy.AddressSignal()
+        with contextlib.suppress(Exception):
+            signal.direct = bool(self._directly_addressed(message))
+        with contextlib.suppress(Exception):
+            signal.soft = bool(self._soft_addressed(message))
+        with contextlib.suppress(Exception):
+            signal.reply_to_other = bool(self._replying_to_other(message))
+        if not signal.reply_to_other:
+            ref = getattr(getattr(message, "reference", None), "resolved", None)
+            ref_id = getattr(getattr(ref, "author", None), "id", None)
+            me_id = getattr(getattr(self, "user", None), "id", None)
+            if ref_id is not None and me_id is not None and ref_id != me_id:
+                signal.reply_to_other = True
+        with contextlib.suppress(Exception):
+            signal.mentions_other = bool(self._addressing_someone_else(message))
+        signal.from_bot = bool(getattr(getattr(message, "author", None), "bot", False))
+        text = str(getattr(message, "content", "") or "")
+        signal.text_length = len(text.strip())
+        signal.is_question = text.rstrip().endswith("?")
+        signal.has_media = bool(
+            getattr(message, "attachments", None) or getattr(message, "embeds", None)
+        )
+        me = getattr(self, "user", None)
+        names = [
+            getattr(me, "display_name", None),
+            getattr(me, "name", None),
+            getattr(self, "bot_name", None),
+        ]
+        signal.names_him = watch_policy.name_mentioned(
+            text, [n for n in names if n]
+        )
+        return signal
+
+    def _note_watch_message(self, message) -> None:
+        """Fold one observed line into its room's pace and engagement."""
+        channel = getattr(message, "channel", None)
+        cid = str(getattr(channel, "id", "") or "")
+        if not cid:
+            return
+        try:
+            now = asyncio.get_running_loop().time()
+        except RuntimeError:
+            return
+        state = self._watch_state(cid)
+        if not getattr(getattr(message, "author", None), "bot", False):
+            state.observe_message(now)
+        with contextlib.suppress(Exception):
+            if self._directly_addressed(message):
+                state.observe_engagement(now)
+
+    def _note_watch_silence(self, message) -> None:
+        """Record a watch turn that ended in no_response.
+
+        This is the feedback that makes the window adaptive: rooms where he
+        keeps choosing silence stop being watched so aggressively. The
+        opposite signal — him actually speaking — is recorded by
+        _arm_watch_from_own_message, which fires for every post he makes.
+        """
+        cid = str(getattr(getattr(message, "channel", None), "id", "") or "")
+        if not cid:
+            return
+        state = self._watch_state(cid)
+        state.turns += 1
+        # Only a soft follow-up counts against the room. Declining to answer a
+        # direct ping is a different decision and must not make the room look
+        # like it is ignoring him.
+        if not getattr(message, "_watch_followup", False):
+            return
+        state.observe_silence()
 
     def _conversation_watch_active(self, channel_id) -> bool:
         watch = getattr(self, "_conversation_watch", None) or {}
@@ -3822,44 +4005,27 @@ class MaxwellBot(commands.Bot):
             lines.append(
                 "Conversation watch is on in this room. You can talk without "
                 "an @, but default to no_response. The transcript is THIS "
-                "channel's current thread — stay on it. Only speak if someone "
-                "is talking to you or asking you something in that exchange. "
-                "Stay silent for lol/ok/side talk, people talking about you "
-                "to someone else, or a new topic you are not in. Don't bring "
-                "up other rooms or old topics that aren't in this conversation."
+                "channel's current thread — stay on it. Speak when the "
+                "exchange in front of you is actually with you; stay silent "
+                "for side talk, reactions, people discussing you with someone "
+                "else, and topics you are not part of. Don't bring up other "
+                "rooms or old topics that aren't in this conversation."
             )
-            directed = False
-            reply_other = False
-            ping_other = False
+            # The old prompt spelled out each addressing case in its own
+            # paragraph, which repeated the rule three times and left the
+            # model to reconcile them. One computed line of facts about the
+            # actual message reads better and covers the combinations prose
+            # kept missing (named-but-not-pinged, broadcast, and so on).
             with contextlib.suppress(Exception):
-                directed = bool(self._directly_addressed(message))
-            with contextlib.suppress(Exception):
-                reply_other = bool(self._replying_to_other(message))
-            if not reply_other:
-                ref = getattr(getattr(message, "reference", None), "resolved", None)
-                ref_id = getattr(getattr(ref, "author", None), "id", None)
-                me_id = getattr(getattr(self, "user", None), "id", None)
-                if ref_id is not None and me_id is not None and ref_id != me_id:
-                    reply_other = True
-            with contextlib.suppress(Exception):
-                ping_other = bool(self._addressing_someone_else(message))
-            if not directed:
-                if reply_other:
-                    lines.append(
-                        "This Discord message is a reply to someone else, not "
-                        "to you. Room chat — not a ping and not a Discord-reply "
-                        "to Maxwell."
-                    )
-                elif ping_other:
-                    lines.append(
-                        "They @ mentioned someone else, not you. This is not a "
-                        "ping to Maxwell."
-                    )
-                else:
-                    lines.append(
-                        "This was posted to the channel, not sent to you. No @, "
-                        "no Discord-reply to you — room chat, not a ping."
-                    )
+                signal = self._watch_address_signal(message)
+                state = self._watch_state(channel_id)
+                now = asyncio.get_running_loop().time()
+                pressure = watch_policy.reply_pressure(
+                    signal, state, now, self._conversation_watch_seconds()
+                )
+                lines.append(
+                    watch_policy.describe_signal(signal, state, pressure, now)
+                )
         if getattr(message, "_watch_followup", False):
             lines.append(
                 "Soft follow-up: they did not @ you or Discord-reply this time. "
@@ -3915,16 +4081,36 @@ class MaxwellBot(commands.Bot):
     async def _arm_watch_from_own_message(self, message) -> None:
         """Any post from Maxwell keeps that whole room on watch."""
         channel = getattr(message, "channel", None)
-        self._arm_conversation_watch(getattr(channel, "id", ""))
+        cid = getattr(channel, "id", "")
+        # Record it before arming: speaking clears the silent streak, so the
+        # window this arms is computed with his patience restored.
+        with contextlib.suppress(Exception):
+            self._watch_state(cid).observe_spoke(asyncio.get_running_loop().time())
+        self._arm_conversation_watch(cid)
 
-    def _watch_debounce_seconds(self) -> float:
+    def _watch_debounce_seconds(self, channel_id=None) -> float:
+        """How long to let a burst settle before answering it.
+
+        The configured value is the baseline for a room with no measured
+        pace. Once a room's rhythm is known the wait tracks it: in a channel
+        where people post every half second, a flat 1s lands mid-thought and
+        he answers a fragment; in a slow channel the same 1s is needless
+        delay. Still clamped to the same 0.05–5s envelope.
+        """
         raw = (getattr(self, "_control", None) or {}).get(
             "conversation_watch_debounce_seconds", 1.0
         )
         try:
-            return max(0.05, min(float(raw), 5.0))
+            base = max(0.05, min(float(raw), 5.0))
         except (TypeError, ValueError):
-            return 1.0
+            base = 1.0
+        if channel_id is None:
+            return base
+        try:
+            state = self._watch_state(channel_id)
+        except Exception:
+            return base
+        return max(0.05, min(watch_policy.debounce_seconds(state, base), 5.0))
 
     def _cancel_watch_debounce(self, channel_id) -> None:
         bucket = (getattr(self, "_watch_debounce", None) or {}).pop(
@@ -3972,7 +4158,7 @@ class MaxwellBot(commands.Bot):
         old = bucket.get("task")
         if old is not None and not old.done():
             old.cancel()
-        delay = self._watch_debounce_seconds()
+        delay = self._watch_debounce_seconds(cid)
         bucket["task"] = self._track_task(
             asyncio.create_task(
                 self._flush_watch_reply(cid, delay),
@@ -4055,57 +4241,35 @@ class MaxwellBot(commands.Bot):
             return
         self._touch_watch_debounce(message)
 
-    async def _acquire_ai_slot(self, timeout: float, *, priority: str = "background"):
+    async def _acquire_ai_slot(
+        self, timeout: float, *, priority: str = "background", key: str = ""
+    ):
         """Acquire one of `ai_concurrency` LLM slots.
 
-        priority="user" outranks "background". When a user call is queued, a
-        background call is told (via the condition) to back off so the user
-        reply doesn't sit behind a 60s background tick. Within the same
-        priority, FIFO.
+        priority="user" outranks "background", so a person is never stuck
+        behind a 60s autonomy tick. `key` is the fairness bucket — pass the
+        channel id from a reply path. Among waiters of the same priority the
+        least-recently-served key goes first, which is what stops one loud
+        room from monopolising the pool when many servers are active.
         """
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
+        await self._ai_slots.acquire(timeout, key=str(key or ""), priority=priority)
         task = asyncio.current_task()
-        async with self._ai_cond:
-            while True:
-                # A user is always allowed through; a background call must wait
-                # if any user is currently queued.
-                if self._ai_active < self._ai_concurrency and not (
-                    priority == "background" and self._ai_user_waiter_count > 0
-                ):
-                    self._ai_active += 1
-                    if task is not None:
-                        self._ai_call_kind[task] = priority
-                    return
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    raise asyncio.TimeoutError()
-                if priority == "user":
-                    self._ai_user_waiter_count += 1
-                try:
-                    await asyncio.wait_for(self._ai_cond.wait(), timeout=remaining)
-                finally:
-                    if priority == "user":
-                        self._ai_user_waiter_count = max(
-                            0, self._ai_user_waiter_count - 1
-                        )
+        if task is not None:
+            self._ai_call_kind[task] = priority
 
     async def _release_ai_slot(self):
-        async with self._ai_cond:
-            if self._ai_active > 0:
-                self._ai_active -= 1
-            task = asyncio.current_task()
-            if task is not None:
-                self._ai_call_kind.pop(task, None)
-            self._ai_cond.notify_all()
+        task = asyncio.current_task()
+        if task is not None:
+            self._ai_call_kind.pop(task, None)
+        await self._ai_slots.release()
 
     def _notify_ai_waiters(self):
-        async def notify():
-            async with self._ai_cond:
-                self._ai_cond.notify_all()
-
         with contextlib.suppress(RuntimeError):
-            _spawn_background(notify())
+            _spawn_background(self._ai_slots.set_capacity(self._ai_concurrency))
+
+    def ai_slot_stats(self) -> dict:
+        """Queue depth for the dashboard / doctor. Cheap, no locking."""
+        return self._ai_slots.stats()
 
     async def setup_hook(self):
         await self.ai_provider.initialize()
@@ -4140,6 +4304,13 @@ class MaxwellBot(commands.Bot):
             asyncio.create_task(self._discord_state_loop()),
             asyncio.create_task(self._rem_scheduler_loop()),
         ]
+        if self.mail_poller is not None and self.mail_poller.configured():
+            self._tasks.append(
+                asyncio.create_task(self._mail_poll_loop(), name="mail-poll")
+            )
+            logger.info(
+                "Mail inbox poll scheduled every %.0fs", self.mail_poller.interval
+            )
         await self.autonomy_engine.start()
         if self.config.TELEGRAM_TOKEN and self.config.ENABLE_TELEGRAM:
             if self.config.TELEGRAM_WEBHOOK_URL:
@@ -5432,6 +5603,13 @@ class MaxwellBot(commands.Bot):
             if message.author.bot and not self._control.get("reply_to_bots", True):
                 return
 
+            # Every human line updates the room's pace and engagement, even
+            # the ones that never become a turn — deliberately above the
+            # cooldown return, so a room's rhythm is already measured by the
+            # time he first speaks there and arms the watch.
+            with contextlib.suppress(Exception):
+                self._note_watch_message(message)
+
             # 2026-07-31: per-user cooldown was previously an early-return at
             # bot.py:2823 that ate ~2/3 of channel traffic before it could
             # reach memory. Now it's applied here, AFTER storage but BEFORE
@@ -5576,7 +5754,11 @@ class MaxwellBot(commands.Bot):
             },
         ]
         try:
-            await self._acquire_ai_slot(timeout=8, priority="user")
+            await self._acquire_ai_slot(
+                timeout=8,
+                priority="user",
+                key=str(getattr(channel, "id", "") or ""),
+            )
             try:
                 resp = await self.ai_provider.generate_response(
                     messages,
@@ -6744,7 +6926,11 @@ class MaxwellBot(commands.Bot):
         )
         # Use the global AI slot (instead of only private VC semaphore) so noisy VC
         # does not starve text replies, autonomy, REM etc. Keep a local bound too.
-        await self._acquire_ai_slot(timeout=vc_timeout, priority="user")
+        await self._acquire_ai_slot(
+            timeout=vc_timeout,
+            priority="user",
+            key=f"vc:{getattr(getattr(self, 'vc_channel', None), 'id', '') or ''}",
+        )
         try:
             async with self._vc_ai_semaphore:
                 return await self.ai_provider.generate_response(
@@ -7595,7 +7781,7 @@ class MaxwellBot(commands.Bot):
 
     async def _onboard_ask_llm(self, messages: list) -> str:
         """One short model turn that picks onboarding options. Never raises."""
-        await self._acquire_ai_slot(timeout=20, priority="user")
+        await self._acquire_ai_slot(timeout=20, priority="user", key="onboarding")
         try:
             resp = await self.ai_provider.generate_response(
                 messages,
@@ -7796,7 +7982,7 @@ class MaxwellBot(commands.Bot):
                     7200,
                 ),
             )
-            await self._acquire_ai_slot(timeout=timeout)
+            await self._acquire_ai_slot(timeout=timeout, key="rem")
             try:
                 # REM uses the aux provider/model (the context-manager brain),
                 # which falls back to the autonomy provider then the main
@@ -8313,10 +8499,25 @@ class MaxwellBot(commands.Bot):
             control["autonomy_interval_seconds"] = max(
                 30, _safe_int(control.get("autonomy_interval_seconds", 300) or 300, 300)
             )
+            control["email_inbox_poll_seconds"] = max(
+                30,
+                min(
+                    _safe_int(
+                        control.get("email_inbox_poll_seconds", 120) or 120, 120
+                    ),
+                    3600,
+                ),
+            )
             if control["ai_concurrency"] != self._ai_concurrency:
                 self._ai_concurrency = control["ai_concurrency"]
                 self._notify_ai_waiters()
             self._control = control
+            poller = getattr(self, "mail_poller", None)
+            if poller is not None:
+                # Takes effect on the next tick; the loop reads backoff_seconds
+                # fresh each time round.
+                poller.interval = float(control["email_inbox_poll_seconds"])
+                poller.max_backoff = max(poller.interval, poller.max_backoff)
             self._sync_audio_input_flags()
             # 2026-07-22: the old global progress_messages re-apply is gone —
             # progress is now per-server via _progress_servers / the env
@@ -8362,46 +8563,93 @@ class MaxwellBot(commands.Bot):
             return "guild"
         return "unknown"
 
+    def _extract_threshold(self) -> float:
+        raw = (getattr(self, "_control", None) or {}).get(
+            "cross_context_extract_threshold", watch_policy.EXTRACT_THRESHOLD
+        )
+        try:
+            return max(0.0, min(float(raw), 1.0))
+        except (TypeError, ValueError):
+            return watch_policy.EXTRACT_THRESHOLD
+
     def _should_extract_context(self, message) -> bool:
+        """Is this message worth spending a context-watcher call on?
+
+        This used to be a list of about fifteen English phrases — "remember",
+        "i like", "my name is". Anything said in other words was dropped, and
+        "I like it" about lunch was kept. It is now a density score over
+        structure: length, lexical variety, named things, where it was said,
+        and how recently this room already produced a fact. No wording rules,
+        so it works for a rephrase and for someone not typing in English.
+
+        The model behind _extract_shared_context_fact still makes the real
+        call and still answers should_store:false — this only decides whether
+        asking it is worth the request.
+        """
         if not self._control.get(
             "cross_context_enabled", True
         ) or not self._control.get("cross_context_extract_enabled", True):
             return False
         combined = message_combined_content(message)
-        if (
-            not combined
-            and not any(
-                getattr(src, "attachments", None) or getattr(src, "embeds", None)
-                for src in iter_message_payloads(message)
-            )
-        ):
+        has_media = any(
+            getattr(src, "attachments", None) or getattr(src, "embeds", None)
+            for src in iter_message_payloads(message)
+        )
+        if not combined and not has_media:
             return False
-        text = combined.lower()
-        triggers = (
-            "important",
-            "remember",
-            "don't forget",
-            "dont forget",
-            "never forget",
-            "tell everyone",
-            "for context",
-            "note that",
-            "call me",
-            "my name is",
-            "i prefer",
-            "i hate",
-            "i like",
-            "this is my",
-            "meet my",
-            "remember this",
+        author = getattr(message, "author", None)
+        author_id = str(getattr(author, "id", "") or "")
+        channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
+        is_admin = False
+        with contextlib.suppress(Exception):
+            is_admin = bool(author is not None and self._is_admin(author.id))
+        since = math.inf
+        last = (getattr(self, "_last_extract_at", None) or {}).get(channel_id)
+        if last is not None:
+            with contextlib.suppress(RuntimeError):
+                since = max(0.0, asyncio.get_running_loop().time() - last)
+        ctx = watch_policy.ExtractionContext(
+            text=combined,
+            is_dm=isinstance(getattr(message, "channel", None), discord.DMChannel),
+            author_is_admin=is_admin,
+            has_attachments=has_media,
+            since_last_extract=since,
+            author_seen_before=author_id
+            in (getattr(self, "_extracted_authors", None) or set()),
         )
-        if any(t in text for t in triggers):
+        score = watch_policy.extraction_score(ctx)
+        threshold = self._extract_threshold()
+        if score.value >= threshold:
+            logger.debug(
+                "Context extract: %.2f >= %.2f (%s)",
+                score.value,
+                threshold,
+                ", ".join(score.reasons),
+            )
             return True
-        return (
-            isinstance(message.channel, discord.DMChannel)
-            and self._is_admin(message.author.id)
-            and len(text) >= 12
-        )
+        return False
+
+    def _note_extraction_ran(self, message) -> None:
+        """Remember that this room and author just produced an extraction."""
+        channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
+        author_id = str(getattr(getattr(message, "author", None), "id", "") or "")
+        store = getattr(self, "_last_extract_at", None)
+        if store is None:
+            self._last_extract_at = {}
+            store = self._last_extract_at
+        with contextlib.suppress(RuntimeError):
+            store[channel_id] = asyncio.get_running_loop().time()
+        if len(store) > 500:
+            for stale in list(store)[:250]:
+                store.pop(stale, None)
+        seen = getattr(self, "_extracted_authors", None)
+        if seen is None:
+            self._extracted_authors = set()
+            seen = self._extracted_authors
+        if author_id:
+            seen.add(author_id)
+            if len(seen) > 2000:
+                self._extracted_authors = set(list(seen)[-1000:])
 
     def _channel_turn_active(self, channel_id: str) -> bool:
         """True when a reply/tool turn is in-flight for this channel."""
@@ -8433,6 +8681,10 @@ class MaxwellBot(commands.Bot):
         if len(self._context_tasks) >= 20:
             logger.warning("Skipping context extraction; backlog is full")
             return
+        # Record it at schedule time, not on success: the point of the recency
+        # term is to space out calls, and a call that returns should_store
+        # false cost the same request as one that stored something.
+        self._note_extraction_ran(message)
         task = asyncio.create_task(self._extract_shared_context_fact(message))
         self._context_tasks.add(task)
         task.add_done_callback(self._context_tasks.discard)
@@ -8657,7 +8909,10 @@ class MaxwellBot(commands.Bot):
                     600,
                 ),
             )
-            await self._acquire_ai_slot(timeout=extract_timeout)
+            await self._acquire_ai_slot(
+                timeout=extract_timeout,
+                key=f"extract:{getattr(getattr(message, 'channel', None), 'id', '') or ''}",
+            )
             try:
                 # Context watcher uses the aux provider/model (the
                 # context-manager brain), separate from the autonomy tick
@@ -9060,16 +9315,61 @@ class MaxwellBot(commands.Bot):
                         cleared += 1
                 except Exception:
                     pass
-        pruned_locks = 0
+        # KeyedLocks self-prunes as it grows; this pass additionally drops
+        # locks for rooms whose memory we just cleared, keeping anything still
+        # held or still live.
         live_channels = set(getattr(self.memory, "memory", {}) or {})
-        for cid, lock in list(self._channel_locks.items()):
-            if cid not in live_channels and not lock.locked():
-                self._channel_locks.pop(cid, None)
-                pruned_locks += 1
-        if cleared or pruned_locks:
+        pruned_locks = self._channel_locks.prune(keep=live_channels, all_idle=True)
+        pruned_state = self._prune_per_channel_state()
+        if cleared or pruned_locks or pruned_state:
             logger.info(
-                f"Cleared {cleared} stale channel memories and pruned {pruned_locks} idle channel locks"
+                "Cleared %s stale channel memories, pruned %s idle channel locks "
+                "and %s per-channel state entries",
+                cleared,
+                pruned_locks,
+                pruned_state,
             )
+
+    def _prune_per_channel_state(self) -> int:
+        """Trim unbounded per-channel maps back under their caps.
+
+        Eviction order is insertion order (dicts preserve it), so the rooms
+        that go are the ones written to longest ago. Every value here is a
+        cache or a hint — losing one costs at most a missed cooldown or an
+        empty typing list, never correctness.
+        """
+        removed = 0
+        for attr, cap in _PER_CHANNEL_STATE_CAPS.items():
+            store = getattr(self, attr, None)
+            if not isinstance(store, dict) or len(store) <= cap:
+                continue
+            for key in list(store)[: len(store) - cap // 2]:
+                store.pop(key, None)
+                removed += 1
+        # Typing state expires on its own clock; drop rooms with nobody typing.
+        typing = getattr(self, "_typing_users", None)
+        if isinstance(typing, dict):
+            for cid in [k for k, room in typing.items() if not room]:
+                typing.pop(cid, None)
+                removed += 1
+        # Watch debounce buckets are popped by their own flush. One that was
+        # cancelled mid-flight would otherwise sit here forever.
+        debounce = getattr(self, "_watch_debounce", None)
+        if isinstance(debounce, dict):
+            for cid, bucket in list(debounce.items()):
+                task = (bucket or {}).get("task")
+                if task is None or task.done():
+                    debounce.pop(cid, None)
+                    removed += 1
+        # Finished reply tasks that never made it through their finally.
+        active = getattr(self, "_active_requests", None)
+        if isinstance(active, dict):
+            for cid, task in list(active.items()):
+                if task is None or task.done():
+                    active.pop(cid, None)
+                    self._active_request_user.pop(cid, None)
+                    removed += 1
+        return removed
 
     async def _site_cleanup_loop(self):
         # Site backend containers carry --restart unless-stopped, so docker
@@ -11689,7 +11989,9 @@ class MaxwellBot(commands.Bot):
                         break
                 else:
                     messages.insert(0, {"role": "system", "content": snip})
-            await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
+            await self._acquire_ai_slot(
+                timeout=ai_timeout, priority="user", key=channel_id
+            )
             try:
                 response = await self.ai_provider.generate_response(
                     messages,
@@ -11841,7 +12143,9 @@ class MaxwellBot(commands.Bot):
                 result_messages = MaxwellBot._apply_prompt_budget(
                     self, [dict(m) for m in messages] + list(conversation_tail)
                 )
-                await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
+                await self._acquire_ai_slot(
+                    timeout=ai_timeout, priority="user", key=channel_id
+                )
                 try:
                     # Attach images from tools so the model can SEE them
                     followup_images = all_tool_images if all_tool_images else []
@@ -11944,6 +12248,10 @@ class MaxwellBot(commands.Bot):
                 tr.startswith("Tool no_response:") and "__NO_RESPONSE__" in tr
                 for tr in all_tool_results
             ):
+                # Feedback for the watch: repeated silence in a room shortens
+                # how long that room stays on watch at all.
+                with contextlib.suppress(Exception):
+                    self._note_watch_silence(message)
                 await self._ensure_reasoning_trace(
                     message, all_tool_results, response, "no_response"
                 )
@@ -12371,7 +12679,20 @@ class MaxwellBot(commands.Bot):
                         params["_confirmed"] = True
                 if not result_text:
                     logger.info("Executing tool %s", name)
-                    raw = await tool.execute(message, **params)
+                    # Budget by resource class. Image generation, shell, and
+                    # site deploys each get a small independent allowance, so
+                    # a run of them in one room cannot consume the outbound
+                    # capacity every other room's reply needs. Cheap tools
+                    # share a wide "default" budget and effectively never
+                    # queue.
+                    budgets = getattr(self, "tool_concurrency", None)
+                    gate = (
+                        budgets.slot(classify_tool(name, tool))
+                        if budgets is not None
+                        else contextlib.nullcontext()
+                    )
+                    async with gate:
+                        raw = await tool.execute(message, **params)
                     result_text = str(raw) if raw else "executed successfully"
                     logger.info(
                         "Tool %s finished: %s",
@@ -14598,7 +14919,9 @@ class MaxwellBot(commands.Bot):
             messages.append({"role": "user", "content": latest_block})
 
         tg_openai_tools = self._build_openai_tools("telegram", content=text)
-        await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
+        await self._acquire_ai_slot(
+            timeout=ai_timeout, priority="user", key=f"tg:{chat_id}"
+        )
         try:
             try:
                 response_text = await self.ai_provider.generate_response(
@@ -15172,7 +15495,9 @@ class MaxwellBot(commands.Bot):
             result_messages = MaxwellBot._apply_prompt_budget(
                 self, result_messages + list(conversation_tail)
             )
-            await self._acquire_ai_slot(timeout=ai_timeout, priority="user")
+            await self._acquire_ai_slot(
+                timeout=ai_timeout, priority="user", key=f"tg:{chat_id}"
+            )
             try:
                 followup = await self.ai_provider.generate_response(
                     result_messages,

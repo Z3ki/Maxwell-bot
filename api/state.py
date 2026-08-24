@@ -201,6 +201,16 @@ def _sanitize_control(control):
         min(_safe_int(out.get("tool_iteration_timeout_seconds") or 3600, 3600), 14400),
     )
     out["ai_concurrency"] = max(1, min(out["ai_concurrency"], 10))
+    out["email_inbox_poll_seconds"] = max(
+        30, min(_safe_int(out.get("email_inbox_poll_seconds") or 120, 120), 3600)
+    )
+    # 0..1 density score (watch_policy.extraction_score). Out-of-range values
+    # would either extract from nothing or from every "lol" in every room.
+    try:
+        _extract_threshold = float(out.get("cross_context_extract_threshold") or 0.25)
+    except (TypeError, ValueError):
+        _extract_threshold = 0.25
+    out["cross_context_extract_threshold"] = max(0.0, min(_extract_threshold, 1.0))
     out["autonomy_interval_seconds"] = max(
         30, _safe_int(out.get("autonomy_interval_seconds") or 300, 300)
     )

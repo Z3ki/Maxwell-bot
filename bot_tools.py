@@ -9172,8 +9172,10 @@ class InboxListTool(Tool):
 
     def get_description(self):
         return (
-            "List unread inbox items: friend requests and other notices. No params. "
-            "Use inbox_act to accept, decline, or dismiss."
+            "List unread inbox items: friend requests, new email, and other "
+            "notices. No params. Use inbox_act to accept, decline, dismiss, or "
+            "mark read. For an email item, email_get_message with the item's "
+            "uid gives you the full body."
         )
 
     async def execute(self, message: Message, **kwargs) -> str:
@@ -9183,14 +9185,14 @@ class InboxListTool(Tool):
         items = store.actionable(await store.load_items())
         if not items:
             return "Inbox is empty."
+        # Same ordering the planner tail uses, but the tool shows more of each
+        # item — he asked for the list, so give him the whole thing.
+        ordered = store.planner_items(items)
         lines = [f"Inbox ({len(items)} actionable):"]
-        for item in items[:20]:
-            acts = ", ".join(str(a) for a in (item.get("actions") or [])[:4])
-            lines.append(
-                f"- [{item.get('id')}] {item.get('kind')} "
-                f"{item.get('actor_name') or '?'}({item.get('actor_id') or '?'}): "
-                f"{item.get('summary')} [{acts}]"
-            )
+        for item in ordered[:20]:
+            lines.append(store.render_item(item, summary_chars=300))
+        if len(items) > len(ordered):
+            lines.append(f"… {len(items) - len(ordered)} more not shown")
         return "\n".join(lines)
 
 
@@ -9199,8 +9201,11 @@ class InboxActTool(Tool):
 
     def get_description(self):
         return (
-            "Act on an inbox item. Params: action (required: accept, decline, or dismiss), "
-            "item_id (inbox id like friend_123) or user_id (the requester's Discord id)."
+            "Act on an inbox item. Params: action (required: accept, decline, "
+            "dismiss, or read), item_id (inbox id like friend_123 or "
+            "email_412) or user_id (the requester's Discord id). accept and "
+            "decline are friend requests only; read demotes a notice without "
+            "clearing it, dismiss clears it for good."
         )
 
     async def execute(
@@ -9562,7 +9567,11 @@ def _imap_list_recent_sync(
         if unread_only:
             criteria_parts.append("UNSEEN")
         criteria = " ".join(criteria_parts)
-        typ, data = M.search(None, criteria)
+        # UID SEARCH, not SEARCH: sequence numbers are renumbered by any
+        # expunge, so an id handed to the model could point at a different
+        # message minutes later. UIDs are stable for the life of the mailbox
+        # and are the same ids the background mail poller files in the inbox.
+        typ, data = M.uid("SEARCH", None, criteria)
         if typ != "OK" or not data or not data[0]:
             return "Inbox is empty for the given filter."
         ids = data[0].split()[-limit:]  # most recent N (highest UIDs last)
@@ -9575,7 +9584,7 @@ def _imap_list_recent_sync(
         # model and on the wire.
         lines: list[str] = []
         for mid in ids:
-            typ, msgdata = M.fetch(mid, "(ENVELOPE)")
+            typ, msgdata = M.uid("FETCH", mid, "(ENVELOPE)")
             if typ != "OK" or not msgdata or not msgdata[0]:
                 lines.append(f"- id={mid.decode(errors='replace')} (fetch failed)")
                 continue
@@ -9822,7 +9831,15 @@ def _imap_format_address_list(s: str) -> str:
 
 
 def _imap_safe_seq(message_id: str) -> str | None:
+    """Digits only, so nothing can be smuggled into an IMAP command line.
+
+    An "email_412" inbox item id is accepted and reduced to 412: that is the
+    id the model sees in its inbox, and making it retype the numeric half was
+    a trap with no upside.
+    """
     s = str(message_id or "").strip()
+    if s.startswith("email_"):
+        s = s[len("email_") :]
     return s if re.fullmatch(r"[0-9]+", s) else None
 
 
@@ -9842,11 +9859,16 @@ def _imap_get_message_sync(
     """Fetch one message and return its headers + body, capped at max_chars."""
     seq = _imap_safe_seq(message_id)
     if seq is None:
-        return "Error: message_id must be a numeric IMAP sequence number"
+        return "Error: message_id must be a numeric IMAP id"
     M = _imap_connect_sync(host, port, user, password)
     try:
         M.select("INBOX")
-        typ, data = M.fetch(seq, "(RFC822)")
+        # UID first — that is what the list/search tools and the inbox notices
+        # hand out. Fall back to a sequence-number fetch so ids the model
+        # cached from an older run still resolve instead of hard-failing.
+        typ, data = M.uid("FETCH", seq, "(RFC822)")
+        if typ != "OK" or not data or not data[0]:
+            typ, data = M.fetch(seq, "(RFC822)")
         if typ != "OK" or not data or not data[0]:
             return f"Error: IMAP fetch failed for message {message_id}"
         # Response shape varies by server: Dovecot collapses into a single
@@ -9946,7 +9968,7 @@ def _imap_search_sync(
     M = _imap_connect_sync(host, port, user, password)
     try:
         M.select("INBOX")
-        typ, data = M.search(None, f'TEXT "{safe}"')
+        typ, data = M.uid("SEARCH", None, f'TEXT "{safe}"')
         if typ != "OK" or not data or not data[0]:
             return f"No messages matched: {query!r}"
         ids = data[0].split()[-limit:]
@@ -9957,7 +9979,7 @@ def _imap_search_sync(
         # round-trip. Same shape as in the list tool above.
         lines = [f"Search results for {query!r} ({len(ids)} match(es)):"]
         for mid in ids:
-            typ, msgdata = M.fetch(mid, "(ENVELOPE)")
+            typ, msgdata = M.uid("FETCH", mid, "(ENVELOPE)")
             if typ != "OK" or not msgdata or not msgdata[0]:
                 lines.append(f"- id={mid.decode(errors='replace')}")
                 continue
@@ -10153,7 +10175,8 @@ class EmailGetMessageTool(Tool):
 
     def get_description(self) -> str:
         return (
-            "Fetch one email by id (from email_read_inbox or email_search). "
+            "Fetch one email by id (from email_read_inbox, email_search, or "
+            "an inbox email notice — both 412 and email_412 work). "
             "Params: message_id, max_chars (default 8000)."
         )
 

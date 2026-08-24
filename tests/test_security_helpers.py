@@ -203,6 +203,11 @@ class TestImapArgumentSanitizers:
     def test_seq_rejects_injection(self):
         assert _imap_safe_seq("1\r\nA001 STORE 1:* +FLAGS (\\Deleted)") is None
         assert _imap_safe_seq("1:*") is None
+        # The inbox item id works directly; the prefix is stripped, and a
+        # prefix around anything non-numeric is still refused.
+        assert _imap_safe_seq("email_412") == "412"
+        assert _imap_safe_seq("email_1:*") is None
+        assert _imap_safe_seq("email_") is None
 
     def test_query_rejects_quotes_and_crlf(self):
         assert _imap_safe_text_query('foo" BAR') is None

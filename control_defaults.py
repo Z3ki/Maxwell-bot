@@ -47,6 +47,12 @@ DEFAULT_CONTROL = {
     # for a cold start and still short enough that one stuck call can't
     # back up the rest of the context-extract queue.
     "cross_context_extract_timeout_seconds": 60,
+    # How dense a message has to look before it is worth a context-watcher
+    # call (0..1, see watch_policy.extraction_score). Lower stores more and
+    # spends more; higher is stingier. This replaced a fixed list of English
+    # trigger phrases, so there is nothing to keep up to date when people
+    # phrase things differently.
+    "cross_context_extract_threshold": 0.25,
     "emoji_context_enabled": True,
     "music_context_enabled": True,
     "reply_dms": True,
@@ -59,6 +65,10 @@ DEFAULT_CONTROL = {
     # Watch follow-ups wait this long for more lines, then one reply.
     # Hard @ / reply-to-Maxwell still go out immediately.
     "conversation_watch_debounce_seconds": 1,
+    # How often the background IMAP poll files new unread mail as inbox
+    # notices. Only runs when ENABLE_EMAIL_TOOLS and a mailbox password are
+    # set. Floor 30s, ceiling 1h.
+    "email_inbox_poll_seconds": 120,
     "reply_to_bots": False,
     # Unused for starting turns. Reactions are stored on the message and
     # shown in context; they never kick off a live reply.

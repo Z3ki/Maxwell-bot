@@ -24,8 +24,22 @@ from utils import (
 logger = logging.getLogger(__name__)
 
 INBOX_RING_SIZE = 200
-INBOX_PLANNER_BUDGET = 500
+INBOX_PLANNER_BUDGET = 900
 ACTIONABLE_STATES = frozenset({"unread", "read"})
+
+# Planner ordering. Something a human is waiting on outranks a notice he can
+# read whenever. Within a kind, newest first — an inbox is a feed, not a log.
+KIND_PRIORITY = {
+    "friend_request": 0,
+    "group_dm": 1,
+    "email": 2,
+}
+KIND_PRIORITY_DEFAULT = 3
+
+# One noisy source must not push the others out of the tail. Mail arrives in
+# bursts; friend requests do not.
+KIND_RENDER_CAP = {"email": 6}
+KIND_RENDER_CAP_DEFAULT = 12
 
 try:
     from discord.enums import RelationshipType
@@ -88,21 +102,72 @@ class InboxStore:
             if isinstance(i, dict) and i.get("state") in ACTIONABLE_STATES
         ]
 
+    @staticmethod
+    def _planner_sort_key(item: dict) -> tuple:
+        """unread before read, then by kind. Recency is a separate pass."""
+        kind = str(item.get("kind") or "notice")
+        unread = 0 if item.get("state") == "unread" else 1
+        return (unread, KIND_PRIORITY.get(kind, KIND_PRIORITY_DEFAULT))
+
+    def planner_items(self, items: list[dict]) -> list[dict]:
+        """Actionable items in the order the planner should see them.
+
+        Sorted by urgency, then capped per kind so a burst of mail can't
+        push a waiting friend request out of the tail.
+        """
+        # Two stable passes: newest first, then urgency. created_at is ISO, so
+        # a plain reverse string sort is chronological.
+        pending = sorted(
+            self.actionable(items),
+            key=lambda i: str(i.get("created_at") or ""),
+            reverse=True,
+        )
+        pending.sort(key=self._planner_sort_key)
+        seen: dict[str, int] = {}
+        out: list[dict] = []
+        for item in pending:
+            kind = str(item.get("kind") or "notice")
+            cap = KIND_RENDER_CAP.get(kind, KIND_RENDER_CAP_DEFAULT)
+            count = seen.get(kind, 0)
+            if count >= cap:
+                continue
+            seen[kind] = count + 1
+            out.append(item)
+        return out
+
+    @staticmethod
+    def render_item(item: dict, *, summary_chars: int = 160) -> str:
+        """One inbox line. Mail leads with sender+subject, not an actor id."""
+        iid = str(item.get("id") or "")
+        kind = str(item.get("kind") or "notice")
+        acts = ",".join(str(a) for a in (item.get("actions") or [])[:4])
+        summary = str(item.get("summary") or "")[:summary_chars]
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        actor = str(item.get("actor_name") or "?")
+        aid = str(item.get("actor_id") or "")
+        if kind == "email":
+            # actor_name/actor_id are the sender's display name and address.
+            who = f"{actor} <{aid}>" if aid else actor
+            subject = str(payload.get("subject") or "").strip() or "(no subject)"
+            body = f'{who} — "{subject}"'
+            snippet = " ".join(str(payload.get("snippet") or "").split())
+            if snippet:
+                body += f": {snippet[:summary_chars]}"
+        else:
+            who = f"{actor}({aid})" if aid else actor
+            body = f"{who}: {summary}"
+        return f"- [{iid}] {kind} {body} [{acts}]"
+
     def render_planner(self, items: list[dict]) -> str:
         """Volatile tail only. Empty → '' so the cached prefix never moves."""
-        pending = self.actionable(items)
+        pending = self.planner_items(items)
         if not pending:
             return ""
         lines = ["=== INBOX (unread / actionable — you may ignore) ==="]
-        for item in pending[:12]:
-            iid = str(item.get("id") or "")
-            kind = str(item.get("kind") or "notice")
-            actor = str(item.get("actor_name") or "?")
-            aid = str(item.get("actor_id") or "")
-            who = f"{actor}({aid})" if aid else actor
-            acts = ",".join(str(a) for a in (item.get("actions") or [])[:4])
-            summary = str(item.get("summary") or "")[:160]
-            lines.append(f"- [{iid}] {kind} {who}: {summary} [{acts}]")
+        for item in pending[:14]:
+            lines.append(self.render_item(item))
+        if len(pending) > 14:
+            lines.append(f"… and {len(pending) - 14} more (inbox_list to see them)")
         text = "\n".join(lines)
         if len(text) > INBOX_PLANNER_BUDGET:
             text = text[: INBOX_PLANNER_BUDGET - 20] + "\n… (inbox truncated)"
@@ -148,6 +213,41 @@ class InboxStore:
                         existing[key] = item[key]
                 existing["updated_at"] = now
                 row = existing
+            await self._save_unlocked(items)
+            return row
+
+    async def insert_if_absent(self, item: dict) -> dict | None:
+        """Create an item only if its id is new. Returns None if it existed.
+
+        The mail poller re-sees the same UID on every tick for as long as the
+        message stays unread. Going through ``upsert`` would reset a dismissed
+        item back to "unread" each time, so a message he deliberately ignored
+        would nag him forever. One insert, then his decision stands.
+        """
+        iid = str(item.get("id") or "").strip()
+        if not iid:
+            raise ValueError("insert_if_absent needs an explicit id")
+        now = _utcnow_iso()
+        async with self._lock:
+            items = await self._load_unlocked()
+            for row in items:
+                if isinstance(row, dict) and str(row.get("id") or "") == iid:
+                    return None
+            row = {
+                "id": iid,
+                "kind": str(item.get("kind") or "notice"),
+                "state": str(item.get("state") or "unread"),
+                "created_at": now,
+                "updated_at": now,
+                "actor_id": str(item.get("actor_id") or ""),
+                "actor_name": str(item.get("actor_name") or ""),
+                "summary": str(item.get("summary") or "")[:400],
+                "actions": list(item.get("actions") or ["dismiss"]),
+                "payload": item.get("payload")
+                if isinstance(item.get("payload"), dict)
+                else {},
+            }
+            items.append(row)
             await self._save_unlocked(items)
             return row
 
@@ -273,8 +373,8 @@ async def apply_inbox_action(
     if store is None:
         return "Error: inbox is not available"
     action = str(action or "").strip().lower()
-    if action not in {"accept", "decline", "dismiss"}:
-        return "Error: action must be accept, decline, or dismiss"
+    if action not in {"accept", "decline", "dismiss", "read"}:
+        return "Error: action must be accept, decline, dismiss, or read"
 
     item = None
     if item_id:
@@ -297,12 +397,27 @@ async def apply_inbox_action(
     if action == "dismiss":
         await store.mark(str(item.get("id")), "dismissed")
         return f"Dismissed {item.get('id')}"
+    if action == "read":
+        # Still actionable, just demoted: it stops leading the planner tail
+        # without disappearing, so he can come back to it.
+        await store.mark(str(item.get("id")), "read")
+        return f"Marked {item.get('id')} read"
     if action not in allowed and kind != "friend_request":
-        return f"Error: {action} is not valid for this item"
+        # Name what IS valid. "not valid for this item" left the model to
+        # guess, and it usually guessed accept again.
+        valid = ", ".join(sorted(allowed | {"dismiss"})) or "dismiss"
+        return (
+            f"Error: {action} is not valid for a {kind or 'notice'} — "
+            f"{item.get('id')} accepts: {valid}"
+        )
 
     uid = str(item.get("actor_id") or user_id or "").strip()
     if not uid.isdigit():
-        return "Error: no user id on this item"
+        return (
+            f"Error: {item.get('id')} is a {kind or 'notice'}, not a friend "
+            "request — there is no Discord user to accept or decline. Use "
+            "read or dismiss."
+        )
     rel = None
     getter = getattr(bot, "get_relationship", None)
     if callable(getter):
