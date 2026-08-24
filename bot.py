@@ -2615,6 +2615,14 @@ class MaxwellBot(commands.Bot):
             set()
         )  # "message_id" dedup for REM events
         self._context_tasks: set[asyncio.Task] = set()
+        # channel_id -> latest message deferred for context extraction. When the
+        # bot is mid-turn (replying / running a tool) in a room we DON'T fire the
+        # context watcher immediately — it would contend for AI slots and flood
+        # the channel with "watcher" calls. Instead we stash the newest message
+        # here and flush it once the turn finishes (see
+        # _flush_deferred_context_extraction). Only the LATEST message per channel
+        # is kept, so a burst collapses to one follow-up extract.
+        self._deferred_context: dict[str, Any] = {}
         self._vc_sinks: dict[int, Any] = {}
         self._incoming_call_seen: set[int] = set()
         self._vc_text_channels: dict[int, discord.abc.Messageable] = {}
@@ -8395,8 +8403,32 @@ class MaxwellBot(commands.Bot):
             and len(text) >= 12
         )
 
+    def _channel_turn_active(self, channel_id: str) -> bool:
+        """True when a reply/tool turn is in-flight for this channel."""
+        active = (getattr(self, "_active_requests", None) or {}).get(channel_id)
+        if active is not None and not active.done():
+            return True
+        return channel_id in (getattr(self, "_replying_channels", None) or set())
+
+    def _flush_deferred_context_extraction(self, channel_id: str) -> None:
+        """Run the latest deferred extract once a turn completes."""
+        message = (getattr(self, "_deferred_context", None) or {}).pop(
+            str(channel_id), None
+        )
+        if message is None:
+            return
+        self._maybe_schedule_context_extraction(message)
+
     def _maybe_schedule_context_extraction(self, message):
         if not self._should_extract_context(message):
+            return
+        channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
+        # While a reply/tool turn is running in this room, don't fire the watcher
+        # now — stash the newest message and run it after the turn finishes. This
+        # stops the watcher from polling every message a tool posts and flooding
+        # the channel with "watcher" calls that contend for AI slots.
+        if channel_id and self._channel_turn_active(channel_id):
+            self._deferred_context[channel_id] = message
             return
         if len(self._context_tasks) >= 20:
             logger.warning("Skipping context extraction; backlog is full")
@@ -12222,6 +12254,10 @@ class MaxwellBot(commands.Bot):
             # here so autonomy can avoid re-engaging a conversation it already
             # answered (the "bot sees its own old reply and posts again" loop).
             self._replying_channels.discard(channel_id)
+            # The context watcher was held back while this turn ran (to avoid
+            # flooding watcher calls / contending for AI slots). Run it now on
+            # the latest deferred message for this room.
+            self._flush_deferred_context_extraction(channel_id)
             if normal_reply_sent:
                 self._last_bot_reply[channel_id] = time.time()
                 if author is not None and not getattr(author, "bot", False):
