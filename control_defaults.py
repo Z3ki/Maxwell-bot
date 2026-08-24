@@ -112,6 +112,16 @@ DEFAULT_CONTROL = {
     "allowed_channels": [],
     "blocked_channels": [],
     "disabled_commands": [],
+    # {guild_id: channel_id}. When a server has an entry, Maxwell only speaks
+    # in that one channel there — every other channel in that server is dead to
+    # him, including autonomy. Set with `,solo`, cleared with `,solo off`.
+    # Scoped per server on purpose: allowed_channels is global, so using it to
+    # quiet one server silences him everywhere.
+    "guild_solo_channel": {},
+    # Guild ids whose autonomy blacklist entry was added BY `,solo`. Only these
+    # are handed back on `,solo off` — a server an admin silenced by hand stays
+    # silenced.
+    "guild_solo_autonomy_added": [],
     "base_personality": (
         "You are Maxwell — a person in the chat, not a service. Use your own "
         "judgment about what to say, how to say it, and whether to engage. "

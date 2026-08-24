@@ -1172,6 +1172,15 @@ class AutonomyEngine:
                     control.get("autonomy_blocked_servers", []) or []
                 ):
                     return False
+                # `,solo` locks a server to one channel. Setting it also
+                # blacklists the guild above, but enforce the lock here too:
+                # the promise is "nowhere but that channel", and it should not
+                # depend on two settings staying in sync.
+                solo = (control.get("guild_solo_channel") or {})
+                if g and isinstance(solo, dict):
+                    pinned = str(solo.get(str(g.id)) or "")
+                    if pinned and pinned != cid:
+                        return False
         except Exception:
             pass
         return True

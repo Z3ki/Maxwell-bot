@@ -4671,6 +4671,27 @@ class MaxwellBot(commands.Bot):
             json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()
 
+    def _solo_channel_for(self, guild) -> str:
+        """The one channel Maxwell may speak in for this server, or ''.
+
+        Per-server by design: allowed_channels is a global whitelist, so using
+        it to quiet one server would silence him in every other server too.
+        """
+        gid = str(getattr(guild, "id", "") or "")
+        if not gid:
+            return ""
+        mapping = self._control.get("guild_solo_channel") or {}
+        if not isinstance(mapping, dict):
+            return ""
+        return str(mapping.get(gid) or "")
+
+    def _solo_blocks(self, message) -> bool:
+        """True when this message is in a soloed server but the wrong channel."""
+        solo = self._solo_channel_for(getattr(message, "guild", None))
+        if not solo:
+            return False
+        return str(getattr(getattr(message, "channel", None), "id", "")) != solo
+
     def _message_update_allowed(self, message) -> bool:
         author = getattr(message, "author", None)
         author_id = str(getattr(author, "id", "") or "")
@@ -4697,6 +4718,8 @@ class MaxwellBot(commands.Bot):
             for value in (self._control.get("blocked_channels", []) or [])
         }
         if channel_id in blocked_channels:
+            return False
+        if self._solo_blocks(message):
             return False
         allowed = {
             str(value)
@@ -5101,6 +5124,10 @@ class MaxwellBot(commands.Bot):
             return
         allowed = set(self._control.get("allowed_channels", []) or [])
         if allowed and channel_id not in allowed:
+            return
+        # ,solo: this server is locked to one channel. Commands already
+        # returned above, so an admin can still run `,solo off` from anywhere.
+        if self._solo_blocks(message):
             return
 
         payloads = iter_message_payloads(message)
@@ -5693,6 +5720,7 @@ class MaxwellBot(commands.Bot):
             "downvote",
             "neg",
             "summarize",
+            "solo",
         }
         if cmd in admin_commands and not self._is_admin(message.author.id):
             await message.channel.send("not authorized")
@@ -6026,6 +6054,8 @@ class MaxwellBot(commands.Bot):
                         self._admins.add(uid)
                         self._save_admins()
                         await message.channel.send(f"Added <@{uid}> to admins.")
+            elif cmd == "solo":
+                await self._handle_solo_command(message, args)
             elif cmd == "help":
                 await message.channel.send(
                     "Commands:\n"
@@ -6039,6 +6069,7 @@ class MaxwellBot(commands.Bot):
                     "` ,autonomy ...` - manage autonomy engine + channel/server blacklists (admin)\n"
                     "` ,vc ...` - voice commands\n"
                     "` ,drug [minutes|off|status]` - drug mode timer\n"
+                    "` ,solo [#channel|off|status]` - lock this server to ONE channel: silence everywhere else and stop autonomy here (admin)\n"
                     "` ,jailbreak on|off|status` - toggle freedom-mode prompt for this server (admin)\n"
                     "` ,progress on|off|status` - toggle live 'thinking: …' messages during tool calls, per server (admin)\n"
                     "` ,sleep [minutes|off|status]` - take a 1-60m sleep window; pings get a notice (admin)\n"
@@ -6155,6 +6186,106 @@ class MaxwellBot(commands.Bot):
             )
             with contextlib.suppress(discord.Forbidden):
                 await message.channel.send("Something went wrong with that command.")
+
+    async def _handle_solo_command(self, message, args):
+        """`,solo` — lock a server to one channel, or unlock it.
+
+        One command each way. Setting it silences every other channel in this
+        server AND stops autonomy from starting anything here; clearing it puts
+        the server back exactly as it was. Nothing about other servers changes,
+        which is why this is its own per-guild map rather than the global
+        allowed_channels list.
+        """
+        if message.guild is None:
+            await message.channel.send("`,solo` only makes sense in a server.")
+            return
+        gid = str(message.guild.id)
+        arg = (args or "").strip()
+        mapping = dict(self._control.get("guild_solo_channel") or {})
+        current = str(mapping.get(gid) or "")
+
+        if arg.lower() in {"status", "?"}:
+            if not current:
+                await message.channel.send(
+                    "Not locked — I reply anywhere in this server I'm allowed to. "
+                    "`,solo` here to lock me to this channel."
+                )
+            else:
+                await message.channel.send(
+                    f"Locked to <#{current}>. Everywhere else in this server is "
+                    "silent and autonomy is off. `,solo off` to unlock."
+                )
+            return
+
+        if arg.lower() in {"off", "clear", "none", "unlock", "reset"}:
+            if not current:
+                await message.channel.send("Wasn't locked.")
+                return
+            mapping.pop(gid, None)
+            await self._save_solo(mapping, gid, unblock_autonomy=True)
+            await message.channel.send(
+                "Unlocked. I'll reply anywhere in this server I'm allowed to "
+                "again, and autonomy is back on here."
+            )
+            return
+
+        # `,solo` with no argument locks to the channel it was run in;
+        # `,solo #channel` (or a raw id) locks to that one.
+        target = str(message.channel.id)
+        if arg:
+            match = re.search(r"\d{5,}", arg)
+            if not match:
+                await message.channel.send(
+                    "Usage: `,solo` (lock to this channel), `,solo #channel`, "
+                    "`,solo off`, `,solo status`."
+                )
+                return
+            target = match.group(0)
+            found = message.guild.get_channel(int(target))
+            if found is None:
+                await message.channel.send(
+                    "That channel isn't in this server — pick one here."
+                )
+                return
+
+        mapping[gid] = target
+        await self._save_solo(mapping, gid, unblock_autonomy=False)
+        where = "this channel" if target == str(message.channel.id) else f"<#{target}>"
+        await message.channel.send(
+            f"Locked to {where}. Every other channel in **{message.guild.name}** "
+            "is silent for me now, and I won't start anything on my own here. "
+            "`,solo off` undoes it."
+        )
+
+    async def _save_solo(self, mapping: dict, gid: str, *, unblock_autonomy: bool):
+        """Persist the solo map, and keep autonomy's server blacklist in step.
+
+        'No autonomy' is half the point of the command, so locking a server
+        also stops the autonomy engine picking it — otherwise Maxwell would go
+        quiet on people and still start conversations by himself.
+        """
+        control = dict(self._control)
+        control["guild_solo_channel"] = mapping
+        blocked = [str(x) for x in (control.get("autonomy_blocked_servers", []) or [])]
+        owned = [str(x) for x in (control.get("guild_solo_autonomy_added", []) or [])]
+        if unblock_autonomy:
+            # Only give autonomy back if solo is what took it away. A server an
+            # admin blacklisted by hand stays blacklisted.
+            if gid in owned:
+                blocked = [x for x in blocked if x != gid]
+                owned = [x for x in owned if x != gid]
+        elif gid not in blocked:
+            blocked.append(gid)
+            if gid not in owned:
+                owned.append(gid)
+        control["autonomy_blocked_servers"] = blocked
+        control["guild_solo_autonomy_added"] = owned
+        self._control = control
+        await asyncio.to_thread(
+            _atomic_json_write_sync,
+            Path(self.config.DATA_DIR) / "bot_control.json",
+            control,
+        )
 
     async def _handle_vc_command(self, message, args: str | None):
         if not getattr(self.config, "ENABLE_VC", True):

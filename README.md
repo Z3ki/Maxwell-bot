@@ -319,6 +319,7 @@ All commands use the `,` prefix. Admin commands require the user to be in the ad
 | `,autonomy unblacklist channel|server <id>` | Yes | Remove from autonomy blacklist |
 | `,drug [minutes]` | No | Temporary "fried" personality override |
 | `,drug off` | No | Turn off drug mode |
+| `,solo` / `,solo #channel` / `,solo off` | Yes | Lock this server to ONE channel: Maxwell answers there and is silent in every other channel, and autonomy stops starting things here. Per-server — other servers are untouched. |
 | `,jailbreak on` / `,jailbreak off` | Yes | Toggle freedom-mode prompt for this server (Discord only; Telegram always on) |
 | `,blacklist [user]` | Yes | Add/view/clear blacklisted users |
 | `,unblacklist [user]` | Yes | Remove a user from the blacklist |

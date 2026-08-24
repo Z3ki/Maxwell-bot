@@ -155,6 +155,18 @@ def _sanitize_control(control):
                 out[key] = float(value)
             except (TypeError, ValueError):
                 out[key] = default
+        elif isinstance(default, dict):
+            # {guild_id: channel_id} maps (guild_solo_channel). Ids only, so a
+            # hand-edited control.json cannot smuggle anything into the gate.
+            out[key] = (
+                {
+                    str(k).strip(): str(v).strip()
+                    for k, v in value.items()
+                    if str(k).strip().isdigit() and str(v).strip().isdigit()
+                }
+                if isinstance(value, dict)
+                else {}
+            )
         elif isinstance(default, list):
             if isinstance(value, list):
                 items = [str(x).strip()[:64] for x in value if str(x).strip()]
