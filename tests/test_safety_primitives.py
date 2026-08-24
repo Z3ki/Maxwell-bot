@@ -1,3 +1,4 @@
+import asyncio
 import pytest
 from datetime import datetime, timezone
 from attention import AttentionSignal, should_notify
@@ -11,12 +12,15 @@ def test_memory_commands_and_layers():
     assert parse_memory_command("forget old preference") == ("forget", "old preference")
     assert MemoryRecord("x", layer="project").normalized()["layer"] == "project"
 
-@pytest.mark.asyncio
-async def test_typed_dispatch():
+def test_typed_dispatch():
     seen = []
     dispatcher = EventDispatcher()
-    dispatcher.subscribe("webhook", lambda event: seen.append(event.payload))
-    await dispatcher.dispatch_payload("webhook", {"typed": True}, source="webhook")
+
+    async def record(event):
+        seen.append(event.payload)
+
+    dispatcher.subscribe("webhook", record)
+    asyncio.run(dispatcher.dispatch_payload("webhook", {"typed": True}, source="webhook"))
     assert seen == [{"typed": True}]
 
 def test_attention_requires_action_and_respects_quiet_hours():

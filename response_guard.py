@@ -10,7 +10,7 @@ def sanitize_transcript(messages: Iterable[dict], *, max_chars: int = 120_000) -
     previous = None
     for message in messages:
         role = str(message.get("role", "user"))
-        content = re.sub(r"\\s+", " ", str(message.get("content", "")).strip())
+        content = re.sub(r"\s+", " ", str(message.get("content", "")).strip())
         if not content: continue
         key = (role, content.casefold())
         if key == previous: continue
@@ -22,7 +22,7 @@ def sanitize_transcript(messages: Iterable[dict], *, max_chars: int = 120_000) -
     return result
 
 def repetition_ratio(text: str, n: int = 3) -> float:
-    words = re.findall(r"[\\w']+", text.lower())
+    words = re.findall(r"[\w']+", text.lower())
     if len(words) < n * 2: return 0.0
     grams = [tuple(words[i:i+n]) for i in range(len(words)-n+1)]
     return 1 - (len(set(grams)) / len(grams))
