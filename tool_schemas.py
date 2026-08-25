@@ -212,7 +212,9 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         {
             "user_id": _str("User ID or @mention to ban"),
             "reason": _str("Optional audit-log reason"),
-            "delete_message_seconds": _str("Optional 0-604800 seconds of messages to delete"),
+            "delete_message_seconds": _str(
+                "Optional 0-604800 seconds of messages to delete"
+            ),
             "guild_id": _str("Optional server ID"),
         },
         ["user_id"],
@@ -520,7 +522,9 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 "Handles like @name also work."
             ),
             "query": _str("Optional YouTube search if url is omitted"),
-            "limit": _int("Optional max videos for channel/playlist/search (default 15)"),
+            "limit": _int(
+                "Optional max videos for channel/playlist/search (default 15)"
+            ),
             "timestamps": _str("Optional comma-separated timestamps for frames"),
             "max_transcript_chars": _int("Optional transcript length cap"),
             "lang": _str("Optional caption language (default en)"),
@@ -1101,9 +1105,10 @@ _bare_arg_cache: dict[frozenset, re.Pattern] = {}
 def _bare_arg_call_re(names: frozenset) -> re.Pattern:
     cached = _bare_arg_cache.get(names)
     if cached is None:
-        alt = "|".join(
-            re.escape(n) for n in sorted(names, key=len, reverse=True)
-        ) or r"(?!x)x"
+        alt = (
+            "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+            or r"(?!x)x"
+        )
         cached = re.compile(
             rf"(?<![A-Za-z0-9_])({alt})\s*{_BARE_ARG_BODY}",
             re.DOTALL | re.IGNORECASE,
@@ -1308,7 +1313,10 @@ _paren_call_cache: dict[frozenset, re.Pattern] = {}
 def _paren_call_re(names: frozenset) -> re.Pattern:
     cached = _paren_call_cache.get(names)
     if cached is None:
-        alt = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True)) or r"(?!x)x"
+        alt = (
+            "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+            or r"(?!x)x"
+        )
         # The name must open the call and be followed immediately by
         # "key=", so ordinary prose containing "(" never matches.
         cached = re.compile(
@@ -1503,7 +1511,7 @@ def recover_text_tool_calls(
             # "<tool_call>send_message\n<arg_key>…" — the name is whatever
             # leads the body, before the first tag or line break. Both the
             # newline-separated and the glued form show up in the wild.
-            lead = re.split(r"[<\n]", body.lstrip(), 1)[0]
+            lead = re.split(r"[<\n]", body.lstrip(), maxsplit=1)[0]
             bare = _BARE_NAME_LINE_RE.match(lead)
             name = bare.group(1) if bare else ""
         if not name:
@@ -1515,17 +1523,26 @@ def recover_text_tool_calls(
             if decoded:
                 _add(match.start(), match.end(), decoded[0], decoded[1])
             continue
-        _add(match.start(), match.end(), name, _pairs_from_body(body, _clean_tool_name(name)))
+        _add(
+            match.start(),
+            match.end(),
+            name,
+            _pairs_from_body(body, _clean_tool_name(name)),
+        )
 
     for pattern, marker in ((_FUNCTION_EQ_RE, "<function"), (_INVOKE_RE, "invoke")):
         for match in _iter_gated(pattern, raw, lowered, marker):
             name = _clean_tool_name(match.group(1))
-            _add(match.start(), match.end(), name, _pairs_from_body(match.group(2), name))
+            _add(
+                match.start(), match.end(), name, _pairs_from_body(match.group(2), name)
+            )
 
     if allowed and "<arg>" in lowered:
         for match in _bare_arg_call_re(frozenset(allowed)).finditer(raw):
             name = _clean_tool_name(match.group(1))
-            _add(match.start(), match.end(), name, _pairs_from_body(match.group(2), name))
+            _add(
+                match.start(), match.end(), name, _pairs_from_body(match.group(2), name)
+            )
 
     # send_message(reasoning=…, content=…) — a call written as a Python call.
     if allowed and "(" in raw and "=" in raw:
@@ -1535,7 +1552,9 @@ def recover_text_tool_calls(
             if open_paren == -1:
                 continue
             end = _balanced_paren_end(raw, open_paren)
-            interior = raw[open_paren + 1 : end - 1 if raw[end - 1 : end] == ")" else end]
+            interior = raw[
+                open_paren + 1 : end - 1 if raw[end - 1 : end] == ")" else end
+            ]
             args = _pairs_from_paren_body(interior, name)
             if args:
                 _add(match.start(), end, name, args)

@@ -89,7 +89,7 @@ def _stub_embed(monkeypatch):
             # L2-normalize basis vectors so token counts don't dominate.
             basis[tok] /= np.linalg.norm(basis[tok]) + 1e-8
         vec = np.zeros(EMBED_DIM, dtype=np.float32)
-        for tok, b in basis.items():
+        for _tok, b in basis.items():
             vec += b
         n = np.linalg.norm(vec)
         if n > 1e-8:
@@ -122,8 +122,7 @@ def test_store_web_results_persists_with_correct_kind(tmp_path, monkeypatch):
         assert n == 2, f"expected 2 inserts, got {n}"
 
         rows = mgr._db.execute(
-            "SELECT kind, source, author, content_hash FROM vectors "
-            "WHERE kind=?",
+            "SELECT kind, source, author, content_hash FROM vectors WHERE kind=?",
             (WEB_RESULT_KIND,),
         ).fetchall()
         assert len(rows) == 2
@@ -370,9 +369,7 @@ def test_store_skips_results_without_url(tmp_path, monkeypatch):
                 "body": "Body.",
             },
         ]
-        n = await mgr.store_web_results(
-            query="mixed", results=results, max_per_query=3
-        )
+        n = await mgr.store_web_results(query="mixed", results=results, max_per_query=3)
         assert n == 1
         rows = mgr._db.execute(
             "SELECT COUNT(*) AS c FROM vectors WHERE kind=?",

@@ -64,6 +64,7 @@ def is_direct_image_url(url: str) -> bool:
         return False
     return Path(path).suffix in _DIRECT_IMAGE_EXTS
 
+
 # Human-readable labels for Discord system message types (welcome messages,
 # joins, boosts, pins, etc.). Anything unmapped falls back to the enum name.
 SYSTEM_MESSAGE_LABELS = {
@@ -208,9 +209,10 @@ def _attachment_is_voice(att: Any) -> bool:
     if callable(checker):
         with contextlib.suppress(Exception):
             return bool(checker())
-    return getattr(att, "duration", None) is not None and getattr(
-        att, "waveform", None
-    ) is not None
+    return (
+        getattr(att, "duration", None) is not None
+        and getattr(att, "waveform", None) is not None
+    )
 
 
 def _attachment_annotation(att: Any) -> str:
@@ -391,14 +393,18 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
         elif key.startswith("MessageType."):
             label = SYSTEM_MESSAGE_LABELS.get(key) or key
             author = getattr(message, "author", None)
-            aname = getattr(author, "display_name", None) if author is not None else None
+            aname = (
+                getattr(author, "display_name", None) if author is not None else None
+            )
             parts.append(f"[system: {label}" + (f" — {aname}" if aname else "") + "]")
         elif hasattr(mtype, "name"):
             # enum-like objects where str() isn't the qualified name
-            key2 = f"MessageType.{getattr(mtype, 'name')}"
+            key2 = f"MessageType.{mtype.name}"
             label = SYSTEM_MESSAGE_LABELS.get(key2) or str(mtype)
             author = getattr(message, "author", None)
-            aname = getattr(author, "display_name", None) if author is not None else None
+            aname = (
+                getattr(author, "display_name", None) if author is not None else None
+            )
             parts.append(f"[system: {label}" + (f" — {aname}" if aname else "") + "]")
 
     embeds = list(getattr(message, "embeds", []) or [])
@@ -420,7 +426,9 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
             img = getattr(e, "image", None)
             thumb = getattr(e, "thumbnail", None)
             img_url = str(getattr(img, "url", "") or "") if img is not None else ""
-            thumb_url = str(getattr(thumb, "url", "") or "") if thumb is not None else ""
+            thumb_url = (
+                str(getattr(thumb, "url", "") or "") if thumb is not None else ""
+            )
             footer = getattr(e, "footer", None)
             footer_text = (
                 str(getattr(footer, "text", "") or "").strip()
@@ -456,10 +464,21 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
         seen.add(u)
         ext = u.rsplit(".", 1)[-1].split("?")[0].lower() if "." in u else ""
         kind = {
-            "png": "image", "jpg": "image", "jpeg": "image", "gif": "image",
-            "webp": "image", "mp4": "video", "webm": "video", "mov": "video",
-            "mkv": "video", "mp3": "audio", "ogg": "audio", "wav": "audio",
-            "flac": "audio", "m4a": "audio", "aac": "audio",
+            "png": "image",
+            "jpg": "image",
+            "jpeg": "image",
+            "gif": "image",
+            "webp": "image",
+            "mp4": "video",
+            "webm": "video",
+            "mov": "video",
+            "mkv": "video",
+            "mp3": "audio",
+            "ogg": "audio",
+            "wav": "audio",
+            "flac": "audio",
+            "m4a": "audio",
+            "aac": "audio",
         }.get(ext, "file")
         found.append((kind, u))
     for m in GIF_PAGE_URL_RE.finditer(raw_content):
@@ -626,7 +645,9 @@ def _discord_id(obj: Any) -> str:
     return str(getattr(obj, "id", "unknown"))
 
 
-def render_discord_context_text(message: Any, content: str | None = None, known_users: dict | None = None) -> str:
+def render_discord_context_text(
+    message: Any, content: str | None = None, known_users: dict | None = None
+) -> str:
     """Make Discord tokens readable for prompts/logged context without mutating the real message.
     known_users: optional {user_id: display_name} from conversation history to resolve pings.
 
@@ -775,7 +796,9 @@ class FileLock:
             _atomic_json_write_sync(path, data)
     """
 
-    def __init__(self, path: Path | str, timeout: float = 30.0, *, fail_open: bool = False):
+    def __init__(
+        self, path: Path | str, timeout: float = 30.0, *, fail_open: bool = False
+    ):
         self.path = Path(path)
         self.lock_path = Path(str(self.path) + ".lock")
         self.timeout = timeout
@@ -788,6 +811,7 @@ class FileLock:
         self._fd = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o644)
         if fcntl is not None:
             import time as _time
+
             deadline = _time.time() + self.timeout
             while True:
                 try:
@@ -806,7 +830,7 @@ class FileLock:
                         self._fd = None
                         raise FileLockTimeout(
                             f"FileLock timeout after {self.timeout}s on {self.lock_path}"
-                        )
+                        ) from None
                     _time.sleep(0.05)
         return self
 

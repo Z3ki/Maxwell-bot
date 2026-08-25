@@ -1071,7 +1071,7 @@ def test_retry_loop_cannot_spin_forever_on_endless_deterministic_400s():
     provider._session = session
 
     async def run():
-        with pytest.raises(Exception):
+        with pytest.raises(RuntimeError):
             await provider.generate_chat_completion([{"role": "user", "content": "hi"}])
 
     asyncio.run(run())
