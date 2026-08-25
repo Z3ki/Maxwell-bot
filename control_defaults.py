@@ -100,6 +100,13 @@ DEFAULT_CONTROL = {
     # Watch follow-ups wait this long for more lines, then one reply.
     # Hard @ / reply-to-Maxwell still go out immediately.
     "conversation_watch_debounce_seconds": 1,
+    # How much a line nobody pinged him with has to look like it wants an
+    # answer before it is worth an LLM turn (0..1, see
+    # watch_policy.reply_pressure). Every watched line used to become a turn,
+    # and a model asked "should you reply?" nearly always says yes — so the
+    # first cut is made here, on the signals, and only lines that plausibly
+    # want him get asked. Lower is chattier; 1.0 means only hard pings.
+    "conversation_watch_pressure": 0.4,
     # How often the background IMAP poll files new unread mail as inbox
     # notices. Only runs when ENABLE_EMAIL_TOOLS and a mailbox password are
     # set. Floor 30s, ceiling 1h.

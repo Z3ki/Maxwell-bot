@@ -46,6 +46,13 @@ DEBOUNCE_MIN_FACTOR = 0.5
 # How many consecutive silent decisions it takes to fully discount a room.
 SILENCE_PATIENCE = 4
 
+# How much a line has to be asking for a reply before it is worth an LLM
+# turn at all. Every soft line used to become a turn, and a model handed a
+# turn nearly always finds something to say — so the "should I speak" call
+# was being made by the most agreeable judge available. This moves the first
+# cut to the signals, and only the lines that plausibly want him get asked.
+REPLY_PRESSURE_THRESHOLD = 0.4
+
 
 @dataclass
 class WatchState:
@@ -210,38 +217,71 @@ def reply_pressure(signal: AddressSignal, state: WatchState, now: float,
 
     A hard ping short-circuits to 1.0; the interesting range is the soft
     middle, where a line lands in a room he was recently part of.
+
+    The weights are deliberately tight. Silence is the default for anything
+    nobody pointed at him: being named, or a live exchange he is already in,
+    clears the bar on its own; everything else — a question thrown at the
+    room, an image, a line right after he happened to speak — needs a second
+    signal to get there. That is what stops him agreeing with every line in
+    a busy channel.
     """
     if signal.direct:
         return 1.0
     if signal.from_bot:
         return 0.0
     score = 0.0
-    # Being named, or included in a broadcast, is the strongest soft signal.
+    # Being named is the one soft signal strong enough to stand alone.
     if signal.names_him:
-        score += 0.45
+        score += REPLY_PRESSURE_THRESHOLD + 0.1
+    # A broadcast is aimed at the room. He is in the room, but so is
+    # everyone, so on its own this is nowhere near enough.
     if signal.soft:
-        score += 0.2
-    # Continuity: was he part of what is happening right now?
-    score += 0.35 * engagement_factor(state, now, base_window)
+        score += 0.1
+    # Continuity: is he actually a participant right now? Being addressed
+    # recently counts fully and clears the bar by itself; merely having
+    # spoken counts for less (presence_factor discounts it), because him
+    # talking is not evidence anyone wants him to keep going.
+    score += 0.45 * presence_factor(state, now, base_window)
     # A question in a room he is part of is more likely aimed at him than a
-    # statement is.
+    # statement is — but only as a tie-breaker on top of real continuity.
     if signal.is_question:
-        score += 0.12
+        score += 0.08
     if signal.has_media:
-        score += 0.05
+        score += 0.03
     # Explicitly aimed elsewhere. Not disqualifying — people talk to two
-    # people at once — but it is evidence.
+    # people at once — but it is strong evidence, and cheap to be wrong
+    # about in the silent direction.
     if signal.reply_to_other:
-        score -= 0.3
-    if signal.mentions_other and not signal.names_him:
-        score -= 0.25
+        score -= 0.45
+    # Naming him no longer rescues this: "maxwell is why @alice can't get in"
+    # is a line about him, said to Alice. Being talked about is the single
+    # most common way he used to butt into a conversation he wasn't in.
+    if signal.mentions_other:
+        score -= 0.35
     # A bare interjection carries almost no request for a reply.
     if signal.text_length and signal.text_length < 4 and not signal.has_media:
-        score -= 0.15
+        score -= 0.2
     # How his last few turns here went. If four in a row ended in silence,
     # this room is background noise and the bar rises.
-    score *= 0.4 + 0.6 * patience_factor(state)
+    score *= 0.25 + 0.75 * patience_factor(state)
     return max(0.0, min(score, 1.0))
+
+
+def should_consider_reply(pressure: float,
+                          threshold: float = REPLY_PRESSURE_THRESHOLD) -> bool:
+    """Is this line worth spending a turn on at all?
+
+    The model is the final judge of whether to speak, but it only gets asked
+    when the situation itself suggests the line might be for him. Below the
+    bar there is no LLM call: he stays quiet without anyone paying for the
+    decision, which is both cheaper and — since the model leans agreeable
+    when handed a turn — much less chatty.
+    """
+    try:
+        bar = float(threshold)
+    except (TypeError, ValueError):
+        bar = REPLY_PRESSURE_THRESHOLD
+    return float(pressure) >= max(0.0, min(bar, 1.0))
 
 
 def describe_signal(signal: AddressSignal, state: WatchState, pressure: float,
@@ -272,8 +312,21 @@ def describe_signal(signal: AddressSignal, state: WatchState, pressure: float,
         bits.append(f"you stayed quiet the last {state.silent_streak} time(s)")
     if state.interval_ema:
         bits.append(f"room pace ~{state.interval_ema:.0f}s between lines")
-    bits.append(f"reply pressure {pressure:.2f}")
-    return "Watch signals: " + "; ".join(bits) + "."
+    bits.append(
+        f"reply pressure {pressure:.2f} (bar for speaking unprompted: "
+        f"{REPLY_PRESSURE_THRESHOLD:.2f})"
+    )
+    line = "Watch signals: " + "; ".join(bits) + "."
+    if not signal.direct and pressure < REPLY_PRESSURE_THRESHOLD + 0.2:
+        # Say it as a fact about this line, not as another rule. The numbers
+        # above already describe the situation; this names what they add up
+        # to, which is the part the model kept talking itself out of.
+        line += (
+            " Nothing here is pointed at you — this is a marginal one, so"
+            " no_response unless the line only makes sense as something said"
+            " to you."
+        )
+    return line
 
 
 # --------------------------------------------------------------------------

@@ -3,6 +3,7 @@
 import math
 
 from watch_policy import (
+    REPLY_PRESSURE_THRESHOLD,
     EXTRACT_THRESHOLD,
     AddressSignal,
     ExtractionContext,
@@ -258,3 +259,50 @@ def test_the_score_is_bounded_and_explains_itself():
 def test_the_default_threshold_is_deliberately_permissive():
     assert 0.0 < EXTRACT_THRESHOLD < 0.5
     assert not math.isnan(EXTRACT_THRESHOLD)
+
+
+def test_only_named_or_live_lines_clear_the_bar():
+    """The bar is what stopped him answering every line in the room."""
+    from watch_policy import should_consider_reply
+
+    cold = WatchState()
+    named = AddressSignal(names_him=True, text_length=40)
+    plain = AddressSignal(text_length=40)
+    assert should_consider_reply(reply_pressure(named, cold, 0.0, BASE))
+    assert not should_consider_reply(reply_pressure(plain, cold, 0.0, BASE))
+    # Mid-exchange — they addressed him seconds ago — a plain line lands.
+    live = WatchState(engaged_at=1000.0)
+    assert should_consider_reply(reply_pressure(plain, live, 1005.0, BASE))
+    # The same room a minute later is no longer an exchange.
+    assert not should_consider_reply(reply_pressure(plain, live, 1090.0, BASE))
+    # Him having spoken is not the same as being spoken to.
+    spoke = WatchState(spoke_at=1000.0)
+    assert not should_consider_reply(reply_pressure(plain, spoke, 1005.0, BASE))
+
+
+def test_being_talked_about_is_not_being_talked_to():
+    from watch_policy import should_consider_reply
+
+    state = WatchState()
+    about = AddressSignal(names_him=True, mentions_other=True, text_length=40)
+    assert not should_consider_reply(reply_pressure(about, state, 0.0, BASE))
+    quoted = AddressSignal(names_him=True, reply_to_other=True, text_length=40)
+    assert not should_consider_reply(reply_pressure(quoted, state, 0.0, BASE))
+
+
+def test_threshold_is_a_parameter():
+    from watch_policy import should_consider_reply
+
+    assert should_consider_reply(0.5, 0.4) is True
+    assert should_consider_reply(0.5, 0.6) is False
+    assert should_consider_reply(0.0, 0.0) is True   # 0 = the old behaviour
+    assert should_consider_reply(0.99, 1.0) is False  # 1 = pings only
+    assert should_consider_reply(0.5, "nope") is (0.5 >= REPLY_PRESSURE_THRESHOLD)
+
+
+def test_describe_signal_states_the_bar():
+    text = describe_signal(
+        AddressSignal(text_length=40), WatchState(), 0.12, 1000.0
+    )
+    assert "bar for speaking unprompted" in text
+    assert "no_response" in text

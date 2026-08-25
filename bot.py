@@ -3600,8 +3600,13 @@ class MaxwellBot(commands.Bot):
         return max(self._channel_lock_timeout(), 90.0)
 
     def _requeue_after_lock_timeout(self, message) -> None:
-        """Keep a live reply queued instead of dropping it while the room is busy."""
-        if message is None or not self._should_live_reply(message):
+        """Keep a hard ping queued instead of dropping it while the room is busy.
+
+        Only a ping. A lock that timed out means something long is running in
+        that room — an image, a big tool call — and a soft line that waits it
+        out and then answers on top of the result is the flood, not a reply.
+        """
+        if message is None or not self._directly_addressed(message):
             return
         retries = int(getattr(message, "_lock_retry_count", 0) or 0)
         if retries >= 4:
@@ -4122,13 +4127,16 @@ class MaxwellBot(commands.Bot):
                 watching = bool(checker(channel_id))
         if watching:
             lines.append(
-                "Conversation watch is on in this room. You can talk without "
-                "an @, but default to no_response. The transcript is THIS "
-                "channel's current thread — stay on it. Speak when the "
-                "exchange in front of you is actually with you; stay silent "
-                "for side talk, reactions, people discussing you with someone "
-                "else, and topics you are not part of. Don't bring up other "
-                "rooms or old topics that aren't in this conversation."
+                "Conversation watch is on in this room: you may speak without "
+                "an @, and no_response is the default, not the fallback. "
+                "Nobody sent this to you — the bar is that the line only "
+                "makes sense as something said to you, or answers something "
+                "you actually asked. Being able to add something is not a "
+                "reason to. Stay silent for side talk, reactions, agreement, "
+                "jokes you were not part of, people discussing you with "
+                "someone else, and anything you would only be seconding. The "
+                "transcript is THIS channel's current thread — stay on it, "
+                "and don't bring up other rooms or old topics."
             )
             # The old prompt spelled out each addressing case in its own
             # paragraph, which repeated the rule three times and left the
@@ -4145,12 +4153,23 @@ class MaxwellBot(commands.Bot):
                 lines.append(
                     watch_policy.describe_signal(signal, state, pressure, now)
                 )
+                # The gate already refused everything well below the bar, so
+                # a line that got here and is still only just over it is the
+                # marginal case — say so rather than leaving him to guess.
+                if not signal.direct and pressure < self._watch_pressure_threshold() + 0.15:
+                    lines.append(
+                        "This one barely cleared the bar for being worth "
+                        "considering. Unless it is plainly for you, "
+                        "no_response is the right answer."
+                    )
         if getattr(message, "_watch_followup", False):
             lines.append(
                 "Soft follow-up: they did not @ you or Discord-reply this time. "
                 "Default is no_response. Speak only if this line continues the "
-                "exchange with you in this room. If the room moved on, stay "
-                "silent. To Discord-reply to an earlier line, send_message "
+                "exchange with you in this room — not because it is on a topic "
+                "you know about, and not to agree, react, or add a thought "
+                "nobody asked for. If the room moved on, stay silent. "
+                "To Discord-reply to an earlier line, send_message "
                 "with reply_to as a short quote or name, like nah or alice — "
                 "not an id."
             )
@@ -4187,15 +4206,96 @@ class MaxwellBot(commands.Bot):
             + "\n".join(rendered)
         ]
 
+    def _watch_pressure_threshold(self) -> float:
+        """How much a soft line has to be asking for him before it costs a turn."""
+        raw = (getattr(self, "_control", None) or {}).get(
+            "conversation_watch_pressure",
+            watch_policy.REPLY_PRESSURE_THRESHOLD,
+        )
+        try:
+            return max(0.0, min(float(raw), 1.0))
+        except (TypeError, ValueError):
+            return watch_policy.REPLY_PRESSURE_THRESHOLD
+
+    def _watch_reply_pressure(self, message, channel_id=None) -> float:
+        """0..1 for this line — see watch_policy.reply_pressure."""
+        if channel_id is None:
+            channel_id = getattr(getattr(message, "channel", None), "id", "")
+        signal = self._watch_address_signal(message)
+        state = self._watch_state(channel_id)
+        now = asyncio.get_running_loop().time()
+        return watch_policy.reply_pressure(
+            signal, state, now, self._conversation_watch_seconds()
+        )
+
+    def _busy_reason(self, channel_id=None) -> str:
+        """What Maxwell is currently in the middle of, or "" if nothing.
+
+        The watch is a background behaviour, so it yields to anything in the
+        foreground. A turn that is generating an image holds its channel for
+        a minute or more; every watch line that landed in the meantime used
+        to queue behind it and then arrive in a clump the moment it finished.
+        Anything running anywhere counts — one turn is one Maxwell, and a
+        room he is not even in is still him being busy.
+        """
+        cid = str(channel_id or "").strip()
+        if cid and self._channel_turn_active(cid):
+            return "a turn is in flight in this room"
+        if getattr(self, "_replying_channels", None):
+            return "a turn is in flight in another room"
+        active = getattr(self, "_active_requests", None) or {}
+        if any(task is not None and not task.done() for task in active.values()):
+            return "a request is still running"
+        if getattr(self, "_rem_running", False):
+            return "REM is running"
+        bus = getattr(self, "agent_events", None)
+        if bus is not None:
+            with contextlib.suppress(Exception):
+                if int((bus.stats() or {}).get("running", 0) or 0) > 0:
+                    return "a sub-agent is running"
+        with contextlib.suppress(Exception):
+            sleeping, _ = self._is_sleeping()
+            if sleeping:
+                return "he is asleep"
+        return ""
+
     def _should_live_reply(self, message) -> bool:
-        """Hard ping always. During watch, every human line — he decides."""
+        """Hard ping always. Soft lines have to earn the turn.
+
+        A hard ping is a request and goes through whatever else is happening.
+        Everything else has to clear two bars first: he has to be free, and
+        the line itself has to look like it is asking him something. Before
+        this, every human line in a watched room became a full LLM turn — and
+        a model handed a turn and asked "should you reply?" says yes far more
+        often than the room wanted.
+        """
         if self._directly_addressed(message):
             return True
         author = getattr(message, "author", None)
         channel = getattr(message, "channel", None)
         if author is None or channel is None or getattr(author, "bot", False):
             return False
-        return self._conversation_watch_active(getattr(channel, "id", ""))
+        cid = getattr(channel, "id", "")
+        if not self._conversation_watch_active(cid):
+            return False
+        busy = self._busy_reason(cid)
+        if busy:
+            logger.debug("Watch: skipping soft line in %s (%s)", cid, busy)
+            return False
+        pressure = 0.0
+        with contextlib.suppress(Exception):
+            pressure = self._watch_reply_pressure(message, cid)
+        if not watch_policy.should_consider_reply(
+            pressure, self._watch_pressure_threshold()
+        ):
+            logger.debug(
+                "Watch: soft line in %s below bar (pressure %.2f)", cid, pressure
+            )
+            # A line he never even considered is not the room ignoring him,
+            # so it must not count against the room's patience — that is
+            # recorded only for turns he actually took.
+            return False
+        return True
 
     async def _arm_watch_from_own_message(self, message) -> None:
         """Any post from Maxwell keeps that whole room on watch."""
@@ -4324,6 +4424,20 @@ class MaxwellBot(commands.Bot):
         if target is None:
             return
         content = getattr(target, "content", "") or bucket.get("content") or ""
+        # Busy is re-checked here, not just when the line arrived: an image
+        # generation or a long tool call can start during the debounce wait,
+        # and a soft follow-up that waits it out then lands on top of the
+        # result is exactly the flood this is meant to prevent. A hard ping
+        # still goes through — that one was asked for.
+        if not self._directly_addressed(target):
+            busy = self._busy_reason(channel_id)
+            if busy:
+                logger.info(
+                    "Watch debounce: dropping soft follow-up in %s (%s)",
+                    channel_id,
+                    busy,
+                )
+                return
         with contextlib.suppress(Exception):
             target._watch_followup = True
             target._watch_burst = list(bucket.get("burst") or [])
@@ -11552,6 +11666,12 @@ class MaxwellBot(commands.Bot):
         self._sleep_until = now + duration_minutes * 60
         # Clear the dedup so the wake-up notice is fresh.
         self._sleep_notified_at.clear()
+        # Drop every conversation watch and every follow-up already waiting
+        # out its debounce. Otherwise going to sleep mid-conversation leaves
+        # a queued turn that fires a second later, from someone asleep.
+        dropper = getattr(self, "_drop_watches_for_sleep", None)
+        if callable(dropper):
+            dropper()
         arm = getattr(self, "_arm_sleep_wake", None)
         if callable(arm):
             arm()
@@ -11561,6 +11681,16 @@ class MaxwellBot(commands.Bot):
             if asyncio.iscoroutine(result):
                 await result
         return f"sleeping for {duration_minutes}m"
+
+    def _drop_watches_for_sleep(self) -> None:
+        """Forget every armed watch and cancel every pending follow-up."""
+        with contextlib.suppress(Exception):
+            (getattr(self, "_conversation_watch", None) or {}).clear()
+        for cid in list((getattr(self, "_watch_debounce", None) or {})):
+            with contextlib.suppress(Exception):
+                self._cancel_watch_debounce(cid)
+        with contextlib.suppress(Exception):
+            (getattr(self, "_watch_debounce", None) or {}).clear()
 
     async def clear_sleep(self) -> str:
         """Cancel any active sleep window. Idempotent."""
@@ -11681,6 +11811,11 @@ class MaxwellBot(commands.Bot):
         message should be swallowed by the sleep gate.
 
         When sleeping:
+          - only a hard ping (DM, @, reply to him) gets the notice. A line
+            that merely landed in a room he had been talking in was never
+            asking him anything, so answering it with "max is sleeping" is
+            him talking while asleep — the exact behaviour sleep exists to
+            stop.
           - notify once per 5 minutes per user (so a long sleep
             doesn't spam one line per ping).
           - post the remaining-time notice in the triggering message's
@@ -11693,9 +11828,17 @@ class MaxwellBot(commands.Bot):
         sleeping, secs = self._is_sleeping()
         if not sleeping:
             return True
+        uid = str(getattr(message.author, "id", "") or "")
+        if not self._directly_addressed(message):
+            logger.info(
+                "Sleep gate: silently dropped unaddressed message from uid=%s in "
+                "channel=%s",
+                uid,
+                getattr(message.channel, "id", "?"),
+            )
+            return False
         # Re-notify cadence: once per 5 minutes per user. If a user
         # already got a 'sleeping' note recently, stay silent.
-        uid = str(getattr(message.author, "id", "") or "")
         if uid:
             now = asyncio.get_running_loop().time()
             last = self._sleep_notified_at.get(uid, 0.0)

@@ -25,7 +25,11 @@ def _bot(*, watch_seconds=180, debounce_seconds=0.05):
         _recent_users={},
         _active_requests={},
         _active_request_user={},
-        user=SimpleNamespace(id=1382894657624866889),
+        _rem_running=False,
+        agent_events=None,
+        user=SimpleNamespace(
+            id=1382894657624866889, display_name="Maxwell", name="maxwell"
+        ),
     )
     bot._conversation_watch_seconds = MaxwellBot._conversation_watch_seconds.__get__(
         bot
@@ -51,6 +55,10 @@ def _bot(*, watch_seconds=180, debounce_seconds=0.05):
     bot._watch_followup_is_directed = MaxwellBot._watch_followup_is_directed.__get__(
         bot
     )
+    bot._watch_pressure_threshold = MaxwellBot._watch_pressure_threshold.__get__(bot)
+    bot._watch_reply_pressure = MaxwellBot._watch_reply_pressure.__get__(bot)
+    bot._channel_turn_active = MaxwellBot._channel_turn_active.__get__(bot)
+    bot._busy_reason = MaxwellBot._busy_reason.__get__(bot)
     bot._should_live_reply = MaxwellBot._should_live_reply.__get__(bot)
     bot._arm_watch_from_own_message = MaxwellBot._arm_watch_from_own_message.__get__(
         bot
@@ -122,19 +130,127 @@ def test_ambient_outside_watch_is_ignored():
     assert MaxwellBot._should_live_reply(bot, named) is False
 
 
-def test_watch_shows_him_every_human_line():
+def test_watch_only_spends_a_turn_on_lines_that_ask_for_him():
+    """On watch, being named or mid-exchange earns a turn. Room chatter doesn't.
+
+    Every human line used to become a full turn where the model decided
+    whether to speak, and a model handed a turn nearly always finds a reason
+    to. The first cut is now made on the signals.
+    """
     bot = _bot()
-    msg = _plain_followup()
 
     async def run():
-        MaxwellBot._arm_conversation_watch(bot, msg.channel.id)
-        assert MaxwellBot._should_live_reply(bot, msg) is True
-        asked = _plain_followup(content="wanna talk about something?")
-        assert MaxwellBot._should_live_reply(bot, asked) is True
+        cid = 1506001126426808511
+        MaxwellBot._arm_conversation_watch(bot, cid)
         named = _plain_followup(content="maxwell say hi")
         assert MaxwellBot._should_live_reply(bot, named) is True
-        chatter = _plain_followup(content="lol")
-        assert MaxwellBot._should_live_reply(bot, chatter) is True
+        # Nobody pointed these at him and he is not mid-exchange here.
+        for content in ("wow fancy i am doing fine myself", "lol", "wanna talk about something?"):
+            assert (
+                MaxwellBot._should_live_reply(bot, _plain_followup(content=content))
+                is False
+            ), content
+
+    asyncio.run(run())
+
+
+def test_a_live_exchange_still_carries_without_an_at():
+    """The point of the watch: once they are talking to him, plain lines land."""
+    bot = _bot()
+
+    async def run():
+        cid = 1506001126426808511
+        MaxwellBot._arm_conversation_watch(bot, cid)
+        ping = _plain_followup(content="hey")
+        ping.mentions = [bot.user]
+        MaxwellBot._note_watch_message(bot, ping)  # records the engagement
+        plain = _plain_followup(content="wow fancy i am doing fine myself")
+        assert MaxwellBot._should_live_reply(bot, plain) is True
+
+    asyncio.run(run())
+
+
+def test_being_ignored_raises_the_bar():
+    """Same line, same room — but his last few turns there went unanswered."""
+    bot = _bot()
+
+    async def run():
+        cid = 1506001126426808511
+        MaxwellBot._arm_conversation_watch(bot, cid)
+        ping = _plain_followup(content="hey")
+        ping.mentions = [bot.user]
+        MaxwellBot._note_watch_message(bot, ping)
+        plain = _plain_followup(content="wow fancy i am doing fine myself")
+        assert MaxwellBot._should_live_reply(bot, plain) is True
+        bot._watch_states[str(cid)].silent_streak = 2
+        assert MaxwellBot._should_live_reply(bot, plain) is False
+
+    asyncio.run(run())
+
+
+def test_watch_yields_while_he_is_busy():
+    """Nothing unprompted while a turn is running — his or anyone's."""
+    bot = _bot()
+
+    async def run():
+        cid = 1506001126426808511
+        MaxwellBot._arm_conversation_watch(bot, cid)
+        named = _plain_followup(content="maxwell say hi")
+        assert MaxwellBot._should_live_reply(bot, named) is True
+        # Mid image-gen in this very room.
+        bot._replying_channels.add(str(cid))
+        assert MaxwellBot._busy_reason(bot, cid) == "a turn is in flight in this room"
+        assert MaxwellBot._should_live_reply(bot, named) is False
+        # Busy in a different room is still busy: one turn, one Maxwell.
+        bot._replying_channels = {"9999"}
+        assert MaxwellBot._should_live_reply(bot, named) is False
+        bot._replying_channels = set()
+        assert MaxwellBot._should_live_reply(bot, named) is True
+        # A hard ping goes through anything.
+        bot._replying_channels = {str(cid)}
+        ping = _plain_followup(content="hey")
+        ping.mentions = [bot.user]
+        assert MaxwellBot._should_live_reply(bot, ping) is True
+
+    asyncio.run(run())
+
+
+def test_busy_covers_sub_agents_and_rem():
+    bot = _bot()
+
+    async def run():
+        cid = 1506001126426808511
+        MaxwellBot._arm_conversation_watch(bot, cid)
+        named = _plain_followup(content="maxwell say hi")
+        bot._rem_running = True
+        assert MaxwellBot._busy_reason(bot, cid) == "REM is running"
+        assert MaxwellBot._should_live_reply(bot, named) is False
+        bot._rem_running = False
+        bot.agent_events = SimpleNamespace(stats=lambda: {"running": 1})
+        assert MaxwellBot._busy_reason(bot, cid) == "a sub-agent is running"
+        assert MaxwellBot._should_live_reply(bot, named) is False
+        bot.agent_events = SimpleNamespace(stats=lambda: {"running": 0})
+        assert MaxwellBot._busy_reason(bot, cid) == ""
+        assert MaxwellBot._should_live_reply(bot, named) is True
+
+    asyncio.run(run())
+
+
+def test_pressure_bar_is_configurable():
+    bot = _bot()
+    assert MaxwellBot._watch_pressure_threshold(bot) == 0.4
+
+    async def run():
+        cid = 1506001126426808511
+        MaxwellBot._arm_conversation_watch(bot, cid)
+        named = _plain_followup(content="maxwell say hi")
+        assert MaxwellBot._should_live_reply(bot, named) is True
+        # 1.0 = only hard pings ever get a turn.
+        bot._control["conversation_watch_pressure"] = 1.0
+        assert MaxwellBot._should_live_reply(bot, named) is False
+        # 0.0 = the old behaviour, every human line on watch.
+        bot._control["conversation_watch_pressure"] = 0.0
+        assert MaxwellBot._should_live_reply(bot, _plain_followup(content="lol")) is True
 
     asyncio.run(run())
 
@@ -149,9 +265,10 @@ def test_watch_is_the_room_not_one_user():
 
     async def run():
         MaxwellBot._arm_conversation_watch(bot, other.channel.id)
+        # Anyone in the room can pull him in — it is not one user's watch.
         assert MaxwellBot._should_live_reply(bot, other) is True
         ambient = _plain_followup(content="lol", author_id=99, display_name="Alice")
-        assert MaxwellBot._should_live_reply(bot, ambient) is True
+        assert MaxwellBot._should_live_reply(bot, ambient) is False
 
     asyncio.run(run())
 
@@ -200,25 +317,33 @@ def test_own_message_arms_the_channel():
     async def run():
         await MaxwellBot._arm_watch_from_own_message(bot, own)
         assert MaxwellBot._conversation_watch_active(bot, own.channel.id) is True
+        # Him having spoken is not evidence anyone wants him to keep going.
         other = _plain_followup(
             content="lol",
             author_id=99,
             display_name="Alice",
         )
-        assert MaxwellBot._should_live_reply(bot, other) is True
+        assert MaxwellBot._should_live_reply(bot, other) is False
+        named = _plain_followup(
+            content="maxwell what was that", author_id=99, display_name="Alice"
+        )
+        assert MaxwellBot._should_live_reply(bot, named) is True
 
     asyncio.run(run())
 
 
 def test_watch_line_is_his_choice():
     bot = _bot()
-    ambient = _plain_followup(content="EZE")
-    assert MaxwellBot._should_live_reply(bot, ambient) is False
+    named = _plain_followup(content="EZE maxwell")
+    assert MaxwellBot._should_live_reply(bot, named) is False
 
     async def run():
-        MaxwellBot._arm_conversation_watch(bot, ambient.channel.id)
-        assert MaxwellBot._should_live_reply(bot, ambient) is True
-        assert MaxwellBot._watch_followup_is_directed(bot, ambient) is True
+        MaxwellBot._arm_conversation_watch(bot, named.channel.id)
+        # Past the bar he still gets the turn and the last word on speaking.
+        assert MaxwellBot._should_live_reply(bot, named) is True
+        assert MaxwellBot._watch_followup_is_directed(bot, named) is True
+        ambient = _plain_followup(content="EZE")
+        assert MaxwellBot._watch_followup_is_directed(bot, ambient) is False
 
     asyncio.run(run())
 
@@ -236,7 +361,8 @@ def test_talking_about_him_is_still_his_choice():
     asyncio.run(run())
 
 
-def test_pinging_someone_else_is_still_his_choice():
+def test_pinging_someone_else_is_left_alone():
+    """Named in a line @-ing somebody else: they are talking about him, not to him."""
     bot = _bot()
     alice = SimpleNamespace(id=99, display_name="Alice")
     msg = _plain_followup(content="maxwell is why you don't have access")
@@ -245,7 +371,7 @@ def test_pinging_someone_else_is_still_his_choice():
     async def run():
         MaxwellBot._arm_conversation_watch(bot, msg.channel.id)
         assert MaxwellBot._addressing_someone_else(bot, msg) is True
-        assert MaxwellBot._should_live_reply(bot, msg) is True
+        assert MaxwellBot._should_live_reply(bot, msg) is False
 
     asyncio.run(run())
 
@@ -274,7 +400,8 @@ def test_reply_to_someone_else_is_his_choice_on_watch():
         assert MaxwellBot._should_live_reply(bot, msg) is False
         MaxwellBot._arm_conversation_watch(bot, msg.channel.id)
         assert MaxwellBot._replying_to_other(bot, msg) is True
-        assert MaxwellBot._should_live_reply(bot, msg) is True
+        # A Discord reply aimed at Alice is Alice's to answer.
+        assert MaxwellBot._should_live_reply(bot, msg) is False
         msg.mentions = [bot.user]
         assert MaxwellBot._directly_addressed(bot, msg) is True
         assert MaxwellBot._should_live_reply(bot, msg) is True
@@ -291,8 +418,8 @@ def test_watch_prompt_lets_him_decide():
         MaxwellBot._arm_conversation_watch(bot, msg.channel.id)
         lines = MaxwellBot._conversation_watch_prompt(bot, msg, msg.channel.id)
         assert any("Conversation watch is on in this room" in line for line in lines)
-        assert any("can talk without an @" in line for line in lines)
-        assert any("default to no_response" in line for line in lines)
+        assert any("speak without an @" in line for line in lines)
+        assert any("no_response is the default" in line for line in lines)
         assert any("current thread" in line for line in lines)
         assert all("Soft follow-up" not in line for line in lines)
         msg._watch_followup = True
@@ -350,11 +477,13 @@ def test_watch_debounce_collapses_a_burst_into_one_reply():
         first = _plain_followup(content="hey maxwell")
         second = _plain_followup(content="lol")
         await MaxwellBot._maybe_live_reply(bot, first, first.content)
+        # "lol" is below the bar on its own, but it still stretches the timer
+        # and joins the burst, so the one turn sees the whole moment.
         await MaxwellBot._maybe_live_reply(bot, second, second.content)
         assert handled == []
         await asyncio.sleep(0.25)
-        assert handled == ["lol"]
-        assert len(getattr(second, "_watch_burst", []) or []) == 2
+        assert handled == ["hey maxwell"]
+        assert len(getattr(first, "_watch_burst", []) or []) == 2
 
     asyncio.run(run())
 
@@ -464,7 +593,8 @@ def test_watch_chatter_does_not_interrupt_inflight():
         MaxwellBot._arm_conversation_watch(bot, chatter.channel.id)
         ping = _plain_followup(content=f"<@{bot.user.id}> make it a cat")
         ping.mentions = [bot.user]
-        assert MaxwellBot._should_live_reply(bot, chatter) is True
+        # It does not even earn a turn now, let alone cancel the running one.
+        assert MaxwellBot._should_live_reply(bot, chatter) is False
         assert MaxwellBot._should_interrupt_inflight(bot, chatter) is False
         assert MaxwellBot._should_interrupt_inflight(bot, ping) is True
 
@@ -479,9 +609,14 @@ def test_lock_timeout_requeues_a_live_reply():
     )
 
     async def run():
-        msg = _plain_followup(content="make an image of a cat")
+        msg = _plain_followup(content=f"<@{bot.user.id}> make an image of a cat")
+        msg.mentions = [bot.user]
         MaxwellBot._arm_conversation_watch(bot, msg.channel.id)
         MaxwellBot._requeue_after_lock_timeout(bot, msg)
+        # A soft line that timed out on the lock is dropped, not requeued:
+        # the lock being held is exactly the "he is busy" case.
+        soft = _plain_followup(content="maxwell say hi")
+        MaxwellBot._requeue_after_lock_timeout(bot, soft)
 
     asyncio.run(run())
     assert queued == [("make an image of a cat", True)]

@@ -37,6 +37,9 @@ if str(ROOT) not in sys.path:
 import bot_tools  # noqa: E402
 
 
+_BOT_USER = SimpleNamespace(id=777, display_name="Maxwell", name="maxwell")
+
+
 class FakeMessage:
     """Minimal stand-in for a discord.Message used in the sleep-gate
     tests. Tracks channel sends and would-be DMs so we can assert
@@ -63,6 +66,13 @@ class FakeMessage:
         self.id = int(uid) + 1000
         self.tool_platform = platform
         self.content = "hi"
+        # A hard ping by default: the sleeping notice is only for people who
+        # actually addressed him.
+        self.mentions = [_BOT_USER]
+        self.mention_everyone = False
+        self.role_mentions = []
+        self.reference = None
+        self.guild = SimpleNamespace(me=None, get_member=lambda _uid: None)
 
 
 class FakeBot:
@@ -255,7 +265,13 @@ def _gate_bot():
         _control={"enable_sleep": True},
         _sleep_until=0.0,
         _sleep_notified_at={},
+        _conversation_watch={},
+        _watch_debounce={},
+        user=_BOT_USER,
     )
+    bot._directly_addressed = MaxwellBot._directly_addressed.__get__(bot)
+    bot._cancel_watch_debounce = MaxwellBot._cancel_watch_debounce.__get__(bot)
+    bot._drop_watches_for_sleep = MaxwellBot._drop_watches_for_sleep.__get__(bot)
     bot._is_sleeping = MaxwellBot._is_sleeping.__get__(bot)
     bot.set_sleep = MaxwellBot.set_sleep.__get__(bot)
     bot._format_sleep_remaining = MaxwellBot._format_sleep_remaining.__get__(bot)
@@ -278,6 +294,43 @@ def test_sleep_gate_posts_in_channel_not_dm():
         proceed2 = await bot._check_sleep_gate(msg)
         assert proceed2 is False
         assert len(msg.channel.sent) == 1
+
+    asyncio.run(scenario())
+
+
+def test_sleep_gate_is_silent_for_lines_nobody_sent_him():
+    """Typing in a room he was in is not a ping — he stays asleep, and quiet.
+
+    The watch keeps a whole room live after he speaks, so an ordinary line in
+    that room used to reach the gate and get answered with "max is sleeping":
+    a bot talking in his sleep to someone who never asked him anything.
+    """
+
+    async def scenario():
+        bot = _gate_bot()
+        await bot.set_sleep(10)
+        ambient = FakeMessage()
+        ambient.mentions = []
+        assert await bot._check_sleep_gate(ambient) is False
+        assert ambient.channel.sent == []
+        # And a real ping still gets the one notice.
+        ping = FakeMessage()
+        assert await bot._check_sleep_gate(ping) is False
+        assert len(ping.channel.sent) == 1
+
+    asyncio.run(scenario())
+
+
+def test_sleep_drops_armed_watches():
+    """Going to sleep forgets every room it was watching."""
+
+    async def scenario():
+        bot = _gate_bot()
+        bot._conversation_watch["222"] = 1e9
+        bot._watch_debounce["222"] = {"task": None}
+        await bot.set_sleep(10)
+        assert bot._conversation_watch == {}
+        assert bot._watch_debounce == {}
 
     asyncio.run(scenario())
 
