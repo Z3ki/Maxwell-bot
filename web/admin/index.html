@@ -681,8 +681,11 @@
         system: null,
         control: {},
         tools: [],
-        memory: [],
-        memoryJson: {},
+        // Two different endpoints: the LTM rows the table renders, and the
+        // aggregate vector counters the summary card renders. Keeping them in
+        // one field is what made the Memory table come up empty.
+        memoryEntries: [],
+        memoryStats: {},
         context: [],
         sites: {},
         prompts: {},
@@ -706,6 +709,8 @@
         loading: false,
         lastLoad: 0,
         filter: "",
+        toolFilter: "",
+        failedFeeds: [],
       };
       const T = [
         ["overview", "Overview"],
@@ -849,6 +854,125 @@
         const s = Math.max(0, Math.floor((Date.now() - Number(ms)) / 1000));
         return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
       }
+      // Every panel's data source, loaded independently of the others.
+      // `norm` shapes the raw response into what the render functions expect;
+      // `required` marks the feeds without which there is nothing to draw at
+      // all. Anything else that errors keeps its previous value and is
+      // reported in the header, instead of one bad endpoint blanking the
+      // whole dashboard the way Promise.all used to.
+      const FEEDS = [
+        { key: "status", url: "/api/status", required: true, norm: (d) => d || {} },
+        { key: "system", url: "/api/system", norm: (d) => d || {} },
+        {
+          // Sanitized + defaults-merged, unlike /data/bot_control.json which
+          // only holds keys someone has actually written. Falls back to the
+          // raw file if an older API build has no GET /api/control.
+          key: "control",
+          url: "/api/control",
+          required: true,
+          fallbackUrl: "/data/bot_control.json",
+          norm: (d) => {
+            if (!d || typeof d !== "object" || Array.isArray(d)) return {};
+            if (d.control && typeof d.control === "object") return d.control;
+            return d;
+          },
+        },
+        {
+          // The memory table's rows. /api/rag/memory is stats only — reading
+          // the table off it is what produced an empty Memory panel.
+          key: "memoryEntries",
+          url: "/api/rag/ltm",
+          norm: (d) =>
+            Array.isArray(d) ? d : Array.isArray(d?.entries) ? d.entries : [],
+        },
+        {
+          // Aggregate vector counters for the summary card only.
+          key: "memoryStats",
+          url: "/api/rag/memory",
+          norm: (d) => (d && typeof d === "object" && !Array.isArray(d) ? d : {}),
+        },
+        {
+          key: "context",
+          url: "/api/context",
+          norm: (d) => (Array.isArray(d) ? d : []),
+        },
+        { key: "sites", url: "/data/sites.json", norm: (d) => d || {} },
+        { key: "prompts", url: "/data/prompts.json", norm: (d) => d || {} },
+        {
+          key: "blacklist",
+          url: "/data/blacklist.json",
+          norm: (d) => (Array.isArray(d) ? d : []),
+        },
+        {
+          key: "auto",
+          url: "/data/auto_channels.json",
+          norm: (d) => (Array.isArray(d) ? d : []),
+        },
+        {
+          key: "commands",
+          url: "/api/commands",
+          norm: (d) => (Array.isArray(d) ? d : []),
+        },
+        {
+          key: "channels",
+          url: "/api/channels",
+          norm: (d) => (Array.isArray(d) ? d : []),
+        },
+        {
+          key: "discord",
+          url: "/api/discord/state",
+          norm: (d) =>
+            d && typeof d === "object" && !Array.isArray(d)
+              ? d
+              : { guilds: [], dms: [] },
+        },
+        {
+          key: "inbox",
+          url: "/api/inbox",
+          norm: (d) =>
+            Array.isArray(d?.items) ? d.items : Array.isArray(d) ? d : [],
+        },
+        { key: "rem", url: "/api/rem/status", norm: (d) => d || null },
+        {
+          key: "remRuns",
+          url: "/api/rem/runs",
+          norm: (d) => (Array.isArray(d) ? d : []),
+        },
+        {
+          key: "autonomyStatus",
+          url: "/api/autonomy/status",
+          norm: (d) => d || null,
+        },
+        {
+          key: "autonomyLog",
+          url: "/api/autonomy/log",
+          norm: (d) => (Array.isArray(d) ? d : d?.entries || []),
+        },
+        {
+          key: "autonomyGoals",
+          url: "/api/autonomy/goals",
+          norm: (d) => (Array.isArray(d) ? d : d?.goals || []),
+        },
+        {
+          key: "cleanup",
+          url: "/api/context_cleanup/status",
+          norm: (d) => d || null,
+        },
+        { key: "pm2", url: "/api/pm2", norm: (d) => (Array.isArray(d) ? d : []) },
+        {
+          key: "traces",
+          url: "/api/llm/traces?limit=200",
+          norm: (d) => (Array.isArray(d) ? d : []),
+        },
+      ];
+      async function loadFeed(feed) {
+        try {
+          return await api(feed.url);
+        } catch (e) {
+          if (!feed.fallbackUrl || String(e.message) === "Unauthorized") throw e;
+          return await api(feed.fallbackUrl);
+        }
+      }
       async function loadAll(silent = false) {
         if (S.loading) return;
         S.loading = true;
@@ -857,97 +981,38 @@
           $("apiState").className = "badge warn";
         }
         try {
-          const [
-            status,
-            system,
-            controlData,
-            memory,
-            memoryJson,
-            context,
-            sites,
-            prompts,
-            blacklist,
-            auto,
-            commands,
-            channels,
-            discord,
-            inbox,
-            rem,
-            remRuns,
-            autonomyStatus,
-            autonomyLog,
-            autonomyGoals,
-            cleanup,
-            pm2,
-            traces,
-          ] = await Promise.all([
-            api("/api/status"),
-            api("/api/system"),
-            api("/data/bot_control.json"),
-            api("/api/rag/ltm"),
-            api("/api/rag/memory"),
-            api("/api/context"),
-            api("/data/sites.json"),
-            api("/data/prompts.json"),
-            api("/data/blacklist.json"),
-            api("/data/auto_channels.json"),
-            api("/api/commands"),
-            api("/api/channels"),
-            api("/api/discord/state"),
-            api("/api/inbox"),
-            api("/api/rem/status"),
-            api("/api/rem/runs"),
-            api("/api/autonomy/status"),
-            api("/api/autonomy/log"),
-            api("/api/autonomy/goals"),
-            api("/api/context_cleanup/status"),
-            api("/api/pm2"),
-            api("/api/llm/traces?limit=200"),
-          ]);
-          Object.assign(S, {
-            status,
-            system,
-            control: (() => {
-              const d = controlData;
-              if (!d || typeof d !== "object" || Array.isArray(d)) return {};
-              if (d.control && typeof d.control === "object") return d.control;
-              return d;
-            })(),
-            tools: (status && status.known_tools) || [],
-            memory: Array.isArray(memory) ? memory : [],
-            memoryJson: memoryJson || {},
-            context: Array.isArray(context) ? context : [],
-            sites: sites || {},
-            prompts: prompts || {},
-            blacklist: Array.isArray(blacklist) ? blacklist : [],
-            auto: Array.isArray(auto) ? auto : [],
-            commands: Array.isArray(commands) ? commands : [],
-            channels: Array.isArray(channels) ? channels : [],
-            discord:
-              discord && typeof discord === "object"
-                ? discord
-                : { guilds: [], dms: [] },
-            inbox: Array.isArray(inbox?.items)
-              ? inbox.items
-              : Array.isArray(inbox)
-                ? inbox
-                : [],
-            rem,
-            remRuns: Array.isArray(remRuns) ? remRuns : [],
-            autonomyStatus: autonomyStatus || null,
-            autonomyLog: Array.isArray(autonomyLog)
-              ? autonomyLog
-              : autonomyLog?.entries || [],
-            autonomyGoals: Array.isArray(autonomyGoals)
-              ? autonomyGoals
-              : autonomyGoals?.goals || [],
-            cleanup: cleanup || null,
-            pm2: Array.isArray(pm2) ? pm2 : [],
-            traces: Array.isArray(traces) ? traces : [],
+          const results = await Promise.allSettled(FEEDS.map(loadFeed));
+          const failed = [];
+          let fatal = null;
+          results.forEach((r, i) => {
+            const feed = FEEDS[i];
+            if (r.status === "fulfilled") {
+              S[feed.key] = feed.norm(r.value);
+              return;
+            }
+            // api() already logged us out on a 401; surface it and stop.
+            if (String(r.reason?.message) === "Unauthorized") {
+              fatal = fatal || r.reason;
+              return;
+            }
+            failed.push(feed.key);
+            if (feed.required) fatal = fatal || r.reason;
           });
+          if (fatal) throw fatal;
+          S.tools = (S.status && S.status.known_tools) || S.tools || [];
+          S.failedFeeds = failed;
           S.lastLoad = Date.now();
-          $("apiState").textContent = status.online ? "online" : "offline";
-          $("apiState").className = "badge " + (status.online ? "ok" : "bad");
+          const online = !!(S.status && S.status.online);
+          $("apiState").textContent =
+            (online ? "online" : "offline") +
+            (failed.length ? " · " + failed.length + " degraded" : "");
+          $("apiState").className =
+            "badge " + (failed.length ? "warn" : online ? "ok" : "bad");
+          $("apiState").title = failed.length
+            ? "Failed to load: " + failed.join(", ")
+            : "";
+          if (failed.length && !silent)
+            toast("Partial load — unavailable: " + failed.join(", "));
           render();
         } catch (e) {
           $("apiState").textContent = "error";
@@ -1032,6 +1097,7 @@
           ["Servers", (S.discord.guilds || []).length],
           ["DMs", (S.discord.dms || []).length],
           ["Context", S.context.length],
+          ["Memory", (S.memoryEntries || []).length],
           ["Commands", S.commands.length],
           [
             "Inbox",
@@ -1271,32 +1337,301 @@
           };
         bindOps();
       }
+      // Declarative mirror of control_defaults.DEFAULT_CONTROL. The min/max on
+      // every numeric field matches the clamp in api/state.py:_sanitize_control,
+      // so the input refuses what the server would otherwise silently rewrite.
+      // Keys added to DEFAULT_CONTROL but not listed here surface in the
+      // "Not surfaced in this panel" card at the bottom.
+      const CTL_SECTIONS = [
+        {
+          title: "Core Switches",
+          fields: [
+            { k: "bot_enabled", t: "bool" },
+            { k: "tools_enabled", t: "bool", hint: "master switch for the tool layer" },
+            { k: "native_tool_calls", t: "bool", hint: "prefer OpenAI-style tool_calls over XML tags" },
+            { k: "lean_chat_tools", t: "bool", hint: "ship a small tool set on ordinary turns" },
+            { k: "enable_sleep", t: "bool" },
+            { k: "typing_indicator", t: "bool" },
+            { k: "log_messages", t: "bool" },
+            { k: "error_replies", t: "bool" },
+            { k: "error_details", t: "bool", hint: "put the real exception in the apology line" },
+          ],
+        },
+        {
+          title: "Replies & Triggers",
+          fields: [
+            { k: "reply_dms", t: "bool" },
+            { k: "reply_groups", t: "bool" },
+            { k: "reply_mentions", t: "bool" },
+            { k: "reply_to_bots", t: "bool" },
+            { k: "reaction_replies", t: "bool", hint: "unused for starting turns" },
+            { k: "process_images", t: "bool" },
+            { k: "process_audio", t: "bool" },
+            { k: "max_image_size_mb", t: "int", min: 1, max: 25 },
+            { k: "conversation_watch_seconds", t: "int", min: 0, max: 3600, hint: "0 disables the follow-up watch" },
+            { k: "conversation_watch_debounce_seconds", t: "float", min: 0.05, max: 5, step: 0.05 },
+            { k: "email_inbox_poll_seconds", t: "int", min: 30, max: 3600 },
+            { k: "max_response_chars", t: "int", min: 80, max: 8000 },
+          ],
+        },
+        {
+          title: "Layered Memory & Extraction",
+          fields: [
+            { k: "store_memory", t: "bool" },
+            { k: "long_term_memory_enabled", t: "bool" },
+            { k: "cross_context_enabled", t: "bool" },
+            { k: "cross_context_extract_enabled", t: "bool" },
+            { k: "cross_context_dm_to_global_admin_only", t: "bool" },
+            { k: "emoji_context_enabled", t: "bool" },
+            { k: "music_context_enabled", t: "bool" },
+            { k: "cross_context_max_items", t: "int", min: 1, max: 50 },
+            { k: "cross_context_min_importance", t: "int", min: 1, max: 10 },
+            {
+              k: "cross_context_extract_threshold",
+              t: "float", min: 0, max: 1, step: 0.05,
+              hint: "0..1 density score; lower stores more and spends more",
+            },
+            { k: "cross_context_extract_timeout_seconds", t: "int", min: 5, max: 600 },
+            { k: "memory_history_messages", t: "int", min: 0, max: 2000 },
+            { k: "memory_context_budget", t: "int", min: 1000, max: 500000, step: 1000, hint: "tokens of recalled history" },
+            { k: "tool_history_messages", t: "int", min: 0, max: 20 },
+            { k: "prompt_context_budget", t: "int", min: 10000, max: 500000, step: 1000, hint: "tokens for the assembled prompt" },
+          ],
+        },
+        {
+          title: "Concurrency & Limits",
+          fields: [
+            { k: "ai_concurrency", t: "int", min: 1, max: 10, hint: "simultaneous model turns" },
+            { k: "ai_timeout_seconds", t: "int", min: 10, max: 7200 },
+            { k: "tool_iteration_timeout_seconds", t: "int", min: 60, max: 14400 },
+            { k: "max_tool_iterations", t: "int", min: 0, max: 100 },
+            { k: "per_user_cooldown_seconds", t: "float", min: 0, max: 3600, step: 0.1 },
+          ],
+        },
+        {
+          title: "Autonomy & Proactivity",
+          note:
+            "The autonomy on/off switch and tick interval live in the Autonomy tab — " +
+            "they go through their own endpoints so the running loop picks them up " +
+            "immediately. Everything here is plain control state.",
+          fields: [
+            { k: "autonomy_floor_enabled", t: "bool", hint: "enforce conversational turn-taking" },
+            { k: "autonomy_floor_cooldown_seconds", t: "int", min: 0, max: 3600 },
+            { k: "autonomy_floor_hold_release_seconds", t: "int", min: 60, max: 86400 },
+            { k: "autonomy_floor_mid_flow_seconds", t: "int", min: 0, max: 600 },
+            { k: "autonomy_floor_mid_flow_messages", t: "int", min: 2, max: 20 },
+            { k: "autonomy_floor_idle_seconds", t: "int", min: 60, max: 86400 },
+            { k: "autonomy_recent_reply_block_seconds", t: "int", min: 0, max: 86400, hint: "legacy; honored as a floor on the cooldown" },
+            { k: "autonomy_reflect_enabled", t: "bool" },
+            { k: "autonomy_reflect_interval_seconds", t: "int", min: 300, max: 86400 },
+            { k: "autonomy_goal_stale_days", t: "int", min: 1, max: 365 },
+            { k: "context_cleanup_enabled", t: "bool" },
+            { k: "context_cleanup_interval_seconds", t: "int", min: 300, max: 86400 },
+            { k: "context_cleanup_ltm_enabled", t: "bool" },
+          ],
+        },
+        {
+          title: "Persona & Providers",
+          note:
+            "Blank base_url/model = fall back to the main provider. Aux drives the " +
+            "background agents (REM, context cleanup, context watcher) and falls back " +
+            "to autonomy first, then main.",
+          fields: [
+            { k: "base_personality", t: "textarea" },
+            { k: "autonomy_base_url", t: "text", placeholder: "blank = main provider" },
+            { k: "autonomy_api_key", t: "secret", placeholder: "blank = main provider" },
+            { k: "autonomy_model", t: "text", placeholder: "blank = main provider" },
+            { k: "autonomy_disable_reasoning", t: "bool", hint: "off for endpoints that reject the reasoning param" },
+            { k: "aux_base_url", t: "text", placeholder: "blank = autonomy → main" },
+            { k: "aux_api_key", t: "secret", placeholder: "blank = autonomy → main" },
+            { k: "aux_model", t: "text", placeholder: "blank = autonomy → main" },
+            { k: "aux_disable_reasoning", t: "bool" },
+          ],
+        },
+        {
+          title: "Voice (VC)",
+          fields: [
+            {
+              k: "vc_tts_engine", t: "select",
+              options: ["fish", "local", "espeak", "espeak-ng"],
+            },
+            { k: "vc_tts_voice", t: "text", placeholder: "blank = default (e.g. tiktok, mommy)" },
+            { k: "vc_reply_mode", t: "select", options: ["voice", "text", "both"] },
+            { k: "vc_response_mode", t: "select", options: ["always", "addressed"] },
+            { k: "vc_wake_words", t: "csv", placeholder: "maxwell, hey max" },
+            { k: "vc_interrupt_enabled", t: "bool" },
+            { k: "vc_cross_context_enabled", t: "bool" },
+            { k: "vc_debug", t: "bool" },
+            { k: "vc_rms_threshold", t: "int", min: 100, max: 10000 },
+            { k: "vc_pause_seconds", t: "float", min: 0.1, max: 5, step: 0.05 },
+            { k: "vc_min_seconds", t: "float", min: 0.1, max: 10, step: 0.05 },
+            { k: "vc_max_seconds", t: "float", min: 1, max: 120, step: 0.5 },
+            { k: "vc_preroll_seconds", t: "float", min: 0, max: 3, step: 0.05 },
+            { k: "vc_ai_timeout_seconds", t: "int", min: 5, max: 180 },
+            { k: "vc_ai_max_tokens", t: "int", min: 16, max: 1000 },
+            { k: "vc_memory_history_messages", t: "int", min: 0, max: 20 },
+            { k: "vc_max_response_chars", t: "int", min: 40, max: 2000 },
+          ],
+        },
+        {
+          title: "Generated Sites",
+          fields: [
+            { k: "create_site_quota_per_user", t: "int", min: 0, max: 10000 },
+            { k: "site_ttl_hours", t: "int", min: 0, max: 8760, hint: "0 = never expire" },
+            { k: "site_inject_csp", t: "bool" },
+          ],
+        },
+        {
+          title: "Access Lists",
+          note: "IDs only, comma or space separated. Empty = no restriction.",
+          fields: [
+            { k: "ignore_users", t: "csv" },
+            { k: "allowed_channels", t: "csv", hint: "non-empty = only these channels, everywhere" },
+            { k: "blocked_channels", t: "csv" },
+            { k: "disabled_commands", t: "csv", hint: "command names, not IDs" },
+            { k: "autonomy_blocked_channels", t: "csv", hint: "autonomy only; normal replies still work" },
+            { k: "autonomy_blocked_servers", t: "csv" },
+          ],
+        },
+      ];
+      // Live keys this panel deliberately does not own.
+      const CTL_ELSEWHERE = {
+        disabled_tools: "Tools card on this page",
+        autonomy_enabled: "Autonomy tab (dedicated endpoint)",
+        autonomy_interval_seconds: "Autonomy tab (dedicated endpoint)",
+        autonomy_min_post_gap_seconds: "deprecated — no longer enforced",
+        guild_solo_channel: "set in chat with ,solo",
+        guild_solo_autonomy_added: "bookkeeping for ,solo off",
+      };
+      function ctlLabel(f) {
+        return (
+          `<span>${esc(f.label || f.k.replaceAll("_", " "))}` +
+          (f.hint ? `<div class="muted" style="font-size:11px">${esc(f.hint)}</div>` : "") +
+          `<div class="mono muted" style="font-size:10px">${esc(f.k)}</div></span>`
+        );
+      }
+      function ctlField(f) {
+        const v = S.control[f.k];
+        const ph = f.placeholder ? ` placeholder="${esc(f.placeholder)}"` : "";
+        if (f.t === "bool")
+          return `<label class="switchline">${ctlLabel(f)}<span class="switch"><input data-ctl="${esc(f.k)}" data-type="bool" type="checkbox" ${v ? "checked" : ""}><span class="knob"></span></span></label>`;
+        if (f.t === "int" || f.t === "float") {
+          const step = f.step != null ? f.step : f.t === "int" ? 1 : "any";
+          return `<div class="switchline">${ctlLabel(f)}<input data-ctl="${esc(f.k)}" data-type="${f.t}" class="field" style="max-width:150px" type="number" min="${esc(f.min ?? "")}" max="${esc(f.max ?? "")}" step="${esc(step)}" value="${esc(v ?? "")}"></div>`;
+        }
+        if (f.t === "select")
+          return `<div class="switchline">${ctlLabel(f)}<select data-ctl="${esc(f.k)}" data-type="text" class="field" style="max-width:180px">${f.options.map((o) => `<option value="${esc(o)}" ${String(v) === o ? "selected" : ""}>${esc(o)}</option>`).join("")}</select></div>`;
+        if (f.t === "csv")
+          return `<div class="switchline">${ctlLabel(f)}<input data-ctl="${esc(f.k)}" data-type="csv" class="field" style="flex:1;min-width:180px"${ph} value="${esc((Array.isArray(v) ? v : []).join(", "))}"></div>`;
+        if (f.t === "secret")
+          return `<div class="switchline">${ctlLabel(f)}<input data-ctl="${esc(f.k)}" data-type="text" class="field" style="flex:1;min-width:180px" type="password"${ph} value="${esc(v ?? "")}"><button class="btn small" data-reveal="${esc(f.k)}">show</button></div>`;
+        if (f.t === "textarea")
+          return `<div style="margin-top:8px">${ctlLabel(f)}<textarea data-ctl="${esc(f.k)}" data-type="text" class="field" style="min-height:120px"${ph}>${esc(v ?? "")}</textarea></div>`;
+        return `<div class="switchline">${ctlLabel(f)}<input data-ctl="${esc(f.k)}" data-type="text" class="field" style="flex:1;min-width:180px"${ph} value="${esc(v ?? "")}"></div>`;
+      }
+      // Reads the form back as *typed* values. Numbers are parsed and clamped
+      // to the field's declared range, checkboxes become real booleans, and
+      // CSV fields become arrays — the API rejects anything whose type does not
+      // match DEFAULT_CONTROL, so sending the raw strings meant silent no-ops.
+      function collectControls(root) {
+        const out = {};
+        (root || document).querySelectorAll("[data-ctl]").forEach((el) => {
+          const k = el.dataset.ctl;
+          const t = el.dataset.type;
+          if (t === "bool") {
+            out[k] = !!el.checked;
+            return;
+          }
+          const raw = String(el.value ?? "");
+          if (t === "int" || t === "float") {
+            const n = t === "int" ? parseInt(raw, 10) : parseFloat(raw);
+            // Blank/garbage: leave the stored value alone rather than
+            // shipping NaN and letting the server fall back to the default.
+            if (!Number.isFinite(n)) return;
+            const lo = el.min === "" ? -Infinity : Number(el.min);
+            const hi = el.max === "" ? Infinity : Number(el.max);
+            out[k] = Math.min(hi, Math.max(lo, n));
+            return;
+          }
+          if (t === "csv") {
+            out[k] = raw.trim()
+              ? raw
+                  .split(/[\s,]+/)
+                  .map((x) => x.trim())
+                  .filter(Boolean)
+                  .slice(0, 500)
+              : [];
+            return;
+          }
+          out[k] = raw;
+        });
+        return out;
+      }
       function controls() {
-        const bools = [
-          "bot_enabled",
-          "reply_dms",
-          "reply_groups",
-          "reply_mentions",
-          "tools_enabled",
-          "store_memory",
-          "long_term_memory_enabled",
-          "cross_context_enabled",
-          "cross_context_extract_enabled",
-          "process_images",
-          "process_audio",
-          "rag_web_search_enabled",
-        ];
+        const covered = new Set(
+          CTL_SECTIONS.flatMap((sec) => sec.fields.map((f) => f.k)),
+        );
+        const uncovered = Object.keys(S.control || {})
+          .filter((k) => !covered.has(k) && !(k in CTL_ELSEWHERE))
+          .sort();
+        const disabled = S.control.disabled_tools || [];
         $("controls").innerHTML =
-          `<div class="grid two" style="margin-top:12px"><div class="card"><h3>Runtime Switches</h3>${bools.map((k) => `<label class="switchline"><span>${esc(k.replaceAll("_", " "))}</span><span class="switch"><input data-bool="${k}" type="checkbox" ${S.control[k] ? "checked" : ""}><span class="knob"></span></span></label>`).join("")}<button id="saveSwitch" class="btn primary">Save switches</button></div><div class="card"><h3>Tools</h3>${S.tools.map((t) => `<label class="switchline"><span class="mono">${esc(t)}</span><span class="switch"><input data-tool="${esc(t)}" type="checkbox" ${!(S.control.disabled_tools || []).includes(t) ? "checked" : ""}><span class="knob"></span></span></label>`).join("")}<button id="saveTools" class="btn primary">Save tools</button></div></div><div class="card" style="margin-top:12px"><h3>Base Personality</h3><textarea id="persona" class="field">${esc(S.control.base_personality || "")}</textarea><button id="savePersona" class="btn primary">Save personality</button></div><div class="card" style="margin-top:12px"><h3>Autonomy Blacklists (Channels &amp; Servers)</h3><p class="muted">Separate from general blocked/allowed. Autonomy skips these servers (guilds) and channels. Use ,autonomy blacklist in chat or edit here. IDs only.</p><div class="row"><span class="muted" style="width:140px;flex:0 0 auto">Blocked channels</span><input id="abChannels" class="field" placeholder="123456789, 987654321" value="${esc((S.control.autonomy_blocked_channels || []).join(", "))}"></div><div class="row" style="margin-top:6px"><span class="muted" style="width:140px;flex:0 0 auto">Blocked servers</span><input id="abServers" class="field" placeholder="guild-id-1, guild-id-2" value="${esc((S.control.autonomy_blocked_servers || []).join(", "))}"></div><button id="saveAutonomyBlack" class="btn primary" style="margin-top:8px">Save autonomy blacklists</button><div class="muted" style="margin-top:4px;font-size:11px">After save, autonomy will respect immediately on next tick. Use raw or ,autonomy blacklist for quick edits too.</div></div>`;
-        $("saveSwitch").onclick = () =>
-          saveControl(
-            Object.fromEntries(
-              [...document.querySelectorAll("[data-bool]")].map((i) => [
-                i.dataset.bool,
-                i.checked,
-              ]),
-            ),
+          `<div class="card" style="margin-top:12px"><div class="row"><b>Runtime controls</b><span class="muted" style="flex:1">Every field below maps to one key in control_defaults.DEFAULT_CONTROL. Ranges match the server-side clamp; saving returns the sanitized value.</span><button id="ctlSaveAll" class="btn primary">Save all</button><button id="ctlReload" class="btn small">Reload</button></div></div>` +
+          CTL_SECTIONS.map(
+            (sec, i) =>
+              `<div class="card" style="margin-top:12px" id="ctlsec${i}"><h3>${esc(sec.title)}</h3>${sec.note ? `<p class="muted">${esc(sec.note)}</p>` : ""}${sec.fields.map(ctlField).join("")}<div class="row" style="margin-top:10px"><button class="btn primary" data-save-sec="${i}">Save section</button></div></div>`,
+          ).join("") +
+          `<div class="card" style="margin-top:12px"><h3>Tools (${S.tools.length - disabled.length}/${S.tools.length} enabled)</h3><div class="row"><input id="toolFilter" class="field" style="flex:1" placeholder="Filter tools…"><button class="btn small" id="toolAll">Enable shown</button><button class="btn small" id="toolNone">Disable shown</button></div><div style="max-height:420px;overflow:auto;margin-top:8px">${S.tools.map((t) => `<label class="switchline" data-tool-row="${esc(String(t).toLowerCase())}"><span class="mono">${esc(t)}</span><span class="switch"><input data-tool="${esc(t)}" type="checkbox" ${!disabled.includes(t) ? "checked" : ""}><span class="knob"></span></span></label>`).join("") || '<div class="muted">Tool list unavailable (/api/status did not load).</div>'}</div><button id="saveTools" class="btn primary" style="margin-top:10px">Save tools</button></div>` +
+          `<div class="card" style="margin-top:12px"><h3>Not surfaced in this panel</h3>${
+            uncovered.length
+              ? `<p class="muted">Live control keys with no input here yet — add them to CTL_SECTIONS.</p><div class="list">${uncovered.map((k) => `<div class="item"><span class="mono">${esc(k)}</span><span class="mono muted">${esc(JSON.stringify(S.control[k]))}</span></div>`).join("")}</div>`
+              : `<p class="muted">None — every live control key is either editable above or owned elsewhere.</p>`
+          }<div class="list" style="margin-top:8px">${Object.entries(CTL_ELSEWHERE).map(([k, where]) => `<div class="item"><span class="mono">${esc(k)}</span><span class="muted">${esc(where)}</span></div>`).join("")}</div></div>`;
+
+        $("ctlSaveAll").onclick = () =>
+          saveControl(collectControls($("controls")));
+        $("ctlReload").onclick = () => loadAll();
+        document.querySelectorAll("[data-save-sec]").forEach(
+          (b) =>
+            (b.onclick = () =>
+              saveControl(collectControls($("ctlsec" + b.dataset.saveSec)))),
+        );
+        document.querySelectorAll("[data-reveal]").forEach(
+          (b) =>
+            (b.onclick = () => {
+              const el = document.querySelector(
+                `[data-ctl="${CSS.escape(b.dataset.reveal)}"]`,
+              );
+              if (!el) return;
+              el.type = el.type === "password" ? "text" : "password";
+              b.textContent = el.type === "password" ? "show" : "hide";
+            }),
+        );
+        const tf = $("toolFilter");
+        const shownTools = () =>
+          [...document.querySelectorAll("[data-tool-row]")].filter(
+            (r) => r.style.display !== "none",
           );
+        if (tf) {
+          tf.value = S.toolFilter || "";
+          const applyFilter = () => {
+            S.toolFilter = tf.value;
+            const q = tf.value.trim().toLowerCase();
+            document.querySelectorAll("[data-tool-row]").forEach((row) => {
+              row.style.display =
+                !q || row.dataset.toolRow.includes(q) ? "" : "none";
+            });
+          };
+          tf.oninput = applyFilter;
+          applyFilter();
+        }
+        const setShown = (on) =>
+          shownTools().forEach((r) => {
+            const box = r.querySelector("[data-tool]");
+            if (box) box.checked = on;
+          });
+        if ($("toolAll")) $("toolAll").onclick = () => setShown(true);
+        if ($("toolNone")) $("toolNone").onclick = () => setShown(false);
         $("saveTools").onclick = () => {
           const boxes = [...document.querySelectorAll("[data-tool]")];
           if (!boxes.length) {
@@ -1309,36 +1644,16 @@
               .map((i) => i.dataset.tool),
           });
         };
-        $("savePersona").onclick = () =>
-          saveControl({ base_personality: $("persona").value });
-        if ($("saveAutonomyBlack")) {
-          $("saveAutonomyBlack").onclick = () => {
-            const chStr = ($("abChannels").value || "").trim();
-            const svStr = ($("abServers").value || "").trim();
-            const toArr = (s) =>
-              s
-                ? s
-                    .split(/[\s,]+/)
-                    .map((x) => x.trim())
-                    .filter(Boolean)
-                    .slice(0, 100)
-                : [];
-            saveControl({
-              autonomy_blocked_channels: toArr(chStr),
-              autonomy_blocked_servers: toArr(svStr),
-            });
-          };
-        }
       }
       function memory() {
-        const ragStats = S.memoryJson || {};
+        const ragStats = S.memoryStats || {};
         const totalVec = ragStats.total_vectors || 0;
         const embedded = ragStats.embedded || 0;
         const pending = totalVec - embedded;
         const embedPct = totalVec > 0 ? Math.round((embedded / totalVec) * 100) : 0;
         const modelName = ragStats.embed_model || "qwen3-embedding:0.6b";
         $("memory").innerHTML =
-          `<div class="card" style="margin-top:12px"><h3>RAG Vector Memory</h3><div class="list"><div class="item"><b>Embedding model</b><span class="mono muted">${esc(modelName)}</span></div><div class="item"><b>Total vectors</b><span>${totalVec}</span></div><div class="item"><b>Embedded</b><span>${embedded} / ${totalVec} (${embedPct}%)</span></div>${pending > 0 ? `<div class="item"><b>Pending</b><span style="color:var(--yellow)">${pending} vectors awaiting embedding</span></div>` : ""}<div class="item"><b>Messages</b><span>${ragStats.messages || 0} across ${ragStats.channel_count || 0} channels</span></div><div class="item"><b>Long-term facts</b><span>${ragStats.ltm || 0}</span></div><div class="item"><b>Shared context</b><span>${ragStats.context || 0}</span></div></div></div><div class="card" style="margin-top:12px"><h3>Add Memory</h3><textarea id="newmem" class="field" placeholder="Fact to store into RAG long-term memory"></textarea><button id="addmem" class="btn primary">Add</button></div><div class="card" style="margin-top:12px"><h3>Long-Term Memory Facts</h3><div class="table"><table><thead><tr><th>ID</th><th>Content</th><th></th></tr></thead><tbody>${S.memory.map((m) => { const id = String(m.id ?? ""); return `<tr><td class="mono" title="${esc(id)}">${esc(sid(id))}</td><td><textarea class="field" data-mem="${esc(id)}">${esc(m.content)}</textarea></td><td><button class="btn small" data-save-mem="${esc(id)}">Save</button> <button class="btn small red" data-del-mem="${esc(id)}">Delete</button></td></tr>`; }).join("")}</tbody></table></div></div>`;
+          `<div class="card" style="margin-top:12px"><h3>RAG Vector Memory</h3><div class="list"><div class="item"><b>Embedding model</b><span class="mono muted">${esc(modelName)}</span></div><div class="item"><b>Total vectors</b><span>${totalVec}</span></div><div class="item"><b>Embedded</b><span>${embedded} / ${totalVec} (${embedPct}%)</span></div>${pending > 0 ? `<div class="item"><b>Pending</b><span style="color:var(--yellow)">${pending} vectors awaiting embedding</span></div>` : ""}<div class="item"><b>Messages</b><span>${ragStats.messages || 0} across ${ragStats.channel_count || 0} channels</span></div><div class="item"><b>Long-term facts</b><span>${ragStats.ltm || 0}</span></div><div class="item"><b>Shared context</b><span>${ragStats.context || 0}</span></div></div></div><div class="card" style="margin-top:12px"><h3>Add Memory</h3><textarea id="newmem" class="field" placeholder="Fact to store into RAG long-term memory"></textarea><button id="addmem" class="btn primary">Add</button></div><div class="card" style="margin-top:12px"><h3>Long-Term Memory Facts (${(S.memoryEntries || []).length})</h3>${(S.memoryEntries || []).length ? "" : `<div class="muted">${(S.failedFeeds || []).includes("memoryEntries") ? "Could not load /api/rag/ltm — entries unavailable." : "No long-term facts stored yet."}</div>`}<div class="table"><table><thead><tr><th>ID</th><th>Content</th><th></th></tr></thead><tbody>${(S.memoryEntries || []).map((m) => { const id = String(m.id ?? ""); return `<tr><td class="mono" title="${esc(id)}">${esc(sid(id))}</td><td><textarea class="field" data-mem="${esc(id)}">${esc(m.content)}</textarea></td><td><button class="btn small" data-save-mem="${esc(id)}">Save</button> <button class="btn small red" data-del-mem="${esc(id)}">Delete</button></td></tr>`; }).join("")}</tbody></table></div></div>`;
         $("addmem").onclick = async () => {
           await api("/api/memory", {
             method: "POST",
@@ -1589,7 +1904,7 @@
       }
       function raw() {
         $("raw").innerHTML =
-          `<div class="grid two" style="margin-top:12px"><div class="card"><h3>control</h3><pre>${esc(JSON.stringify(S.control, null, 2))}</pre></div><div class="card"><h3>memory</h3><pre>${esc(JSON.stringify(S.memoryJson, null, 2))}</pre></div><div class="card"><h3>sites</h3><pre>${esc(JSON.stringify(S.sites, null, 2))}</pre></div><div class="card"><h3>prompts</h3><pre>${esc(JSON.stringify(S.prompts, null, 2))}</pre></div><div class="card"><h3>tools</h3><pre>${esc(JSON.stringify(S.tools, null, 2))}</pre></div><div class="card"><h3>llm traces</h3><pre>${esc(JSON.stringify(S.traces, null, 2))}</pre></div></div>`;
+          `<div class="grid two" style="margin-top:12px"><div class="card"><h3>control</h3><pre>${esc(JSON.stringify(S.control, null, 2))}</pre></div><div class="card"><h3>memory stats</h3><pre>${esc(JSON.stringify(S.memoryStats, null, 2))}</pre></div><div class="card"><h3>memory entries</h3><pre>${esc(JSON.stringify(S.memoryEntries, null, 2))}</pre></div><div class="card"><h3>sites</h3><pre>${esc(JSON.stringify(S.sites, null, 2))}</pre></div><div class="card"><h3>prompts</h3><pre>${esc(JSON.stringify(S.prompts, null, 2))}</pre></div><div class="card"><h3>tools</h3><pre>${esc(JSON.stringify(S.tools, null, 2))}</pre></div><div class="card"><h3>llm traces</h3><pre>${esc(JSON.stringify(S.traces, null, 2))}</pre></div></div>`;
       }
       async function queue(type, body = {}) {
         await api("/api/commands", {
@@ -1601,13 +1916,38 @@
         loadAll();
       }
       async function saveControl(body) {
-        const d = await api("/api/control", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        S.control = d.control;
-        toast("Saved");
+        if (!body || !Object.keys(body).length) {
+          toast("Nothing to save");
+          return;
+        }
+        let d;
+        try {
+          d = await api("/api/control", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+        } catch (e) {
+          toast("Save failed: " + e.message);
+          throw e;
+        }
+        // Re-render from the sanitized control the server echoed back, not
+        // from what we sent: anything it clamped or rejected shows up in the
+        // inputs immediately instead of after the next poll.
+        if (d && d.control && typeof d.control === "object") {
+          S.control = d.control;
+          const changed = Object.keys(body).filter(
+            (k) =>
+              JSON.stringify(d.control[k]) !== JSON.stringify(body[k]),
+          );
+          toast(
+            changed.length
+              ? "Saved — adjusted by server: " + changed.join(", ")
+              : "Saved",
+          );
+        } else {
+          toast("Saved");
+        }
         render();
       }
       function bindOps() {

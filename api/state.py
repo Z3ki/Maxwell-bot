@@ -146,8 +146,11 @@ def _sanitize_control(control):
         if isinstance(default, bool):
             out[key] = _parse_bool(value, default)
         elif isinstance(default, int):
+            # Accept "30", 30.0 and "30.0" alike. The dashboard's number
+            # inputs hand back strings, and a float-shaped one used to fall
+            # silently all the way back to the default.
             try:
-                out[key] = int(value)
+                out[key] = int(float(value))
             except (TypeError, ValueError):
                 out[key] = default
         elif isinstance(default, float):
@@ -183,11 +186,11 @@ def _sanitize_control(control):
         0, min(out["per_user_cooldown_seconds"], 3600)
     )
     out["conversation_watch_seconds"] = max(
-        0, min(_safe_int(out.get("conversation_watch_seconds") or 180, 180), 3600)
+        0, min(_safe_int(out.get("conversation_watch_seconds"), 180), 3600)
     )
     try:
         _watch_debounce = float(
-            out.get("conversation_watch_debounce_seconds") or 1
+            out.get("conversation_watch_debounce_seconds")
         )
     except (TypeError, ValueError):
         _watch_debounce = 1.0
@@ -198,50 +201,50 @@ def _sanitize_control(control):
     out["ai_timeout_seconds"] = max(10, min(out["ai_timeout_seconds"], 7200))
     out["tool_iteration_timeout_seconds"] = max(
         60,
-        min(_safe_int(out.get("tool_iteration_timeout_seconds") or 3600, 3600), 14400),
+        min(_safe_int(out.get("tool_iteration_timeout_seconds"), 3600), 14400),
     )
     out["ai_concurrency"] = max(1, min(out["ai_concurrency"], 10))
     out["email_inbox_poll_seconds"] = max(
-        30, min(_safe_int(out.get("email_inbox_poll_seconds") or 120, 120), 3600)
+        30, min(_safe_int(out.get("email_inbox_poll_seconds"), 120), 3600)
     )
     # 0..1 density score (watch_policy.extraction_score). Out-of-range values
     # would either extract from nothing or from every "lol" in every room.
     try:
-        _extract_threshold = float(out.get("cross_context_extract_threshold") or 0.25)
+        _extract_threshold = float(out.get("cross_context_extract_threshold"))
     except (TypeError, ValueError):
         _extract_threshold = 0.25
     out["cross_context_extract_threshold"] = max(0.0, min(_extract_threshold, 1.0))
     out["autonomy_interval_seconds"] = max(
-        30, _safe_int(out.get("autonomy_interval_seconds") or 300, 300)
+        30, _safe_int(out.get("autonomy_interval_seconds"), 300)
     )
     out["autonomy_recent_reply_block_seconds"] = max(
-        0, min(_safe_int(out.get("autonomy_recent_reply_block_seconds") or 0, 0), 86400)
+        0, min(_safe_int(out.get("autonomy_recent_reply_block_seconds"), 0), 86400)
     )
     # Conversational turn-taking windows (autonomy_social.py). Clamped so a
     # fat-fingered dashboard value can't either disable turn-taking outright
     # (0 everywhere) or wedge autonomy silent for a day.
     out["autonomy_floor_cooldown_seconds"] = max(
         0,
-        min(_safe_int(out.get("autonomy_floor_cooldown_seconds") or 300, 300), 3600),
+        min(_safe_int(out.get("autonomy_floor_cooldown_seconds"), 300), 3600),
     )
     out["autonomy_floor_hold_release_seconds"] = max(
         60,
         min(
-            _safe_int(out.get("autonomy_floor_hold_release_seconds") or 1800, 1800),
+            _safe_int(out.get("autonomy_floor_hold_release_seconds"), 1800),
             86400,
         ),
     )
     out["autonomy_floor_mid_flow_seconds"] = max(
         0,
-        min(_safe_int(out.get("autonomy_floor_mid_flow_seconds") or 45, 45), 600),
+        min(_safe_int(out.get("autonomy_floor_mid_flow_seconds"), 45), 600),
     )
     out["autonomy_floor_mid_flow_messages"] = max(
         2,
-        min(_safe_int(out.get("autonomy_floor_mid_flow_messages") or 2, 2), 20),
+        min(_safe_int(out.get("autonomy_floor_mid_flow_messages"), 2), 20),
     )
     out["autonomy_floor_idle_seconds"] = max(
         60,
-        min(_safe_int(out.get("autonomy_floor_idle_seconds") or 600, 600), 86400),
+        min(_safe_int(out.get("autonomy_floor_idle_seconds"), 600), 86400),
     )
     out["autonomy_base_url"] = str(out.get("autonomy_base_url", "") or "")[:512]
     out["autonomy_api_key"] = str(out.get("autonomy_api_key", "") or "")[:512]
@@ -252,11 +255,11 @@ def _sanitize_control(control):
     out["memory_history_messages"] = max(0, min(out["memory_history_messages"], 2000))
     out["memory_context_budget"] = max(1000, min(out["memory_context_budget"], 500000))
     out["tool_history_messages"] = max(
-        0, min(_safe_int(out.get("tool_history_messages") or 3, 3), 20)
+        0, min(_safe_int(out.get("tool_history_messages"), 20), 20)
     )
     out["prompt_context_budget"] = max(
         10000,
-        min(_safe_int(out.get("prompt_context_budget") or 200000, 200000), 500000),
+        min(_safe_int(out.get("prompt_context_budget"), 240000), 500000),
     )
     out["cross_context_max_items"] = max(
         1, min(_safe_int(out.get("cross_context_max_items"), 10), 50)
@@ -275,32 +278,71 @@ def _sanitize_control(control):
     )
     out["max_tool_iterations"] = max(0, min(out["max_tool_iterations"], 100))
     out["max_response_chars"] = max(80, min(out["max_response_chars"], 8000))
+    out["create_site_quota_per_user"] = max(
+        0, min(_safe_int(out.get("create_site_quota_per_user"), 50), 10000)
+    )
+    # The context janitor's own loop refuses to run faster than 5 minutes;
+    # clamp here too so the dashboard can't persist a value the bot ignores.
+    out["context_cleanup_interval_seconds"] = max(
+        300,
+        min(
+            _safe_int(out.get("context_cleanup_interval_seconds"), 1800),
+            86400,
+        ),
+    )
+    out["autonomy_goal_stale_days"] = max(
+        1, min(_safe_int(out.get("autonomy_goal_stale_days"), 14), 365)
+    )
+    out["autonomy_reflect_interval_seconds"] = max(
+        300,
+        min(
+            _safe_int(out.get("autonomy_reflect_interval_seconds"), 3600),
+            86400,
+        ),
+    )
     out["vc_rms_threshold"] = max(
-        100, min(_safe_int(out.get("vc_rms_threshold") or 1200, 1200), 10000)
+        100, min(_safe_int(out.get("vc_rms_threshold"), 1200), 10000)
     )
     out["vc_pause_seconds"] = max(
-        0.1, min(_safe_float(out.get("vc_pause_seconds") or 0.8, 0.8), 5.0)
+        0.1, min(_safe_float(out.get("vc_pause_seconds"), 0.8), 5.0)
     )
     out["vc_min_seconds"] = max(
-        0.1, min(_safe_float(out.get("vc_min_seconds") or 0.55, 0.55), 10.0)
+        0.1, min(_safe_float(out.get("vc_min_seconds"), 0.55), 10.0)
     )
     out["vc_max_seconds"] = max(
-        1.0, min(_safe_float(out.get("vc_max_seconds") or 18, 18.0), 120.0)
+        1.0, min(_safe_float(out.get("vc_max_seconds"), 18.0), 120.0)
     )
     out["vc_preroll_seconds"] = max(
-        0.0, min(_safe_float(out.get("vc_preroll_seconds") or 0.25, 0.25), 3.0)
+        0.0, min(_safe_float(out.get("vc_preroll_seconds"), 0.25), 3.0)
     )
     out["vc_ai_timeout_seconds"] = max(
-        5, min(_safe_int(out.get("vc_ai_timeout_seconds") or 25, 25), 180)
+        5, min(_safe_int(out.get("vc_ai_timeout_seconds"), 45), 180)
     )
     out["vc_ai_max_tokens"] = max(
-        16, min(_safe_int(out.get("vc_ai_max_tokens") or 90, 90), 1000)
+        16, min(_safe_int(out.get("vc_ai_max_tokens"), 90), 1000)
     )
     out["vc_memory_history_messages"] = max(
-        0, min(_safe_int(out.get("vc_memory_history_messages") or 2, 2), 20)
+        0, min(_safe_int(out.get("vc_memory_history_messages"), 2), 20)
     )
     out["vc_max_response_chars"] = max(
-        40, min(_safe_int(out.get("vc_max_response_chars") or 260, 260), 2000)
+        40, min(_safe_int(out.get("vc_max_response_chars"), 2000), 2000)
+    )
+    # Free-text VC fields are enums in practice (bot.py switches on them);
+    # an unknown value would silently take the else branch forever.
+    _tts_engine = str(out.get("vc_tts_engine") or "fish").strip().lower()
+    out["vc_tts_engine"] = (
+        _tts_engine
+        if _tts_engine in {"fish", "local", "espeak", "espeak-ng"}
+        else "fish"
+    )
+    out["vc_tts_voice"] = str(out.get("vc_tts_voice") or "").strip()[:64]
+    _reply_mode = str(out.get("vc_reply_mode") or "voice").strip().lower()
+    out["vc_reply_mode"] = (
+        _reply_mode if _reply_mode in {"voice", "text", "both"} else "voice"
+    )
+    _response_mode = str(out.get("vc_response_mode") or "always").strip().lower()
+    out["vc_response_mode"] = (
+        _response_mode if _response_mode in {"always", "addressed"} else "always"
     )
     out["vc_wake_words"] = [
         str(x).strip()[:32] for x in out.get("vc_wake_words", []) if str(x).strip()

@@ -1038,6 +1038,18 @@ async def site_proxy(request):
 
 
 # ---------- Runtime controls ----------
+async def control_get(request):
+    """Return the live control set: persisted values merged over DEFAULT_CONTROL
+    and run through the same sanitizer a PUT goes through.
+
+    The dashboard used to read /data/bot_control.json directly, which is only
+    what has ever been *written*. Any key an operator never touched came back
+    undefined, so its input rendered blank instead of showing the default the
+    bot is actually running with.
+    """
+    return _json_response({"ok": True, "control": _load_control()})
+
+
 async def control_put(request):
     try:
         body = await request.json()
@@ -2292,6 +2304,7 @@ site_app = web.Application(client_max_size=SITE_UPLOAD_MAX)
 site_app.router.add_route("*", "/{slug}/api", site_proxy)
 site_app.router.add_route("*", "/{slug}/api/{path:.*}", site_proxy)
 app.add_subapp("/bot/", site_app)
+app.router.add_get("/api/control", control_get)
 app.router.add_put("/api/control", control_put)
 app.router.add_delete("/api/control", control_reset)
 app.router.add_get("/api/llm/traces", llm_traces)
