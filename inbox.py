@@ -432,8 +432,14 @@ async def apply_inbox_action(
         await store.mark(str(item.get("id")), "dismissed")
         return f"Dismissed {item.get('id')}"
     if action == "read":
-        # Still actionable, just demoted: it stops leading the planner tail
-        # without disappearing, so he can come back to it.
+        # Takes a notice out of the prompt tail without deleting it — it is
+        # still in `inbox_list`, and `dismiss` is still what clears one for
+        # good. Deliberately handled before the `allowed` check below: every
+        # item can be read, whatever actions it declares.
+        #
+        # He rarely has to call this. A notice is marked read automatically
+        # once the reply that carried it goes out; this is the manual version,
+        # for something he has decided not to mention at all.
         await store.mark(str(item.get("id")), "read")
         return f"Marked {item.get('id')} read"
     if action not in allowed and kind != "friend_request":

@@ -313,6 +313,7 @@ present). Restart to re-detect. `python3 doctor.py` shows the resolved state.
 | `MAXWELL_IMAP_HOST` / `MAXWELL_IMAP_PORT` | Dovecot for inbound (default `127.0.0.1:993`) |
 | `MAXWELL_EMAIL_USER` / `MAXWELL_EMAIL_PASSWORD` | SASL credentials |
 | `MAXWELL_EMAIL_FROM` / `MAXWELL_EMAIL_FROM_NAME` | `From:` header |
+| `MAXWELL_EMAIL_IGNORE_SENDERS` | Senders never filed as inbox notices — comma-separated addresses, or leading-dot domains (`.google.com`). Empty by default |
 
 ### Sub-agent (only used if `ENABLE_SUBAGENT` is on)
 
@@ -561,13 +562,29 @@ An inbox item is either a *notice* (mail, a group-DM add — something to be
 told) or a *request* someone is waiting on (a friend request). Requests keep
 showing in the prompt until they are accepted or declined; notices drop out of
 it once he has actually said them out loud, which happens automatically after
-the reply that mentioned them is delivered.
+the reply that mentioned them is delivered. He can also do it by hand with
+`inbox_action action=read`, which works on any item whatever actions it
+declares — for something he has decided not to mention at all.
 
 Before that, `read` only reordered an item, so a notice had no way out of the
 prompt short of an explicit `dismiss` — the same email was announced on every
 turn, reworded each time. Leaving the prompt is not leaving the inbox:
 `inbox_list` still shows read notices, and `dismiss` is still what clears one
 for good.
+
+**Mail from his own address is never filed.** A self-copy — a server-side
+`always_bcc`, a self-BCC, a list that reflects the post back — arrives in INBOX
+like anything else, and was announced as though a stranger had written in, so
+he narrated his own outbox. Both the mailbox login and `MAXWELL_EMAIL_FROM`
+count as his.
+
+For machine mail there is `MAXWELL_EMAIL_IGNORE_SENDERS`: a comma-separated
+list of addresses, or leading-dot domains (`.google.com`) covering a domain and
+its subdomains. It is **empty by default**, deliberately — which machine mail
+matters is your call. A DMARC aggregate report is pure telemetry, but a
+`MAILER-DAEMON` bounce means something he sent did not arrive, and nothing can
+tell those apart by shape. Ignoring a sender only skips the inbox row; the mail
+stays on the server and the `email_*` tools still read it.
 
 ### Repetition
 

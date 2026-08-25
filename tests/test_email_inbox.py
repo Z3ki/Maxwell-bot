@@ -10,6 +10,8 @@ from email_inbox import (
     _decode_header,
     _parse_fetch_response,
     email_item_id,
+    is_ignored_sender,
+    is_self_copy,
 )
 from inbox import InboxStore
 
@@ -185,3 +187,86 @@ def test_fetch_response_shapes():
 @pytest.mark.parametrize("uid,expected", [(1, "email_1"), ("42", "email_42")])
 def test_item_ids(uid, expected):
     assert email_item_id(uid) == expected
+
+
+# ─── his own mail is not new mail ────────────────────────────────────────
+
+
+def test_a_self_copy_is_not_filed_as_new_mail():
+    """A server-side always_bcc or self-BCC lands in INBOX like anything else.
+
+    Filed and announced, it reads as a stranger writing in — he narrates his
+    own outbox. On the install that surfaced this, 13 of 36 filed messages
+    were his own.
+    """
+    own = {"maxwell@z3ki.dev"}
+    assert is_self_copy({"from_addr": "maxwell@z3ki.dev"}, own) is True
+    # Display names and casing are the same sender.
+    assert is_self_copy({"from_addr": '"Maxwell" <Maxwell@Z3ki.dev>'}, own) is True
+    assert is_self_copy({"from_addr": "z3kilol77@gmail.com"}, own) is False
+
+
+def test_an_unknown_sender_is_never_a_self_copy():
+    own = {"maxwell@z3ki.dev"}
+    assert is_self_copy({"from_addr": ""}, own) is False
+    assert is_self_copy({}, own) is False
+    # No configured identity means nothing can be recognised as his — filing
+    # everything is the safe direction, since the alternative is losing mail.
+    assert is_self_copy({"from_addr": "maxwell@z3ki.dev"}, set()) is False
+
+
+def test_the_poller_knows_both_of_his_addresses(tmp_path):
+    # An install can authenticate as one address and send as another.
+    poller = EmailInboxPoller(
+        InboxStore(str(tmp_path)),
+        {
+            "imap_host": "localhost",
+            "imap_port": 993,
+            "user": "Login@Z3ki.dev",
+            "password": "x",
+            "from_addr": "Maxwell <maxwell@z3ki.dev>",
+        },
+        data_dir=str(tmp_path),
+    )
+    assert poller.own_addresses == {"login@z3ki.dev", "maxwell@z3ki.dev"}
+
+
+# ─── senders the operator does not want to hear from ─────────────────────
+
+
+def test_the_ignore_list_matches_addresses_and_domains():
+    patterns = {"noreply-dmarc-support@google.com", ".example.org"}
+    assert is_ignored_sender({"from_addr": "noreply-dmarc-support@google.com"}, patterns)
+    assert is_ignored_sender({"from_addr": "NOREPLY-DMARC-SUPPORT@Google.com"}, patterns)
+    # A leading-dot pattern covers the domain and its subdomains.
+    assert is_ignored_sender({"from_addr": "x@example.org"}, patterns)
+    assert is_ignored_sender({"from_addr": "y@mail.example.org"}, patterns)
+    assert not is_ignored_sender({"from_addr": "friend@gmail.com"}, patterns)
+
+
+def test_a_lookalike_domain_is_not_a_match():
+    # `.example.org` must not match `example.org.evil.com`.
+    patterns = {".example.org"}
+    assert not is_ignored_sender({"from_addr": "z@example.org.evil.com"}, patterns)
+
+
+def test_nothing_is_ignored_by_default():
+    # Which machine mail matters is the operator's call. A DMARC report is
+    # telemetry; a MAILER-DAEMON bounce means something he sent did not
+    # arrive, and a heuristic cannot tell those apart.
+    assert not is_ignored_sender({"from_addr": "anyone@anywhere.com"}, set())
+
+
+def test_the_poller_parses_the_ignore_list(tmp_path):
+    poller = EmailInboxPoller(
+        InboxStore(str(tmp_path)),
+        {
+            "imap_host": "localhost",
+            "imap_port": 993,
+            "user": "maxwell@z3ki.dev",
+            "password": "x",
+            "ignore_senders": " noreply@a.com , .b.com ,, ",
+        },
+        data_dir=str(tmp_path),
+    )
+    assert poller.ignored_senders == {"noreply@a.com", ".b.com"}

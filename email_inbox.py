@@ -6,7 +6,7 @@ already suspects it exists. This module polls IMAP in the background and
 turns each new unread message into an inbox notice, so a new mail shows up
 in his planner tail next to friend requests without him going looking.
 
-Two rules keep it from nagging:
+Three rules keep it from nagging:
 
 * One notice per message, ever — ``InboxStore.insert_if_absent`` plus a
   persisted UID high-water mark. Dismissing a mail makes it stay dismissed
@@ -14,6 +14,11 @@ Two rules keep it from nagging:
 * The poll never marks anything read. ``BODY.PEEK`` leaves the \\Seen flag
   alone, so the mailbox looks the same to the email tools and to a human
   reading it in a real client.
+* Mail from his own address is not new mail. A self-copy of something
+  he sent — a server-side ``always_bcc``, a self-BCC, a list that
+  reflects the post back — lands in INBOX like anything else, and used
+  to be filed and announced as if a stranger had written in. On this
+  install that was 13 of 36 filed messages.
 """
 
 from __future__ import annotations
@@ -47,6 +52,50 @@ MAX_NEW_PER_POLL = 8
 
 def email_item_id(uid: str | int) -> str:
     return f"email_{str(uid).strip()}"
+
+
+def _addr(raw: str) -> str:
+    """Bare lowercase address out of a From header value."""
+    return parseaddr(str(raw or ""))[1].strip().lower()
+
+
+def is_ignored_sender(mail: dict, patterns: set[str]) -> bool:
+    """True when this sender is on the operator's ignore list.
+
+    Patterns are matched on the bare address: a full address
+    (`noreply-dmarc-support@google.com`) or a leading-dot domain
+    (`.google.com`) which matches that domain and its subdomains.
+
+    Empty by default on purpose. Which machine mail matters is the operator's
+    call, not ours — a DMARC aggregate report is pure telemetry, but a
+    MAILER-DAEMON bounce means something he sent did not arrive, and both
+    look identical to a heuristic.
+    """
+    if not patterns:
+        return False
+    addr = _addr(mail.get("from_addr"))
+    if not addr:
+        return False
+    if addr in patterns:
+        return True
+    domain = addr.rpartition("@")[2]
+    return any(
+        p.startswith(".") and (domain == p[1:] or domain.endswith(p))
+        for p in patterns
+    )
+
+
+def is_self_copy(mail: dict, own_addresses: set[str]) -> bool:
+    """True when this message is one of his own, come back around.
+
+    Compared on the bare address, so `"Maxwell" <maxwell@z3ki.dev>` and
+    `maxwell@z3ki.dev` are the same sender. Both the mailbox login and the
+    configured From address count as his: an install can send as one and
+    receive as the other.
+    """
+    if not own_addresses:
+        return False
+    return _addr(mail.get("from_addr")) in own_addresses
 
 
 def _decode_header(raw: str | None) -> str:
@@ -224,6 +273,22 @@ class EmailInboxPoller:
     ):
         self.store = store
         self.cfg = dict(cfg)
+        # Every address that counts as "him". The login and the From address
+        # can differ — an install may authenticate as one and send as another
+        # — so both are his, and a self-copy from either is not new mail.
+        self.ignored_senders = {
+            p.strip().lower()
+            for p in str(self.cfg.get("ignore_senders") or "").split(",")
+            if p.strip()
+        }
+        self.own_addresses = {
+            addr
+            for addr in (
+                _addr(self.cfg.get("user")),
+                _addr(self.cfg.get("from_addr")),
+            )
+            if addr
+        }
         self.interval = max(15.0, float(interval))
         self.max_backoff = max(self.interval, float(max_backoff))
         self.state = MailPollState(data_dir)
@@ -292,8 +357,26 @@ class EmailInboxPoller:
         if not mails:
             return 0
         filed = 0
+        skipped_self = 0
+        skipped_ignored = 0
         highest = self.state.last_uid
         for mail in mails:
+            if is_ignored_sender(mail, self.ignored_senders):
+                # Operator said this sender is not worth an inbox row. Still
+                # advance the mark: the mail stays on the server and the email
+                # tools can still read it, it just does not queue for
+                # attention.
+                skipped_ignored += 1
+                highest = max(highest, int(mail["uid"]))
+                continue
+            if is_self_copy(mail, self.own_addresses):
+                # His own message, come back around. Advance the mark past it
+                # so it is not reconsidered every tick, but file nothing —
+                # announcing a copy of what he just sent as new mail is how
+                # he ended up narrating his own outbox.
+                skipped_self += 1
+                highest = max(highest, int(mail["uid"]))
+                continue
             try:
                 row = await self.store.insert_if_absent(self._build_item(mail))
             except Exception as exc:
@@ -306,6 +389,15 @@ class EmailInboxPoller:
             highest = max(highest, int(mail["uid"]))
         if highest > self.state.last_uid:
             await self.state.save(highest)
+        if skipped_self:
+            logger.info(
+                "Mail poll: skipped %s self-copy message(s)", skipped_self
+            )
+        if skipped_ignored:
+            logger.info(
+                "Mail poll: skipped %s message(s) from ignored senders",
+                skipped_ignored,
+            )
         if filed:
             logger.info("Mail poll: %s new message(s) in the inbox", filed)
         return filed

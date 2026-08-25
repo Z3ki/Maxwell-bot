@@ -485,6 +485,16 @@ class Config:
         os.getenv("MAXWELL_EMAIL_FROM", "").strip() or MAXWELL_EMAIL_USER
     )
     MAXWELL_EMAIL_FROM_NAME = os.getenv("MAXWELL_EMAIL_FROM_NAME", "Maxwell").strip()
+    # Senders whose mail is never filed as an inbox notice. Comma-separated;
+    # a full address, or a leading-dot domain (".google.com") for it and its
+    # subdomains. Empty by default: which machine mail matters is the
+    # operator's call. A DMARC aggregate report is pure telemetry, but a
+    # MAILER-DAEMON bounce means something he sent did not arrive, and a
+    # heuristic cannot tell those apart. The mail itself is untouched — it
+    # stays on the server and the email_* tools still read it.
+    MAXWELL_EMAIL_IGNORE_SENDERS = os.getenv(
+        "MAXWELL_EMAIL_IGNORE_SENDERS", ""
+    ).strip()
 
     # -------------------------------------------------------------------------
     # Native sub-agent (only used if ENABLE_SUBAGENT resolves true).

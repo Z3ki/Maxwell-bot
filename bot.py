@@ -3292,6 +3292,11 @@ class MaxwellBot(commands.Bot):
                     "imap_port": getattr(self.config, "MAXWELL_IMAP_PORT", 993),
                     "user": getattr(self.config, "MAXWELL_EMAIL_USER", ""),
                     "password": getattr(self.config, "MAXWELL_EMAIL_PASSWORD", ""),
+                    # So the poller can recognise his own mail coming back.
+                    "from_addr": getattr(self.config, "MAXWELL_EMAIL_FROM", ""),
+                    "ignore_senders": getattr(
+                        self.config, "MAXWELL_EMAIL_IGNORE_SENDERS", ""
+                    ),
                 },
                 data_dir=self.config.DATA_DIR,
                 interval=self._mail_poll_seconds(),
