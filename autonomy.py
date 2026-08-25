@@ -1485,6 +1485,25 @@ class AutonomyEngine:
     def _floor_settings(self) -> FloorSettings:
         return FloorSettings.from_control(getattr(self.bot, "_control", None))
 
+    def _sleeping(self) -> bool:
+        """True while a sleep window is open. Never raises.
+
+        `enable_sleep` gates the feature exactly as it does on the live reply
+        path, so an operator who has turned sleep off does not get a silent
+        autonomy pause from a stale window.
+        """
+        control = getattr(self.bot, "_control", None) or {}
+        if not control.get("enable_sleep", True):
+            return False
+        check = getattr(self.bot, "_is_sleeping", None)
+        if not callable(check):
+            return False
+        try:
+            sleeping, _secs = check()
+            return bool(sleeping)
+        except Exception:
+            return False
+
     def _floor_enabled(self) -> bool:
         """Turn-taking is on unless an operator explicitly switches it off.
 
@@ -3310,6 +3329,23 @@ class AutonomyEngine:
             post_cid = self._post_target_of(action)
             if not post_cid:
                 verdicts.append(GateVerdict(action, True, "ok", ""))
+                continue
+
+            # He is asleep. The live path already refuses to answer people who
+            # talk to him and tells them "max is sleeping, back in Xm" — but
+            # nothing checked it here, so the tick would post unprompted into
+            # a channel or DM someone while that notice was still standing.
+            # Speaking only: research, memory and goal work carry on.
+            if self._sleeping():
+                verdicts.append(
+                    GateVerdict(
+                        action,
+                        False,
+                        "asleep",
+                        "you are in a sleep window — not speaking until you wake",
+                        post_cid,
+                    )
+                )
                 continue
 
             # Same-tick dedup: one plan does not get to post twice into one

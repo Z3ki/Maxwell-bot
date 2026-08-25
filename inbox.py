@@ -27,6 +27,23 @@ INBOX_RING_SIZE = 200
 INBOX_PLANNER_BUDGET = 900
 ACTIONABLE_STATES = frozenset({"unread", "read"})
 
+# Actions that mean a human is waiting on an answer. An item carrying one of
+# these stays in the planner tail after it has been read — reading a friend
+# request does not answer it. Everything else is a *notice*: something to be
+# told once. Mail is the common case, and it used to have no way out of the
+# tail short of an explicit dismiss, so the same message was announced on
+# every turn, reworded each time ("update from z3ki…", "z3ki already
+# replied…", "update: z3ki just replied…").
+DECISION_ACTIONS = frozenset({"accept", "decline"})
+
+
+def needs_decision(item: dict) -> bool:
+    """True when someone is waiting on an answer this item can give."""
+    return bool(
+        DECISION_ACTIONS
+        & {str(a).strip().lower() for a in (item.get("actions") or [])}
+    )
+
 # Planner ordering. Something a human is waiting on outranks a notice he can
 # read whenever. Within a kind, newest first — an inbox is a feed, not a log.
 KIND_PRIORITY = {
@@ -109,16 +126,33 @@ class InboxStore:
         unread = 0 if item.get("state") == "unread" else 1
         return (unread, KIND_PRIORITY.get(kind, KIND_PRIORITY_DEFAULT))
 
-    def planner_items(self, items: list[dict]) -> list[dict]:
+    def planner_items(
+        self, items: list[dict], *, exclude_announced: bool = False
+    ) -> list[dict]:
         """Actionable items in the order the planner should see them.
 
         Sorted by urgency, then capped per kind so a burst of mail can't
         push a waiting friend request out of the tail.
+
+        ``exclude_announced`` drops notices he has already said out loud —
+        read, and with no decision left to make. Only the prompt tail passes
+        it. `inbox_list` deliberately does not: a read email has not gone
+        anywhere, and "show me my inbox" should show the whole inbox. Without
+        that split a notice had no way out of the prompt short of an explicit
+        dismiss, so the same email was announced on every turn, reworded each
+        time, until somebody cleared it by hand.
         """
         # Two stable passes: newest first, then urgency. created_at is ISO, so
         # a plain reverse string sort is chronological.
+        rows = [
+            i
+            for i in self.actionable(items)
+            if not exclude_announced
+            or i.get("state") != "read"
+            or needs_decision(i)
+        ]
         pending = sorted(
-            self.actionable(items),
+            rows,
             key=lambda i: str(i.get("created_at") or ""),
             reverse=True,
         )
@@ -160,7 +194,7 @@ class InboxStore:
 
     def render_planner(self, items: list[dict]) -> str:
         """Volatile tail only. Empty → '' so the cached prefix never moves."""
-        pending = self.planner_items(items)
+        pending = self.planner_items(items, exclude_announced=True)
         if not pending:
             return ""
         lines = ["=== INBOX (unread / actionable — you may ignore) ==="]

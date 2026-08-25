@@ -232,7 +232,7 @@ present). Restart to re-detect. `python3 doctor.py` shows the resolved state.
 
 | Variable | Controls | `auto` needs |
 |---|---|---|
-| `ENABLE_IMAGE_INPUT` | Forwarding images to the LLM (also `process_images` in the dashboard) | — |
+| `ENABLE_IMAGE_INPUT` | Forwarding images to the LLM; the hard switch, `false` wins over the dashboard's `process_images` | — |
 | `ENABLE_VIDEO_INPUT` | Video frame extraction for `video/*` attachments | `ffmpeg` |
 | `ENABLE_AUDIO_INPUT` | Forwarding audio to "omni" audio-capable models | opt-in (`false` by default) |
 | `ENABLE_IMAGE_GEN` | `image_generator` (NVIDIA Flux) + `hd_image` (Gemini, generate **and** edit) | — |
@@ -249,7 +249,7 @@ present). Restart to re-detect. `python3 doctor.py` shows the resolved state.
 | `ENABLE_SUBAGENT` | `sub_agent` tool (writes and runs code) | follows `ENABLE_SHELL` |
 | `ENABLE_RAG` | RAG vector memory; `false` makes no embedding calls at all | — |
 | `ENABLE_TELEGRAM` | Auto-start Telegram polling/webhook when `TELEGRAM_TOKEN` is set | — |
-| `ENABLE_AUTONOMY` | Autonomy engine (also controlled via dashboard) | opt-in in `.env.example` |
+| `ENABLE_AUTONOMY` | Autonomy engine; `false` never starts the loop (the dashboard's `autonomy_enabled` is the runtime toggle) | opt-in in `.env.example` |
 | `ENABLE_REM` | Background REM dreaming pass (alias of `REM_ENABLED`) | opt-in (`false` by default) |
 
 ### RAG embeddings (only used if `ENABLE_RAG` is on)
@@ -555,6 +555,20 @@ The REM pass is not a live chat response and never posts to Discord. Current cod
 
 REM is opt-in: it is off unless you set `ENABLE_REM=true` (or `REM_ENABLED=true`) in `.env`. Configure `REM_INTERVAL_SECONDS`, `REM_EVENT_BUFFER_MAX`, `REM_RUN_HISTORY`, and `OLLAMA_REM_MODEL` in `.env`. Admins can use `,rem*` commands or the dashboard REM card.
 
+### Inbox notices
+
+An inbox item is either a *notice* (mail, a group-DM add — something to be
+told) or a *request* someone is waiting on (a friend request). Requests keep
+showing in the prompt until they are accepted or declined; notices drop out of
+it once he has actually said them out loud, which happens automatically after
+the reply that mentioned them is delivered.
+
+Before that, `read` only reordered an item, so a notice had no way out of the
+prompt short of an explicit `dismiss` — the same email was announced on every
+turn, reworded each time. Leaving the prompt is not leaving the inbox:
+`inbox_list` still shows read notices, and `dismiss` is still what clears one
+for good.
+
 ### Repetition
 
 Two different problems that read as one complaint ("it keeps saying jajajaja").
@@ -623,6 +637,8 @@ Before anything sends, the engine reads each room and returns a verdict on wheth
 The verdict is used twice on purpose: it is rendered into the planner prompt as a `CONVERSATION FLOOR` section so the model can choose freely among the rooms that are actually his, and it is re-checked against live state immediately before the send, because the plan is seconds stale by then and rooms move.
 
 **This gates speaking only.** Research, memory writes, goal work, and reflection are never blocked by it — the point is to constrain timing, not initiative. Restraint that can be computed lives in code; the prompt is left free.
+
+The same gate honours an open sleep window. The live reply path has always refused to answer while `,sleep` is set, telling people "max is sleeping, back in Xm" — but nothing checked it on the autonomy side, so the tick would post into a channel or DM someone while that notice was still standing. It is speech-only there too: asleep, he still thinks, remembers and plans.
 
 | Control | Default | Meaning |
 | --- | --- | --- |

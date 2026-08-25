@@ -309,7 +309,11 @@ from control_defaults import (  # noqa: E402
 )
 import guild_onboarding  # noqa: E402
 from email_inbox import EmailInboxPoller  # noqa: E402
-from inbox import InboxStore, apply_inbox_action  # noqa: E402
+from inbox import (  # noqa: E402
+    InboxStore,
+    apply_inbox_action,
+    needs_decision as inbox_needs_decision,
+)
 from response_guard import break_echo_loop, scrub_repetitions  # noqa: E402
 from providers import (  # noqa: E402
     MIME_MAP,
@@ -3266,6 +3270,8 @@ class MaxwellBot(commands.Bot):
             self.config.DATA_DIR, run_history=self.config.REM_RUN_HISTORY
         )
         self.inbox = InboxStore(self.config.DATA_DIR)
+        # Notice ids the last prompt carried, marked read once he speaks.
+        self._inbox_shown_ids: list[str] = []
         # Live sub-agent telemetry. A sub-agent run is minutes of silence
         # otherwise — the channel sees nothing until the final report, and if
         # it hangs there is nothing to look at. In-process and non-durable on
@@ -4419,7 +4425,15 @@ class MaxwellBot(commands.Bot):
             logger.info(
                 "Mail inbox poll scheduled every %.0fs", self.mail_poller.interval
             )
-        await self.autonomy_engine.start()
+        # ENABLE_AUTONOMY was defined in config.py, listed in the feature
+        # report, and documented in the README as the switch for this engine —
+        # and nothing read it, so setting it to false started the loop anyway.
+        # A switch that silently does nothing is worse than no switch: it is
+        # turned off for a reason, and the operator believes it worked.
+        if self.config.ENABLE_AUTONOMY:
+            await self.autonomy_engine.start()
+        else:
+            logger.info("Autonomy engine not started (ENABLE_AUTONOMY=false)")
         if self.config.TELEGRAM_TOKEN and self.config.ENABLE_TELEGRAM:
             if self.config.TELEGRAM_WEBHOOK_URL:
                 self._tasks.append(asyncio.create_task(self._telegram_webhook_loop()))
@@ -4556,11 +4570,43 @@ class MaxwellBot(commands.Bot):
         if store is None:
             return
         try:
-            text = store.render_planner(await store.load_items())
+            items = await store.load_items()
+            pending = store.planner_items(items, exclude_announced=True)
+            text = store.render_planner(items)
         except Exception:
             return
-        if text:
-            dynamic_parts.append(text)
+        if not text:
+            return
+        dynamic_parts.append(text)
+        # Remember which notices this prompt carried, so they can be marked
+        # read once he actually says something. Marking them here instead
+        # would burn a notice on a turn he stayed silent for, and *not*
+        # marking them at all is what made the same email get announced on
+        # every turn until someone dismissed it by hand.
+        self._inbox_shown_ids = [
+            str(i.get("id"))
+            for i in pending
+            if not inbox_needs_decision(i) and i.get("state") == "unread"
+        ]
+
+    async def _mark_inbox_announced(self) -> None:
+        """Mark the notices the last prompt carried as read. Called after a send.
+
+        Only notices — anything still awaiting an accept/decline keeps showing
+        until it is actually answered. Never raises: a reply has already gone
+        out by the time this runs, and failing to update the inbox is not
+        worth turning a delivered message into an error.
+        """
+        shown = list(getattr(self, "_inbox_shown_ids", ()) or ())
+        if not shown:
+            return
+        self._inbox_shown_ids = []
+        store = getattr(self, "inbox", None)
+        if store is None:
+            return
+        for item_id in shown:
+            with contextlib.suppress(Exception):
+                await store.mark(item_id, "read")
 
     async def on_relationship_add(self, relationship):
         try:
@@ -5280,7 +5326,7 @@ class MaxwellBot(commands.Bot):
                 for item in (getattr(self, "_media_context", {}).get(channel_id, []) or [])
             )
             if media_refresh_ok and (
-                parse_bool(self._control.get("process_images"), True) or old_cached
+                MaxwellBot._image_input_enabled(self) or old_cached
             ):
                 self._replace_media_context_for_message(channel_id, mid, media)
         latest_state = update_state.get(mid)
@@ -5686,7 +5732,7 @@ class MaxwellBot(commands.Bot):
                 )
             )
             if (
-                parse_bool(self._control.get("process_images"), True)
+                MaxwellBot._image_input_enabled(self)
                 and not (reply_path_enabled and self._should_live_reply(message))
                 and self._message_carries_media(message)
             ):
@@ -7236,6 +7282,15 @@ class MaxwellBot(commands.Bot):
                 self._vc_active_tasks.pop(key, None)
 
     async def _play_vc_response(self, guild, text_channel, response: str):
+        # ENABLE_TTS_VC was documented as the switch for voice-channel
+        # playback and read by nobody — only ENABLE_TTS (the `tts` tool) was
+        # ever checked, so turning VC playback off in .env left the bot
+        # talking in voice anyway. Fall back to text, which is what the rest
+        # of this method already does when it cannot speak.
+        if not getattr(self.config, "ENABLE_TTS_VC", True):
+            with contextlib.suppress(Exception):
+                await text_channel.send(response)
+            return
         t_total = time.perf_counter()
         key = self._vc_context_key(guild, None, text_channel)
         voice_channel = self._vc_voice_channels.get(key)
@@ -10010,7 +10065,7 @@ class MaxwellBot(commands.Bot):
             return await _read_response_limited(resp, max_bytes)
 
     async def _extract_media(self, message) -> tuple[list[str], list[dict]]:
-        proc_img = parse_bool(self._control.get("process_images"), True)
+        proc_img = MaxwellBot._image_input_enabled(self)
         proc_aud = _owner_audio_input_enabled(self)
         # If neither images nor audio processing, skip all binary media collection.
         # (process_audio / ENABLE_AUDIO_INPUT controls audio input to the model)
@@ -10278,8 +10333,7 @@ class MaxwellBot(commands.Bot):
         """Extract representative frames and audio track from video for reliable model coverage."""
         results = []
         if include_frames is None:
-            control = getattr(self, "_control", None) or {}
-            include_frames = parse_bool(control.get("process_images"), True)
+            include_frames = MaxwellBot._image_input_enabled(self)
         suffix = Path(filename).suffix.lower() or ".mp4"
         try:
             with tempfile.TemporaryDirectory(prefix="maxwell-vderiv-") as tmp:
@@ -10970,10 +11024,7 @@ class MaxwellBot(commands.Bot):
             item.get("message_id"),
             max_size,
             source_url=str(item.get("url") or ""),
-            include_frames=parse_bool(
-                (getattr(self, "_control", None) or {}).get("process_images"),
-                True,
-            ),
+            include_frames=MaxwellBot._image_input_enabled(self),
             source_prefix=source_prefix,
         )
 
@@ -10982,7 +11033,7 @@ class MaxwellBot(commands.Bot):
         if not embeds:
             return []
         max_size = self._max_media_bytes()
-        proc_img = parse_bool(self._control.get("process_images"), True)
+        proc_img = MaxwellBot._image_input_enabled(self)
         proc_aud = _owner_audio_input_enabled(self)
         video_input_enabled = parse_bool(
             getattr(getattr(self, "config", None), "ENABLE_VIDEO_INPUT", True),
@@ -11150,7 +11201,7 @@ class MaxwellBot(commands.Bot):
         host network), the size cap, and a real content-type check — the
         extension only decides what is worth fetching, never what it is.
         """
-        proc_img = parse_bool(self._control.get("process_images"), True)
+        proc_img = MaxwellBot._image_input_enabled(self)
         proc_aud = _owner_audio_input_enabled(self)
         if not proc_img and not proc_aud:
             return []
@@ -11445,6 +11496,22 @@ class MaxwellBot(commands.Bot):
     # the user about sleep. The wake is automatic when the monotonic
     # deadline passes.
 
+    def _image_input_enabled(self) -> bool:
+        """Both switches have to agree before an image reaches the model.
+
+        `ENABLE_IMAGE_INPUT` is the install-level switch (documented in the
+        README, reported by doctor.py); `process_images` is the dashboard's
+        runtime toggle. Only the second one was ever read, so setting
+        `ENABLE_IMAGE_INPUT=false` in .env changed nothing and images kept
+        being forwarded — the exact opposite of what someone turning it off
+        for cost or privacy reasons expects.
+        """
+        config = getattr(self, "config", None)
+        if config is not None and not getattr(config, "ENABLE_IMAGE_INPUT", True):
+            return False
+        control = getattr(self, "_control", None) or {}
+        return parse_bool(control.get("process_images"), True)
+
     def _is_sleeping(self) -> tuple[bool, int]:
         """Return (sleeping, seconds_remaining). Auto-clears expired
         state so callers don't have to check the deadline themselves.
@@ -11729,7 +11796,7 @@ class MaxwellBot(commands.Bot):
                     },
                 )
             )
-            if parse_bool(self._control.get("process_images"), True):
+            if MaxwellBot._image_input_enabled(self):
                 grid = await self._maybe_emoji_grid(message, channel_id)
                 if grid is not None:
                     media.append(grid)
@@ -12663,6 +12730,7 @@ class MaxwellBot(commands.Bot):
                 if reply_delivered:
                     await self._record_rem_event(message, "assistant", response)
                     normal_reply_sent = True
+                    await self._mark_inbox_announced()
         except asyncio.CancelledError as _exc:
             logger.info(f"Cancelled active request in channel {channel_id}")
             raise
@@ -15454,6 +15522,9 @@ class MaxwellBot(commands.Bot):
             delivered_text = response_text
         elif any("__TTS_SENT__" in tr for tr in all_tool_results):
             delivered_text = "[voice message sent]"
+
+        if delivered_text:
+            await self._mark_inbox_announced()
 
         if (
             delivered_text

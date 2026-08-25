@@ -13,7 +13,7 @@ from bot_tools import (
     _find_member_voice,
     _is_voice_channel,
 )
-from inbox import InboxStore, apply_inbox_action, friend_item_id
+from inbox import InboxStore, apply_inbox_action, friend_item_id, needs_decision
 from tool_schemas import TOOL_PARAMETERS
 
 
@@ -393,3 +393,65 @@ def test_the_tail_stays_inside_its_budget(tmp_path):
     ]
     text = store.render_planner(items)
     assert len(text) <= 900
+
+
+# ─── an announced notice stops being announced ──────────────────────────
+
+
+def test_a_read_notice_leaves_the_prompt_tail(tmp_path):
+    """The reported bug: the same email announced three times, reworded.
+
+    Nothing marked a notice as said, and `read` kept it in the tail, so every
+    prompt carried it again and he narrated it again — "update from z3ki…",
+    "z3ki already replied…", "update: z3ki just replied…".
+    """
+    store = InboxStore(str(tmp_path))
+
+    async def run():
+        await store.upsert(_item("email_1", "email", "2026-08-24T09:00:00Z"))
+        assert "email_1" in store.render_planner(await store.load_items())
+
+        await store.mark("email_1", "read")
+        assert store.render_planner(await store.load_items()) == ""
+
+    asyncio.run(run())
+
+
+def test_a_read_request_someone_is_waiting_on_stays(tmp_path):
+    # Reading a friend request does not answer it, so it keeps showing.
+    store = InboxStore(str(tmp_path))
+
+    async def run():
+        await store.upsert(
+            _item(
+                "friend_9",
+                "friend_request",
+                "2026-08-24T09:00:00Z",
+                actions=["accept", "decline"],
+            )
+        )
+        await store.mark("friend_9", "read")
+        assert "friend_9" in store.render_planner(await store.load_items())
+
+    asyncio.run(run())
+
+
+def test_the_inbox_tool_still_shows_a_read_notice(tmp_path):
+    # It left the prompt tail, not the inbox. "Show me my inbox" shows it.
+    store = InboxStore(str(tmp_path))
+
+    async def run():
+        await store.upsert(_item("email_1", "email", "2026-08-24T09:00:00Z"))
+        await store.mark("email_1", "read")
+        items = await store.load_items()
+        assert [i["id"] for i in store.planner_items(items)] == ["email_1"]
+        assert store.planner_items(items, exclude_announced=True) == []
+
+    asyncio.run(run())
+
+
+def test_needs_decision_reads_the_actions(tmp_path):
+    assert needs_decision({"actions": ["accept", "decline"]}) is True
+    assert needs_decision({"actions": ["ACCEPT"]}) is True
+    assert needs_decision({"actions": ["read", "dismiss"]}) is False
+    assert needs_decision({}) is False

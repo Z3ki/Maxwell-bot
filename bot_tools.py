@@ -9554,8 +9554,9 @@ class InboxActTool(Tool):
             "Act on an inbox item. Params: action (required: accept, decline, "
             "dismiss, or read), item_id (inbox id like friend_123 or "
             "email_412) or user_id (the requester's Discord id). accept and "
-            "decline are friend requests only; read demotes a notice without "
-            "clearing it, dismiss clears it for good."
+            "decline are friend requests only; read keeps a notice in the "
+            "inbox but stops it being brought to your attention again, "
+            "dismiss clears it for good."
         )
 
     async def execute(

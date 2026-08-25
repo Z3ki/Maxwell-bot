@@ -256,3 +256,84 @@ def test_a_hung_observation_fails_the_tick_rather_than_freezing_it(tmp_path):
         return "returned"
 
     assert asyncio.run(run()) == "timed out"
+
+
+# ─── sleep ───────────────────────────────────────────────────────────────
+
+
+def test_a_sleeping_bot_does_not_post_unprompted(tmp_path):
+    """He tells people he is asleep, then posts anyway — he did, until now.
+
+    The live reply path refuses to answer while a sleep window is open and
+    says "max is sleeping, back in Xm". Nothing checked that here, so the tick
+    would post into a channel or DM someone while that notice was still
+    standing.
+    """
+    channel = _open_room()
+    engine = _engine(tmp_path, channel)
+    engine.bot._is_sleeping = lambda: (True, 600)
+
+    verdicts = asyncio.run(
+        engine.policy_gate(
+            [{"kind": "post_channel", "target_channel_id": "100", "content": "hi"}]
+        )
+    )
+
+    assert verdicts[0].allowed is False
+    assert verdicts[0].code == "asleep"
+    assert channel.sent == []
+
+
+def test_sleep_stops_speech_only(tmp_path):
+    # Freedom is the point: he can still think, remember and plan asleep.
+    engine = _engine(tmp_path, _open_room())
+    engine.bot._is_sleeping = lambda: (True, 600)
+
+    verdicts = asyncio.run(
+        engine.policy_gate(
+            [
+                {"kind": "update_memory", "content": "a fact"},
+                {"kind": "create_goal", "description": "learn webgpu"},
+            ]
+        )
+    )
+    assert all(v.allowed for v in verdicts)
+
+
+def test_an_awake_bot_is_unaffected(tmp_path):
+    engine = _engine(tmp_path, _open_room())
+    engine.bot._is_sleeping = lambda: (False, 0)
+    verdicts = asyncio.run(
+        engine.policy_gate(
+            [{"kind": "post_channel", "target_channel_id": "100", "content": "hi"}]
+        )
+    )
+    assert verdicts[0].allowed is True
+
+
+def test_sleep_disabled_means_no_autonomy_pause(tmp_path):
+    # An operator who turned the feature off should not get a silent pause
+    # from a stale window.
+    engine = _engine(tmp_path, _open_room(), control={"enable_sleep": False})
+    engine.bot._is_sleeping = lambda: (True, 600)
+    verdicts = asyncio.run(
+        engine.policy_gate(
+            [{"kind": "post_channel", "target_channel_id": "100", "content": "hi"}]
+        )
+    )
+    assert verdicts[0].allowed is True
+
+
+def test_a_bot_that_cannot_report_sleep_is_treated_as_awake(tmp_path):
+    engine = _engine(tmp_path, _open_room())
+
+    def _boom():
+        raise RuntimeError("no loop")
+
+    engine.bot._is_sleeping = _boom
+    verdicts = asyncio.run(
+        engine.policy_gate(
+            [{"kind": "post_channel", "target_channel_id": "100", "content": "hi"}]
+        )
+    )
+    assert verdicts[0].allowed is True
