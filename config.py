@@ -178,7 +178,12 @@ class Config:
     OLLAMA_MAX_TOKENS = _int_env(
         "OLLAMA_MAX_TOKENS", 8192, min_value=1, max_value=131072
     )
-    OLLAMA_TEMPERATURE = _float_env("OLLAMA_TEMPERATURE", 1.0, min_value=0.0)
+    # 0.7 rather than 1.0: at 1.0 the tail of the distribution is wide enough
+    # that a chat model wanders — it picks a tic and rides it, which is the
+    # generation-side half of the repetition the scrubber cleans up after.
+    # 0.7 keeps him improvising without letting the sampler pick the odd token
+    # for its own sake. Raise it back per-install with OLLAMA_TEMPERATURE.
+    OLLAMA_TEMPERATURE = _float_env("OLLAMA_TEMPERATURE", 0.7, min_value=0.0)
     OLLAMA_DISABLE_REASONING = _bool_env("OLLAMA_DISABLE_REASONING", True)
     OLLAMA_FALLBACK_BASE_URL = os.getenv("OLLAMA_FALLBACK_BASE_URL", "").strip()
     OLLAMA_FALLBACK_API_KEY = os.getenv("OLLAMA_FALLBACK_API_KEY", "").strip()

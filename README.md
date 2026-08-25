@@ -218,7 +218,7 @@ required values are the first thing in the file. The ones that matter:
 |---|---|
 | `OLLAMA_REM_MODEL` | REM dreamer model (defaults to `OLLAMA_MODEL`) |
 | `OLLAMA_MAX_TOKENS` | Max output tokens per completion (default: `8192`) |
-| `OLLAMA_TEMPERATURE` | Temperature (default: `1.0`) |
+| `OLLAMA_TEMPERATURE` | Sampling temperature (default: `0.7`) |
 | `OLLAMA_FALLBACK_*` | Optional secondary endpoint, rotates with primary |
 | `OLLAMA_VISION_*` | Optional vision/omni model for image/video turns (blank base/key inherit primary) |
 | `OLLAMA_RETRY_ATTEMPTS` | Total attempts per request (default: `3`) |
