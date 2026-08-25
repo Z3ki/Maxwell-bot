@@ -495,6 +495,12 @@ class Config:
     SUBAGENT_COMMAND_TIMEOUT_SECONDS = _int_env(
         "SUBAGENT_COMMAND_TIMEOUT_SECONDS", 120, min_value=5, max_value=3600
     )
+    # Where the sub-agent's `run_command` executes. "docker" (default) runs
+    # each run in its own throwaway container with only the run's scratch
+    # workspace mounted — the bot's .env and source are not visible to it.
+    # "host" runs `bash -lc` in the bot's own environment: no isolation, and
+    # only sensible if the whole machine is already disposable.
+    SUBAGENT_SANDBOX = os.getenv("SUBAGENT_SANDBOX", "docker").strip().lower()
     SUBAGENT_MAX_FILE_BYTES = _int_env(
         "SUBAGENT_MAX_FILE_BYTES", 200_000, min_value=1000, max_value=5_000_000
     )

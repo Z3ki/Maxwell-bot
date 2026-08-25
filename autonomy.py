@@ -47,6 +47,7 @@ import random
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, cast
@@ -90,6 +91,54 @@ from autonomy_social import (  # noqa: E402
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ─── the four-stage tick ────────────────────────────────────────────────
+#
+# A tick is: **observe** what changed, **plan** what to do about it, run the
+# plan through a **policy gate**, then **execute** what survives.
+#
+# Those stages always existed but only two of them had names. Observation was
+# `gather_context`, planning was `plan`, and the gate was a block of `continue`
+# statements in the middle of `execute` — so a denied action and a failed
+# action produced the same shape of result, and nothing could report "the plan
+# was fine, policy stopped it". Naming the gate makes denials first-class:
+# they carry a code, they are counted separately from errors in the tick
+# summary, and the gate can be tested without side effects.
+#
+# The gate deliberately runs at execution time, not plan time. The plan is
+# seconds stale by the time it lands — someone starts typing, the live bot
+# answers the same question — and a gate that read the room at plan time would
+# be deciding on a room that no longer exists.
+
+
+@dataclass
+class Observation:
+    """Stage 1's output: what the world looked like at the top of the tick."""
+
+    context: str
+    started_at: str
+    duration: float = 0.0
+
+    @property
+    def chars(self) -> int:
+        return len(self.context)
+
+
+@dataclass
+class GateVerdict:
+    """Stage 3's per-action ruling.
+
+    ``code`` is a stable slug for counting ("floor", "duplicate_post",
+    "tool_blocked"); ``reason`` is the sentence handed back to the planner as
+    feedback, so it has to explain rather than label.
+    """
+
+    action: dict
+    allowed: bool
+    code: str = "ok"
+    reason: str = ""
+    target_channel_id: str | None = None
 
 
 # Regex constants, _discord_display_name, _discord_id, _coerce_utc_datetime,
@@ -1338,22 +1387,13 @@ class AutonomyEngine:
                     self._lock.release()
                     acquired = False
                 try:
-                    # gather_context does many Discord history fetches + up to 3
-                    # youtube fetches with no per-call timeout; one hung fetch
-                    # used to stall the tick (and, via single-flight, the whole
-                    # autonomy loop) indefinitely. Bound it generously so a true
-                    # hang is recovered instead of freezing the engine forever.
-                    try:
-                        context = await asyncio.wait_for(
-                            self.gather_context(), timeout=180
-                        )
-                    except asyncio.TimeoutError:
-                        logger.error(
-                            "Autonomy gather_context timed out (>180s); "
-                            "skipping tick to recover the loop"
-                        )
-                        raise RuntimeError("gather_context timed out")
-                    actions, results = await self._plan_execute_loop(context)
+                    # Stage 1 of 4. See the module header for why the stages
+                    # have names.
+                    observation = await self.observe(tick_start_iso)
+                    context = observation.context
+                    # Stages 2-4 (plan / policy gate / execute), looped so the
+                    # planner can react to its own tool output.
+                    actions, results, stages = await self._plan_execute_loop(context)
                     duration = time.time() - start
                     await self._log_tick(
                         context, actions, results, duration, tick_start_iso
@@ -1362,6 +1402,13 @@ class AutonomyEngine:
                         "skipped": False,
                         "actions": len(results),
                         "duration": duration,
+                        "stages": {
+                            "observe": {
+                                "chars": observation.chars,
+                                "duration": round(observation.duration, 2),
+                            },
+                            **stages,
+                        },
                     }
                 except Exception as e:
                     duration = time.time() - start
@@ -2547,18 +2594,78 @@ class AutonomyEngine:
             verdicts, inbox_pending=inbox_pending, has_goals=has_goals
         )
 
-    async def _plan_execute_loop(self, context: str) -> tuple[list[dict], list[dict]]:
-        """Plan and execute, then let the model react to its own tool output.
+    # ─── stage 1: observe ─────────────────────────────────────────────
+
+    async def observe(self, started_at: str | None = None) -> Observation:
+        """Read the world. Returns the planner's context plus what it cost.
+
+        `gather_context` does many Discord history fetches plus up to three
+        YouTube fetches with no per-call timeout; one hung fetch used to stall
+        the tick and, through single-flight, the whole autonomy loop, forever.
+        The bound is generous — a real hang is what it catches, not a slow
+        network — and a timeout is raised rather than swallowed so the tick is
+        recorded as failed and `last_tick` is not advanced past events nobody
+        planned over.
+        """
+        started_at = started_at or _utcnow_iso()
+        begin = time.time()
+        try:
+            context = await asyncio.wait_for(self.gather_context(), timeout=180)
+        except asyncio.TimeoutError:
+            logger.error(
+                "Autonomy gather_context timed out (>180s); "
+                "skipping tick to recover the loop"
+            )
+            raise RuntimeError("gather_context timed out") from None
+        return Observation(
+            context=context,
+            started_at=started_at,
+            duration=time.time() - begin,
+        )
+
+    # ─── stages 2-4, looped ───────────────────────────────────────────
+
+    async def _plan_execute_loop(
+        self, context: str
+    ) -> tuple[list[dict], list[dict], dict]:
+        """Stages 2-4, looped so the model can react to its own tool output.
 
         Autonomy used to be strictly one-shot per tick: it could fire
         search_messages but never see the results until the next tick, where
         they arrived as a 180-char summary line. Now a run_tool that returns
         output is fed straight back for a follow-up decision, bounded by
         MAX_TOOL_LOOP_ROUNDS rounds and MAX_TOOL_LOOP_ACTIONS total actions.
+
+        The third return value is the per-stage tally the tick reports:
+        how many actions were planned, how many the gate allowed, and what
+        denials it issued, broken down by code. That last part is the thing
+        that used to be invisible — a plan that was entirely denied and a
+        plan that was empty produced identical logs.
         """
         # Shared across rounds so the one-post-per-channel guard survives the
         # loop rather than resetting each round.
         planned_post_channels: set[str] = set()
+        stages: dict = {
+            "plan": {"actions": 0, "rounds": 0},
+            "policy_gate": {"allowed": 0, "denied": 0, "denials": {}},
+            "execute": {"ran": 0},
+        }
+
+        async def _gate_and_run(planned: list[dict]) -> list[dict]:
+            """Stage 3 then stage 4, tallying what the gate decided."""
+            verdicts = await self.policy_gate(planned, planned_post_channels)
+            for verdict in verdicts:
+                if verdict.allowed:
+                    stages["policy_gate"]["allowed"] += 1
+                else:
+                    stages["policy_gate"]["denied"] += 1
+                    denials = stages["policy_gate"]["denials"]
+                    denials[verdict.code] = denials.get(verdict.code, 0) + 1
+            ran = await self.run_allowed(verdicts)
+            stages["execute"]["ran"] += sum(
+                1 for r in ran if r.get("result") != "skipped"
+            )
+            return ran
 
         if not await self._should_call_planner():
             self._idle_skip_streak = int(getattr(self, "_idle_skip_streak", 0) or 0) + 1
@@ -2573,12 +2680,14 @@ class AutonomyEngine:
                     "reason": "mechanical skip: nothing to decide",
                 }
             ]
-            results = await self.execute(actions, planned_post_channels)
-            return actions, results
+            results = await _gate_and_run(actions)
+            return actions, results, stages
         self._idle_skip_streak = 0
 
         actions = await self.plan(context)
-        results = await self.execute(actions, planned_post_channels)
+        stages["plan"]["actions"] = len(actions)
+        stages["plan"]["rounds"] = 1
+        results = await _gate_and_run(actions)
 
         loop_context = context
         last_round = results
@@ -2612,7 +2721,9 @@ class AutonomyEngine:
             # Respect the total budget even if the model asked for more.
             room = MAX_TOOL_LOOP_ACTIONS - len(results)
             more = more[:room]
-            new_results = await self.execute(more, planned_post_channels)
+            stages["plan"]["actions"] += len(more)
+            stages["plan"]["rounds"] += 1
+            new_results = await _gate_and_run(more)
             actions.extend(more)
             results.extend(new_results)
             last_round = new_results
@@ -2621,7 +2732,15 @@ class AutonomyEngine:
                 f"{len(new_results)} more action(s), {len(results)} total"
             )
 
-        return actions, results
+        gate = stages["policy_gate"]
+        if gate["denied"]:
+            logger.info(
+                "Autonomy policy gate: %s allowed, %s denied (%s)",
+                gate["allowed"],
+                gate["denied"],
+                ", ".join(f"{k}={v}" for k, v in sorted(gate["denials"].items())),
+            )
+        return actions, results, stages
 
     async def plan(self, context: str) -> list[dict]:
         """Ask the LLM what to do. Returns validated action list."""
@@ -3122,25 +3241,158 @@ class AutonomyEngine:
     # execute
     # -----------------------------------------------------------------------
 
+    # ─── stage 3: policy gate ─────────────────────────────────────────
+
+    def _post_target_of(self, action: dict) -> str | None:
+        """Which conversation, if any, this action would speak into.
+
+        post_channel is the obvious case. A message-sending run_tool is the
+        same act wearing a tool's name, and a DM is a conversation too — a bot
+        that DMs you three times before you answer once is the same failure as
+        one that talks over itself in #general. All three resolve to a channel
+        id so all three go through one gate.
+        """
+        kind = action.get("kind", "do_nothing")
+        if kind == "post_channel":
+            return str(action.get("target_channel_id") or "") or None
+        if kind == "run_tool" and str(action.get("tool_name", "")) in AUTONOMY_POST_TOOLS:
+            ta = action.get("tool_args") or {}
+            return (
+                str(
+                    action.get("target_channel_id")
+                    or ta.get("target_channel_id")
+                    or ta.get("channel_id")
+                    or ""
+                )
+                or None
+            )
+        if kind == "send_dm":
+            return self._dm_channel_by_user.get(str(action.get("target_user_id") or ""))
+        return None
+
+    async def policy_gate(
+        self, actions: list[dict], planned_post_channels: set[str] | None = None
+    ) -> list[GateVerdict]:
+        """Decide which planned actions are allowed to happen, and say why.
+
+        This is the third stage of the tick: observe → plan → **policy gate**
+        → execute. It used to be inline in `execute`, mixed in with dispatch,
+        which meant a denial and a failure were the same kind of event and
+        neither was visible as its own thing. Pulled out, the tick can report
+        "planned 4, allowed 2, denied 2 (floor, tool_blocked)" — and the gate
+        can be tested without executing anything.
+
+        It runs immediately before execution rather than at plan time on
+        purpose: the plan is seconds stale by the time it lands and rooms
+        move. Denials carry a `reason` string because that string is fed back
+        to the planner as tool-loop feedback, so it has to read as an
+        explanation, not an error code.
+        """
+        if planned_post_channels is None:
+            planned_post_channels = set()
+        verdicts: list[GateVerdict] = []
+        for action in actions:
+            kind = str(action.get("kind", "do_nothing"))
+
+            if kind == "run_tool":
+                tool_name = str(action.get("tool_name") or "")
+                if tool_name and not self._autonomy_tool_allowed(tool_name):
+                    verdicts.append(
+                        GateVerdict(
+                            action,
+                            False,
+                            "tool_blocked",
+                            f"tool {tool_name!r} is not available to autonomy",
+                        )
+                    )
+                    continue
+
+            post_cid = self._post_target_of(action)
+            if not post_cid:
+                verdicts.append(GateVerdict(action, True, "ok", ""))
+                continue
+
+            # Same-tick dedup: one plan does not get to post twice into one
+            # room. Checked before the floor read so a duplicate costs
+            # nothing. Note this deliberately runs even when turn-taking is
+            # disabled — it's structural, not a matter of taste.
+            if post_cid in planned_post_channels:
+                logger.info(
+                    f"Autonomy skip duplicate post to {post_cid} in same tick/plan"
+                )
+                verdicts.append(
+                    GateVerdict(
+                        action,
+                        False,
+                        "duplicate_post",
+                        "already sent to this conversation in this tick",
+                        post_cid,
+                    )
+                )
+                continue
+
+            # THE GATE. One read of the room decides every "should I speak
+            # here" question: mid-reply, holding the floor after his own
+            # last line, already handled by the live path, inside the
+            # cooldown, or cutting into someone else's exchange.
+            # See autonomy_social.
+            if self._floor_enabled():
+                verdict = await self._floor_gate(post_cid)
+                if not verdict.may_speak:
+                    logger.info(
+                        "Autonomy skip %s to %s: floor=%s (%s)",
+                        kind,
+                        post_cid,
+                        verdict.state,
+                        verdict.reason,
+                    )
+                    verdicts.append(
+                        GateVerdict(
+                            action,
+                            False,
+                            "floor",
+                            f"not your turn in this conversation "
+                            f"[{verdict.state}] — {verdict.reason}",
+                            post_cid,
+                        )
+                    )
+                    continue
+
+            # Claim the room only once it's cleared to speak in. Claiming
+            # before the gate would make a *blocked* action consume the
+            # slot, and the next action aimed at the same room would come
+            # back "already sent" — which is false, and that string is fed
+            # to the planner as feedback next tick.
+            planned_post_channels.add(post_cid)
+            verdicts.append(GateVerdict(action, True, "ok", "", post_cid))
+        return verdicts
+
+    # ─── stage 4: execute ─────────────────────────────────────────────
+
     async def execute(
         self, actions: list[dict], planned_post_channels: set[str] | None = None
     ) -> list[dict]:
-        """Execute each action. One failure doesn't kill the rest.
+        """Gate then run. Kept as one call for the many callers that want both.
 
-        ``planned_post_channels`` is passed in by the tool loop so the
-        one-post-per-channel-per-tick guarantee holds across continuation
-        rounds; a fresh set per round would let the loop post twice.
+        The tick uses the stages separately so it can report what the gate
+        decided; everything else (tests, `,autonomy run`, the tool loop's
+        mechanical-skip path) wants plan-in, results-out.
+        """
+        verdicts = await self.policy_gate(actions, planned_post_channels)
+        return await self.run_allowed(verdicts)
+
+    async def run_allowed(self, verdicts: list[GateVerdict]) -> list[dict]:
+        """Execute the actions the gate allowed. One failure doesn't kill the rest.
+
+        Denied actions still produce a result row — the planner reads results
+        as feedback, and an action that silently vanished would be re-planned
+        next tick forever.
         """
         results = []
         ACTION_TIMEOUT = 30  # seconds per action
 
-        # Prevent multiple posts to the *same* channel within a single autonomy tick/plan.
-        # This was a bypass of cooldowns noted in reviews: validation happened before any
-        # side effects, so the LLM could return several post_channel for one cid and all would run.
-        if planned_post_channels is None:
-            planned_post_channels = set()
-
-        for action in actions:
+        for verdict in verdicts:
+            action = verdict.action
             # bail if bot disconnected mid-tick
             if self.bot.is_closed():
                 logger.warning(
@@ -3151,86 +3403,17 @@ class AutonomyEngine:
             kind = action.get("kind", "do_nothing")
             result = {"kind": kind, "result": "success", "error": None}
 
-            # Determine the target channel for any post-style action so we can
-            # gate it against live main-bot activity. Applies to post_channel
-            # and message-sending run_tool (AUTONOMY_POST_TOOLS).
-            post_cid = None
-            if kind == "post_channel":
-                post_cid = str(action.get("target_channel_id") or "") or None
-            elif (
-                kind == "run_tool"
-                and str(action.get("tool_name", "")) in AUTONOMY_POST_TOOLS
-            ):
-                ta = action.get("tool_args") or {}
-                post_cid = (
-                    str(
-                        action.get("target_channel_id")
-                        or ta.get("target_channel_id")
-                        or ta.get("channel_id")
-                        or ""
-                    )
-                    or None
-                )
-            # send_dm is a conversation too. Resolve the recipient's DM channel
-            # so it goes through the same turn-taking gate as a channel post —
-            # a bot that DMs you three times before you answer once is the same
-            # failure as one that talks over itself in #general.
-            if kind == "send_dm" and not post_cid:
-                dm_uid = str(action.get("target_user_id") or "")
-                post_cid = self._dm_channel_by_user.get(dm_uid)
-
-            if post_cid:
-                # Same-tick dedup: one plan does not get to post twice into one
-                # room. Checked before the floor read so a duplicate costs
-                # nothing. Note this deliberately runs even when turn-taking is
-                # disabled — it's structural, not a matter of taste.
-                if post_cid in planned_post_channels:
-                    logger.info(
-                        f"Autonomy skip duplicate post to {post_cid} in same tick/plan"
-                    )
-                    result = {
+            if not verdict.allowed:
+                results.append(
+                    {
                         "kind": kind,
                         "result": "skipped",
                         "error": None,
-                        "content_summary": "already sent to this conversation in this tick",
+                        "denied_by": verdict.code,
+                        "content_summary": verdict.reason,
                     }
-                    results.append(result)
-                    continue
-
-                # THE GATE. One read of the room decides every "should I speak
-                # here" question: mid-reply, holding the floor after his own
-                # last line, already handled by the live path, inside the
-                # cooldown, or cutting into someone else's exchange. It runs
-                # here rather than at plan time because the plan is seconds
-                # stale and rooms move. See autonomy_social.
-                if self._floor_enabled():
-                    verdict = await self._floor_gate(post_cid)
-                    if not verdict.may_speak:
-                        logger.info(
-                            "Autonomy skip %s to %s: floor=%s (%s)",
-                            kind,
-                            post_cid,
-                            verdict.state,
-                            verdict.reason,
-                        )
-                        result = {
-                            "kind": kind,
-                            "result": "skipped",
-                            "error": None,
-                            "content_summary": (
-                                f"not your turn in this conversation "
-                                f"[{verdict.state}] — {verdict.reason}"
-                            ),
-                        }
-                        results.append(result)
-                        continue
-
-                # Claim the room only once it's cleared to speak in. Claiming
-                # before the gate would make a *blocked* action consume the
-                # slot, and the next action aimed at the same room would come
-                # back "already sent" — which is false, and that string is fed
-                # to the planner as feedback next tick.
-                planned_post_channels.add(post_cid)
+                )
+                continue
 
             try:
                 if kind == "send_dm":

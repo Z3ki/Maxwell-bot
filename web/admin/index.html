@@ -686,6 +686,8 @@
         // one field is what made the Memory table come up empty.
         memoryEntries: [],
         memoryStats: {},
+        entities: [],
+        subagents: [],
         context: [],
         sites: {},
         prompts: {},
@@ -889,6 +891,21 @@
           key: "memoryStats",
           url: "/api/rag/memory",
           norm: (d) => (d && typeof d === "object" && !Array.isArray(d) ? d : {}),
+        },
+        {
+          // Global per-user entity memory — one row per Discord user id,
+          // independent of guild. Optional: a database from before the
+          // feature has no table and the endpoint answers with an empty set.
+          key: "entities",
+          url: "/api/rag/entities",
+          norm: (d) => (Array.isArray(d?.entities) ? d.entities : []),
+        },
+        {
+          // Live + recent sub-agent runs, mirrored to disk by the bot (the
+          // event bus itself lives in the bot process, not this one).
+          key: "subagents",
+          url: "/api/subagents",
+          norm: (d) => (Array.isArray(d?.runs) ? d.runs : []),
         },
         {
           key: "context",
@@ -1280,6 +1297,28 @@
           `<div class="grid two" style="margin-top:12px"><div class="card"><h3>What REM Does</h3><p class="muted">REM is Maxwell's background review loop. It reads recent visible events and writes an audit. It does not currently edit long-term memory/context; that old promise was documentation fan fiction.</p><div class="item">${badge(S.rem?.enabled ? "enabled" : "disabled", S.rem?.enabled ? "ok" : "")}<div class="muted">running ${S.rem?.running ? "yes" : "no"} · interval ${esc(S.rem?.interval_s ?? 0)}s · buffered events ${esc(S.rem?.events_buffered ?? 0)}</div></div><div class="row"><button class="btn small" data-rem="run">Run now</button><button class="btn small green" data-rem="enable">Enable</button><button class="btn small red" data-rem="disable">Disable</button></div></div><div class="card"><h3>REM Model</h3><p class="muted">REM shares the Autonomy model config — it uses the same provider, base_url, api key, and model set in the <b>Autonomy</b> tab ("Autonomy Model" card). If that is blank, REM falls back to the configured <code>OLLAMA_REM_MODEL</code>, then the main bot model.</p><div class="item"><b class="mono">${esc(S.control.autonomy_model || "(unset — using OLLAMA_REM_MODEL / main)")}</b><div class="muted">model currently resolved for both REM and autonomy</div></div><div class="row"><button class="btn small" onclick="S.tab='autonomy';render()">Open Autonomy model config</button></div></div><div class="card"><h3>Last Audit</h3><pre>${esc(S.rem?.last_audit_preview || "No REM audit yet.")}</pre></div></div>`;
         bindOps();
       }
+      // Sub-agent runs. A run is minutes of a nested agent working alone, and
+      // until it publishes events there is nothing to look at while it does —
+      // this is that stream. Live rows first; finished ones stay briefly so a
+      // failure can be read after the fact.
+      function subagentsCard() {
+        const runs = S.subagents || [];
+        if (!runs.length && (S.failedFeeds || []).includes("subagents")) {
+          return `<div class="card" style="margin-top:12px"><h3>Sub-agents</h3><div class="muted">Could not load /api/subagents.</div></div>`;
+        }
+        const statusClass = (s) =>
+          s === "running" ? "" : s === "done" ? "ok" : "bad";
+        const rows = runs
+          .map((r) => {
+            const steps =
+              r.max_steps ? `${r.steps || 0}/${r.max_steps}` : String(r.steps || 0);
+            const files = (r.files_written || []).length;
+            return `<div class="item"><div class="row"><span class="badge ${statusClass(r.status)}">${esc(r.status || "?")}</span><span class="mono muted">${esc(sid(r.run_id, 12))}</span><span class="muted">step ${esc(steps)} · ${Number(r.commands_run || 0)} cmd${files ? ` · ${files} file(s)` : ""} · ${Number(r.elapsed_seconds || 0).toFixed(0)}s</span></div><div><b>${esc(r.task || "")}</b></div>${r.last_activity ? `<div class="mono muted">${esc(r.last_activity)}</div>` : ""}${r.summary && r.status !== "running" ? `<details><summary class="muted" style="cursor:pointer;font-size:11px">report</summary><pre style="font-size:11px;margin-top:4px;max-height:200px;overflow:auto">${esc(r.summary)}</pre></details>` : ""}</div>`;
+          })
+          .join("");
+        const live = runs.filter((r) => r.status === "running").length;
+        return `<div class="card" style="margin-top:12px"><h3>Sub-agents (${runs.length}${live ? `, ${live} running` : ""})</h3><p class="muted">Nested agents working a task to completion in their own Docker sandbox. Live progress; finished runs are kept briefly, then only the report in the channel remains.</p><div class="list">${rows || '<div class="muted">No sub-agent runs recorded.</div>'}</div></div>`;
+      }
       function autonomy() {
         const a = S.autonomyStatus || {};
         const on = !!a.enabled;
@@ -1316,7 +1355,7 @@
                   })()}</div>${e.thought ? `<details><summary class="muted" style="cursor:pointer;font-size:11px">thought</summary><div class="mono" style="font-size:11px;margin-top:4px">${esc(e.thought)}</div></details>` : ""}${e.error ? `<div style="color:var(--red);font-size:12px;margin-top:4px">${esc(e.error)}</div>` : ""}</div>`,
               )
               .join("") || '<div class="muted">No actions yet.</div>'
-          }</div></div></div>`;
+          }</div></div></div>${subagentsCard()}`;
         const toggle = $("autoToggle");
         if (toggle)
           toggle.onchange = async () => {
@@ -1390,6 +1429,26 @@
             { k: "memory_context_budget", t: "int", min: 1000, max: 500000, step: 1000, hint: "tokens of recalled history" },
             { k: "tool_history_messages", t: "int", min: 0, max: 20 },
             { k: "prompt_context_budget", t: "int", min: 10000, max: 500000, step: 1000, hint: "tokens for the assembled prompt" },
+            { k: "entity_memory_enabled", t: "bool", hint: "per-person facts that follow a user across servers and DMs" },
+            { k: "entity_memory_from_extract", t: "bool", hint: "mirror user-scoped extracted facts into entity memory" },
+            { k: "entity_memory_max_items", t: "int", min: 1, max: 50 },
+          ],
+        },
+        {
+          title: "Context Budget (per tier)",
+          note:
+            "Relative shares of the prompt's memory characters. They are normalized, " +
+            "so only the ratio matters — 70/12/8/7/3 and 7/1.2/0.8/0.7/0.3 behave the " +
+            "same. A weight of 0 switches that tier off entirely. A tier that comes in " +
+            "under its share hands the remainder to the others, and whatever the lookup " +
+            "tiers leave goes to the transcript, so these are shares of demand rather " +
+            "than fixed reservations.",
+          fields: [
+            { k: "context_tier_recent_weight", t: "int", min: 0, max: 100, hint: "channel transcript" },
+            { k: "context_tier_ltm_weight", t: "int", min: 0, max: 100, hint: "recalled long-term facts and messages" },
+            { k: "context_tier_entity_weight", t: "int", min: 0, max: 100, hint: "who this person is" },
+            { k: "context_tier_facts_weight", t: "int", min: 0, max: 100, hint: "cross-context facts" },
+            { k: "context_tier_web_weight", t: "int", min: 0, max: 100, hint: "cached web results" },
           ],
         },
         {
@@ -1636,6 +1695,32 @@
           });
         };
       }
+      // Global per-user entity memory. One row per Discord user id: the same
+      // person in two servers and a DM is one entry, which is the whole point
+      // of the tier — everything else in this store is scoped to a channel or
+      // a guild.
+      function peopleCard() {
+        const people = S.entities || [];
+        const failed = (S.failedFeeds || []).includes("entities");
+        const rows = people
+          .map((p) => {
+            const names = (p.display_names || []).filter(Boolean);
+            const where = [
+              (p.guild_ids || []).length
+                ? (p.guild_ids || []).length + " server(s)"
+                : "",
+              p.dm_seen ? "DMs" : "",
+            ]
+              .filter(Boolean)
+              .join(" + ");
+            return `<tr><td class="mono" title="${esc(p.user_id)}">${esc(sid(p.user_id))}</td><td>${esc(names[0] || "-")}${names.length > 1 ? `<span class="muted"> (${esc(names.slice(1, 4).join(", "))})</span>` : ""}</td><td>${esc(where || "-")}</td><td>${Number(p.fact_count || 0)}</td><td>${Number(p.message_count || 0)}</td><td class="mono muted">${esc(String(p.last_seen || "").slice(0, 16))}</td></tr>`;
+          })
+          .join("");
+        const empty = failed
+          ? "Could not load /api/rag/entities — the roster is unavailable."
+          : "Nobody on file yet. Rows appear as people talk; facts arrive from the context extractor.";
+        return `<div class="card" style="margin-top:12px"><h3>People (${people.length})</h3><p class="muted">Global per-user memory: identity and durable facts keyed on the Discord user id, so they carry across servers and DMs. Weight and item cap live under Controls → Layered Memory.</p>${people.length ? "" : `<div class="muted">${empty}</div>`}<div class="table"><table><thead><tr><th>User ID</th><th>Known as</th><th>Seen in</th><th>Facts</th><th>Msgs</th><th>Last seen</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+      }
       function memory() {
         const ragStats = S.memoryStats || {};
         const totalVec = ragStats.total_vectors || 0;
@@ -1644,7 +1729,7 @@
         const embedPct = totalVec > 0 ? Math.round((embedded / totalVec) * 100) : 0;
         const modelName = ragStats.embed_model || "qwen3-embedding:0.6b";
         $("memory").innerHTML =
-          `<div class="card" style="margin-top:12px"><h3>RAG Vector Memory</h3><div class="list"><div class="item"><b>Embedding model</b><span class="mono muted">${esc(modelName)}</span></div><div class="item"><b>Total vectors</b><span>${totalVec}</span></div><div class="item"><b>Embedded</b><span>${embedded} / ${totalVec} (${embedPct}%)</span></div>${pending > 0 ? `<div class="item"><b>Pending</b><span style="color:var(--yellow)">${pending} vectors awaiting embedding</span></div>` : ""}<div class="item"><b>Messages</b><span>${ragStats.messages || 0} across ${ragStats.channel_count || 0} channels</span></div><div class="item"><b>Long-term facts</b><span>${ragStats.ltm || 0}</span></div><div class="item"><b>Shared context</b><span>${ragStats.context || 0}</span></div></div></div><div class="card" style="margin-top:12px"><h3>Add Memory</h3><textarea id="newmem" class="field" placeholder="Fact to store into RAG long-term memory"></textarea><button id="addmem" class="btn primary">Add</button></div><div class="card" style="margin-top:12px"><h3>Long-Term Memory Facts (${(S.memoryEntries || []).length})</h3>${(S.memoryEntries || []).length ? "" : `<div class="muted">${(S.failedFeeds || []).includes("memoryEntries") ? "Could not load /api/rag/ltm — entries unavailable." : "No long-term facts stored yet."}</div>`}<div class="table"><table><thead><tr><th>ID</th><th>Content</th><th></th></tr></thead><tbody>${(S.memoryEntries || []).map((m) => { const id = String(m.id ?? ""); return `<tr><td class="mono" title="${esc(id)}">${esc(sid(id))}</td><td><textarea class="field" data-mem="${esc(id)}">${esc(m.content)}</textarea></td><td><button class="btn small" data-save-mem="${esc(id)}">Save</button> <button class="btn small red" data-del-mem="${esc(id)}">Delete</button></td></tr>`; }).join("")}</tbody></table></div></div>`;
+          `<div class="card" style="margin-top:12px"><h3>RAG Vector Memory</h3><div class="list"><div class="item"><b>Embedding model</b><span class="mono muted">${esc(modelName)}</span></div><div class="item"><b>Total vectors</b><span>${totalVec}</span></div><div class="item"><b>Embedded</b><span>${embedded} / ${totalVec} (${embedPct}%)</span></div>${pending > 0 ? `<div class="item"><b>Pending</b><span style="color:var(--yellow)">${pending} vectors awaiting embedding</span></div>` : ""}<div class="item"><b>Messages</b><span>${ragStats.messages || 0} across ${ragStats.channel_count || 0} channels</span></div><div class="item"><b>Long-term facts</b><span>${ragStats.ltm || 0}</span></div><div class="item"><b>Shared context</b><span>${ragStats.context || 0}</span></div></div></div>${peopleCard()}<div class="card" style="margin-top:12px"><h3>Add Memory</h3><textarea id="newmem" class="field" placeholder="Fact to store into RAG long-term memory"></textarea><button id="addmem" class="btn primary">Add</button></div><div class="card" style="margin-top:12px"><h3>Long-Term Memory Facts (${(S.memoryEntries || []).length})</h3>${(S.memoryEntries || []).length ? "" : `<div class="muted">${(S.failedFeeds || []).includes("memoryEntries") ? "Could not load /api/rag/ltm — entries unavailable." : "No long-term facts stored yet."}</div>`}<div class="table"><table><thead><tr><th>ID</th><th>Content</th><th></th></tr></thead><tbody>${(S.memoryEntries || []).map((m) => { const id = String(m.id ?? ""); return `<tr><td class="mono" title="${esc(id)}">${esc(sid(id))}</td><td><textarea class="field" data-mem="${esc(id)}">${esc(m.content)}</textarea></td><td><button class="btn small" data-save-mem="${esc(id)}">Save</button> <button class="btn small red" data-del-mem="${esc(id)}">Delete</button></td></tr>`; }).join("")}</tbody></table></div></div>`;
         $("addmem").onclick = async () => {
           await api("/api/memory", {
             method: "POST",

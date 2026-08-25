@@ -35,6 +35,7 @@ import uuid
 import discord
 from discord import Activity, File, Message, Status
 from tools import Tool
+import agent_events
 from captcha_solver import CaptchaSolveError
 from config import Config
 from control_defaults import parse_bool
@@ -6214,6 +6215,63 @@ _SHELL_BLOCKED_PATTERNS = [
 ]
 
 
+async def _run_docker_cmd(*args: str, timeout: int = 30):
+    """Run one `docker` command. Returns ``((stdout, stderr), returncode)``.
+
+    Shared by every sandboxed tool — the shell and the sub-agent both need
+    exactly this and had no business each owning a copy.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "docker",
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        return await asyncio.wait_for(
+            proc.communicate(), timeout=timeout
+        ), proc.returncode
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        # 2026-07-21: also catch CancelledError. If the parent
+        # task is cancelled (channel lock timeout, bot shutdown,
+        # ,cancel command), proc.communicate() raises CancelledError
+        # and the old `except TimeoutError` did not match — the
+        # subprocess was left running, eventually filling the
+        # stdout/stderr pipes and wedging the container.
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.wait()
+        raise
+
+
+# Image shared by the shell sandbox and the sub-agent sandbox. Built from
+# docker/Dockerfile on first use by whichever tool needs it first.
+SANDBOX_IMAGE_NAME = "maxwell-shell"
+SANDBOX_DOCKERFILE_DIR = os.path.join(os.path.dirname(__file__), "docker")
+
+
+async def _ensure_sandbox_image(image: str = SANDBOX_IMAGE_NAME) -> None:
+    """Build the sandbox image if it is not present. Idempotent."""
+    try:
+        (_stdout, _stderr), code = await _run_docker_cmd(
+            "image", "inspect", image, timeout=15
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("docker is not installed or not on PATH") from exc
+    except asyncio.TimeoutError as exc:
+        raise RuntimeError("docker did not respond") from exc
+    if code == 0:
+        return
+    (_stdout, stderr), build_code = await _run_docker_cmd(
+        "build", "-t", image, SANDBOX_DOCKERFILE_DIR, timeout=900
+    )
+    if build_code != 0:
+        raise RuntimeError(
+            stderr.decode(errors="replace").strip() or "docker build failed"
+        )
+
+
 class ShellTool(Tool):
     """Execute shell commands in the dedicated Docker sandbox."""
 
@@ -6351,28 +6409,7 @@ class ShellTool(Tool):
         )
 
     async def _run_docker(self, *args: str, timeout: int = 30):
-        proc = await asyncio.create_subprocess_exec(
-            "docker",
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            return await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
-            ), proc.returncode
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            # 2026-07-21: also catch CancelledError. If the parent
-            # task is cancelled (channel lock timeout, bot shutdown,
-            # ,cancel command), proc.communicate() raises CancelledError
-            # and the old `except TimeoutError` did not match — the
-            # subprocess was left running, eventually filling the
-            # stdout/stderr pipes and wedging the container.
-            with contextlib.suppress(ProcessLookupError):
-                proc.kill()
-            with contextlib.suppress(Exception):
-                await proc.wait()
-            raise
+        return await _run_docker_cmd(*args, timeout=timeout)
 
     async def _ensure_container(self):
         # Reuse a running container when present and access mode matches.
@@ -6981,6 +7018,33 @@ class SubAgentTool(Tool):
     # Writes files and runs commands: same trust class as `shell`.
     is_destructive = True
 
+    # ─── execution sandbox ────────────────────────────────────────────
+    #
+    # The sub-agent's `run_command` used to be `bash -lc` on the host, in the
+    # bot process's own environment and working directory tree. That put the
+    # bot's `.env` — Discord token, provider API keys — one `cat` away from
+    # anything the model decided to try, and the `shell` tool next door had
+    # been in a container for months. Same trust class, same isolation.
+    #
+    # Each run gets its own container off the shared sandbox image, with the
+    # run's workspace bind-mounted and nothing else. State persists across
+    # commands within a run (an installed package, a built binary) because it
+    # is one long-lived container, and it is torn down when the run ends.
+    #
+    # `SUBAGENT_SANDBOX=host` opts back out. It is a real choice for someone
+    # running the bot in a VM they already treat as disposable, and it is why
+    # this refuses rather than silently falling back when Docker is missing:
+    # quietly downgrading isolation is how you end up thinking you are
+    # sandboxed when you are not.
+    SANDBOX_CONTAINER_PREFIX = "maxwell-subagent-"
+    SANDBOX_WORKDIR = "/home/maxwell/work"
+
+    @staticmethod
+    def _sandbox_mode() -> str:
+        """'docker' (default) or 'host'."""
+        raw = str(getattr(Config, "SUBAGENT_SANDBOX", "docker") or "docker")
+        return "host" if raw.strip().lower() in {"host", "off", "none", "0", "false"} else "docker"
+
     _SYSTEM_PROMPT = (
         "You are Maxwell's sub-agent: a focused engineer working one task to "
         "completion, alone, with no user to ask.\n"
@@ -7137,6 +7201,12 @@ class SubAgentTool(Tool):
         command = str(command or "").strip()
         if not command:
             return "error: empty command"
+        if self._sandbox_mode() == "docker":
+            return await self._run_command_docker(workspace, command)
+        return await self._run_command_host(workspace, command)
+
+    async def _run_command_host(self, workspace: Path, command: str) -> str:
+        """Unsandboxed fallback — only when SUBAGENT_SANDBOX=host."""
         try:
             proc = await asyncio.create_subprocess_exec(
                 "bash",
@@ -7165,6 +7235,124 @@ class SubAgentTool(Tool):
         if len(text) > 12000:
             text = text[:12000] + "\n… (output truncated)"
         return f"exit={proc.returncode}\n{text or '(no output)'}"
+
+    def _container_name(self, workspace: Path) -> str:
+        # The workspace directory name already carries a random suffix, so it
+        # is unique per run and makes an orphaned container traceable back to
+        # the work it was doing.
+        return f"{self.SANDBOX_CONTAINER_PREFIX}{workspace.name}"[:60]
+
+    async def _ensure_sandbox(self, workspace: Path) -> str:
+        """Start (or reuse) this run's container. Returns its name."""
+        name = self._container_name(workspace)
+        (stdout, _stderr), code = await _run_docker_cmd(
+            "inspect", "-f", "{{.State.Running}}", name, timeout=10
+        )
+        if code == 0 and stdout.decode(errors="replace").strip().lower() == "true":
+            return name
+        if code == 0:
+            # Exists but stopped — a previous run of the same workspace.
+            await _run_docker_cmd("rm", "-f", name, timeout=15)
+
+        await _ensure_sandbox_image()
+        run_args = [
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            name,
+            "--label",
+            "maxwell.subagent=1",
+            "--memory",
+            "4g",
+            "--cpus",
+            "2.0",
+            "--pids-limit",
+            "1024",
+            "--tmpfs",
+            "/tmp:rw,exec,nosuid,size=256m",
+            # The only host path the agent can see is the scratch directory it
+            # was given. No bot source, no .env, no host root.
+            "-v",
+            f"{workspace.resolve()}:{self.SANDBOX_WORKDIR}:rw",
+            "-w",
+            self.SANDBOX_WORKDIR,
+            "--network",
+            "bridge",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--cap-drop",
+            "ALL",
+            "--cap-add",
+            "CHOWN",
+            "--cap-add",
+            "SETUID",
+            "--cap-add",
+            "SETGID",
+            "--cap-add",
+            "DAC_OVERRIDE",
+            "--cap-add",
+            "FOWNER",
+            SANDBOX_IMAGE_NAME,
+        ]
+        (_stdout, stderr), run_code = await _run_docker_cmd(*run_args, timeout=60)
+        if run_code != 0:
+            raise RuntimeError(
+                stderr.decode(errors="replace").strip() or "docker run failed"
+            )
+        return name
+
+    async def _stop_sandbox(self, workspace: Path) -> None:
+        """Tear the run's container down. Best effort — never raises.
+
+        Started with --rm, so a successful stop removes it. A container left
+        behind by a crashed bot is reaped by the `inspect`/`rm -f` path in
+        `_ensure_sandbox` the next time that workspace name comes round, and
+        is findable meanwhile by its `maxwell.subagent` label.
+        """
+        with contextlib.suppress(Exception):
+            await _run_docker_cmd(
+                "stop", "-t", "2", self._container_name(workspace), timeout=30
+            )
+
+    async def _run_command_docker(self, workspace: Path, command: str) -> str:
+        try:
+            name = await self._ensure_sandbox(workspace)
+        except FileNotFoundError:
+            return (
+                "error: the sub-agent sandbox needs Docker, and docker is not "
+                "installed or not on PATH. Install Docker, or set "
+                "SUBAGENT_SANDBOX=host in .env to run commands directly on the "
+                "host (no isolation)."
+            )
+        except Exception as e:
+            return f"error: could not start the sandbox container: {e}"
+
+        try:
+            (out, err), code = await _run_docker_cmd(
+                "exec",
+                "-w",
+                self.SANDBOX_WORKDIR,
+                name,
+                "bash",
+                "-lc",
+                command,
+                timeout=Config.SUBAGENT_COMMAND_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            return (
+                f"error: command timed out after "
+                f"{Config.SUBAGENT_COMMAND_TIMEOUT_SECONDS}s (it was killed)"
+            )
+        except Exception as e:
+            return f"error: could not run the command in the sandbox: {e}"
+        text = (out or b"").decode("utf-8", errors="replace")
+        errtext = (err or b"").decode("utf-8", errors="replace")
+        if errtext:
+            text = (text + "\n" + errtext) if text else errtext
+        if len(text) > 12000:
+            text = text[:12000] + "\n… (output truncated)"
+        return f"exit={code}\n{text or '(no output)'}"
 
     def _write_file(self, workspace: Path, path: str, content: str) -> str:
         try:
@@ -7248,6 +7436,122 @@ class SubAgentTool(Tool):
         deadline = time.monotonic() + Config.SUBAGENT_TIMEOUT_SECONDS
         model = Config.SUBAGENT_MODEL or None
 
+        # Open a run on the event bus so the channel progress message and the
+        # dashboard can both watch this happen instead of staring at silence
+        # for four minutes. Publishing is fire-and-forget and never raises, so
+        # a missing bus (tests, a bot built without one) changes nothing.
+        bus = agent_events.bus_for(self.bot)
+        author = getattr(message, "author", None)
+        run = (
+            bus.start_run(
+                task,
+                requested_by=str(getattr(author, "display_name", "") or ""),
+                channel_id=str(getattr(getattr(message, "channel", None), "id", "") or ""),
+                workdir=str(workspace),
+                max_steps=max_steps,
+            )
+            if bus
+            else None
+        )
+        run_id = run.run_id if run else ""
+
+        # Mirror the run onto the channel's live progress message so a
+        # four-minute run reads as "step 3/24: running: pytest -q" instead of
+        # a silent typing indicator. Backgrounded rather than inlined: the
+        # agent must not wait on a Discord edit.
+        watcher = None
+        progress = self._channel_progress(message)
+        if bus and run_id and progress is not None:
+            watcher = asyncio.create_task(
+                self._mirror_events_to_progress(bus, run_id, progress)
+            )
+        try:
+            report = await self._agent_loop(
+                task,
+                workspace,
+                max_steps=max_steps,
+                deadline=deadline,
+                model=model,
+                provider=provider,
+                bus=bus,
+                run_id=run_id,
+            )
+            if bus and run_id:
+                bus.finish_run(run_id, agent_events.STATUS_DONE, report[:2000])
+            return report
+        except Exception as e:
+            if bus and run_id:
+                bus.finish_run(run_id, agent_events.STATUS_FAILED, str(e)[:2000])
+            raise
+        finally:
+            if watcher is not None:
+                watcher.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await watcher
+            # Always reap the container, including on the timeout, error and
+            # cancellation paths — an orphaned sandbox holds 4GB of limit and
+            # a bind mount on a workspace nobody is using.
+            if self._sandbox_mode() == "docker":
+                await self._stop_sandbox(workspace)
+
+    def _channel_progress(self, message):
+        """The live progress message for this channel, if a batch owns one."""
+        per_chan = getattr(self.bot, "_current_progress_by_channel", None)
+        if not isinstance(per_chan, dict):
+            return None
+        channel = getattr(message, "channel", None)
+        return per_chan.get(str(getattr(channel, "id", "") or ""))
+
+    @staticmethod
+    async def _mirror_events_to_progress(bus, run_id: str, progress) -> None:
+        """Feed run events into the channel progress message until it ends.
+
+        Only the events a human would want to read: which step, and what it is
+        doing right now. Tool *results* are deliberately not mirrored — the
+        tail of a command's stderr scrolling through a Discord edit is noise,
+        and it is in the dashboard's event list for anyone who wants it.
+        """
+        try:
+            async for event in bus.stream(run_id):
+                label = str(event.data.get("label") or "")
+                if not label or event.type not in (
+                    agent_events.EV_STEP,
+                    agent_events.EV_TOOL_CALL,
+                    agent_events.EV_NOTE,
+                ):
+                    continue
+                with contextlib.suppress(Exception):
+                    await progress.update("sub_agent", reasoning=label)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # pragma: no cover - telemetry only
+            logger.debug("sub_agent progress mirror stopped: %s", e)
+
+    async def _agent_loop(
+        self,
+        task: str,
+        workspace: Path,
+        *,
+        max_steps: int,
+        deadline: float,
+        model,
+        provider,
+        bus=None,
+        run_id: str = "",
+    ) -> str:
+        """The step loop itself. Returns the report string."""
+
+        def _emit(event_type: str, **data):
+            if bus and run_id:
+                bus.publish(run_id, event_type, **data)
+
+        def _note_run(**fields):
+            run_obj = bus.get(run_id) if (bus and run_id) else None
+            if run_obj is None:
+                return
+            for key, value in fields.items():
+                setattr(run_obj, key, value)
+
         messages = [
             {
                 "role": "system",
@@ -7263,6 +7567,10 @@ class SubAgentTool(Tool):
         files_written: list[str] = []
         while steps < max_steps:
             if time.monotonic() > deadline:
+                _emit(
+                    agent_events.EV_NOTE,
+                    label=f"time budget exhausted after {steps} step(s)",
+                )
                 return self._report(
                     task,
                     workspace,
@@ -7272,6 +7580,13 @@ class SubAgentTool(Tool):
                     f"stopped: hit the {Config.SUBAGENT_TIMEOUT_SECONDS}s time budget",
                 )
             steps += 1
+            _emit(
+                agent_events.EV_STEP,
+                step=steps,
+                max_steps=max_steps,
+                label=f"step {steps}/{max_steps}: thinking",
+            )
+            _note_run(steps=steps)
             try:
                 reply = await provider.generate_chat_completion(
                     messages=messages,
@@ -7281,6 +7596,7 @@ class SubAgentTool(Tool):
                 )
             except Exception as e:
                 logger.warning("sub_agent provider call failed: %s", e)
+                _emit(agent_events.EV_ERROR, label="model call failed", error=str(e)[:400])
                 return self._report(
                     task,
                     workspace,
@@ -7321,6 +7637,7 @@ class SubAgentTool(Tool):
                 name = call.get("name") or ""
                 args = call.get("arguments") or {}
                 if name == "finish":
+                    _emit(agent_events.EV_NOTE, label="agent called finish")
                     return self._report(
                         task,
                         workspace,
@@ -7331,11 +7648,31 @@ class SubAgentTool(Tool):
                     )
                 if name == "run_command":
                     commands_run += 1
+                # The label is what a human reads in the progress message, so
+                # it carries the actual command / path rather than the tool
+                # name — "running: pytest -q" beats "run_command".
+                _emit(
+                    agent_events.EV_TOOL_CALL,
+                    tool=name,
+                    step=steps,
+                    label=self._call_label(name, args),
+                )
                 result = await self._dispatch(workspace, name, args)
+                _emit(
+                    agent_events.EV_TOOL_RESULT,
+                    tool=name,
+                    step=steps,
+                    ok=not result.startswith("error:"),
+                    # A tail, not a head: the interesting part of a failing
+                    # command is the error at the end, not the banner.
+                    preview=result[-400:],
+                )
+                _note_run(commands_run=commands_run)
                 if name == "write_file" and not result.startswith("error:"):
                     written = str(args.get("path") or "").strip()
                     if written and written not in files_written:
                         files_written.append(written)
+                        _note_run(files_written=list(files_written))
                 messages.append(
                     {
                         "role": "tool",
@@ -7352,6 +7689,7 @@ class SubAgentTool(Tool):
             head, tail = messages[:2], messages[2:]
             messages = head + trim_tool_tail(tail)
 
+        _emit(agent_events.EV_NOTE, label=f"step budget exhausted ({max_steps})")
         return self._report(
             task,
             workspace,
@@ -7360,6 +7698,18 @@ class SubAgentTool(Tool):
             files_written,
             f"stopped: used all {max_steps} steps without calling finish",
         )
+
+    @staticmethod
+    def _call_label(name: str, args: dict) -> str:
+        """One human-readable line for what the agent is about to do."""
+        if name == "run_command":
+            return "running: " + " ".join(str(args.get("command") or "").split())[:120]
+        if name in ("write_file", "read_file"):
+            verb = "writing" if name == "write_file" else "reading"
+            return f"{verb}: {str(args.get('path') or '')[:120]}"
+        if name == "list_files":
+            return "listing the workdir"
+        return str(name)[:120]
 
     def _report(
         self,

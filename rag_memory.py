@@ -166,6 +166,20 @@ MAX_MEMORY_CHARS = 1000
 MAX_LTM_LINES = 999
 DEFAULT_REM_EVENT_BUFFER_MAX = 500
 
+# ─── global user entity memory ──────────────────────────────────────────
+# Per-person caps. These bound one chatty user's footprint so they cannot
+# crowd out everyone else in the store, and bound the prompt tier's worst
+# case. 200 facts at ~1200 chars is ~240KB per user on disk, which is
+# nothing; the real reason for the cap is that a profile nobody can read is
+# not a profile.
+MAX_ENTITY_FACTS_PER_USER = 200
+# Aliases kept per person, newest first. People rename; the last handful is
+# what makes "is BongoCat the same person as alice" answerable, and the
+# hundred before that is landfill.
+MAX_ENTITY_ALIASES = 8
+# Guilds recorded per person. Only used to describe where we know them from.
+MAX_ENTITY_GUILDS = 32
+
 # Cosine similarity threshold for RAG retrieval. Below this, results are
 # considered noise and filtered out.
 SIM_THRESHOLD = 0.35
@@ -833,6 +847,44 @@ class RAGMemoryManager:
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_embed_cache_used "
             "ON embed_cache(last_used_at)"
+        )
+
+        # ─── global user entity memory ─────────────────────────────────
+        # One row per Discord user id, independent of guild. Discord ids are
+        # already global — the same person in two servers and a DM is one
+        # user_id — but nothing in this store used that. Channel memory is
+        # per-channel, LTM is unattributed, and shared_context facts are
+        # scoped strings. So the bot could learn your name in one server and
+        # meet you as a stranger in the next.
+        #
+        # This table holds identity only (aliases, where and when we have
+        # seen you). The *facts* live in `vectors` under kind='entity' with
+        # author_id=<user_id>, so they get embeddings and semantic recall
+        # for free.
+        self._db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_entities (
+                user_id TEXT PRIMARY KEY,
+                display_names TEXT NOT NULL DEFAULT '[]',
+                guild_ids TEXT NOT NULL DEFAULT '[]',
+                dm_seen INTEGER NOT NULL DEFAULT 0,
+                message_count INTEGER NOT NULL DEFAULT 0,
+                first_seen TEXT NOT NULL DEFAULT '',
+                last_seen TEXT NOT NULL DEFAULT '',
+                metadata TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_entities_seen "
+            "ON user_entities(last_seen DESC)"
+        )
+        # Entity facts are always queried as "everything about this person",
+        # never "everything in this channel", so they need their own index —
+        # idx_kind alone would scan every entity row for every user.
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_kind_author "
+            "ON vectors(kind, author_id)"
         )
 
         # Seed embed_cache from existing rows so the first recall after
@@ -1687,6 +1739,23 @@ class RAGMemoryManager:
         ]
 
     async def add_long_term_memory(self, content: str) -> str:
+        """Store one durable fact. Returns the row id, new or existing."""
+        row_id, _created = await self.add_long_term_memory_dedup(content)
+        return row_id
+
+    async def add_long_term_memory_dedup(self, content: str) -> tuple[str, bool]:
+        """Same as `add_long_term_memory`, but says whether it was new.
+
+        Returns ``(id, created)``.
+
+        Write-time dedup: the unique index on (kind, channel_id, content_hash)
+        already refused duplicate lines, but it refused them by raising
+        IntegrityError out of this method. `apply_ltm_batch` counted that as
+        an *error*, so a model re-asserting something it had already learned
+        was told the write failed — and models retry failures. Now a repeat
+        returns the existing id and refreshes its timestamp, which is what
+        "the fact is stored" should look like from the caller's side.
+        """
         content = _normalize_ltm_line(content)
         mid = uuid.uuid4().hex
         ts = _utcnow_iso()
@@ -1694,14 +1763,33 @@ class RAGMemoryManager:
 
         norm = _strip_for_embedding(content)
         ch = _hashlib.sha256(norm.encode("utf-8")).hexdigest()
-        self._db.execute(
-            "INSERT INTO vectors (id, kind, channel_id, guild_id, author, author_id, "
-            "source, content, content_hash, embedding, metadata, scope, importance, "
-            "parent_id, chunk_index, downvotes, timestamp, created_at) "
-            "VALUES (?, 'ltm', '', '', '', '', 'user', ?, ?, NULL, '{}', 'global', "
-            "5, '', 0, 0, ?, ?)",
-            (mid, content, ch, ts, time.time()),
-        )
+        existing = self._db.execute(
+            "SELECT id FROM vectors WHERE kind='ltm' AND channel_id='' "
+            "AND content_hash=? LIMIT 1",
+            (ch,),
+        ).fetchone()
+        if existing is not None:
+            self._db.execute(
+                "UPDATE vectors SET timestamp=? WHERE id=?", (ts, existing["id"])
+            )
+            return str(existing["id"]), False
+        try:
+            self._db.execute(
+                "INSERT INTO vectors (id, kind, channel_id, guild_id, author, author_id, "
+                "source, content, content_hash, embedding, metadata, scope, importance, "
+                "parent_id, chunk_index, downvotes, timestamp, created_at) "
+                "VALUES (?, 'ltm', '', '', '', '', 'user', ?, ?, NULL, '{}', 'global', "
+                "5, '', 0, 0, ?, ?)",
+                (mid, content, ch, ts, time.time()),
+            )
+        except sqlite3.IntegrityError:
+            # Raced with another writer of the identical line — same outcome.
+            row = self._db.execute(
+                "SELECT id FROM vectors WHERE kind='ltm' AND channel_id='' "
+                "AND content_hash=? LIMIT 1",
+                (ch,),
+            ).fetchone()
+            return (str(row["id"]) if row else mid), False
         # Prune if exceeding max
         count_row = self._db.execute(
             "SELECT COUNT(*) as c FROM vectors WHERE kind='ltm'"
@@ -1714,7 +1802,7 @@ class RAGMemoryManager:
             )
         # Embed in background
         self._spawn(self._embed_and_store(mid, content))
-        return mid
+        return mid, True
 
     async def edit_long_term_memory(self, memory_id: str, content: str) -> bool:
         content = _normalize_ltm_line(content)
@@ -1743,6 +1831,7 @@ class RAGMemoryManager:
         added = 0
         edited = 0
         deleted = 0
+        deduped = 0
         errors = 0
         for op in ops:
             try:
@@ -1750,8 +1839,14 @@ class RAGMemoryManager:
                 if kind == "add":
                     content = str(op.get("content") or "")
                     if content:
-                        await self.add_long_term_memory(content)
-                        added += 1
+                        _fid, created = await self.add_long_term_memory_dedup(content)
+                        if created:
+                            added += 1
+                        else:
+                            # Already known. Not an error — reporting it as
+                            # one is what made the model re-send the same
+                            # fact next turn.
+                            deduped += 1
                 elif kind == "edit":
                     mid = str(op.get("id") or "")
                     content = str(op.get("content") or "")
@@ -1770,7 +1865,401 @@ class RAGMemoryManager:
             except Exception as e:
                 logger.warning(f"LTM batch op failed: {e}")
                 errors += 1
-        return {"added": added, "edited": edited, "deleted": deleted, "errors": errors}
+        return {
+            "added": added,
+            "edited": edited,
+            "deleted": deleted,
+            "deduped": deduped,
+            "errors": errors,
+        }
+
+    # ─── global user entity memory ────────────────────────────────
+    #
+    # "Who is this person" answered from one place, whatever guild or DM the
+    # question arrives in. Everything below keys on the Discord user id and
+    # never filters on guild_id — that is the whole point. A fact learned in
+    # a DM is available in a server and vice versa; if a fact should NOT
+    # travel, it belongs in shared_context with a channel/guild scope, not
+    # here.
+
+    @staticmethod
+    def _entity_hash(user_id: str, content: str) -> str:
+        """Content hash for an entity fact, salted with the user id.
+
+        The unique index is (kind, channel_id, content_hash) and every entity
+        row has channel_id=''. Hashing the bare text would therefore make
+        "works night shifts" collide across *different people* — the second
+        person to say it would silently lose the fact. Folding the user id
+        into the hash keeps dedup per-person, which is what write-time dedup
+        means for this tier, without touching the shared index.
+        """
+        import hashlib as _hashlib
+
+        norm = _strip_for_embedding(str(content))
+        return _hashlib.sha256(
+            f"entity:{user_id}\x00{norm}".encode("utf-8")
+        ).hexdigest()
+
+    async def observe_user(
+        self,
+        user_id: str,
+        display_name: str = "",
+        guild_id: str = "",
+        is_dm: bool = False,
+    ) -> None:
+        """Record that we have seen this person, here, now.
+
+        Called on the message path, so it must stay cheap: one upsert, no
+        embedding, no LLM. Aliases accumulate newest-first and are capped —
+        people rename themselves, and the last few names are what makes
+        "wait, is BongoCat the same person as alice?" answerable.
+        """
+        uid = str(user_id or "").strip()
+        if not uid:
+            return
+        now = _utcnow_iso()
+        name = str(display_name or "").strip()[:80]
+        gid = str(guild_id or "").strip()
+        async with self._lock:
+            row = self._db.execute(
+                "SELECT display_names, guild_ids, dm_seen, message_count, first_seen "
+                "FROM user_entities WHERE user_id=?",
+                (uid,),
+            ).fetchone()
+            if row is None:
+                self._db.execute(
+                    "INSERT OR IGNORE INTO user_entities "
+                    "(user_id, display_names, guild_ids, dm_seen, message_count, "
+                    "first_seen, last_seen, metadata) VALUES (?,?,?,?,1,?,?, '{}')",
+                    (
+                        uid,
+                        json.dumps([name] if name else []),
+                        json.dumps([gid] if gid else []),
+                        1 if is_dm else 0,
+                        now,
+                        now,
+                    ),
+                )
+                return
+            try:
+                names = [str(n) for n in json.loads(row["display_names"] or "[]")]
+            except (ValueError, TypeError):
+                names = []
+            try:
+                guilds = [str(g) for g in json.loads(row["guild_ids"] or "[]")]
+            except (ValueError, TypeError):
+                guilds = []
+            if name:
+                if name in names:
+                    names.remove(name)
+                names.insert(0, name)
+                names = names[:MAX_ENTITY_ALIASES]
+            if gid and gid not in guilds:
+                guilds.append(gid)
+                guilds = guilds[:MAX_ENTITY_GUILDS]
+            self._db.execute(
+                "UPDATE user_entities SET display_names=?, guild_ids=?, dm_seen=?, "
+                "message_count=message_count+1, last_seen=? WHERE user_id=?",
+                (
+                    json.dumps(names),
+                    json.dumps(guilds),
+                    1 if (is_dm or row["dm_seen"]) else 0,
+                    now,
+                    uid,
+                ),
+            )
+
+    async def add_entity_fact(
+        self,
+        user_id: str,
+        content: str,
+        importance: int = 5,
+        source_guild_id: str = "",
+        source: str = "extract",
+        author: str = "",
+    ) -> tuple[str, bool]:
+        """Store a durable fact about a person. Returns ``(id, created)``.
+
+        ``created`` is False when the fact was already known — that is a
+        successful no-op, not an error. Callers used to see the unique-index
+        IntegrityError and report a failure, which made the model retry a
+        fact it had already stored.
+        """
+        uid = str(user_id or "").strip()
+        text = " ".join(str(content or "").split())[:1200]
+        if not uid or not text:
+            return "", False
+        digest = self._entity_hash(uid, text)
+        existing = self._db.execute(
+            "SELECT id FROM vectors WHERE kind='entity' AND content_hash=? LIMIT 1",
+            (digest,),
+        ).fetchone()
+        if existing is not None:
+            # Known fact — refresh its recency so repeatedly-confirmed things
+            # outlive one-off mentions, but do not create a second row.
+            self._db.execute(
+                "UPDATE vectors SET timestamp=?, importance=MAX(importance, ?) "
+                "WHERE id=?",
+                (_utcnow_iso(), max(1, min(int(importance or 5), 10)), existing["id"]),
+            )
+            return str(existing["id"]), False
+
+        # Make sure the person has an identity row even if we learned a fact
+        # about them before ever seeing them speak (an admin writing a note,
+        # a fact extracted from someone else's message). Otherwise they hold
+        # facts but never appear in list_user_entities.
+        self._db.execute(
+            "INSERT OR IGNORE INTO user_entities (user_id, first_seen, last_seen) "
+            "VALUES (?, ?, ?)",
+            (uid, _utcnow_iso(), _utcnow_iso()),
+        )
+        fid = uuid.uuid4().hex
+        ts = _utcnow_iso()
+        meta = json.dumps(
+            {
+                "source": str(source or "extract")[:32],
+                "source_guild_id": str(source_guild_id or ""),
+            }
+        )
+        try:
+            self._db.execute(
+                "INSERT INTO vectors (id, kind, channel_id, guild_id, author, "
+                "author_id, source, content, content_hash, embedding, metadata, "
+                "scope, importance, parent_id, chunk_index, downvotes, timestamp, "
+                "created_at) VALUES (?, 'entity', '', '', ?, ?, 'system', ?, ?, "
+                "NULL, ?, ?, ?, '', 0, 0, ?, ?)",
+                (
+                    fid,
+                    str(author or "")[:80],
+                    uid,
+                    text,
+                    digest,
+                    meta,
+                    f"user:{uid}",
+                    max(1, min(int(importance or 5), 10)),
+                    ts,
+                    time.time(),
+                ),
+            )
+        except sqlite3.IntegrityError:
+            # Lost a race with a concurrent write of the same fact. Same
+            # outcome as the check above: the fact is stored, just not by us.
+            row = self._db.execute(
+                "SELECT id FROM vectors WHERE kind='entity' AND content_hash=? LIMIT 1",
+                (digest,),
+            ).fetchone()
+            return (str(row["id"]) if row else ""), False
+
+        # Bound per-person growth. Drop the least important, oldest facts —
+        # a global cap would let one chatty user evict everyone else.
+        count_row = self._db.execute(
+            "SELECT COUNT(*) AS c FROM vectors WHERE kind='entity' AND author_id=?",
+            (uid,),
+        ).fetchone()
+        if count_row and count_row["c"] > MAX_ENTITY_FACTS_PER_USER:
+            self._db.execute(
+                "DELETE FROM vectors WHERE id IN ("
+                "  SELECT id FROM vectors WHERE kind='entity' AND author_id=?"
+                "  ORDER BY importance ASC, created_at ASC LIMIT ?"
+                ")",
+                (uid, count_row["c"] - MAX_ENTITY_FACTS_PER_USER),
+            )
+        self._spawn(self._embed_and_store(fid, text))
+        return fid, True
+
+    async def remove_entity_fact(self, fact_id: str) -> bool:
+        cursor = self._db.execute(
+            "DELETE FROM vectors WHERE id=? AND kind='entity'", (str(fact_id),)
+        )
+        return cursor.rowcount > 0
+
+    async def get_entity_facts(
+        self,
+        user_id: str,
+        query: str = "",
+        top_k: int = 8,
+        budget: int | None = None,
+        include_shared_context: bool = True,
+    ) -> list[dict]:
+        """Facts about one person, from every guild and DM they appear in.
+
+        With a ``query`` the entity tier is ranked semantically; without one
+        (or before embeddings are warm) it falls back to importance then
+        recency, so a cold start still says something true about the person
+        instead of nothing.
+
+        ``include_shared_context`` folds in the pre-existing ``user:<id>`` /
+        ``dm:<id>`` shared-context rows. Those were already global — they are
+        the same tier by another name — and merging them here means the
+        upgrade does not start from an empty profile.
+        """
+        uid = str(user_id or "").strip()
+        if not uid:
+            return []
+        top_k = max(1, min(int(top_k or 8), 50))
+        picked: dict[str, dict] = {}
+
+        if query and hasattr(self, "rag_search"):
+            try:
+                for row in await self.rag_search(
+                    query,
+                    kinds=["entity"],
+                    author_id=uid,
+                    apply_recency=False,
+                    top_k=top_k * 2,
+                    exclude_negatives=False,
+                ):
+                    picked[str(row["id"])] = {
+                        "id": row["id"],
+                        "content": row["content"],
+                        "importance": row.get("importance", 5),
+                        "timestamp": row.get("timestamp", ""),
+                        "similarity": row.get("similarity", 0.0),
+                        "origin": "entity",
+                    }
+            except Exception as e:
+                logger.debug(f"entity semantic recall skipped: {e}")
+
+        # Always take the importance-ranked head too. Semantic recall answers
+        # "what is relevant to this message"; a profile also needs the things
+        # that are true regardless of what was just said (their name, their
+        # timezone), which no query reliably retrieves.
+        for row in self._db.execute(
+            "SELECT id, content, importance, timestamp FROM vectors "
+            "WHERE kind='entity' AND author_id=? "
+            "ORDER BY importance DESC, created_at DESC LIMIT ?",
+            (uid, top_k * 2),
+        ).fetchall():
+            picked.setdefault(
+                str(row["id"]),
+                {
+                    "id": row["id"],
+                    "content": row["content"],
+                    "importance": row["importance"],
+                    "timestamp": row["timestamp"],
+                    "similarity": 0.0,
+                    "origin": "entity",
+                },
+            )
+
+        if include_shared_context:
+            for row in self._db.execute(
+                "SELECT id, content, importance, timestamp FROM vectors "
+                "WHERE kind='shared_context' AND scope IN (?, ?) "
+                "ORDER BY importance DESC, created_at DESC LIMIT ?",
+                (f"user:{uid}", f"dm:{uid}", top_k * 2),
+            ).fetchall():
+                picked.setdefault(
+                    str(row["id"]),
+                    {
+                        "id": row["id"],
+                        "content": row["content"],
+                        "importance": row["importance"],
+                        "timestamp": row["timestamp"],
+                        "similarity": 0.0,
+                        "origin": "shared_context",
+                    },
+                )
+
+        results = sorted(
+            picked.values(),
+            key=lambda r: (
+                float(r.get("similarity") or 0.0),
+                int(r.get("importance") or 0),
+                str(r.get("timestamp") or ""),
+            ),
+            reverse=True,
+        )[:top_k]
+
+        if budget is not None:
+            try:
+                budget_i = max(0, int(budget))
+            except (TypeError, ValueError):
+                budget_i = 0
+            if budget_i <= 0:
+                return []
+            kept, used = [], 0
+            for entry in results:
+                cost = len(str(entry.get("content") or ""))
+                if kept and used + cost > budget_i:
+                    break
+                kept.append(entry)
+                used += cost
+            results = kept
+        return results
+
+    def get_user_entity(self, user_id: str) -> dict | None:
+        """The identity row for one person, or None if never seen."""
+        uid = str(user_id or "").strip()
+        if not uid:
+            return None
+        row = self._db.execute(
+            "SELECT * FROM user_entities WHERE user_id=?", (uid,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._entity_row_to_dict(row)
+
+    def _entity_row_to_dict(self, row) -> dict:
+        def _load(raw, fallback):
+            try:
+                val = json.loads(raw or "")
+                return val if isinstance(val, type(fallback)) else fallback
+            except (ValueError, TypeError):
+                return fallback
+
+        fact_count = self._db.execute(
+            "SELECT COUNT(*) AS c FROM vectors WHERE kind='entity' AND author_id=?",
+            (row["user_id"],),
+        ).fetchone()
+        return {
+            "user_id": row["user_id"],
+            "display_names": _load(row["display_names"], []),
+            "guild_ids": _load(row["guild_ids"], []),
+            "dm_seen": bool(row["dm_seen"]),
+            "message_count": int(row["message_count"] or 0),
+            "first_seen": row["first_seen"],
+            "last_seen": row["last_seen"],
+            "metadata": _load(row["metadata"], {}),
+            "fact_count": int(fact_count["c"] if fact_count else 0),
+        }
+
+    def list_user_entities(self, limit: int = 100) -> list[dict]:
+        """Everyone we have on file, most recently seen first."""
+        limit = max(1, min(int(limit or 100), 1000))
+        return [
+            self._entity_row_to_dict(row)
+            for row in self._db.execute(
+                "SELECT * FROM user_entities ORDER BY last_seen DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        ]
+
+    async def get_user_profile(
+        self, user_id: str, query: str = "", top_k: int = 8, budget: int | None = None
+    ) -> dict:
+        """Identity + facts in one call — what the prompt tier renders."""
+        entity = self.get_user_entity(user_id) or {"user_id": str(user_id)}
+        entity["facts"] = await self.get_entity_facts(
+            user_id, query=query, top_k=top_k, budget=budget
+        )
+        return entity
+
+    def entity_stats(self) -> dict:
+        """Counters for the dashboard's memory panel."""
+        users = self._db.execute("SELECT COUNT(*) AS c FROM user_entities").fetchone()
+        facts = self._db.execute(
+            "SELECT COUNT(*) AS c FROM vectors WHERE kind='entity'"
+        ).fetchone()
+        embedded = self._db.execute(
+            "SELECT COUNT(*) AS c FROM vectors WHERE kind='entity' "
+            "AND embedding IS NOT NULL"
+        ).fetchone()
+        return {
+            "users": int(users["c"] if users else 0),
+            "facts": int(facts["c"] if facts else 0),
+            "facts_embedded": int(embedded["c"] if embedded else 0),
+        }
 
     # ─── server prompts (kept as JSON file) ───────────────────────
 
@@ -2466,6 +2955,7 @@ class RAGMemoryManager:
         channel_id: str = "",
         guild_id: str = "",
         source: str | list[str] | None = None,
+        author_id: str = "",
         top_k: int = 10,
         min_similarity: float = SIM_THRESHOLD,
         apply_recency: bool = True,
@@ -2483,6 +2973,9 @@ class RAGMemoryManager:
                         OR global (channel_id='') by default
             guild_id: NEW — if set, restrict to this server (discord)
             source: NEW — 'user' | 'bot' | 'system' filter; or list of those
+            author_id: restrict to rows attributed to one person. Exact
+                       match — used by the entity-memory tier, where a
+                       global row would be about the wrong human.
             top_k: max results to RETURN (after scoring)
             min_similarity: cosine similarity cutoff
             apply_recency: NEW — multiply score by recency decay
@@ -2544,6 +3037,13 @@ class RAGMemoryManager:
             placeholders = ",".join("?" * len(src))
             where_parts.append(f"source IN ({placeholders})")
             params.extend(src)
+        if author_id:
+            # Exact match, unlike channel_id/guild_id above: those widen to
+            # include global rows because a global fact is relevant in every
+            # channel. A fact about a *person* is not relevant for a
+            # different person, so there is no '' escape hatch here.
+            where_parts.append("author_id=?")
+            params.append(str(author_id))
 
         where_clause = " AND ".join(where_parts)
         rows = self._db.execute(

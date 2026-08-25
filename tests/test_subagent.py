@@ -1,6 +1,10 @@
 """Native sub-agent: the loop, the workdir sandbox, and the budgets."""
 
 import asyncio
+
+import pytest
+
+import bot_tools
 import json
 import types
 
@@ -28,11 +32,16 @@ class _ScriptedProvider:
         return self.replies.pop(0)
 
 
-def _tool(provider, tmp_path, monkeypatch):
+def _tool(provider, tmp_path, monkeypatch, sandbox="host"):
     monkeypatch.setenv("SUBAGENT_BASE_DIR", str(tmp_path))
     from config import Config
 
     monkeypatch.setattr(Config, "SUBAGENT_BASE_DIR", str(tmp_path))
+    # The loop tests are about the loop, so they run commands directly rather
+    # than in the Docker sandbox the tool defaults to — otherwise every one of
+    # them needs a working daemon and pays a container start. The sandbox
+    # itself is covered by the docker-gated tests at the bottom of this file.
+    monkeypatch.setattr(Config, "SUBAGENT_SANDBOX", sandbox)
     return SubAgentTool(types.SimpleNamespace(provider=provider))
 
 
@@ -149,3 +158,150 @@ def test_command_timeout_is_reported_not_raised(tmp_path, monkeypatch):
 
     outputs = [m["content"] for m in provider.seen[-1] if m.get("role") == "tool"]
     assert any("timed out" in out for out in outputs)
+
+
+# ─── event streaming ─────────────────────────────────────────────────────
+
+
+def test_a_run_publishes_its_progress(tmp_path, monkeypatch):
+    """A run is minutes of silence otherwise — this is what fills it."""
+    from agent_events import AgentEventBus
+
+    bus = AgentEventBus()
+    provider = _ScriptedProvider(
+        [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    _call("write_file", {"path": "a.py", "content": "print(1)\n"})
+                ],
+            },
+            {
+                "role": "assistant",
+                "tool_calls": [_call("run_command", {"command": "python3 a.py"}, "2")],
+            },
+            {"role": "assistant", "tool_calls": [_call("finish", {"report": "ok"}, "3")]},
+        ]
+    )
+    tool = _tool(provider, tmp_path, monkeypatch)
+    tool.bot.agent_events = bus
+    message = types.SimpleNamespace(
+        author=types.SimpleNamespace(display_name="alice"),
+        channel=types.SimpleNamespace(id=7),
+    )
+
+    asyncio.run(tool.execute(message, task="write a script"))
+
+    run = bus.snapshot()[0]
+    assert run["status"] == "done"
+    assert run["task"] == "write a script"
+    assert run["requested_by"] == "alice"
+    assert run["channel_id"] == "7"
+    assert run["steps"] == 3
+    assert run["commands_run"] == 1
+    assert run["files_written"] == ["a.py"]
+
+    events = bus.events(run["run_id"])
+    assert [e["type"] for e in events][0] == "start"
+    assert [e["type"] for e in events][-1] == "finish"
+    labels = [e.get("label", "") for e in events]
+    # The label is what a human reads, so it carries the command, not the
+    # tool's name.
+    assert any("running: python3 a.py" in label for label in labels)
+    assert any("writing: a.py" in label for label in labels)
+    assert any("step 1/" in label for label in labels)
+
+
+def test_a_run_without_a_bus_still_works(tmp_path, monkeypatch):
+    provider = _ScriptedProvider(
+        [{"role": "assistant", "tool_calls": [_call("finish", {"report": "done"})]}]
+    )
+    tool = _tool(provider, tmp_path, monkeypatch)
+    assert "done" in asyncio.run(tool.execute(None, task="no telemetry here"))
+
+
+# ─── the docker sandbox ──────────────────────────────────────────────────
+
+
+def _docker_available() -> bool:
+    import subprocess
+
+    try:
+        return (
+            subprocess.run(
+                ["docker", "info"], capture_output=True, timeout=20
+            ).returncode
+            == 0
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def test_sandbox_mode_defaults_to_docker(tmp_path, monkeypatch):
+    from config import Config
+
+    tool = _tool(_ScriptedProvider([]), tmp_path, monkeypatch, sandbox="docker")
+    assert tool._sandbox_mode() == "docker"
+    for opt_out in ("host", "off", "none", "0", "false", "HOST"):
+        monkeypatch.setattr(Config, "SUBAGENT_SANDBOX", opt_out)
+        assert tool._sandbox_mode() == "host"
+    # Anything unrecognised stays sandboxed. Failing open on a typo is how
+    # you end up thinking you are isolated when you are not.
+    monkeypatch.setattr(Config, "SUBAGENT_SANDBOX", "sanbdox")
+    assert tool._sandbox_mode() == "docker"
+
+
+def test_missing_docker_refuses_rather_than_falling_back(tmp_path, monkeypatch):
+    tool = _tool(_ScriptedProvider([]), tmp_path, monkeypatch, sandbox="docker")
+
+    async def _no_docker(*args, **kwargs):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(bot_tools, "_run_docker_cmd", _no_docker)
+    out = asyncio.run(tool._run_command(tmp_path, "echo hi"))
+    # A silent downgrade to the host would be the worst possible outcome.
+    assert "error:" in out
+    assert "SUBAGENT_SANDBOX=host" in out
+
+
+@pytest.mark.skipif(not _docker_available(), reason="needs a docker daemon")
+def test_the_sandbox_cannot_see_the_bot_source_tree(tmp_path, monkeypatch):
+    """The reason this exists: the bot's .env was one `cat` away."""
+    tool = _tool(_ScriptedProvider([]), tmp_path, monkeypatch, sandbox="docker")
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+
+    async def run():
+        try:
+            inside = await tool._run_command(workspace, "echo hello; ls /root/maxwell")
+            escaped = await tool._run_command(
+                workspace, "test -f /root/maxwell/.env && echo LEAKED || echo safe"
+            )
+            return inside, escaped
+        finally:
+            await tool._stop_sandbox(workspace)
+
+    inside, escaped = asyncio.run(run())
+    assert "hello" in inside
+    assert "LEAKED" not in escaped
+    assert "safe" in escaped
+
+
+@pytest.mark.skipif(not _docker_available(), reason="needs a docker daemon")
+def test_the_sandbox_keeps_state_between_commands(tmp_path, monkeypatch):
+    # One container per run, not one per command: an installed package or a
+    # built binary has to survive to the next step.
+    tool = _tool(_ScriptedProvider([]), tmp_path, monkeypatch, sandbox="docker")
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+
+    async def run():
+        try:
+            await tool._run_command(workspace, "echo persisted > marker.txt")
+            return await tool._run_command(workspace, "cat marker.txt")
+        finally:
+            await tool._stop_sandbox(workspace)
+
+    assert "persisted" in asyncio.run(run())
+    # Written through the bind mount, so the host tools see it too.
+    assert (workspace / "marker.txt").read_text().strip() == "persisted"

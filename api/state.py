@@ -261,6 +261,16 @@ def _sanitize_control(control):
     out["cross_context_max_items"] = max(
         1, min(_safe_int(out.get("cross_context_max_items"), 10), 50)
     )
+    out["entity_memory_max_items"] = max(
+        1, min(_safe_int(out.get("entity_memory_max_items"), 8), 50)
+    )
+    # Tier weights are ratios, so any non-negative value is meaningful and 0
+    # is a real setting (that tier off). The upper bound exists only to keep
+    # one tier from being written as 10**9 and reducing every other weight to
+    # an integer-division zero.
+    for _tier in ("recent", "ltm", "entity", "facts", "web"):
+        _key = f"context_tier_{_tier}_weight"
+        out[_key] = max(0, min(_safe_int(out.get(_key), 0), 100))
     out["cross_context_min_importance"] = max(
         1, min(_safe_int(out.get("cross_context_min_importance"), 5), 10)
     )

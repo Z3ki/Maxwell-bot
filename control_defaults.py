@@ -53,6 +53,30 @@ DEFAULT_CONTROL = {
     # trigger phrases, so there is nothing to keep up to date when people
     # phrase things differently.
     "cross_context_extract_threshold": 0.25,
+    # ─── global user entity memory ──────────────────────────────────────
+    # Facts keyed on the Discord user id rather than on a channel or guild,
+    # so what the bot knows about you follows you between servers and DMs.
+    # Off means the tier is neither written nor read; existing rows are kept.
+    "entity_memory_enabled": True,
+    # Facts about the current speaker injected into one prompt. The tier's
+    # real ceiling is the character budget below — this only bounds how many
+    # rows are considered.
+    "entity_memory_max_items": 8,
+    # Mirror `user:`/`dm:`-scoped extracted facts into entity memory. Those
+    # facts are already global-by-user; this makes them retrievable by the
+    # entity tier too, with per-person semantic ranking.
+    "entity_memory_from_extract": True,
+    # ─── per-tier context budget (see context_budget.py) ────────────────
+    # Relative weights for how the memory character budget is divided. They
+    # are normalized, so what matters is their ratio, not the total. A
+    # weight of 0 switches that tier off. A tier that comes in under budget
+    # returns the remainder to the others, so these are shares of demand,
+    # not fixed reservations.
+    "context_tier_recent_weight": 70,
+    "context_tier_ltm_weight": 12,
+    "context_tier_entity_weight": 8,
+    "context_tier_facts_weight": 7,
+    "context_tier_web_weight": 3,
     "emoji_context_enabled": True,
     "music_context_enabled": True,
     "reply_dms": True,

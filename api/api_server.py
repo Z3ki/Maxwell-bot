@@ -39,6 +39,7 @@ from api.storage import (  # noqa: E402
     _load,
     _load_for_write,
     _rem_runs_path,
+    _safe_int,
     _safe_list,
     _safe_object,
     atomic_json_write,
@@ -274,6 +275,127 @@ async def rag_ltm_list(request):
         )
     except sqlite3.Error as e:
         return _json_response({"error": f"rag db: {e}"}, 500)
+
+
+async def rag_entities_list(request):
+    """Global per-user entity memory: who the bot knows, and what about them.
+
+    One row per Discord user id, independent of guild — the point of the tier
+    is that it follows a person between servers and DMs. `?user_id=` returns
+    one person with their facts; without it, the roster.
+    """
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
+    user_id = str(request.query.get("user_id") or "").strip()
+    try:
+        limit = max(1, min(_safe_int(request.query.get("limit"), 200), 1000))
+        if user_id:
+            rows = _rag_query(
+                "SELECT * FROM user_entities WHERE user_id=?", (user_id,)
+            )
+            facts = _rag_query(
+                "SELECT id, content, importance, timestamp, metadata FROM vectors "
+                "WHERE kind='entity' AND author_id=? "
+                "ORDER BY importance DESC, created_at DESC LIMIT 200",
+                (user_id,),
+            )
+            return _json_response(
+                {
+                    "entity": _entity_row(rows[0]) if rows else {"user_id": user_id},
+                    "facts": [
+                        {
+                            "id": f["id"],
+                            "content": f["content"],
+                            "importance": f["importance"],
+                            "timestamp": f["timestamp"],
+                        }
+                        for f in facts
+                    ],
+                }
+            )
+        rows = _rag_query(
+            "SELECT * FROM user_entities ORDER BY last_seen DESC LIMIT ?", (limit,)
+        )
+        counts = {
+            str(r["author_id"]): r["c"]
+            for r in _rag_query(
+                "SELECT author_id, COUNT(*) AS c FROM vectors "
+                "WHERE kind='entity' GROUP BY author_id"
+            )
+        }
+        entities = []
+        for row in rows:
+            entity = _entity_row(row)
+            entity["fact_count"] = counts.get(str(row["user_id"]), 0)
+            entities.append(entity)
+        return _json_response(
+            {
+                "entities": entities,
+                "count": len(entities),
+                "facts": sum(counts.values()),
+            }
+        )
+    except sqlite3.Error as e:
+        # The table is created by the bot on first run. A dashboard opened
+        # against a database from before this feature should show an empty
+        # panel, not a 500 that fails the whole page load.
+        if "no such table" in str(e):
+            return _json_response({"entities": [], "count": 0, "facts": 0})
+        return _json_response({"error": f"rag db: {e}"}, 500)
+
+
+def _entity_row(row) -> dict:
+    def _load(raw, fallback):
+        try:
+            val = json.loads(raw or "")
+            return val if isinstance(val, type(fallback)) else fallback
+        except (ValueError, TypeError):
+            return fallback
+
+    return {
+        "user_id": row["user_id"],
+        "display_names": _load(row["display_names"], []),
+        "guild_ids": _load(row["guild_ids"], []),
+        "dm_seen": bool(row["dm_seen"]),
+        "message_count": int(row["message_count"] or 0),
+        "first_seen": row["first_seen"],
+        "last_seen": row["last_seen"],
+    }
+
+
+async def subagents_list(request):
+    """Live and recent sub-agent runs, newest first.
+
+    Served from `data/subagent_runs.json`, which the bot rewrites as runs
+    start, step and finish. The event bus itself lives in the bot process —
+    the API server is a separate process and cannot reach it — so this is the
+    snapshot the bot publishes, not the bus.
+    """
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
+    path = Path(DATA_DIR) / "subagent_runs.json"
+    if not path.exists():
+        return _json_response({"runs": [], "running": 0})
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, ValueError):
+        return _json_response({"error": "read failed"}, 500)
+    runs = data.get("runs") if isinstance(data, dict) else data
+    if not isinstance(runs, list):
+        runs = []
+    run_id = str(request.query.get("run_id") or "").strip()
+    if run_id:
+        for run in runs:
+            if str(run.get("run_id")) == run_id:
+                return _json_response(run)
+        return _json_response({"error": "no such run"}, 404)
+    return _json_response(
+        {
+            "runs": runs[:50],
+            "running": sum(1 for r in runs if r.get("status") == "running"),
+            "updated_at": data.get("updated_at", "") if isinstance(data, dict) else "",
+        }
+    )
 
 
 async def context_get(request):
@@ -2264,6 +2386,8 @@ app.router.add_options(
 )
 app.router.add_get("/api/rag/memory", rag_memory_stats)
 app.router.add_get("/api/rag/ltm", rag_ltm_list)
+app.router.add_get("/api/rag/entities", rag_entities_list)
+app.router.add_get("/api/subagents", subagents_list)
 app.router.add_post("/api/memory", memory_add)
 app.router.add_put("/api/memory", memory_update)
 app.router.add_delete("/api/memory", memory_delete)

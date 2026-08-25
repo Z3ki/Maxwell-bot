@@ -136,11 +136,35 @@ toolset (run a command, read/write/list files, finish). It writes the code, runs
 it, fixes what breaks, and reports back — then that report comes back into the
 conversation as the tool result.
 
-There is no external coding-agent binary and no container image to build; the
-old OpenCode/Docker backend is gone. The sub-agent writes and runs code, so it
+There is no external coding-agent binary: the sub-agent is Maxwell, so it
 follows `ENABLE_SHELL` unless you set `ENABLE_SUBAGENT` explicitly, and it
 refuses any path outside its workdir. Budgets: `SUBAGENT_MAX_STEPS` (24),
 `SUBAGENT_TIMEOUT_SECONDS` (900), `SUBAGENT_COMMAND_TIMEOUT_SECONDS` (120).
+
+`run_command` executes inside a throwaway Docker container, one per run, off
+the same `docker/Dockerfile` image the shell tool uses. Only the run's own
+scratch workspace is mounted (at `/home/maxwell/work`); the bot's source and
+`.env` are not visible to it. The container is hardened the same way as the
+shell sandbox — bridge network, `--cap-drop ALL` plus a small add-back set,
+`no-new-privileges`, 4 GB / 2 CPU / 1024 pids — and is torn down when the run
+ends. State does persist *within* a run, so an installed package or a built
+binary survives to the next step.
+
+`SUBAGENT_SANDBOX=host` opts back out and runs `bash -lc` in the bot's own
+environment instead. That is a real choice on a machine you already treat as
+disposable, and it has to be made explicitly: with the default setting and no
+Docker daemon, the tool returns an error rather than quietly running
+unsandboxed.
+
+### Watching a run
+
+A sub-agent run is minutes of work, and it used to be minutes of silence — the
+channel saw nothing until the final report. Runs now publish events as they
+happen (`agent_events.py`): the channel progress message shows the current step
+and what it is doing (`step 3/24 · running: pytest -q`), and the dashboard's
+Autonomy tab lists live and recent runs with their step counts, files written,
+and final reports. The stream is in-process and non-durable — the durable
+record of a run is its report in the channel.
 
 ## Project Structure
 
@@ -150,6 +174,8 @@ bot_tools.py        Tool implementations
 providers.py        OpenAI-compatible provider wrapper
 config.py           Environment-backed configuration (incl. feature detection)
 rag_memory.py       RAG vector memory (SQLite + numpy + embeddings API)
+context_budget.py   Splits the prompt's memory chars across the memory tiers
+agent_events.py     Live event bus for sub-agent runs (progress + dashboard)
 site_backend.py     Per-site datastore behind /api/site/<slug>/ (generated sites)
 site_server.py      Per-site backend containers behind /bot/<slug>/api/
 doctor.py           Install check: what works, what doesn't, why
@@ -298,6 +324,7 @@ present). Restart to re-detect. `python3 doctor.py` shows the resolved state.
 | `SUBAGENT_TIMEOUT_SECONDS` | Wall-clock budget for one task (default `900`) |
 | `SUBAGENT_COMMAND_TIMEOUT_SECONDS` | Per-command timeout (default `120`) |
 | `SUBAGENT_MAX_FILE_BYTES` | Largest file the sub-agent may write (default `200000`) |
+| `SUBAGENT_SANDBOX` | `docker` (default) runs each sub-agent run in its own container; `host` runs commands in the bot's own environment with no isolation |
 
 ### Temporary Free Model
 
@@ -484,7 +511,43 @@ MAXWELL_EMBED_DIM=1536
 Changing the model or dimension invalidates existing vectors: delete
 `data/maxwell_rag.db` (or accept that old rows stop matching) when you switch.
 
-The SQLite database lives at `data/maxwell_rag.db` (gitignored). Channel memory, LTM, and shared context are all in one `vectors` table distinguished by `kind` (`message`, `ltm`, `shared_context`).
+The SQLite database lives at `data/maxwell_rag.db` (gitignored). Channel memory, LTM, shared context, and per-user entity facts are all in one `vectors` table distinguished by `kind` (`message`, `ltm`, `shared_context`, `entity`), alongside a `user_entities` table holding identity.
+
+### Global user memory
+
+A Discord user id is already global — the same person in two servers and a DM
+is one id — but nothing used that, so the bot could learn your name in one
+server and meet you as a stranger in the next. It now keeps a row per user id,
+independent of guild: the names they have gone by, where they have been seen,
+and durable facts about them. All of it is read back regardless of which server
+or DM the current message arrived in, and it renders as its own prompt block
+("About this person"). Facts arrive from the context extractor's `user:`- and
+`dm:`-scoped output; admin-only ones are deliberately not mirrored, since
+material that should not follow someone between servers is exactly what this
+tier would carry. The dashboard's Memory tab lists the roster under **People**,
+and `GET /api/rag/entities` serves it.
+
+Controls: `entity_memory_enabled`, `entity_memory_max_items`,
+`entity_memory_from_extract`.
+
+### Per-tier context budget
+
+The prompt is assembled from several memory tiers — the channel transcript,
+recalled long-term facts, the entity profile, cross-context facts, and cached
+web results. Each used to be capped by an *item count*, which is a bad proxy
+for size: fifty one-line facts and fifty paragraph-long ones differ by two
+orders of magnitude. The combined size swung wildly, and the transcript — which
+is assembled last and sits in the middle of the message list where the
+whole-prompt trim cannot reach it — absorbed every overshoot.
+
+`context_budget.py` now divides the available characters across the tiers by
+weight before any of them render, and each is trimmed to fit its share. A tier
+that comes in under budget hands the remainder to the tiers after it, and
+whatever the lookup tiers leave over goes to the transcript — so the tier that
+carries the actual conversation is the one that benefits from a quiet turn,
+rather than the one that pays for a noisy one. Weights are
+`context_tier_recent_weight` and friends (default 70/12/8/7/3); a weight of 0
+switches a tier off and redistributes its share.
 
 REM adds a separate visible-only ring at `data/rem_events.json` and, when enabled, periodically reviews events since the previous run.
 
@@ -495,6 +558,30 @@ REM is opt-in: it is off unless you set `ENABLE_REM=true` (or `REM_ENABLED=true`
 ## Autonomy
 
 Autonomy is separate from the removed `,auto` auto-reply mode. It wakes on `autonomy_interval_seconds`, gathers recent conversations, DMs, goals, memory, and available channels, then asks the LLM for a JSON action plan. Supported actions are channel posts, DMs, tool calls, memory updates, goal creation, or doing nothing.
+
+### The four stages
+
+One tick is **observe → plan → policy gate → execute**.
+
+| Stage | Method | What it does |
+| --- | --- | --- |
+| Observe | `observe()` | Reads the world into the planner's context, bounded so one hung fetch cannot freeze the loop. |
+| Plan | `plan(context)` | Asks the model for a validated action list. |
+| Policy gate | `policy_gate(actions)` | Rules on each action — tool allowlist, one-post-per-room, turn-taking — without side effects. |
+| Execute | `run_allowed(verdicts)` | Runs what survived. |
+
+Those stages always existed, but only two of them had names: the gate was a
+block of `continue` statements inside `execute`, so a denied action and a
+failed action produced the same shape of result and nothing could report "the
+plan was fine, policy stopped it". Denials now carry a code (`floor`,
+`duplicate_post`, `tool_blocked`) and are counted separately from errors in the
+tick summary. `execute(actions)` still gates-then-runs in one call for the many
+callers that want plan-in, results-out.
+
+The gate deliberately runs at execution time rather than at plan time: the plan
+is seconds stale by the time it lands — someone starts typing, the live bot
+answers the same question — and a gate that read the room at plan time would be
+deciding about a room that no longer exists.
 
 ### Turn-taking
 
@@ -566,9 +653,9 @@ python3 doctor.py        # config/feature sanity
 > are stripped from `bot_control.json` at load), `memory.py`,
 > `context_cleanup.py` (its `context_cleanup_*` control keys are stripped the
 > same way; the `/api/context_cleanup/*` routes stay as no-op stubs so
-> external callers do not 404), and the OpenCode/Docker sub-agent backend. RAG
+> external callers do not 404), and the OpenCode sub-agent backend. RAG
 > vector memory handles memory upkeep, and `sub_agent` now runs inside
-> Maxwell itself. The `autonomy` engine still writes fresh facts into
+> Maxwell itself (in its own Docker sandbox). The `autonomy` engine still writes fresh facts into
 > long-term memory on its own cadence.
 
 ## Dashboard / API
@@ -594,6 +681,14 @@ key with ranges that mirror the server-side clamp. A key added there with no
 input in the panel is listed in that panel's "Not surfaced" card rather than
 quietly going missing.
 
+Read-only routes worth knowing: `GET /api/rag/memory` is aggregate vector
+counters, `GET /api/rag/ltm` is the long-term-memory rows, `GET
+/api/rag/entities` is the global per-user roster (`?user_id=` for one person
+with their facts), and `GET /api/subagents` is live and recent sub-agent runs
+(`?run_id=` for one). The sub-agent event bus lives in the bot process, so that
+last one reads `data/subagent_runs.json`, which the bot rewrites as runs start,
+step and finish.
+
 The dashboard loads every panel's data independently (`Promise.allSettled`), so
 one failing endpoint degrades that panel and names itself in the header instead
 of blanking the page.
@@ -605,7 +700,7 @@ Static files (`web/index.html`, `web/admin/index.html`) should be copied to a we
 - Never commit `.env`, `data/`, logs, PM2 dumps, or generated sites.
 - Set real values for `MAXWELL_ADMIN_USER` and `MAXWELL_ADMIN_PASSWORD`. The API does not persist or bootstrap credentials.
 - Generated bot sites serve arbitrary HTML. Host them on a separate origin from admin pages to prevent credential theft via XSS.
-- The shell tool runs `bash -lc` inside the `maxwell-shell` Docker container (`docker/Dockerfile`), not on the host. By default that container is isolated: bridge network, `--cap-drop ALL` (plus a small add-back set), `no-new-privileges`, 4 GB / 2 CPU / 1024 pids, no docker socket, and no host filesystem — only `shelldocker/` is bind-mounted as its working directory at `/home/maxwell`. Setting `MAXWELL_SHELL_FULL_HOST=true` deliberately drops that wall: host network plus `/:/host:rw`, which is documented root-equivalent access for admins. The sub-agent writes and runs code in its own workdir and refuses paths outside it. Both tools are on by default; set `ENABLE_SHELL=false` (which also turns off `sub_agent`) to withhold that access entirely. The bot logs a warning at startup whenever shell is enabled.
+- The shell tool runs `bash -lc` inside the `maxwell-shell` Docker container (`docker/Dockerfile`), not on the host. By default that container is isolated: bridge network, `--cap-drop ALL` (plus a small add-back set), `no-new-privileges`, 4 GB / 2 CPU / 1024 pids, no docker socket, and no host filesystem — only `shelldocker/` is bind-mounted as its working directory at `/home/maxwell`. Setting `MAXWELL_SHELL_FULL_HOST=true` deliberately drops that wall: host network plus `/:/host:rw`, which is documented root-equivalent access for admins. The sub-agent runs under the same isolation: one throwaway container per run, off the same image, with only that run's scratch workspace mounted — so the bot's `.env` and source are not reachable from code it writes. `SUBAGENT_SANDBOX=host` opts out explicitly; with the default and no Docker daemon the tool errors rather than silently running on the host. Both tools are on by default; set `ENABLE_SHELL=false` (which also turns off `sub_agent`) to withhold that access entirely. The bot logs a warning at startup whenever shell is enabled.
 - Running `shell` needs a working Docker daemon the bot user can reach. Without one the tool reports the failure rather than silently falling back to the host. `python3 doctor.py` tells you which side you are on.
 - `DISABLE_TAINT_GATE=false` (the default) makes `shell` require an out-of-band `,confirm` on any turn that read fetched web content — the second line of defence against indirect prompt injection. Only disable it on a single-user install you fully trust.
 

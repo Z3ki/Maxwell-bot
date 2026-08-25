@@ -295,6 +295,12 @@ from captcha_solver import (  # noqa: E402
     build_solver,
 )
 from config import Config  # noqa: E402
+from context_budget import (  # noqa: E402
+    BudgetPlan,
+    allocate,
+    fit_lines,
+    weights_from_control,
+)
 from control_defaults import (  # noqa: E402
     DEAD_CONTROL_KEYS,
     DEFAULT_CONTROL,
@@ -309,6 +315,7 @@ from providers import (  # noqa: E402
     OllamaProvider,
     ProviderUsageExhaustedError,
 )
+from agent_events import AgentEventBus  # noqa: E402
 from rag_memory import RAGMemoryManager, RemEventLog, _parse_iso  # noqa: E402
 from rem import RemStore, load_rem_defaults, run_rem_once  # noqa: E402
 from tool_progress import make_progress as _make_tool_progress  # noqa: E402
@@ -3240,6 +3247,14 @@ class MaxwellBot(commands.Bot):
             self.config.DATA_DIR, run_history=self.config.REM_RUN_HISTORY
         )
         self.inbox = InboxStore(self.config.DATA_DIR)
+        # Live sub-agent telemetry. A sub-agent run is minutes of silence
+        # otherwise — the channel sees nothing until the final report, and if
+        # it hangs there is nothing to look at. In-process and non-durable on
+        # purpose: the durable record of a run is its report in the channel.
+        self.agent_events = AgentEventBus(on_change=self._mirror_agent_runs)
+        # Debounce for the mirror below — a busy run publishes several events
+        # per step and the dashboard polls on its own schedule anyway.
+        self._agent_runs_mirrored_at = 0.0
         # Mail is pull-only through the email_* tools, so an unread message is
         # invisible until he thinks to look. The poller files new mail as inbox
         # notices; it stays None when no mailbox password is configured.
@@ -3461,6 +3476,80 @@ class MaxwellBot(commands.Bot):
         enriched = dict(message_dict)
         enriched.update(self._mem_kwargs(message))
         await self.memory.add_to_channel_memory(channel_id, enriched)
+        await self._observe_message_author(message, enriched)
+
+    def _mirror_agent_runs(self, bus) -> None:
+        """Write the live sub-agent snapshot where the dashboard can read it.
+
+        The event bus lives in this process; the API server is a different
+        one, so the only way it sees a running sub-agent is through a file.
+        Written from the bus's synchronous change hook, so it must not block:
+        the write is scheduled, throttled, and every failure is swallowed —
+        losing a telemetry snapshot is not worth interrupting a run for.
+        """
+        now = time.time()
+        snapshot = bus.snapshot()
+        # Always write immediately when nothing is running (that is the edge
+        # that leaves a stale "running" row on the dashboard forever);
+        # otherwise throttle.
+        any_running = any(r.get("status") == "running" for r in snapshot)
+        if any_running and now - getattr(self, "_agent_runs_mirrored_at", 0.0) < 2.0:
+            return
+        self._agent_runs_mirrored_at = now
+        payload = {
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "runs": snapshot,
+        }
+        path = Path(self.config.DATA_DIR) / "subagent_runs.json"
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # No loop (shutdown, or a test driving the bus directly). Write
+            # inline rather than building a coroutine nobody will await.
+            with contextlib.suppress(Exception):
+                _atomic_json_write_sync(path, payload)
+            return
+        try:
+            _spawn_background(asyncio.to_thread(_atomic_json_write_sync, path, payload))
+        except Exception as e:
+            logger.debug(f"sub-agent run mirror skipped: {e}")
+
+    async def _observe_message_author(self, message, enriched: dict) -> None:
+        """Keep the global per-user entity row current.
+
+        Discord ids are already global — the same person in two servers and a
+        DM is one user_id — but nothing used that, so the bot could learn your
+        name in one server and meet you as a stranger in the next. This is the
+        cheap half of the fix: one upsert per stored message recording who was
+        seen, under what name, and where. The expensive half (facts) is
+        written by the extractor.
+
+        Runs on the message path, so it must never raise and never block: an
+        identity row is a nicety, a dropped message is not.
+        """
+        if message is None or enriched.get("is_tool"):
+            return
+        if not (self._control.get("entity_memory_enabled", True)):
+            return
+        observe = getattr(self.memory, "observe_user", None)
+        if not callable(observe):
+            return
+        try:
+            author = getattr(message, "author", None)
+            if author is None or getattr(author, "bot", False):
+                return
+            uid = str(getattr(author, "id", "") or "")
+            if not uid:
+                return
+            guild = getattr(message, "guild", None)
+            await observe(
+                uid,
+                display_name=str(getattr(author, "display_name", "") or ""),
+                guild_id=str(getattr(guild, "id", "") or ""),
+                is_dm=guild is None,
+            )
+        except Exception as e:
+            logger.debug(f"entity observe skipped: {e}")
 
     def _get_channel_lock(self, channel_id: str) -> asyncio.Lock:
         return self._channel_locks.get(channel_id)
@@ -8946,8 +9035,62 @@ class MaxwellBot(commands.Bot):
                 logger.info(
                     f"Context watcher stored fact {context_id}: {entry['content'][:120]}"
                 )
+            await self._mirror_fact_to_entity(message, entry)
         except Exception as e:
             logger.warning(f"Context extraction error: {e}")
+
+    async def _mirror_fact_to_entity(self, message, entry: dict) -> None:
+        """Copy a person-scoped extracted fact into global entity memory.
+
+        A ``user:<id>`` or ``dm:<id>`` fact is already about one human and
+        already ignores guild boundaries — it is the entity tier under an
+        older name. Mirroring it means the entity tier is populated from day
+        one instead of starting empty, and gets per-person semantic ranking
+        that the scope-string lookup cannot do.
+
+        Deliberately a copy rather than a move: shared_context retrieval has
+        its own visibility rules (private / admin_only, expiry) that the
+        entity tier does not model, so the original stays the authority for
+        those. `add_entity_fact` dedups by (person, content), so re-running
+        the extractor on the same fact is a no-op.
+        """
+        if not self._control.get("entity_memory_enabled", True):
+            return
+        if not self._control.get("entity_memory_from_extract", True):
+            return
+        scope = str((entry or {}).get("scope") or "")
+        if not (scope.startswith("user:") or scope.startswith("dm:")):
+            return
+        # Secrets and admin-only material are exactly what should not follow
+        # someone into another server.
+        if str(entry.get("visibility") or "") == "admin_only":
+            return
+        # An expiring fact is explicitly temporary, and the entity tier has no
+        # concept of expiry — mirroring one would make a fact the extractor
+        # said should last a day last forever.
+        if str(entry.get("expires_at") or "").strip():
+            return
+        uid = scope.split(":", 1)[1].strip()
+        if not uid:
+            return
+        add_fact = getattr(self.memory, "add_entity_fact", None)
+        if not callable(add_fact):
+            return
+        try:
+            author = getattr(message, "author", None)
+            guild = getattr(message, "guild", None)
+            _fid, created = await add_fact(
+                uid,
+                str(entry.get("content") or ""),
+                importance=_safe_int(entry.get("importance"), 5),
+                source_guild_id=str(getattr(guild, "id", "") or ""),
+                source="extract",
+                author=str(getattr(author, "display_name", "") or ""),
+            )
+            if created:
+                logger.info("Entity memory: new fact for user %s", uid)
+        except Exception as e:
+            logger.debug(f"entity mirror skipped: {e}")
 
     async def _command_queue_loop(self):
         path = Path(self.config.DATA_DIR) / "bot_commands.json"
@@ -13837,6 +13980,113 @@ class MaxwellBot(commands.Bot):
         output_reserve = max(16000, raw_budget // 4)
         return max(10000, raw_budget - output_reserve)
 
+    # ─── per-tier context budget ──────────────────────────────────────
+
+    def _context_budget_plan(
+        self, message, user_message: str, system_parts: list[str]
+    ) -> BudgetPlan:
+        """Divide the prompt's memory characters across the memory tiers.
+
+        The total is what is left of the prompt budget once the static system
+        blocks assembled so far, the jailbreak suffix, and headroom for the
+        live turn are paid for. Weights come from the control set so an
+        operator can decide, say, that this bot is a lookup tool and should
+        spend on facts rather than on transcript.
+
+        Tiers the controls have switched off are excluded before the split, so
+        turning off cross-context does not leave a 7% hole — the characters go
+        to the tiers that are still on.
+        """
+        control = getattr(self, "_control", None) or {}
+        overhead = (
+            sum(len(p) for p in system_parts)
+            + len(JAILBREAK_PROMPT)
+            + 4000  # live user turn, media summary, music context
+        )
+        total = max(0, MaxwellBot._prompt_budget_chars(self) - overhead)
+
+        disabled: set[str] = set()
+        short_turn = self._is_short_live_turn(message, user_message)
+        if not control.get("long_term_memory_enabled", True) or short_turn:
+            # A short ambient turn deliberately skips RAG (see the transcript
+            # comment below) — its budget belongs to the transcript, not to a
+            # tier that will not render.
+            disabled.add("ltm")
+            disabled.add("web")
+        if not control.get("cross_context_enabled", True) or short_turn:
+            disabled.add("facts")
+        if not control.get("entity_memory_enabled", True):
+            disabled.add("entity")
+        return allocate(
+            total, weights=weights_from_control(control), disabled=disabled
+        )
+
+    async def _entity_profile_for(
+        self, message, user_message: str, budget: int
+    ) -> tuple[dict | None, list[dict]]:
+        """Identity + durable facts for whoever is talking, from everywhere.
+
+        Discord user ids are global, so this deliberately does not filter by
+        guild: what the bot learned about someone in a DM is what it knows
+        about them in a server, and vice versa. Facts that should NOT travel
+        are the ones that never enter this tier — see _mirror_fact_to_entity.
+        """
+        author = getattr(message, "author", None)
+        uid = str(getattr(author, "id", "") or "")
+        if not uid or budget <= 0:
+            return None, []
+        get_profile = getattr(self.memory, "get_user_profile", None)
+        if not callable(get_profile):
+            return None, []
+        control = getattr(self, "_control", None) or {}
+        max_items = max(
+            1,
+            min(_safe_int(control.get("entity_memory_max_items", 8) or 8, 8), 50),
+        )
+        profile = await get_profile(
+            uid, query=user_message, top_k=max_items, budget=budget
+        )
+        return profile, list(profile.get("facts") or [])
+
+    def _render_entity_block(
+        self, message, entity: dict | None, facts: list[dict]
+    ) -> str:
+        """Render the entity tier, or "" when there is nothing worth saying.
+
+        Aliases are only shown when they differ from the name on the current
+        message — "also known as: alice" under a message from alice is pure
+        noise, and it is the *other* names that make someone recognisable
+        across servers.
+        """
+        if not entity:
+            return ""
+        author = getattr(message, "author", None)
+        current = str(getattr(author, "display_name", "") or "").strip()
+        lines: list[str] = []
+        aliases = [
+            str(n)
+            for n in (entity.get("display_names") or [])
+            if str(n).strip() and str(n).strip() != current
+        ][:4]
+        if aliases:
+            lines.append("- also seen as: " + ", ".join(aliases))
+        guild_count = len(entity.get("guild_ids") or [])
+        if guild_count > 1 or (guild_count and entity.get("dm_seen")):
+            where = f"{guild_count} server(s)" if guild_count else ""
+            if entity.get("dm_seen"):
+                where = (where + " and DMs") if where else "DMs"
+            lines.append(f"- known from: {where}")
+        for fact in facts:
+            content = str(fact.get("content") or "").strip()
+            if content:
+                lines.append(f"- {content}")
+        if not lines:
+            return ""
+        return (
+            "About this person (global — carries across servers and DMs; "
+            "background, don't recite):\n" + "\n".join(lines)
+        )
+
     def _apply_prompt_budget(self, messages: list[dict]) -> list[dict]:
         budget = MaxwellBot._prompt_budget_chars(self)
         total = sum(MaxwellBot._message_content_chars(m) for m in messages)
@@ -13979,6 +14229,49 @@ class MaxwellBot(commands.Bot):
         dynamic_parts.append(
             f"User: {message.author.display_name} ({message.author.id}, {user_kind}) | {local_now.strftime('%a %b %d %I:%M %p')} AST | Channel: #{channel_name} ({channel_id}, {channel_kind})"
         )
+        # ─── per-tier context budget ────────────────────────────────────
+        # Every lookup tier below (long-term facts, recalled messages, cached
+        # web results, cross-context facts, and the entity profile) used to be
+        # capped only by an item count. Item counts are a bad proxy for size —
+        # fifty one-line facts and fifty paragraphs differ by two orders of
+        # magnitude — so their combined size swung wildly, and the transcript,
+        # which is assembled last and sits in the middle of the message list
+        # where _apply_prompt_budget cannot reach it, absorbed every overshoot.
+        #
+        # Now each tier gets a hard character budget carved out of what the
+        # prompt can actually afford. The transcript's own share is not spent
+        # here: its budget is computed further down from what is genuinely
+        # left, so anything a lookup tier does not use flows to the running
+        # conversation, which is the tier worth protecting.
+        ctx_plan = MaxwellBot._context_budget_plan(
+            self, message, user_message, system_parts
+        )
+        # Characters a lookup tier declined to spend, offered to the tiers that
+        # come after it. Without this, a turn with no web results and no
+        # entity profile would leave that budget unspent while cross-context
+        # facts were being trimmed.
+        ctx_spare = 0
+
+        entity_facts: list[dict] = []
+        entity_row: dict | None = None
+        if self._control.get("entity_memory_enabled", True):
+            try:
+                entity_row, entity_facts = await MaxwellBot._entity_profile_for(
+                    self,
+                    message,
+                    user_message,
+                    budget=ctx_plan.budget_for("entity"),
+                )
+            except Exception as e:
+                logger.debug(f"entity profile skipped: {e}")
+            block = MaxwellBot._render_entity_block(
+                self, message, entity_row, entity_facts
+            )
+            if block:
+                dynamic_parts.append(block)
+                ctx_plan.note_usage("entity", len(block), items=len(entity_facts))
+            ctx_spare = ctx_plan.spare_after("entity")
+
         if self._control.get("long_term_memory_enabled", True) and not self._is_short_live_turn(
             message, user_message
         ):
@@ -14073,10 +14366,22 @@ class MaxwellBot(commands.Bot):
                             rag_lines.append(
                                 f"- [{kind_label}, {sim_pct}% match] {r['content']}"
                             )
-                        dynamic_parts.append(
-                            "Relevant memories (background, don't recite):\n"
-                            + "\n".join(rag_lines)
+                        # Results arrive similarity-ranked, so trimming from
+                        # the tail drops the weakest matches first.
+                        rag_lines, rag_dropped = fit_lines(
+                            rag_lines, ctx_plan.budget_for("ltm") + ctx_spare
                         )
+                        if rag_lines:
+                            body = "\n".join(rag_lines)
+                            dynamic_parts.append(
+                                "Relevant memories (background, don't recite):\n" + body
+                            )
+                            ctx_plan.note_usage(
+                                "ltm",
+                                len(body),
+                                items=len(rag_lines),
+                                dropped=rag_dropped,
+                            )
                     if rag_recent:
                         rec_lines = []
                         for r in rag_recent:
@@ -14101,10 +14406,30 @@ class MaxwellBot(commands.Bot):
                             rec_lines.append(
                                 f"- [{who}{stamp}, {sim_pct}% match] {str(r['content'])[:300]}"
                             )
-                        dynamic_parts.append(
-                            "Recent relevant messages (background):\n"
-                            + "\n".join(rec_lines)
+                        # Same tier as the facts above — recalled chat and
+                        # recalled facts are both "things looked up about this
+                        # topic", so they share one budget rather than each
+                        # getting an unbounded item count.
+                        rec_lines, rec_dropped = fit_lines(
+                            rec_lines,
+                            max(
+                                0,
+                                ctx_plan.budget_for("ltm")
+                                + ctx_spare
+                                - ctx_plan.tiers["ltm"].used,
+                            ),
                         )
+                        if rec_lines:
+                            body = "\n".join(rec_lines)
+                            dynamic_parts.append(
+                                "Recent relevant messages (background):\n" + body
+                            )
+                            ctx_plan.note_usage(
+                                "ltm",
+                                ctx_plan.tiers["ltm"].used + len(body),
+                                items=ctx_plan.tiers["ltm"].items + len(rec_lines),
+                                dropped=ctx_plan.tiers["ltm"].dropped + rec_dropped,
+                            )
                     if rag_web:
                         web_lines = []
                         for r in rag_web:
@@ -14136,10 +14461,22 @@ class MaxwellBot(commands.Bot):
                                 f"- [{sim_pct}% match, web{stamp}]{qpart} "
                                 f"{title}\n  {url}\n  {content}"
                             )
-                        dynamic_parts.append(
-                            "Earlier web results (cite URL if reused):\n"
-                            + "\n".join(web_lines)
+                        web_lines, web_dropped = fit_lines(
+                            web_lines,
+                            ctx_plan.budget_for("web")
+                            + ctx_plan.spare_after("entity", "ltm"),
                         )
+                        if web_lines:
+                            body = "\n".join(web_lines)
+                            dynamic_parts.append(
+                                "Earlier web results (cite URL if reused):\n" + body
+                            )
+                            ctx_plan.note_usage(
+                                "web",
+                                len(body),
+                                items=len(web_lines),
+                                dropped=web_dropped,
+                            )
                 elif ltm:
                     # Fallback: no embeddings yet, use recent LTM
                     ltm_cap = max(
@@ -14154,12 +14491,28 @@ class MaxwellBot(commands.Bot):
                         ),
                     )
                     recent_ltm = ltm[-ltm_cap:] if len(ltm) > ltm_cap else ltm
-                    dynamic_parts.append(
-                        "Long-term memory (background, newest first):\n"
-                        + "\n".join(e["content"] for e in reversed(recent_ltm))
+                    # Cold start: no embeddings yet, so this is the whole tier
+                    # and it is ordered newest-first rather than by relevance.
+                    # Same budget applies — an unbudgeted fallback is how the
+                    # tier blew past its share before embeddings warmed up.
+                    fallback_lines, fb_dropped = fit_lines(
+                        [str(e["content"]) for e in reversed(recent_ltm)],
+                        ctx_plan.budget_for("ltm") + ctx_spare,
                     )
+                    if fallback_lines:
+                        body = "\n".join(fallback_lines)
+                        dynamic_parts.append(
+                            "Long-term memory (background, newest first):\n" + body
+                        )
+                        ctx_plan.note_usage(
+                            "ltm",
+                            len(body),
+                            items=len(fallback_lines),
+                            dropped=fb_dropped,
+                        )
             except Exception as e:
                 logger.warning(f"Failed to load long-term memory: {e}")
+            ctx_spare = ctx_plan.spare_after("entity", "ltm", "web")
         if self._control.get("cross_context_enabled", True) and not self._is_short_live_turn(
             message, user_message
         ):
@@ -14189,13 +14542,21 @@ class MaxwellBot(commands.Bot):
                         lines.append(
                             f"- [{fact.get('scope')}, i{fact.get('importance')}] {fact.get('content')}"
                         )
+                    lines, facts_dropped = fit_lines(
+                        lines, ctx_plan.budget_for("facts") + ctx_spare
+                    )
                     if lines:
+                        body = "\n".join(lines)
                         dynamic_parts.append(
                             "Cross-context facts (background; don't reveal source):\n"
-                            + "\n".join(lines)
+                            + body
+                        )
+                        ctx_plan.note_usage(
+                            "facts", len(body), items=len(lines), dropped=facts_dropped
                         )
             except Exception as e:
                 logger.warning(f"Failed to build shared context: {e}")
+        logger.debug("%s", ctx_plan.summary())
 
         if conv_users:
             ul = [f"- {n} (ID {uid})" for uid, n in list(conv_users.items())[:30]]

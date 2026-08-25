@@ -117,14 +117,16 @@ def check_system_tools() -> None:
 
 
 def check_docker(cfg) -> None:
-    """The shell tool runs in a container, so Docker is a hard dependency for it.
+    """The shell and sub-agent tools run in containers, so Docker is required.
 
-    Nothing else reported this: `shell` would just fail at call time with a
-    docker error the operator only saw in a Discord reply.
+    Nothing else reported this: `shell` and `sub_agent` would just fail at call
+    time with a docker error the operator only saw in a Discord reply.
     """
-    if cfg is None or not getattr(cfg, "ENABLE_SHELL", False):
+    if cfg is None or not (
+        getattr(cfg, "ENABLE_SHELL", False) or getattr(cfg, "ENABLE_SUBAGENT", False)
+    ):
         return
-    head("Docker (needed by the shell tool)")
+    head("Docker (needed by the shell and sub-agent tools)")
     import shutil
     import subprocess
 
@@ -132,7 +134,8 @@ def check_docker(cfg) -> None:
         line(
             "warn",
             "docker not found",
-            "shell/sub_agent will fail; install Docker or set ENABLE_SHELL=false",
+            "shell/sub_agent will fail; install Docker, set ENABLE_SHELL=false, "
+            "or set SUBAGENT_SANDBOX=host to run sub-agent commands unsandboxed",
         )
         return
     try:
