@@ -239,6 +239,16 @@ DEAD_CONTROL_KEYS = frozenset(
         "context_cleanup_enabled",
         "context_cleanup_interval_seconds",
         "context_cleanup_ltm_enabled",
+        # Leftovers found in live bot_control.json with zero read sites in the
+        # codebase. Progress is per-server via _progress_servers now (see the
+        # note in bot._load_control); the subagent_* knobs moved to SUBAGENT_*
+        # env vars; cross_context_budget was superseded by
+        # cross_context_max_items + memory_context_budget.
+        "progress_messages",
+        "subagent_docker",
+        "subagent_max_concurrent_per_user",
+        "subagent_max_timeout_minutes",
+        "cross_context_budget",
     }
 )
 
