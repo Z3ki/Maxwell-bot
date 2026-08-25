@@ -68,6 +68,7 @@ pip install ddgs                           # or just web search
 | Text to speech | `espeak-ng` (free), or `pip install gTTS`, or a Fish/NVIDIA key | `tts` tool, VC speech |
 | Semantic memory | `ollama pull qwen3-embedding:0.6b`, or any embeddings endpoint | RAG vector recall |
 | Email tools | Postfix + Dovecot, then set `MAXWELL_EMAIL_PASSWORD` | `email_*` tools |
+| Posting to X | two cookies from a logged-in x.com tab (`X_AUTH_TOKEN`, `X_CT0`) | `x_post`; reading X needs nothing |
 
 Debian/Ubuntu, everything except mail:
 
@@ -120,6 +121,7 @@ for videos that trigger YouTube bot checks. Never commit that file.
 - Tool system: image generation (Pollinations, NVIDIA NIM, GPT-compatible), web search, URL fetch, YouTube transcript/frame extraction, arbitrary file sending, meme/media sending, shell execution, a native coding sub-agent, polls, invites, server join/leave (`join_server`, `leave_server`), self-service role/channel setup through a server's onboarding prompts (`server_setup`, also run automatically on join), site generation, avatar/presence/nickname changes, message editing/forwarding/deletion, live tool-call progress messages, and more.
 - Full-message context: every message in context carries its timestamp plus structured annotations for polls, app-command invocations, system/welcome events, embeds (title/description/fields/images), direct media URLs, and attachment names — including messages that never pinged Maxwell (they still reach context via memory/history).
 - CAPTCHA handling: Discord's hCaptcha challenges (invite accepts, DM gates, phone checks) are auto-solved via a configured solver service (`CAPTCHA_SOLVER_SERVICE` — capsolver/2captcha), or handled human-in-the-loop: the bot hosts a one-shot solve page (`/captcha/<id>`, proxied at `MAXWELL_PUBLIC_BASE_URL`), DMs the link to the owner (fallback `CAPTCHA_FALLBACK_USER_ID`), waits for a browser solve, and retries the original request with the solved token. Auto-onboarding completes role-selection prompts when joining a server that uses `GUILD_ONBOARDING`.
+- X (Twitter): `x_read` pulls the home timeline, any public account, a search, mentions, or one post; `x_post` posts, replies, quotes, likes, reposts and deletes. Reading needs no account at all; posting uses the session cookies of a logged-in browser. No paid API anywhere. See [X (Twitter)](#x-twitter).
 - Autonomy: periodic self-directed checks where Maxwell reviews context/goals and decides whether to act without running a decider on every few messages.
 - Per-server custom prompts, RAG vector memory, and scoped cross-context facts across DMs, servers, groups, and channels.
 - RAG vector memory: messages, long-term facts, and shared context entries are embedded through any OpenAI-compatible or Ollama embeddings endpoint and stored in a SQLite vector database. Semantic search retrieves the most relevant memories for each conversation — global across all channels and servers. With no embedder reachable the bot logs one line and falls back to recent-history context.
@@ -176,6 +178,7 @@ config.py           Environment-backed configuration (incl. feature detection)
 rag_memory.py       RAG vector memory (SQLite + numpy + embeddings API)
 context_budget.py   Splits the prompt's memory chars across the memory tiers
 agent_events.py     Live event bus for sub-agent runs (progress + dashboard)
+x_client.py         X (Twitter): read backends, posting, mention poller
 site_backend.py     Per-site datastore behind /api/site/<slug>/ (generated sites)
 site_server.py      Per-site backend containers behind /bot/<slug>/api/
 doctor.py           Install check: what works, what doesn't, why
@@ -245,6 +248,7 @@ present). Restart to re-detect. `python3 doctor.py` shows the resolved state.
 | `ENABLE_CREATE_SITE` | `create_site` / `edit_site` / `delete_site` / `list_sites` tools | — |
 | `ENABLE_AVATAR` | `change_avatar` tool | — |
 | `ENABLE_EMAIL_TOOLS` | The four `email_*` tools | `MAXWELL_EMAIL_PASSWORD` set |
+| `ENABLE_X` | `x_read` / `x_post` | — (public reads need no credentials) |
 | `ENABLE_SHELL` | `shell` tool (host access — only enable if you trust the model) | — |
 | `ENABLE_SUBAGENT` | `sub_agent` tool (writes and runs code) | follows `ENABLE_SHELL` |
 | `ENABLE_RAG` | RAG vector memory; `false` makes no embedding calls at all | — |
@@ -315,6 +319,20 @@ present). Restart to re-detect. `python3 doctor.py` shows the resolved state.
 | `MAXWELL_EMAIL_FROM` / `MAXWELL_EMAIL_FROM_NAME` | `From:` header |
 | `MAXWELL_EMAIL_IGNORE_SENDERS` | Senders never filed as inbox notices — comma-separated addresses, or leading-dot domains (`.google.com`). Empty by default |
 
+### X / Twitter (only used if `ENABLE_X` is on)
+
+| Variable | Description |
+|---|---|
+| `X_AUTH_TOKEN` / `X_CT0` | The two cookies from a logged-in x.com tab. This is the whole write credential — treat it like `DISCORD_TOKEN`. Blank = read-only |
+| `X_HANDLE` | The account those cookies belong to, no `@`. Needed for mentions |
+| `X_BACKEND` | `auto` (default: cookies → api → rss → syndication) or a pinned subset |
+| `X_API_BASE_URL` / `X_API_KEY` / `X_API_KEY_HEADER` / `X_API_PATHS` | Your own gateway, if you already run one. `X_API_PATHS` is a JSON map of path templates |
+| `X_RSS_BASE_URL` / `X_RSS_PATHS` | A Nitter or RSSHub instance for credential-free reading |
+| `X_SYNDICATION` | X's own embed backend (default `true`). The zero-config read source |
+| `X_MAX_CHARS` | Post length limit (default `280`; premium accounts can raise it) |
+| `X_TIMEOUT_SECONDS` | Per-request timeout (default `20`) |
+| `X_GRAPHQL_FILE` | Where the internal query ids live (default `data/x_graphql.json`) |
+
 ### Sub-agent (only used if `ENABLE_SUBAGENT` is on)
 
 | Variable | Description |
@@ -373,6 +391,10 @@ All commands use the `,` prefix. Admin commands require the user to be in the ad
 | `,rem on` / `,rem off` | Yes | Enable or disable REM for this process |
 | `,rem audit [N]` | Yes | Show recent REM run audits |
 | `,rem fix` | Yes | Restore REM prompt/interval/max-turn defaults |
+| `,x` / `,x status` | Yes | What X can do here: backends, posting, hourly budget |
+| `,x read [@handle]` | Yes | Home timeline, or that account's posts |
+| `,x search <query>` / `,x tweet <id\|url>` | Yes | One search or one post |
+| `,x post <text>` | Yes | Post to X by hand (spends the hourly budget) |
 | `,vc join` | No | Join your current VC and start live listening |
 | `,vc leave` | No | Stop listening and disconnect from VC |
 | `,vc listen` | No | Start live VC listening while staying connected |
@@ -481,6 +503,94 @@ handle /bot/*/api/* {
 ## Web and YouTube Tools
 
 When tools are enabled, Maxwell can use `web_search` for recent/searchable info, `fetch_url` to read a specific web page, and `youtube` for YouTube. Video URLs return title/channel/duration plus transcript or auto-captions when available (YouTube timedtext first, `yt-dlp` as fallback). Channel, handle, playlist, and `/videos` URLs list recent uploads instead of trying to caption the whole channel. `query` runs a YouTube search. Cookie-backed caption fetching uses `yt-dlp --ignore-no-formats-error --write-subs --write-auto-subs`. Requested timestamp frames use yt-dlp's `web_embedded` YouTube client, then attach back to the model. Timestamps can be written like `0:10` or `1:23,2:45`. Listings are cached for a few minutes so auto-invokes don't 429 YouTube.
+
+## X (Twitter)
+
+He could be quoted at all day and never look at the thing himself. Now he can,
+and none of it costs money — there is no developer account and no paid tier
+anywhere in this feature.
+
+The two halves are deliberately separate:
+
+**Reading is free and needs no account.** X's own embed backend (the one that
+renders quoted tweets on other people's blogs) serves any public profile and
+any single post, and it is on by default with nothing to configure. Point
+`X_RSS_BASE_URL` at a Nitter or RSSHub instance and search works too.
+
+**Writing needs an account**, and the free way to have one is the session of a
+browser already logged in as him:
+
+1. log into x.com in a normal browser
+2. devtools → Application → Cookies → `https://x.com`
+3. copy `auth_token` into `X_AUTH_TOKEN` and `ct0` into `X_CT0`, and set `X_HANDLE`
+
+Those two cookies **are** the account — treat them exactly like
+`DISCORD_TOKEN`. They also unlock the two reads no anonymous endpoint can
+serve: the home timeline and mentions. Driving an account this way is against
+X's ToS, which is the same bet as the Discord self-bot this whole project is.
+
+Already run your own gateway or scraper? `X_API_BASE_URL` is tried before the
+public sources, and `X_API_PATHS` remaps its routes if they differ from the
+defaults.
+
+### The two tools
+
+```
+x_read  action=home | user | search | mentions | tweet
+x_post  action=post | reply | quote | delete | like | repost
+```
+
+`x_read` renders each post with its id, so replying to one is
+`x_post action=reply reply_to=<id>`. A post's media URLs come back too, so
+`see_image` can look at the picture. X search operators work as written —
+`from:nasa`, `min_faves:500`, `-filter:replies`, `lang:en`.
+
+### Backends and fallback
+
+| Backend | Needs | Can read | Can write |
+|---|---|---|---|
+| `cookies` | `X_AUTH_TOKEN` + `X_CT0` | everything | yes |
+| `api` | `X_API_BASE_URL` | everything your gateway serves | yes |
+| `rss` | `X_RSS_BASE_URL` | user, search | no |
+| `syndication` | nothing | user, tweet | no |
+
+Reads walk that list and take the first backend that answers, so an expired
+cookie or a dead Nitter instance is a slower read rather than a dead feature.
+Writes deliberately do **not** fall through: a post landing from a different
+path than you expected is a surprise, so a failed write is reported as failed.
+
+X's internal GraphQL query ids rot every few weeks. They live in
+`data/x_graphql.json` (`{"ids": {"CreateTweet": "..."}}`) and any call that
+404s says exactly where to copy a fresh one from. Stale ids cost the cookie
+backend, not the feature — reads fall through to syndication and only posting
+actually stops. A missing feature flag heals itself: X names the flag in the
+error, the client adds it and retries once.
+
+### Guardrails
+
+Posting is the least reversible thing in the whole tool catalog, so it has
+more than a prompt holding it back:
+
+| Control | Default | What it does |
+|---|---|---|
+| `x_post_enabled` | `true` | Master switch for every write. Off leaves reading intact |
+| `x_posts_per_hour` | `8` | Hard rolling-hour ceiling, enforced against a persisted log so a crash loop cannot reset it. `0` = never post |
+| `x_autonomy_post` | `false` | Whether the unattended autonomy tick may post at all — separate from answering someone who asked |
+| `x_cache_seconds` | `60` | Identical reads reuse the last answer instead of spending rate-limit budget |
+| `x_mention_poll_seconds` | `300` | How often mentions become inbox notices |
+
+`x_post` is also taint-gated like `shell` and `email_send`: a turn that read a
+web page, a search result, or X itself needs an out-of-band `,confirm` before
+it can publish, because "post this" is exactly what an injected page would
+say. `DISABLE_TAINT_GATE=true` turns that off install-wide.
+
+### Mentions
+
+Someone @-ing him on X is someone waiting on him, so mentions file as inbox
+notices next to friend requests and mail — one notice per post ever, his own
+posts never filed, a dismissed mention staying dismissed. It needs a session
+(mentions are not public), and the poller stays quiet and says so once when
+there is nothing to read them with.
 
 ## Memory and RAG
 
@@ -701,7 +811,13 @@ python3 -m pytest -q     # test suite
 python3 doctor.py        # config/feature sanity
 ```
 
-> Removed along the way: the Intel engine (commit `d455e4b`; the `,intel`
+> Removed along the way: four never-wired "safety primitive" modules
+> (`approval.py`, `attention.py`, `event_dispatch.py`, `memory_controls.py`,
+> plus `docs/ARCHITECTURE_SAFETY.md` and their test file) — they had tests and
+> a design doc and nothing ever imported them, while the gates that actually
+> run live elsewhere: `Tool.is_destructive` + the taint check in `bot.py` for
+> destructive tools, `autonomy_social.py` / `watch_policy.py` for unsolicited
+> speech, and `rag_memory.py` for memory. Also removed: the Intel engine (commit `d455e4b`; the `,intel`
 > commands and the `intel_enabled` / `intel_interval_seconds` control keys
 > are stripped from `bot_control.json` at load), `memory.py`,
 > `context_cleanup.py` (its `context_cleanup_*` control keys are stripped the

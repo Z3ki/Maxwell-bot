@@ -628,6 +628,38 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         },
         ["query"],
     ),
+    # X (Twitter). One read tool and one write tool — the action enum keeps
+    # the catalog from growing six near-identical entries.
+    "x_read": _obj(
+        {
+            "action": _str(
+                "home (your feed), user (someone's posts), search, mentions "
+                "(people talking to you), or tweet (one post by id/URL)",
+                enum=["home", "user", "search", "mentions", "tweet"],
+            ),
+            "handle": _str("Account for action=user, with or without the @"),
+            "query": _str(
+                "Search text for action=search. X operators work: from:nasa, "
+                "-filter:replies, min_faves:100, lang:en"
+            ),
+            "tweet_id": _str("Post id or full x.com URL, for action=tweet"),
+            "limit": _int("How many posts (default 15, max 50)"),
+        },
+        ["action"],
+    ),
+    "x_post": _obj(
+        {
+            "action": _str(
+                "post (new), reply, quote, delete, like, or repost",
+                enum=["post", "reply", "quote", "delete", "like", "repost"],
+            ),
+            "text": _str("The post itself, for post/reply/quote"),
+            "reply_to": _str("Post id or URL being replied to"),
+            "quote": _str("Post id or URL being quoted"),
+            "tweet_id": _str("Post id or URL for delete/like/repost"),
+        },
+        ["action"],
+    ),
 }
 
 
@@ -707,6 +739,10 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "email_read_inbox",
         "email_get_message",
         "email_search",
+        "x_read",
+        # x_post gets a turn back so he can say what he posted (and see the
+        # link) instead of describing a post he has not confirmed landed.
+        "x_post",
         "inbox_list",
         "inbox_act",
         "join_vc",

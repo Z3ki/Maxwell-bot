@@ -213,3 +213,49 @@ class TestImapArgumentSanitizers:
         assert _imap_safe_text_query('foo" BAR') is None
         assert _imap_safe_text_query("foo\r\n") is None
         assert _imap_safe_text_query("invoice") == "invoice"
+
+
+class TestTaintBookkeeping:
+    """The taint set is consulted for one turn and kept forever.
+
+    Nothing ever removed an id — `clear_message_taint` clears the *incoming*
+    message, which was never in there — so a process left running for months
+    grew one entry per tainted turn and never gave any of it back.
+    """
+
+    @staticmethod
+    def _bot():
+        from types import SimpleNamespace
+
+        from bot import MaxwellBot
+
+        bot = SimpleNamespace(_tainted_messages={})
+        bot.mark_message_tainted = lambda m: MaxwellBot.mark_message_tainted(bot, m)
+        bot.is_message_tainted = lambda m: MaxwellBot.is_message_tainted(bot, m)
+        bot.clear_message_taint = lambda m: MaxwellBot.clear_message_taint(bot, m)
+        return bot
+
+    @staticmethod
+    def _message(mid):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(id=mid)
+
+    def test_a_marked_message_reads_as_tainted(self):
+        bot = self._bot()
+        message = self._message("1")
+        assert bot.is_message_tainted(message) is False
+        bot.mark_message_tainted(message)
+        assert bot.is_message_tainted(message) is True
+        bot.clear_message_taint(message)
+        assert bot.is_message_tainted(message) is False
+
+    def test_the_set_is_bounded(self):
+        from bot import _MAX_TAINTED_MESSAGES
+
+        bot = self._bot()
+        for i in range(_MAX_TAINTED_MESSAGES * 3):
+            bot.mark_message_tainted(self._message(str(i)))
+        assert len(bot._tainted_messages) <= _MAX_TAINTED_MESSAGES
+        # The newest turn is the one that still matters.
+        assert bot.is_message_tainted(self._message(str(_MAX_TAINTED_MESSAGES * 3 - 1)))

@@ -50,12 +50,15 @@ KIND_PRIORITY = {
     "friend_request": 0,
     "group_dm": 1,
     "email": 2,
+    # An @ on X is someone talking to him in public, which is more like mail
+    # than like a friend request: worth telling, not waiting on an answer.
+    "x_mention": 3,
 }
-KIND_PRIORITY_DEFAULT = 3
+KIND_PRIORITY_DEFAULT = 4
 
 # One noisy source must not push the others out of the tail. Mail arrives in
 # bursts; friend requests do not.
-KIND_RENDER_CAP = {"email": 6}
+KIND_RENDER_CAP = {"email": 6, "x_mention": 5}
 KIND_RENDER_CAP_DEFAULT = 12
 
 try:
@@ -179,7 +182,13 @@ class InboxStore:
         payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
         actor = str(item.get("actor_name") or "?")
         aid = str(item.get("actor_id") or "")
-        if kind == "email":
+        if kind == "x_mention":
+            # actor_id is the handle; the summary already reads as a sentence.
+            body = summary or f"@{aid}"
+            url = str(payload.get("url") or "")
+            if url:
+                body += f" — {url}"
+        elif kind == "email":
             # actor_name/actor_id are the sender's display name and address.
             who = f"{actor} <{aid}>" if aid else actor
             subject = str(payload.get("subject") or "").strip() or "(no subject)"

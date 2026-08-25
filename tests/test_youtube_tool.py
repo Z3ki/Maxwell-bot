@@ -1,5 +1,4 @@
 import asyncio
-import json
 
 from bot_tools import YouTubeTool
 

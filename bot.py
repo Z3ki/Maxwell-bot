@@ -280,6 +280,8 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     VcWhereTool,
     WaitTool,
     WebSearchTool,
+    XPostTool,
+    XReadTool,
     YouTubeTool,
     forget_shell_progress,
     _IMAGE_FETCH_UA,
@@ -309,6 +311,7 @@ from control_defaults import (  # noqa: E402
 )
 import guild_onboarding  # noqa: E402
 from email_inbox import EmailInboxPoller  # noqa: E402
+from x_client import XClient, XMentionPoller  # noqa: E402
 from inbox import (  # noqa: E402
     InboxStore,
     apply_inbox_action,
@@ -412,6 +415,10 @@ _CONFIRM_TTL_SECONDS = 120.0
 # Ceiling on remembered per-room watch state. Eviction costs a room one
 # default-length watch window and nothing else.
 _MAX_WATCH_STATES = 300
+# Message ids remembered as "read untrusted content this turn". One turn's
+# worth is all that is ever consulted; the cap only stops the dict growing
+# for the life of the process.
+_MAX_TAINTED_MESSAGES = 512
 
 # Every one of these is keyed by channel or user and written on the hot path.
 # None of them had an eviction rule, so each was a slow leak proportional to
@@ -2137,6 +2144,10 @@ TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "email_read_inbox",
     "email_get_message",
     "email_search",
+    # X is a different network entirely — nothing about it is Discord-shaped,
+    # so both tools work unchanged on Telegram.
+    "x_read",
+    "x_post",
     "inbox_list",
     "inbox_act",
 }
@@ -2666,7 +2677,10 @@ class MaxwellBot(commands.Bot):
         # message so it's strictly per-turn: a clean follow-up resets the flag.
         # `message_id -> bool` lets us be precise when multiple replies are
         # in flight on different channels.
-        self._tainted_messages: set[str] = set()
+        # message id -> when it was tainted. Bounded: nothing ever removed an
+        # id (a turn clears its own message, which was never in here), so a
+        # process that ran for months grew one entry per tainted turn forever.
+        self._tainted_messages: dict[str, float] = {}
         # Out-of-band user confirmation for destructive tools on tainted turns.
         # author_id -> monotonic timestamp of the last `,confirm`. Consumed
         # (one-shot) by the destructive-tool gate in _execute_tool_by_name, and
@@ -3302,6 +3316,47 @@ class MaxwellBot(commands.Bot):
                 interval=self._mail_poll_seconds(),
             )
 
+        # X (Twitter). The client is cheap to build and needs no credentials
+        # for the read half, so it exists whenever ENABLE_X is on; what it can
+        # actually do is decided per call by which backends are configured.
+        self.x_client: XClient | None = None
+        self.x_mention_poller: XMentionPoller | None = None
+        if getattr(self.config, "ENABLE_X", False):
+            self.x_client = XClient(
+                {
+                    "backend": getattr(self.config, "X_BACKEND", "auto"),
+                    "auth_token": getattr(self.config, "X_AUTH_TOKEN", ""),
+                    "ct0": getattr(self.config, "X_CT0", ""),
+                    "handle": getattr(self.config, "X_HANDLE", ""),
+                    "api_base_url": getattr(self.config, "X_API_BASE_URL", ""),
+                    "api_key": getattr(self.config, "X_API_KEY", ""),
+                    "api_key_header": getattr(
+                        self.config, "X_API_KEY_HEADER", "Authorization"
+                    ),
+                    "api_paths": getattr(self.config, "X_API_PATHS", {}),
+                    "rss_base_url": getattr(self.config, "X_RSS_BASE_URL", ""),
+                    "rss_paths": getattr(self.config, "X_RSS_PATHS", {}),
+                    "syndication_enabled": getattr(self.config, "X_SYNDICATION", True),
+                    "max_chars": getattr(self.config, "X_MAX_CHARS", 280),
+                    "timeout": getattr(self.config, "X_TIMEOUT_SECONDS", 20),
+                    "graphql_file": getattr(self.config, "X_GRAPHQL_FILE", ""),
+                    # Runtime knobs; _load_control re-applies them live.
+                    "post_enabled": True,
+                    "posts_per_hour": 8,
+                    "cache_seconds": 60,
+                },
+                data_dir=self.config.DATA_DIR,
+            )
+            # Mentions are the half of X somebody is waiting on, so they file
+            # as inbox notices like mail does. Public reads cannot see them —
+            # the poller stays idle without a session and says so once.
+            self.x_mention_poller = XMentionPoller(
+                self.inbox,
+                self.x_client,
+                data_dir=self.config.DATA_DIR,
+                interval=self._x_poll_seconds(),
+            )
+
     def _setup_tools(self):
         # Every tool is gated by an ENABLE_* env var so a fresh install
         # can opt out of paid APIs (NVIDIA, Mailgun) or heavy deps
@@ -3405,6 +3460,13 @@ class MaxwellBot(commands.Bot):
             self.tools["email_read_inbox"] = EmailReadInboxTool(self)
             self.tools["email_get_message"] = EmailGetMessageTool(self)
             self.tools["email_search"] = EmailSearchTool(self)
+
+        # X (Twitter). x_read works with no credentials at all; x_post says
+        # what is missing when there is no session to post with, so both are
+        # registered together under one switch.
+        if getattr(self.config, "ENABLE_X", False) and self.x_client is not None:
+            self.tools["x_read"] = XReadTool(self)
+            self.tools["x_post"] = XPostTool(self)
 
         # Log what we did and didn't register so misconfigurations surface
         # in pm2 logs at startup instead of at first call.
@@ -3970,6 +4032,38 @@ class MaxwellBot(commands.Bot):
         if poller is None:
             return
         await poller.run()
+
+    def _x_poll_seconds(self) -> float:
+        raw = (getattr(self, "_control", None) or {}).get("x_mention_poll_seconds", 300)
+        try:
+            # Floor of 60s: a mention is a conversation, not an alarm, and
+            # the free backends have small rate-limit budgets.
+            return max(60.0, min(float(raw), 3600.0))
+        except (TypeError, ValueError):
+            return 300.0
+
+    async def _x_mention_poll_loop(self) -> None:
+        poller = getattr(self, "x_mention_poller", None)
+        if poller is None:
+            return
+        await poller.run()
+
+    def _apply_x_control(self, control: dict) -> None:
+        """Push the dashboard's X knobs into the live client and poller.
+
+        Read on every control reload rather than at startup so turning
+        posting off actually turns it off now, mid-conversation, without a
+        restart — that is the whole point of having the switch.
+        """
+        client = getattr(self, "x_client", None)
+        if client is not None:
+            client.post_enabled = parse_bool(control.get("x_post_enabled", True), True)
+            client.budget.per_hour = int(control.get("x_posts_per_hour", 8) or 0)
+            client.cache_seconds = float(control.get("x_cache_seconds", 60) or 0)
+        poller = getattr(self, "x_mention_poller", None)
+        if poller is not None:
+            poller.interval = float(control.get("x_mention_poll_seconds", 300))
+            poller.max_backoff = max(poller.interval, poller.max_backoff)
 
     def _conversation_watch_seconds(self) -> float:
         raw = (getattr(self, "_control", None) or {}).get(
@@ -4544,6 +4638,17 @@ class MaxwellBot(commands.Bot):
             logger.info(
                 "Mail inbox poll scheduled every %.0fs", self.mail_poller.interval
             )
+        if self.x_mention_poller is not None and self.x_mention_poller.configured():
+            self._tasks.append(
+                asyncio.create_task(self._x_mention_poll_loop(), name="x-mention-poll")
+            )
+            logger.info(
+                "X mention poll scheduled every %.0fs (@%s)",
+                self.x_mention_poller.interval,
+                getattr(self.config, "X_HANDLE", "") or "?",
+            )
+        elif self.x_client is not None:
+            logger.info("X ready — %s", self.x_client.status())
         # ENABLE_AUTONOMY was defined in config.py, listed in the feature
         # report, and documented in the README as the switch for this engine —
         # and nothing read it, so setting it to false started the loop anyway.
@@ -6191,6 +6296,7 @@ class MaxwellBot(commands.Bot):
             "neg",
             "summarize",
             "solo",
+            "x",
         }
         if cmd in admin_commands and not self._is_admin(message.author.id):
             await message.channel.send("not authorized")
@@ -6538,6 +6644,7 @@ class MaxwellBot(commands.Bot):
                     "` ,rem ...` - manage/run REM (admin)\n"
                     "` ,autonomy ...` - manage autonomy engine + channel/server blacklists (admin)\n"
                     "` ,vc ...` - voice commands\n"
+                    "` ,x [status|read <handle>|post <text>|budget]` - X/Twitter (admin)\n"
                     "` ,drug [minutes|off|status]` - drug mode timer\n"
                     "` ,solo [#channel|off|status]` - lock this server to ONE channel: silence everywhere else and stop autonomy here (admin)\n"
                     "` ,jailbreak on|off|status` - toggle freedom-mode prompt for this server (admin)\n"
@@ -6549,6 +6656,8 @@ class MaxwellBot(commands.Bot):
                     "` ,confirm` - authorize one destructive tool call on a tainted turn\n"
                     "` ,blacklist [@user|clear]` / `,unblacklist @user` - blacklist controls (admin)\n"
                 )
+            elif cmd == "x":
+                await self._handle_x_command(message, args)
             elif cmd == "vc":
                 await self._handle_vc_command(message, args)
             elif cmd in ("shell",):
@@ -6756,6 +6865,65 @@ class MaxwellBot(commands.Bot):
             Path(self.config.DATA_DIR) / "bot_control.json",
             control,
         )
+
+    async def _handle_x_command(self, message, args: str | None) -> None:
+        """`,x` — see what X can do here, read a timeline, or post by hand.
+
+        Deliberately thin: it exists so an operator can tell "the cookies
+        expired" from "the model chose not to post" without reading logs.
+        """
+        client = getattr(self, "x_client", None)
+        if client is None:
+            await message.channel.send(
+                "X is off (ENABLE_X=false). Set it to true in .env and restart."
+            )
+            return
+        from x_client import XError, render_tweets
+
+        parts = (args or "status").strip().split(None, 1)
+        sub = parts[0].lower() if parts else "status"
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        try:
+            if sub in {"status", ""}:
+                budget = await client.budget.check()
+                await message.channel.send(
+                    f"X: {client.status()}\n"
+                    + (f"budget: {budget}" if budget else "budget: room to post")
+                )
+            elif sub == "budget":
+                blocked = await client.budget.check()
+                await message.channel.send(blocked or "X budget: room to post")
+            elif sub in {"read", "user", "search", "tweet", "home", "mentions"}:
+                # `,x read` is the home timeline; `,x read @someone` is theirs.
+                action = sub
+                if sub == "read":
+                    action = "user" if rest else "home"
+                tweets = await client.read(
+                    action,
+                    handle=rest if action == "user" else None,
+                    query=rest if action == "search" else None,
+                    tweet_id=rest if action == "tweet" else None,
+                    limit=5,
+                )
+                text = render_tweets(tweets, header=f"X — {action} {rest}".strip())
+                await message.channel.send(text[:1900])
+            elif sub == "post":
+                if not rest:
+                    await message.channel.send("usage: `,x post <text>`")
+                    return
+                result = await client.post(rest)
+                await message.channel.send(
+                    f"posted: {result.get('url') or result.get('id')}"
+                )
+            else:
+                await message.channel.send(
+                    "usage: `,x status` | `,x read [@handle]` | `,x search <q>` "
+                    "| `,x tweet <id|url>` | `,x post <text>` | `,x budget`"
+                )
+        except XError as e:
+            await message.channel.send(f"X error: {e}"[:1900])
+        except Exception as e:  # pragma: no cover - defensive
+            await message.channel.send(f"X failed: {type(e).__name__}: {e}"[:1900])
 
     async def _handle_vc_command(self, message, args: str | None):
         if not getattr(self.config, "ENABLE_VC", True):
@@ -8039,7 +8207,15 @@ class MaxwellBot(commands.Bot):
                     raise CaptchaSolveError("human captcha server not started")
                 # LLM explanation DM in the background — never blocks the solve.
                 with contextlib.suppress(Exception):
-                    asyncio.create_task(self._explain_captcha_dm(url, exception))
+                    # Tracked: a bare create_task can be garbage-collected
+                    # mid-flight, which is how a fire-and-forget DM silently
+                    # never arrives.
+                    self._track_task(
+                        asyncio.create_task(
+                            self._explain_captcha_dm(url, exception),
+                            name="captcha-explain-dm",
+                        )
+                    )
                 return await srv.wait_for_token(url)
             except CaptchaSolveError as e:
                 logger.error("human captcha solve failed: %s", e)
@@ -8790,10 +8966,21 @@ class MaxwellBot(commands.Bot):
                     3600,
                 ),
             )
+            control["x_posts_per_hour"] = max(
+                0, min(_safe_int(control.get("x_posts_per_hour", 8), 8), 100)
+            )
+            control["x_cache_seconds"] = max(
+                0, min(_safe_int(control.get("x_cache_seconds", 60), 60), 3600)
+            )
+            control["x_mention_poll_seconds"] = max(
+                60,
+                min(_safe_int(control.get("x_mention_poll_seconds", 300), 300), 3600),
+            )
             if control["ai_concurrency"] != self._ai_concurrency:
                 self._ai_concurrency = control["ai_concurrency"]
                 self._notify_ai_waiters()
             self._control = control
+            self._apply_x_control(control)
             poller = getattr(self, "mail_poller", None)
             if poller is not None:
                 # Takes effect on the next tick; the loop reads backoff_seconds
@@ -13736,15 +13923,21 @@ class MaxwellBot(commands.Bot):
         if message is None:
             return
         mid = str(getattr(message, "id", "") or "")
-        if mid:
-            self._tainted_messages.add(mid)
+        if not mid:
+            return
+        self._tainted_messages[mid] = time.time()
+        if len(self._tainted_messages) > _MAX_TAINTED_MESSAGES:
+            # Taint only matters for the length of one turn, so the oldest
+            # half is dead weight by definition. dicts keep insertion order.
+            for stale in list(self._tainted_messages)[: _MAX_TAINTED_MESSAGES // 2]:
+                self._tainted_messages.pop(stale, None)
 
     def clear_message_taint(self, message) -> None:
         """Drop the taint flag for a message (e.g. when a fresh user turn starts)."""
         if message is None:
             return
         mid = str(getattr(message, "id", "") or "")
-        self._tainted_messages.discard(mid)
+        self._tainted_messages.pop(mid, None)
 
     def is_message_tainted(self, message) -> bool:
         """True if the current turn has read content from an untrusted source."""
@@ -13811,6 +14004,9 @@ class MaxwellBot(commands.Bot):
         r"sleep|nap|wake|"
         r"remember|forget|memory|personality|prompt|"
         r"agent|subagent|sub-agent|"
+        # X/Twitter. "post" and "share" above already catch most of it; these
+        # catch "what's on twitter", "check my mentions", a pasted x.com link.
+        r"twitter|tweet|tweets|tweeted|retweet|xitter|x\.com|timeline|mentions|"
         r"tool|tools"
         r")\b"
     )
@@ -16319,6 +16515,14 @@ async def main():
                 await xp.close()
         except Exception as e:
             logger.error(f"Failed to close aux provider: {e}")
+        # The X client owns its own aiohttp session (it is deliberately
+        # importable without discord, so it cannot share the bot's).
+        try:
+            xc = getattr(bot, "x_client", None)
+            if xc is not None:
+                await xc.aclose()
+        except Exception as e:
+            logger.error(f"Failed to close X client: {e}")
         try:
             await close_shared_session()
         except Exception as e:

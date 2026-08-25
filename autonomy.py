@@ -1256,6 +1256,12 @@ class AutonomyEngine:
         if name in AUTONOMY_DISABLED_TOOLS:
             return False
         control = getattr(self.bot, "_control", None) or {}
+        if name == "x_post" and not control.get("x_autonomy_post", False):
+            # Reading X unattended is research; posting to a public timeline
+            # unattended is a different decision, and it gets its own switch
+            # rather than riding on x_post_enabled (which is about whether he
+            # can post at all, including when someone asked him to).
+            return False
         if not control.get("tools_enabled", True):
             return False
         return name not in set(control.get("disabled_tools", []) or [])

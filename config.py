@@ -75,6 +75,26 @@ def _bool_env(name: str, default: bool) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _json_env(name: str) -> dict:
+    """A JSON object out of an env var, or {} — a typo never stops startup.
+
+    Used for the small override maps (X path templates). A malformed value
+    is worth a log line at first use, not a crash on import, so it degrades
+    to "no overrides".
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return {}
+    try:
+        import json
+
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        print(f"warning: {name} is not valid JSON — ignoring it", file=sys.stderr)
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def _first_env(*names: str, default: str = "") -> str:
     """First non-empty value among ``names`` (aliases), else ``default``."""
     for name in names:
@@ -271,6 +291,16 @@ class Config:
         on_text="auto: MAXWELL_EMAIL_PASSWORD is set",
         off_text="auto: off, no MAXWELL_EMAIL_PASSWORD",
     )
+
+    # X (Twitter). Reading is free and needs no account at all — X's own
+    # embed backend and any Nitter/RSSHub instance serve public profiles,
+    # posts and searches — so `auto` is on. Posting needs the session
+    # cookies below; without them the read half still works and x_post says
+    # what is missing.
+    # No detector: there is no dependency to find. Public reads need no
+    # credentials at all, so `auto` means on and posting simply stays
+    # unavailable until X_AUTH_TOKEN/X_CT0 are set.
+    ENABLE_X = _feature_env("ENABLE_X")
 
     # Host access. Kept on by default for parity with older installs, but
     # this is THE security-relevant switch: `shell` runs commands as the bot
@@ -492,6 +522,28 @@ class Config:
     # MAILER-DAEMON bounce means something he sent did not arrive, and a
     # heuristic cannot tell those apart. The mail itself is untouched — it
     # stays on the server and the email_* tools still read it.
+    # -------------------------------------------------------------------------
+    # X (Twitter). Two cookies out of a logged-in browser tab are the whole
+    # of the write credential; everything else has a working default.
+    # X_BACKEND pins the backend order ("cookies", "api", "rss",
+    # "syndication", or a comma-separated subset); auto tries them in that
+    # order and takes the first that answers.
+    # -------------------------------------------------------------------------
+    X_BACKEND = os.getenv("X_BACKEND", "auto").strip() or "auto"
+    X_AUTH_TOKEN = os.getenv("X_AUTH_TOKEN", "").strip()
+    X_CT0 = os.getenv("X_CT0", "").strip()
+    X_HANDLE = os.getenv("X_HANDLE", "").strip().lstrip("@")
+    X_API_BASE_URL = os.getenv("X_API_BASE_URL", "").strip().rstrip("/")
+    X_API_KEY = os.getenv("X_API_KEY", "").strip()
+    X_API_KEY_HEADER = os.getenv("X_API_KEY_HEADER", "Authorization").strip()
+    X_API_PATHS = _json_env("X_API_PATHS")
+    X_RSS_BASE_URL = os.getenv("X_RSS_BASE_URL", "").strip().rstrip("/")
+    X_RSS_PATHS = _json_env("X_RSS_PATHS")
+    X_SYNDICATION = _bool_env("X_SYNDICATION", True)
+    X_MAX_CHARS = _int_env("X_MAX_CHARS", 280, min_value=1, max_value=25000)
+    X_TIMEOUT_SECONDS = _int_env("X_TIMEOUT_SECONDS", 20, min_value=5, max_value=120)
+    X_GRAPHQL_FILE = os.getenv("X_GRAPHQL_FILE", "").strip()
+
     MAXWELL_EMAIL_IGNORE_SENDERS = os.getenv(
         "MAXWELL_EMAIL_IGNORE_SENDERS", ""
     ).strip()
@@ -547,6 +599,7 @@ class Config:
         ("ENABLE_CREATE_SITE", "site generation"),
         ("ENABLE_AVATAR", "avatar changes"),
         ("ENABLE_EMAIL_TOOLS", "email tools"),
+        ("ENABLE_X", "X (Twitter)"),
         ("ENABLE_SHELL", "shell (docker sandbox)"),
         ("ENABLE_SUBAGENT", "native sub-agent"),
         ("ENABLE_RAG", "RAG vector memory"),

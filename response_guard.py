@@ -6,7 +6,66 @@ from collections import Counter
 from typing import Iterable
 
 _CODE_FENCE = re.compile(r"(```[\s\S]*?```|~~~[\s\S]*?~~~)")
-_WORD = r"[\w\u00C0-\u024F]+(?:['’][\w\u00C0-\u024F]+)?"
+_WORD = r"[\w\u00C0-\u024F]+(?:['\u2019][\w\u00C0-\u024F]+)?"
+_WORD_RE = re.compile(_WORD)
+_SEPARATORS = r"(?:\s+|[ \t]*[,;:\u2014-][ \t]*|[ \t]*\n[ \t]*)"
+_TERMINATORS = ".!?\u2026"
+# Sentence boundaries are found by scanning for the terminators themselves.
+# A "[^.!?]*[.!?]" chunk pattern reads better and is a trap: on a stretch of
+# prose that never reaches a full stop it rescans from every position, which
+# is O(n**2) — 3.8s on one 19KB message.
+_TERMINATOR_RE = re.compile(rf"[{re.escape(_TERMINATORS)}]")
+
+
+def _is_plain_sentence(body: str) -> bool:
+    """A run of words and single spaces ending in terminal punctuation.
+
+    Deliberately narrow, and the same shape the old regex recognized: no
+    commas, no newlines, no list bullets. "- Item." twice in a list is a list,
+    not a stutter.
+    """
+    if len(body) < 2 or body[-1] not in _TERMINATORS:
+        return False
+    core = body[:-1]
+    if not any(ch.isalnum() for ch in core):
+        return False
+    return all(ch.isalnum() or ch in "_ \t'\u2019" for ch in core)
+
+
+def _collapse_repeated_sentences(text: str) -> str:
+    r""""This works. This works." -> "This works."
+
+    This used to be one regex with a backreference over an unbounded
+    `word(\s+word)*` run, which backtracks catastrophically on any long
+    stretch of prose that never reaches a full stop: ~4s on an 8KB message,
+    burned in the event loop, on every single reply. Same rule, one linear
+    pass, no backtracking.
+    """
+    if not text:
+        return text
+    kept: list[str] = []
+    previous = ""
+    end = 0
+    for match in _TERMINATOR_RE.finditer(text):
+        chunk = text[end : match.end()]
+        end = match.end()
+        body = chunk.strip()
+        if previous and body.casefold() == previous and _is_plain_sentence(body):
+            # Drop the repeat AND the whitespace that led to it, exactly as
+            # the old pattern's `\s*` did.
+            continue
+        kept.append(chunk)
+        previous = body.casefold() if _is_plain_sentence(body) else ""
+    kept.append(text[end:])
+    return "".join(kept)
+
+
+def _has_adjacent_repeat(words: list[str], size: int) -> bool:
+    """True when some run of `size` words is immediately followed by itself."""
+    for i in range(len(words) - 2 * size + 1):
+        if words[i : i + size] == words[i + size : i + 2 * size]:
+            return True
+    return False
 
 
 def _scrub_prose(text: str, *, max_ngram: int = 12) -> str:
@@ -39,23 +98,25 @@ def _scrub_prose(text: str, *, max_ngram: int = 12) -> str:
     text = re.sub(r"([^\s\w])\1{3,}", r"\1\1\1", text)
     # Duplicate adjacent word ("y y" / "de de") -> one.
     text = re.sub(rf"(?i)\b({_WORD})\s+\1\b", r"\1", text)
-    # Repeated sentence ("This. This.") -> one. A sentence is words ending in
-    # terminal punctuation; dedup adjacent identical sentences.
-    sent = rf"{_WORD}(?:[ \t]+{_WORD})*"
-    text = re.sub(
-        rf"(?i)(?P<sent>{sent}[\.!?…])\s*(?P=sent)(?:\s*(?P=sent))*",
-        r"\g<sent>",
-        text,
-    )
+    # Repeated sentence ("This. This.") -> one.
+    text = _collapse_repeated_sentences(text)
     # Repeated n-gram phrase (2+ occurrences of the same n words joined by
     # whitespace/comma/semicolon) -> one occurrence. Run longest first so a long
     # repeated phrase collapses before its sub-phrases are re-matched. Terminal
     # punctuation is intentionally NOT a separator here (the sentence rule above
     # owns that case, and mixing '.' into this loop breaks the backreference).
-    separators = r"(?:\s+|[ \t]*[,;:—-][ \t]*|[ \t]*\n[ \t]*)"
+    words = _WORD_RE.findall(text.lower())
     for size in range(max_ngram, 1, -1):
-        unit = rf"(?:{_WORD}{separators}){{{size-1}}}{_WORD}"
-        pattern = re.compile(rf"(?i)(?P<unit>{unit})(?:{separators}(?P=unit))+")
+        # The regex below is the expensive part of this whole module, and on
+        # ordinary prose it finds nothing. Ask a linear question first — does
+        # any run of `size` words repeat back to back at all? — and only pay
+        # for the regex when the answer is yes. The check is a necessary
+        # condition for the pattern to match, so nothing that used to be
+        # collapsed stops being collapsed.
+        if not _has_adjacent_repeat(words, size):
+            continue
+        unit = rf"(?:{_WORD}{_SEPARATORS}){{{size-1}}}{_WORD}"
+        pattern = re.compile(rf"(?i)(?P<unit>{unit})(?:{_SEPARATORS}(?P=unit))+")
         text = pattern.sub(lambda m: m.group("unit"), text)
     # Collapse 3+ blank lines to 2, but never inside code (caller splits).
     text = re.sub(r"\n{3,}", "\n\n", text)
@@ -98,7 +159,16 @@ def repetition_ratio(text: str, n: int = 3) -> float:
 
 
 def break_echo_loop(text: str, *, threshold: float = .55) -> str:
-    """Truncate at a repeated n-gram boundary, preserving a useful prefix."""
+    """Truncate at a repeated n-gram boundary, preserving a useful prefix.
+
+    Fenced code is left alone entirely. Repetition is what an echo loop looks
+    like, but it is also what a table, a list of assertions or a block of
+    JSON looks like, and truncating one of those mid-fence corrupts the code
+    AND leaves the fence unterminated. `scrub_repetitions` has always skipped
+    fences; this ran after it over the whole reply and undid that, so a code
+    block with a dozen similar lines came out cut to its first two.
+    """
+    if _CODE_FENCE.search(text): return text
     if repetition_ratio(text) < threshold: return text
     words = text.split(); seen: Counter[tuple[str, ...]] = Counter()
     for i in range(len(words)-2):

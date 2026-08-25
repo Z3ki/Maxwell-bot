@@ -1409,6 +1409,17 @@
           ],
         },
         {
+          title: "X (Twitter)",
+          note: "Reading X is always on when ENABLE_X is set — it needs no account. These govern the half that talks back.",
+          fields: [
+            { k: "x_post_enabled", t: "bool", hint: "master switch for every write (post, reply, like, repost, delete)" },
+            { k: "x_posts_per_hour", t: "int", min: 0, max: 100, hint: "hard hourly ceiling, survives a restart; 0 = never post" },
+            { k: "x_autonomy_post", t: "bool", hint: "let the unattended autonomy tick post, not just answer people" },
+            { k: "x_cache_seconds", t: "int", min: 0, max: 3600, hint: "reuse identical reads for this long" },
+            { k: "x_mention_poll_seconds", t: "int", min: 60, max: 3600, hint: "how often mentions become inbox notices" },
+          ],
+        },
+        {
           title: "Layered Memory & Extraction",
           fields: [
             { k: "store_memory", t: "bool" },

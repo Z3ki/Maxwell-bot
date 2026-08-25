@@ -45,6 +45,8 @@ def test_defaults_are_their_own_fixed_point():
         "max_tool_iterations",
         "tool_history_messages",
         "memory_history_messages",
+        "x_posts_per_hour",  # 0 = never post to X
+        "x_cache_seconds",  # 0 = never reuse a read
     ],
 )
 def test_zero_is_honored_not_treated_as_unset(key):

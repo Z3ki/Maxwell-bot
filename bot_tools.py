@@ -6272,6 +6272,25 @@ async def _ensure_sandbox_image(image: str = SANDBOX_IMAGE_NAME) -> None:
         )
 
 
+def _taint_gate_blocks(tool: Any, message: Any, kwargs: dict) -> bool:
+    """True when a destructive call must be refused on an untrusted turn.
+
+    bot.py's dispatcher is the primary enforcement point and injects
+    ``_confirmed`` when the user has actually confirmed. Tools keep their own
+    check because that dispatcher is not the only caller — the autonomy tick
+    invokes ``tool.execute`` directly — but the two must agree on
+    ``DISABLE_TAINT_GATE``, or turning the gate off in .env leaves the
+    per-tool copy refusing anyway and the switch reads as broken.
+    """
+    bot = getattr(tool, "bot", None)
+    if bot is None or kwargs.get("_confirmed", False):
+        return False
+    if getattr(getattr(bot, "config", None), "DISABLE_TAINT_GATE", False):
+        return False
+    checker = getattr(bot, "is_message_tainted", None)
+    return bool(checker and checker(message))
+
+
 class ShellTool(Tool):
     """Execute shell commands in the dedicated Docker sandbox."""
 
@@ -6811,12 +6830,7 @@ class ShellTool(Tool):
         # prompt-injection payloads), require an explicit confirm flag on the
         # call. Without this, a malicious page can say "run `rm -rf ~`" and
         # the model can comply even with the blocklist in place.
-        tainted = bool(
-            self.bot is not None
-            and getattr(self.bot, "is_message_tainted", None)
-            and self.bot.is_message_tainted(message)
-        )
-        if tainted and not kwargs.get("_confirmed", False):
+        if _taint_gate_blocks(self, message, kwargs):
             preview = normalized[:200] + ("..." if len(normalized) > 200 else "")
             return (
                 "Error: shell refused: this turn read content from a fetched "
@@ -10425,12 +10439,7 @@ class EmailSendTool(Tool):
         # Indirect-prompt-injection gate. If this turn was tainted by a
         # fetched URL or web search result, refuse without an explicit user
         # confirmation. Same pattern as shell/sub_agent.
-        tainted = bool(
-            self.bot is not None
-            and getattr(self.bot, "is_message_tainted", None)
-            and self.bot.is_message_tainted(message)
-        )
-        if tainted and not kwargs.get("_confirmed", False):
+        if _taint_gate_blocks(self, message, kwargs):
             preview = str(body)[:200] + ("..." if len(str(body)) > 200 else "")
             return (
                 "Error: email_send refused: this turn read content from a "
@@ -10607,6 +10616,186 @@ class EmailSearchTool(Tool):
         if self.bot is not None:
             self.bot.mark_message_tainted(message)
         return result
+
+
+# ---------------------------------------------------------------------------
+# X (Twitter). Reading is free and needs no account; posting uses the
+# session cookies of a browser logged in as him. Both live in x_client.py —
+# these two tools are the model-facing surface and nothing more.
+# ---------------------------------------------------------------------------
+
+
+def _x_client(bot):
+    """The bot's live XClient, or None when the feature is off."""
+    return getattr(bot, "x_client", None)
+
+
+def _x_unavailable() -> str:
+    return (
+        "Error: X is not available on this install (ENABLE_X=false, or "
+        "x_client failed to start). Check `python3 doctor.py`."
+    )
+
+
+class XReadTool(Tool):
+    """Read X: a timeline, a search, an account, or one post."""
+
+    def get_description(self) -> str:
+        return (
+            "Read X/Twitter. Params: action (home, user, search, mentions, "
+            "tweet), handle (for action=user), query (for action=search — X "
+            "search operators work: 'from:nasa', '-filter:replies', "
+            "'min_faves:100'), tweet_id or a post URL (for action=tweet), "
+            "limit (default 15, max 50). home and mentions need the logged-in "
+            "session; user, search and tweet work without one. Returns the "
+            "posts with their ids, so you can reply to or quote one with "
+            "x_post."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        action: str = "home",
+        handle: str | None = None,
+        query: str | None = None,
+        tweet_id: str | None = None,
+        limit: str | int = 15,
+        **kwargs,
+    ) -> str:
+        client = _x_client(self.bot)
+        if client is None:
+            return _x_unavailable()
+        from x_client import XError, render_tweets
+
+        act = str(action or "home").strip().lower()
+        # The model reaches for the verb it means rather than the enum, and a
+        # rejected call costs a whole turn. Map the obvious synonyms instead.
+        act = {
+            "timeline": "home",
+            "feed": "home",
+            "profile": "user",
+            "account": "user",
+            "mention": "mentions",
+            "notifications": "mentions",
+            "status": "tweet",
+            "post": "tweet",
+            "get": "tweet",
+        }.get(act, act)
+        # A handle in the query slot and a query in the handle slot are both
+        # common; so is passing a URL as the handle.
+        if act == "user" and not handle and query:
+            handle = query
+        if act == "search" and not query and handle:
+            query = handle
+        if act == "tweet" and not tweet_id and (query or handle):
+            tweet_id = query or handle
+        try:
+            count = max(1, min(int(limit), 50))
+        except (TypeError, ValueError):
+            count = 15
+
+        try:
+            tweets = await client.read(
+                act, handle=handle, query=query, tweet_id=tweet_id, limit=count
+            )
+        except XError as e:
+            return f"Error: {e}"
+        except Exception as e:  # pragma: no cover - defensive
+            return f"Error: X read failed: {type(e).__name__}: {e}"
+
+        header = {
+            "home": "X — home timeline",
+            "user": f"X — @{str(handle or '').lstrip('@')}",
+            "search": f"X — search: {query}",
+            "mentions": "X — mentions of you",
+            "tweet": "X — one post",
+        }.get(act, "X")
+        # Same posture as fetch_url/web_search: this is arbitrary text written
+        # by strangers, so the turn is tainted and destructive tools need an
+        # out-of-band confirm before they run.
+        if self.bot is not None:
+            self.bot.mark_message_tainted(message)
+        return render_tweets(tweets, header=f"{header} ({len(tweets)}):")
+
+
+class XPostTool(Tool):
+    """Post, reply, quote, delete, like, or repost on X."""
+
+    # A public post is the least reversible thing he can do with a tool, and
+    # the obvious target of anything injected through a fetched page. On a
+    # tainted turn the user confirms first.
+    is_destructive: bool = True
+
+    def get_description(self) -> str:
+        return (
+            "Post on X/Twitter as yourself. Params: action (post, reply, "
+            "quote, delete, like, repost — default post), text (the post; "
+            "required for post/reply/quote), reply_to or tweet_id (the post "
+            "id or URL you are answering/quoting/liking/deleting). Posts are "
+            "public and permanent-ish: say something worth saying. There is "
+            "an hourly budget, so do not narrate every thought."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        action: str = "post",
+        text: str | None = None,
+        reply_to: str | None = None,
+        quote: str | None = None,
+        tweet_id: str | None = None,
+        **kwargs,
+    ) -> str:
+        client = _x_client(self.bot)
+        if client is None:
+            return _x_unavailable()
+        from x_client import XError
+
+        act = str(action or "post").strip().lower()
+        act = {
+            "tweet": "post",
+            "send": "post",
+            "publish": "post",
+            "retweet": "repost",
+            "favorite": "like",
+            "fav": "like",
+            "remove": "delete",
+        }.get(act, act)
+        if act not in {"post", "reply", "quote", "delete", "like", "repost"}:
+            return (
+                f"Error: unknown action {act!r}. Use post, reply, quote, "
+                "delete, like, or repost."
+            )
+
+        # Indirect-prompt-injection gate, same contract as email_send/shell:
+        # a turn that read a web page or a search result cannot publish
+        # without the user confirming out of band.
+        if _taint_gate_blocks(self, message, kwargs):
+            preview = str(text or tweet_id or reply_to or "")[:200]
+            return (
+                "Error: x_post refused: this turn read content from the web "
+                "(a page, a search, or X itself) that may carry "
+                "prompt-injection payloads, and posting is public. The user "
+                "must confirm out-of-band with `,confirm`.\n"
+                f"Action: {act}\nContent: {preview}"
+            )
+
+        try:
+            if act in {"post", "reply", "quote"}:
+                target = reply_to or (tweet_id if act == "reply" else None)
+                quoted = quote or (tweet_id if act == "quote" else None)
+                result = await client.post(
+                    str(text or ""), reply_to=target, quote=quoted
+                )
+                label = {"post": "Posted", "reply": "Replied", "quote": "Quoted"}[act]
+                return f"{label} on X: {result.get('url') or result.get('id') or 'ok'}"
+            result = await client.act(act, str(tweet_id or reply_to or quote or ""))
+        except XError as e:
+            return f"Error: {e}"
+        except Exception as e:  # pragma: no cover - defensive
+            return f"Error: X {act} failed: {type(e).__name__}: {e}"
+        done = {"delete": "Deleted", "like": "Liked", "repost": "Reposted"}[act]
+        return f"{done} on X: {result.get('url') or result.get('id') or 'ok'}"
 
 
 # ---------------------------------------------------------------------------

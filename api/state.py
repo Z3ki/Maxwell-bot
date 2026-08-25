@@ -210,6 +210,17 @@ def _sanitize_control(control):
     out["email_inbox_poll_seconds"] = max(
         30, min(_safe_int(out.get("email_inbox_poll_seconds"), 120), 3600)
     )
+    # X: the same clamps the bot applies in _load_control, so the dashboard
+    # cannot show a value the bot would quietly refuse.
+    out["x_posts_per_hour"] = max(
+        0, min(_safe_int(out.get("x_posts_per_hour"), 8), 100)
+    )
+    out["x_cache_seconds"] = max(
+        0, min(_safe_int(out.get("x_cache_seconds"), 60), 3600)
+    )
+    out["x_mention_poll_seconds"] = max(
+        60, min(_safe_int(out.get("x_mention_poll_seconds"), 300), 3600)
+    )
     # 0..1 density score (watch_policy.extraction_score). Out-of-range values
     # would either extract from nothing or from every "lol" in every room.
     try:

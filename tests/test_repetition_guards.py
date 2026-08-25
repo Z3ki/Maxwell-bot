@@ -38,6 +38,17 @@ def test_code_blocks_are_never_scrubbed():
     assert _sanitize_visible_reply(code) == code
 
 
+def test_a_repetitive_code_block_survives_the_echo_breaker():
+    """Repetition is also what a table or a block of asserts looks like.
+
+    scrub_repetitions skipped fences; break_echo_loop then ran over the whole
+    reply and truncated inside one — the message went out as two lines of
+    code and an unterminated ``` fence.
+    """
+    code = "```py\n" + "print(1)\n" * 40 + "```"
+    assert _sanitize_visible_reply(code) == code
+
+
 def test_an_echo_loop_is_truncated_rather_than_posted_whole():
     looped = "the same thing " * 40
     out = _sanitize_visible_reply(looped)

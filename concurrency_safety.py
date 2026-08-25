@@ -10,7 +10,6 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any

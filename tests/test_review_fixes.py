@@ -1,7 +1,6 @@
 """Regressions from the 2026-08-19 multi-agent code review."""
 
 import asyncio
-import json
 from types import SimpleNamespace
 
 from bot import TelegramMessageAdapter, strip_tool_payload_leaks
