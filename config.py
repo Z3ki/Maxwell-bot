@@ -526,7 +526,7 @@ class Config:
         ("ENABLE_CREATE_SITE", "site generation"),
         ("ENABLE_AVATAR", "avatar changes"),
         ("ENABLE_EMAIL_TOOLS", "email tools"),
-        ("ENABLE_SHELL", "shell (host access)"),
+        ("ENABLE_SHELL", "shell (docker sandbox)"),
         ("ENABLE_SUBAGENT", "native sub-agent"),
         ("ENABLE_RAG", "RAG vector memory"),
         ("ENABLE_TELEGRAM", "Telegram transport"),

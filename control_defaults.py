@@ -202,9 +202,6 @@ DEFAULT_CONTROL = {
     "autonomy_floor_mid_flow_messages": 2,
     # Silence past this and the room reads as idle rather than active.
     "autonomy_floor_idle_seconds": 600,
-    "context_cleanup_enabled": True,  # background context janitor (dedupe/merge/remove weird shared-context facts)
-    "context_cleanup_interval_seconds": 1800,  # how often the janitor runs (>=300s)
-    "context_cleanup_ltm_enabled": True,  # also clean long_term_memory (where remote feeds/intel would have dumped)
     # Autonomy-specific blacklists (separate from general blocked_channels/allowed_channels).
     # These prevent autonomy from posting/DMing or acting in listed channels or servers (guilds),
     # while normal bot replies (mentions etc) can still work if not otherwise blocked.
@@ -235,6 +232,13 @@ DEAD_CONTROL_KEYS = frozenset(
         "intel_feed_urls",
         "intel_run_history",
         "autonomy_drives_enabled",
+        # The context janitor was replaced by RAG memory. bot.py answers every
+        # context_cleanup_* command with "engine removed" and the API routes are
+        # no-op stubs, so keeping these in DEFAULT_CONTROL only put three
+        # switches in the dashboard that could not do anything.
+        "context_cleanup_enabled",
+        "context_cleanup_interval_seconds",
+        "context_cleanup_ltm_enabled",
     }
 )
 

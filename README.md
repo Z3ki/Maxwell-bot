@@ -29,6 +29,12 @@ python3 bot.py
 `python3 doctor.py --probe` also calls your model and embedding endpoints, so
 you find out the URL or key is wrong before the bot does.
 
+One thing is worth knowing up front: the `shell` and `sub_agent` tools run
+inside a Docker container, so they need a working Docker daemon your user can
+reach. Everything else works without it. `doctor.py` reports the daemon
+alongside the rest, and `ENABLE_SHELL=false` turns both tools off if you would
+rather not install Docker at all.
+
 ### The minimum .env
 
 ```ini
@@ -151,7 +157,11 @@ setup.sh            One-command installer
 api/api_server.py   Dashboard and admin API server
 web/                Static dashboard files (index.html, admin/)
 examples/           Caddyfile and PM2 config examples
-docker/             Shell sandbox Dockerfile
+docker/             Shell sandbox Dockerfile (docker/site-runtime/ for site backends)
+shelldocker/        Bind-mounted working directory for the shell container
+control_defaults.py Canonical DEFAULT_CONTROL — bot and API both import it
+autonomy_social.py  Conversational turn-taking (the autonomy floor)
+watch_policy.py     Conversation-watch + extraction scoring
 ecosystem.config.js PM2 process config
 ```
 
@@ -554,7 +564,9 @@ python3 doctor.py        # config/feature sanity
 > Removed along the way: the Intel engine (commit `d455e4b`; the `,intel`
 > commands and the `intel_enabled` / `intel_interval_seconds` control keys
 > are stripped from `bot_control.json` at load), `memory.py`,
-> `context_cleanup.py`, and the OpenCode/Docker sub-agent backend. RAG
+> `context_cleanup.py` (its `context_cleanup_*` control keys are stripped the
+> same way; the `/api/context_cleanup/*` routes stay as no-op stubs so
+> external callers do not 404), and the OpenCode/Docker sub-agent backend. RAG
 > vector memory handles memory upkeep, and `sub_agent` now runs inside
 > Maxwell itself. The `autonomy` engine still writes fresh facts into
 > long-term memory on its own cadence.
@@ -567,6 +579,25 @@ The API server (`api/api_server.py`) serves a dashboard and admin interface.
 - `POST /api/login` is exempt from middleware; credentials are validated by the handler and rate-limited.
 - The admin HTML can be served publicly, but it will not load data or mutate anything until credentials are supplied.
 
+Control state moves over three routes. `GET /api/control` returns the live
+control set — the persisted `data/bot_control.json` merged over
+`DEFAULT_CONTROL` and run through the same sanitizer a write goes through, so
+every key comes back even if nobody has ever set it. `PUT /api/control` takes a
+partial object, ignores keys that are not in `DEFAULT_CONTROL`, clamps each
+value to its documented range, and echoes the sanitized result; the dashboard
+re-renders from that echo, so anything the server adjusted is visible
+immediately. `DELETE /api/control` resets everything to defaults.
+
+`control_defaults.py` is the single source of truth for those keys — the bot and
+the API both import it, and the dashboard's Controls panel renders one input per
+key with ranges that mirror the server-side clamp. A key added there with no
+input in the panel is listed in that panel's "Not surfaced" card rather than
+quietly going missing.
+
+The dashboard loads every panel's data independently (`Promise.allSettled`), so
+one failing endpoint degrades that panel and names itself in the header instead
+of blanking the page.
+
 Static files (`web/index.html`, `web/admin/index.html`) should be copied to a web root. Reverse proxy `/api/*` and `/data/*` to `MAXWELL_API_HOST:MAXWELL_API_PORT`. See `examples/Caddyfile.example`.
 
 ## Security
@@ -574,7 +605,8 @@ Static files (`web/index.html`, `web/admin/index.html`) should be copied to a we
 - Never commit `.env`, `data/`, logs, PM2 dumps, or generated sites.
 - Set real values for `MAXWELL_ADMIN_USER` and `MAXWELL_ADMIN_PASSWORD`. The API does not persist or bootstrap credentials.
 - Generated bot sites serve arbitrary HTML. Host them on a separate origin from admin pages to prevent credential theft via XSS.
-- The shell tool runs commands directly with `bash -lc` from the bot process environment, and the sub-agent writes and runs code in its workdir. Both are on by default; set `ENABLE_SHELL=false` (which also turns off `sub_agent`) if you don't want the model to have that access. The bot logs a warning at startup whenever shell is enabled.
+- The shell tool runs `bash -lc` inside the `maxwell-shell` Docker container (`docker/Dockerfile`), not on the host. By default that container is isolated: bridge network, `--cap-drop ALL` (plus a small add-back set), `no-new-privileges`, 4 GB / 2 CPU / 1024 pids, no docker socket, and no host filesystem — only `shelldocker/` is bind-mounted as its working directory at `/home/maxwell`. Setting `MAXWELL_SHELL_FULL_HOST=true` deliberately drops that wall: host network plus `/:/host:rw`, which is documented root-equivalent access for admins. The sub-agent writes and runs code in its own workdir and refuses paths outside it. Both tools are on by default; set `ENABLE_SHELL=false` (which also turns off `sub_agent`) to withhold that access entirely. The bot logs a warning at startup whenever shell is enabled.
+- Running `shell` needs a working Docker daemon the bot user can reach. Without one the tool reports the failure rather than silently falling back to the host. `python3 doctor.py` tells you which side you are on.
 - `DISABLE_TAINT_GATE=false` (the default) makes `shell` require an out-of-band `,confirm` on any turn that read fetched web content — the second line of defence against indirect prompt injection. Only disable it on a single-user install you fully trust.
 
 ## License

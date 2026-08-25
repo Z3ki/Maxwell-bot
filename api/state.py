@@ -22,9 +22,6 @@ from api.storage import (
     _autonomy_log_path,
     _autonomy_state_path,
     _commands_path,
-    _context_cleanup_control_path,
-    _context_cleanup_log_path,
-    _context_cleanup_state_path,
     _context_path,
     _control_path,
     _inbox_path,
@@ -281,15 +278,6 @@ def _sanitize_control(control):
     out["create_site_quota_per_user"] = max(
         0, min(_safe_int(out.get("create_site_quota_per_user"), 50), 10000)
     )
-    # The context janitor's own loop refuses to run faster than 5 minutes;
-    # clamp here too so the dashboard can't persist a value the bot ignores.
-    out["context_cleanup_interval_seconds"] = max(
-        300,
-        min(
-            _safe_int(out.get("context_cleanup_interval_seconds"), 1800),
-            86400,
-        ),
-    )
     out["autonomy_goal_stale_days"] = max(
         1, min(_safe_int(out.get("autonomy_goal_stale_days"), 14), 365)
     )
@@ -483,53 +471,6 @@ def _load_autonomy_log():
     data = _safe_object(_load(_autonomy_log_path()))
     entries = data.get("entries", [])
     return entries if isinstance(entries, list) else []
-
-
-def _load_context_cleanup_control():
-    control = _safe_object(_load(_context_cleanup_control_path()))
-    bot_control = _safe_object(_load(_control_path()))
-    enabled = _parse_bool(
-        control.get("enabled"),
-        _parse_bool(
-            bot_control.get("context_cleanup_enabled"),
-            DEFAULT_CONTROL.get("context_cleanup_enabled", False),
-        ),
-    )
-    try:
-        interval = max(
-            300,
-            int(
-                control.get("interval_seconds")
-                or bot_control.get(
-                    "context_cleanup_interval_seconds",
-                    DEFAULT_CONTROL.get("context_cleanup_interval_seconds", 1800),
-                )
-                or 1800
-            ),
-        )
-    except (TypeError, ValueError):
-        interval = 1800
-    return {"enabled": enabled, "interval_seconds": interval}
-
-
-def _load_context_cleanup_status():
-    control = _load_context_cleanup_control()
-    state = _safe_object(_load(_context_cleanup_state_path()))
-    log = _safe_list(_load(_context_cleanup_log_path()))
-    entries = log if isinstance(log, list) else []
-    return {
-        "enabled": control["enabled"],
-        "interval_seconds": control["interval_seconds"],
-        "running": bool(state.get("running")),
-        "last_run": state.get("last_run", ""),
-        "last_duration": state.get("last_duration"),
-        "last_audit": str(state.get("last_audit") or "")[:4000],
-        "last_error": state.get("last_error"),
-        "ops_applied_total": state.get("ops_applied_total", 0),
-        "ops_skipped_total": state.get("ops_skipped_total", 0),
-        "passes_total": state.get("passes_total", 0),
-        "log": entries[-20:],
-    }
 
 
 def _load_inbox():

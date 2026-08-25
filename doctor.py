@@ -116,6 +116,46 @@ def check_system_tools() -> None:
             line("warn", f"{binary} not found", f"needed for: {purpose}")
 
 
+def check_docker(cfg) -> None:
+    """The shell tool runs in a container, so Docker is a hard dependency for it.
+
+    Nothing else reported this: `shell` would just fail at call time with a
+    docker error the operator only saw in a Discord reply.
+    """
+    if cfg is None or not getattr(cfg, "ENABLE_SHELL", False):
+        return
+    head("Docker (needed by the shell tool)")
+    import shutil
+    import subprocess
+
+    if not shutil.which("docker"):
+        line(
+            "warn",
+            "docker not found",
+            "shell/sub_agent will fail; install Docker or set ENABLE_SHELL=false",
+        )
+        return
+    try:
+        proc = subprocess.run(
+            ["docker", "info", "--format", "{{.ServerVersion}}"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        line("warn", "docker not usable", f"{type(e).__name__}: {e}")
+        return
+    if proc.returncode == 0:
+        line("ok", "docker daemon reachable", f"server {proc.stdout.strip()}")
+    else:
+        detail = (proc.stderr or proc.stdout).strip().splitlines()
+        line(
+            "warn",
+            "docker installed but not reachable",
+            (detail[-1][:120] if detail else "is the daemon running, and are you in the docker group?"),
+        )
+
+
 def check_features(cfg) -> None:
     if cfg is None:
         return
@@ -209,6 +249,7 @@ def main() -> int:
 
     check_required_settings(cfg)
     check_system_tools()
+    check_docker(cfg)
     check_features(cfg)
     if args.probe:
         probe(cfg)

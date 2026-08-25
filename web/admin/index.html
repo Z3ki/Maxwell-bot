@@ -699,7 +699,6 @@
         autonomyStatus: null,
         autonomyLog: [],
         autonomyGoals: [],
-        cleanup: null,
         pm2: [],
         inbox: [],
         traces: [],
@@ -952,11 +951,6 @@
           key: "autonomyGoals",
           url: "/api/autonomy/goals",
           norm: (d) => (Array.isArray(d) ? d : d?.goals || []),
-        },
-        {
-          key: "cleanup",
-          url: "/api/context_cleanup/status",
-          norm: (d) => d || null,
         },
         { key: "pm2", url: "/api/pm2", norm: (d) => (Array.isArray(d) ? d : []) },
         {
@@ -1425,9 +1419,6 @@
             { k: "autonomy_reflect_enabled", t: "bool" },
             { k: "autonomy_reflect_interval_seconds", t: "int", min: 300, max: 86400 },
             { k: "autonomy_goal_stale_days", t: "int", min: 1, max: 365 },
-            { k: "context_cleanup_enabled", t: "bool" },
-            { k: "context_cleanup_interval_seconds", t: "int", min: 300, max: 86400 },
-            { k: "context_cleanup_ltm_enabled", t: "bool" },
           ],
         },
         {
@@ -1694,20 +1685,6 @@
         );
       }
       function context() {
-        const c = S.cleanup || {};
-        const on = !!c.enabled;
-        const interval = c.interval_seconds || 1800;
-        const lastRun = c.last_run ? new Date(c.last_run) : null;
-        const ago = lastRun ? (Date.now() - lastRun.getTime()) / 1000 : null;
-        const agoText =
-          ago !== null
-            ? ago < 60
-              ? Math.round(ago) + "s ago"
-              : ago < 3600
-                ? Math.round(ago / 60) + "m ago"
-                : Math.round(ago / 3600) + "h ago"
-            : "never";
-        const logEntries = (c.log || []).slice().reverse();
         $("context").innerHTML =
           `<div class="card" style="margin-top:12px"><h3>Cross-context</h3><p class="muted">Inject relevant facts from other channels/users/guilds into the prompt. Turn off to keep the bot's context strictly local to the current channel.</p><label class="switchline"><span>Cross-context enabled</span><span class="switch"><input id="ctxCrossToggle" type="checkbox" ${S.control.cross_context_enabled !== false ? "checked" : ""}><span class="knob"></span></span></label></div><div class="card" style="margin-top:12px">
     <h3>RAG Automatic Pruning</h3>
@@ -1848,45 +1825,6 @@
             }),
         );
 
-        document.querySelectorAll("[data-cleanup]").forEach(
-          (b) =>
-            (b.onclick = async () => {
-              const m = b.dataset.cleanup;
-              if (m === "run") {
-                await api("/api/context_cleanup/run", { method: "POST" });
-                toast("Cleanup run queued");
-              } else if (m === "enable") {
-                await api("/api/context_cleanup/enable", { method: "POST" });
-                toast("Cleanup enabled");
-              } else if (m === "disable") {
-                await api("/api/context_cleanup/disable", { method: "POST" });
-                toast("Cleanup disabled");
-              } else if (m === "clear-log") {
-                if (confirm("Clear all cleanup log entries?")) {
-                  await api("/api/context_cleanup/log", { method: "DELETE" });
-                  toast("Log cleared");
-                }
-              }
-              loadAll();
-            }),
-        );
-
-        if ($("cleanupIntervalBtn")) {
-          $("cleanupIntervalBtn").onclick = async () => {
-            const v = parseInt($("cleanupInterval").value);
-            if (!v || v < 300) {
-              toast("Interval must be >= 300 seconds");
-              return;
-            }
-            await api("/api/context_cleanup/interval", {
-              method: "PUT",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ interval_seconds: v }),
-            });
-            toast("Interval updated");
-            loadAll();
-          };
-        }
       }
 
       function logs() {
