@@ -555,6 +555,26 @@ The REM pass is not a live chat response and never posts to Discord. Current cod
 
 REM is opt-in: it is off unless you set `ENABLE_REM=true` (or `REM_ENABLED=true`) in `.env`. Configure `REM_INTERVAL_SECONDS`, `REM_EVENT_BUFFER_MAX`, `REM_RUN_HISTORY`, and `OLLAMA_REM_MODEL` in `.env`. Admins can use `,rem*` commands or the dashboard REM card.
 
+### Repetition
+
+Two different problems that read as one complaint ("it keeps saying jajajaja").
+
+Inside a single reply, a laugh run, a doubled word, a sentence said twice or a
+phrase repeated is collapsed before the message is sent. `response_guard.py`
+has done this since it was written — it just was not wired to anything, so
+every run reached the channel intact. Fenced code is never touched, and a reply
+that has fallen into a full echo loop is truncated at the first repeat rather
+than posted whole. Control: `scrub_repetitions`.
+
+Across replies, the same phrase opening six messages running is a pattern no
+single message is wrong for, so nothing downstream can catch it — and the model
+does not notice it in its own transcript, because it reads its last reply as
+evidence of what it sounds like and does it again. When several of his recent
+messages open the same way (laugh runs of different lengths count as one habit)
+the prompt says so, naming the phrase: general advice like "vary your language"
+changes nothing, "you have opened 4 of your last 8 messages with jajaja" does.
+Control: `self_repetition_note_enabled`.
+
 ## Autonomy
 
 Autonomy is separate from the removed `,auto` auto-reply mode. It wakes on `autonomy_interval_seconds`, gathers recent conversations, DMs, goals, memory, and available channels, then asks the LLM for a JSON action plan. Supported actions are channel posts, DMs, tool calls, memory updates, goal creation, or doing nothing.

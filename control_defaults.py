@@ -77,6 +77,17 @@ DEFAULT_CONTROL = {
     "context_tier_entity_weight": 8,
     "context_tier_facts_weight": 7,
     "context_tier_web_weight": 3,
+    # ─── repetition guards ──────────────────────────────────────────────
+    # Collapse repetition inside a single reply before it is sent: laugh runs
+    # ("jajajajajaja" -> "ja"), doubled words, a sentence said twice, a phrase
+    # repeated. Never touches fenced code. `response_guard` has done this since
+    # it was written; until now nothing called it.
+    "scrub_repetitions": True,
+    # The other half: tell him when he has opened several messages running with
+    # the same phrase. No single message is wrong, so nothing downstream can
+    # catch it, and the model reads its own last reply as evidence of what it
+    # sounds like and does it again.
+    "self_repetition_note_enabled": True,
     "emoji_context_enabled": True,
     "music_context_enabled": True,
     "reply_dms": True,

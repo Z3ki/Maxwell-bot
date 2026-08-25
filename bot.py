@@ -310,6 +310,7 @@ from control_defaults import (  # noqa: E402
 import guild_onboarding  # noqa: E402
 from email_inbox import EmailInboxPoller  # noqa: E402
 from inbox import InboxStore, apply_inbox_action  # noqa: E402
+from response_guard import break_echo_loop, scrub_repetitions  # noqa: E402
 from providers import (  # noqa: E402
     MIME_MAP,
     OllamaProvider,
@@ -1724,8 +1725,16 @@ def strip_tool_payload_leaks(text: str) -> str:
     return cleaned
 
 
-def _sanitize_visible_reply(text: str) -> str:
-    """Shared Discord/Telegram cleanup for leaked tool traces and sent-markers."""
+def _sanitize_visible_reply(text: str, *, scrub_repeats: bool = True) -> str:
+    """Shared Discord/Telegram cleanup for leaked tool traces and sent-markers.
+
+    Also the one place output repetition is collapsed. `response_guard` was
+    written for exactly that — "jajajajajaja" down to "ja", a sentence said
+    twice down to once — and had passing tests, but nothing ever called it, so
+    every run of it reached the channel intact. This is the choke point both
+    transports already share, which is why the call belongs here rather than
+    in each send path.
+    """
     raw = str(text or "")
     if "\\n" in raw and "```" not in raw:
         raw = raw.replace("\\n", "\n")
@@ -1748,7 +1757,17 @@ def _sanitize_visible_reply(text: str) -> str:
         "__REASONING_RECORDED__",
     ):
         response = response.replace(marker, "")
-    return strip_tool_payload_leaks(response).strip()
+    response = strip_tool_payload_leaks(response).strip()
+    if scrub_repeats and response:
+        # Collapses laugh runs, doubled words, repeated sentences and repeated
+        # phrases — never inside fenced code, so a program that legitimately
+        # repeats a line is untouched.
+        response = scrub_repetitions(response)
+        # A model that has fallen into an echo loop emits the same trigram
+        # over and over until it hits the token cap. Truncating at the first
+        # repeat leaves the useful prefix instead of posting the whole loop.
+        response = break_echo_loop(response)
+    return response
 
 
 def _auto_format_discord(text: str) -> str:
@@ -12465,7 +12484,10 @@ class MaxwellBot(commands.Bot):
                 and not (response or "").strip()
             ):
                 return
-            response = _sanitize_visible_reply(response)
+            response = _sanitize_visible_reply(
+                response,
+                scrub_repeats=bool(self._control.get("scrub_repetitions", True)),
+            )
             # Safety net: if the user asked for a site/page/website and the
             # model replied with raw HTML/JS in chat instead of calling
             # create_site, auto-route the HTML to create_site so the user
@@ -13980,6 +14002,68 @@ class MaxwellBot(commands.Bot):
         output_reserve = max(16000, raw_budget // 4)
         return max(10000, raw_budget - output_reserve)
 
+    _ECHO_OPENER_WORDS = 4
+    _ECHO_LOOKBACK = 8
+    _ECHO_MIN_REPEATS = 3
+
+    def _self_repetition_note(self, memory: list[dict] | None) -> str:
+        """Tell him when he has been opening every message the same way.
+
+        Repetition inside one message is cleaned up after generation
+        (`_sanitize_visible_reply`). This is the other half: the same catchphrase
+        opening six messages running. No single message is wrong, so nothing
+        downstream can catch it, and the model does not notice the pattern in its
+        own transcript — it reads its last reply as evidence of what it sounds
+        like and does it again, harder.
+
+        Only fires on an actual streak, and names the phrase rather than giving
+        general advice, because "vary your language" changes nothing and "you
+        have started 4 of your last 8 messages with 'jajaja'" does.
+        """
+        if not memory:
+            return ""
+        control = getattr(self, "_control", None) or {}
+        if not control.get("self_repetition_note_enabled", True):
+            return ""
+        self_id = str(getattr(self.user, "id", "")) if getattr(self, "user", None) else ""
+        openers: list[str] = []
+        for entry in reversed(memory):
+            if len(openers) >= MaxwellBot._ECHO_LOOKBACK:
+                break
+            if entry.get("is_tool"):
+                continue
+            is_self = bool(entry.get("author_is_bot")) or (
+                self_id and str(entry.get("author_id") or "") == self_id
+            )
+            if not is_self:
+                continue
+            words = re.findall(r"[\w\u00C0-\u024F']+", str(entry.get("content") or "").lower())
+            if not words:
+                continue
+            openers.append(" ".join(words[: MaxwellBot._ECHO_OPENER_WORDS]))
+        if len(openers) < MaxwellBot._ECHO_MIN_REPEATS:
+            return ""
+
+        # Compare on the first word or two: "jajaja bro" and "jajajaja man" are
+        # the same tic, and an exact-match check would miss both.
+        def _stem(opener: str) -> str:
+            first = opener.split(" ", 1)[0]
+            # Any laugh run normalizes to one token so length does not hide it.
+            return re.sub(r"(?i)^((?:j[aeiou]|h(?:a|e)|lo)+)$", r"<laugh>", first)
+
+        counts: dict[str, list[str]] = {}
+        for opener in openers:
+            counts.setdefault(_stem(opener), []).append(opener)
+        stem, hits = max(counts.items(), key=lambda kv: len(kv[1]))
+        if len(hits) < MaxwellBot._ECHO_MIN_REPEATS:
+            return ""
+        phrase = hits[0].split(" ", 1)[0]
+        return (
+            f"You have opened {len(hits)} of your last {len(openers)} messages with "
+            f"\"{phrase}\". It has stopped meaning anything. Do not open this one "
+            "that way — say the thing itself, or say nothing."
+        )
+
     # ─── per-tier context budget ──────────────────────────────────────
 
     def _context_budget_plan(
@@ -14915,6 +14999,14 @@ class MaxwellBot(commands.Bot):
                         + "\n</previous_conversation>",
                     }
                 )
+        # Self-repetition across turns. The scrubber in _sanitize_visible_reply
+        # collapses a run inside one message, but it cannot see that the last
+        # six messages all opened with the same "jajaja" — that is a pattern
+        # only visible over the transcript, and the model reliably fails to
+        # notice it in its own history. So it gets told.
+        echo_note = MaxwellBot._self_repetition_note(self, memory)
+        if echo_note:
+            dynamic_parts.append(echo_note)
         # Volatile per-turn context goes here: after the static system block
         # and after the transcript, so the cacheable prefix is
         # [static system + transcript] and only this small tail changes every
@@ -15332,7 +15424,10 @@ class MaxwellBot(commands.Bot):
             ai_timeout,
         )
 
-        response_text = _sanitize_visible_reply(response_text)
+        response_text = _sanitize_visible_reply(
+            response_text,
+            scrub_repeats=bool(self._control.get("scrub_repetitions", True)),
+        )
 
         delivered_text = ""
         if response_text:
@@ -15891,7 +15986,10 @@ class MaxwellBot(commands.Bot):
                 tg_tool_message, all_tool_results, response_text, "send_message"
             )
             response_text = ""
-        response_text = _sanitize_visible_reply(response_text)
+        response_text = _sanitize_visible_reply(
+            response_text,
+            scrub_repeats=bool(self._control.get("scrub_repetitions", True)),
+        )
         return response_text, all_tool_results
 
 

@@ -1435,6 +1435,19 @@
           ],
         },
         {
+          title: "Repetition Guards",
+          note:
+            "Two halves of the same problem. The scrubber collapses repetition " +
+            "inside one reply before it is sent — laugh runs, doubled words, a " +
+            "sentence said twice — and never touches fenced code. The nudge " +
+            "handles what the scrubber cannot see: the same phrase opening " +
+            "several messages in a row, which no single message is wrong for.",
+          fields: [
+            { k: "scrub_repetitions", t: "bool", hint: "collapse repeats within one reply" },
+            { k: "self_repetition_note_enabled", t: "bool", hint: "call out a repeated opener across messages" },
+          ],
+        },
+        {
           title: "Context Budget (per tier)",
           note:
             "Relative shares of the prompt's memory characters. They are normalized, " +
