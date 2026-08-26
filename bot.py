@@ -5869,12 +5869,13 @@ class MaxwellBot(commands.Bot):
             except Exception as e:
                 logger.warning(f"Failed to fetch referenced message: {e}")
 
-        # Same-user interrupt: if this user already has an in-flight request in
-        # this channel and is now addressing Maxwell again, cancel the stale
-        # request so the new message takes over immediately instead of queuing
-        # behind a slow (up to ai_timeout_seconds) response. Without this the
-        # channel lock serializes the new message behind the old one, so a
-        # re-ping while Maxwell is mid-generation just waits silently.
+        # Same-user re-ping while a request is in-flight in this channel. We
+        # used to cancel the in-flight request so the new message took over
+        # instantly — but that DROPPED the in-flight reply entirely, which read
+        # as "Maxwell didn't respond." Now we don't cancel: the current turn
+        # finishes and posts, then this message is answered (the channel lock
+        # serializes it). Nothing gets lost; a re-ping simply waits behind the
+        # reply it was trying to cut off.
         if not message.author.bot and self.user is not None:
             active = self._active_requests.get(channel_id)
             active_user = self._active_request_user.get(channel_id)
@@ -5886,24 +5887,9 @@ class MaxwellBot(commands.Bot):
                 and self._should_interrupt_inflight(message)
             ):
                 logger.info(
-                    f"Same-user interrupt: cancelling in-flight request for "
-                    f"{message.author.display_name} ({message.author.id}) in "
-                    f"{channel_id}"
+                    f"Same-user re-ping in {channel_id}: not cancelling in-flight "
+                    f"reply — this message will be answered right after it."
                 )
-                active.cancel()
-                # 2026-07-31: previously we cancelled without awaiting, so the
-                # cancelled coroutine could still hold the per-channel `_lock`
-                # when THIS on_message tried to acquire it. Result: 120-second
-                # wait_for() timeout, then silent return at the channel-lock
-                # guard, add_message_to_memory never called. Wait for the
-                # cancel to actually finish so the channel lock is released.
-                try:
-                    await asyncio.wait_for(
-                        asyncio.shield(_await_task_done(active)),
-                        timeout=5.0,
-                    )
-                except asyncio.TimeoutError:
-                    pass
 
         _lock = self._get_channel_lock(channel_id)
         _lock_acquired = False
@@ -12268,6 +12254,27 @@ class MaxwellBot(commands.Bot):
         # otherwise normal chat gets polluted by yesterday's meme/screenshot.
         active_media = current_images + cached_media + self._current_binary_media(media)
         media_summary = self._format_media_summary(media, active_media)
+        # If the message carries attachable media but nothing made it into the
+        # turn (a failed/partial extraction, an embed that didn't download, a
+        # forward snapshot), don't leave the model blind — hand it the raw
+        # attachment URLs so it can fetch them itself with see_image, and log
+        # the miss so we can see it in the logs.
+        if not active_media and self._message_carries_media(message):
+            raw_urls = [
+                str(getattr(a, "url", "") or "").strip()
+                for a in self._payload_attr_list(message, "attachments", 5)
+            ]
+            raw_urls = [u for u in raw_urls if u.startswith("http")]
+            if raw_urls:
+                media_summary = (
+                    media_summary
+                    + "\nAttached media did not auto-attach; fetch it with "
+                    + "see_image (one URL at a time): "
+                    + ", ".join(raw_urls)
+                ).strip()
+                logger.warning(
+                    "Media auto-attach miss; handing URLs to see_image: %s", raw_urls
+                )
         # If MESSAGE_UPDATE refreshed this turn while its original extraction
         # was in flight, that extraction is stale. Let the edit handler's
         # replacement remain authoritative for subsequent turns.
@@ -15600,6 +15607,32 @@ class MaxwellBot(commands.Bot):
             messages[-1]["content"] += "\n\n" + current
         else:
             messages.append({"role": "user", "content": current})
+        # Surface quiet sub-agent notes into this turn's context (no chat post).
+        # A sub-agent that calls ``message_main`` records the note on its relay
+        # instead of posting to chat; pull any pending ones for this channel in
+        # so Maxwell sees them and can reply with sub_agent_message. Inlined (not
+        # a method) so the test harness's bare bot object is a clean no-op here.
+        sub = (getattr(self, "tools", None) or {}).get("sub_agent")
+        drain = getattr(sub, "drain_notes_for", None)
+        if callable(drain):
+            try:
+                nid = str(getattr(getattr(message, "channel", None), "id", "") or "")
+                notes = drain(nid)
+            except Exception:  # pragma: no cover - never break a turn
+                notes = []
+            if notes:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "## Sub-agent notes (quiet relay — do not repeat to "
+                            "the channel)\n"
+                            + "\n".join(notes)
+                            + "\nA note that asks you something: answer it with "
+                            "sub_agent_message(run_id, text)."
+                        ),
+                    }
+                )
         return MaxwellBot._apply_prompt_budget(self, messages)
 
     async def _telegram_webhook_loop(self):
@@ -15874,6 +15907,27 @@ class MaxwellBot(commands.Bot):
             )
         else:
             messages.append({"role": "user", "content": latest_block})
+        sub = (getattr(self, "tools", None) or {}).get("sub_agent")
+        drain = getattr(sub, "drain_notes_for", None)
+        if callable(drain):
+            try:
+                nid = str(getattr(getattr(message, "channel", None), "id", "") or "")
+                notes = drain(nid)
+            except Exception:  # pragma: no cover - never break a turn
+                notes = []
+            if notes:
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "## Sub-agent notes (quiet relay — do not repeat to "
+                            "the channel)\n"
+                            + "\n".join(notes)
+                            + "\nA note that asks you something: answer it with "
+                            "sub_agent_message(run_id, text)."
+                        ),
+                    }
+                )
 
         tg_openai_tools = self._build_openai_tools("telegram", content=text)
         await self._acquire_ai_slot(

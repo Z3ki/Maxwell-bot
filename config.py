@@ -577,6 +577,11 @@ class Config:
     # requests are refused with a clear "too busy" so a channel flood can't
     # grow the in-memory queue without bound. Foreground calls are unaffected.
     SUBAGENT_MAX_QUEUED = _int_env("SUBAGENT_MAX_QUEUED", 8, min_value=1, max_value=128)
+    # How long a finished sub-agent's message channel is kept so the main agent
+    # can still reply to it (sub_agent_message) and read its pending notes.
+    SUBAGENT_CHAN_GRACE_SECONDS = _int_env(
+        "SUBAGENT_CHAN_GRACE_SECONDS", 600, min_value=30, max_value=7200
+    )
     # Where the sub-agent's `run_command` executes. "docker" (default) runs
     # each run in its own throwaway container with only the run's scratch
     # workspace mounted — the bot's .env and source are not visible to it.

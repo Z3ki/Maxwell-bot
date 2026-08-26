@@ -371,7 +371,7 @@ def test_sub_agent_message_main_tool(tmp_path, monkeypatch):
 
     # Unknown run id is a clear error, not a crash.
     bad = asyncio.run(main_tool.execute(None, run_id="nope", text="hi"))
-    assert "no running sub-agent" in bad
+    assert "no sub-agent with run_id nope" in bad
 
 
 def test_main_message_is_injected_into_the_sub_agent_loop(tmp_path, monkeypatch):
@@ -397,6 +397,36 @@ def test_main_message_is_injected_into_the_sub_agent_loop(tmp_path, monkeypatch)
     )
     injected = [m for m in provider.seen[0] if "Message from Maxwell/main agent" in str(m.get("content") or "")]
     assert injected and "answer me" in injected[0]["content"]
+
+
+def test_sub_agent_message_finds_a_recently_finished_run(tmp_path, monkeypatch):
+    # Even after a run finishes, its channel is kept for a grace period, so
+    # Maxwell can still reply to it with sub_agent_message.
+    tool = _tool(_ScriptedProvider([]), tmp_path, monkeypatch)
+    chan = _SubChan("r9")
+    tool._chans["r9"] = chan
+    tool._retain_chan("r9")
+    bot = types.SimpleNamespace(tools={"sub_agent": tool})
+    main_tool = SubAgentMessageTool(bot)
+
+    result = asyncio.run(main_tool.execute(None, run_id="r9", text="ok"))
+    assert "Sent to the sub-agent" in result
+    assert chan.msgs[-1]["src"] == "main"
+
+
+def test_drain_notes_for_surfaces_quiet_message_main(tmp_path, monkeypatch):
+    # A sub-agent's quiet message_main (no chat post) must reach the main agent
+    # via drain_notes_for(channel_id), so Maxwell can see and answer it.
+    tool = _tool(_ScriptedProvider([]), tmp_path, monkeypatch)
+    chan = _SubChan("r7")
+    chan.channel_id = "555"
+    chan.push("sub", "need a decision")
+    tool._chans["r7"] = chan
+
+    notes = tool.drain_notes_for("555")
+    assert any("need a decision" in n and "r7" in n for n in notes)
+    # Marked surfaced: a second drain returns nothing.
+    assert tool.drain_notes_for("555") == []
 
 
 def test_sub_agent_can_call_bot_tools(tmp_path, monkeypatch):

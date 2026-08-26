@@ -7057,6 +7057,8 @@ class _SubChan:
         self.msgs: list[dict] = []  # {"src": "main"|"sub", "text": str, "ts": float}
         self.injected: set[int] = set()
         self.target = None  # the channel/dm the run delivers to, set at run start
+        self.channel_id = ""  # originating channel, so the main agent can find runs
+        self.surfaced: set[int] = set()  # sub->main msgs already shown to Maxwell
 
     def push(self, src: str, text: str) -> None:
         self.msgs.append({"src": src, "text": str(text or "")[:2000], "ts": time.time()})
@@ -7073,6 +7075,14 @@ class _SubChan:
 
     def transcript(self, limit: int = 20) -> list[dict]:
         return list(self.msgs[-limit:])
+
+    def pending_to_main(self) -> list[tuple[int, str]]:
+        """Sub->main messages not yet surfaced to the main agent."""
+        return [
+            (i, m["text"])
+            for i, m in enumerate(self.msgs)
+            if m["src"] == "sub" and i not in self.surfaced
+        ]
 
 
 class _LiveMessage:
@@ -7146,12 +7156,12 @@ class SubAgentMessageTool(Tool):
         if not text:
             return "error: sub_agent_message needs `text`."
         sub = getattr(self.bot, "tools", {}).get("sub_agent")
-        chans = getattr(sub, "_chans", {}) if sub is not None else {}
-        chan = chans.get(run_id)
+        find_chan = getattr(sub, "_find_chan", None)
+        chan = find_chan(run_id) if callable(find_chan) else None
         if chan is None:
             return (
-                f"error: no running sub-agent with run_id {run_id} (it may have "
-                f"already finished, or the run_id is wrong)."
+                f"error: no sub-agent with run_id {run_id} (not running and not "
+                f"recently finished; it may have ended too long ago)."
             )
         chan.push("main", text)
         thread = "\n".join(
@@ -7427,8 +7437,13 @@ class SubAgentTool(Tool):
         # in-memory queue without bound. Only touched from the event loop.
         self._bg_inflight = 0
         # Live bidirectional channels for running sub-agents (main <-> sub).
-        # Keyed by run_id; created in execute(), removed when the run ends.
+        # Keyed by run_id; created in execute().
         self._chans: dict[str, _SubChan] = {}
+        # Finished runs kept briefly so sub_agent_message can still find them
+        # (Maxwell often replies after a run ends) and so pending notes are
+        # readable. {"run_id": (chan, finished_monotonic)}. Pruned lazily.
+        self._finished_chans: dict[str, tuple[_SubChan, float]] = {}
+        self._chan_grace = float(getattr(Config, "SUBAGENT_CHAN_GRACE_SECONDS", 600) or 600)
 
     def get_description(self) -> str:
         return (
@@ -7754,6 +7769,51 @@ class SubAgentTool(Tool):
 
     # ─── the loop ─────────────────────────────────────────────────────
 
+    def _retain_chan(self, run_id: str) -> None:
+        """Keep a finished run's channel briefly so replies still find it."""
+        chan = self._chans.pop(run_id, None)
+        if chan is None:
+            return
+        self._finished_chans[run_id] = (chan, time.monotonic())
+        self._prune_finished_chans()
+
+    def _prune_finished_chans(self) -> None:
+        now = time.monotonic()
+        for rid in list(self._finished_chans):
+            if now - self._finished_chans[rid][1] > self._chan_grace:
+                self._finished_chans.pop(rid, None)
+
+    def _find_chan(self, run_id: str) -> "_SubChan | None":
+        """The live or recently-finished channel for a run id."""
+        chan = self._chans.get(run_id)
+        if chan is not None:
+            return chan
+        finished = self._finished_chans.get(run_id)
+        if finished is not None:
+            return finished[0]
+        return None
+
+    def drain_notes_for(self, channel_id: str) -> list[str]:
+        """Pending sub->main notes for runs originating in this channel.
+
+        Called by the main agent when it builds a turn in a channel, so a quiet
+        ``message_main`` from a sub-agent reaches Maxwell without posting to chat.
+        Marks each returned note as surfaced.
+        """
+        if not channel_id:
+            return []
+        notes: list[str] = []
+        for chan in list(self._chans.values()) + [c for c, _t in self._finished_chans.values()]:
+            if chan.channel_id != channel_id:
+                continue
+            pending = chan.pending_to_main()
+            if not pending:
+                continue
+            for i, text in pending:
+                notes.append(f"[sub-agent {chan.run_id} note] {text}")
+                chan.surfaced.add(i)
+        return notes
+
     async def execute(self, message: Message, **kwargs) -> str:
         task = str(kwargs.get("task") or "").strip()
         if not task:
@@ -7808,6 +7868,10 @@ class SubAgentTool(Tool):
         # both the foreground and background paths can push/pull, and removed in
         # the run's finally so a finished run doesn't leak a channel.
         chan = self._chans.setdefault(run_id, _SubChan(run_id)) if run_id else None
+        if chan is not None:
+            chan.channel_id = str(
+                getattr(getattr(message, "channel", None), "id", "") or ""
+            )
 
         # Fire-and-forget: ``mode=background`` returns immediately and hands the
         # whole run to a background task that posts the result to this channel
@@ -7902,7 +7966,7 @@ class SubAgentTool(Tool):
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await watcher
             if run_id:
-                self._chans.pop(run_id, None)
+                self._retain_chan(run_id)
             # Always reap the container, including on the timeout, error and
             # cancellation paths — an orphaned sandbox holds 4GB of limit and
             # a bind mount on a workspace nobody is using.
@@ -8056,7 +8120,7 @@ class SubAgentTool(Tool):
                 if self._bg_inflight > 0:
                     self._bg_inflight -= 1
                 if run_id:
-                    self._chans.pop(run_id, None)
+                    self._retain_chan(run_id)
                 if watcher is not None:
                     watcher.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
