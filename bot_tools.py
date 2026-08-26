@@ -7527,7 +7527,13 @@ class SubAgentTool(Tool):
         if not task:
             return "sub_agent needs a `task` describing the work."
 
-        provider = getattr(self.bot, "provider", None)
+        # The bot's LLM is bound as `ai_provider` (see bot.py). `provider` is
+        # only the name the test harness and older call sites used — keep the
+        # fallback so the tests and any lightweight bot object keep working.
+        provider = (
+            getattr(self.bot, "ai_provider", None)
+            or getattr(self.bot, "provider", None)
+        )
         if provider is None:
             return "sub_agent is unavailable: no LLM provider on this bot."
 

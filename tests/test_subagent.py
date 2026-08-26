@@ -76,6 +76,27 @@ def test_writes_runs_and_reports(tmp_path, monkeypatch):
     assert any("hey" in out and "exit=0" in out for out in tool_outputs)
 
 
+def test_uses_ai_provider_when_present(tmp_path, monkeypatch):
+    # The real bot binds its LLM as ``bot.ai_provider``; there is no ``.provider``
+    # attribute on it. The sub-agent must run on ``ai_provider``, not refuse with
+    # "no LLM provider" (the bug that surfaced in production).
+    provider = _ScriptedProvider(
+        [
+            {"role": "assistant", "tool_calls": [_call("finish", {"report": "worked"}, "1")]}
+        ]
+    )
+    monkeypatch.setenv("SUBAGENT_BASE_DIR", str(tmp_path))
+    from config import Config
+
+    monkeypatch.setattr(Config, "SUBAGENT_BASE_DIR", str(tmp_path))
+    monkeypatch.setattr(Config, "SUBAGENT_SANDBOX", "host")
+    # The bot object exposes ai_provider but no provider attribute.
+    tool = SubAgentTool(types.SimpleNamespace(ai_provider=provider))
+    result = asyncio.run(tool.execute(None, task="write a hello script"))
+    assert "worked" in result
+    assert result != "sub_agent is unavailable: no LLM provider on this bot."
+
+
 def test_paths_cannot_escape_the_workdir(tmp_path, monkeypatch):
     provider = _ScriptedProvider(
         [
