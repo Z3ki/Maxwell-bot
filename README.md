@@ -118,7 +118,7 @@ for videos that trigger YouTube bot checks. Never commit that file.
 
 - Multimodal input: images, audio, video, text files, and Discord embeds are forwarded to the model with normalized video, extracted frames, and extracted audio.
 - Visual memory: recent images persist across messages per channel (configurable depth).
-- Tool system: image generation (Pollinations, NVIDIA NIM, GPT-compatible), web search, URL fetch, YouTube transcript/frame extraction, arbitrary file sending, meme/media sending, shell execution, a native coding sub-agent, polls, invites, server join/leave (`join_server`, `leave_server`), self-service role/channel setup through a server's onboarding prompts (`server_setup`, also run automatically on join), site generation, avatar/presence/nickname changes, message editing/forwarding/deletion, live tool-call progress messages, and more.
+- Tool system: image generation (Pollinations, NVIDIA NIM, GPT-compatible), web search, URL fetch, YouTube transcript/frame extraction, arbitrary file sending, meme/media sending, shell execution, a native coding sub-agent, polls, invites, server join/leave (`join_server`, `leave_server`), self-service role/channel setup through a server's onboarding prompts (`server_setup`, also run automatically on join), site generation, avatar/presence/nickname changes, message editing/forwarding/deletion, live tool-call progress messages, real chess (`chess_start`/`chess_move`/`chess_state`/`chess_resign`), API usage reporting (`usage`), and more.
 - Full-message context: every message in context carries its timestamp plus structured annotations for polls, app-command invocations, system/welcome events, embeds (title/description/fields/images), direct media URLs, and attachment names — including messages that never pinged Maxwell (they still reach context via memory/history).
 - CAPTCHA handling: Discord's hCaptcha challenges (invite accepts, DM gates, phone checks) are auto-solved via a configured solver service (`CAPTCHA_SOLVER_SERVICE` — capsolver/2captcha), or handled human-in-the-loop: the bot hosts a one-shot solve page (`/captcha/<id>`, proxied at `MAXWELL_PUBLIC_BASE_URL`), DMs the link to the owner (fallback `CAPTCHA_FALLBACK_USER_ID`), waits for a browser solve, and retries the original request with the solved token. Auto-onboarding completes role-selection prompts when joining a server that uses `GUILD_ONBOARDING`.
 - X (Twitter): `x_read` pulls the home timeline, any public account, a search, mentions, or one post; `x_post` posts, replies, quotes, likes, reposts and deletes. Reading needs no account at all; posting uses the session cookies of a logged-in browser. No paid API anywhere. See [X (Twitter)](#x-twitter).
@@ -591,6 +591,34 @@ notices next to friend requests and mail — one notice per post ever, his own
 posts never filed, a dismissed mention staying dismissed. It needs a session
 (mentions are not public), and the poller stays quiet and says so once when
 there is nothing to read them with.
+
+## Chess
+
+Maxwell plays real chess against whoever starts a game. One game per channel,
+and only the player who started it may move — that player is the one Maxwell
+focuses on there. The chess tools own the board state, render the position as
+a PNG (white at the bottom, last move and check highlighted), post that image
+to the channel so the player sees it, and return the board as text + FEN +
+legal moves plus the image as base64 so Maxwell sees it on the next turn.
+
+| Tool | What it does |
+|---|---|
+| `chess_start` | Start a game against the invoking player. `bot_side=white\|black\|auto` (default white); `depth` 1-4 (default 3). If Maxwell is white it opens automatically. |
+| `chess_move` | Play a move in SAN (`e4`, `Nf3`, `O-O`) or UCI (`e2e4`). Player's move is relayed; Maxwell's own move is a legal choice or, if omitted on its turn, picked by a small alpha-beta engine. `respond=true` (default) makes Maxwell reply right after a player move. |
+| `chess_state` | Re-sync: current board, FEN, legal moves, whose move — no board change, no post. |
+| `chess_resign` | End the game (`side=maxwell` or `side=player`). |
+
+Maxwell's engine is a depth-limited negamax with material + piece-square
+evaluation and a small opening book, so it plays a sane opening instead of
+1.a3. Games persist in `data/chess_games.json` (gitignored) and survive a
+restart. Deps: `python-chess` + `pillow` (already in `requirements.txt`).
+
+## Usage
+
+The `usage` tool queries the provider quota endpoint (`z3ki.dev/v2/usage`)
+with the API key already in the environment (`OLLAMA_API_KEY`, falling back to
+`OPENAI_COMPAT_API_KEY`), returning remaining percentage and reset times.
+Override the URL with `MAXWELL_USAGE_URL`.
 
 ## Memory and RAG
 

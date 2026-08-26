@@ -398,4 +398,9 @@ KNOWN_TOOLS = [
     "x_read",
     "x_post",
     "more_tools",
+    "chess_start",
+    "chess_move",
+    "chess_state",
+    "chess_resign",
+    "usage",
 ]

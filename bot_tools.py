@@ -53,6 +53,30 @@ from utils import (  # single source of truth, fd-safe
     is_gif_page_url,
 )
 
+# Chess is optional: if python-chess is missing the chess_* tools will not be
+# registered, but nothing else breaks. __CHESS_IMPORTED__ gates the tool classes.
+try:  # noqa: E402
+    import chess as _chess  # noqa: F401
+
+    from chess_game import (
+        ChessManager as _ChessManager,
+        choose_bot_move as _chess_choose_bot_move,
+        board_ascii as _chess_board_ascii,
+        get_manager as _chess_get_manager,
+        render_board_png as _chess_render_board_png,
+    )
+
+    __CHESS_IMPORTED__ = True
+except Exception as _chess_err:  # pragma: no cover - missing optional dep
+    __CHESS_IMPORTED__ = False
+    _ChessManager = None
+    _chess_choose_bot_move = None
+    _chess_board_ascii = None
+    _chess_get_manager = None
+    _chess_render_board_png = None
+    _chess = None
+    logger.warning("chess tools disabled: python-chess not importable (%s)", _chess_err)
+
 try:
     from ddgs import DDGS as _DDGS
 
@@ -10924,3 +10948,505 @@ class UpdateServerPromptTool(Tool):
             f"{len(text_str)} chars written. The change is live on the next "
             f"turn in that server — no restart needed."
         )
+
+
+# --------------------------------------------------------------------------- #
+# Chess
+#
+# The chess_* tools let Maxwell play a real game against whoever started it in
+# a channel. Exactly one active game per channel; only the player who started
+# it can move. Maxwell "sees" the board two ways: the tool result carries the
+# board as ASCII + FEN + legal moves, and the posted PNG is returned as base64
+# (__IMAGE_B64__) so the vision path attaches it to the next model turn. The
+# same PNG is posted to the channel so the player sees it too.
+# --------------------------------------------------------------------------- #
+
+
+def _chess_color_name(color) -> str:
+    return "white" if _chess and color == _chess.WHITE else "black"
+
+
+def _chess_render_safe(game) -> bytes | None:
+    """Render the board PNG, or None if Pillow/chess rendering is unavailable.
+
+    Callers degrade to a text-only result rather than failing the whole tool.
+    """
+    try:
+        return _chess_render_board_png(game.board)
+    except Exception as exc:  # pragma: no cover - non-fatal
+        logger.warning("chess board render failed: %s", exc)
+        return None
+
+
+def _chess_state_text(game) -> str:
+    """The board + metadata the model needs to play, as plain text."""
+    lines: list[str] = []
+    lines.append("CHESS BOARD (text — see attached image for the real board):")
+    lines.append(_chess_board_ascii(game.board))
+    lines.append("")
+    lines.append(f"FEN: {game.fen}")
+    move_hist = " ".join(game.history_san) or "none"
+    lines.append(f"Move history (SAN): {move_hist}")
+    lines.append(
+        f"Maxwell={_chess_color_name(game.bot_color)} · "
+        f"{game.player_name}={_chess_color_name(game.player_color)}"
+    )
+    result = game.result
+    if result:
+        lines.append(f"GAME OVER: {result}")
+    else:
+        legal = game.legal_san
+        lines.append(f"To move: {game.turn_label}")
+        shown = ", ".join(legal[:48])
+        if len(legal) > 48:
+            shown += f" … (+{len(legal) - 48} more)"
+        lines.append(f"Legal moves ({len(legal)}): {shown}")
+        who = "Maxwell" if game.bot_turn else game.player_name
+        lines.append(f"It is {who}'s move.")
+    return "\n".join(lines)
+
+
+def _chess_save_png(bot, game) -> str | None:
+    """Best-effort write of the board PNG to data/exports/chess for reuse."""
+    try:
+        png = _chess_render_safe(game)
+        if not png:
+            return None
+        data_dir = os.path.abspath(
+            getattr(getattr(bot, "config", None), "DATA_DIR", "data") or "data"
+        )
+        out_dir = os.path.join(data_dir, "exports", "chess")
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, f"{game.game_id}.png")
+        with open(path, "wb") as fh:
+            fh.write(png)
+        return path
+    except Exception as exc:  # pragma: no cover - non-fatal
+        logger.warning("Could not persist chess board png: %s", exc)
+        return None
+
+
+async def _chess_post_board(bot, message, game) -> tuple[str, str, bytes | None]:
+    """Render, send the PNG to the channel, return ``(cdn_url, local_path, png)``."""
+    png = _chess_render_safe(game)
+    local_path = _chess_save_png(bot, game)
+    cdn_url = ""
+    if not png:
+        return cdn_url, local_path, None
+    try:
+        file = File(BytesIO(png), filename=f"chess-{game.game_id}.png")
+        sent = await message.channel.send(file=file)
+        if sent is not None and getattr(sent, "attachments", None):
+            cdn_url = sent.attachments[0].url
+    except discord.Forbidden:
+        logger.warning("Cannot post chess board in %s — missing permissions", getattr(message.channel, "id", "?"))
+    except discord.HTTPException as exc:
+        logger.warning("Failed to post chess board: %s", exc)
+    return cdn_url, local_path, png
+
+
+def _chess_append_image(result: str, png: bytes) -> str:
+    if not png:
+        return result
+    b64 = base64.b64encode(png).decode("ascii")
+    return result + f"\n__IMAGE_B64__{b64}__END_IMAGE_B64__\n"
+
+
+async def _chess_record(bot, message, text: str) -> None:
+    """Record a small chess line to channel memory so the model keeps continuity."""
+    try:
+        mem = getattr(bot, "memory", None)
+        if mem is not None and hasattr(mem, "add_to_channel_memory"):
+            await mem.add_to_channel_memory(
+                str(getattr(message.channel, "id", "") or ""),
+                {
+                    "author": "Tool",
+                    "content": text,
+                    "is_tool": True,
+                },
+            )
+    except Exception:  # pragma: no cover
+        pass
+
+
+def _chess_game_result(game, *, posted: bool, cdn_url: str = "", local_path: str = "", png: bytes | None = None) -> str:
+    text = _chess_state_text(game)
+    extra: list[str] = []
+    if posted:
+        extra.append("Board image posted to the channel.")
+    if cdn_url:
+        extra.append(f"Board image URL: {cdn_url}")
+    if local_path:
+        extra.append(f"Board image local path: {local_path}")
+    if extra:
+        text += "\n" + "\n".join(extra)
+    if png:
+        text = _chess_append_image(text, png)
+    return text
+
+
+class ChessStartTool(Tool):
+    """Start a new chess game in this channel with the invoking player."""
+
+    def get_description(self):
+        return (
+            "Start a chess game in this channel against the player who asked. "
+            "One game per channel; once started, only that player may move. "
+            "Posts the starting board image and returns the full board state, "
+            "FEN, and legal moves. Params: bot_side (white|black|auto, default "
+            "white), depth (search depth 1-4, default 3). If Maxwell is white it "
+            "plays its first move automatically and then it is the player's turn."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        bot_side: str | None = "white",
+        depth: int | None = None,
+        **kwargs,
+    ) -> str:
+        if not __CHESS_IMPORTED__:
+            return "Error: chess is not available (python-chess is missing)."
+        channel_id = str(getattr(message.channel, "id", "") or "")
+        author_id = str(getattr(message.author, "id", "") or "")
+        author_name = str(getattr(message.author, "display_name", "") or "") or str(
+            getattr(message.author, "name", "") or "player"
+        )
+        if not channel_id:
+            return "Error: no channel context."
+
+        manager = _chess_get_manager()
+        existing = manager.active(channel_id)
+        if existing is not None:
+            return (
+                f"Error: a chess game is already active in this channel. "
+                f"It is between Maxwell and {existing.player_name}. "
+                f"Use chess_state to see it, or chess_resign to end it first."
+            )
+
+        side = str(bot_side or "auto").strip().lower()
+        if side in ("auto", "random"):
+            bot_color = None
+        elif side == "white":
+            bot_color = _chess.WHITE if hasattr(_chess, "WHITE") else True
+        elif side == "black":
+            bot_color = _chess.BLACK if hasattr(_chess, "BLACK") else False
+        else:
+            return "Error: bot_side must be 'white', 'black', or 'auto'."
+
+        max_depth = int(depth or 3)
+        if max_depth < 1:
+            max_depth = 1
+        if max_depth > 4:
+            max_depth = 4
+
+        game = manager.start(
+            channel_id,
+            author_id,
+            author_name,
+            bot_color=bot_color,
+            max_depth=max_depth,
+            jitter=0.35,
+        )
+
+        # If Maxwell is white it opens; otherwise the player moves first.
+        played: list[str] = []
+        if game.bot_turn and not game.is_over:
+            try:
+                mv, san = _chess_choose_bot_move(game.board, depth=game.max_depth, jitter=game.jitter)
+                game.apply_move(mv)
+                played.append(san)
+            except Exception as exc:  # pragma: no cover
+                logger.warning("chess_start engine move failed: %s", exc)
+            manager.persist()
+
+        self._signal_streaming(message)
+        cdn_url, local_path, png = await _chess_post_board(self.bot, message, game)
+        manager.persist()
+        await _chess_record(
+            self.bot,
+            message,
+            f"started a chess game. Maxwell is "
+            f"{_chess_color_name(game.bot_color)}, "
+            f"{game.player_name} is {_chess_color_name(game.player_color)}."
+            + (f" Maxwell opened with {played[-1]}." if played else ""),
+        )
+
+        result = _chess_game_result(game, posted=True, cdn_url=cdn_url, local_path=local_path, png=png)
+        if played:
+            result += (
+                "\n\nGame started. Maxwell ("
+                + _chess_color_name(game.bot_color)
+                + ") opened with '"
+                + played[-1]
+                + "'. Tell "
+                + game.player_name
+                + " it is their move and prompt them to play."
+            )
+        elif game.bot_turn and not game.is_over:
+            result += (
+                "\n\nGame started. It is Maxwell's move — call chess_move"
+                " (or pass move=) to play."
+            )
+        else:
+            result += (
+                "\n\nGame started. It is "
+                + game.player_name
+                + "'s move — prompt them to play."
+            )
+        result += " Use chess_move to advance the game."
+        return result
+
+
+class ChessStateTool(Tool):
+    """Show the current chess board, FEN, and legal moves (no board change)."""
+
+    def get_description(self):
+        return (
+            "Get the current chess board state (text board, FEN, legal moves, "
+            "whose move it is) for the active game in this channel. Does NOT "
+            "change the board or post an image; use it to re-sync when you lose "
+            "track of the position. Only the player who started the game may "
+            "call it."
+        )
+
+    async def execute(self, message: Message, **kwargs) -> str:
+        if not __CHESS_IMPORTED__:
+            return "Error: chess is not available (python-chess is missing)."
+        channel_id = str(getattr(message.channel, "id", "") or "")
+        author_id = str(getattr(message.author, "id", "") or "")
+        manager = _chess_get_manager()
+        try:
+            game = manager.game_for(channel_id, author_id)
+        except ValueError as exc:
+            return f"Error: {exc}"
+        except PermissionError as exc:
+            return f"Error: {exc}"
+        png = _chess_render_safe(game)
+        return _chess_game_result(game, posted=False, png=png)
+
+
+class ChessMoveTool(Tool):
+    """Play a chess move: the player's move or Maxwell's own move."""
+
+    def get_description(self):
+        return (
+            "Advance the chess game by one move (or a full round). Pass move= "
+            "in SAN (e4, Nf3, O-O, exd5, Qh5) or UCI (e2e4, e7e8q). If it is "
+            "the player's turn, this relays their move; if it is Maxwell's turn "
+            "and move is omitted, Maxwell picks a move itself. respond=true "
+            "(default) makes Maxwell reply automatically after a player move. "
+            "Posts the updated board image and returns FEN + legal moves. Only "
+            "the player who started the game may call it."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        move: str | None = None,
+        respond: bool = True,
+        **kwargs,
+    ) -> str:
+        if not __CHESS_IMPORTED__:
+            return "Error: chess is not available (python-chess is missing)."
+        channel_id = str(getattr(message.channel, "id", "") or "")
+        author_id = str(getattr(message.author, "id", "") or "")
+        manager = _chess_get_manager()
+        try:
+            game = manager.game_for(channel_id, author_id)
+        except ValueError as exc:
+            return f"Error: {exc}"
+        except PermissionError as exc:
+            return f"Error: {exc}"
+
+        played: list[str] = []
+        error_text: str | None = None
+        try:
+            if game.bot_turn:
+                # Maxwell to move. Either the model supplies its chosen move,
+                # or the engine picks one.
+                if move:
+                    mv = game.parse_move(move)
+                    played.append(game.apply_move(mv))
+                else:
+                    mv, san = _chess_choose_bot_move(game.board, depth=game.max_depth, jitter=game.jitter)
+                    game.apply_move(mv)
+                    played.append(san)
+            else:
+                # Player to move. They must supply a move; it must be legal for
+                # the side to move (parse_move enforces that).
+                if not move:
+                    return (
+                        f"Error: it is {game.player_name}'s move. "
+                        "Pass move= (e.g. move=...'e4') with the move they just "
+                        "played. Leave move unset and it stays on the player."
+                    )
+                mv = game.parse_move(move)
+                played.append(game.apply_move(mv))
+        except ValueError as exc:
+            error_text = str(exc)
+        except Exception as exc:
+            error_text = f"could not apply move: {exc}"
+
+        if error_text:
+            return f"Error: {error_text}"
+
+        # If the human just moved and it is now Maxwell's turn, respond.
+        if respond and game.bot_turn and not game.is_over:
+            try:
+                mv2, san2 = _chess_choose_bot_move(game.board, depth=game.max_depth, jitter=game.jitter)
+                game.apply_move(mv2)
+                played.append(san2)
+            except Exception as exc:  # pragma: no cover
+                logger.warning("chess_move engine reply failed: %s", exc)
+
+        manager.persist()
+        self._signal_streaming(message)
+        cdn_url, local_path, png = await _chess_post_board(self.bot, message, game)
+        manager.persist()
+        await _chess_record(
+            self.bot,
+            message,
+            "chess move(s): " + " ".join(played) + f" · fen {game.fen.split()[0]}",
+        )
+
+        result = _chess_game_result(game, posted=True, cdn_url=cdn_url, local_path=local_path, png=png)
+        result += (
+            "\n\n" + "Played move(s): " + " ".join(played)
+            + ("\nThe game is over." if game.is_over else
+               ("\nIt is now the player's move — tell them it is their turn."
+                if not game.bot_turn else
+                "\nIt is Maxwell's move — play it or pass the next call."))
+        )
+        return result
+
+
+class ChessResignTool(Tool):
+    """End the current chess game."""
+
+    def get_description(self):
+        return (
+            "End the active chess game in this channel. Pass side=maxwell to "
+            "have Maxwell resign, side=player to record the player resigning, or "
+            "leave it default for a mutual end. Returns the final board and "
+            "result. Only the player who started the game may call it."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        side: str | None = None,
+        **kwargs,
+    ) -> str:
+        if not __CHESS_IMPORTED__:
+            return "Error: chess is not available (python-chess is missing)."
+        channel_id = str(getattr(message.channel, "id", "") or "")
+        author_id = str(getattr(message.author, "id", "") or "")
+        manager = _chess_get_manager()
+        try:
+            game = manager.game_for(channel_id, author_id)
+        except ValueError as exc:
+            return f"Error: {exc}"
+        except PermissionError as exc:
+            return f"Error: {exc}"
+
+        who = str(side or "player").strip().lower()
+        if who in ("player", "user", "human"):
+            winner = _chess_color_name(game.bot_color)
+        elif who in ("maxwell", "bot", "max"):
+            winner = _chess_color_name(game.player_color)
+        else:
+            winner = None
+        manager.remove(channel_id)
+        final = _chess_state_text(game)
+        png = _chess_render_safe(game)
+        if winner:
+            final += f"\nGAME OVER: {winner} wins by resignation."
+        else:
+            final += "\nGAME OVER: the game was ended."
+        final = _chess_append_image(final, png)
+        await _chess_record(self.bot, message, f"chess game ended ({who} resigned).")
+        return final + "\n\nGame ended. Use chess_start to begin a new one."
+
+
+class UsageTool(Tool):
+    """Query the usage/quota endpoint (z3ki.dev/v2/usage) with the API key in env."""
+
+    def get_description(self):
+        return (
+            "Fetch current API usage and remaining quota from the provider "
+            "(z3ki.dev/v2/usage) using the API key already configured in env. "
+            "Returns usage percentages, reset times, and account counts so you "
+            "can report how much budget is left."
+        )
+
+    def _url(self) -> str:
+        return (os.environ.get("MAXWELL_USAGE_URL", "") or "").strip() or "https://z3ki.dev/v2/usage"
+
+    def _api_key(self) -> str:
+        return (
+            os.environ.get("OLLAMA_API_KEY", "")
+            or os.environ.get("OPENAI_COMPAT_API_KEY", "")
+            or ""
+        ).strip()
+
+    async def execute(self, message: Message, **kwargs) -> str:
+        url = self._url()
+        key = self._api_key()
+        if not key:
+            return "Error: no API key configured (OLLAMA_API_KEY or OPENAI_COMPAT_API_KEY)."
+        session = await _get_shared_session()
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json",
+        }
+        try:
+            async with session.get(
+                url,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                body = await resp.text()
+                if resp.status != 200:
+                    return f"Error: usage endpoint returned HTTP {resp.status}: {body[:400]}"
+        except asyncio.TimeoutError:
+            return "Error: usage endpoint timed out."
+        except Exception as exc:
+            return f"Error: could not reach usage endpoint: {exc}"
+
+        # Condense to a concise summary the model can read at a glance, with
+        # the raw payload appended (truncated) only if the shape is unfamiliar.
+        try:
+            data = json.loads(body)
+        except ValueError:
+            return f"API usage from {url}:\n{body[:4000]}"
+
+        lines: list[str] = [f"API usage from {url}:"]
+        accounts = data.get("accounts")
+        if accounts is not None:
+            lines.append(f"Accounts: {accounts}")
+        combined = data.get("combined") or {}
+        if isinstance(combined, dict):
+            for family, limits in combined.items():
+                if not isinstance(limits, dict):
+                    continue
+                parts: list[str] = []
+                for window in ("5h", "weekly"):
+                    info = limits.get(window)
+                    if not isinstance(info, dict):
+                        continue
+                    pct = info.get("remaining_pct")
+                    reset = str(info.get("reset_time", ""))[:16]
+                    name = info.get("display_name", window)
+                    if pct is not None:
+                        parts.append(f"{window}: {pct:.1f}% left (resets {reset})")
+                    else:
+                        parts.append(f"{window}: {name} (resets {reset})")
+                if parts:
+                    lines.append(f"- {family}: " + " · ".join(parts))
+        # Include a trimmed raw copy so unusual fields are still available.
+        rendered = json.dumps(data, indent=2, ensure_ascii=False)
+        if len(rendered) > 4000:
+            rendered = rendered[:4000] + "\n… [truncated]"
+        lines.append("\nRaw payload:" + rendered)
+        return "\n".join(lines)

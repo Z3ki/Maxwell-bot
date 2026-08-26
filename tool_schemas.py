@@ -664,6 +664,40 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         },
         ["action"],
     ),
+
+    # ---- Chess (Maxwell plays real chess against whoever starts a game) ----
+    "chess_start": _obj(
+        {
+            "bot_side": _str(
+                "white | black | auto (default white). The side Maxwell plays. "
+                "The player gets the other colour."
+            ),
+            "depth": _int("Search depth for Maxwell's engine moves (1-4, default 3)"),
+        }
+    ),
+    "chess_move": _obj(
+        {
+            "move": _str(
+                "The move to play, in SAN (e4, Nf3, O-O, exd5, Qh5) or UCI "
+                "(e2e4, e7e8q). If it is Maxwell's turn and move is omitted, "
+                "Maxwell picks a move itself."
+            ),
+            "respond": _bool(
+                "After a player move, automatically play Maxwell's reply in the "
+                "same call (default true). Set false to play Maxwell's move "
+                "separately."
+            ),
+        }
+    ),
+    "chess_state": _obj({}),
+    "chess_resign": _obj(
+        {
+            "side": _str(
+                "who resigns: maxwell | player (optional; default player)"
+            ),
+        }
+    ),
+    "usage": _obj({}),
 }
 
 
@@ -762,6 +796,12 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "update_server_prompt",
         # more_tools hands the full catalog back and must get a turn to use it.
         "more_tools",
+        # chess + usage return data the model needs a follow-up turn to react to.
+        "chess_start",
+        "chess_move",
+        "chess_state",
+        "chess_resign",
+        "usage",
     }
 )
 
@@ -788,6 +828,11 @@ CHAT_CORE_TOOL_NAMES: frozenset[str] = frozenset(
         "send_meme",
         "image_generator",
         "more_tools",
+        "chess_start",
+        "chess_move",
+        "chess_state",
+        "chess_resign",
+        "usage",
     }
 )
 

@@ -5,3 +5,5 @@ aiohttp>=3.14.0            # LLM provider + admin API HTTP
 aiofiles>=24.1.0           # async file IO
 python-dotenv>=1.0.0       # .env loading
 numpy>=2.5.1               # RAG vector math (cosine search)
+python-chess>=1.999        # chess_* tools: board state, legal moves, engine
+pillow>=10.0.0             # chess board PNG rendering (also used by HD image)

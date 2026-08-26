@@ -283,6 +283,12 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     XPostTool,
     XReadTool,
     YouTubeTool,
+    ChessStartTool,
+    ChessMoveTool,
+    ChessStateTool,
+    ChessResignTool,
+    UsageTool,
+    __CHESS_IMPORTED__ as _CHESS_IMPORTED,
     forget_shell_progress,
     _IMAGE_FETCH_UA,
     _guild_access_line,
@@ -2150,6 +2156,13 @@ TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "x_post",
     "inbox_list",
     "inbox_act",
+    # Chess + usage are transport-agnostic: they only send on the channel and
+    # read the author id, so they work unchanged on Telegram.
+    "chess_start",
+    "chess_move",
+    "chess_state",
+    "chess_resign",
+    "usage",
 }
 
 # Jailbreak / freedom-mode. OFF per server unless an admin runs `,jailbreak on`.
@@ -3436,6 +3449,15 @@ class MaxwellBot(commands.Bot):
             self.tools["youtube"] = YouTubeTool(self)
         self.tools["send_file"] = SendFileTool(self)
         self.tools["send_message"] = SendMessageTool(self)
+        # Chess: Maxwell plays real chess against whoever starts a game in a
+        # channel. Gated on the optional python-chess dep so a missing import
+        # turns the whole feature off instead of breaking startup.
+        if _CHESS_IMPORTED:
+            self.tools["chess_start"] = ChessStartTool(self)
+            self.tools["chess_move"] = ChessMoveTool(self)
+            self.tools["chess_state"] = ChessStateTool(self)
+            self.tools["chess_resign"] = ChessResignTool(self)
+        self.tools["usage"] = UsageTool(self)
         # No more standalone `reasoning_log` tool. Reasoning now rides INSIDE
         # every tool call via the auto-injected `reasoning` param (see
         # tool_registry.record_reasoning + tool_schemas.build_openai_tools).
