@@ -562,6 +562,19 @@ class Config:
     SUBAGENT_COMMAND_TIMEOUT_SECONDS = _int_env(
         "SUBAGENT_COMMAND_TIMEOUT_SECONDS", 120, min_value=5, max_value=3600
     )
+    # How many background (fire-and-forget) sub-agents may run at once. Each
+    # one holds a provider loop and a sandbox container, so this caps both the
+    # provider load and how many throwaway containers are alive. Foreground
+    # (blocking) sub-agent calls are not limited by this — the model only ever
+    # runs one of those per turn.
+    SUBAGENT_MAX_CONCURRENT = _int_env(
+        "SUBAGENT_MAX_CONCURRENT", 2, min_value=1, max_value=16
+    )
+    # Hard ceiling on background sub-agents submitted but not yet finished
+    # (running + waiting on a concurrency slot). Past this, new background
+    # requests are refused with a clear "too busy" so a channel flood can't
+    # grow the in-memory queue without bound. Foreground calls are unaffected.
+    SUBAGENT_MAX_QUEUED = _int_env("SUBAGENT_MAX_QUEUED", 8, min_value=1, max_value=128)
     # Where the sub-agent's `run_command` executes. "docker" (default) runs
     # each run in its own throwaway container with only the run's scratch
     # workspace mounted — the bot's .env and source are not visible to it.

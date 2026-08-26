@@ -49,6 +49,7 @@ import site_server
 from utils import (  # single source of truth, fd-safe
     FileLock,
     _atomic_json_write_sync,
+    _spawn_background,
     is_direct_image_url,
     is_gif_page_url,
 )
@@ -7036,6 +7037,45 @@ class ShellTool(Tool):
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+class _LiveMessage:
+    """One Discord message edited in place as a background sub-agent runs.
+
+    Throttled so a fast run doesn't spam edits; ``finalize()`` swaps the body
+    for the report. Every operation is best-effort — a deleted message, a
+    channel the bot lost access to, or a rate limit just means the live view
+    goes quiet rather than the run failing.
+    """
+
+    _EDIT_COOLDOWN = 6.0
+
+    def __init__(self, message, task: str, run_id: str):
+        self._m = message
+        self._task = (task or "").strip()
+        self._run_id = run_id
+        self._last_edit = 0.0
+
+    async def update(self, name="", reasoning=""):
+        now = time.monotonic()
+        if now - self._last_edit < self._EDIT_COOLDOWN:
+            return
+        self._last_edit = now
+        label = str(reasoning or "").strip()
+        head = self._task[:110] or "sub-agent"
+        body = f"⚙️ {head}\n`{label[:280]}`" if label else f"⚙️ {head}"
+        with contextlib.suppress(Exception):
+            await self._m.edit(content=body)
+
+    async def finalize(self, report: str):
+        report = str(report or "").strip() or "(sub-agent returned nothing)"
+        head = self._task[:110] or "sub-agent"
+        cap = 1800
+        body = f"✅ {head}\n\n{report[:cap]}"
+        if len(report) > cap:
+            body += "\n…(report truncated)"
+        with contextlib.suppress(Exception):
+            await self._m.edit(content=body)
+
+
 class SubAgentTool(Tool):
     """Delegate a coding task to a nested Maxwell that works it to completion.
 
@@ -7199,14 +7239,43 @@ class SubAgentTool(Tool):
         },
     ]
 
+    def __init__(self, bot):
+        super().__init__(bot)
+        # Cap how many background (fire-and-forget) sub-agents run at once.
+        # Each holds a provider loop and a sandbox container, so this bounds
+        # both provider load and how many throwaway containers are alive.
+        try:
+            limit = max(1, int(getattr(Config, "SUBAGENT_MAX_CONCURRENT", 2) or 2))
+        except (TypeError, ValueError):
+            limit = 2
+        try:
+            self._bg_max_queued = max(
+                1, int(getattr(Config, "SUBAGENT_MAX_QUEUED", 8) or 8)
+            )
+        except (TypeError, ValueError):
+            self._bg_max_queued = 8
+        self._bg_sem = asyncio.Semaphore(limit)
+        # Submitted background sub-agents not yet finished (running + queued on
+        # the slot). Capped so a flood across many channels can't grow the
+        # in-memory queue without bound. Only touched from the event loop.
+        self._bg_inflight = 0
+
     def get_description(self) -> str:
         return (
-            "Hand a self-contained coding task to a sub-agent (another "
-            "instance of you) that writes the code, runs it, fixes what "
-            "breaks, and reports back with the result. Use it for work that "
-            "needs several build-and-test rounds — a script, a small program, "
-            "a data-crunching job — not for a one-liner you could just run "
-            "with `shell`. It cannot ask questions, so state the task fully."
+            "Hand a self-contained task to a sub-agent (another instance of "
+            "you) that works it to completion in its own scratch directory and "
+            "reports back. This is your DEFAULT engine for any heavy, "
+            "multi-step job — building a whole site, writing and debugging a "
+            "program/script, a data-crunching or file-conversion task, anything "
+            "that takes several build-and-test rounds. Don't grind such a job "
+            "through a long inline chain; hand it over and get one report. It "
+            "cannot ask questions, so put the full goal, inputs, and how to "
+            "verify the result into `task`. `mode=background` (the default for "
+            "heavy work) returns immediately and posts the result when the run is "
+            "done; `mode=foreground` blocks for the report now. `deliver` controls "
+            "where the result lands: `channel` (default) or `dm` to the requester. "
+            "Not for a one-liner you could just run with `shell`. `workdir` pins "
+            "the scratch dir; `max_steps` caps a runaway job."
         )
 
     # ─── workspace helpers ────────────────────────────────────────────
@@ -7493,6 +7562,60 @@ class SubAgentTool(Tool):
         )
         run_id = run.run_id if run else ""
 
+        # Fire-and-forget: ``mode=background`` returns immediately and hands the
+        # whole run to a background task that posts the result to this channel
+        # when done. The model stays responsive — no minutes of silence while
+        # the main loop waits on a nested agent. ``mode=foreground`` (the old
+        # behaviour, and what the tests exercise) blocks until the report.
+        mode = str(kwargs.get("mode") or kwargs.get("background") or "").strip().lower()
+        background = mode in {
+            "background",
+            "bg",
+            "async",
+            "fire_and_forget",
+            "fire-and-forget",
+            "fire",
+            "true",
+            "1",
+            "yes",
+            "on",
+        }
+        if background:
+            # Refuse rather than grow without bound when a channel flood keeps
+            # submitting heavy work faster than runs finish.
+            if self._bg_inflight >= self._bg_max_queued:
+                return (
+                    f"A background sub-agent is already queued/running ("
+                    f"{self._bg_inflight}/{self._bg_max_queued}). I won't pile "
+                    f"on more right now — say the word and I'll run it once the "
+                    f"queue drains, or use mode=foreground to block for it now."
+                )
+            self._bg_inflight += 1
+            deliver = (
+                str(kwargs.get("deliver") or kwargs.get("notify") or "channel")
+                .strip()
+                .lower()
+            )
+            _spawn_background(
+                self._run_background(
+                    message,
+                    task,
+                    workspace,
+                    max_steps,
+                    model,
+                    provider,
+                    bus,
+                    run_id,
+                    deliver,
+                )
+            )
+            return (
+                f"Started a background sub-agent (run {run_id}: "
+                f"{self._short(task)}). It's working on this chat — I'll post "
+                f"the message here when it's done. Don't wait on it; reply or "
+                f"keep going with anything else."
+            )
+
         # Mirror the run onto the channel's live progress message so a
         # four-minute run reads as "step 3/24: running: pytest -q" instead of
         # a silent typing indicator. Backgrounded rather than inlined: the
@@ -7531,6 +7654,154 @@ class SubAgentTool(Tool):
             # a bind mount on a workspace nobody is using.
             if self._sandbox_mode() == "docker":
                 await self._stop_sandbox(workspace)
+
+    # ─── background (fire-and-forget) runs ───────────────────────────
+
+    @staticmethod
+    def _short(text: str, n: int = 120) -> str:
+        t = " ".join(str(text or "").split())
+        return t[:n] + ("…" if len(t) > n else "")
+
+    async def _resolve_channel(self, channel_id) -> Any:
+        """A sendable text channel by id, or None. Falls back to fetch on cold cache."""
+        if not channel_id:
+            return None
+        try:
+            cid = int(channel_id)
+        except (TypeError, ValueError):
+            return None
+        bot = self.bot
+        with contextlib.suppress(Exception):
+            ch = bot.get_channel(cid)
+            if ch is not None:
+                return ch
+        with contextlib.suppress(Exception):
+            return await asyncio.wait_for(bot.fetch_channel(cid), timeout=6)
+        return None
+
+    async def _resolve_dm(self, user_id) -> Any:
+        """A sendable DM channel for a user, or None (DMs closed/blocked, gone)."""
+        if not user_id:
+            return None
+        try:
+            uid = int(user_id)
+        except (TypeError, ValueError):
+            return None
+        bot = self.bot
+        user = bot.get_user(uid)
+        if user is None:
+            with contextlib.suppress(Exception):
+                user = await asyncio.wait_for(bot.fetch_user(uid), timeout=6)
+        if user is None:
+            return None
+        dm = getattr(user, "dm_channel", None)
+        if dm is None:
+            with contextlib.suppress(Exception):
+                dm = await user.create_dm()
+        return dm
+
+    async def _resolve_delivery(self, message, deliver: str) -> Any:
+        """Channel or DM to deliver to. Falls back to channel when a DM isn't reachable."""
+        if str(deliver).strip().lower() in {"dm", "dm_only", "direct", "dm-only"}:
+            author = getattr(message, "author", None)
+            dm = await self._resolve_dm(str(getattr(author, "id", "") or ""))
+            if dm is not None:
+                return dm
+            # DM not reachable — fall back to the asking channel so the result
+            # is never silently lost to a private channel Maxwell can't open.
+            return await self._resolve_channel(
+                str(getattr(getattr(message, "channel", None), "id", "") or "")
+            )
+        return await self._resolve_channel(
+            str(getattr(getattr(message, "channel", None), "id", "") or "")
+        )
+
+    async def _open_live_message(self, target, task: str, run_id: str):
+        """Post the 'working' message a background run edits in place.
+
+        Returns a _LiveMessage, or None when the target can't be resolved or
+        the send fails (tests, a channel that vanished, DM closed, no perms).
+        The run itself still completes — it just has no live view.
+        """
+        if target is None:
+            return None
+        try:
+            sent = await target.send(f"⚙️ {self._short(task)}\nrun {run_id} — starting…")
+        except Exception:
+            return None
+        return _LiveMessage(sent, task, run_id)
+
+    async def _run_background(
+        self,
+        message,
+        task: str,
+        workspace: Path,
+        max_steps: int,
+        model,
+        provider,
+        bus,
+        run_id: str,
+        deliver: str = "channel",
+    ) -> None:
+        """Run a sub-agent to completion in the background, then post the result.
+
+        Never blocks the turn. The live message is both the progress display and
+        the final report. Never raises out of here — the only thing on the far
+        side of this task is the user's channel, and a failure should be a
+        reported message, not an unhandled task exception.
+
+        The time budget starts here, not when the request was queued, so a run
+        that waited for a concurrency slot still gets its full budget.
+        """
+        async with self._bg_sem:
+            # Budget relative to the work actually starting, not the request
+            # being queued behind a concurrency slot.
+            deadline = time.monotonic() + Config.SUBAGENT_TIMEOUT_SECONDS
+            target = await self._resolve_delivery(message, deliver)
+            live = await self._open_live_message(target, task, run_id)
+            watcher = None
+            if bus and run_id and live is not None:
+                watcher = asyncio.create_task(
+                    self._mirror_events_to_progress(bus, run_id, live)
+                )
+            try:
+                report = await self._agent_loop(
+                    task,
+                    workspace,
+                    max_steps=max_steps,
+                    deadline=deadline,
+                    model=model,
+                    provider=provider,
+                    bus=bus,
+                    run_id=run_id,
+                )
+                if bus and run_id:
+                    bus.finish_run(run_id, agent_events.STATUS_DONE, report[:2000])
+                if live is not None:
+                    with contextlib.suppress(Exception):
+                        await live.finalize(report)
+            except asyncio.CancelledError:
+                if bus and run_id:
+                    bus.finish_run(run_id, agent_events.STATUS_FAILED, "cancelled")
+                raise
+            except Exception as e:  # noqa: BLE001 - report it to the channel
+                logger.warning("background sub-agent %s failed: %s", run_id, e)
+                if bus and run_id:
+                    bus.finish_run(run_id, agent_events.STATUS_FAILED, str(e)[:2000])
+                if live is not None:
+                    with contextlib.suppress(Exception):
+                        await live.finalize(f"❌ sub-agent failed:\n{e}")
+            finally:
+                if self._bg_inflight > 0:
+                    self._bg_inflight -= 1
+                if watcher is not None:
+                    watcher.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await watcher
+                # Reap the sandbox on every exit path — an orphaned container
+                # holds 4GB of limit and a bind mount nobody is using.
+                if self._sandbox_mode() == "docker":
+                    await self._stop_sandbox(workspace)
 
     def _channel_progress(self, message):
         """The live progress message for this channel, if a batch owns one."""

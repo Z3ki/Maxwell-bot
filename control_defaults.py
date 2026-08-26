@@ -182,6 +182,15 @@ DEFAULT_CONTROL = {
     # the full catalog only when the turn actually asks for something (or the
     # model calls more_tools). Saves the tokens ~60 tool schemas cost on "lol".
     "lean_chat_tools": True,
+    # Make sub_agent the DEFAULT executor for heavy multi-step work (site
+    # builds, scripts/programs, data-crunching, anything needing several
+    # build/test rounds). When on, the tool prompt carries a "Delegate heavy
+    # work to sub_agent" block so Maxwell hands the whole job to a nested
+    # sub-agent and returns one report, instead of grinding a long inline
+    # chain that bloats context and crawls. Off keeps the old inline-first
+    # behaviour. Only matters when ENABLE_SUBAGENT is on and sub_agent is in
+    # the turn's tool set.
+    "subagent_delegate": True,
     "disabled_tools": [],
     "ignore_users": [],
     "allowed_channels": [],

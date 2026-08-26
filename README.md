@@ -343,7 +343,30 @@ present). Restart to re-detect. `python3 doctor.py` shows the resolved state.
 | `SUBAGENT_TIMEOUT_SECONDS` | Wall-clock budget for one task (default `900`) |
 | `SUBAGENT_COMMAND_TIMEOUT_SECONDS` | Per-command timeout (default `120`) |
 | `SUBAGENT_MAX_FILE_BYTES` | Largest file the sub-agent may write (default `200000`) |
+| `SUBAGENT_MAX_CONCURRENT` | How many background (fire-and-forget) sub-agents run at once (default `2`) |
+| `SUBAGENT_MAX_QUEUED` | Hard ceiling on background sub-agents submitted but not finished; past this new ones are refused (default `8`) |
 | `SUBAGENT_SANDBOX` | `docker` (default) runs each sub-agent run in its own container; `host` runs commands in the bot's own environment with no isolation |
+
+By default Maxwell **delegates heavy multi-step work to `sub_agent`** — a full
+site build, a program/script, a data-crunching or file-conversion job, anything
+needing several build/test rounds — instead of grinding a long inline `shell`
+chain that bloats the main context and crawls. Toggle this at runtime
+with the `subagent_delegate` control key (API `POST /api/control`); `true`
+(default) prefers delegation, `false` restores the old inline-first behaviour.
+Only matters when `ENABLE_SUBAGENT` is on and `sub_agent` is in the turn's tool set.
+
+Sub-agent runs have two modes. `mode=background` (the default for heavy work)
+returns immediately — Maxwell keeps the turn going and the run posts the result
+when it finishes, so nobody stares at a silent typing indicator for minutes.
+`mode=foreground` blocks for the report and hands it back in-turn. `deliver`
+controls where the result lands: `channel` (default, where it was asked) or
+`dm` to the person who asked (used for long or private results in a busy
+channel). Background runs are capped by `SUBAGENT_MAX_CONCURRENT`, and a
+channel flood can't pile them up without bound — past `SUBAGENT_MAX_QUEUED` new
+ones are refused. Both run in-process and are lost on a process restart (the
+durable record of what one did is its report on the channel). Multi-step
+terminal work (install → build → test, a command loop) is `sub_agent`, not
+`shell` — the sub-agent owns the live channel progress.
 
 ### Temporary Free Model
 

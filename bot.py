@@ -2367,6 +2367,51 @@ LEAN_TOOL_PROTOCOL = (
 )
 
 
+# Appended to the tool prompt (on any turn that carries sub_agent) when
+# ``subagent_delegate`` is on. This is the behavioral spine of "use sub-agents
+# as the main way to do actions": instead of grinding a big project through a
+# long chain of inline shell/site calls that bloats the main context and makes
+# the turn crawl, Maxwell hands the whole thing to a nested sub-agent and gets
+# back one clean report. The delegation machinery lives in bot_tools.SubAgentTool;
+# this block is the instruction that makes it the default executor.
+SUBAGENT_DELEGATION = (
+    "## Delegate heavy work to sub_agent\n"
+    "Your default engine for any SELF-CONTAINED task that needs several "
+    "build/test/fix rounds is `sub_agent` — a nested copy of you that works the "
+    "task to completion in its own scratch directory and reports back. "
+    "Do NOT grind a big project through a long chain of inline `shell` calls "
+    "here: it burns your context and makes the turn crawl. Instead:\n"
+    "- Delegate building a site, a script, a program, a data-crunching job, a "
+    "file-conversion job, or anything you estimate takes MORE than ~3 shell "
+    "round-trips. A full site build is always sub_agent territory — never write "
+    "the whole thing inline in chat.\n"
+    "- Multi-step terminal work (install → build → test → fix), anything with "
+    "a command loop, is sub_agent — NOT `shell`. `shell` is for one-shot "
+    "commands you run once and read. The sub-agent owns the channel progress "
+    "(step x/24 live) so a long job reads as progress, not as a stalled typing "
+    "indicator.\n"
+    "- Use `mode=background` for heavy work: it returns immediately and the run "
+    "posts its result to this channel when done, so you never sit here blocking "
+    "a nested agent for minutes. Use `mode=foreground` ONLY when you need the "
+    "report right now to make the next decision this turn.\n"
+    "- Write the WHOLE task into `task` (inputs, the file or URL to write, the "
+    "endpoint to hit, and the standard you want met). The sub-agent cannot ask "
+    "questions — it picks the reasonable interpretation and records its "
+    "assumption in the report.\n"
+    "- background gives you [returns output] (a short \"started\" ack) — since "
+    "the real result arrives in the channel later, don't wait for or invent it. "
+    "Ack the user in one line and end the turn; the report appears on its own.\n"
+    "- Use `deliver=dm` when the result is long and would clutter a busy "
+    "channel, or when the work is private to the person who asked — the report "
+    "lands in their DMs instead. Default `deliver=channel`.\n"
+    "- Keep it for heavy work. A one-liner, a quick lookup, or a single command "
+    "is faster direct with `shell`/`web_search`/`fetch_url` — delegation there "
+    "is pure overhead.\n"
+    "- Pass `workdir` to pin the sub-agent's scratch to a known spot, and "
+    "`max_steps` to cap a runaway job."
+)
+
+
 def _tool_results_need_followup(tool_results: list[str]) -> bool:
     # First pass: does the batch contain anything that needs a model turn
     # (a follow-up tool result, or an error)? If yes, we ALWAYS loop back,
@@ -14191,7 +14236,13 @@ class MaxwellBot(commands.Bot):
         # descriptions, but dropping this block meant Maxwell never saw
         # "search / fetch instead of guessing". Chat turns get the short
         # version — the full one documents tools they aren't carrying.
-        return header + "\n\n" + (LEAN_TOOL_PROTOCOL if lean else TOOL_PROTOCOL)
+        protocol = LEAN_TOOL_PROTOCOL if lean else TOOL_PROTOCOL
+        # When sub_agent is on this turn, add a block that makes it the default
+        # executor for heavy multi-step work instead of a long inline chain.
+        # Toggle at runtime with the `subagent_delegate` control key.
+        if "sub_agent" in names and self._control.get("subagent_delegate", True):
+            protocol += "\n\n" + SUBAGENT_DELEGATION
+        return header + "\n\n" + protocol
 
     @staticmethod
     def _topic_tokens(text: str) -> set[str]:

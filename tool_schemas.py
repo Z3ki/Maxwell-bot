@@ -487,6 +487,19 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             ),
             "workdir": _str("Optional short name for the scratch directory"),
             "max_steps": _int("Optional cap on sub-agent steps (default 24)"),
+            "mode": _str(
+                "'background' (default for heavy work) returns immediately and "
+                "the sub-agent runs on its own, posting the result when done — "
+                "the turn is not blocked. 'foreground' waits here and hands the "
+                "report back to you now. Use background unless you genuinely "
+                "need the report to make the next decision this turn."
+            ),
+            "deliver": _str(
+                "Where to post the result. 'channel' (default) posts to the "
+                "channel where it was asked; 'dm' sends it to the person who "
+                "asked, in a direct message. Use 'dm' when a long result would "
+                "clutter a busy channel or when the work is private to them."
+            ),
         },
         ["task"],
     ),

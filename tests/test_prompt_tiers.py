@@ -175,6 +175,29 @@ def test_switching_the_tier_off_skips_it_entirely():
     assert memory.profile_calls == []
 
 
+def test_the_entity_tier_follows_the_person_across_channels():
+    # The global person facts are keyed on the Discord user id only, so the
+    # same facts must render whether the person talks in channel A or channel B
+    # (or, by the same id, DMs). This is the "remember across servers/channels"
+    # guarantee — the entity tier must never be channel-scoped.
+    memory = _Memory(
+        entity={"user_id": "456", "display_names": ["alice"]},
+        facts=[{"content": "works night shifts", "importance": 8}],
+    )
+    bot = _bot(memory)
+
+    def prompt_for_channel(cid):
+        msg = _message()
+        msg.channel = SimpleNamespace(id=cid)
+        messages = asyncio.run(MaxwellBot._build_messages(bot, msg, LONG_TURN))
+        return "\n".join(str(m.get("content") or "") for m in messages)
+
+    first = prompt_for_channel(123)
+    second = prompt_for_channel(999)
+    assert "works night shifts" in first
+    assert "works night shifts" in second
+
+
 def test_nothing_known_renders_nothing():
     # An empty "About this person:" header invites the model to invent one.
     memory = _Memory(entity={"user_id": "456", "display_names": ["alice"]}, facts=[])
