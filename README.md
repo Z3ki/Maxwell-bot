@@ -408,7 +408,7 @@ All commands use the `,` prefix. Admin commands require the user to be in the ad
 | `,context forget <id>` | Yes | Delete a shared context fact |
 | `,context private <id>` | Yes | Mark a shared context fact private |
 | `,context global <id>` | Yes | Promote a fact to global shared context |
-| `,progress on` / `,progress off` / `,progress status` | Yes | Toggle live "thinking: …" progress messages during tool calls, per server (on by default; `,progress off` silences a noisy server; DMs never get them) |
+| `,progress on` / `,progress off` / `,progress status` | Yes | Toggle live "thinking: …" tool progress messages, per server (off by default; the sub-agent's plain "working on it" ack is the usual feedback; DMs never get them) |
 | `,rem` | Yes | Show REM status and last audit preview |
 | `,rem now` | Yes | Trigger one REM dream pass immediately |
 | `,rem on` / `,rem off` | Yes | Enable or disable REM for this process |

@@ -374,16 +374,13 @@ class Config:
     AUX_MODEL = os.getenv("AUX_MODEL", "").strip()
     AUX_DISABLE_REASONING = _bool_env("AUX_DISABLE_REASONING", True)
 
-    # Live tool progress messages. ON by default: this is the "say it's working
-    # on it" signal — one short status message ("shell: checking disk") per
-    # non-terminal tool batch, edited in place as tools run and deleted when the
-    # batch ends, so a long tool reads as progress instead of a silent typing
-    # indicator that looks like the bot did nothing. Set
-    # MAXWELL_PROGRESS_MESSAGES=false to silence globally. Per-server override is
-    # unchanged: `,progress off` (stored in data/progress_servers.json) silences
-    # a noisy server even under the on-by-default baseline; DMs never get them.
-    # See tool_progress.py for design.
-    PROGRESS_MESSAGES = _bool_env("MAXWELL_PROGRESS_MESSAGES", True)
+    # Live tool progress messages. OFF by default: a per-server `,progress on`
+    # opts a server in, and MAXWELL_PROGRESS_MESSAGES=true enables it for every
+    # server as a baseline. Prefer the plain "working on it" ack the sub-agent
+    # posts over these per-tool statuses — see MAXWELL_BASE_KNOWLEDGE and the
+    # sub_agent delegation block. `,progress off` silences a noisy server even
+    # under the env baseline; DMs never get them. See tool_progress.py.
+    PROGRESS_MESSAGES = _bool_env("MAXWELL_PROGRESS_MESSAGES", False)
 
     # Custom streaming tool-call protocol. Native OpenAI-style tools= doesn't
     # stream incrementally on some providers (notably Ollama cloud's

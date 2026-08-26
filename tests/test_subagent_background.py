@@ -122,11 +122,11 @@ def test_background_returns_immediately_and_posts_result(tmp_path, monkeypatch):
         started = await tool.execute(
             msg, task="write a hello script", mode="background"
         )
-        assert "Started a background sub-agent" in started
+        assert "Started sub-agent" in started
         # The background task shares this loop; let it run to completion.
         for _ in range(1000):
             if chan.last_message is not None and any(
-                e and "✅" in e for e in chan.last_message.edits
+                e and "done:" in e for e in chan.last_message.edits
             ):
                 return chan.last_message.content
             await asyncio.sleep(0.01)
@@ -151,7 +151,7 @@ def test_background_returns_immediately_even_without_a_channel(tmp_path, monkeyp
 
     async def scenario():
         started = await tool.execute(None, task="do a thing", mode="background")
-        assert "Started a background sub-agent" in started
+        assert "Started sub-agent" in started
         # Let the background task drain. It has no channel to post to, so
         # completion is the only signal — poll the provider's seen history.
         for _ in range(1000):
@@ -180,10 +180,10 @@ def test_background_deliver_dm_posts_to_the_requester(tmp_path, monkeypatch):
 
     async def scenario():
         started = await tool.execute(msg, task="private task", mode="background", deliver="dm")
-        assert "Started a background sub-agent" in started
+        assert "Started sub-agent" in started
         for _ in range(1000):
             if dm.last_message is not None and any(
-                e and "✅" in e for e in dm.last_message.edits
+                e and "done:" in e for e in dm.last_message.edits
             ):
                 return dm.last_message.content
             await asyncio.sleep(0.01)

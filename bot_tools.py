@@ -7061,7 +7061,9 @@ class _LiveMessage:
         self._last_edit = now
         label = str(reasoning or "").strip()
         head = self._task[:110] or "sub-agent"
-        body = f"⚙️ {head}\n`{label[:280]}`" if label else f"⚙️ {head}"
+        body = (
+            f"working on it: {head}\n{label[:280]}" if label else f"working on it: {head}"
+        )
         with contextlib.suppress(Exception):
             await self._m.edit(content=body)
 
@@ -7069,7 +7071,7 @@ class _LiveMessage:
         report = str(report or "").strip() or "(sub-agent returned nothing)"
         head = self._task[:110] or "sub-agent"
         cap = 1800
-        body = f"✅ {head}\n\n{report[:cap]}"
+        body = f"done: {head}\n\n{report[:cap]}"
         if len(report) > cap:
             body += "\n…(report truncated)"
         with contextlib.suppress(Exception):
@@ -7620,10 +7622,8 @@ class SubAgentTool(Tool):
                 )
             )
             return (
-                f"Started a background sub-agent (run {run_id}: "
-                f"{self._short(task)}). It's working on this chat — I'll post "
-                f"the message here when it's done. Don't wait on it; reply or "
-                f"keep going with anything else."
+                f"Started sub-agent (run {run_id}) on: {self._short(task, 60)}. "
+                f"I'll post the result here when it's done."
             )
 
         # Mirror the run onto the channel's live progress message so a
@@ -7736,7 +7736,7 @@ class SubAgentTool(Tool):
         if target is None:
             return None
         try:
-            sent = await target.send(f"⚙️ {self._short(task)}\nrun {run_id} — starting…")
+            sent = await target.send(f"working on it: {self._short(task)}")
         except Exception:
             return None
         return _LiveMessage(sent, task, run_id)
