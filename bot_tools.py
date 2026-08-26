@@ -7037,6 +7037,12 @@ class ShellTool(Tool):
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+def _shorten(text, n: int) -> str:
+    """Collapse to one line and truncate. Shared by the live-message renderers."""
+    t = " ".join(str(text or "").split())
+    return t[:n] + ("…" if len(t) > n else "")
+
+
 class _SubChan:
     """Bidirectional message relay between the main agent and a sub-agent run.
 
@@ -7073,9 +7079,12 @@ class _LiveMessage:
     """One Discord message edited in place as a background sub-agent runs.
 
     Throttled so a fast run doesn't spam edits; ``finalize()`` swaps the body
-    for the report. Every operation is best-effort — a deleted message, a
-    channel the bot lost access to, or a rate limit just means the live view
-    goes quiet rather than the run failing.
+    for the report. Kept deliberately minimal: the running line is just
+    "working on it" plus a step counter — never the full task text or a raw
+    shell command. The task description belongs in the model's ack and the
+    final report, not in a heartbeat that refreshes every few seconds. Every
+    operation is best-effort — a deleted message, a lost channel, or a rate
+    limit just makes the live view go quiet rather than failing the run.
     """
 
     _EDIT_COOLDOWN = 6.0
@@ -7092,16 +7101,18 @@ class _LiveMessage:
             return
         self._last_edit = now
         label = str(reasoning or "").strip()
-        head = self._task[:110] or "sub-agent"
-        body = (
-            f"working on it: {head}\n{label[:280]}" if label else f"working on it: {head}"
-        )
+        # Surface only a step counter if the label carries one. Never show the
+        # raw command / path — that's the ugly dump the operator flagged.
+        step = ""
+        match = re.search(r"step\s*(\d+)\s*/\s*(\d+)", label, re.IGNORECASE)
+        if match:
+            step = f" ({match.group(1)}/{match.group(2)})"
         with contextlib.suppress(Exception):
-            await self._m.edit(content=body)
+            await self._m.edit(content=f"working on it{step}")
 
     async def finalize(self, report: str):
         report = str(report or "").strip() or "(sub-agent returned nothing)"
-        head = self._task[:110] or "sub-agent"
+        head = _shorten(self._task, 48) or "sub-agent"
         cap = 1800
         body = f"done: {head}\n\n{report[:cap]}"
         if len(report) > cap:
@@ -7210,6 +7221,12 @@ class SubAgentTool(Tool):
         "- Work in small steps: inspect, change, run, check the output.\n"
         "- Actually verify. Run the code, the test, the linter — do not claim "
         "something works because it looks right.\n"
+        "- You are sandboxed. Your commands run in a throwaway container with "
+        "only this workdir mounted — you CANNOT reach the bot's files, the host, "
+        "or any bot tool (create_site, send_file, publish, etc.). If the task "
+        "needs one of those, do what you can here, then `finish` with a clear note "
+        "for Maxwell to complete that step. Never spin trying to reach something "
+        "you don't have — that wastes the budget.\n"
         "- Decide what you can. If a decision would be risky or genuinely "
         "cannot be made (a missing requirement, a blocker only the operator "
         "can resolve, a choice with real consequences), call `message_main` "
@@ -7879,7 +7896,9 @@ class SubAgentTool(Tool):
         if target is None:
             return None
         try:
-            sent = await target.send(f"working on it: {self._short(task)}")
+            # A heartbeat, not a task dump: the operator doesn't want the whole
+            # request or the running command pasted every few seconds.
+            sent = await target.send("working on it")
         except Exception:
             return None
         return _LiveMessage(sent, task, run_id)
