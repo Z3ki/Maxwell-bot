@@ -7037,6 +7037,38 @@ class ShellTool(Tool):
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+class _SubChan:
+    """Bidirectional message relay between the main agent and a sub-agent run.
+
+    The sub-agent can push a message up (``message_main``) and the main agent
+    can push one down (``sub_agent_message``). The sub-agent's loop injects any
+    unseen main -> sub messages at the top of each step so they land in its
+    context and it can respond. Kept in-process for the life of the run.
+    """
+
+    def __init__(self, run_id: str):
+        self.run_id = run_id
+        self.msgs: list[dict] = []  # {"src": "main"|"sub", "text": str, "ts": float}
+        self.injected: set[int] = set()
+        self.target = None  # the channel/dm the run delivers to, set at run start
+
+    def push(self, src: str, text: str) -> None:
+        self.msgs.append({"src": src, "text": str(text or "")[:2000], "ts": time.time()})
+
+    def unseen_main(self) -> list[tuple[int, dict]]:
+        out = []
+        for i, m in enumerate(self.msgs):
+            if m["src"] == "main" and i not in self.injected:
+                out.append((i, m))
+        return out
+
+    def mark_injected(self, indices) -> None:
+        self.injected.update(indices)
+
+    def transcript(self, limit: int = 20) -> list[dict]:
+        return list(self.msgs[-limit:])
+
+
 class _LiveMessage:
     """One Discord message edited in place as a background sub-agent runs.
 
@@ -7076,6 +7108,48 @@ class _LiveMessage:
             body += "\n…(report truncated)"
         with contextlib.suppress(Exception):
             await self._m.edit(content=body)
+
+
+class SubAgentMessageTool(Tool):
+    """Main agent -> sub-agent. Push a message into a running sub-agent's inbox.
+
+    The message is injected at the top of the sub-agent's next step, so it can
+    answer it (or call finish if it changes the task). Returns the conversation
+    so far so Maxwell sees the thread. Looks up the live run via the
+    SubAgentTool instance registered on the bot.
+    """
+
+    def get_description(self) -> str:
+        return (
+            "Reply to a running sub-agent. Pass the `run_id` it gave you when it "
+            "started and `text` to send. Use it to answer a question it raised, "
+            "add a requirement, or steer a long job mid-run. Returns the "
+            "conversation so far."
+        )
+
+    async def execute(self, message: Message, **kwargs) -> str:
+        run_id = str(kwargs.get("run_id") or "").strip()
+        text = str(kwargs.get("text") or "").strip()
+        if not run_id:
+            return "error: sub_agent_message needs a `run_id`."
+        if not text:
+            return "error: sub_agent_message needs `text`."
+        sub = getattr(self.bot, "tools", {}).get("sub_agent")
+        chans = getattr(sub, "_chans", {}) if sub is not None else {}
+        chan = chans.get(run_id)
+        if chan is None:
+            return (
+                f"error: no running sub-agent with run_id {run_id} (it may have "
+                f"already finished, or the run_id is wrong)."
+            )
+        chan.push("main", text)
+        thread = "\n".join(
+            f"[{m['src']}] {m['text']}" for m in chan.transcript()
+        )
+        return (
+            "Sent to the sub-agent — it'll see it on the next step."
+            + ("\n\nConversation so far:\n" + thread if thread else "")
+        )
 
 
 class SubAgentTool(Tool):
@@ -7136,8 +7210,11 @@ class SubAgentTool(Tool):
         "- Work in small steps: inspect, change, run, check the output.\n"
         "- Actually verify. Run the code, the test, the linter — do not claim "
         "something works because it looks right.\n"
-        "- Never ask questions. Pick the reasonable option and note the "
-        "assumption in your final report.\n"
+        "- Decide what you can. If a decision would be risky or genuinely "
+        "cannot be made (a missing requirement, a blocker only the operator "
+        "can resolve, a choice with real consequences), call `message_main` "
+        "to ask Maxwell — it reaches him and the channel live, and his reply "
+        "lands here on your next step. Don't spam it for trivia.\n"
         "- Stay inside the workdir and keep commands short-lived. No "
         "interactive programs, no servers that never exit, no `sudo`.\n"
         "- When the task is done (or genuinely cannot be finished), call "
@@ -7239,6 +7316,33 @@ class SubAgentTool(Tool):
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "message_main",
+                "description": (
+                    "Send a message back to the main agent (Maxwell) and the "
+                    "channel. Use it when you genuinely cannot decide — a "
+                    "blocker that only the operator can resolve, a missing "
+                    "requirement, or a choice with real consequences. It's live: "
+                    "Maxwell can reply and the reply reaches you on your next "
+                    "step. Don't spam it for trivia — decide what you can."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": (
+                                "What you need. Be specific — a question, a "
+                                "decision, or the piece you're missing."
+                            ),
+                        }
+                    },
+                    "required": ["text"],
+                },
+            },
+        },
     ]
 
     def __init__(self, bot):
@@ -7261,6 +7365,9 @@ class SubAgentTool(Tool):
         # the slot). Capped so a flood across many channels can't grow the
         # in-memory queue without bound. Only touched from the event loop.
         self._bg_inflight = 0
+        # Live bidirectional channels for running sub-agents (main <-> sub).
+        # Keyed by run_id; created in execute(), removed when the run ends.
+        self._chans: dict[str, _SubChan] = {}
 
     def get_description(self) -> str:
         return (
@@ -7509,7 +7616,7 @@ class SubAgentTool(Tool):
                 break
         return "\n".join(entries) or "(workdir is empty)"
 
-    async def _dispatch(self, workspace: Path, name: str, args: dict) -> str:
+    async def _dispatch(self, workspace: Path, name: str, args: dict, run_id: str = "") -> str:
         if name == "run_command":
             return await self._run_command(workspace, args.get("command", ""))
         if name == "write_file":
@@ -7520,7 +7627,30 @@ class SubAgentTool(Tool):
             return self._read_file(workspace, args.get("path", ""))
         if name == "list_files":
             return self._list_files(workspace)
+        if name == "message_main":
+            return await self._message_main(run_id, args.get("text", ""))
         return f"error: unknown tool {name!r}"
+
+    async def _message_main(self, run_id: str, text: str) -> str:
+        """The sub-agent talks back to the main agent and posts to the channel.
+
+        Non-blocking: the message is pushed to the run's channel and the run
+        keeps going. Maxwell sees it (channel history / next turn) and can reply
+        with sub_agent_message, which is injected at the top of the next step.
+        """
+        text = str(text or "").strip()
+        if not text:
+            return "error: empty message - say what you need."
+        chan = self._chans.get(run_id)
+        if chan is None:
+            return "error: this run is no longer active."
+        chan.push("sub", text)
+        # Post it live so the user and Maxwell can see/answer it.
+        if chan.target is not None:
+            with contextlib.suppress(Exception):
+                await chan.target.send(f"sub-agent: {text}")
+        return "Message sent to Maxwell. It's on the channel now. Keep working, and " \
+            "watch the reply on your next step."
 
     # ─── the loop ─────────────────────────────────────────────────────
 
@@ -7574,6 +7704,11 @@ class SubAgentTool(Tool):
         )
         run_id = run.run_id if run else ""
 
+        # Live bidirectional channel (main <-> sub) for this run. Created here so
+        # both the foreground and background paths can push/pull, and removed in
+        # the run's finally so a finished run doesn't leak a channel.
+        chan = self._chans.setdefault(run_id, _SubChan(run_id)) if run_id else None
+
         # Fire-and-forget: ``mode=background`` returns immediately and hands the
         # whole run to a background task that posts the result to this channel
         # when done. The model stays responsive — no minutes of silence while
@@ -7619,6 +7754,7 @@ class SubAgentTool(Tool):
                     bus,
                     run_id,
                     deliver,
+                    chan,
                 )
             )
             return (
@@ -7636,6 +7772,10 @@ class SubAgentTool(Tool):
             watcher = asyncio.create_task(
                 self._mirror_events_to_progress(bus, run_id, progress)
             )
+        if chan is not None and chan.target is None:
+            chan.target = await self._resolve_channel(
+                str(getattr(getattr(message, "channel", None), "id", "") or "")
+            )
         try:
             report = await self._agent_loop(
                 task,
@@ -7646,6 +7786,7 @@ class SubAgentTool(Tool):
                 provider=provider,
                 bus=bus,
                 run_id=run_id,
+                conv=chan,
             )
             if bus and run_id:
                 bus.finish_run(run_id, agent_events.STATUS_DONE, report[:2000])
@@ -7659,6 +7800,8 @@ class SubAgentTool(Tool):
                 watcher.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await watcher
+            if run_id:
+                self._chans.pop(run_id, None)
             # Always reap the container, including on the timeout, error and
             # cancellation paths — an orphaned sandbox holds 4GB of limit and
             # a bind mount on a workspace nobody is using.
@@ -7752,6 +7895,7 @@ class SubAgentTool(Tool):
         bus,
         run_id: str,
         deliver: str = "channel",
+        chan: "_SubChan | None" = None,
     ) -> None:
         """Run a sub-agent to completion in the background, then post the result.
 
@@ -7768,6 +7912,8 @@ class SubAgentTool(Tool):
             # being queued behind a concurrency slot.
             deadline = time.monotonic() + Config.SUBAGENT_TIMEOUT_SECONDS
             target = await self._resolve_delivery(message, deliver)
+            if chan is not None:
+                chan.target = target
             live = await self._open_live_message(target, task, run_id)
             watcher = None
             if bus and run_id and live is not None:
@@ -7784,6 +7930,7 @@ class SubAgentTool(Tool):
                     provider=provider,
                     bus=bus,
                     run_id=run_id,
+                    conv=chan,
                 )
                 if bus and run_id:
                     bus.finish_run(run_id, agent_events.STATUS_DONE, report[:2000])
@@ -7804,6 +7951,8 @@ class SubAgentTool(Tool):
             finally:
                 if self._bg_inflight > 0:
                     self._bg_inflight -= 1
+                if run_id:
+                    self._chans.pop(run_id, None)
                 if watcher is not None:
                     watcher.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -7857,8 +8006,14 @@ class SubAgentTool(Tool):
         provider,
         bus=None,
         run_id: str = "",
+        conv: "_SubChan | None" = None,
     ) -> str:
-        """The step loop itself. Returns the report string."""
+        """The step loop itself. Returns the report string.
+
+        ``conv`` is the live bidirectional channel to the main agent: any
+        ``main`` messages pushed in are injected at the top of the next step so
+        the sub-agent sees them and can answer.
+        """
 
         def _emit(event_type: str, **data):
             if bus and run_id:
@@ -7885,6 +8040,25 @@ class SubAgentTool(Tool):
         commands_run = 0
         files_written: list[str] = []
         while steps < max_steps:
+            # Pull in any main-agent messages that arrived since the last step so
+            # the sub-agent can answer them in this turn's reasoning.
+            if conv is not None:
+                unseen = conv.unseen_main()
+                if unseen:
+                    indices = [i for i, _m in unseen]
+                    for _i, _m in unseen:
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "[Message from Maxwell/main agent] "
+                                    + str(_m.get("text") or "")
+                                    + "\nAnswer this in your next action, or call "
+                                    "finish if it changes the task."
+                                ),
+                            }
+                        )
+                    conv.mark_injected(indices)
             if time.monotonic() > deadline:
                 _emit(
                     agent_events.EV_NOTE,
@@ -7976,7 +8150,7 @@ class SubAgentTool(Tool):
                     step=steps,
                     label=self._call_label(name, args),
                 )
-                result = await self._dispatch(workspace, name, args)
+                result = await self._dispatch(workspace, name, args, run_id)
                 _emit(
                     agent_events.EV_TOOL_RESULT,
                     tool=name,

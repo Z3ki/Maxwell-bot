@@ -272,6 +272,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     SiteServerTool,
     SleepTool,
     SubAgentTool,
+    SubAgentMessageTool,
     TtsTool,
     TypingTool,
     UpdateBasePersonalityTool,
@@ -2416,6 +2417,9 @@ SUBAGENT_DELEGATION = (
     "- Keep it for heavy work. A one-liner, a quick lookup, or a single command "
     "is faster direct with `shell`/`web_search`/`fetch_url` — delegation there "
     "is pure overhead.\n"
+    "- A running sub-agent can message you mid-run (`message_main` posts to the "
+    "channel). When you see one, answer it with `sub_agent_message(run_id, text)` "
+    "— it lands in the sub-agent's next step so it can continue.\n"
     "- Pass `workdir` to pin the sub-agent's scratch to a known spot, and "
     "`max_steps` to cap a runaway job."
 )
@@ -3495,6 +3499,8 @@ class MaxwellBot(commands.Bot):
             # Native sub-agent: a nested Maxwell on the same provider, not an
             # external coding-agent binary. See bot_tools.SubAgentTool.
             self.tools["sub_agent"] = SubAgentTool(self)
+            # Main -> sub: reply to a running sub-agent (two-way channel).
+            self.tools["sub_agent_message"] = SubAgentMessageTool(self)
         if self.config.ENABLE_FETCH_URL:
             self.tools["fetch_url"] = FetchUrlTool(self)
         self.tools["see_image"] = SeeImageTool(self)

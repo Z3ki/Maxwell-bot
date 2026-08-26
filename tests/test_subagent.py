@@ -6,9 +6,10 @@ import pytest
 
 import bot_tools
 import json
+import time
 import types
 
-from bot_tools import SubAgentTool
+from bot_tools import SubAgentTool, SubAgentMessageTool, _SubChan
 
 
 def _call(name, args, call_id="1"):
@@ -306,6 +307,94 @@ def test_the_sandbox_cannot_see_the_bot_source_tree(tmp_path, monkeypatch):
     assert "hello" in inside
     assert "LEAKED" not in escaped
     assert "safe" in escaped
+
+
+class _FakeChannel:
+    def __init__(self, cid):
+        self.id = cid
+        self.last_message = None
+
+    async def send(self, content, **kwargs):
+        msg = _FakeMessage(content)
+        self.last_message = msg
+        return msg
+
+
+class _FakeMessage:
+    def __init__(self, content):
+        self.content = content
+        self.edits = []
+
+    async def edit(self, content=None, **kwargs):
+        self.edits.append(content)
+        if content is not None:
+            self.content = content
+
+
+def test_sub_agent_can_message_main(tmp_path, monkeypatch):
+    # sub -> main: message_main pushes to the run's channel and posts to the
+    # delivery target so Maxwell and the channel see it, and keeps working.
+    provider = _ScriptedProvider(
+        [
+            {"role": "assistant", "tool_calls": [_call("message_main", {"text": "need a decision"}, "1")]},
+            {"role": "assistant", "tool_calls": [_call("finish", {"report": "done"}, "2")]},
+        ]
+    )
+    tool = _tool(provider, tmp_path, monkeypatch)
+    target = _FakeChannel(9)
+    chan = _SubChan("r1")
+    chan.target = target
+    tool._chans["r1"] = chan
+
+    result = asyncio.run(tool._message_main("r1", "need a decision"))
+    assert "Message sent to Maxwell" in result
+    assert chan.msgs[-1] == {"src": "sub", "text": "need a decision", "ts": chan.msgs[-1]["ts"]}
+    assert target.last_message.content == "sub-agent: need a decision"
+
+
+def test_sub_agent_message_main_tool(tmp_path, monkeypatch):
+    # main -> sub: the main-facing tool pushes to a running sub-agent and
+    # returns the conversation thread.
+    tool = _tool(_ScriptedProvider([]), tmp_path, monkeypatch)
+    chan = _SubChan("r2")
+    tool._chans["r2"] = chan
+    bot = types.SimpleNamespace(tools={"sub_agent": tool})
+    main_tool = SubAgentMessageTool(bot)
+
+    result = asyncio.run(main_tool.execute(None, run_id="r2", text="do X"))
+    assert "Sent to the sub-agent" in result
+    assert chan.msgs[-1]["src"] == "main"
+    assert chan.msgs[-1]["text"] == "do X"
+    assert "do X" in result
+
+    # Unknown run id is a clear error, not a crash.
+    bad = asyncio.run(main_tool.execute(None, run_id="nope", text="hi"))
+    assert "no running sub-agent" in bad
+
+
+def test_main_message_is_injected_into_the_sub_agent_loop(tmp_path, monkeypatch):
+    # A main -> sub message must land inside the sub-agent's context on its
+    # next step, so it can answer it.
+    provider = _ScriptedProvider(
+        [{"role": "assistant", "tool_calls": [_call("finish", {"report": "done"}, "1")]}]
+    )
+    tool = _tool(provider, tmp_path, monkeypatch)
+    conv = _SubChan("r3")
+    conv.push("main", "answer me")
+
+    asyncio.run(
+        tool._agent_loop(
+            "task",
+            tmp_path,
+            max_steps=2,
+            deadline=time.time() + 30,
+            model=None,
+            provider=provider,
+            conv=conv,
+        )
+    )
+    injected = [m for m in provider.seen[0] if "Message from Maxwell/main agent" in str(m.get("content") or "")]
+    assert injected and "answer me" in injected[0]["content"]
 
 
 @pytest.mark.skipif(not _docker_available(), reason="needs a docker daemon")

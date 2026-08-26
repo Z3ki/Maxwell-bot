@@ -368,6 +368,11 @@ durable record of what one did is its report on the channel). Multi-step
 terminal work (install → build → test, a command loop) is `sub_agent`, not
 `shell` — the sub-agent owns the live channel progress.
 
+Sub-agents are two-way now: a running sub-agent can `message_main` to flag a
+blocker or ask for a decision (posted to the channel), and Maxwell can reply
+with `sub_agent_message(run_id, text)`, which is injected into the sub-agent's
+next step so it answers and carries on.
+
 ### Temporary Free Model
 
 For a temporary free OpenRouter fallback, the current recommended model is Moonshot AI Kimi K2.6:

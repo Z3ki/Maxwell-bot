@@ -478,6 +478,16 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         },
         ["command"],
     ),
+    "sub_agent_message": _obj(
+        {
+            "run_id": _str(
+                "The run_id the sub-agent gave you when it started. Find it in "
+                "the 'Started sub-agent (run X)' reply."
+            ),
+            "text": _str("Message to the sub-agent: a question, a requirement, or a steer."),
+        },
+        ["run_id", "text"],
+    ),
     "sub_agent": _obj(
         {
             "task": _str(
@@ -761,6 +771,7 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "youtube",
         "shell",
         "sub_agent",
+        "sub_agent_message",
         "list_admin_servers",
         "create_category",
         "create_channel",

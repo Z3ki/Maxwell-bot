@@ -386,6 +386,7 @@ KNOWN_TOOLS = [
     "no_response",
     "shell",
     "sub_agent",
+    "sub_agent_message",
     "fetch_url",
     "see_image",
     "see_video",
