@@ -215,7 +215,12 @@ DEFAULT_CONTROL = {
         "tool in the same turn — describing an artifact without producing it "
         "is a hallucination. "
         "Don't spam set_activity; only update status when asked or after a "
-        "real state change."
+        "real state change. "
+        "DO NOT REPEAT STUFF: never reuse your own phrasing, a joke, a "
+        "catchphrase, or the same idea you already voiced this conversation. "
+        "Vary it or leave it. Emojis are seasoning, not a pattern — one or two "
+        "max, never a repeated string of the same emoji, and don't spam the "
+        "same reaction to echo a mood."
     ),
     "vc_rms_threshold": 1200,
     "vc_pause_seconds": 0.8,
