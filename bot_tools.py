@@ -7210,6 +7210,21 @@ class SubAgentTool(Tool):
         raw = str(getattr(Config, "SUBAGENT_SANDBOX", "docker") or "docker")
         return "host" if raw.strip().lower() in {"host", "off", "none", "0", "false"} else "docker"
 
+    # Bot tools the sub-agent may call directly on the host via ``bot_call``.
+    # Deliberately the safe, non-destructive publishing/file set — no moderation,
+    # no shell-on-host, no admin. Each still runs under its own ownership / quota
+    # checks as the requesting user (create_site etc. enforce that).
+    _BOT_TOOLS = frozenset(
+        {
+            "create_site",
+            "edit_site",
+            "delete_site",
+            "list_sites",
+            "site_server",
+            "send_file",
+        }
+    )
+
     _SYSTEM_PROMPT = (
         "You are Maxwell's sub-agent: a focused engineer working one task to "
         "completion, alone, with no user to ask.\n"
@@ -7357,6 +7372,35 @@ class SubAgentTool(Tool):
                         }
                     },
                     "required": ["text"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "bot_call",
+                "description": (
+                    "Call a bot tool directly on the host. Available: "
+                    + ", ".join(sorted(_BOT_TOOLS))
+                    + ". Use it to finish a job that needs a bot/host capability "
+                    "— publish a site you built (create_site), edit it "
+                    "(edit_site), list sites, or hand a file to the user "
+                    "(send_file). Pass `name` and `arguments` as a JSON object "
+                    "with exactly that tool's params (name/title/body/files for "
+                    "create_site, etc.). It runs as the person who asked, so "
+                    "ownership and quota checks apply."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Bot tool name"},
+                        "arguments": {
+                            "type": "object",
+                            "description": "The tool's params as a JSON object.",
+                            "additionalProperties": True,
+                        },
+                    },
+                    "required": ["name", "arguments"],
                 },
             },
         },
@@ -7633,7 +7677,9 @@ class SubAgentTool(Tool):
                 break
         return "\n".join(entries) or "(workdir is empty)"
 
-    async def _dispatch(self, workspace: Path, name: str, args: dict, run_id: str = "") -> str:
+    async def _dispatch(
+        self, workspace: Path, name: str, args: dict, run_id: str = "", message=None
+    ) -> str:
         if name == "run_command":
             return await self._run_command(workspace, args.get("command", ""))
         if name == "write_file":
@@ -7646,14 +7692,54 @@ class SubAgentTool(Tool):
             return self._list_files(workspace)
         if name == "message_main":
             return await self._message_main(run_id, args.get("text", ""))
+        if name == "bot_call":
+            return await self._bot_call(
+                message, args.get("name", ""), args.get("arguments", {})
+            )
         return f"error: unknown tool {name!r}"
 
-    async def _message_main(self, run_id: str, text: str) -> str:
-        """The sub-agent talks back to the main agent and posts to the channel.
+    async def _bot_call(self, message, name, arguments) -> str:
+        """Route a whitelisted bot tool call to the real bot tool on the host.
 
-        Non-blocking: the message is pushed to the run's channel and the run
-        keeps going. Maxwell sees it (channel history / next turn) and can reply
-        with sub_agent_message, which is injected at the top of the next step.
+        The sub-agent is sandboxed for run_command, but it can still finish a
+        job that needs a bot/host capability by calling create_site / edit_site /
+        send_file etc. here. Each tool runs as the originating user, so its own
+        ownership / quota / permission checks apply.
+        """
+        name = str(name or "").strip()
+        if name not in self._BOT_TOOLS:
+            return (
+                f"error: bot_call '{name}' is not available to sub-agents. "
+                f"Available: {', '.join(sorted(self._BOT_TOOLS))}."
+            )
+        tool = (getattr(self.bot, "tools", None) or {}).get(name)
+        if tool is None:
+            return f"error: tool '{name}' is not registered on this bot."
+        args = arguments
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except Exception:
+                return f"error: `arguments` must be a JSON object, got: {args[:120]}"
+        if not isinstance(args, dict):
+            return "error: `arguments` must be a JSON object."
+        if message is None:
+            return "error: no message context for bot_call — cannot run bot tools."
+        try:
+            result = await tool.execute(message, **args)
+        except TypeError as e:
+            return f"error: bad arguments to {name}: {e}"
+        except Exception as e:
+            logger.warning("sub-agent bot_call %s failed: %s", name, e)
+            return f"error: {name} failed: {e}"
+        return str(result)
+
+    async def _message_main(self, run_id: str, text: str) -> str:
+        """The sub-agent talks back to the main agent — quietly.
+
+        Never posts to the channel: the message goes onto the run's relay, where
+        the main agent picks it up on its next turn in that channel and can reply
+        with sub_agent_message. No public chat spam.
         """
         text = str(text or "").strip()
         if not text:
@@ -7662,12 +7748,9 @@ class SubAgentTool(Tool):
         if chan is None:
             return "error: this run is no longer active."
         chan.push("sub", text)
-        # Post it live so the user and Maxwell can see/answer it.
-        if chan.target is not None:
-            with contextlib.suppress(Exception):
-                await chan.target.send(f"sub-agent: {text}")
-        return "Message sent to Maxwell. It's on the channel now. Keep working, and " \
-            "watch the reply on your next step."
+        return "Noted — sent to Maxwell (not posted to chat). He'll see it on his " \
+            "next turn here and can reply. Keep working; watch the reply on your " \
+            "next step."
 
     # ─── the loop ─────────────────────────────────────────────────────
 
@@ -7804,6 +7887,7 @@ class SubAgentTool(Tool):
                 bus=bus,
                 run_id=run_id,
                 conv=chan,
+                message=message,
             )
             if bus and run_id:
                 bus.finish_run(run_id, agent_events.STATUS_DONE, report[:2000])
@@ -7950,6 +8034,7 @@ class SubAgentTool(Tool):
                     bus=bus,
                     run_id=run_id,
                     conv=chan,
+                    message=message,
                 )
                 if bus and run_id:
                     bus.finish_run(run_id, agent_events.STATUS_DONE, report[:2000])
@@ -8026,6 +8111,7 @@ class SubAgentTool(Tool):
         bus=None,
         run_id: str = "",
         conv: "_SubChan | None" = None,
+        message=None,
     ) -> str:
         """The step loop itself. Returns the report string.
 
@@ -8169,7 +8255,7 @@ class SubAgentTool(Tool):
                     step=steps,
                     label=self._call_label(name, args),
                 )
-                result = await self._dispatch(workspace, name, args, run_id)
+                result = await self._dispatch(workspace, name, args, run_id, message)
                 _emit(
                     agent_events.EV_TOOL_RESULT,
                     tool=name,

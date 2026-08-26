@@ -347,9 +347,11 @@ def test_sub_agent_can_message_main(tmp_path, monkeypatch):
     tool._chans["r1"] = chan
 
     result = asyncio.run(tool._message_main("r1", "need a decision"))
-    assert "Message sent to Maxwell" in result
-    assert chan.msgs[-1] == {"src": "sub", "text": "need a decision", "ts": chan.msgs[-1]["ts"]}
-    assert target.last_message.content == "sub-agent: need a decision"
+    assert "sent to Maxwell" in result
+    assert chan.msgs[-1]["src"] == "sub"
+    assert chan.msgs[-1]["text"] == "need a decision"
+    # Quiet relay: the sub-agent's message is NOT posted to the channel.
+    assert target.last_message is None
 
 
 def test_sub_agent_message_main_tool(tmp_path, monkeypatch):
@@ -395,6 +397,55 @@ def test_main_message_is_injected_into_the_sub_agent_loop(tmp_path, monkeypatch)
     )
     injected = [m for m in provider.seen[0] if "Message from Maxwell/main agent" in str(m.get("content") or "")]
     assert injected and "answer me" in injected[0]["content"]
+
+
+def test_sub_agent_can_call_bot_tools(tmp_path, monkeypatch):
+    # `bot_call` lets a sub-agent finish a job that needs a bot/host capability
+    # (create_site etc.) on the host, running as the requesting user.
+    called = {}
+
+    class FakeCreateSite:
+        async def execute(self, message, **kwargs):
+            called["author"] = str(message.author.id)
+            called["args"] = kwargs
+            return f"published site {kwargs.get('name')}"
+
+    class FakeBot:
+        provider = _ScriptedProvider([])
+        tools = {"create_site": FakeCreateSite()}
+
+        def get_channel(self, cid):
+            return None
+
+        async def fetch_channel(self, cid):
+            return None
+
+        def get_user(self, uid):
+            return None
+
+        async def fetch_user(self, uid):
+            return None
+
+    from config import Config
+
+    monkeypatch.setattr(Config, "SUBAGENT_BASE_DIR", str(tmp_path))
+    monkeypatch.setattr(Config, "SUBAGENT_SANDBOX", "host")
+    tool = SubAgentTool(FakeBot())
+    msg = types.SimpleNamespace(
+        author=types.SimpleNamespace(id=77, display_name="alice"),
+        channel=types.SimpleNamespace(id=5),
+    )
+
+    result = asyncio.run(
+        tool._bot_call(msg, "create_site", {"name": "test", "title": "T", "body": "<html></html>"})
+    )
+    assert "published site test" in result
+    assert called["author"] == "77"
+    assert called["args"]["name"] == "test"
+
+    # Non-whitelisted tools are refused, not run.
+    blocked = asyncio.run(tool._bot_call(msg, "ban_member", {"user_id": "1"}))
+    assert "not available to sub-agents" in blocked
 
 
 @pytest.mark.skipif(not _docker_available(), reason="needs a docker daemon")
