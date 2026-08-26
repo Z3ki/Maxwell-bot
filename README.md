@@ -338,7 +338,7 @@ present). Restart to re-detect. `python3 doctor.py` shows the resolved state.
 | Variable | Description |
 |---|---|
 | `SUBAGENT_BASE_DIR` | Where sub-agent workdirs are created (default `data/subagents`, gitignored) |
-| `SUBAGENT_MODEL` | Model for sub-agent work; blank = the main `OLLAMA_MODEL` |
+| `SUBAGENT_MODEL` | Model for sub-agent work; **blank = the main `OLLAMA_MODEL`** (the sub-agent runs on the same model as the chat) |
 | `SUBAGENT_MAX_STEPS` | Tool-call steps before it must report back (default `24`) |
 | `SUBAGENT_TIMEOUT_SECONDS` | Wall-clock budget for one task (default `900`) |
 | `SUBAGENT_COMMAND_TIMEOUT_SECONDS` | Per-command timeout (default `120`) |

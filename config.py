@@ -556,7 +556,10 @@ class Config:
     # workdir — no external coding-agent binary, no container image.
     # -------------------------------------------------------------------------
     SUBAGENT_BASE_DIR = os.getenv("SUBAGENT_BASE_DIR", "data/subagents").strip()
-    SUBAGENT_MODEL = os.getenv("SUBAGENT_MODEL", "").strip()  # blank = main model
+    # MODEL for sub-agent work. Blank means the main OLLAMA_MODEL — the sub-
+    # agent runs on the SAME model the chat uses by default. Only set this to
+    # run sub-agent jobs on a different (typically cheaper/faster) model.
+    SUBAGENT_MODEL = os.getenv("SUBAGENT_MODEL", "").strip()
     SUBAGENT_MAX_STEPS = _int_env("SUBAGENT_MAX_STEPS", 24, min_value=1, max_value=200)
     SUBAGENT_TIMEOUT_SECONDS = _int_env(
         "SUBAGENT_TIMEOUT_SECONDS", 900, min_value=30, max_value=7200

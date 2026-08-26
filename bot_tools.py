@@ -7541,7 +7541,11 @@ class SubAgentTool(Tool):
 
         workspace = self._workspace(task, str(kwargs.get("workdir") or ""))
         deadline = time.monotonic() + Config.SUBAGENT_TIMEOUT_SECONDS
-        model = Config.SUBAGENT_MODEL or None
+        # Default the sub-agent to the SAME model the main bot uses, not to an
+        # implicit provider default that could drift. Blank SUBAGENT_MODEL = main
+        # OLLAMA_MODEL; only set SUBAGENT_MODEL to run sub-agent work on a
+        # different (e.g. cheaper/faster) model.
+        model = Config.SUBAGENT_MODEL or Config.OLLAMA_MODEL or None
 
         # Open a run on the event bus so the channel progress message and the
         # dashboard can both watch this happen instead of staring at silence
