@@ -18,7 +18,6 @@ import logging
 import os
 import random
 import threading
-import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -96,27 +95,48 @@ def _load_font(size: int) -> object:
     return ImageFont.load_default()
 
 
-def _pixel(square: int, *, margin: int = _MARGIN) -> tuple[int, int]:
-    """Pixel coords for a square, oriented white-at-the-bottom."""
+def _pixel(
+    square: int, *, margin: int = _MARGIN, perspective: str = "white"
+) -> tuple[int, int]:
+    """Pixel coords for a square.
+
+    Default ``perspective="white"`` orients white-at-the-bottom (a1 bottom-left).
+    ``perspective="black"`` rotates 180° so black is at the bottom (h8 bottom-left),
+    which is how a player on black sees the board.
+    """
+    if perspective == "black":
+        # 180° rotation: file h at the left, rank 8 at the bottom.
+        return (
+            margin + (7 - chess.square_file(square)) * _SQUARE,
+            margin + chess.square_rank(square) * _SQUARE,
+        )
     return (
         margin + chess.square_file(square) * _SQUARE,
         margin + (7 - chess.square_rank(square)) * _SQUARE,
     )
 
 
-def render_board_png(board: chess.Board) -> bytes:
-    """Render ``board`` to PNG bytes. White at the bottom; last move and the
-    king in check are highlighted."""
+def render_board_png(board: chess.Board, perspective: str = "white") -> bytes:
+    """Render ``board`` to PNG bytes.
+
+    Default ``perspective="white"`` puts white at the bottom; ``"black"`` puts
+    black at the bottom (180° rotation, coordinates flipped to match). Last move
+    and the king in check are highlighted in both.
+    """
     if not _PIL:
         raise RuntimeError("Pillow is not available; cannot render the board")
     img = Image.new("RGBA", (_SIZE, _SIZE), (255, 255, 255, 255))
     draw = ImageDraw.Draw(img)
     font_big = _load_font(int(_SQUARE * 0.82))
     font_small = _load_font(int(_MARGIN * 0.58))
+    perspective = perspective if perspective == "black" else "white"
+
+    def px(sq: int) -> tuple[int, int]:
+        return _pixel(sq, perspective=perspective)
 
     # Board squares.
     for sq in chess.SQUARES:
-        x, y = _pixel(sq)
+        x, y = px(sq)
         shade = _LIGHT_SQ if (chess.square_file(sq) + chess.square_rank(sq)) % 2 == 0 else _DARK_SQ
         draw.rectangle([x, y, x + _SQUARE, y + _SQUARE], fill=shade)
 
@@ -125,7 +145,7 @@ def render_board_png(board: chess.Board) -> bytes:
         try:
             last = board.peek()
             for sq in (last.from_square, last.to_square):
-                x, y = _pixel(sq)
+                x, y = px(sq)
                 draw.rectangle(
                     [x, y, x + _SQUARE, y + _SQUARE],
                     fill=_LAST_MOVE,
@@ -137,7 +157,7 @@ def render_board_png(board: chess.Board) -> bytes:
     if board.is_check():
         king_sq = board.king(board.turn)
         if king_sq is not None:
-            x, y = _pixel(king_sq)
+            x, y = px(king_sq)
             draw.rectangle([x, y, x + _SQUARE, y + _SQUARE], fill=_CHECK)
 
     # Pieces.
@@ -146,7 +166,7 @@ def render_board_png(board: chess.Board) -> bytes:
         if piece is None:
             continue
         glyph = _GLYPH[piece.color][piece.piece_type]
-        cx, cy = _pixel(sq)
+        cx, cy = px(sq)
         cx += _SQUARE // 2
         cy += _SQUARE // 2
         fill = _WHITE_PIECE if piece.color == chess.WHITE else _BLACK_PIECE
@@ -158,9 +178,11 @@ def render_board_png(board: chess.Board) -> bytes:
             draw.text((cx + dx, cy + dy), glyph, font=font_big, fill=outline, anchor="mm")
         draw.text((cx, cy), glyph, font=font_big, fill=fill, anchor="mm")
 
-    # Coordinates.
+    # Coordinates. A black-perspective board reads files h→a and ranks 1→8 so
+    # the labels match the flipped board instead of contradicting it.
+    file_labels = "hgfedcba" if perspective == "black" else "abcdefgh"
     for f in range(8):
-        label = "abcdefgh"[f]
+        label = file_labels[f]
         draw.text(
             (_MARGIN + f * _SQUARE + _SQUARE // 2, _MARGIN // 2),
             label,
@@ -176,16 +198,17 @@ def render_board_png(board: chess.Board) -> bytes:
             anchor="mm",
         )
     for r in range(8):
+        rank_label = str(r + 1) if perspective == "black" else str(8 - r)
         draw.text(
             (_MARGIN // 2, _MARGIN + r * _SQUARE + _SQUARE // 2),
-            str(8 - r),
+            rank_label,
             font=font_small,
             fill=_COORD,
             anchor="mm",
         )
         draw.text(
             (_SIZE - _MARGIN // 2, _MARGIN + r * _SQUARE + _SQUARE // 2),
-            str(8 - r),
+            rank_label,
             font=font_small,
             fill=_COORD,
             anchor="mm",

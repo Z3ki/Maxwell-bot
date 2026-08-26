@@ -43,6 +43,29 @@ def test_render_white_at_bottom_last_move_highlighted():
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
 
 
+def test_render_black_perspective_flips_the_image():
+    b = chess.Board()
+    white = cg.render_board_png(b)
+    black = cg.render_board_png(b, perspective="black")
+    assert white[:8] == b"\x89PNG\r\n\x1a\n"
+    assert black[:8] == b"\x89PNG\r\n\x1a\n"
+    # The two orientations must actually differ — the flip is real.
+    assert white != black
+
+
+def test_black_perspective_puts_black_back_rank_at_the_bottom():
+    # For a player on black, h8 (black's king square) must sit at the
+    # bottom-left, and a1 (white's rook square) at the top-right — the board
+    # reads from black's side, not the standard white-at-the-bottom view.
+    h8_x, h8_y = cg._pixel(chess.H8, perspective="black")
+    a1_x, a1_y = cg._pixel(chess.A1, perspective="black")
+    assert h8_x < 40 and h8_y > 460  # bottom-left
+    assert a1_x > 460 and a1_y < 40  # top-right
+    # Default (white) perspective: a1 stays bottom-left.
+    a1w_x, a1w_y = cg._pixel(chess.A1)
+    assert a1w_x < 40 and a1w_y > 460
+
+
 def test_board_ascii_orientation():
     b = chess.Board()
     ascii_board = cg.board_ascii(b)

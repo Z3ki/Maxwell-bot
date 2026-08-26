@@ -11244,10 +11244,18 @@ def _chess_color_name(color) -> str:
 def _chess_render_safe(game) -> bytes | None:
     """Render the board PNG, or None if Pillow/chess rendering is unavailable.
 
-    Callers degrade to a text-only result rather than failing the whole tool.
+    The board is oriented for the human player: if they're on black, black sits
+    at the bottom so the image reads like their own board, not the standard
+    white-at-the-bottom view. Callers degrade to a text-only result rather than
+    failing the whole tool.
     """
     try:
-        return _chess_render_board_png(game.board)
+        perspective = (
+            "black"
+            if _chess and getattr(game, "player_color", None) == _chess.BLACK
+            else "white"
+        )
+        return _chess_render_board_png(game.board, perspective=perspective)
     except Exception as exc:  # pragma: no cover - non-fatal
         logger.warning("chess board render failed: %s", exc)
         return None
