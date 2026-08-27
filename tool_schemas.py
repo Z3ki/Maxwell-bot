@@ -488,6 +488,14 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         },
         ["run_id", "text"],
     ),
+    "sub_agent_status": _obj(
+        {
+            "run_id": _str(
+                "Optional. The run_id to inspect. Omit to list every live sub-agent "
+                "run (status, step, elapsed) so you can see what's in flight."
+            ),
+        }
+    ),
     "sub_agent": _obj(
         {
             "task": _str(
@@ -772,6 +780,7 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "shell",
         "sub_agent",
         "sub_agent_message",
+        "sub_agent_status",
         "list_admin_servers",
         "create_category",
         "create_channel",

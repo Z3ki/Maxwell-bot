@@ -197,6 +197,7 @@ _patch_voice_recv_decoder()
 
 from autonomy import AutonomyEngine, _reply_relation_bit  # noqa: E402
 import watch_policy  # noqa: E402
+import channel_watch  # noqa: E402
 from concurrency_safety import (  # noqa: E402
     ChannelWorkQueues,
     FairSemaphore,
@@ -273,6 +274,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     SleepTool,
     SubAgentTool,
     SubAgentMessageTool,
+    SubAgentStatusTool,
     TtsTool,
     TypingTool,
     UpdateBasePersonalityTool,
@@ -2399,9 +2401,7 @@ SUBAGENT_DELEGATION = (
     "expect the sub-agent to finish it — it can't, and it just burns steps.\n"
     "- Multi-step terminal work (install → build → test → fix), anything with "
     "a command loop, is sub_agent — NOT `shell`. `shell` is for one-shot "
-    "commands you run once and read. The sub-agent owns the channel progress "
-    "(step x/24 live) so a long job reads as progress, not as a stalled typing "
-    "indicator.\n"
+    "commands you run once and read.\n"
     "- Use `mode=background` for heavy work: it returns immediately and the run "
     "posts its result to this channel when done, so you never sit here blocking "
     "a nested agent for minutes. Use `mode=foreground` ONLY when you need the "
@@ -2410,20 +2410,26 @@ SUBAGENT_DELEGATION = (
     "endpoint to hit, and the standard you want met). The sub-agent cannot ask "
     "questions — it picks the reasonable interpretation and records its "
     "assumption in the report.\n"
-    "- background gives you [returns output] (a short \"started\" ack). Don't "
-    "wait for or invent the result — it lands in the channel on its own. "
-    "Ack the user in ONE plain line, no fluff: just \"working on it\" or \"started\", "
-    "maybe with the task in a few words. No fancy phrasing, no filler, no emoji "
-    "spam. Then end the turn.\n"
+    "- There is NO per-step 'working on it' heartbeat posted to the channel for "
+    "a background run. You own the visibility: the run streams its state on the "
+    "event bus, so use `sub_agent_status(run_id)` to check it is actually "
+    "working, what step it is on, what it just did, and whether it is waiting on "
+    "you. If it is stuck or looping, steer it with `sub_agent_message(run_id, text)`.\n"
+    "- A background result arrives on its own — do not invent it or re-run it "
+    "because you don't see it yet. Ack the user in ONE short plain line that you "
+    "handed it off (e.g. \"on it, posting when it's done\"), no filler, no emoji. "
+    "If you want to report progress, check sub_agent_status() yourself rather "
+    "than guessing.\n"
     "- Use `deliver=dm` when the result is long and would clutter a busy "
     "channel, or when the work is private to the person who asked — the report "
     "lands in their DMs instead. Default `deliver=channel`.\n"
     "- Keep it for heavy work. A one-liner, a quick lookup, or a single command "
     "is faster direct with `shell`/`web_search`/`fetch_url` — delegation there "
     "is pure overhead.\n"
-    "- A running sub-agent can message you mid-run (`message_main` posts to the "
-    "channel). When you see one, answer it with `sub_agent_message(run_id, text)` "
-    "— it lands in the sub-agent's next step so it can continue.\n"
+    "- A running sub-agent can DM you mid-run (`message_main` reaches you "
+    "privately on your next turn, wherever it lands). When you see one, answer "
+    "it with `sub_agent_message(run_id, text)` — it lands in the sub-agent's "
+    "next step so it can continue.\n"
     "- Pass `workdir` to pin the sub-agent's scratch to a known spot, and "
     "`max_steps` to cap a runaway job."
 )
@@ -3505,6 +3511,8 @@ class MaxwellBot(commands.Bot):
             self.tools["sub_agent"] = SubAgentTool(self)
             # Main -> sub: reply to a running sub-agent (two-way channel).
             self.tools["sub_agent_message"] = SubAgentMessageTool(self)
+            # Main -> sub: peek into a run's live status/actions and its questions.
+            self.tools["sub_agent_status"] = SubAgentStatusTool(self)
         if self.config.ENABLE_FETCH_URL:
             self.tools["fetch_url"] = FetchUrlTool(self)
         self.tools["see_image"] = SeeImageTool(self)
@@ -8422,6 +8430,70 @@ class MaxwellBot(commands.Bot):
             )
         except Exception as e:
             logger.debug("Inbox guild_join notice failed: %s", e)
+
+    async def on_guild_channel_create(self, channel):
+        """A channel was created in a server Maxwell is in.
+
+        Notices the room and, for support/ticket-style channels, posts a short
+        opening line so Maxwell is present in the new room and it lands in his
+        memory / conversation-watch scope (his own posts go through the normal
+        memory path). Fire-and-forget: never raises, never blocks a turn. Gated
+        by the ``auto_ticket_greeting`` control, ``bot_enabled``, and the bot
+        actually having send permission in the channel.
+        """
+        try:
+            self._load_control()
+        except Exception:
+            return
+        if not self._control.get("bot_enabled", True):
+            return
+        # Only real text channels can be greeted. Voice/category/stage/forum
+        # events are observation-only, never a place to post a line. Guard with
+        # isinstance; channel proxies in some gateway builds lack the type.
+        if not isinstance(channel, discord.TextChannel):
+            return
+        guild = getattr(channel, "guild", None)
+        if guild is None:
+            return
+        name = str(getattr(channel, "name", "") or "")
+        if not name:
+            return
+        kind = channel_watch.channel_kind(name)
+        try:
+            logger.info(
+                "Channel created in %s: #%s (id=%s, kind=%s)",
+                guild.name, name, getattr(channel, "id", ""), kind,
+            )
+        except Exception:
+            pass
+        # A soloed server only allows one channel; don't poke a new one there.
+        solo = self._solo_channel_for(guild)
+        if solo and str(getattr(channel, "id", "")) != solo:
+            return
+        if kind != "ticket" or not self._control.get(
+            "auto_ticket_greeting", channel_watch.default_ticket_greeting()
+        ):
+            return
+        me = getattr(guild, "me", None)
+        if me is None:
+            try:
+                me = await guild.fetch_member(self.user.id)
+            except Exception:
+                me = None
+        if me is None:
+            return
+        try:
+            perms = channel.permissions_for(me)
+        except Exception:
+            return
+        if not getattr(perms, "send_messages", False):
+            return
+        try:
+            await channel.send(channel_watch.greeting_for(name))
+        except discord.Forbidden:
+            logger.debug("no permission to greet new ticket channel #%s", name)
+        except Exception as e:
+            logger.debug("ticket channel greet failed for #%s: %s", name, e)
 
     async def _load_rem_control(self):
         try:

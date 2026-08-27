@@ -191,6 +191,11 @@ DEFAULT_CONTROL = {
     # behaviour. Only matters when ENABLE_SUBAGENT is on and sub_agent is in
     # the turn's tool set.
     "subagent_delegate": True,
+    # When a new support/ticket-style channel is created in a server Maxwell is
+    # in, post a short opening line so he is present in the room and it enters
+    # his memory / conversation-watch scope. Off and he only observes new
+    # channels without posting anything.
+    "auto_ticket_greeting": True,
     "disabled_tools": [],
     "ignore_users": [],
     "allowed_channels": [],
@@ -387,6 +392,7 @@ KNOWN_TOOLS = [
     "shell",
     "sub_agent",
     "sub_agent_message",
+    "sub_agent_status",
     "fetch_url",
     "see_image",
     "see_video",

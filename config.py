@@ -376,10 +376,11 @@ class Config:
 
     # Live tool progress messages. OFF by default: a per-server `,progress on`
     # opts a server in, and MAXWELL_PROGRESS_MESSAGES=true enables it for every
-    # server as a baseline. Prefer the plain "working on it" ack the sub-agent
-    # posts over these per-tool statuses — see MAXWELL_BASE_KNOWLEDGE and the
-    # sub_agent delegation block. `,progress off` silences a noisy server even
-    # under the env baseline; DMs never get them. See tool_progress.py.
+    # server as a baseline. The sub-agent does NOT post a per-step "working on
+    # it" heartbeat anymore — Maxwell watches the run on the event bus via
+    # sub_agent_status and reports/steers it itself; only the final report lands
+    # in the channel. `,progress off` silences a noisy server even under the env
+    # baseline; DMs never get them. See tool_progress.py.
     PROGRESS_MESSAGES = _bool_env("MAXWELL_PROGRESS_MESSAGES", False)
 
     # Custom streaming tool-call protocol. Native OpenAI-style tools= doesn't
@@ -590,6 +591,21 @@ class Config:
     SUBAGENT_SANDBOX = os.getenv("SUBAGENT_SANDBOX", "docker").strip().lower()
     SUBAGENT_MAX_FILE_BYTES = _int_env(
         "SUBAGENT_MAX_FILE_BYTES", 200_000, min_value=1000, max_value=5_000_000
+    )
+    # How many times a sub-agent retries a provider call that fails before it
+    # gives up the whole run. A self-hosted or proxied model drops a call now
+    # and then (network blip, 5xx, transient timeout) — that used to end a
+    # minutes-long run with "the model call failed". Retries with backoff make
+    # a hiccup cost a step, not the run. 0 disables and keeps the old behaviour.
+    SUBAGENT_PROVIDER_RETRIES = _int_env(
+        "SUBAGENT_PROVIDER_RETRIES", 2, min_value=0, max_value=6
+    )
+    # How many consecutive "dud" replies (no tool call AND no content) a
+    # sub-agent tolerates before it ends the run. A model that returns nothing
+    # at all is stalled or glitched; instead of ending the run we nudge it once
+    # or twice to take an action, then give up. 0 keeps the old behaviour.
+    SUBAGENT_DUD_TOLERANCE = _int_env(
+        "SUBAGENT_DUD_TOLERANCE", 2, min_value=0, max_value=6
     )
 
     # Admin / owner allowlists. Re-exported here so Config is the single

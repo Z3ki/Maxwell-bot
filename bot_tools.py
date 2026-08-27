@@ -7085,50 +7085,7 @@ class _SubChan:
         ]
 
 
-class _LiveMessage:
-    """One Discord message edited in place as a background sub-agent runs.
 
-    Throttled so a fast run doesn't spam edits; ``finalize()`` swaps the body
-    for the report. Kept deliberately minimal: the running line is just
-    "working on it" plus a step counter — never the full task text or a raw
-    shell command. The task description belongs in the model's ack and the
-    final report, not in a heartbeat that refreshes every few seconds. Every
-    operation is best-effort — a deleted message, a lost channel, or a rate
-    limit just makes the live view go quiet rather than failing the run.
-    """
-
-    _EDIT_COOLDOWN = 6.0
-
-    def __init__(self, message, task: str, run_id: str):
-        self._m = message
-        self._task = (task or "").strip()
-        self._run_id = run_id
-        self._last_edit = 0.0
-
-    async def update(self, name="", reasoning=""):
-        now = time.monotonic()
-        if now - self._last_edit < self._EDIT_COOLDOWN:
-            return
-        self._last_edit = now
-        label = str(reasoning or "").strip()
-        # Surface only a step counter if the label carries one. Never show the
-        # raw command / path — that's the ugly dump the operator flagged.
-        step = ""
-        match = re.search(r"step\s*(\d+)\s*/\s*(\d+)", label, re.IGNORECASE)
-        if match:
-            step = f" ({match.group(1)}/{match.group(2)})"
-        with contextlib.suppress(Exception):
-            await self._m.edit(content=f"working on it{step}")
-
-    async def finalize(self, report: str):
-        report = str(report or "").strip() or "(sub-agent returned nothing)"
-        head = _shorten(self._task, 48) or "sub-agent"
-        cap = 1800
-        body = f"done: {head}\n\n{report[:cap]}"
-        if len(report) > cap:
-            body += "\n…(report truncated)"
-        with contextlib.suppress(Exception):
-            await self._m.edit(content=body)
 
 
 class SubAgentMessageTool(Tool):
@@ -7171,6 +7128,122 @@ class SubAgentMessageTool(Tool):
             "Sent to the sub-agent — it'll see it on the next step."
             + ("\n\nConversation so far:\n" + thread if thread else "")
         )
+
+
+class SubAgentStatusTool(Tool):
+    """Main agent -> inspect a sub-agent run's live status, actions and questions.
+
+    Maxwell can't see inside a running sub-agent by default — it only gets the
+    final report when the run ends. This is the window into the middle: whether
+    it's actually working, what step it's on, what it just did, what it wrote,
+    and anything it's waiting on. Complements ``sub_agent_message`` (send it a
+    message) and ``message_main`` (it DMs you). ``run_id`` inspects one run;
+    omit it to list every live run.
+    """
+
+    @staticmethod
+    def _event_line(e) -> str:
+        t = getattr(e, "type", "")
+        data = getattr(e, "data", {}) or {}
+        if t == agent_events.EV_STEP:
+            return f"step: {data.get('label') or ''}"
+        if t == agent_events.EV_TOOL_CALL:
+            return f"tool: {data.get('tool') or data.get('name') or data.get('label') or ''}"
+        if t == agent_events.EV_TOOL_RESULT:
+            return f"result: {(data.get('tail') or data.get('label') or '')[:80]}"
+        if t == agent_events.EV_NOTE:
+            return f"note: {data.get('label') or ''}"
+        if t == agent_events.EV_FINISH:
+            return f"finished: {data.get('summary') or ''}"
+        if t == agent_events.EV_ERROR:
+            return f"error: {data.get('summary') or ''}"
+        return f"{t}: {data.get('label') or ''}"
+
+    @staticmethod
+    def _lookup(bot):
+        """(sub_agent tool, event bus) for this bot, each safely Optional."""
+        sub = getattr(bot, "tools", {}).get("sub_agent")
+        return sub, agent_events.bus_for(bot)
+
+    def get_description(self) -> str:
+        return (
+            "Look inside a sub-agent run: is it actually working, what step it's "
+            "on, commands it ran, files it wrote, its latest action, and any "
+            "question it's waiting on for you. Pass `run_id` to inspect one run, "
+            "or omit it to list every live run. Use it to confirm a background "
+            "job is making progress (or caught in a loop) before trusting the "
+            "report, then steer it with `sub_agent_message(run_id, text)`."
+        )
+
+    async def execute(self, message: Message, **kwargs) -> str:
+        run_id = str(kwargs.get("run_id") or "").strip()
+        sub, bus = self._lookup(self.bot)
+        if not run_id:
+            return self._list_live(bus)
+        return self._describe_one(bus, sub, run_id)
+
+    @staticmethod
+    def _list_live(bus) -> str:
+        if bus is None:
+            return "no sub-agent telemetry on this bot (no event bus)."
+        runs = bus.snapshot(include_finished=False)
+        if not runs:
+            return "no sub-agent is running right now."
+        lines = ["Live sub-agent runs:"]
+        for d in runs:
+            lines.append(
+                f"- {d['run_id']} | {d['status']} | step {d['steps']}/"
+                f"{d['max_steps'] or '?'} | {d['elapsed_seconds']}s | "
+                f"{d['task']}"
+            )
+        lines.append("For detail pass run_id=<one of the above>.")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _describe_one(bus, sub, run_id: str) -> str:
+        run = bus.get(run_id) if bus else None
+        chan = None
+        if sub is not None and callable(getattr(sub, "_find_chan", None)):
+            chan = sub._find_chan(run_id)
+        if run is None and chan is None:
+            return (
+                f"no sub-agent with run_id {run_id} (not running and not "
+                f"recently finished)."
+            )
+        lines = []
+        if run is not None:
+            d = run.as_dict()
+            lines.append(f"run_id: {run_id}")
+            lines.append(f"status: {d['status']}")
+            lines.append(f"task: {d['task']}")
+            lines.append(f"elapsed: {d['elapsed_seconds']}s")
+            lines.append(f"steps: {d['steps']}/{d['max_steps'] or '?'}")
+            lines.append(f"commands run: {d['commands_run']}")
+            lines.append(
+                "files written: " + (", ".join(d["files_written"]) or "none so far")
+            )
+            lines.append(f"last activity: {d['last_activity'] or '—'}")
+            if d.get("summary"):
+                lines.append(f"summary: {d['summary'][:200]}")
+            recent = [e for e in (run.events or [])][-8:]
+            lines.append("recent actions:")
+            if recent:
+                for e in recent:
+                    lines.append("  " + SubAgentStatusTool._event_line(e))
+            else:
+                lines.append("  (none yet)")
+        if chan is not None:
+            pending = chan.pending_to_main()
+            if pending:
+                lines.append("waiting on you (sub-agent asked):")
+                for _i, t in pending[-5:]:
+                    lines.append(f"  - {t}")
+            transcript = chan.transcript(limit=8)
+            if transcript:
+                lines.append("conversation so far:")
+                for m in transcript[-8:]:
+                    lines.append(f"  [{m['src']}] {m['text'][:160]}")
+        return "\n".join(lines)
 
 
 class SubAgentTool(Tool):
@@ -7255,8 +7328,9 @@ class SubAgentTool(Tool):
         "- Decide what you can. If a decision would be risky or genuinely "
         "cannot be made (a missing requirement, a blocker only the operator "
         "can resolve, a choice with real consequences), call `message_main` "
-        "to ask Maxwell — it reaches him and the channel live, and his reply "
-        "lands here on your next step. Don't spam it for trivia.\n"
+        "to DM Maxwell directly — he sees it on his next turn wherever he is, "
+        "and his reply lands here on your next step. No channel spam. Don't "
+        "spam it for trivia.\n"
         "- Stay inside the workdir and keep commands short-lived. No "
         "interactive programs, no servers that never exit, no `sudo`.\n"
         "- When the task is done (or genuinely cannot be finished), call "
@@ -7363,12 +7437,12 @@ class SubAgentTool(Tool):
             "function": {
                 "name": "message_main",
                 "description": (
-                    "Send a message back to the main agent (Maxwell) and the "
-                    "channel. Use it when you genuinely cannot decide — a "
-                    "blocker that only the operator can resolve, a missing "
-                    "requirement, or a choice with real consequences. It's live: "
-                    "Maxwell can reply and the reply reaches you on your next "
-                    "step. Don't spam it for trivia — decide what you can."
+                    "DM the main agent (Maxwell) privately — no channel post. "
+                    "Use it when you genuinely cannot decide: a blocker only the "
+                    "operator can resolve, a missing requirement, or a choice "
+                    "with real consequences. Maxwell sees it on his next turn and "
+                    "can reply; the reply reaches you on your next step. Don't "
+                    "spam it for trivia — decide what you can."
                 ),
                 "parameters": {
                     "type": "object",
@@ -7794,18 +7868,17 @@ class SubAgentTool(Tool):
         return None
 
     def drain_notes_for(self, channel_id: str) -> list[str]:
-        """Pending sub->main notes for runs originating in this channel.
+        """Pending sub->main notes, GLOBAL — this is the sub-agent's DM to Maxwell.
 
-        Called by the main agent when it builds a turn in a channel, so a quiet
-        ``message_main`` from a sub-agent reaches Maxwell without posting to chat.
-        Marks each returned note as surfaced.
+        Called by the main agent when it builds a turn. A quiet ``message_main``
+        from a sub-agent is a direct message to Maxwell, not a channel post, so it
+        must reach him on his NEXT turn wherever that lands — not only when he
+        happens to be in the run's originating channel. ``channel_id`` is kept
+        only for backward-compat callers and no longer filters. Marks each
+        returned note as surfaced so it is delivered exactly once.
         """
-        if not channel_id:
-            return []
         notes: list[str] = []
         for chan in list(self._chans.values()) + [c for c, _t in self._finished_chans.values()]:
-            if chan.channel_id != channel_id:
-                continue
             pending = chan.pending_to_main()
             if not pending:
                 continue
@@ -8034,22 +8107,41 @@ class SubAgentTool(Tool):
             str(getattr(getattr(message, "channel", None), "id", "") or "")
         )
 
-    async def _open_live_message(self, target, task: str, run_id: str):
-        """Post the 'working' message a background run edits in place.
+    async def _post_report(self, target, message, task, report):
+        """Post a finished sub-agent's report to the delivery target.
 
-        Returns a _LiveMessage, or None when the target can't be resolved or
-        the send fails (tests, a channel that vanished, DM closed, no perms).
-        The run itself still completes — it just has no live view.
+        This is the ONLY user-facing message a background run produces — no
+        interim 'working on it' heartbeat. Maxwell watches the run on the event
+        bus and reports/steers it itself; the report is the final word. Threaded
+        back to the message that triggered it (``reference``) when it lands in
+        the same channel, so it reads as a reply to the request instead of an
+        orphan. A plain ``reference`` does NOT ping the author — only an explicit
+        mention does. ``deliver=dm`` lands in a different channel and has no
+        valid reference, so it just sends. Never raises.
         """
         if target is None:
-            return None
+            return
+        body = self._report_body(task, report)
         try:
-            # A heartbeat, not a task dump: the operator doesn't want the whole
-            # request or the running command pasted every few seconds.
-            sent = await target.send("working on it")
-        except Exception:
-            return None
-        return _LiveMessage(sent, task, run_id)
+            if message is not None and getattr(target, "id", None) == getattr(
+                getattr(message, "channel", None), "id", None
+            ):
+                await target.send(body, reference=message)
+            else:
+                await target.send(body)
+        except Exception as e:  # noqa: BLE001 - a lost report must not crash the run
+            logger.warning("failed to post sub-agent report: %s", e)
+
+    @staticmethod
+    def _report_body(task, report):
+        report = str(report or "").strip() or "(sub-agent returned nothing)"
+        head = _shorten(task, 48) or "sub-agent"
+        cap = 1800
+        body = f"done: {head}\n\n{report[:cap]}"
+        if len(report) > cap:
+            body += "\n…(report truncated)"
+        return body
+
 
     async def _run_background(
         self,
@@ -8066,9 +8158,11 @@ class SubAgentTool(Tool):
     ) -> None:
         """Run a sub-agent to completion in the background, then post the result.
 
-        Never blocks the turn. The live message is both the progress display and
-        the final report. Never raises out of here — the only thing on the far
-        side of this task is the user's channel, and a failure should be a
+        Never blocks the turn. No channel heartbeat — there is no 'working on it'
+        edit-in-place message. Maxwell sees the run on the event bus (via
+        sub_agent_status) and reports/steers it itself; this only posts the final
+        report when the run ends. Never raises out of here — the only thing on the
+        far side of this task is the user's channel, and a failure should be a
         reported message, not an unhandled task exception.
 
         The time budget starts here, not when the request was queued, so a run
@@ -8081,12 +8175,6 @@ class SubAgentTool(Tool):
             target = await self._resolve_delivery(message, deliver)
             if chan is not None:
                 chan.target = target
-            live = await self._open_live_message(target, task, run_id)
-            watcher = None
-            if bus and run_id and live is not None:
-                watcher = asyncio.create_task(
-                    self._mirror_events_to_progress(bus, run_id, live)
-                )
             try:
                 report = await self._agent_loop(
                     task,
@@ -8102,9 +8190,7 @@ class SubAgentTool(Tool):
                 )
                 if bus and run_id:
                     bus.finish_run(run_id, agent_events.STATUS_DONE, report[:2000])
-                if live is not None:
-                    with contextlib.suppress(Exception):
-                        await live.finalize(report)
+                await self._post_report(target, message, task, report)
             except asyncio.CancelledError:
                 if bus and run_id:
                     bus.finish_run(run_id, agent_events.STATUS_FAILED, "cancelled")
@@ -8113,18 +8199,12 @@ class SubAgentTool(Tool):
                 logger.warning("background sub-agent %s failed: %s", run_id, e)
                 if bus and run_id:
                     bus.finish_run(run_id, agent_events.STATUS_FAILED, str(e)[:2000])
-                if live is not None:
-                    with contextlib.suppress(Exception):
-                        await live.finalize(f"❌ sub-agent failed:\n{e}")
+                await self._post_report(target, message, task, f"❌ sub-agent failed:\n{e}")
             finally:
                 if self._bg_inflight > 0:
                     self._bg_inflight -= 1
                 if run_id:
                     self._retain_chan(run_id)
-                if watcher is not None:
-                    watcher.cancel()
-                    with contextlib.suppress(asyncio.CancelledError, Exception):
-                        await watcher
                 # Reap the sandbox on every exit path — an orphaned container
                 # holds 4GB of limit and a bind mount nobody is using.
                 if self._sandbox_mode() == "docker":
@@ -8162,6 +8242,41 @@ class SubAgentTool(Tool):
             raise
         except Exception as e:  # pragma: no cover - telemetry only
             logger.debug("sub_agent progress mirror stopped: %s", e)
+
+    async def _provider_call(self, provider, messages, model, deadline):
+        """Call the sub-agent's provider with retry on transient failure.
+
+        A single dropped provider call used to end a sub-agent run — the loop
+        bailed with "stopped: the model call failed". For a self-hosted or
+        proxied model that is a routine hiccup (network blip, 5xx, transient
+        timeout), not a reason to torch a minutes-long run. Retry a couple of
+        times with a short backoff, then give up. Always respects the overall
+        deadline so a retry storm can't run past the run's budget.
+        """
+        retries = int(getattr(Config, "SUBAGENT_PROVIDER_RETRIES", 2) or 0)
+        attempt = 0
+        while True:
+            remaining = int(max(30, deadline - time.monotonic()))
+            try:
+                return await provider.generate_chat_completion(
+                    messages=messages,
+                    tools=self._TOOLS,
+                    model=model,
+                    timeout=remaining,
+                )
+            except Exception as e:
+                attempt += 1
+                logger.warning(
+                    "sub_agent provider call failed (try %d/%d): %s",
+                    attempt,
+                    retries + 1,
+                    e,
+                )
+                # Out of budget, or retries exhausted — let the caller decide.
+                if attempt > retries or time.monotonic() >= deadline:
+                    raise
+                backoff = min(1.5 * (2 ** (attempt - 1)), 6.0)
+                await asyncio.sleep(backoff)
 
     async def _agent_loop(
         self,
@@ -8208,6 +8323,8 @@ class SubAgentTool(Tool):
         steps = 0
         commands_run = 0
         files_written: list[str] = []
+        duds = 0
+        dud_tolerance = int(getattr(Config, "SUBAGENT_DUD_TOLERANCE", 2) or 0)
         while steps < max_steps:
             # Pull in any main-agent messages that arrived since the last step so
             # the sub-agent can answer them in this turn's reasoning.
@@ -8250,12 +8367,7 @@ class SubAgentTool(Tool):
             )
             _note_run(steps=steps)
             try:
-                reply = await provider.generate_chat_completion(
-                    messages=messages,
-                    tools=self._TOOLS,
-                    model=model,
-                    timeout=int(max(30, deadline - time.monotonic())),
-                )
+                reply = await self._provider_call(provider, messages, model, deadline)
             except Exception as e:
                 logger.warning("sub_agent provider call failed: %s", e)
                 _emit(agent_events.EV_ERROR, label="model call failed", error=str(e)[:400])
@@ -8270,9 +8382,42 @@ class SubAgentTool(Tool):
 
             calls = normalize_native_tool_calls(reply.get("tool_calls"))
             content = str(reply.get("content") or "").strip()
+            if not calls and not content:
+                # A model that returns neither a tool call nor any text is a
+                # dud turn — it stalled, or the endpoint glitched. Rather than
+                # end the run with "stopped without a report", nudge it to act
+                # a couple of times, then give up. Consumes a step per nudge.
+                duds += 1
+                _emit(
+                    agent_events.EV_NOTE,
+                    label=f"empty model reply ({duds}/{dud_tolerance}); nudging",
+                )
+                if duds > dud_tolerance:
+                    return self._report(
+                        task,
+                        workspace,
+                        steps,
+                        commands_run,
+                        files_written,
+                        "the sub-agent stopped without a report (repeated empty replies)",
+                    )
+                messages.append({"role": "assistant", "content": "", "tool_calls": []})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "<reminder> You returned no action and no text. "
+                            "Don't stop: run a command, read/write a file, or "
+                            "call `finish` with your report. A bare empty reply "
+                            "is not a result.</reminder>"
+                        ),
+                    }
+                )
+                continue
             if not calls:
-                # No tool call: the model is done talking, or it drifted into
-                # prose. Either way its text is the best report we have.
+                # No tool call but real content: the model is done talking, or
+                # it drifted into prose. Either way its text is the best report
+                # we have.
                 return self._report(
                     task,
                     workspace,
