@@ -7867,15 +7867,19 @@ class SubAgentTool(Tool):
             return finished[0]
         return None
 
+    _FINISHED_PREFIX = "[finished] "
+
     def drain_notes_for(self, channel_id: str) -> list[str]:
-        """Pending sub->main notes, GLOBAL — this is the sub-agent's DM to Maxwell.
+        """Pending sub->main QUESTION notes (not finished reports), GLOBAL.
 
         Called by the main agent when it builds a turn. A quiet ``message_main``
         from a sub-agent is a direct message to Maxwell, not a channel post, so it
-        must reach him on his NEXT turn wherever that lands — not only when he
-        happens to be in the run's originating channel. ``channel_id`` is kept
-        only for backward-compat callers and no longer filters. Marks each
-        returned note as surfaced so it is delivered exactly once.
+        must reach him wherever his next turn lands — not only when he happens to
+        be in the run's originating channel. Finished reports are excluded here
+        and surfaced channel-scoped via ``drain_finished_reports`` so Maxwell
+        replies in the right place. ``channel_id`` is kept only for backward-compat
+        callers and no longer filters. Marks each returned note as surfaced so it
+        is delivered exactly once.
         """
         notes: list[str] = []
         for chan in list(self._chans.values()) + [c for c, _t in self._finished_chans.values()]:
@@ -7883,9 +7887,38 @@ class SubAgentTool(Tool):
             if not pending:
                 continue
             for i, text in pending:
+                text = str(text or "")
+                if text.startswith(self._FINISHED_PREFIX):
+                    continue
                 notes.append(f"[sub-agent {chan.run_id} note] {text}")
                 chan.surfaced.add(i)
         return notes
+
+    def drain_finished_reports(self, channel_id: str) -> list[str]:
+        """Pending FINISHED-run reports for runs in this channel, CHANNEL-SCOPED.
+
+        When a background sub-agent finishes, its report is pushed to the relay
+        tagged ``[finished]`` (see ``_handoff_report``). Maxwell needs to reply to
+        the user in the channel where the run was asked, so these surface only on
+        a turn in that channel — unlike ``message_main`` questions which are
+        global. Marks each returned report as surfaced so it is delivered once.
+        """
+        if not channel_id:
+            return []
+        reports: list[str] = []
+        for chan in list(self._chans.values()) + [c for c, _t in self._finished_chans.values()]:
+            if chan.channel_id != channel_id:
+                continue
+            pending = chan.pending_to_main()
+            if not pending:
+                continue
+            for i, text in pending:
+                text = str(text or "")
+                if not text.startswith(self._FINISHED_PREFIX):
+                    continue
+                reports.append(f"[sub-agent {chan.run_id}] {text}")
+                chan.surfaced.add(i)
+        return reports
 
     async def execute(self, message: Message, **kwargs) -> str:
         task = str(kwargs.get("task") or "").strip()
@@ -7996,7 +8029,7 @@ class SubAgentTool(Tool):
             )
             return (
                 f"Started sub-agent (run {run_id}) on: {self._short(task, 60)}. "
-                f"I'll post the result here when it's done."
+                f"On it — I'll report back when it's done."
             )
 
         # Mirror the run onto the channel's live progress message so a
@@ -8108,16 +8141,14 @@ class SubAgentTool(Tool):
         )
 
     async def _post_report(self, target, message, task, report):
-        """Post a finished sub-agent's report to the delivery target.
+        """Fallback: post a finished sub-agent's report to the delivery target.
 
-        This is the ONLY user-facing message a background run produces — no
-        interim 'working on it' heartbeat. Maxwell watches the run on the event
-        bus and reports/steers it itself; the report is the final word. Threaded
-        back to the message that triggered it (``reference``) when it lands in
-        the same channel, so it reads as a reply to the request instead of an
-        orphan. A plain ``reference`` does NOT ping the author — only an explicit
-        mention does. ``deliver=dm`` lands in a different channel and has no
-        valid reference, so it just sends. Never raises.
+        Only used when there is no relay (no event bus / no run_id) to hand the
+        report to Maxwell — e.g. tests, a bot built without telemetry. The real
+        background path hands the report to Maxwell (``_handoff_report``) and he
+        composes the reply. Threaded back to the triggering message (``reference``)
+        when it lands in the same channel — a plain ``reference`` does NOT ping the
+        author. Never raises.
         """
         if target is None:
             return
@@ -8142,6 +8173,27 @@ class SubAgentTool(Tool):
             body += "\n…(report truncated)"
         return body
 
+    async def _handoff_report(self, target, message, chan, run_id, task, report):
+        """Hand a finished background sub-agent's report to Maxwell, not the channel.
+
+        The raw report (task headline, step/command counts, workdir, and the
+        sub-agent's own words) is pushed onto the run's relay as a sub->main
+        message tagged ``[finished]``. Maxwell sees it on his next turn in the
+        run's channel via ``drain_finished_reports`` and composes the user-facing
+        response himself — nothing is dumped raw into chat.
+
+        Fallback: when there is no relay for this run (no event bus / no run_id,
+        e.g. tests or a bot without telemetry), post the report so it isn't lost.
+        """
+        if chan is not None and run_id:
+            body = (
+                f"[finished] {self._short(task, 60)}:\n"
+                f"{str(report or '').strip()[:1600]}"
+            )
+            chan.push("sub", body)
+            return
+        await self._post_report(target, message, task, report)
+
 
     async def _run_background(
         self,
@@ -8156,14 +8208,14 @@ class SubAgentTool(Tool):
         deliver: str = "channel",
         chan: "_SubChan | None" = None,
     ) -> None:
-        """Run a sub-agent to completion in the background, then post the result.
+        """Run a sub-agent to completion in the background, then hand it to Maxwell.
 
-        Never blocks the turn. No channel heartbeat — there is no 'working on it'
-        edit-in-place message. Maxwell sees the run on the event bus (via
-        sub_agent_status) and reports/steers it itself; this only posts the final
-        report when the run ends. Never raises out of here — the only thing on the
-        far side of this task is the user's channel, and a failure should be a
-        reported message, not an unhandled task exception.
+        Never blocks the turn. There is no channel heartbeat and no raw report
+        dump: when the run ends, the report is pushed to Maxwell via the run's
+        relay (``_handoff_report``) and he surfaces it on his next turn in that
+        channel to compose the user-facing reply. Never raises out of here — the
+        only thing on the far side of this task is the user's channel, and a
+        failure should be a reported message, not an unhandled task exception.
 
         The time budget starts here, not when the request was queued, so a run
         that waited for a concurrency slot still gets its full budget.
@@ -8190,7 +8242,7 @@ class SubAgentTool(Tool):
                 )
                 if bus and run_id:
                     bus.finish_run(run_id, agent_events.STATUS_DONE, report[:2000])
-                await self._post_report(target, message, task, report)
+                await self._handoff_report(target, message, chan, run_id, task, report)
             except asyncio.CancelledError:
                 if bus and run_id:
                     bus.finish_run(run_id, agent_events.STATUS_FAILED, "cancelled")
@@ -8199,7 +8251,9 @@ class SubAgentTool(Tool):
                 logger.warning("background sub-agent %s failed: %s", run_id, e)
                 if bus and run_id:
                     bus.finish_run(run_id, agent_events.STATUS_FAILED, str(e)[:2000])
-                await self._post_report(target, message, task, f"❌ sub-agent failed:\n{e}")
+                await self._handoff_report(
+                    target, message, chan, run_id, task, f"❌ sub-agent failed:\n{e}"
+                )
             finally:
                 if self._bg_inflight > 0:
                     self._bg_inflight -= 1

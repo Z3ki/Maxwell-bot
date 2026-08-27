@@ -293,3 +293,60 @@ def test_subagent_status_lists_live_runs(tmp_path, monkeypatch):
     out = asyncio.run(status.execute(None))
     assert "Live sub-agent runs" in out
     assert "job alpha" in out
+
+
+def test_background_report_handed_to_maxwell_not_posted(tmp_path, monkeypatch):
+    """A finished background sub-agent does NOT dump its raw report (task headline,
+    step/command counts, workdir) in the channel. The report is handed to Maxwell
+    via the run's relay and surfaces channel-scoped via drain_finished_reports, so
+    he composes the user-facing reply."""
+    provider = _ScriptedProvider(
+        [{"role": "assistant", "tool_calls": [_call("finish", {"report": "Hi Z3ki! 👋"}, "1")]}]
+    )
+    chan = _FakeChannel(123)
+    bus = agent_events.AgentEventBus()
+    bot = _FakeBot(provider, chan)
+    bot.agent_events = bus
+    monkeypatch.setenv("SUBAGENT_BASE_DIR", str(tmp_path))
+    monkeypatch.setattr(Config, "SUBAGENT_BASE_DIR", str(tmp_path))
+    monkeypatch.setattr(Config, "SUBAGENT_SANDBOX", "host")
+    tool = SubAgentTool(bot)
+    msg = _Message(chan)
+
+    async def scenario():
+        started = await tool.execute(msg, task="say hi", mode="background")
+        assert "Started sub-agent" in started
+        for _ in range(1000):
+            if not provider.replies and provider.seen:
+                return
+            await asyncio.sleep(0.01)
+
+    asyncio.run(scenario())
+
+    # Nothing was dumped to the channel.
+    assert chan.last_message is None
+    # The report was handed to Maxwell via the run's relay.
+    reports = tool.drain_finished_reports("123")
+    assert any("Hi Z3ki" in r for r in reports)
+    assert any("[finished]" in r for r in reports)
+    # A finished report is NOT surfaced as a mid-run question note.
+    assert tool.drain_notes_for("123") == []
+    # Delivered exactly once.
+    assert tool.drain_finished_reports("123") == []
+
+
+def test_drain_finished_reports_is_channel_scoped(tmp_path, monkeypatch):
+    tool = SubAgentTool(_FakeBot(_ScriptedProvider([]), _FakeChannel(123)))
+    a = _SubChan("a1")
+    a.channel_id = "555"
+    a.push("sub", "[finished] task: report for 555")
+    b = _SubChan("b1")
+    b.channel_id = "999"
+    b.push("sub", "[finished] task: report for 999")
+    tool._finished_chans["a1"] = (a, 0.0)
+    tool._finished_chans["b1"] = (b, 0.0)
+    # Only the report for the turn's channel surfaces.
+    got_a = tool.drain_finished_reports("555")
+    assert any("report for 555" in r for r in got_a)
+    got_b = tool.drain_finished_reports("999")
+    assert any("report for 999" in r for r in got_b)

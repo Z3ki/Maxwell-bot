@@ -2402,10 +2402,11 @@ SUBAGENT_DELEGATION = (
     "- Multi-step terminal work (install → build → test → fix), anything with "
     "a command loop, is sub_agent — NOT `shell`. `shell` is for one-shot "
     "commands you run once and read.\n"
-    "- Use `mode=background` for heavy work: it returns immediately and the run "
-    "posts its result to this channel when done, so you never sit here blocking "
-    "a nested agent for minutes. Use `mode=foreground` ONLY when you need the "
-    "report right now to make the next decision this turn.\n"
+    "- Use `mode=background` for heavy work: it returns immediately, and when the "
+    "sub-agent finishes the report is handed BACK to you (not dumped raw in chat) — "
+    "you compose the user-facing reply. So you never sit here blocking a nested "
+    "agent for minutes. Use `mode=foreground` ONLY when you need the report right "
+    "now to make the next decision this turn.\n"
     "- Write the WHOLE task into `task` (inputs, the file or URL to write, the "
     "endpoint to hit, and the standard you want met). The sub-agent cannot ask "
     "questions — it picks the reasonable interpretation and records its "
@@ -2415,11 +2416,12 @@ SUBAGENT_DELEGATION = (
     "event bus, so use `sub_agent_status(run_id)` to check it is actually "
     "working, what step it is on, what it just did, and whether it is waiting on "
     "you. If it is stuck or looping, steer it with `sub_agent_message(run_id, text)`.\n"
-    "- A background result arrives on its own — do not invent it or re-run it "
-    "because you don't see it yet. Ack the user in ONE short plain line that you "
-    "handed it off (e.g. \"on it, posting when it's done\"), no filler, no emoji. "
-    "If you want to report progress, check sub_agent_status() yourself rather "
-    "than guessing.\n"
+    "- A background result arrives back to YOU, not the channel — do not invent it "
+    "or re-run it because you don't see it yet. Ack the user in ONE short plain "
+    "line that you handed it off (e.g. \"on it, I'll report back\"), no filler, no "
+    "emoji. When the run finishes, its report surfaces for you to reply to — "
+    "compose a clean answer, never paste the raw report or its meta. If you want "
+    "to report progress mid-run, check sub_agent_status() yourself.\n"
     "- Use `deliver=dm` when the result is long and would clutter a busy "
     "channel, or when the work is private to the person who asked — the report "
     "lands in their DMs instead. Default `deliver=channel`.\n"
@@ -15679,32 +15681,56 @@ class MaxwellBot(commands.Bot):
             messages[-1]["content"] += "\n\n" + current
         else:
             messages.append({"role": "user", "content": current})
-        # Surface quiet sub-agent notes into this turn's context (no chat post).
-        # A sub-agent that calls ``message_main`` records the note on its relay
-        # instead of posting to chat; pull any pending ones for this channel in
-        # so Maxwell sees them and can reply with sub_agent_message. Inlined (not
-        # a method) so the test harness's bare bot object is a clean no-op here.
+        # Surface quiet sub-agent traffic into this turn's context (no chat post).
+        # 1) ``message_main`` question notes are a DM to Maxwell: global, reach him
+        #    wherever his next turn lands. 2) ``[finished]`` reports surface
+        #    channel-scoped so he replies in the run's own channel. Inlined (not a
+        #    method) so the test harness's bare bot object is a clean no-op here.
         sub = (getattr(self, "tools", None) or {}).get("sub_agent")
+        nid = str(getattr(getattr(message, "channel", None), "id", "") or "")
+        notes = []
         drain = getattr(sub, "drain_notes_for", None)
         if callable(drain):
             try:
-                nid = str(getattr(getattr(message, "channel", None), "id", "") or "")
                 notes = drain(nid)
             except Exception:  # pragma: no cover - never break a turn
                 notes = []
-            if notes:
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            "## Sub-agent notes (quiet relay — do not repeat to "
-                            "the channel)\n"
-                            + "\n".join(notes)
-                            + "\nA note that asks you something: answer it with "
-                            "sub_agent_message(run_id, text)."
-                        ),
-                    }
-                )
+        if notes:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "## Sub-agent messages to you (quiet relay — do not repeat "
+                        "to the channel)\n"
+                        + "\n".join(notes)
+                        + "\nA note that asks you something: answer it with "
+                        "sub_agent_message(run_id, text)."
+                    ),
+                }
+            )
+        reports = []
+        drain_reports = getattr(sub, "drain_finished_reports", None)
+        if callable(drain_reports):
+            try:
+                reports = drain_reports(nid)
+            except Exception:  # pragma: no cover - never break a turn
+                reports = []
+        if reports:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "## Finished sub-agent report(s) — reply to the user here\n"
+                        + "\n".join(reports)
+                        + "\nThese sub-agents just finished. Compose ONE clean, natural "
+                        "reply to the person who asked, in this channel, reporting the "
+                        "result. Do NOT paste the raw report, the task headline, step "
+                        "counts, or the workdir path — synthesize it into the answer. "
+                        "You may call sub_agent_status(run_id) for detail. If you cannot "
+                        "honestly complete what was asked, say what's stuck and stop."
+                    ),
+                }
+            )
         return MaxwellBot._apply_prompt_budget(self, messages)
 
     async def _telegram_webhook_loop(self):
