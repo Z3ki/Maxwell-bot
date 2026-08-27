@@ -50,10 +50,13 @@ import site_server
 from utils import (  # single source of truth, fd-safe
     FileLock,
     _atomic_json_write_sync,
+    _safe_int,
     _spawn_background,
     is_direct_image_url,
     is_gif_page_url,
 )
+
+logger = logging.getLogger(__name__)
 
 # Chess is optional: if python-chess is missing the chess_* tools will not be
 # registered, but nothing else breaks. __CHESS_IMPORTED__ gates the tool classes.
@@ -86,8 +89,6 @@ try:
 except ImportError:
     _DDGS = None
     _DDGS_AVAILABLE = False
-
-logger = logging.getLogger(__name__)
 
 # Owner IDs come from env var only — no hardcoded defaults to leak in open-source.
 # Load dotenv first so bare `python bot.py` sees MAXWELL_OWNER_IDS from .env
@@ -5741,7 +5742,8 @@ class SendMessageTool(Tool):
         sent_chunks: list[str] = []
         try:
             target_channel = getattr(message, "channel", None)
-            target_dest = (channel_id or user_id or kwargs.get("recipient_id") or "").strip()
+            raw_dest = channel_id if channel_id is not None else (user_id if user_id is not None else kwargs.get("recipient_id"))
+            target_dest = str(raw_dest or "").strip()
             if target_dest and self.bot:
                 dest_id = _safe_int(target_dest)
                 if dest_id:

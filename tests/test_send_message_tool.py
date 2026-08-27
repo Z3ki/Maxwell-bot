@@ -197,3 +197,51 @@ def test_send_message_uses_slowmode_helper_when_present():
         assert message.replies == ["hi"]
 
     asyncio.run(run())
+
+
+def test_send_message_explicit_channel_id():
+    class FakeTargetChannel:
+        def __init__(self, cid):
+            self.id = cid
+            self.sent = []
+
+        async def send(self, text):
+            self.sent.append(text)
+
+    class FakeBot:
+        def __init__(self):
+            self.channels = {123456789: FakeTargetChannel(123456789)}
+
+        def get_channel(self, cid):
+            return self.channels.get(cid)
+
+        async def fetch_channel(self, cid):
+            if cid in self.channels:
+                return self.channels[cid]
+            raise RuntimeError("Channel not found")
+
+    async def run():
+        bot = FakeBot()
+        tool = SendMessageTool(bot)
+        origin_msg = FakeMessage()
+
+        # Test string channel_id
+        res = await tool.execute(origin_msg, content="hello target channel", channel_id="123456789")
+        assert "__MESSAGE_SENT__" in res
+        assert bot.channels[123456789].sent == ["hello target channel"]
+        assert origin_msg.channel.sent == []
+        assert origin_msg.replies == []
+
+        # Test int channel_id
+        res2 = await tool.execute(origin_msg, content="hello again", channel_id=123456789)
+        assert "__MESSAGE_SENT__" in res2
+        assert bot.channels[123456789].sent == ["hello target channel", "hello again"]
+
+        # Test invalid channel_id
+        res3 = await tool.execute(origin_msg, content="nope", channel_id="invalid_id")
+        assert "__MESSAGE_SENT__" in res3
+        # When channel not found, fallback sends to origin_msg channel
+        assert origin_msg.replies == ["nope"]
+
+    asyncio.run(run())
+
