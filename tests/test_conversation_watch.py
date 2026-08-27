@@ -532,12 +532,12 @@ def test_watch_debounce_still_shows_an_aside():
     asyncio.run(run())
 
 
-def test_hard_ping_does_not_wait_for_watch_debounce():
+def test_hard_ping_batches_with_watch_debounce():
     bot = _bot()
     handled = []
 
     async def handle(message, content=None):
-        handled.append("now")
+        handled.append(content or message.content)
 
     bot._handle_message = handle
 
@@ -545,7 +545,8 @@ def test_hard_ping_does_not_wait_for_watch_debounce():
         msg = _plain_followup(content="ok")
         msg.mentions = [bot.user]
         await MaxwellBot._maybe_live_reply(bot, msg, msg.content)
-        assert handled == ["now"]
+        await asyncio.sleep(0.1)
+        assert handled == ["ok"]
 
     asyncio.run(run())
 

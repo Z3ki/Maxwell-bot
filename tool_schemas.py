@@ -188,7 +188,10 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "channel_id": _str("Channel ID"),
             "name": _str("New name"),
             "category_id": _str("New parent category ID"),
+            "category_name": _str("New parent category name"),
             "topic": _str("New topic"),
+            "slowmode_seconds": _int("Slowmode delay in seconds (0 to disable)"),
+            "nsfw": _bool("Whether the channel is NSFW"),
             "position": _int("New position"),
         },
         ["channel_id"],
@@ -432,6 +435,9 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     ),
     "send_message": _obj(
         {
+            "channel_id": _str(
+                "Optional channel ID or DM recipient user ID to send to. If omitted, sends to current channel."
+            ),
             "content": _str("Message text (Discord markdown OK)"),
             "reply": _bool(
                 "Discord quote-reply (the quoted-parent UI). Default true. "

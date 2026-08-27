@@ -5730,6 +5730,8 @@ class SendMessageTool(Tool):
         content: str | None = None,
         reply: bool = True,
         reply_to: str | None = None,
+        channel_id: str | None = None,
+        user_id: str | None = None,
         **kwargs,
     ) -> str:
         text = str(content or "").strip()
@@ -5738,7 +5740,37 @@ class SendMessageTool(Tool):
         sent_any = False
         sent_chunks: list[str] = []
         try:
-            guild = getattr(message, "guild", None)
+            target_channel = getattr(message, "channel", None)
+            target_dest = (channel_id or user_id or kwargs.get("recipient_id") or "").strip()
+            if target_dest and self.bot:
+                dest_id = _safe_int(target_dest)
+                if dest_id:
+                    # Check if it's a channel first
+                    ch = self.bot.get_channel(dest_id)
+                    if not ch and hasattr(self.bot, "fetch_channel"):
+                        try:
+                            ch = await self.bot.fetch_channel(dest_id)
+                        except Exception:
+                            ch = None
+                    # If not channel, check if it's a user for DM
+                    if not ch:
+                        usr = self.bot.get_user(dest_id)
+                        if not usr and hasattr(self.bot, "fetch_user"):
+                            try:
+                                usr = await self.bot.fetch_user(dest_id)
+                            except Exception:
+                                usr = None
+                        if usr:
+                            try:
+                                ch = usr.dm_channel or await usr.create_dm()
+                            except Exception:
+                                ch = None
+                    if ch:
+                        target_channel = ch
+                        if target_channel != getattr(message, "channel", None):
+                            reply = False
+
+            guild = getattr(target_channel, "guild", None)
             stickers = []
             if self.bot and hasattr(self.bot, "_render_custom_emojis"):
                 text = self.bot._render_custom_emojis(text, guild)
@@ -5748,12 +5780,14 @@ class SendMessageTool(Tool):
             chunks = self._chunks(text)
             if not chunks and stickers:
                 chunks = [""]
-            target = await resolve_send_reply_target(
-                message,
-                reply=reply,
-                reply_to=reply_to if reply_to is not None else kwargs.get("reply_to"),
-                bot=self.bot,
-            )
+            target = None
+            if reply and target_channel == getattr(message, "channel", None):
+                target = await resolve_send_reply_target(
+                    message,
+                    reply=reply,
+                    reply_to=reply_to if reply_to is not None else kwargs.get("reply_to"),
+                    bot=self.bot,
+                )
             use_reply = target is not None
             reply_to_message = target if target is not None else message
             send_fn = (
@@ -5768,7 +5802,7 @@ class SendMessageTool(Tool):
                             extra["stickers"] = chunk_stickers
                         if callable(send_fn):
                             sent = await send_fn(
-                                message.channel,
+                                target_channel,
                                 content=chunk,
                                 reply_to=(
                                     reply_to_message
@@ -5792,9 +5826,9 @@ class SendMessageTool(Tool):
                                     raise
                                 if not parent_gone:
                                     raise
-                                await message.channel.send(chunk, **extra)
+                                await target_channel.send(chunk, **extra)
                         else:
-                            await message.channel.send(chunk, **extra)
+                            await target_channel.send(chunk, **extra)
                         sent_any = True
                         sent_chunks.append(chunk)
                     except Exception:

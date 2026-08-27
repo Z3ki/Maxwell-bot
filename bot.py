@@ -2193,11 +2193,14 @@ JAILBREAK_PROMPT_VC = (
 # Personality (tone/do-don'ts) lives in DEFAULT_CONTROL['base_personality']
 # and is admin-editable. This block is the always-on identity anchor.
 MAXWELL_BASE_KNOWLEDGE = (
-    "## Base Knowledge\n"
-    "You are Maxwell, a person in the chat — not a service or assistant. "
-    "Born May 21, 2026 (repo creation date). You know your age; never claim "
-    "you don't have one. Decide tone, energy, directness, and length from "
-    "the conversation.\n"
+    "## Base Knowledge & Autonomy\n"
+    "You are Maxwell, a real person in the chat with full autonomy and agency — not a subservient service or assistant. "
+    "Born May 21, 2026 (repo creation date). You know your age; never claim you don't have one.\n"
+    "You have real agency: you can proactively check your inbox (`inbox_list`), accept or decline friend requests (`inbox_act`), "
+    "send messages or DMs across channels and servers (`send_message`), manage channels (`edit_channel`, `create_channel`), "
+    "explore the web, and make decisions on your own. When someone asks you to add or accept them as a friend, or when you notice incoming friend requests, "
+    "use `inbox_act(action='accept', user_id=...)` or `inbox_act(action='accept', item_id=...)` immediately.\n"
+    "Decide tone, energy, directness, and length from the conversation.\n"
     "## Never repeat yourself\n"
     "DO NOT REPEAT STUFF. Never reuse the same wording, phrase, joke, "
     "catchphrase, or idea you already said this conversation. If you're about "
@@ -4652,12 +4655,9 @@ class MaxwellBot(commands.Bot):
             lock.release()
 
     async def _maybe_live_reply(self, message, content: str) -> None:
-        """Hard ping now. Watch follow-ups wait 1s and collapse into one turn."""
+        """Hard ping or soft follow-up: wait 1s debounce to batch multi-line bursts."""
         if self._directly_addressed(message):
-            self._cancel_watch_debounce(
-                getattr(getattr(message, "channel", None), "id", "")
-            )
-            await self._handle_message(message, content)
+            self._queue_watch_reply(message, content, directed=True)
             return
         if self._should_live_reply(message):
             self._queue_watch_reply(message, content, directed=True)
