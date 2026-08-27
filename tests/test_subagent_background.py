@@ -295,58 +295,40 @@ def test_subagent_status_lists_live_runs(tmp_path, monkeypatch):
     assert "job alpha" in out
 
 
-def test_background_report_handed_to_maxwell_not_posted(tmp_path, monkeypatch):
-    """A finished background sub-agent does NOT dump its raw report (task headline,
-    step/command counts, workdir) in the channel. The report is handed to Maxwell
-    via the run's relay and surfaces channel-scoped via drain_finished_reports, so
-    he composes the user-facing reply."""
-    provider = _ScriptedProvider(
-        [{"role": "assistant", "tool_calls": [_call("finish", {"report": "Hi Z3ki! 👋"}, "1")]}]
-    )
-    chan = _FakeChannel(123)
-    bus = agent_events.AgentEventBus()
-    bot = _FakeBot(provider, chan)
-    bot.agent_events = bus
-    monkeypatch.setenv("SUBAGENT_BASE_DIR", str(tmp_path))
-    monkeypatch.setattr(Config, "SUBAGENT_BASE_DIR", str(tmp_path))
-    monkeypatch.setattr(Config, "SUBAGENT_SANDBOX", "host")
+def test_post_subagent_reply_reenters_bot_when_available(tmp_path, monkeypatch):
+    """A finished background sub-agent must NOT dump its report in the channel.
+    Instead it re-enters the bot reply pipeline with a synthetic message so
+    Maxwell composes the reply NOW (no 'on a later turn' gap)."""
+    class _ReplyBot:
+        def __init__(self):
+            self.tools = {}
+            self.calls = []
+
+        async def _handle_message(self, message, content=None):
+            self.calls.append((message, content))
+
+    bot = _ReplyBot()
     tool = SubAgentTool(bot)
+    chan = _FakeChannel(123)
     msg = _Message(chan)
-
-    async def scenario():
-        started = await tool.execute(msg, task="say hi", mode="background")
-        assert "Started sub-agent" in started
-        for _ in range(1000):
-            if not provider.replies and provider.seen:
-                return
-            await asyncio.sleep(0.01)
-
-    asyncio.run(scenario())
-
-    # Nothing was dumped to the channel.
-    assert chan.last_message is None
-    # The report was handed to Maxwell via the run's relay.
-    reports = tool.drain_finished_reports("123")
-    assert any("Hi Z3ki" in r for r in reports)
-    assert any("[finished]" in r for r in reports)
-    # A finished report is NOT surfaced as a mid-run question note.
-    assert tool.drain_notes_for("123") == []
-    # Delivered exactly once.
-    assert tool.drain_finished_reports("123") == []
+    asyncio.run(tool._post_subagent_reply(chan, msg, "r1", "say hi", "Hi Z3ki! 👋"))
+    assert len(bot.calls) == 1
+    message, content = bot.calls[0]
+    assert content.startswith("The sub-agent (run r1)")
+    # The report rides inside the message for Maxwell to read, not as a raw dump.
+    assert "Hi Z3ki" in content
+    assert "say hi" in content
+    # The synthetic message is reply-shaped (channel + reply shim).
+    assert getattr(message, "channel", None) is chan
+    assert callable(getattr(message, "reply", None))
 
 
-def test_drain_finished_reports_is_channel_scoped(tmp_path, monkeypatch):
+def test_post_subagent_reply_falls_back_when_no_pipeline(tmp_path, monkeypatch):
+    """No bot reply pipeline (tests / a bare bot): fall back to posting the report
+    so the result is never lost."""
     tool = SubAgentTool(_FakeBot(_ScriptedProvider([]), _FakeChannel(123)))
-    a = _SubChan("a1")
-    a.channel_id = "555"
-    a.push("sub", "[finished] task: report for 555")
-    b = _SubChan("b1")
-    b.channel_id = "999"
-    b.push("sub", "[finished] task: report for 999")
-    tool._finished_chans["a1"] = (a, 0.0)
-    tool._finished_chans["b1"] = (b, 0.0)
-    # Only the report for the turn's channel surfaces.
-    got_a = tool.drain_finished_reports("555")
-    assert any("report for 555" in r for r in got_a)
-    got_b = tool.drain_finished_reports("999")
-    assert any("report for 999" in r for r in got_b)
+    chan = _FakeChannel(123)
+    msg = _Message(chan)
+    asyncio.run(tool._post_subagent_reply(chan, msg, "r1", "say hi", "Hi Z3ki! 👋"))
+    assert chan.last_message is not None
+    assert "Hi Z3ki" in chan.last_message.content

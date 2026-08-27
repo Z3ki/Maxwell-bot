@@ -31,6 +31,7 @@ import aiofiles
 import aiohttp
 import asyncio
 import base64
+import types
 import uuid
 import discord
 from discord import Activity, File, Message, Status
@@ -7867,19 +7868,15 @@ class SubAgentTool(Tool):
             return finished[0]
         return None
 
-    _FINISHED_PREFIX = "[finished] "
-
     def drain_notes_for(self, channel_id: str) -> list[str]:
-        """Pending sub->main QUESTION notes (not finished reports), GLOBAL.
+        """Pending sub->main notes, GLOBAL — this is the sub-agent's DM to Maxwell.
 
         Called by the main agent when it builds a turn. A quiet ``message_main``
         from a sub-agent is a direct message to Maxwell, not a channel post, so it
         must reach him wherever his next turn lands — not only when he happens to
-        be in the run's originating channel. Finished reports are excluded here
-        and surfaced channel-scoped via ``drain_finished_reports`` so Maxwell
-        replies in the right place. ``channel_id`` is kept only for backward-compat
-        callers and no longer filters. Marks each returned note as surfaced so it
-        is delivered exactly once.
+        be in the run's originating channel. ``channel_id`` is kept only for
+        backward-compat callers and no longer filters. Marks each returned note as
+        surfaced so it is delivered exactly once.
         """
         notes: list[str] = []
         for chan in list(self._chans.values()) + [c for c, _t in self._finished_chans.values()]:
@@ -7887,38 +7884,9 @@ class SubAgentTool(Tool):
             if not pending:
                 continue
             for i, text in pending:
-                text = str(text or "")
-                if text.startswith(self._FINISHED_PREFIX):
-                    continue
                 notes.append(f"[sub-agent {chan.run_id} note] {text}")
                 chan.surfaced.add(i)
         return notes
-
-    def drain_finished_reports(self, channel_id: str) -> list[str]:
-        """Pending FINISHED-run reports for runs in this channel, CHANNEL-SCOPED.
-
-        When a background sub-agent finishes, its report is pushed to the relay
-        tagged ``[finished]`` (see ``_handoff_report``). Maxwell needs to reply to
-        the user in the channel where the run was asked, so these surface only on
-        a turn in that channel — unlike ``message_main`` questions which are
-        global. Marks each returned report as surfaced so it is delivered once.
-        """
-        if not channel_id:
-            return []
-        reports: list[str] = []
-        for chan in list(self._chans.values()) + [c for c, _t in self._finished_chans.values()]:
-            if chan.channel_id != channel_id:
-                continue
-            pending = chan.pending_to_main()
-            if not pending:
-                continue
-            for i, text in pending:
-                text = str(text or "")
-                if not text.startswith(self._FINISHED_PREFIX):
-                    continue
-                reports.append(f"[sub-agent {chan.run_id}] {text}")
-                chan.surfaced.add(i)
-        return reports
 
     async def execute(self, message: Message, **kwargs) -> str:
         task = str(kwargs.get("task") or "").strip()
@@ -8173,24 +8141,84 @@ class SubAgentTool(Tool):
             body += "\n…(report truncated)"
         return body
 
-    async def _handoff_report(self, target, message, chan, run_id, task, report):
-        """Hand a finished background sub-agent's report to Maxwell, not the channel.
+    @staticmethod
+    def _synthetic_message(chan, author, content):
+        """A minimal Message-like object the reply pipeline accepts.
 
-        The raw report (task headline, step/command counts, workdir, and the
-        sub-agent's own words) is pushed onto the run's relay as a sub->main
-        message tagged ``[finished]``. Maxwell sees it on his next turn in the
-        run's channel via ``drain_finished_reports`` and composes the user-facing
-        response himself — nothing is dumped raw into chat.
-
-        Fallback: when there is no relay for this run (no event bus / no run_id,
-        e.g. tests or a bot without telemetry), post the report so it isn't lost.
+        Mirrors the shape bot._message_from_raw_update builds (id, channel,
+        guild, author, content, empty media + mention lists, reference, etc.),
+        plus a ``reply()`` shim so the reply threads. ``chan`` MUST be a real
+        sendable channel; ``author`` the user the reply is addressed to.
         """
-        if chan is not None and run_id:
-            body = (
-                f"[finished] {self._short(task, 60)}:\n"
-                f"{str(report or '').strip()[:1600]}"
+        if author is None:
+            author = types.SimpleNamespace(
+                id="0", display_name="User", name="User", bot=False
             )
-            chan.push("sub", body)
+        msg = types.SimpleNamespace(
+            id=str(uuid.uuid4().hex[:12]),
+            channel=chan,
+            guild=getattr(chan, "guild", None),
+            author=author,
+            content=content,
+            embeds=[],
+            attachments=[],
+            stickers=[],
+            mentions=[],
+            role_mentions=[],
+            mention_everyone=False,
+            reference=None,
+            components=[],
+            poll=None,
+            type=0,
+        )
+
+        def _reply(reply_content=None, **kwargs):
+            return chan.send(content=reply_content, reference=msg, **kwargs)
+
+        setattr(msg, "reply", _reply)
+        return msg
+
+    async def _post_subagent_reply(self, target, message, run_id, task, report):
+        """Have Maxwell compose and post the user-facing reply right now.
+
+        The background turn already ended after the 'started' ack, so we
+        re-enter the bot's reply pipeline with a synthetic message carrying the
+        finished report. Maxwell reads it and replies in the run's channel — no
+        'report on a later turn' gap. Fully defensive: if re-entry is not
+        possible (tests, a bare bot) or raises, fall back to posting the report
+        so the result is never lost.
+        """
+        bot = getattr(self, "bot", None)
+        handle = getattr(bot, "_handle_message", None)
+        chan = target if target is not None else getattr(getattr(message, "channel", None), "id", None)
+        if not callable(handle) or chan is None:
+            await self._post_report(target, message, task, report)
+            return
+        head = _shorten(task, 60) or "sub-agent"
+        body = (
+            f"The sub-agent (run {run_id}) you asked me to run just finished.\n\n"
+            f"TASK: {head}\n"
+            f"REPORT:\n{str(report or '').strip()[:1600]}\n\n"
+            f"Reply to the person who asked with a clean, natural answer, in this "
+            f"channel. Do NOT paste the raw report, the task headline, step counts, "
+            f"or workdir path — synthesize it into the answer. Keep it short and plain."
+        )
+        synthetic = self._synthetic_message(chan, getattr(message, "author", None), body)
+        try:
+            await handle(synthetic, body)
+        except Exception as e:  # noqa: BLE001 - a failed re-entry must not lose the result
+            logger.warning("sub-agent immediate reply failed (%s); posting report", e)
+            await self._post_report(target, message, task, report)
+
+    async def _handoff_report(self, target, message, chan, run_id, task, report):
+        """Hand a finished background sub-agent's result to Maxwell.
+
+        No raw dump to chat: Maxwell composes the user-facing reply. When there
+        is no bot reply pipeline to re-enter (tests / no telemetry), fall back to
+        posting the report so the result isn't lost.
+        """
+        if chan is not None or run_id:
+            await self._post_subagent_reply(target, message, run_id, task, report)
             return
         await self._post_report(target, message, task, report)
 

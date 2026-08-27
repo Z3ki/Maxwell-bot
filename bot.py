@@ -15681,17 +15681,18 @@ class MaxwellBot(commands.Bot):
             messages[-1]["content"] += "\n\n" + current
         else:
             messages.append({"role": "user", "content": current})
-        # Surface quiet sub-agent traffic into this turn's context (no chat post).
-        # 1) ``message_main`` question notes are a DM to Maxwell: global, reach him
-        #    wherever his next turn lands. 2) ``[finished]`` reports surface
-        #    channel-scoped so he replies in the run's own channel. Inlined (not a
-        #    method) so the test harness's bare bot object is a clean no-op here.
+        # Surface quiet sub-agent question notes into this turn's context (no chat
+        # post). A sub-agent's ``message_main`` is a DM to Maxwell: global, reach
+        # him wherever his next turn lands. Finished reports are handled by the
+        # sub_agent tool re-entering the reply pipeline directly (see
+        # SubAgentTool._post_subagent_reply), so they are NOT surfaced here. Inlined
+        # (not a method) so the test harness's bare bot object is a clean no-op.
         sub = (getattr(self, "tools", None) or {}).get("sub_agent")
-        nid = str(getattr(getattr(message, "channel", None), "id", "") or "")
         notes = []
         drain = getattr(sub, "drain_notes_for", None)
         if callable(drain):
             try:
+                nid = str(getattr(getattr(message, "channel", None), "id", "") or "")
                 notes = drain(nid)
             except Exception:  # pragma: no cover - never break a turn
                 notes = []
@@ -15705,29 +15706,6 @@ class MaxwellBot(commands.Bot):
                         + "\n".join(notes)
                         + "\nA note that asks you something: answer it with "
                         "sub_agent_message(run_id, text)."
-                    ),
-                }
-            )
-        reports = []
-        drain_reports = getattr(sub, "drain_finished_reports", None)
-        if callable(drain_reports):
-            try:
-                reports = drain_reports(nid)
-            except Exception:  # pragma: no cover - never break a turn
-                reports = []
-        if reports:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": (
-                        "## Finished sub-agent report(s) — reply to the user here\n"
-                        + "\n".join(reports)
-                        + "\nThese sub-agents just finished. Compose ONE clean, natural "
-                        "reply to the person who asked, in this channel, reporting the "
-                        "result. Do NOT paste the raw report, the task headline, step "
-                        "counts, or the workdir path — synthesize it into the answer. "
-                        "You may call sub_agent_status(run_id) for detail. If you cannot "
-                        "honestly complete what was asked, say what's stuck and stop."
                     ),
                 }
             )
