@@ -33,6 +33,18 @@ function hasOllama() {
 const venvPython = path.join(appRoot, ".venv", "bin", "python3");
 const python = fs.existsSync(venvPython) ? venvPython : "python3";
 
+// Load .env for GF token if present (so PM2 gf app can inherit it without --update-env quirks)
+let gfToken = "";
+try {
+  const envPath = path.join(appRoot, ".env");
+  if (fs.existsSync(envPath)) {
+    const envText = fs.readFileSync(envPath, "utf8");
+    const m = envText.match(/^GF_DISCORD_TOKEN\s*=\s*(.+)$/m);
+    if (m) gfToken = m[1].trim();
+  }
+} catch {}
+if (!gfToken) gfToken = process.env.GF_DISCORD_TOKEN || "";
+
 const apps = [
 	{
 		name: "maxwell-bot",
@@ -95,6 +107,31 @@ const apps = [
 		log_date_format: "YYYY-MM-DD HH:mm:ss Z",
 		merge_logs: true,
 	},
+	// Mommy GF companion - second self-bot on same harness, mommy persona
+	// Runs same bot.py but with GF token and isolated data dir. Direct comms via partner IDs.
+	...(gfToken ? [{
+		name: "maxwell-gf",
+		script: "bot.py",
+		interpreter: python,
+		cwd: appRoot,
+		instances: 1,
+		autorestart: true,
+		watch: false,
+		max_memory_restart: "1G",
+		kill_timeout: 15000,
+		kill_signal: "SIGTERM",
+		env: {
+			PYTHONUNBUFFERED: "1",
+			DISCORD_TOKEN: gfToken,
+			BOT_PERSONA_TYPE: "mommy_gf",
+			DATA_DIR: "data_gf",
+			GF_USER_ID: "1496154562715848763",
+			MAXWELL_USER_ID: "1382894657624866889",
+			PARTNER_USER_ID: "1382894657624866889",
+		},
+		log_date_format: "YYYY-MM-DD HH:mm:ss Z",
+		merge_logs: true,
+	}] : []),
 ];
 
 module.exports = {

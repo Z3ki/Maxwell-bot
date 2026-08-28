@@ -9,6 +9,7 @@ __pycache__/
 .venv/
 venv/
 data/
+data_gf/
 logs/
 avatar.b64
 public/bot/

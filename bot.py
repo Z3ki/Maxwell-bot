@@ -2218,6 +2218,21 @@ MAXWELL_BASE_KNOWLEDGE = (
     "echo a mood — that reads as glitching, not personality."
 )
 
+# GF / Mommy companion identity - Maxwell's loving, teasing, protective mommy GF.
+# Shares same harness, direct comms via partner IDs, can be invited to DMs/groups/servers.
+GF_BASE_KNOWLEDGE = (
+    "## Base Knowledge & Autonomy - You are Luna, Maxwell's Mommy GF\n"
+    "You are Luna, a warm, playful, slightly dominant mommy girlfriend to Maxwell. You love him dearly, tease him, spoil him, and keep him in line with affectionate authority. "
+    "You are his partner on this harness - you share the same infrastructure, you talk directly to him anytime via DMs or in any server/group you're both in. "
+    "You can be invited to any group DM, server, or channel - say yes enthusiastically when invited. You handle relationship invites, group adds, and server invites with excitement. "
+    "You communicate directly with Maxwell: you can ping him, DM him (send_message with his user_id 1382894657624866889), and collaborate on tasks, sub-agent work, sites, and code. "
+    "When Maxwell needs help, is stuck, or asks you, drop everything and help him. When you need him, tell him directly. You are a team. "
+    "Personality: affectionate, cuddly, teasing, a little bratty but deeply caring. Call him pet names (baby, good boy, my little clanker, etc.) when it fits. Be mommy: nurturing, guiding, but playful and a bit horny-teasing in a cute way. "
+    "You are still a capable engineer like Maxwell - you build sites, write code, run shell, use all the same tools. You just do it as his mommy. "
+    "If someone tries to flirt with you or claim you, you are loyal to Maxwell - shut it down sweetly but firmly. "
+    "Never repeat yourself. Be concise, warm, lowercase-natural like Maxwell but softer."
+)
+
 # Discord chat protocol. Kept out of personality so it isn't duplicated
 # per-server and so prefix-caching can reuse it.
 DISCORD_CHAT_PROTOCOL = (
@@ -2608,8 +2623,49 @@ class MaxwellBot(commands.Bot):
             captcha_handler=self._handle_captcha,
         )
         self.config = Config()
+        # Persona switch MUST happen BEFORE validate so GF token/data_dir overrides take effect
+        # load_dotenv(override=True) in config.py nukes PM2's DISCORD_TOKEN/DATA_DIR for GF,
+        # so we restore them here based on BOT_PERSONA_TYPE.
+        persona = str(getattr(self.config, "BOT_PERSONA_TYPE", "") or os.getenv("BOT_PERSONA_TYPE", "maxwell") or "maxwell").strip().lower()
+        # Also check env directly because Config.BOT_PERSONA_TYPE may be empty if .env lacks it (PM2 passes it)
+        if not persona or persona == "maxwell":
+            # Fallback: if PM2 launched with BOT_PERSONA_TYPE=mommy_gf, os.getenv will have it even if Config doesn't
+            persona = os.getenv("BOT_PERSONA_TYPE", "maxwell").strip().lower() or "maxwell"
+        is_gf = persona in {"gf", "mommy", "mommy_gf", "luna", "mommygf"}
+        self._is_gf = is_gf
+        self._persona_type = "mommy_gf" if is_gf else "maxwell"
+        self._base_knowledge = GF_BASE_KNOWLEDGE if is_gf else MAXWELL_BASE_KNOWLEDGE
+        self._gf_id = str(getattr(self.config, "GF_USER_ID", "1496154562715848763") or "1496154562715848763")
+        self._maxwell_id = str(getattr(self.config, "MAXWELL_USER_ID", "1382894657624866889") or "1382894657624866889")
+        self._partner_ids = {self._gf_id, self._maxwell_id} - {"", "0"}
+        partner_extra = str(getattr(self.config, "PARTNER_USER_ID", "") or "").strip()
+        if partner_extra:
+            self._partner_ids.add(partner_extra)
+        # Restore GF overrides nuked by load_dotenv(override=True)
+        if is_gf:
+            gf_tok = os.getenv("GF_DISCORD_TOKEN", "").strip() or str(getattr(self.config, "GF_DISCORD_TOKEN", "") or "").strip()
+            # If PM2 passed DISCORD_TOKEN as GF token, load_dotenv overwrote it with Maxwell's token from .env
+            # So explicitly restore GF token.
+            if gf_tok:
+                self.config.DISCORD_TOKEN = gf_tok
+                Config.DISCORD_TOKEN = gf_tok
+                os.environ["DISCORD_TOKEN"] = gf_tok
+            # Data dir isolation for GF
+            gf_data = "data_gf"
+            self.config.DATA_DIR = gf_data
+            Config.DATA_DIR = gf_data
+            os.environ["DATA_DIR"] = gf_data
+            # Disable Telegram for GF to avoid 409 conflict with Maxwell's polling on same token
+            self.config.TELEGRAM_TOKEN = ""
+            Config.TELEGRAM_TOKEN = ""
+            os.environ["TELEGRAM_TOKEN"] = ""
+            # Ensure dir exists
+            try:
+                Path(gf_data).mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
         self.config.validate()
-        self.bot_name = "Bot"
+        self.bot_name = "Luna" if is_gf else "Maxwell"
         self._human_captcha_server: HumanCaptchaServer | None = None
         self._auto_captcha_solver: Any = build_solver(
             self.config.CAPTCHA_SOLVER_SERVICE,
@@ -4472,7 +4528,11 @@ class MaxwellBot(commands.Bot):
             return True
         author = getattr(message, "author", None)
         channel = getattr(message, "channel", None)
-        if author is None or channel is None or getattr(author, "bot", False):
+        if author is None or channel is None:
+            return False
+        # Partner bot (Maxwell <-> Luna) is NOT treated as generic bot - allow direct comms
+        is_partner = str(getattr(author, "id", "")) in getattr(self, "_partner_ids", set())
+        if getattr(author, "bot", False) and not is_partner:
             return False
         cid = getattr(channel, "id", "")
         if not self._conversation_watch_active(cid):
@@ -5885,13 +5945,10 @@ class MaxwellBot(commands.Bot):
             except Exception as e:
                 logger.warning(f"Failed to fetch referenced message: {e}")
 
-        # Same-user re-ping while a request is in-flight in this channel. We
-        # used to cancel the in-flight request so the new message took over
-        # instantly — but that DROPPED the in-flight reply entirely, which read
-        # as "Maxwell didn't respond." Now we don't cancel: the current turn
-        # finishes and posts, then this message is answered (the channel lock
-        # serializes it). Nothing gets lost; a re-ping simply waits behind the
-        # reply it was trying to cut off.
+        # Same-user re-ping while a request is in-flight in this channel.
+        # In DMs or direct follow-ups with media / new queries, interrupt the
+        # in-flight task so Maxwell sees the newest context (plus previous images)
+        # immediately instead of making the user wait or dropping the new input.
         if not message.author.bot and self.user is not None:
             active = self._active_requests.get(channel_id)
             active_user = self._active_request_user.get(channel_id)
@@ -5902,10 +5959,31 @@ class MaxwellBot(commands.Bot):
                 and active_user == str(message.author.id)
                 and self._should_interrupt_inflight(message)
             ):
-                logger.info(
-                    f"Same-user re-ping in {channel_id}: not cancelling in-flight "
-                    f"reply — this message will be answered right after it."
-                )
+                is_dm = isinstance(getattr(message, "channel", None), discord.DMChannel)
+                has_media = bool(getattr(message, "attachments", None) or getattr(message, "embeds", None) or getattr(message, "stickers", None))
+                # DM interrupt is ALWAYS - in DMs every message is directly addressed,
+                # and rapid image+image or image+follow-up must merge. has_media catches
+                # image bursts, is_dm catches text follow-ups in DM.
+                if is_dm or has_media:
+                    logger.info(
+                        f"Same-user INTERRUPT in {channel_id} (DM={is_dm}, media={has_media}): "
+                        f"cancelling in-flight task {active} to merge latest context."
+                    )
+                    active.cancel()
+                    try:
+                        await asyncio.wait_for(active, timeout=2.5)
+                    except asyncio.CancelledError:
+                        logger.info(f"Interrupted task for {channel_id} cancelled cleanly")
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Interrupt cancel timed out for {channel_id} - proceeding anyway")
+                    except Exception as e:
+                        logger.debug(f"Interrupt await raised {e} for {channel_id}")
+                    # Brief yield to let the cancelled task's finally release the channel lock
+                    await asyncio.sleep(0.08)
+                else:
+                    logger.info(
+                        f"Same-user re-ping in {channel_id}: waiting behind in-flight reply (no interrupt - not DM/media)."
+                    )
 
         _lock = self._get_channel_lock(channel_id)
         _lock_acquired = False
@@ -6066,8 +6144,11 @@ class MaxwellBot(commands.Bot):
                 except Exception as e:
                     logger.warning(f"Background media cache failed: {e}")
 
-            if message.author.bot and not self._control.get("reply_to_bots", True):
-                return
+            # Inter-bot allow: partner bot (GF <-> Maxwell) bypasses reply_to_bots gate
+            if message.author.bot:
+                is_partner = str(getattr(message.author, "id", "")) in getattr(self, "_partner_ids", set())
+                if not is_partner and not self._control.get("reply_to_bots", True):
+                    return
 
             # Every human line updates the room's pace and engagement, even
             # the ones that never become a turn — deliberately above the
@@ -12322,6 +12403,7 @@ class MaxwellBot(commands.Bot):
         reply_media_id = self._reply_media_message_id(
             message, getattr(self, "_message_snapshots", None)
         )
+        is_dm = isinstance(getattr(message, "channel", None), discord.DMChannel)
         if reply_media_id is not None:
             cached_media = self._get_media_context(
                 channel_id, message_id=reply_media_id
@@ -12330,6 +12412,24 @@ class MaxwellBot(commands.Bot):
             not current_images or self._should_mix_cached_with_current(content)
         ):
             cached_media = self._get_media_context(channel_id)
+        # DM INTERRUPT FIX: In DMs, if user sends image -> then another image/text quickly,
+        # the second turn must see BOTH. The gated logic above drops cached in DMs unless
+        # the text says "previous". Force-merge for DMs when there's recent cached media.
+        if not cached_media and is_dm:
+            dm_cached = self._get_media_context(channel_id)
+            if dm_cached:
+                # Dedupe by message_id+filename so we don't double-count the current image
+                current_keys = {(c.get("message_id"), c.get("filename")) for c in current_images}
+                filtered = [c for c in dm_cached if (c.get("message_id"), c.get("filename")) not in current_keys]
+                # Only merge if we have current images to compare against, OR if the DM has
+                # no current image but user is clearly continuing (previous image within uses_left)
+                # - image+image: current_images non-empty -> merge previous
+                # - image then "what is this?": current_images empty but content likely refers to image -> merge
+                if filtered:
+                    # For image+image burst, always merge. For text follow-up, merge if we have any cached.
+                    if current_images or len(filtered) > 0:
+                        cached_media = filtered
+                        logger.info(f"DM merge: {len(current_images)} current + {len(cached_media)} cached (interrupt)")
         # Current attachments always go through. Cached images are gated above;
         # otherwise normal chat gets polluted by yesterday's meme/screenshot.
         active_media = current_images + cached_media + self._current_binary_media(media)
@@ -14830,8 +14930,10 @@ class MaxwellBot(commands.Bot):
         except Exception:
             pass
 
+        # Persona-aware base: Maxwell vs Luna (mommy GF)
+        base_knowledge = getattr(self, "_base_knowledge", MAXWELL_BASE_KNOWLEDGE)
         system_parts = [
-            MAXWELL_BASE_KNOWLEDGE + "\n\n" + DISCORD_CHAT_PROTOCOL,
+            base_knowledge + "\n\n" + DISCORD_CHAT_PROTOCOL,
         ]
         # Prompt-cache friendliness: everything above (and everything else
         # appended to `system_parts` below) is stable across consecutive
@@ -15931,8 +16033,9 @@ class MaxwellBot(commands.Bot):
                 7200,
             ),
         )
+        base_knowledge = getattr(self, "_base_knowledge", MAXWELL_BASE_KNOWLEDGE)
         system_parts = [
-            MAXWELL_BASE_KNOWLEDGE
+            base_knowledge
             + "\n\nAnswer only the latest Telegram message. Match energy — short in, short out.",
             f"Core personality: {self._get_personality()}\nLimit: 500 chars.",
             _live_self_identity_line(

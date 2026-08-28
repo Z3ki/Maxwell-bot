@@ -283,6 +283,13 @@ class Config:
         lambda _tts=ENABLE_TTS: _tts and _has_binary("ffmpeg"),
         needs="ffmpeg + a TTS engine",
     )
+    # Maxwell Companion / Partner
+    GF_DISCORD_TOKEN = os.getenv("GF_DISCORD_TOKEN", "").strip()
+    GF_USER_ID = os.getenv("GF_USER_ID", "1496154562715848763").strip()
+    MAXWELL_USER_ID = os.getenv("MAXWELL_USER_ID", "1382894657624866889").strip()
+    PARTNER_USER_ID = os.getenv("PARTNER_USER_ID", "").strip()
+    BOT_PERSONA_TYPE = os.getenv("BOT_PERSONA_TYPE", "maxwell").strip().lower()
+
     # Email needs a real mailbox. Without a password the four tools could
     # only ever answer "not configured", so auto keeps them unregistered.
     ENABLE_EMAIL_TOOLS = _feature_env(
