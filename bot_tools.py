@@ -6963,9 +6963,6 @@ class ShellTool(Tool):
         if max_out and len(combined) > max_out:
             combined = combined[:max_out] + "\n... (truncated)"
 
-        # Finish progress with a clean status message, no terminal dump
-        await _publish("working on it…")
-
         result = combined if combined else "(command produced no output)"
 
         # Send requested files from the container
