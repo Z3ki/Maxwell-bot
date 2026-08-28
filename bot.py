@@ -2345,6 +2345,7 @@ TOOL_PROTOCOL = (
     "Default: helper tools first (they finish before terminals), then ONE "
     "send_message. Multiple sends + wait are for rare spacing, not ordinary chat. "
     "wait is <=10s; longer pauses use sleep (sleep ends dispatch).\n"
+    "Parallel multi-tool calling: you can call helper tools (like shell) alongside send_message in the same batch turn. When invoking a terminal command or slow operation, you can emit a quick contextual acknowledgement (e.g. `send_message(content='on it...', ...)` or `send_message(content='checking that now...')`) in the same batch so the user gets an instant natural reply while the tool executes.\n"
     "Files the user should receive must be attached via send_file or shell `files=`. "
     "A filesystem path is not delivery.\n"
     "create_site: full HTML document in `body`, never pasted into chat. Real "
@@ -13719,8 +13720,6 @@ class MaxwellBot(commands.Bot):
                 "tts": "text",
             }
             field = _ARTIFACT_FIELDS.get(tool_name)
-            if tool_name == "shell":
-                return "working on it…"
             if not field:
                 # Unknown tool: pick the first non-reasoning string
                 # field. Falls back to whatever the model wrote —

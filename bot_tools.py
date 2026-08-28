@@ -6926,41 +6926,11 @@ class ShellTool(Tool):
                 f"Command preview: {preview}"
             )
 
-        sess = None
-        slot = None
         try:
-            sess, slot = await self._begin_shell_progress(
-                message, "working on it…"
-            )
-        except Exception:
-            sess, slot = None, None
-
-        async def _publish(text: str) -> None:
-            if sess is not None and slot is not None:
-                await self._finish_shell_progress(message, sess, slot, text)
-                return
-            with contextlib.suppress(Exception):
-                await message.channel.send(text)
-
-        async def _on_progress(stdout_b, stderr_b, elapsed) -> None:
-            if sess is None or slot is None:
-                return
-            await self._finish_shell_progress(
-                message,
-                sess,
-                slot,
-                "working on it…",
-            )
-
-        try:
-            stdout, stderr, exit_code = await self._run_shell_command(
-                normalized, on_progress=_on_progress
-            )
+            stdout, stderr, exit_code = await self._run_shell_command(normalized)
         except asyncio.TimeoutError:
-            await _publish(f"Command timed out after {self._timeout_seconds()}s")
             return f"Error: Command timed out after {self._timeout_seconds()}s"
         except Exception as e:
-            await _publish(f"Error: {e}")
             return f"Error executing command: {e}"
 
         out = stdout.decode(errors="replace")
