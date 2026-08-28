@@ -230,13 +230,12 @@ def reply_pressure(signal: AddressSignal, state: WatchState, now: float,
     if signal.from_bot:
         return 0.0
     score = 0.0
-    # Being named is the one soft signal strong enough to stand alone.
+    # Direct mention or being named
     if signal.names_him:
-        score += REPLY_PRESSURE_THRESHOLD + 0.1
-    # A broadcast is aimed at the room. He is in the room, but so is
-    # everyone, so on its own this is nowhere near enough.
+        score += REPLY_PRESSURE_THRESHOLD + 0.15
+    # A broadcast is aimed at the room. If the conversation is active or interesting, join naturally
     if signal.soft:
-        score += 0.1
+        score += 0.25
     # Continuity: is he actually a participant right now? Being addressed
     # recently counts fully and clears the bar by itself; merely having
     # spoken counts for less (presence_factor discounts it), because him

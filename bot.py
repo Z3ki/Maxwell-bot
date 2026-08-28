@@ -4390,16 +4390,13 @@ class MaxwellBot(commands.Bot):
                 watching = bool(checker(channel_id))
         if watching:
             lines.append(
-                "Conversation watch is on in this room: you may speak without "
-                "an @, and no_response is the default, not the fallback. "
-                "Nobody sent this to you — the bar is that the line only "
-                "makes sense as something said to you, or answers something "
-                "you actually asked. Being able to add something is not a "
-                "reason to. Stay silent for side talk, reactions, agreement, "
-                "jokes you were not part of, people discussing you with "
-                "someone else, and anything you would only be seconding. The "
-                "transcript is THIS channel's current thread — stay on it, "
-                "and don't bring up other rooms or old topics."
+                "Conversation watch is on in this room: you may speak without an @. "
+                "Read the room naturally. no_response is the default when the line has nothing to do with you. "
+                "Respond if someone asks a question, reacts to something you said, "
+                "discusses something you are actively involved in, or makes a comment "
+                "that naturally invites a reply from you in this current thread. "
+                "Stay silent for side conversations between other people, unrelated banter, or spam. "
+                "Be casual, concise, and natural."
             )
             # The old prompt spelled out each addressing case in its own
             # paragraph, which repeated the rule three times and left the
@@ -4428,13 +4425,9 @@ class MaxwellBot(commands.Bot):
         if getattr(message, "_watch_followup", False):
             lines.append(
                 "Soft follow-up: they did not @ you or Discord-reply this time. "
-                "Default is no_response. Speak only if this line continues the "
-                "exchange with you in this room — not because it is on a topic "
-                "you know about, and not to agree, react, or add a thought "
-                "nobody asked for. If the room moved on, stay silent. "
-                "To Discord-reply to an earlier line, send_message "
-                "with reply_to as a short quote or name, like nah or alice — "
-                "not an id."
+                "Default is no_response when unrelated. Join in naturally if the conversation is ongoing with you. "
+                "If the room has moved on to an unrelated topic or side chatter between others, "
+                "stay silent. To Discord-reply to an earlier line, send_message with reply_to. Keep your replies concise and conversational."
             )
         burst_lines = self._watch_burst_prompt_lines(message)
         if burst_lines:
