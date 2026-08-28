@@ -5961,29 +5961,24 @@ class MaxwellBot(commands.Bot):
             ):
                 is_dm = isinstance(getattr(message, "channel", None), discord.DMChannel)
                 has_media = bool(getattr(message, "attachments", None) or getattr(message, "embeds", None) or getattr(message, "stickers", None))
-                # DM interrupt is ALWAYS - in DMs every message is directly addressed,
-                # and rapid image+image or image+follow-up must merge. has_media catches
-                # image bursts, is_dm catches text follow-ups in DM.
-                if is_dm or has_media:
-                    logger.info(
-                        f"Same-user INTERRUPT in {channel_id} (DM={is_dm}, media={has_media}): "
-                        f"cancelling in-flight task {active} to merge latest context."
-                    )
-                    active.cancel()
-                    try:
-                        await asyncio.wait_for(active, timeout=2.5)
-                    except asyncio.CancelledError:
-                        logger.info(f"Interrupted task for {channel_id} cancelled cleanly")
-                    except asyncio.TimeoutError:
-                        logger.warning(f"Interrupt cancel timed out for {channel_id} - proceeding anyway")
-                    except Exception as e:
-                        logger.debug(f"Interrupt await raised {e} for {channel_id}")
-                    # Brief yield to let the cancelled task's finally release the channel lock
-                    await asyncio.sleep(0.08)
-                else:
-                    logger.info(
-                        f"Same-user re-ping in {channel_id}: waiting behind in-flight reply (no interrupt - not DM/media)."
-                    )
+                # Always interrupt if the same user directly pings/messages again
+                # (in DMs, media bursts, or guild channels) so the newer query takes over
+                # and doesn't get dropped or starved behind a slow LLM turn.
+                logger.info(
+                    f"Same-user INTERRUPT in {channel_id} (DM={is_dm}, media={has_media}): "
+                    f"cancelling in-flight task {active} to merge latest context."
+                )
+                active.cancel()
+                try:
+                    await asyncio.wait_for(active, timeout=2.5)
+                except asyncio.CancelledError:
+                    logger.info(f"Interrupted task for {channel_id} cancelled cleanly")
+                except asyncio.TimeoutError:
+                    logger.warning(f"Interrupt cancel timed out for {channel_id} - proceeding anyway")
+                except Exception as e:
+                    logger.debug(f"Interrupt await raised {e} for {channel_id}")
+                # Brief yield to let the cancelled task's finally release the channel lock
+                await asyncio.sleep(0.08)
 
         _lock = self._get_channel_lock(channel_id)
         _lock_acquired = False
