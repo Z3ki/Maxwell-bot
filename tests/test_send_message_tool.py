@@ -243,5 +243,15 @@ def test_send_message_explicit_channel_id():
         # When channel not found, fallback sends to origin_msg channel
         assert origin_msg.replies == ["nope"]
 
+        # Test replying when target message is a SimpleNamespace without .reply
+        from types import SimpleNamespace
+        sn_msg = SimpleNamespace(
+            channel=SimpleNamespace(id="chan1", send=origin_msg.channel.send),
+            id="msg123",
+            content="klipy link https://klipy.co/123",
+        )
+        res4 = await tool.execute(sn_msg, content="nice link")
+        assert "__MESSAGE_SENT__" in res4
+
     asyncio.run(run())
 

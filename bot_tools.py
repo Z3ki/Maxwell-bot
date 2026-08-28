@@ -5822,6 +5822,9 @@ class SendMessageTool(Tool):
                 )
             use_reply = target is not None
             reply_to_message = target if target is not None else message
+            # If reply_to_message is a mock/SimpleNamespace without .reply, don't attempt direct .reply()
+            if not callable(getattr(reply_to_message, "reply", None)):
+                use_reply = False
             send_fn = (
                 getattr(self.bot, "_send_with_slowmode", None) if self.bot else None
             )

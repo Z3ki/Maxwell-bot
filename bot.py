@@ -2622,6 +2622,7 @@ class MaxwellBot(commands.Bot):
             self_bot=True,
             help_command=None,
             captcha_handler=self._handle_captcha,
+            mobile_status=True,
         )
         self.config = Config()
         # Persona switch MUST happen BEFORE validate so GF token/data_dir overrides take effect
