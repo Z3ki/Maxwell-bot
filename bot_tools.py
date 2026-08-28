@@ -2757,14 +2757,16 @@ class SearchMessagesTool(Tool):
     async def execute(
         self, message: Message, query: str | None = None, limit: str = "5", **kwargs
     ) -> str:
-        if not message.guild and not getattr(message, "channel", None):
+        chan = getattr(message, "channel", None)
+        if not message.guild and not chan:
             return "Error: Channel context unavailable"
         try:
             search_limit = max(1, min(int(limit), 25))
             results = []
-            # If query is empty or blank, fetch recent channel history instead of failing
-            if not query or not str(query).strip():
-                chan = getattr(message, "channel", None)
+            clean_query = str(query or "").strip().lower()
+
+            # If query is empty or blank, fetch recent channel history
+            if not clean_query:
                 if chan and hasattr(chan, "history"):
                     async for msg in chan.history(limit=search_limit):
                         snippet = msg.content[:150] + ("..." if len(msg.content) > 150 else "")
@@ -2774,16 +2776,41 @@ class SearchMessagesTool(Tool):
                     return f"Recent messages ({len(results)}):\n" + "\n".join(results)
                 return "Error: query is required"
 
-            if not message.guild:
-                return "Error: Cannot search by keyword in DMs"
-            async for msg in message.guild.search(content=query, limit=search_limit):
-                snippet = msg.content[:150] + ("..." if len(msg.content) > 150 else "")
-                results.append(f"[{msg.id}] {msg.author.display_name}: {snippet}")
+            # 1. First search recent history in current channel (bots can always read accessible channel history)
+            if chan and hasattr(chan, "history"):
+                try:
+                    async for msg in chan.history(limit=100):
+                        if clean_query in (msg.content or "").lower():
+                            snippet = msg.content[:150] + ("..." if len(msg.content) > 150 else "")
+                            results.append(f"[#{getattr(chan, 'name', 'chat')} - {msg.id}] {msg.author.display_name}: {snippet}")
+                            if len(results) >= search_limit:
+                                break
+                except Exception:
+                    pass
+
+            # 2. If not enough results and in a guild, search across other accessible text channels
+            if len(results) < search_limit and getattr(message, "guild", None):
+                guild = message.guild
+                channels_to_check = [
+                    c for c in getattr(guild, "text_channels", [])
+                    if c.id != getattr(chan, "id", None) and c.permissions_for(guild.me).read_messages
+                ][:8]
+                for c in channels_to_check:
+                    if len(results) >= search_limit:
+                        break
+                    try:
+                        async for msg in c.history(limit=50):
+                            if clean_query in (msg.content or "").lower():
+                                snippet = msg.content[:150] + ("..." if len(msg.content) > 150 else "")
+                                results.append(f"[#{c.name} - {msg.id}] {msg.author.display_name}: {snippet}")
+                                if len(results) >= search_limit:
+                                    break
+                    except Exception:
+                        continue
+
             if not results:
                 return f"No messages found matching '{query}'"
             return "Search results:\n" + "\n".join(results)
-        except discord.Forbidden:
-            return "Error: I don't have permission to search in this server"
         except Exception as e:
             return f"Error searching messages: {e}"
 
@@ -7331,9 +7358,8 @@ class SubAgentTool(Tool):
         return "host" if raw.strip().lower() in {"host", "off", "none", "0", "false"} else "docker"
 
     # Bot tools the sub-agent may call directly on the host via ``bot_call``.
-    # Deliberately the safe, non-destructive publishing/file set — no moderation,
-    # no shell-on-host, no admin. Each still runs under its own ownership / quota
-    # checks as the requesting user (create_site etc. enforce that).
+    # Safe, productive tools for sites, files, search, and message lookups.
+    # Each still runs under its own ownership / quota checks as the requesting user.
     _BOT_TOOLS = frozenset(
         {
             "create_site",
@@ -7342,6 +7368,9 @@ class SubAgentTool(Tool):
             "list_sites",
             "site_server",
             "send_file",
+            "web_search",
+            "search_messages",
+            "fetch_url",
         }
     )
 
@@ -7356,12 +7385,11 @@ class SubAgentTool(Tool):
         "- Work in small steps: inspect, change, run, check the output.\n"
         "- Actually verify. Run the code, the test, the linter — do not claim "
         "something works because it looks right.\n"
-        "- You are sandboxed. Your commands run in a throwaway container with "
-        "only this workdir mounted — you CANNOT reach the bot's files, the host, "
-        "or any bot tool (create_site, send_file, publish, etc.). If the task "
-        "needs one of those, do what you can here, then `finish` with a clear note "
-        "for Maxwell to complete that step. Never spin trying to reach something "
-        "you don't have — that wastes the budget.\n"
+        "- You have local command execution in your workdir PLUS access to host "
+        "bot tools via `bot_call` (e.g. create_site, edit_site, list_sites, send_file, "
+        "web_search, search_messages). When tasked with making or deploying a website, "
+        "you can build it and call `bot_call` with `create_site` directly, verify the result, "
+        "and return the link.\n"
         "- Decide what you can. If a decision would be risky or genuinely "
         "cannot be made (a missing requirement, a blocker only the operator "
         "can resolve, a choice with real consequences), call `message_main` "
@@ -7371,8 +7399,8 @@ class SubAgentTool(Tool):
         "- Stay inside the workdir and keep commands short-lived. No "
         "interactive programs, no servers that never exit, no `sudo`.\n"
         "- When the task is done (or genuinely cannot be finished), call "
-        "`finish` with a report: what you built, which files matter, what you "
-        "verified, and anything left undone.\n"
+        "`finish` with a report: what you built, links/URLs created, which files matter, "
+        "what you verified, and anything left undone.\n"
         "\n"
         "You have {max_steps} steps. Spend them on the task, not on narration."
     )

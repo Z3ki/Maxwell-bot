@@ -159,7 +159,7 @@ DEFAULT_CONTROL = {
     "memory_context_budget": 200000,
     "tool_history_messages": 20,
     "prompt_context_budget": 240000,
-    "max_tool_iterations": 30,
+    "max_tool_iterations": 50,
     "tool_iteration_timeout_seconds": 3600,
     "max_response_chars": 4000,
     # Prefer OpenAI-style native tool_calls when the provider supports them.
