@@ -87,8 +87,6 @@ def _bot(*, watch_seconds=180, debounce_seconds=0.05):
     bot._typing_channel_ids = MaxwellBot._typing_channel_ids.__get__(bot)
     bot._typing_prompt_lines = MaxwellBot._typing_prompt_lines.__get__(bot)
     bot._TYPING_TTL_SECONDS = MaxwellBot._TYPING_TTL_SECONDS
-    bot._TYPING_WAIT_CAP_SECONDS = MaxwellBot._TYPING_WAIT_CAP_SECONDS
-    bot._TYPING_WAIT_STEP_SECONDS = MaxwellBot._TYPING_WAIT_STEP_SECONDS
     return bot
 
 

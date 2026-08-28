@@ -2949,8 +2949,6 @@ class MaxwellBot(commands.Bot):
         return None
 
     _TYPING_TTL_SECONDS = 10.0
-    _TYPING_WAIT_CAP_SECONDS = 8.0
-    _TYPING_WAIT_STEP_SECONDS = 0.4
 
     def _prune_typing(self, channel_id=None) -> None:
         """Drop expired typing rows. Optional channel_id limits the sweep."""
@@ -4662,23 +4660,6 @@ class MaxwellBot(commands.Bot):
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
             return
-        typer = getattr(self, "_typing_in_channel", None)
-        extra = 0.0
-        cap = float(getattr(self, "_TYPING_WAIT_CAP_SECONDS", 8.0) or 8.0)
-        step_n = float(getattr(self, "_TYPING_WAIT_STEP_SECONDS", 0.4) or 0.4)
-        while extra < cap:
-            people = []
-            if callable(typer):
-                with contextlib.suppress(Exception):
-                    people = typer(channel_id) or []
-            if not people:
-                break
-            step = min(step_n, cap - extra)
-            try:
-                await asyncio.sleep(step)
-            except asyncio.CancelledError:
-                return
-            extra += step
         bucket = (getattr(self, "_watch_debounce", None) or {}).pop(
             str(channel_id), None
         )
@@ -4726,9 +4707,12 @@ class MaxwellBot(commands.Bot):
             lock.release()
 
     async def _maybe_live_reply(self, message, content: str) -> None:
-        """Hard ping or soft follow-up: wait 1s debounce to batch multi-line bursts."""
+        """Direct mentions reply immediately; soft chatter waits debounce quiet timer."""
         if self._directly_addressed(message):
-            self._queue_watch_reply(message, content, directed=True)
+            self._cancel_watch_debounce(
+                getattr(getattr(message, "channel", None), "id", "")
+            )
+            await self._handle_message(message, content)
             return
         if self._should_live_reply(message):
             self._queue_watch_reply(message, content, directed=True)
