@@ -5832,13 +5832,13 @@ class SendMessageTool(Tool):
                 for i, chunk in enumerate(chunks):
                     chunk_stickers = stickers if i == 0 else None
                     try:
-                        extra = {}
+                        extra = {k: v for k, v in kwargs.items() if k not in ("content", "body", "message")}
                         if chunk_stickers:
                             extra["stickers"] = chunk_stickers
                         if callable(send_fn):
                             sent = await send_fn(
                                 target_channel,
-                                content=chunk,
+                                chunk,
                                 reply_to=(
                                     reply_to_message
                                     if (i == 0 and use_reply)
