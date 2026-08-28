@@ -5875,8 +5875,14 @@ class MaxwellBot(commands.Bot):
         # traffic — "no context for outside messages" complaint. Cooldown
         # now only applies to the REPLY path (provider call downstream); the
         # STORAGE path always runs so RAG sees every message.
+        # Direct pings/mentions and owner messages bypass cooldown completely so
+        # interactive pings are never dropped or delayed by burst typing.
+        is_direct = self._directly_addressed(message)
+        is_owner = self._is_admin(message.author.id) if hasattr(self, "_is_admin") else False
         cooldown_for_reply = (
-            cooldown > 0 and now - last < cooldown and not (has_attachment or has_embed)
+            cooldown > 0
+            and now - last < cooldown
+            and not (has_attachment or has_embed or is_direct or is_owner)
         )
         self._cooldowns[str(message.author.id)] = now
         if len(self._cooldowns) > 1000:
