@@ -8,8 +8,6 @@ are exercised in the live bot.
 
 from __future__ import annotations
 
-import os
-import tempfile
 
 import chess
 import pytest

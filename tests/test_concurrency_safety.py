@@ -57,7 +57,8 @@ def test_queue_is_bounded():
         with pytest.raises(RuntimeError, match="queue is full"):
             await queues.submit(1, 1, work)
         blocker.set()
-        first.cancel(); second.cancel()
+        first.cancel()
+        second.cancel()
         await queues.close()
 
     asyncio.run(run())

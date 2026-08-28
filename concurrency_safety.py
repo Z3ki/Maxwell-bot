@@ -66,21 +66,25 @@ class ChannelWorkQueues:
                 try:
                     work.result.set_result(await work.callback())
                 except asyncio.CancelledError:
-                    if not work.result.done(): work.result.cancel()
+                    if not work.result.done():
+                        work.result.cancel()
                     raise
                 except Exception as exc:
-                    if not work.result.done(): work.result.set_exception(exc)
+                    if not work.result.done():
+                        work.result.set_exception(exc)
             finally:
                 queue.task_done()
 
     async def close(self) -> None:
         workers = list(self._workers.values())
         for queue in self._queues.values():
-            with contextlib.suppress(asyncio.QueueFull): queue.put_nowait(None)
+            with contextlib.suppress(asyncio.QueueFull):
+                queue.put_nowait(None)
         for worker in workers:
             worker.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
-        self._workers.clear(); self._queues.clear()
+        self._workers.clear()
+        self._queues.clear()
 
 
 class FairSemaphore:

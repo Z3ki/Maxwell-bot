@@ -12,9 +12,7 @@ import json
 import types
 import time
 
-import pytest
 
-import bot_tools
 from bot_tools import SubAgentTool
 from config import Config
 
