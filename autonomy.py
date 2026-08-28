@@ -1814,11 +1814,14 @@ class AutonomyEngine:
         # as its own block so a busy #general does not erase the others.
         channel_ids_to_check = await self._collect_activity_channel_ids(events)
 
-        sem = asyncio.Semaphore(8)
+        # Use Semaphore(2) and load history sequentially to avoid bursting Discord API rate limits
+        sem = asyncio.Semaphore(2)
 
         async def _bounded_history(cid: str):
             async with sem:
-                return await self._load_channel_history(cid)
+                res = await self._load_channel_history(cid)
+                await asyncio.sleep(0.5)
+                return res
 
         loaded = await asyncio.gather(
             *[_bounded_history(cid) for cid in channel_ids_to_check],
