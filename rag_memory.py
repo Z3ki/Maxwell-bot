@@ -1203,6 +1203,8 @@ class RAGMemoryManager:
 
             self._embed_endpoint_recovered()
             return vec
+        except (GeneratorExit, asyncio.CancelledError):
+            raise
         except asyncio.TimeoutError:
             self._trip_embed_breaker("timeout")
             return None
@@ -1306,21 +1308,26 @@ class RAGMemoryManager:
 
     async def _embed_and_store(self, row_id: str, text: str) -> bool:
         """Generate embedding and update the row in DB."""
-        vec = await self._embed(text)
-        if vec is not None:
-            blob = _embedding_to_blob(vec)
-            import hashlib as _hashlib
+        try:
+            vec = await self._embed(text)
+            if vec is not None:
+                blob = _embedding_to_blob(vec)
+                import hashlib as _hashlib
 
-            ch = _hashlib.sha256(_strip_for_embedding(text).encode("utf-8")).hexdigest()
-            self._db.execute(
-                "UPDATE vectors SET embedding=? WHERE id=? AND "
-                "(content_hash=? OR "
-                "(content_hash='' AND content=?) OR "
-                "(content_hash IS NULL AND content=?))",
-                (blob, row_id, ch, str(text or "")[:8000], str(text or "")[:8000]),
-            )
-            return True
-        return False
+                ch = _hashlib.sha256(_strip_for_embedding(text).encode("utf-8")).hexdigest()
+                self._db.execute(
+                    "UPDATE vectors SET embedding=? WHERE id=? AND "
+                    "(content_hash=? OR "
+                    "(content_hash='' AND content=?) OR "
+                    "(content_hash IS NULL AND content=?))",
+                    (blob, row_id, ch, str(text or "")[:8000], str(text or "")[:8000]),
+                )
+                return True
+            return False
+        except (GeneratorExit, asyncio.CancelledError):
+            raise
+        except Exception:
+            return False
 
     async def _embed_pending(self, kind: str):
         """Embed all rows of a kind that don't have embeddings yet."""

@@ -98,22 +98,22 @@ def test_shell_tool_runs_without_author_gate():
     async def run():
         async def fake_run_shell(command, on_progress=None):
             assert len(message.channel.sent) == 1
-            assert "$ printf hi" in message.channel.sent[0].content
+            assert "working on it…" in message.channel.sent[0].content
             return b"hi", b"", 0
 
         tool._run_shell_command = fake_run_shell
 
         result = await tool.execute(message, command="printf hi")
-        assert result == "__SHELL_SENT__\n$ printf hi\nhi"
+        assert result == "hi"
         assert len(message.files) == 0
         assert len(message.channel.sent) == 1
-        assert "$ printf hi" in message.channel.sent[0].content
-        assert "hi" in message.channel.sent[0].content
+        assert "working on it…" in message.channel.sent[0].content
 
     asyncio.run(run())
 
 
-def test_shell_tool_truncates_channel_preview_to_300_chars():
+def test_shell_tool_truncates_captured_output_to_max_output(monkeypatch):
+    monkeypatch.setenv("MAXWELL_SHELL_MAX_OUTPUT", "100")
     class FakeBot:
         def _is_admin(self, user_id):
             return True
@@ -128,15 +128,12 @@ def test_shell_tool_truncates_channel_preview_to_300_chars():
 
         tool._run_shell_command = fake_run_shell
         result = await tool.execute(message, command="cat huge.log")
-        assert result.startswith("__SHELL_SENT__\n")
         assert "line of shell output" in result
-        assert len(result) > 300
+        assert "... (truncated)" in result
+        assert len(result) <= 150
         assert len(message.channel.sent) == 1
         posted = message.channel.sent[0]
-        assert posted.content.startswith("```ansi\n")
-        inner = posted.content[len("```ansi\n") : -len("\n```")]
-        assert len(inner) <= 300
-        assert "truncated for channel" in inner
+        assert posted.content == "working on it…"
 
     asyncio.run(run())
 
@@ -158,8 +155,7 @@ def test_same_turn_shell_calls_update_one_progress_message():
         await tool.execute(message, command="uname")
         assert len(message.channel.sent) == 1
         posted = message.channel.sent[0]
-        assert "$ date" in posted.content
-        assert "$ uname" in posted.content
+        assert "working on it…" in posted.content
         assert posted.edits
         assert not posted.deleted
         forget_shell_progress(tool.bot, message)
@@ -188,11 +184,7 @@ def test_shell_progress_edits_while_command_runs():
         result = await tool.execute(message, command="fetch.sh")
         assert len(message.channel.sent) == 1
         posted = message.channel.sent[0]
-        edited = "\n".join(posted.edits)
-        assert "… running" in edited
-        assert "downloading" in edited
-        assert "… running" not in posted.content
-        assert "done" in posted.content
+        assert "working on it…" in posted.content
         assert result.endswith("done")
 
     asyncio.run(run())
@@ -217,8 +209,8 @@ def test_new_user_message_gets_a_fresh_shell_progress_message():
         await tool.execute(second, command="uname")
         assert len(first.channel.sent) == 2
         posted_first, posted_second = first.channel.sent
-        assert "$ date" in posted_first.content
-        assert "$ uname" in posted_second.content
+        assert "working on it…" in posted_first.content
+        assert "working on it…" in posted_second.content
         assert posted_first is not posted_second
         assert not posted_first.deleted
         assert not posted_second.deleted
