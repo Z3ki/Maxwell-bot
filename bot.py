@@ -13697,7 +13697,7 @@ class MaxwellBot(commands.Bot):
         def _artifact_snippet_for(tool_name: str, params: dict) -> str:
             _ARTIFACT_FIELDS = {
                 "create_site": "body",
-                "shell": "command",
+                # "shell": suppress showing the raw command; show clean status message
                 "send_file": "content",
                 "send_message": "body",
                 "edit_message": "content",
@@ -13711,6 +13711,8 @@ class MaxwellBot(commands.Bot):
                 "tts": "text",
             }
             field = _ARTIFACT_FIELDS.get(tool_name)
+            if tool_name == "shell":
+                return "working on it…"
             if not field:
                 # Unknown tool: pick the first non-reasoning string
                 # field. Falls back to whatever the model wrote —

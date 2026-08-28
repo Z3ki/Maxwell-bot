@@ -572,10 +572,10 @@ AUTONOMY_POST_TOOLS = frozenset(
 # and give the planner enough space to actually see them.
 CTX_BUDGET_GOALS = 800
 CTX_BUDGET_RECENT_EVENTS = 2000
-CTX_BUDGET_CHANNEL_ACTIVITY = 8000
+CTX_BUDGET_CHANNEL_ACTIVITY = 250000
 CTX_BUDGET_CHANNEL_MEMORY = 4000
 CTX_BUDGET_RECENT_ACTIONS = 1200
-CTX_BUDGET_DM_HISTORY = 1200
+CTX_BUDGET_DM_HISTORY = 100000
 CTX_BUDGET_LTM = 800
 CTX_BUDGET_SHARED = 600
 CTX_BUDGET_CHANNELS_MAP = 1600  # bumped from 800 — enriched with topic/recency
@@ -893,6 +893,7 @@ Read CONVERSATION FLOOR before post_channel / send_dm / any send.
 
 ## Do
 Answer ADDRESSED rooms. In OPEN, join if you have something real. In IDLE, speak only if you want to — no empty openers. Take a real goal step or complete_goal / create_goal. Else do_nothing.
+Never send messages claiming someone's message "cut off", was truncated, or stopped mid-sentence. Real messages in Discord context are complete; do not guess or hallucinate missing endings.
 INBOX (when present): inbox_list / inbox_act, optional. Voice: join_vc / vc_where / vc_status / leave_vc.
 Skip research, web_search, fetch_url, youtube, and anything already in YOUR RECENT ACTIONS.
 
@@ -1101,12 +1102,12 @@ class AutonomyEngine:
 
     def _activity_history_limit(self) -> int:
         raw = (getattr(self.bot, "_control", None) or {}).get(
-            "autonomy_activity_messages", 25
+            "autonomy_activity_messages", 1500
         )
         try:
-            return max(8, min(int(raw), 50))
+            return max(8, min(int(raw), 1500))
         except (TypeError, ValueError):
-            return 25
+            return 1500
 
     async def _collect_activity_channel_ids(self, events) -> list[str]:
         """Rooms the planner should actually read this tick.
@@ -1183,7 +1184,7 @@ class AutonomyEngine:
                 async for m in ch.history(limit=limit):
                     messages.append(m)
 
-            await asyncio.wait_for(_pull(), timeout=8)
+            await asyncio.wait_for(_pull(), timeout=30)
             return cid, ch, messages
         except (discord.Forbidden, discord.NotFound, discord.HTTPException):
             return None
@@ -2097,7 +2098,8 @@ class AutonomyEngine:
                 # only through send_dm + user id; a group DM only through
                 # post_channel + its G-handle. Leaving that implicit is how
                 # replies ended up in the wrong room.
-                messages = [m async for m in channel.history(limit=20)]
+                # Fetch up to 1500 messages from DM history
+                messages = [m async for m in channel.history(limit=1500)]
                 last_msg_age = ""
                 if messages:
                     last_created = getattr(messages[0], "created_at", None)
@@ -2162,7 +2164,7 @@ class AutonomyEngine:
                 _truncate(
                     "=== DIRECT MESSAGES & GROUP DMS (private rooms — NOT in "
                     "AVAILABLE CHANNELS; never target one with a plain "
-                    "channel number) ===\n" + "\n\n".join(dm_blocks[-20:]),
+                    "channel number) ===\n" + "\n\n".join(dm_blocks[-1500:]),
                     CTX_BUDGET_DM_HISTORY,
                 )
             )

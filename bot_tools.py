@@ -6850,17 +6850,8 @@ class ShellTool(Tool):
         return header + notice + body[-room:]
 
     def _format_ansi_message(self, text: str) -> str:
-        """Wrap truncated shell text in one ```ansi block under Discord's 2000 cap."""
-        wrapper = 13  # len("```ansi\n") + len("\n```")
-        headroom = 7
-        limit = 2000 - wrapper - headroom
-        max_chars = self._channel_max_chars()
-        if max_chars:
-            text = self._truncate_shell_preview(text, max_chars)
-        if len(text) > limit:
-            text = self._truncate_shell_preview(text, limit)
-        safe = text.replace("```", "'''")
-        return f"```ansi\n{safe}\n```"
+        """Format shell status message under Discord's 2000 cap."""
+        return str(text or "")[:1990]
 
     async def _flush_shell_progress_unlocked(
         self, message: Message, sess: _ShellProgressTurn
@@ -6939,18 +6930,17 @@ class ShellTool(Tool):
         slot = None
         try:
             sess, slot = await self._begin_shell_progress(
-                message, self._shell_echo_text(normalized)
+                message, "working on it…"
             )
         except Exception:
             sess, slot = None, None
-        self._signal_streaming(message)
 
         async def _publish(text: str) -> None:
             if sess is not None and slot is not None:
                 await self._finish_shell_progress(message, sess, slot, text)
                 return
             with contextlib.suppress(Exception):
-                await message.channel.send(self._format_ansi_message(text))
+                await message.channel.send(text)
 
         async def _on_progress(stdout_b, stderr_b, elapsed) -> None:
             if sess is None or slot is None:
@@ -6959,7 +6949,7 @@ class ShellTool(Tool):
                 message,
                 sess,
                 slot,
-                self._shell_running_text(normalized, stdout_b, stderr_b, elapsed),
+                "working on it…",
             )
 
         try:
@@ -6967,15 +6957,11 @@ class ShellTool(Tool):
                 normalized, on_progress=_on_progress
             )
         except asyncio.TimeoutError:
-            text = self._shell_echo_text(
-                normalized, f"\u23f1 Timed out after {self._timeout_seconds()}s"
-            )
-            await _publish(text)
-            return f"__SHELL_SENT__\n{text}"
+            await _publish(f"Command timed out after {self._timeout_seconds()}s")
+            return f"Error: Command timed out after {self._timeout_seconds()}s"
         except Exception as e:
-            text = self._shell_echo_text(normalized, f"\u274c Error: {e}")
-            await _publish(text)
-            return f"__SHELL_SENT__\n{text}"
+            await _publish(f"Error: {e}")
+            return f"Error executing command: {e}"
 
         out = stdout.decode(errors="replace")
         err = stderr.decode(errors="replace")
@@ -6989,17 +6975,14 @@ class ShellTool(Tool):
         if exit_code != 0:
             combined += f"\n[exit code: {exit_code}]"
 
-        # 0 = unlimited. Still useful as a safety belt against accidental
-        # 500 MB stdout floods — but if the operator really wants the
-        # full firehose, they can opt in.
         max_out = self._max_output()
         if max_out and len(combined) > max_out:
             combined = combined[:max_out] + "\n... (truncated)"
 
-        text = self._shell_echo_text(normalized, combined)
-        await _publish(text)
+        # Finish progress with a clean status message, no terminal dump
+        await _publish("working on it…")
 
-        result = f"__SHELL_SENT__\n{text}"
+        result = combined if combined else "(command produced no output)"
 
         # Send requested files from the container
         if files:
