@@ -10,9 +10,15 @@ You need exactly two things: **a Discord token** and **a model** (any
 OpenAI-compatible endpoint). Everything else is optional and turns itself on
 only if what it needs is already installed.
 
+### Prerequisites (Debian/Ubuntu)
 ```bash
-git clone <this repo> maxwell && cd maxwell
+sudo apt update && sudo apt install -y git python3 python3-venv python3-pip
+```
+
+```bash
+git clone https://github.com/Z3ki/Maxwell-bot.git maxwell && cd maxwell
 ./setup.sh          # venv + core deps + asks for the two required values
+. .venv/bin/activate
 python3 bot.py
 ```
 

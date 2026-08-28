@@ -15,7 +15,8 @@ yt-dlp-ejs>=0.8.0
 
 # --- voice channels (ENABLE_VC) ----------------------------------------------
 # Also needs system libopus + libsodium, and ffmpeg for playback.
-PyNaCl>=1.6.0
+# PyNaCl is constrained to <1.6 to maintain compatibility with discord.py[voice]
+PyNaCl>=1.5.0,<1.6
 davey>=0.1.6
 discord-ext-voice-recv==0.5.2a179
 
