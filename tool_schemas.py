@@ -424,7 +424,11 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         {"name": _str("Slug of the site to delete")},
         ["name"],
     ),
-    "list_sites": _obj({}),
+    "list_sites": _obj(
+        {
+            "all_users": _bool("Optional boolean. If true, list all published sites across all users."),
+        },
+    ),
     "web_search": _obj(
         {
             "query": _str("Search query"),

@@ -5284,15 +5284,24 @@ class ListSitesTool(Tool):
             "delete_site take. No params."
         )
 
-    async def execute(self, message: Message, **kwargs) -> str:
+    async def execute(self, message: Message, all_users: bool = False, **kwargs) -> str:
         user_id = str(message.author.id)
         if hasattr(self.bot, "_load_sites"):
             self.bot._load_sites(quiet=True)
-        sites = self.bot._sites
-        user_sites = {k: v for k, v in sites.items() if v.get("user_id") == user_id}
+        sites = getattr(self.bot, "_sites", {}) or {}
 
-        if not user_sites:
-            return "You don't have any active sites."
+        # If user is admin/owner or explicitly requests all_users, show all sites
+        is_admin = False
+        if hasattr(self.bot, "_is_admin") and self.bot._is_admin(user_id):
+            is_admin = True
+
+        if is_admin or all_users:
+            selected_sites = sites
+        else:
+            selected_sites = {k: v for k, v in sites.items() if str(v.get("user_id", "")) == user_id}
+
+        if not selected_sites:
+            return "No active sites found."
 
         control = (
             getattr(self.bot, "control", {}) or getattr(self.bot, "_control", {}) or {}
@@ -5300,22 +5309,27 @@ class ListSitesTool(Tool):
         base_url = getattr(
             self.bot.config,
             "MAXWELL_PUBLIC_BASE_URL",
-            "https://maxwell.example.com",
+            "https://maxwell.z3ki.dev",
         ).rstrip("/")
         lines = []
-        for slug, data in user_sites.items():
+        for slug, data in selected_sites.items():
             title = data.get("title", "untitled")
             marks = []
             if data.get("server"):
                 marks.append("server")
             elif data.get("backend"):
                 marks.append("store")
+            owner_label = ""
+            if (is_admin or all_users) and data.get("user_id"):
+                owner_uid = str(data.get("user_id"))
+                owner_label = f" [owner: {owner_uid}]"
             tail = f" [{', '.join(marks)}]" if marks else ""
             lines.append(
                 f"  • {slug} — {base_url}/bot/{slug}/ — '{title}' "
-                f"({site_expiry_label(data, control)}){tail}"
+                f"({site_expiry_label(data, control)}){owner_label}{tail}"
             )
-        return "Your active sites:\n" + "\n".join(lines)
+        header = "All active sites:\n" if (is_admin or all_users) else "Your active sites:\n"
+        return header + "\n".join(lines)
 
 
 _WEB_REPLY_CTX_RE = re.compile(r"\[Latest message replies to[^\]]*\]", re.IGNORECASE)
