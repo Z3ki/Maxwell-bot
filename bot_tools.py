@@ -4105,11 +4105,14 @@ class ChangeAvatarTool(Tool):
 
     def get_description(self):
         return (
-            "Change your profile picture. Params: url (direct jpg/png/gif/webp). "
+            "Change your profile picture (admin only). Params: url (direct jpg/png/gif/webp). "
             "Discord rate-limits spam."
         )
 
     async def execute(self, message: Message, url: str | None = None, **kwargs) -> str:
+        if not self.bot or not self.bot._is_admin(message.author.id):
+            return "Error: Changing avatar is restricted to admins only."
+
         if not url:
             return "Error: url is required"
 
