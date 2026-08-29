@@ -6214,6 +6214,24 @@ class MaxwellBot(commands.Bot):
                     return
 
             if isinstance(message.channel, discord.DMChannel):
+                # Apply partner loop turn limits to DMs as well so Maxwell and Uni don't DM endlessly
+                is_partner = str(getattr(message.author, "id", "")) in getattr(self, "_partner_ids", set())
+                if is_partner:
+                    cid_str = str(getattr(message.channel, "id", ""))
+                    now = time.time()
+                    last_t = getattr(self, "_last_partner_time", {}).get(cid_str, 0)
+                    if now - last_t > 60:
+                        if hasattr(self, "_partner_turns"):
+                            self._partner_turns[cid_str] = 0
+                    current_turns = getattr(self, "_partner_turns", {}).get(cid_str, 0)
+                    if current_turns >= 4:
+                        logger.info("DM: partner conversation turn limit reached (%s turns) in %s, resting", current_turns, cid_str)
+                        return
+                    if hasattr(self, "_partner_turns"):
+                        self._partner_turns[cid_str] = current_turns + 1
+                    if hasattr(self, "_last_partner_time"):
+                        self._last_partner_time[cid_str] = now
+
                 if self._control.get("reply_dms", True):
                     await self._handle_message(
                         message,
