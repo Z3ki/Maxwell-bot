@@ -1,0 +1,8 @@
+{
+  "name": "checkers",
+  "version": "1.0.0",
+  "description": "Play interactive American Checkers / English Draughts games with Maxwell.",
+  "enabled_globally": false,
+  "allowed_users": [],
+  "denied_users": []
+}

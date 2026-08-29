@@ -418,5 +418,6 @@ KNOWN_TOOLS = [
     "chess_move",
     "chess_state",
     "chess_resign",
+    "manage_plugin",
     "usage",
 ]

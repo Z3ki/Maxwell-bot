@@ -2696,13 +2696,14 @@ class LeaveServerTool(Tool):
 
 
 class LookupUserTool(Tool):
-    """Look up information about a Discord user"""
+    """Look up information about a Discord user including bio, roles, and banner"""
 
     def get_description(self):
         return (
             "Look up a Discord user by ID or mention. Params: user_id "
-            "(required, numeric ID or @mention). Returns name, creation date, "
-            "avatar, and whether they are in a voice channel."
+            "(required, numeric ID or @mention). Returns name, bio / about me, "
+            "creation date, banner, accent color, guild roles/nickname, avatar, "
+            "and whether they are in a voice channel."
         )
 
     async def execute(
@@ -2714,32 +2715,82 @@ class LookupUserTool(Tool):
         cleaned = re.sub(r"[^0-9]", "", str(user_id))
         if not cleaned:
             return f"Error: Could not extract a numeric user ID from '{user_id}'"
+        uid_int = int(cleaned)
         try:
-            user = await self.bot.fetch_user(int(cleaned))
+            user = await self.bot.fetch_user(uid_int)
             if not user:
                 return f"Error: User {user_id} not found"
             created = (
                 user.created_at.strftime("%Y-%m-%d") if user.created_at else "unknown"
             )
-            info = (
-                f"Name: {user.display_name} (@{user.name})\n"
-                f"ID: {user.id}\n"
-                f"Created: {created}\n"
-                f"Bot: {user.bot}\n"
-                f"Avatar: {getattr(user.display_avatar, 'url', 'none') if hasattr(user, 'display_avatar') else getattr(user, 'avatar_url', 'none')}"
+            avatar = (
+                getattr(user.display_avatar, "url", "none")
+                if hasattr(user, "display_avatar")
+                else getattr(user, "avatar_url", "none")
             )
+            info_lines = [
+                f"Name: {user.display_name} (@{user.name})",
+                f"ID: {user.id}",
+                f"Created: {created}",
+                f"Bot: {user.bot}",
+            ]
+
+            # Attempt bio / about me retrieval
+            bio = getattr(user, "bio", None)
+            if not bio and hasattr(self.bot, "fetch_user_profile"):
+                try:
+                    prof = await self.bot.fetch_user_profile(uid_int)
+                    bio = getattr(prof, "bio", None)
+                except Exception:
+                    bio = None
+            if bio:
+                info_lines.append(f"Bio: {bio}")
+
+            # Banner and accent color
+            banner = getattr(getattr(user, "banner", None), "url", None)
+            if banner:
+                info_lines.append(f"Banner: {banner}")
+            accent = getattr(user, "accent_color", None)
+            if accent is not None:
+                val = getattr(accent, "value", None)
+                if val is None and isinstance(accent, int):
+                    val = accent
+                if val is not None:
+                    info_lines.append(f"Accent Color: #{val:06X}")
+
+            # Guild-specific information if executed inside a guild
+            guild = getattr(message, "guild", None)
+            if guild:
+                member = guild.get_member(uid_int)
+                if not member and hasattr(guild, "fetch_member"):
+                    try:
+                        member = await guild.fetch_member(uid_int)
+                    except Exception:
+                        member = None
+                if member:
+                    if getattr(member, "nick", None):
+                        info_lines.append(f"Server Nickname: {member.nick}")
+                    if getattr(member, "joined_at", None):
+                        info_lines.append(f"Server Joined: {member.joined_at.strftime('%Y-%m-%d')}")
+                    roles = [r.name for r in getattr(member, "roles", []) if getattr(r, "name", "") != "@everyone"]
+                    if roles:
+                        info_lines.append(f"Roles: {', '.join(roles)}")
+
+            info_lines.append(f"Avatar: {avatar}")
+
+            # Voice channel presence
             member, voice_ch = _find_member_voice(
-                self.bot, int(cleaned), getattr(message, "guild", None)
+                self.bot, uid_int, getattr(message, "guild", None)
             )
             if voice_ch is not None:
                 gname = getattr(getattr(voice_ch, "guild", None), "name", "?")
-                info += (
-                    f"\nVoice: in #{getattr(voice_ch, 'name', voice_ch.id)} "
-                    f"({gname})"
+                info_lines.append(
+                    f"Voice: in #{getattr(voice_ch, 'name', voice_ch.id)} ({gname})"
                 )
             else:
-                info += "\nVoice: not in a voice channel (from cached members)"
-            return info
+                info_lines.append("Voice: not in a voice channel (from cached members)")
+
+            return "\n".join(info_lines)
         except discord.NotFound:
             return f"Error: User {user_id} not found"
         except ValueError:
@@ -12343,3 +12394,70 @@ class UsageTool(Tool):
             rendered = rendered[:4000] + "\n… [truncated]"
         lines.append("\nRaw payload:" + rendered)
         return "\n".join(lines)
+
+
+class ManagePluginTool(Tool):
+    """Manage Maxwell modular plugins (enable, disable, list, status)."""
+
+    def get_description(self):
+        return (
+            "Manage Maxwell modular plugins. Params: action (required: 'list', 'enable', 'disable', 'status'), "
+            "plugin (optional, plugin name), user_id (optional, user ID or @mention), "
+            "is_global (optional boolean, enable/disable plugin globally - requires admin)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        action: str = "list",
+        plugin: str | None = None,
+        user_id: str | None = None,
+        is_global: bool = False,
+        **kwargs,
+    ) -> str:
+        pm = getattr(self.bot, "plugin_manager", None)
+        if not pm:
+            return "Error: Plugin manager is not initialized on this bot."
+
+        author_id = message.author.id if message and hasattr(message, "author") else None
+        act = (action or "list").strip().lower()
+
+        if act == "list" or act == "status":
+            plugins = pm.list_plugins(user_id=author_id)
+            if not plugins:
+                return "No plugins currently installed in plugins/."
+            lines = ["**Installed Maxwell Plugins:**"]
+            for p in plugins:
+                glob = "🌐 GLOBAL" if p["enabled_globally"] else "🔒 PER-USER"
+                status = "✅ ACTIVE FOR YOU" if p["enabled_for_you"] else "❌ INACTIVE FOR YOU"
+                tools_str = ", ".join(p["tools"]) if p["tools"] else "none"
+                lines.append(
+                    f"• **{p['name']}** (v{p['version']}) — {glob} | {status}\n"
+                    f"  {p['description']}\n"
+                    f"  *Tools*: `{tools_str}`"
+                )
+            return "\n".join(lines)
+
+        if not plugin:
+            return f"Error: 'plugin' name is required for action '{act}'."
+
+        plugin_name = plugin.strip().lower()
+
+        # Admin gate check for global modifications
+        if is_global:
+            if author_id is None or not self.bot._is_admin(author_id):
+                return "Error: Modifying global plugin status requires Maxwell admin permissions."
+
+        target_user = user_id
+        if target_user:
+            target_user = re.sub(r"[^0-9]", "", str(target_user))
+        elif not is_global and author_id:
+            target_user = str(author_id)
+
+        if act == "enable":
+            return pm.enable_plugin(plugin_name, user_id=target_user, is_global=is_global)
+        elif act == "disable":
+            return pm.disable_plugin(plugin_name, user_id=target_user, is_global=is_global)
+        else:
+            return f"Error: Unknown action '{act}'. Use 'list', 'enable', 'disable', or 'status'."
+

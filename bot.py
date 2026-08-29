@@ -255,6 +255,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     AuditLogTool,
     ListSitesTool,
     LookupUserTool,
+    ManagePluginTool,
     MoreToolsTool,
     NoResponseTool,
     ReactTool,
@@ -342,6 +343,7 @@ from tool_registry import (  # noqa: E402 — reasoning now rides inside tool ca
 )
 import site_backend  # noqa: E402
 import site_server  # noqa: E402
+from plugin_manager import PluginManager  # noqa: E402
 from tool_schemas import (  # noqa: E402
     CHAT_CORE_TOOL_NAMES,
     RESULT_TOOL_NAMES,
@@ -2701,6 +2703,7 @@ class MaxwellBot(commands.Bot):
         self.rem_prompt_body = load_rem_defaults()["prompt"]
         self._rem_running = False
         self.tools = {}
+        self.plugin_manager = PluginManager(self)
         # Bounded: a plain dict here kept one Lock alive per channel the bot
         # had ever seen, which across a few hundred servers only ever grows.
         self._channel_locks = KeyedLocks(max_idle=256)
@@ -3544,6 +3547,7 @@ class MaxwellBot(commands.Bot):
         self.tools["create_poll"] = CreatePollTool(self)
         self.tools["create_invite"] = CreateInviteTool(self)
         self.tools["lookup_user"] = LookupUserTool(self)
+        self.tools["manage_plugin"] = ManagePluginTool(self)
         self.tools["join_server"] = JoinServerTool(self)
         self.tools["server_setup"] = ServerSetupTool(self)
         self.tools["leave_server"] = LeaveServerTool(self)
@@ -3645,6 +3649,12 @@ class MaxwellBot(commands.Bot):
         if getattr(self.config, "ENABLE_X", False) and self.x_client is not None:
             self.tools["x_read"] = XReadTool(self)
             self.tools["x_post"] = XPostTool(self)
+
+        # Discover and load drop-in plugins from plugins/ directory
+        try:
+            self.plugin_manager.load_plugins()
+        except Exception as e:
+            logger.error("Failed to load plugins: %s", e)
 
         # Log what we did and didn't register so misconfigurations surface
         # in pm2 logs at startup instead of at first call.
@@ -6852,6 +6862,69 @@ class MaxwellBot(commands.Bot):
                         await message.channel.send(
                             f"Added <@{uid}> to shell whitelist."
                         )
+            elif cmd in ("plugin", "plugins"):
+                author_id = str(message.author.id)
+                is_admin = self._is_admin(message.author.id)
+                pm = getattr(self, "plugin_manager", None)
+                if not pm:
+                    await message.channel.send("Plugin system is not initialized.")
+                    return
+                parts = (args or "").strip().split()
+                sub = parts[0].lower() if parts else "list"
+                if sub in ("list", "ls"):
+                    p_list = pm.list_plugins(user_id=author_id)
+                    if not p_list:
+                        await message.channel.send("No plugins installed in `plugins/`.")
+                    else:
+                        lines = ["**Installed Maxwell Plugins:**"]
+                        for p in p_list:
+                            status_sym = "🟢 Enabled" if p["user_active"] else "⚪ Disabled"
+                            glob_note = " (Global)" if p["enabled_globally"] else ""
+                            lines.append(
+                                f"• **{p['name']}** v{p['version']} — {status_sym}{glob_note}\n"
+                                f"  _{p['description']}_ | Tools: {', '.join(p['tools']) or 'none'}"
+                            )
+                        await message.channel.send("\n".join(lines))
+                elif sub in ("enable", "on"):
+                    if len(parts) < 2:
+                        await message.channel.send("Usage: `,plugin enable <name> [--global]`")
+                        return
+                    p_name = parts[1].lower()
+                    is_global = "--global" in parts or "-g" in parts
+                    if is_global and not is_admin:
+                        await message.channel.send("Error: Only bot admins can enable plugins globally.")
+                        return
+                    res = pm.enable_plugin(
+                        p_name,
+                        user_id=author_id if not is_global else None,
+                        is_global=is_global,
+                    )
+                    await message.channel.send(res)
+                elif sub in ("disable", "off"):
+                    if len(parts) < 2:
+                        await message.channel.send("Usage: `,plugin disable <name> [--global]`")
+                        return
+                    p_name = parts[1].lower()
+                    is_global = "--global" in parts or "-g" in parts
+                    if is_global and not is_admin:
+                        await message.channel.send("Error: Only bot admins can disable plugins globally.")
+                        return
+                    res = pm.disable_plugin(
+                        p_name,
+                        user_id=author_id if not is_global else None,
+                        is_global=is_global,
+                    )
+                    await message.channel.send(res)
+                elif sub in ("reload", "refresh"):
+                    if not is_admin:
+                        await message.channel.send("Error: Only bot admins can reload plugins.")
+                        return
+                    res = pm.reload_plugins()
+                    await message.channel.send(res)
+                else:
+                    await message.channel.send(
+                        "Usage: `,plugin <list|enable|disable|reload> [plugin_name] [--global]`"
+                    )
             elif cmd == "confirm":
                 # Out-of-band confirmation for destructive tools (shell/sub_agent)
                 # on a tainted turn. Anyone can confirm their own turn. The model
@@ -13473,9 +13546,17 @@ class MaxwellBot(commands.Bot):
                 params["content"] = content
             if name in disabled:
                 result_text = "Error - tool is disabled"
-            elif name not in compatible:
+            elif name not in compatible and not (
+                hasattr(self, "plugin_manager")
+                and self.plugin_manager
+                and self.plugin_manager.get_tool(name)
+            ):
                 result_text = "Error - tool is not available on this platform"
-            elif name not in self.tools:
+            elif name not in self.tools and not (
+                hasattr(self, "plugin_manager")
+                and self.plugin_manager
+                and self.plugin_manager.get_tool(name)
+            ):
                 result_text = "Error - unknown tool"
             elif self._tool_breaker.is_open(name):
                 result_text = (
@@ -13489,7 +13570,9 @@ class MaxwellBot(commands.Bot):
                 # confirmed; the model cannot forge it because _-keys were stripped
                 # above. This is the single enforcement point instead of per-tool
                 # checks that previously read the model-controlled flag.
-                tool = self.tools[name]
+                tool = self.tools.get(name)
+                if tool is None and hasattr(self, "plugin_manager") and self.plugin_manager:
+                    tool = self.plugin_manager.get_tool(name)
                 if (
                     getattr(tool, "is_destructive", False)
                     and self.is_message_tainted(message)
@@ -14313,6 +14396,19 @@ class MaxwellBot(commands.Bot):
         compatible = MaxwellBot._compatible_tool_names(self, platform)
         disabled = set(self._control.get("disabled_tools", []) or [])
         names = {n for n in compatible if n not in disabled}
+
+        # Include enabled plugin tools for this user or global
+        if hasattr(self, "plugin_manager") and self.plugin_manager is not None:
+            author_id = None
+            if message is not None:
+                author_id = getattr(getattr(message, "author", None), "id", None)
+            plugin_tools = self.plugin_manager.get_available_tools(
+                user_id=author_id, platform=platform
+            )
+            for pt_name in plugin_tools:
+                if pt_name not in disabled:
+                    names.add(pt_name)
+
         if message is not None and MaxwellBot._lean_chat_turn(self, message, content):
             lean = {n for n in names if n in CHAT_CORE_TOOL_NAMES}
             # Never strip the turn down to nothing to say — if the core set

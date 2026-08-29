@@ -138,8 +138,22 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         ["server"],
     ),
     "lookup_user": _obj(
-        {"user_id": _str("Numeric user ID or @mention")},
+        {
+            "user_id": _str(
+                "Numeric user ID or @mention. Returns bio/about me, banner, accent color, "
+                "guild roles/nickname, account creation date, avatar, and voice status."
+            )
+        },
         ["user_id"],
+    ),
+    "manage_plugin": _obj(
+        {
+            "action": _str("Action to perform: 'list', 'enable', 'disable', 'status'"),
+            "plugin": _str("Plugin name (e.g. 'checkers')"),
+            "user_id": _str("Optional target user ID or @mention (defaults to caller)"),
+            "is_global": _bool("Whether to enable/disable plugin globally across all users (admin only)"),
+        },
+        ["action"],
     ),
     "search_messages": _obj(
         {
@@ -763,6 +777,7 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "image_generator",
         "hd_image",
         "lookup_user",
+        "manage_plugin",
         "search_messages",
         "create_invite",
         "join_server",

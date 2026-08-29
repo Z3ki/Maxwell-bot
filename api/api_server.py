@@ -2469,6 +2469,13 @@ app.router.add_get("/api/pm2/logs", pm2_logs)
 app.router.add_post("/api/pm2/restart", pm2_restart)
 app.router.add_get("/api/channels", channel_list)
 app.router.add_get("/api/chat/history", chat_history)
+async def plugins_get(request):
+    plugins_file = _data_path("plugins.json")
+    state = _load_for_read(plugins_file, dict, {"plugins": {}})
+    return _json_response({"ok": True, "plugins": state.get("plugins", {})})
+
+
+app.router.add_get("/api/plugins", plugins_get)
 app.router.add_get("/api/status", bot_status)
 app.router.add_get("/api/system", system_stats)
 app.router.add_options(
