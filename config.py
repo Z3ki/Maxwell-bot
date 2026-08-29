@@ -289,6 +289,10 @@ class Config:
     MAXWELL_USER_ID = os.getenv("MAXWELL_USER_ID", "1382894657624866889").strip()
     PARTNER_USER_ID = os.getenv("PARTNER_USER_ID", "").strip()
     BOT_PERSONA_TYPE = os.getenv("BOT_PERSONA_TYPE", "maxwell").strip().lower()
+    CREATOR_NAME = os.getenv("CREATOR_NAME", "Z3ki").strip() or "Z3ki"
+    CREATOR_ID = os.getenv("CREATOR_ID", "1471821513824014480").strip() or "1471821513824014480"
+    BOT_NAME = os.getenv("BOT_NAME", "Maxwell").strip() or "Maxwell"
+    PARTNER_NAME = os.getenv("PARTNER_NAME", "Uni").strip() or "Uni"
 
     # Email needs a real mailbox. Without a password the four tools could
     # only ever answer "not configured", so auto keeps them unregistered.

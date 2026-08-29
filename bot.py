@@ -2682,7 +2682,20 @@ class MaxwellBot(commands.Bot):
             else os.getenv("COMMAND_PREFIX", "").strip() or str(getattr(self.config, "COMMAND_PREFIX", "") or "").strip()
         )
         self.command_prefix = prefix_override or ("." if is_gf else ",")
-        self._base_knowledge = GF_BASE_KNOWLEDGE if is_gf else MAXWELL_BASE_KNOWLEDGE
+        # Load customizable identity properties from config or environment
+        creator_name = getattr(self.config, "CREATOR_NAME", "Z3ki") or "Z3ki"
+        creator_id = getattr(self.config, "CREATOR_ID", "1471821513824014480") or "1471821513824014480"
+        bot_name = getattr(self.config, "BOT_NAME", "Maxwell") or "Maxwell"
+        partner_name = getattr(self.config, "PARTNER_NAME", "Uni") or "Uni"
+
+        raw_base_knowledge = GF_BASE_KNOWLEDGE if is_gf else MAXWELL_BASE_KNOWLEDGE
+        self._base_knowledge = (
+            raw_base_knowledge
+            .replace("Z3ki", creator_name)
+            .replace("1471821513824014480", creator_id)
+            .replace("Maxwell", bot_name)
+            .replace("Uni", partner_name)
+        )
         self._gf_id = str(getattr(self.config, "GF_USER_ID", "1496154562715848763") or "1496154562715848763")
         self._maxwell_id = str(getattr(self.config, "MAXWELL_USER_ID", "1382894657624866889") or "1382894657624866889")
         self._partner_ids = {self._gf_id, self._maxwell_id} - {"", "0"}
