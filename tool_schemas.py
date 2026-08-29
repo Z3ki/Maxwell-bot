@@ -528,7 +528,7 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 "should verify the result."
             ),
             "workdir": _str("Optional short name for the scratch directory"),
-            "max_steps": _int("Optional cap on sub-agent steps (default 24)"),
+            "max_steps": _int("Optional cap on sub-agent steps (default 100, budget not requirement — finish early when done)"),
             "mode": _str(
                 "'background' (default for heavy work) returns immediately and "
                 "the sub-agent runs on its own, posting the result when done — "

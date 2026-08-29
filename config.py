@@ -585,13 +585,13 @@ class Config:
     # (blocking) sub-agent calls are not limited by this — the model only ever
     # runs one of those per turn.
     SUBAGENT_MAX_CONCURRENT = _int_env(
-        "SUBAGENT_MAX_CONCURRENT", 2, min_value=1, max_value=16
+        "SUBAGENT_MAX_CONCURRENT", 5, min_value=1, max_value=16
     )
     # Hard ceiling on background sub-agents submitted but not yet finished
     # (running + waiting on a concurrency slot). Past this, new background
     # requests are refused with a clear "too busy" so a channel flood can't
     # grow the in-memory queue without bound. Foreground calls are unaffected.
-    SUBAGENT_MAX_QUEUED = _int_env("SUBAGENT_MAX_QUEUED", 8, min_value=1, max_value=128)
+    SUBAGENT_MAX_QUEUED = _int_env("SUBAGENT_MAX_QUEUED", 16, min_value=1, max_value=128)
     # How long a finished sub-agent's message channel is kept so the main agent
     # can still reply to it (sub_agent_message) and read its pending notes.
     SUBAGENT_CHAN_GRACE_SECONDS = _int_env(

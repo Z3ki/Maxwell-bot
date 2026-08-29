@@ -146,7 +146,7 @@ conversation as the tool result.
 
 There is no external coding-agent binary: the sub-agent is Maxwell, so it
 follows `ENABLE_SHELL` unless you set `ENABLE_SUBAGENT` explicitly, and it
-refuses any path outside its workdir. Budgets: `SUBAGENT_MAX_STEPS` (24),
+refuses any path outside its workdir. Budgets: `SUBAGENT_MAX_STEPS` (100),
 `SUBAGENT_TIMEOUT_SECONDS` (900), `SUBAGENT_COMMAND_TIMEOUT_SECONDS` (120).
 
 `run_command` executes inside a throwaway Docker container, one per run, off
@@ -169,7 +169,7 @@ unsandboxed.
 A sub-agent run is minutes of work, and it used to be minutes of silence — the
 channel saw nothing until the final report. Runs now publish events as they
 happen (`agent_events.py`): the channel progress message shows the current step
-and what it is doing (`step 3/24 · running: pytest -q`), and the dashboard's
+and what it is doing (`step 3/100 · running: pytest -q`), and the dashboard's
 Autonomy tab lists live and recent runs with their step counts, files written,
 and final reports. The stream is in-process and non-durable — the durable
 record of a run is its report in the channel.
@@ -345,12 +345,12 @@ present). Restart to re-detect. `python3 doctor.py` shows the resolved state.
 |---|---|
 | `SUBAGENT_BASE_DIR` | Where sub-agent workdirs are created (default `data/subagents`, gitignored) |
 | `SUBAGENT_MODEL` | Model for sub-agent work; **blank = the main `OLLAMA_MODEL`** (the sub-agent runs on the same model as the chat) |
-| `SUBAGENT_MAX_STEPS` | Tool-call steps before it must report back (default `24`) |
+| `SUBAGENT_MAX_STEPS` | Tool-call steps before it must report back (default `100`, budget not target — finish early) |
 | `SUBAGENT_TIMEOUT_SECONDS` | Wall-clock budget for one task (default `900`) |
 | `SUBAGENT_COMMAND_TIMEOUT_SECONDS` | Per-command timeout (default `120`) |
 | `SUBAGENT_MAX_FILE_BYTES` | Largest file the sub-agent may write (default `200000`) |
-| `SUBAGENT_MAX_CONCURRENT` | How many background (fire-and-forget) sub-agents run at once (default `2`) |
-| `SUBAGENT_MAX_QUEUED` | Hard ceiling on background sub-agents submitted but not finished; past this new ones are refused (default `8`) |
+| `SUBAGENT_MAX_CONCURRENT` | How many background (fire-and-forget) sub-agents run at once (default `5`) |
+| `SUBAGENT_MAX_QUEUED` | Hard ceiling on background sub-agents submitted but not finished; past this new ones are refused (default `16`) |
 | `SUBAGENT_SANDBOX` | `docker` (default) runs each sub-agent run in its own container; `host` runs commands in the bot's own environment with no isolation |
 
 By default Maxwell **delegates heavy multi-step work to `sub_agent`** — a full

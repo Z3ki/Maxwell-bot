@@ -7409,8 +7409,11 @@ class SubAgentTool(Tool):
         "- You have local command execution in your workdir PLUS access to host "
         "bot tools via `bot_call` (e.g. create_site, edit_site, list_sites, send_file, "
         "web_search, search_messages). When tasked with making or deploying a website, "
-        "you can build it and call `bot_call` with `create_site` directly, verify the result, "
-        "and return the link.\n"
+        "PREFER to build it and call `bot_call` with `create_site`/`edit_site` directly, "
+        "verify the result, and return the link. If you build locally instead, write FULL "
+        "production HTML/JS/CSS to the workdir (no placeholders, no TODOs) and report the "
+        "EXACT relative path(s) plus proposed site name/slug in `finish(report=...)` so "
+        "the main agent can deploy it cleanly — never leave a placeholder site or drop code.\n"
         "- Decide what you can. If a decision would be risky or genuinely "
         "cannot be made (a missing requirement, a blocker only the operator "
         "can resolve, a choice with real consequences), call `message_main` "
@@ -7423,7 +7426,8 @@ class SubAgentTool(Tool):
         "`finish` with a report: what you built, links/URLs created, which files matter, "
         "what you verified, and anything left undone.\n"
         "\n"
-        "You have {max_steps} steps. Spend them on the task, not on narration."
+        "You have up to {max_steps} steps — this is a BUDGET, not a target. "
+        "Call `finish` as soon as the task is done; do NOT waste steps or pad work to hit 100."
     )
 
     # The sub-agent's own tools. Small on purpose: a bigger surface makes
@@ -7501,7 +7505,8 @@ class SubAgentTool(Tool):
                 "name": "finish",
                 "description": (
                     "End the task and report back. Call this exactly once, "
-                    "when the work is done or definitively blocked."
+                    "when the work is done or definitively blocked. You have up to 100 steps "
+                    "but finish EARLY as soon as done — do not waste steps."
                 ),
                 "parameters": {
                     "type": "object",
@@ -7582,15 +7587,15 @@ class SubAgentTool(Tool):
         # Each holds a provider loop and a sandbox container, so this bounds
         # both provider load and how many throwaway containers are alive.
         try:
-            limit = max(1, int(getattr(Config, "SUBAGENT_MAX_CONCURRENT", 2) or 2))
+            limit = max(1, int(getattr(Config, "SUBAGENT_MAX_CONCURRENT", 5) or 5))
         except (TypeError, ValueError):
-            limit = 2
+            limit = 5
         try:
             self._bg_max_queued = max(
-                1, int(getattr(Config, "SUBAGENT_MAX_QUEUED", 8) or 8)
+                1, int(getattr(Config, "SUBAGENT_MAX_QUEUED", 16) or 16)
             )
         except (TypeError, ValueError):
-            self._bg_max_queued = 8
+            self._bg_max_queued = 16
         self._bg_sem = asyncio.Semaphore(limit)
         # Submitted background sub-agents not yet finished (running + queued on
         # the slot). Capped so a flood across many channels can't grow the
