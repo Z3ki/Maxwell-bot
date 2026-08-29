@@ -5897,7 +5897,9 @@ class SendMessageTool(Tool):
                 for i, chunk in enumerate(chunks):
                     chunk_stickers = stickers if i == 0 else None
                     try:
-                        extra = {k: v for k, v in kwargs.items() if k not in ("content", "body", "message")}
+                        # Only pass stickers to Discord; drop all other tool kwargs (reasoning, channel_id, etc.)
+                        # to avoid "multiple values for keyword argument 'content'" and "unexpected keyword"
+                        extra = {}
                         if chunk_stickers:
                             extra["stickers"] = chunk_stickers
                         if callable(send_fn):
@@ -5926,9 +5928,9 @@ class SendMessageTool(Tool):
                                     raise
                                 if not parent_gone:
                                     raise
-                                await target_channel.send(chunk, **extra)
+                                await target_channel.send(content=chunk, **extra)
                         else:
-                            await target_channel.send(chunk, **extra)
+                            await target_channel.send(content=chunk, **extra)
                         sent_any = True
                         sent_chunks.append(chunk)
                     except Exception:
