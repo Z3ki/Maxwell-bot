@@ -12665,11 +12665,18 @@ class MaxwellBot(commands.Bot):
                     yt_scan,
                     re.IGNORECASE,
                 )
-                for yt_url in yt_urls[:3]:
+                async def _exec_yt(u):
                     try:
-                        yt_result = await self.tools["youtube"].execute(
-                            message, url=yt_url
-                        )
+                        res = await self.tools["youtube"].execute(message, url=u)
+                        return (u, res)
+                    except Exception as e:
+                        logger.warning(f"Auto youtube tool failed for {u}: {e}")
+                        return (u, None)
+
+                if yt_urls:
+                    yt_tasks = [_exec_yt(u) for u in yt_urls[:3]]
+                    yt_done = await asyncio.gather(*yt_tasks)
+                    for _, yt_result in yt_done:
                         if yt_result:
                             pre_results.append(f"Tool youtube (auto): {yt_result}")
                             _IMG_RE = re.compile(
@@ -12677,8 +12684,6 @@ class MaxwellBot(commands.Bot):
                             )
                             for m in _IMG_RE.finditer(yt_result):
                                 pre_images.append(m.group(1).strip())
-                    except Exception as e:
-                        logger.warning(f"Auto youtube tool failed for {yt_url}: {e}")
 
             # Auto web_search for queries about new/recent AI models, releases, current events.
             # This is code logic (not a prompt rule) to ensure the bot looks up the most

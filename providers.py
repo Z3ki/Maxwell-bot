@@ -1584,6 +1584,7 @@ class OllamaProvider:
             # works across Ollama and OpenRouter without branching.
             data["reasoning_effort"] = "none"
             data["reasoning"] = {"effort": "none"}
+            data["thinking"] = {"type": "disabled", "budget_tokens": 0}
         elif "kimi-k2.7" in str(data.get("model") or "").lower():
             # OpenCode Go's kimi-k2.7-code rejects reasoning_effort=none
             # ("invalid thinking: only type=enabled is allowed") and, if we

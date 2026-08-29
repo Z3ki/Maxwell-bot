@@ -8422,6 +8422,7 @@ class SubAgentTool(Tool):
         """
         retries = int(getattr(Config, "SUBAGENT_PROVIDER_RETRIES", 2) or 0)
         attempt = 0
+        max_tokens = int(getattr(Config, "SUBAGENT_MAX_TOKENS", 32768) or 32768)
         while True:
             remaining = int(max(30, deadline - time.monotonic()))
             try:
@@ -8429,6 +8430,7 @@ class SubAgentTool(Tool):
                     messages=messages,
                     tools=self._TOOLS,
                     model=model,
+                    max_tokens=max_tokens,
                     timeout=remaining,
                 )
             except Exception as e:
