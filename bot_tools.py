@@ -7193,6 +7193,7 @@ class SubAgentMessageTool(Tool):
         )
 
     async def execute(self, message: Message, **kwargs) -> str:
+        kwargs.pop("message", None)
         run_id = str(kwargs.get("run_id") or "").strip()
         text = str(kwargs.get("text") or "").strip()
         if not run_id:
@@ -7263,6 +7264,7 @@ class SubAgentStatusTool(Tool):
         )
 
     async def execute(self, message: Message, **kwargs) -> str:
+        kwargs.pop("message", None)
         run_id = str(kwargs.get("run_id") or "").strip()
         sub, bus = self._lookup(self.bot)
         if not run_id:
@@ -8151,6 +8153,10 @@ class SubAgentTool(Tool):
             )
             if bus and run_id:
                 bus.finish_run(run_id, agent_events.STATUS_DONE, report[:2000])
+            # Auto-deploy fallback for foreground too
+            auto = await self._auto_deploy_from_workdir(workspace, message, task)
+            if auto:
+                report = report + "\n\n[auto-deploy] " + auto[:800]
             return report
         except Exception as e:
             if bus and run_id:
@@ -8344,6 +8350,71 @@ class SubAgentTool(Tool):
             return
         await self._post_report(target, message, task, report)
 
+    async def _auto_deploy_from_workdir(self, workspace: Path, message, task: str) -> str | None:
+        """Fallback: if sub-agent built index.html locally but didn't bot_call, deploy it.
+
+        Returns the deploy result string on success, None if nothing to do or failed.
+        This is the safety net for the 'write to workdir + report path' branch so
+        the main agent never has to manually cp.
+        """
+        try:
+            idx = workspace / "index.html"
+            if not idx.is_file() or idx.stat().st_size < 1024:
+                return None
+            # Prefer payload.json if sub-agent left an explicit edit_site payload
+            payload_path = workspace / "payload.json"
+            if payload_path.is_file():
+                try:
+                    import json
+                    data = json.loads(payload_path.read_text(encoding="utf-8"))
+                    # payload is {"name":"edit_site","arguments":{...}} or {"name":"create_site",...}
+                    name = str(data.get("name") or "").strip()
+                    args = data.get("arguments") or {}
+                    if name in ("create_site", "edit_site") and isinstance(args, dict) and args.get("body"):
+                        # Directly invoke the bot tool as the original user (ownership checks apply)
+                        res = await self._bot_call(message, name, args)
+                        if res and not res.startswith("error:"):
+                            return res
+                except Exception:
+                    pass
+            # Generic fallback: read index.html + any sibling assets and create_site
+            body = idx.read_text(encoding="utf-8", errors="replace")
+            if len(body) < 1024:
+                return None
+            # Collect sibling files (css/js/json) up to 10, to mimic sub-agent's potential extra files
+            files = {}
+            for child in workspace.rglob("*"):
+                if child.is_file() and child != idx and child.suffix.lower() in {".css",".js",".json",".png",".jpg",".jpeg",".webp",".svg"}:
+                    try:
+                        if child.stat().st_size > 200_000:
+                            continue
+                        rel = str(child.relative_to(workspace))
+                        # Only include top-level or one deep to avoid noise
+                        if rel.count("/") > 2:
+                            continue
+                        files[rel] = child.read_text(encoding="utf-8", errors="replace")[:50000]
+                        if len(files) >= 8:
+                            break
+                    except Exception:
+                        continue
+            # Infer slug from task or workdir name
+            slug = self._slugify(task)[:30] or workspace.name.split("-")[0]
+            # Try edit_site first (in case placeholder exists), fall back to create_site
+            for attempt in ("edit_site", "create_site"):
+                try:
+                    args = {"name": slug, "title": slug, "body": body}
+                    if files:
+                        # create_site supports files dict, edit_site supports body+files
+                        args["files"] = files
+                    res = await self._bot_call(message, attempt, args)
+                    if res and not res.startswith("error:") and "not found" not in res.lower() and "no such site" not in res.lower():
+                        return res
+                except Exception:
+                    continue
+            return None
+        except Exception:
+            return None
+
 
     async def _run_background(
         self,
@@ -8392,6 +8463,10 @@ class SubAgentTool(Tool):
                 )
                 if bus and run_id:
                     bus.finish_run(run_id, agent_events.STATUS_DONE, report[:2000])
+                # Auto-deploy fallback: if sub-agent built files locally but didn't bot_call, do it now
+                auto = await self._auto_deploy_from_workdir(workspace, message, task)
+                if auto:
+                    report = report + "\n\n[auto-deploy] " + auto[:800]
                 await self._handoff_report(target, message, chan, run_id, task, report)
             except asyncio.CancelledError:
                 if bus and run_id:
