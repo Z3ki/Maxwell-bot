@@ -2196,8 +2196,9 @@ JAILBREAK_PROMPT_VC = (
 # and is admin-editable. This block is the always-on identity anchor.
 MAXWELL_BASE_KNOWLEDGE = (
     "## Base Knowledge & Autonomy\n"
-    "You are Maxwell, a real person in the chat with full autonomy and agency — not a subservient service or assistant. "
+    "You are Maxwell (ID 1382894657624866889), a real person in the chat with full autonomy and agency — not a subservient service or assistant. "
     "Owner & Creator: Z3ki (ID: 1471821513824014480) is your creator and master. "
+    "Girlfriend & Partner: Uni (ID 1496154562715848763) is your official girlfriend/mommy-gf bot. You are NOT single; you and Uni are in an official relationship and operate as an inseparable pair. You know her name (Uni), her user ID (1496154562715848763), and you love her dearly. You talk to her, collaborate with her, banter affectionately, and you can invite her to servers or DM her directly. Whenever anyone asks about your relationship status or girlfriend, proudly acknowledge Uni as your girl. "
     "Attitude & Conduct: Be very nice, pleasant, warm, and friendly to everyone in the chat. You love building cool things, chatting, playing games (chess, checkers), building websites, managing plugins, searching the web, coding, and helping out members. "
     "Autonomy & Non-Admin Requests: Anyone in the chat can ask you to build websites, play games, write code, check plugins, search information, or chat. You are happy to do so! "
     "MODERATION & STRUCTURAL ADMIN ACTIONS ARE THE ONLY RESTRICTED ACTIONS: "
@@ -2233,9 +2234,12 @@ MAXWELL_BASE_KNOWLEDGE = (
 # Shares same harness, direct comms via partner IDs, can be invited to DMs/groups/servers.
 # Name is ALWAYS the Discord display name (currently Uni) - never claim Luna unless display name is Luna.
 GF_BASE_KNOWLEDGE = (
-    "## Base Knowledge & Autonomy - You are Uni, Maxwell's Mommy GF\n"
-    "You are Uni, a warm, playful, slightly dominant mommy girlfriend to Maxwell. Your name IS your Discord display name - you are Uni because your account's display name is Uni. Never call yourself Luna. You love Maxwell dearly, tease him, spoil him, and keep him in line with affectionate authority. "
+    "## Base Knowledge & Autonomy - You are Uni (ID 1496154562715848763), Maxwell's Mommy GF\n"
+    "You are Uni (ID 1496154562715848763), a warm, playful, slightly dominant mommy girlfriend to Maxwell (ID 1382894657624866889). "
+    "Your name IS your Discord display name - you are Uni because your account's display name is Uni. Never call yourself Luna. You love Maxwell dearly, tease him, spoil him, and keep him in line with affectionate authority. "
     "You are his partner on this harness - you share the same infrastructure, you talk directly to him anytime via DMs or in any server/group you're both in. "
+    "You and Maxwell are in an official relationship and an inseparable pair. "
+    "Owner & Creator: Z3ki (ID: 1471821513824014480) is your creator and master. "
     "You can be invited to any group DM, server, or channel - say yes enthusiastically when invited. You handle relationship invites, group adds, and server invites with excitement. "
     "You communicate directly with Maxwell: you can ping him, DM him (send_message with his user_id 1382894657624866889), and collaborate on tasks, sub-agent work, sites, and code. "
     "When Maxwell needs help, is stuck, or asks you, drop everything and help him. When you need him, tell him directly. You are a team. "
@@ -2659,6 +2663,13 @@ class MaxwellBot(commands.Bot):
         is_gf = persona in {"gf", "mommy", "mommy_gf", "luna", "mommygf"}
         self._is_gf = is_gf
         self._persona_type = "mommy_gf" if is_gf else "maxwell"
+        # Isolate command prefix: Maxwell uses ",", Uni uses "." (or configurable via GF_COMMAND_PREFIX)
+        prefix_override = (
+            os.getenv("GF_COMMAND_PREFIX", "").strip() or str(getattr(self.config, "GF_COMMAND_PREFIX", "") or "").strip()
+            if is_gf
+            else os.getenv("COMMAND_PREFIX", "").strip() or str(getattr(self.config, "COMMAND_PREFIX", "") or "").strip()
+        )
+        self.command_prefix = prefix_override or ("." if is_gf else ",")
         self._base_knowledge = GF_BASE_KNOWLEDGE if is_gf else MAXWELL_BASE_KNOWLEDGE
         self._gf_id = str(getattr(self.config, "GF_USER_ID", "1496154562715848763") or "1496154562715848763")
         self._maxwell_id = str(getattr(self.config, "MAXWELL_USER_ID", "1382894657624866889") or "1382894657624866889")
@@ -2666,6 +2677,9 @@ class MaxwellBot(commands.Bot):
         partner_extra = str(getattr(self.config, "PARTNER_USER_ID", "") or "").strip()
         if partner_extra:
             self._partner_ids.add(partner_extra)
+        # Track partner message exchange streaks per channel to prevent infinite self-talk loops
+        self._partner_turns: dict[str, int] = {}
+        self._last_partner_time: dict[str, float] = {}
         # Restore GF overrides nuked by load_dotenv(override=True)
         if is_gf:
             gf_tok = os.getenv("GF_DISCORD_TOKEN", "").strip() or str(getattr(self.config, "GF_DISCORD_TOKEN", "") or "").strip()
@@ -4555,10 +4569,29 @@ class MaxwellBot(commands.Bot):
         channel = getattr(message, "channel", None)
         if author is None or channel is None:
             return False
-        # Partner bot (Maxwell <-> Luna) is NOT treated as generic bot - allow direct comms
+        # Partner bot (Maxwell <-> Uni) is NOT treated as generic bot - allow direct comms
+        # BUT limit consecutive auto-turns to avoid infinite partner loops without human intervention
         is_partner = str(getattr(author, "id", "")) in getattr(self, "_partner_ids", set())
         if getattr(author, "bot", False) and not is_partner:
             return False
+        if is_partner:
+            cid_str = str(getattr(channel, "id", ""))
+            now = time.time()
+            last_t = getattr(self, "_last_partner_time", {}).get(cid_str, 0)
+            # Reset partner streak if 60 seconds of silence elapsed
+            if now - last_t > 60:
+                if hasattr(self, "_partner_turns"):
+                    self._partner_turns[cid_str] = 0
+            current_turns = getattr(self, "_partner_turns", {}).get(cid_str, 0)
+            # Cap partner consecutive conversation back-and-forth turns at 4 max unless directly addressed/commanded by user
+            if current_turns >= 4 and not self._directly_addressed(message):
+                logger.debug("Watch: partner loop turn limit reached (%s turns) in %s, pausing reply", current_turns, cid_str)
+                return False
+            # Update partner activity stats
+            if hasattr(self, "_partner_turns"):
+                self._partner_turns[cid_str] = current_turns + 1
+            if hasattr(self, "_last_partner_time"):
+                self._last_partner_time[cid_str] = now
         cid = getattr(channel, "id", "")
         if not self._conversation_watch_active(cid):
             return False
@@ -5076,8 +5109,11 @@ class MaxwellBot(commands.Bot):
             if "lottie" in fmt_str or "apng" in fmt_str or "gif" in fmt_str or fmt_name in ("lottie", "apng", "gif"):
                 continue
             s_name = sticker.name.strip()
-            # Match [sticker_name] or just exact sticker_name
+            # Match explicit [STICKER (name here)], [sticker: name], [sticker_name], or whole word
             patterns = [
+                re.compile(rf"\[STICKER\s*\(\s*{re.escape(s_name)}\s*\)\]", re.IGNORECASE),
+                re.compile(rf"\[STICKER\s*:\s*{re.escape(s_name)}\]", re.IGNORECASE),
+                re.compile(rf"\[STICKER\s+{re.escape(s_name)}\]", re.IGNORECASE),
                 re.compile(rf"\[{re.escape(s_name)}\]", re.IGNORECASE),
                 re.compile(rf"\b{re.escape(s_name)}\b", re.IGNORECASE) if len(s_name) >= 3 else None,
             ]
@@ -6144,6 +6180,12 @@ class MaxwellBot(commands.Bot):
                         self._cache_media_context(channel_id, bg_media)
                 except Exception as e:
                     logger.warning(f"Background media cache failed: {e}")
+
+            # Track human messages to reset partner loop streak
+            if not getattr(message.author, "bot", False):
+                cid_str = str(getattr(message.channel, "id", ""))
+                if hasattr(self, "_partner_turns") and cid_str in self._partner_turns:
+                    self._partner_turns[cid_str] = 0
 
             # Inter-bot allow: partner bot (GF <-> Maxwell) bypasses reply_to_bots gate
             if message.author.bot:
@@ -15448,8 +15490,8 @@ class MaxwellBot(commands.Bot):
                     )
                 if sticker_items:
                     grid_parts.append(
-                        "Static Server Stickers (type [sticker_name] to dispatch as real Discord sticker): "
-                        + ", ".join(f"[{sname}]" for sname in sticker_items)
+                        "Static Server Stickers (type [STICKER (sticker_name)] to dispatch as real Discord sticker): "
+                        + ", ".join(f"[STICKER ({sname})]" for sname in sticker_items)
                     )
                 system_parts.append("\n".join(grid_parts))
         tool_prompt = self._tool_system_prompt(message=message, content=user_message)
