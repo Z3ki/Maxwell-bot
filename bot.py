@@ -4897,6 +4897,13 @@ class MaxwellBot(commands.Bot):
             else:
                 self._tasks.append(asyncio.create_task(self._telegram_loop()))
                 logger.info("Telegram polling loop scheduled")
+        # Resume any sub-agents that were running when the bot last died (pm2 restart, OOM, etc.)
+        try:
+            sub = self.tools.get("sub_agent")
+            if sub is not None and hasattr(sub, "resume_pending_runs"):
+                await sub.resume_pending_runs()
+        except Exception as e:
+            logger.warning("sub-agent resume failed: %s", e)
         logger.info("Bot setup complete")
 
     async def on_ready(self):

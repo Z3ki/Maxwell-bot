@@ -7652,6 +7652,36 @@ class SubAgentTool(Tool):
             raise ValueError(f"path escapes the workdir: {rel_path}")
         return candidate
 
+    # ─── persistence for resume across restarts ───────────────────────
+    _STATE_FILE = ".subagent_state.json"
+
+    @staticmethod
+    def _state_path(workspace: Path) -> Path:
+        return workspace / SubAgentTool._STATE_FILE
+
+    def _write_state(self, workspace: Path, **data):
+        try:
+            path = self._state_path(workspace)
+            tmp = path.with_suffix(".tmp")
+            workspace.mkdir(parents=True, exist_ok=True)
+            import json
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(path)
+        except Exception:
+            pass
+
+    def _clear_state(self, workspace: Path):
+        import contextlib
+        with contextlib.suppress(Exception):
+            self._state_path(workspace).unlink()
+
+    def _read_state(self, path: Path) -> dict | None:
+        try:
+            import json
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
     # ─── the sub-agent's own tools ────────────────────────────────────
 
     async def _run_command(self, workspace: Path, command: str) -> str:
@@ -8465,12 +8495,14 @@ class SubAgentTool(Tool):
         run_id: str = "",
         conv: "_SubChan | None" = None,
         message=None,
+        resume_state: dict | None = None,
     ) -> str:
         """The step loop itself. Returns the report string.
 
         ``conv`` is the live bidirectional channel to the main agent: any
         ``main`` messages pushed in are injected at the top of the next step so
         the sub-agent sees them and can answer.
+        If ``resume_state`` is provided, continue from its saved messages/steps.
         """
 
         def _emit(event_type: str, **data):
@@ -8484,24 +8516,55 @@ class SubAgentTool(Tool):
             for key, value in fields.items():
                 setattr(run_obj, key, value)
 
-        messages = [
-            {
-                "role": "system",
-                "content": self._SYSTEM_PROMPT.format(
-                    workdir=workspace, max_steps=max_steps
-                ),
-            },
-            {"role": "user", "content": task},
-        ]
+        def _persist(messages, steps, commands_run, files_written, duds):
+            try:
+                self._write_state(
+                    workspace,
+                    status="running",
+                    run_id=run_id,
+                    task=task,
+                    workdir=str(workspace),
+                    max_steps=max_steps,
+                    steps=steps,
+                    commands_run=commands_run,
+                    files_written=list(files_written),
+                    duds=duds,
+                    messages=messages,
+                    channel_id=str(getattr(getattr(message, "channel", None), "id", "") or "") if message else str(resume_state.get("channel_id","") if resume_state else ""),
+                    author_id=str(getattr(getattr(message, "author", None), "id", "") or "") if message else str(resume_state.get("author_id","") if resume_state else ""),
+                    author_name=str(getattr(getattr(message, "author", None), "display_name", "") or getattr(getattr(message, "author", None), "name", "") or "") if message else str(resume_state.get("author_name","") if resume_state else ""),
+                    deliver=str(getattr(message, "_deliver", "channel") or resume_state.get("deliver","channel") if resume_state else "channel"),
+                    updated_at=time.time(),
+                )
+            except Exception:
+                pass
 
-        steps = 0
-        commands_run = 0
-        files_written: list[str] = []
-        duds = 0
+        if resume_state and isinstance(resume_state.get("messages"), list) and resume_state.get("messages"):
+            messages = resume_state.get("messages")
+            steps = int(resume_state.get("steps") or 0)
+            commands_run = int(resume_state.get("commands_run") or 0)
+            files_written = list(resume_state.get("files_written") or [])
+            duds = int(resume_state.get("duds") or 0)
+            _note_run(steps=steps, commands_run=commands_run, files_written=list(files_written))
+            _emit(agent_events.EV_NOTE, label=f"resumed from step {steps}/{max_steps}")
+        else:
+            messages = [
+                {
+                    "role": "system",
+                    "content": self._SYSTEM_PROMPT.format(
+                        workdir=workspace, max_steps=max_steps
+                    ),
+                },
+                {"role": "user", "content": task},
+            ]
+            steps = 0
+            commands_run = 0
+            files_written: list[str] = []
+            duds = 0
+            _persist(messages, steps, commands_run, files_written, duds)
+
         dud_tolerance = int(getattr(Config, "SUBAGENT_DUD_TOLERANCE", 2) or 0)
         while steps < max_steps:
-            # Pull in any main-agent messages that arrived since the last step so
-            # the sub-agent can answer them in this turn's reasoning.
             if conv is not None:
                 unseen = conv.unseen_main()
                 if unseen:
@@ -8519,11 +8582,13 @@ class SubAgentTool(Tool):
                             }
                         )
                     conv.mark_injected(indices)
+                    _persist(messages, steps, commands_run, files_written, duds)
             if time.monotonic() > deadline:
                 _emit(
                     agent_events.EV_NOTE,
                     label=f"time budget exhausted after {steps} step(s)",
                 )
+                self._clear_state(workspace)
                 return self._report(
                     task,
                     workspace,
@@ -8545,6 +8610,7 @@ class SubAgentTool(Tool):
             except Exception as e:
                 logger.warning("sub_agent provider call failed: %s", e)
                 _emit(agent_events.EV_ERROR, label="model call failed", error=str(e)[:400])
+                self._clear_state(workspace)
                 return self._report(
                     task,
                     workspace,
@@ -8557,16 +8623,13 @@ class SubAgentTool(Tool):
             calls = normalize_native_tool_calls(reply.get("tool_calls"))
             content = str(reply.get("content") or "").strip()
             if not calls and not content:
-                # A model that returns neither a tool call nor any text is a
-                # dud turn — it stalled, or the endpoint glitched. Rather than
-                # end the run with "stopped without a report", nudge it to act
-                # a couple of times, then give up. Consumes a step per nudge.
                 duds += 1
                 _emit(
                     agent_events.EV_NOTE,
                     label=f"empty model reply ({duds}/{dud_tolerance}); nudging",
                 )
                 if duds > dud_tolerance:
+                    self._clear_state(workspace)
                     return self._report(
                         task,
                         workspace,
@@ -8587,11 +8650,10 @@ class SubAgentTool(Tool):
                         ),
                     }
                 )
+                _persist(messages, steps, commands_run, files_written, duds)
                 continue
             if not calls:
-                # No tool call but real content: the model is done talking, or
-                # it drifted into prose. Either way its text is the best report
-                # we have.
+                self._clear_state(workspace)
                 return self._report(
                     task,
                     workspace,
@@ -8605,20 +8667,19 @@ class SubAgentTool(Tool):
                 {
                     "role": "assistant",
                     "content": reply.get("content") or "",
-                    # Elided: a write_file call carries the whole file body,
-                    # and the replayed transcript would otherwise pay for it
-                    # again on every remaining step.
                     "tool_calls": elide_tool_calls_for_history(
                         reply.get("tool_calls") or []
                     ),
                 }
             )
+            _persist(messages, steps, commands_run, files_written, duds)
 
             for call in calls:
                 name = call.get("name") or ""
                 args = call.get("arguments") or {}
                 if name == "finish":
                     _emit(agent_events.EV_NOTE, label="agent called finish")
+                    self._clear_state(workspace)
                     return self._report(
                         task,
                         workspace,
@@ -8629,9 +8690,6 @@ class SubAgentTool(Tool):
                     )
                 if name == "run_command":
                     commands_run += 1
-                # The label is what a human reads in the progress message, so
-                # it carries the actual command / path rather than the tool
-                # name — "running: pytest -q" beats "run_command".
                 _emit(
                     agent_events.EV_TOOL_CALL,
                     tool=name,
@@ -8644,8 +8702,6 @@ class SubAgentTool(Tool):
                     tool=name,
                     step=steps,
                     ok=not result.startswith("error:"),
-                    # A tail, not a head: the interesting part of a failing
-                    # command is the error at the end, not the banner.
                     preview=result[-400:],
                 )
                 _note_run(commands_run=commands_run)
@@ -8661,16 +8717,13 @@ class SubAgentTool(Tool):
                         "content": result,
                     }
                 )
-            # Bound the replayed transcript. Results are capped at 12k chars
-            # each, but SUBAGENT_MAX_STEPS goes up to 200 — unbounded, the loop
-            # walks off the end of the context window long before it can call
-            # `finish`. The system prompt and the task stay pinned; only older
-            # rounds are dropped, whole rounds at a time so no role=tool
-            # message is ever orphaned from its assistant call.
+                _persist(messages, steps, commands_run, files_written, duds)
             head, tail = messages[:2], messages[2:]
             messages = head + trim_tool_tail(tail)
+            _persist(messages, steps, commands_run, files_written, duds)
 
         _emit(agent_events.EV_NOTE, label=f"step budget exhausted ({max_steps})")
+        self._clear_state(workspace)
         return self._report(
             task,
             workspace,
@@ -8710,6 +8763,169 @@ class SubAgentTool(Tool):
         lines.append("")
         lines.append(outcome.strip())
         return "\n".join(lines)
+
+    # ─── resume across restarts ───────────────────────────────────────
+    async def resume_pending_runs(self):
+        """Resume any .subagent_state.json left behind by a restart.
+
+        Scans ``SUBAGENT_BASE_DIR`` for workspaces with a running state,
+        recreates a bus run + channel, and re-queues the loop in the
+        background. Never raises; a bad state file is just cleared.
+        """
+        base = Path(Config.SUBAGENT_BASE_DIR)
+        if not base.is_absolute():
+            base = Path(__file__).resolve().parent / base
+        if not base.is_dir():
+            return
+        # Find all state files (rglob to catch nested, but workspaces are 1 deep)
+        try:
+            state_files = list(base.rglob(self._STATE_FILE))
+        except Exception:
+            return
+        if not state_files:
+            return
+        # Need provider + model for resumed runs
+        provider = getattr(self.bot, "ai_provider", None) or getattr(self.bot, "provider", None)
+        if provider is None:
+            logger.warning("resume_pending_runs: no provider, skipping %d pending", len(state_files))
+            return
+        model = Config.SUBAGENT_MODEL or Config.OLLAMA_MODEL or None
+        bus = agent_events.bus_for(self.bot)
+        for sp in state_files:
+            try:
+                state = self._read_state(sp)
+                if not state or state.get("status") != "running":
+                    continue
+                # Stale check: ignore states older than 24h to avoid resurrecting ancient work
+                try:
+                    age = time.time() - float(state.get("updated_at", 0) or 0)
+                except Exception:
+                    age = 0
+                if age > 86400:
+                    self._clear_state(sp.parent)
+                    continue
+                task = str(state.get("task") or "").strip()
+                if not task:
+                    self._clear_state(sp.parent)
+                    continue
+                workspace = sp.parent
+                if not workspace.is_dir():
+                    self._clear_state(workspace)
+                    continue
+                max_steps = int(state.get("max_steps") or Config.SUBAGENT_MAX_STEPS)
+                # Reuse or create a synthetic message for bot_call context
+                channel_id = str(state.get("channel_id") or "")
+                author_id = str(state.get("author_id") or "")
+                author_name = str(state.get("author_name") or "User")
+                deliver = str(state.get("deliver") or "channel")
+                # Build minimal message-like object the loop needs for bot_call + delivery
+                fake_author = type("A", (), {"id": author_id or "0", "display_name": author_name, "name": author_name, "bot": False})()
+                # Try to resolve real channel for delivery; fall back to fake
+                target = None
+                try:
+                    if channel_id:
+                        target = await self._resolve_channel(channel_id)
+                except Exception:
+                    target = None
+                if target is None and channel_id:
+                    # fake channel that at least carries id
+                    target = type("C", (), {"id": channel_id, "guild": None, "send": lambda *a, **k: None})()
+                else:
+                    # if no channel, use any
+                    target = target
+                fake_chan = type("C", (), {"id": channel_id or "0", "guild": getattr(target, "guild", None)})() if channel_id else None
+                fake_msg = type("M", (), {
+                    "channel": fake_chan or target,
+                    "guild": getattr(fake_chan or target, "guild", None) if (fake_chan or target) else None,
+                    "author": fake_author,
+                    "id": "resume-" + (state.get("run_id") or "0"),
+                })()
+                # Mark deliver on the fake message for _persist to pick up if needed
+                try:
+                    setattr(fake_msg, "_deliver", deliver)
+                except Exception:
+                    pass
+                # New bus run for the resumed work
+                run = None
+                run_id = ""
+                if bus:
+                    try:
+                        run = bus.start_run(
+                            task,
+                            requested_by=author_name,
+                            channel_id=channel_id,
+                            workdir=str(workspace),
+                            max_steps=max_steps,
+                        )
+                        run_id = run.run_id if run else ""
+                    except Exception:
+                        run_id = str(state.get("run_id") or "")
+                else:
+                    run_id = str(state.get("run_id") or "")
+                chan = self._chans.setdefault(run_id, _SubChan(run_id)) if run_id else _SubChan(run_id or "resume")
+                if chan is not None and channel_id:
+                    chan.channel_id = channel_id
+                    chan.target = target
+                # Respect concurrency via _run_background (which uses the semaphore)
+                # Extend deadline from now
+                # Use the saved max_steps but allow remaining budget
+                remaining = max(1, max_steps - int(state.get("steps") or 0))
+                # We don't recreate a new workspace; pass the existing one
+                # Spawn background resume
+                import asyncio as _asyncio
+                # Use the stored messages/steps via resume_state
+                # We need to call _agent_loop directly in background, wrapping with handoff
+                async def _resume_task(ws=workspace, rs=state, rid=run_id, ch=chan, msg=fake_msg, tgt=target, tsk=task, ms=max_steps):
+                    # Ensure old container is cleaned before resuming (orphaned)
+                    if self._sandbox_mode() == "docker":
+                        with __import__("contextlib").suppress(Exception):
+                            await self._stop_sandbox(ws)
+                    deadline = time.monotonic() + Config.SUBAGENT_TIMEOUT_SECONDS
+                    try:
+                        async with self._bg_sem:
+                            self._bg_inflight += 1
+                            try:
+                                report = await self._agent_loop(
+                                    tsk, ws,
+                                    max_steps=ms,
+                                    deadline=deadline,
+                                    model=model,
+                                    provider=provider,
+                                    bus=bus,
+                                    run_id=rid,
+                                    conv=ch,
+                                    message=msg,
+                                    resume_state=rs,
+                                )
+                                if bus and rid:
+                                    bus.finish_run(rid, agent_events.STATUS_DONE, report[:2000])
+                                await self._handoff_report(tgt, msg, ch, rid, tsk, report)
+                            except __import__("asyncio").CancelledError:
+                                if bus and rid:
+                                    bus.finish_run(rid, agent_events.STATUS_FAILED, "cancelled")
+                                raise
+                            except Exception as e:
+                                logger.warning("resumed sub-agent %s failed: %s", rid, e)
+                                if bus and rid:
+                                    bus.finish_run(rid, agent_events.STATUS_FAILED, str(e)[:2000])
+                                await self._handoff_report(tgt, msg, ch, rid, tsk, f"❌ resumed sub-agent failed:\n{e}")
+                            finally:
+                                if self._bg_inflight > 0:
+                                    self._bg_inflight -= 1
+                                if rid:
+                                    self._retain_chan(rid)
+                                if self._sandbox_mode() == "docker":
+                                    await self._stop_sandbox(ws)
+                    except Exception as e:
+                        logger.warning("resume task outer failed %s: %s", rid, e)
+
+                _spawn_background(_resume_task())
+                logger.info("resumed sub-agent %s from %s (step %s/%s)", state.get("run_id"), workspace.name, state.get("steps"), max_steps)
+            except Exception as e:
+                logger.warning("resume_pending_runs failed for %s: %s", sp, e)
+                with __import__("contextlib").suppress(Exception):
+                    sp.unlink()
+
 
 
 _FETCH_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
