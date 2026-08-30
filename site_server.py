@@ -34,6 +34,7 @@ import os
 import re
 import shutil
 import socket
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,7 @@ MAX_FILES = 20
 MAX_ENV_KEYS = 25
 MAX_ENV_VALUE = 4_000
 START_TIMEOUT = 25.0
+_LIFECYCLE_LOCK = asyncio.Lock()
 
 ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 SLUG_RE = re.compile(r"^[a-z0-9-]{2,30}$")
@@ -78,7 +80,7 @@ class SiteServerError(Exception):
 
 
 def _check_slug(slug: str) -> str:
-    if not SLUG_RE.match(str(slug or "")):
+    if not SLUG_RE.fullmatch(str(slug or "")):
         raise SiteServerError("bad site slug")
     return str(slug)
 
@@ -104,9 +106,23 @@ def registry_path(data_dir) -> Path:
 def _read_registry(data_dir) -> dict[str, dict]:
     try:
         raw = json.loads(registry_path(data_dir).read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+    except (
+        FileNotFoundError,
+        json.JSONDecodeError,
+        OSError,
+        UnicodeError,
+        ValueError,
+    ):
         return {}
-    return {k: v for k, v in raw.items() if isinstance(v, dict)} if isinstance(raw, dict) else {}
+    return (
+        {
+            str(k): v
+            for k, v in raw.items()
+            if SLUG_RE.fullmatch(str(k)) and isinstance(v, dict)
+        }
+        if isinstance(raw, dict)
+        else {}
+    )
 
 
 def get_entry(data_dir, slug: str) -> dict | None:
@@ -114,6 +130,7 @@ def get_entry(data_dir, slug: str) -> dict | None:
 
 
 def _write_entry(data_dir, slug: str, entry: dict | None) -> None:
+    slug = _check_slug(slug)
     path = registry_path(data_dir)
     with FileLock(path, timeout=15.0):
         reg = _read_registry(data_dir)
@@ -127,19 +144,30 @@ def _write_entry(data_dir, slug: str, entry: dict | None) -> None:
 def port_for(data_dir, slug: str) -> int | None:
     """The loopback port a slug's backend listens on, for the proxy."""
     entry = get_entry(data_dir, slug)
-    if not entry or not entry.get("running"):
+    if not entry or entry.get("running") is not True:
         return None
     try:
-        return int(entry.get("port") or 0) or None
+        port = int(entry.get("port") or 0)
     except (TypeError, ValueError):
         return None
+    return port if port in PORT_RANGE else None
+
+
+def _registry_port(value: Any) -> int | None:
+    try:
+        port = int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return port if port in PORT_RANGE else None
 
 
 def _free_port(data_dir, slug: str) -> int:
     taken = {
-        int(e.get("port") or 0)
+        port
         for s, e in _read_registry(data_dir).items()
-        if s != slug and e.get("port")
+        if s != slug
+        for port in [_registry_port(e.get("port"))]
+        if port is not None
     }
     for port in PORT_RANGE:
         if port in taken:
@@ -154,6 +182,18 @@ def _free_port(data_dir, slug: str) -> int:
     raise SiteServerError("no free backend ports left — delete an unused site backend")
 
 
+def _port_is_free(port: int) -> bool:
+    if port not in PORT_RANGE:
+        return False
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
 # ── docker ────────────────────────────────────────────────────────────────
 async def _docker(*args: str, timeout: float = 30.0) -> tuple[int, str, str]:
     try:
@@ -166,11 +206,13 @@ async def _docker(*args: str, timeout: float = 30.0) -> tuple[int, str, str]:
         raise SiteServerError("docker is not installed or not on PATH") from exc
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
         with contextlib.suppress(Exception):
             await proc.wait()
+        if isinstance(exc, asyncio.CancelledError):
+            raise
         raise SiteServerError(f"docker did not respond within {timeout:.0f}s") from None
     return (
         proc.returncode or 0,
@@ -199,7 +241,7 @@ async def _remove_container(slug: str) -> None:
     wrong health diagnoses. So: ask, then confirm it is absent.
     """
     name = container_name(slug)
-    await _docker("rm", "-f", name, timeout=30)
+    _rm_code, _out, rm_err = await _docker("rm", "-f", name, timeout=30)
     for _ in range(100):  # ~20s — docker can be slow while a build is running
         code, _out, _err = await _docker(
             "inspect", "--type", "container", "-f", "{{.Id}}", name, timeout=10
@@ -207,7 +249,30 @@ async def _remove_container(slug: str) -> None:
         if code != 0:
             return
         await asyncio.sleep(0.2)
-    logger.warning("Container %s did not disappear after rm -f", name)
+    # Docker can return before a restart/removal has fully settled. Retry
+    # regardless of the first exit code; a replacement must not proceed into a
+    # name/port collision, and a destroy should make a best effort to kill the
+    # service rather than merely deleting its registry row.
+    retry_code, _out, retry_err = await _docker("rm", "-f", name, timeout=30)
+    if retry_code == 0:
+        for _ in range(25):
+            code, _out, _err = await _docker(
+                "inspect",
+                "--type",
+                "container",
+                "-f",
+                "{{.Id}}",
+                name,
+                timeout=10,
+            )
+            if code != 0:
+                return
+            await asyncio.sleep(0.2)
+    rm_err = retry_err or rm_err
+    raise SiteServerError(
+        f"could not remove backend container {name}: "
+        f"{(rm_err or 'container is still present').strip()[:300]}"
+    )
 
 
 # ── code ──────────────────────────────────────────────────────────────────
@@ -217,9 +282,13 @@ def _safe_rel(raw: Any) -> str | None:
         return None
     parts = []
     for part in text.split("/"):
-        if not part or part == "." :
+        if not part or part == ".":
             continue
-        if part == ".." or part.startswith(".") or part == "_data":
+        if (
+            part == ".."
+            or part.startswith(".")
+            or part in {"_data", "_build"}
+        ):
             return None
         if not re.fullmatch(r"[A-Za-z0-9._-]{1,60}", part):
             return None
@@ -240,7 +309,9 @@ def parse_files(files: Any) -> dict[str, str]:
     if isinstance(raw, dict) and "path" in raw and "content" in raw:
         raw = [raw]
     if isinstance(raw, list):
-        pairs = [(i.get("path"), i.get("content")) for i in raw if isinstance(i, dict)]
+        if not all(isinstance(item, dict) for item in raw):
+            raise SiteServerError("each server file needs {path, content}")
+        pairs = [(i.get("path"), i.get("content")) for i in raw]
     elif isinstance(raw, dict):
         pairs = list(raw.items())
     else:
@@ -252,7 +323,14 @@ def parse_files(files: Any) -> dict[str, str]:
             raise SiteServerError(f"unsafe server file path: {path!r}")
         if not rel.endswith((".py", ".txt", ".json", ".sql", ".html", ".css", ".js")):
             raise SiteServerError(f"{rel}: server files must be .py/.json/.txt/.sql/.html/.css/.js")
-        out[rel] = content if isinstance(content, str) else json.dumps(content, indent=2)
+        if isinstance(content, str):
+            rendered = content
+        else:
+            try:
+                rendered = json.dumps(content, indent=2, allow_nan=False)
+            except (TypeError, ValueError):
+                raise SiteServerError(f"{rel}: content must be JSON-serializable") from None
+        out[rel] = rendered
     if not out:
         raise SiteServerError("no files given")
     if len(out) > MAX_FILES:
@@ -286,7 +364,7 @@ def parse_packages(packages: Any) -> list[str]:
         name = str(item or "").strip()
         if not name:
             continue
-        if not PACKAGE_RE.match(name):
+        if not PACKAGE_RE.fullmatch(name):
             raise SiteServerError(
                 f"bad package {name!r} — use a plain pip name, optionally "
                 "pinned like 'redis==5.0.1'"
@@ -299,10 +377,12 @@ def parse_packages(packages: Any) -> list[str]:
 
 async def build_site_image(data_dir, slug: str, packages: list[str]) -> str:
     """Image for one site: the shared runtime plus its extra packages."""
+    slug = _check_slug(slug)
+    packages = parse_packages(packages)
     if not packages:
         return IMAGE
     await _ensure_image()
-    tag = IMAGE_PREFIX + _check_slug(slug)
+    tag = IMAGE_PREFIX + slug
     build_dir = Path(data_dir) / "site_servers" / slug / "_build"
     build_dir.mkdir(parents=True, exist_ok=True)
     # Package names are validated above, so this cannot inject flags.
@@ -321,7 +401,7 @@ async def build_site_image(data_dir, slug: str, packages: list[str]) -> str:
 
 
 async def _remove_site_image(slug: str) -> None:
-    await _docker("image", "rm", "-f", IMAGE_PREFIX + slug, timeout=60)
+    await _docker("image", "rm", "-f", IMAGE_PREFIX + _check_slug(slug), timeout=60)
 
 
 def parse_env(env: Any) -> dict[str, str]:
@@ -338,11 +418,19 @@ def parse_env(env: Any) -> dict[str, str]:
     out = {}
     for key, value in raw.items():
         key = str(key).strip()
-        if not ENV_KEY_RE.match(key):
+        if not ENV_KEY_RE.fullmatch(key):
             raise SiteServerError(f"bad env name {key!r} — use UPPER_SNAKE_CASE")
         if key in RESERVED_ENV:
             raise SiteServerError(f"{key} is set by the runtime and cannot be overridden")
-        text = value if isinstance(value, str) else json.dumps(value)
+        if isinstance(value, str):
+            text = value
+        else:
+            try:
+                text = json.dumps(value, allow_nan=False)
+            except (TypeError, ValueError):
+                raise SiteServerError(
+                    f"{key} must contain a JSON-serializable value"
+                ) from None
         if len(text) > MAX_ENV_VALUE:
             raise SiteServerError(f"{key} is too long (max {MAX_ENV_VALUE} chars)")
         out[key] = text
@@ -356,24 +444,78 @@ def write_code(data_dir, slug: str, files: dict[str, str]) -> list[str]:
     target = code_dir(data_dir, slug)
     target.mkdir(parents=True, exist_ok=True)
     state_dir(data_dir, slug).mkdir(parents=True, exist_ok=True)
-    # Drop the previous source (never the _data dir) so a renamed module can't
-    # linger and shadow the new one.
-    for old in target.iterdir():
-        if old.name in {"_data", "_build"}:
-            continue
-        if old.is_dir():
-            shutil.rmtree(old, ignore_errors=True)
-        else:
-            with contextlib.suppress(OSError):
-                old.unlink()
-    written = []
+    if not isinstance(files, dict) or not files:
+        raise SiteServerError("no server files given")
+    checked: dict[str, str] = {}
     for rel, content in files.items():
-        dest = (target / rel).resolve()
-        if target.resolve() not in dest.parents:
-            raise SiteServerError(f"{rel}: path escapes the server directory")
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(content, encoding="utf-8")
-        written.append(rel)
+        safe = _safe_rel(rel)
+        if not safe:
+            raise SiteServerError(f"unsafe server file path: {rel!r}")
+        if not safe.endswith(
+            (".py", ".txt", ".json", ".sql", ".html", ".css", ".js")
+        ):
+            raise SiteServerError(
+                f"{safe}: server files must be .py/.json/.txt/.sql/.html/.css/.js"
+            )
+        if not isinstance(content, str):
+            raise SiteServerError(f"{safe}: server file content must be a string")
+        checked[safe] = content
+    if len(checked) > MAX_FILES:
+        raise SiteServerError(f"too many server files (max {MAX_FILES})")
+    total = sum(len(content.encode("utf-8")) for content in checked.values())
+    if total > MAX_CODE_BYTES:
+        raise SiteServerError(
+            f"server code too large ({total} bytes, max {MAX_CODE_BYTES})"
+        )
+
+    # Stage and validate the complete replacement before touching live source.
+    # A disk/encoding failure must not leave an otherwise working backend with
+    # half of its modules deleted.
+    stage = target / f".staging-{uuid.uuid4().hex}"
+    backup = target / f".backup-{uuid.uuid4().hex}"
+    try:
+        stage.mkdir()
+        for rel, content in checked.items():
+            dest = (stage / rel).resolve()
+            if stage.resolve() not in dest.parents:
+                raise SiteServerError(f"{rel}: path escapes the server directory")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(content, encoding="utf-8")
+
+        backup.mkdir()
+        moved_old: list[Path] = []
+        moved_new: list[Path] = []
+        try:
+            # Keep the persistent _data and generated _build directories out of
+            # the replacement while moving every other old entry aside.
+            for old in target.iterdir():
+                if old.name in {"_data", "_build", stage.name, backup.name}:
+                    continue
+                destination = backup / old.name
+                os.replace(old, destination)
+                moved_old.append(destination)
+            for staged in stage.iterdir():
+                destination = target / staged.name
+                os.replace(staged, destination)
+                moved_new.append(destination)
+        except Exception as exc:
+            for new in reversed(moved_new):
+                with contextlib.suppress(Exception):
+                    if new.is_dir() and not new.is_symlink():
+                        shutil.rmtree(new)
+                    else:
+                        new.unlink()
+            for old in reversed(moved_old):
+                with contextlib.suppress(Exception):
+                    os.replace(old, target / old.name)
+            raise SiteServerError(f"could not replace server source: {exc}") from exc
+    finally:
+        with contextlib.suppress(Exception):
+            shutil.rmtree(stage, ignore_errors=True)
+        with contextlib.suppress(Exception):
+            shutil.rmtree(backup, ignore_errors=True)
+
+    written = sorted(checked)
     # /data is written by uid 10001 inside the container.
     with contextlib.suppress(OSError):
         os.chown(state_dir(data_dir, slug), 10001, 10001)
@@ -384,7 +526,10 @@ def read_code(data_dir, slug: str, rel: str) -> str:
     safe = _safe_rel(rel)
     if not safe:
         raise SiteServerError(f"bad path {rel!r}")
-    path = code_dir(data_dir, slug) / safe
+    base = code_dir(data_dir, slug).resolve()
+    path = (base / safe).resolve()
+    if base not in path.parents:
+        raise SiteServerError(f"{safe} is not in this site's server")
     if not path.is_file():
         raise SiteServerError(f"{safe} is not in this site's server")
     return path.read_text(encoding="utf-8", errors="replace")
@@ -398,7 +543,11 @@ def list_code(data_dir, slug: str) -> list[tuple[str, int]]:
     for path in sorted(base.rglob("*")):
         # _data is the app's database, _build is our generated Dockerfile —
         # neither is source the model wrote, so neither belongs in the listing.
-        if path.is_file() and not {"_data", "_build"} & set(path.parts):
+        if (
+            path.is_file()
+            and not path.is_symlink()
+            and not {"_data", "_build"} & set(path.parts)
+        ):
             with contextlib.suppress(OSError):
                 out.append((str(path.relative_to(base)), path.stat().st_size))
     return out
@@ -449,6 +598,8 @@ async def _wait_healthy(port: int, slug: str) -> str:
         if code != 0:
             return "the container disappeared"
         parts = out.split()
+        if len(parts) < 2:
+            return "could not read container health"
         running, restarting = parts[0] == "true", parts[1] == "true"
         restarts = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
         exit_code = parts[3] if len(parts) > 3 else "?"
@@ -464,7 +615,7 @@ async def _wait_healthy(port: int, slug: str) -> str:
     return last
 
 
-async def start(
+async def _start_unlocked(
     data_dir,
     slug: str,
     *,
@@ -481,13 +632,22 @@ async def start(
     await _ensure_image()
     previous = get_entry(data_dir, slug) or {}
     if env is None:
-        env = {k: str(v) for k, v in (previous.get("env") or {}).items()}
+        previous_env = previous.get("env")
+        env = (
+            {k: str(v) for k, v in previous_env.items()}
+            if isinstance(previous_env, dict)
+            else {}
+        )
+    env = parse_env(env)
     if packages is None:
-        packages = list(previous.get("packages") or [])
+        previous_packages = previous.get("packages")
+        packages = list(previous_packages) if isinstance(previous_packages, list) else []
+    packages = parse_packages(packages)
     image = await build_site_image(data_dir, slug, packages)
-    port = int(previous.get("port") or 0) or _free_port(data_dir, slug)
 
     await _remove_container(slug)
+    previous_port = _registry_port(previous.get("port"))
+    port = previous_port if previous_port is not None else _free_port(data_dir, slug)
     # The port is reused across restarts, so wait for the old listener to
     # actually stop answering. Without this the first health ping can be
     # served by the container we just removed, and a broken replacement
@@ -496,6 +656,10 @@ async def start(
         if await _http_ping(port) != "ok":
             break
         await asyncio.sleep(0.25)
+    if not _port_is_free(port):
+        # The old container may have vanished while another local service
+        # claimed its port. Never publish a site backend onto that service.
+        port = _free_port(data_dir, slug)
     args = [
         "run", "-d",
         "--name", container_name(slug),
@@ -521,6 +685,20 @@ async def start(
 
     code, _out, err = await _docker(*args, timeout=60)
     if code != 0:
+        if previous:
+            failed = dict(previous)
+            failed.update(
+                {
+                    "port": port,
+                    "env": env,
+                    "packages": packages,
+                    "running": False,
+                    "health": f"start failed: {err.strip()[:300]}",
+                    "container": container_name(slug),
+                    "image": image,
+                }
+            )
+            _write_entry(data_dir, slug, failed)
         raise SiteServerError(f"could not start the backend: {err.strip()[:300]}")
 
     health = await _wait_healthy(port, slug)
@@ -539,7 +717,8 @@ async def start(
         # tells the model what to fix. Then remove it, so a broken app is not
         # left crash-looping forever holding a port.
         tail = await logs(data_dir, slug, lines=30)
-        await _remove_container(slug)
+        with contextlib.suppress(Exception):
+            await _remove_container(slug)
         raise SiteServerError(
             f"the backend never came up: {health}.\n"
             "It must listen on 0.0.0.0:$PORT and stay in the foreground.\n"
@@ -548,7 +727,23 @@ async def start(
     return entry
 
 
-async def stop(data_dir, slug: str) -> bool:
+async def start(
+    data_dir,
+    slug: str,
+    *,
+    env: dict[str, str] | None = None,
+    packages: list[str] | None = None,
+) -> dict:
+    # Port selection, container replacement, and registry writes form one
+    # lifecycle operation. Serialize them so two overlapping tool calls cannot
+    # choose the same port or race through the same container name.
+    async with _LIFECYCLE_LOCK:
+        return await _start_unlocked(
+            data_dir, slug, env=env, packages=packages
+        )
+
+
+async def _stop_unlocked(data_dir, slug: str) -> bool:
     """Stop and remove the container; keep the code, the data, and the env."""
     slug = _check_slug(slug)
     entry = get_entry(data_dir, slug)
@@ -561,8 +756,14 @@ async def stop(data_dir, slug: str) -> bool:
     return bool(entry)
 
 
-async def destroy(data_dir, slug: str) -> None:
+async def stop(data_dir, slug: str) -> bool:
+    async with _LIFECYCLE_LOCK:
+        return await _stop_unlocked(data_dir, slug)
+
+
+async def _destroy_unlocked(data_dir, slug: str) -> None:
     """Site is gone: container, code, database, secrets, registry row."""
+    slug = _check_slug(slug)
     with contextlib.suppress(SiteServerError, Exception):
         await _remove_container(slug)
     with contextlib.suppress(Exception):
@@ -573,8 +774,17 @@ async def destroy(data_dir, slug: str) -> None:
         _write_entry(data_dir, slug, None)
 
 
+async def destroy(data_dir, slug: str) -> None:
+    async with _LIFECYCLE_LOCK:
+        await _destroy_unlocked(data_dir, slug)
+
+
 async def logs(data_dir, slug: str, lines: int = 40) -> str:
-    lines = max(1, min(int(lines or 40), 200))
+    try:
+        lines = int(lines or 40)
+    except (TypeError, ValueError):
+        lines = 40
+    lines = max(1, min(lines, 200))
     code, out, err = await _docker(
         "logs", "--tail", str(lines), container_name(slug), timeout=20
     )
@@ -594,8 +804,14 @@ async def status(data_dir, slug: str) -> str:
     )
     live = out.strip() if code == 0 else "absent"
     files = ", ".join(f"{n} ({s}B)" for n, s in list_code(data_dir, slug)) or "no files"
-    secrets = ", ".join(sorted(entry.get("env") or {})) or "none"
-    extra = ", ".join(entry.get("packages") or []) or "none (baked-in toolkit only)"
+    raw_env = entry.get("env")
+    secrets = ", ".join(sorted(raw_env)) if isinstance(raw_env, dict) else "none"
+    raw_packages = entry.get("packages")
+    extra = (
+        ", ".join(str(package) for package in raw_packages)
+        if isinstance(raw_packages, list)
+        else ""
+    ) or "none (baked-in toolkit only)"
     return (
         f"container {live} on 127.0.0.1:{entry.get('port')} "
         f"(public path /bot/{slug}/api/...)\nfiles: {files}\nenv: {secrets}\n"
@@ -611,7 +827,7 @@ async def reconcile(data_dir) -> None:
     us (docker prune, manual rm, a site deleted while the bot was down).
     """
     for slug, entry in list(_read_registry(data_dir).items()):
-        if not entry.get("running"):
+        if entry.get("running") is not True:
             continue
         code, out, _err = await _docker(
             "inspect", "--type", "container", "-f", "{{.State.Running}}",

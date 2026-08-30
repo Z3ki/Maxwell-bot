@@ -40,51 +40,91 @@ class ChannelWorkQueues:
         self._queues: dict[tuple[int, int], asyncio.Queue[_Work | None]] = {}
         self._workers: dict[tuple[int, int], asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
+        self._closed = False
 
     async def submit(self, guild_id: int, channel_id: int,
                      callback: Callable[[], Awaitable[Any]]) -> Any:
         key = (int(guild_id), int(channel_id))
+        result: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         async with self._lock:
+            if self._closed:
+                result.cancel()
+                raise RuntimeError("channel work queues are closed")
             queue = self._queues.setdefault(key, asyncio.Queue(self.max_pending))
             worker = self._workers.get(key)
             if worker is None or worker.done():
                 worker = asyncio.create_task(self._run(key, queue), name=f"channel-worker-{key[0]}-{key[1]}")
                 self._workers[key] = worker
-        result: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
-        try:
-            queue.put_nowait(_Work(callback, result))
-        except asyncio.QueueFull:
-            raise RuntimeError("channel queue is full; try again shortly") from None
+            try:
+                queue.put_nowait(_Work(callback, result))
+            except asyncio.QueueFull:
+                result.cancel()
+                raise RuntimeError("channel queue is full; try again shortly") from None
         return await result
 
     async def _run(self, key: tuple[int, int], queue: asyncio.Queue[_Work | None]) -> None:
-        while True:
-            work = await queue.get()
-            try:
-                if work is None:
-                    return
+        current = asyncio.current_task()
+        try:
+            while True:
+                work = await queue.get()
                 try:
-                    work.result.set_result(await work.callback())
-                except asyncio.CancelledError:
-                    if not work.result.done():
-                        work.result.cancel()
-                    raise
-                except Exception as exc:
-                    if not work.result.done():
-                        work.result.set_exception(exc)
-            finally:
+                    if work is None:
+                        return
+                    if work.result.cancelled():
+                        # The submitter may have timed out or been cancelled
+                        # while this item was waiting. Do not execute a
+                        # callback whose caller no longer exists.
+                        continue
+                    try:
+                        work.result.set_result(await work.callback())
+                    except asyncio.CancelledError:
+                        if not work.result.done():
+                            work.result.cancel()
+                        raise
+                    except Exception as exc:
+                        if not work.result.done():
+                            work.result.set_exception(exc)
+                finally:
+                    queue.task_done()
+                # Workers are demand-driven. Removing an idle worker bounds
+                # memory for channels that are used once, while taking the
+                # same lock as submit prevents a new item from being lost
+                # between the empty check and worker teardown.
+                async with self._lock:
+                    if (
+                        self._workers.get(key) is current
+                        and queue.empty()
+                    ):
+                        self._workers.pop(key, None)
+                        if self._queues.get(key) is queue:
+                            self._queues.pop(key, None)
+                        return
+        finally:
+            # Cancellation (including close()) must wake every submitter whose
+            # work was still queued. Otherwise their Future hangs forever.
+            while True:
+                try:
+                    pending = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if pending is not None and not pending.result.done():
+                    pending.result.cancel()
                 queue.task_done()
+            async with self._lock:
+                if self._workers.get(key) is current:
+                    self._workers.pop(key, None)
+                if self._queues.get(key) is queue:
+                    self._queues.pop(key, None)
 
     async def close(self) -> None:
-        workers = list(self._workers.values())
-        for queue in self._queues.values():
-            with contextlib.suppress(asyncio.QueueFull):
-                queue.put_nowait(None)
+        async with self._lock:
+            self._closed = True
+            workers = list(self._workers.values())
+            self._workers.clear()
+            self._queues.clear()
         for worker in workers:
             worker.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
-        self._workers.clear()
-        self._queues.clear()
 
 
 class FairSemaphore:
@@ -282,7 +322,7 @@ class KeyedLocks:
             if key in protected:
                 continue
             lock = self._locks.get(key)
-            if lock is None or lock.locked():
+            if lock is None or lock.locked() or getattr(lock, "_waiters", None):
                 continue
             self._locks.pop(key, None)
             self._used.pop(key, None)
@@ -395,8 +435,25 @@ class ToolConcurrency:
                 self._waiting[name] = max(0, self._waiting.get(name, 1) - 1)
 
     async def run(self, name: str, operation: Awaitable[Any], timeout: float) -> Any:
-        async with self.gate(name):
+        gate = self.gate(name)
+        acquired = False
+        try:
+            await gate.acquire()
+            acquired = True
             return await asyncio.wait_for(operation, timeout=timeout)
+        except asyncio.CancelledError:
+            # The caller can cancel while queued on the semaphore, before
+            # asyncio.wait_for has a chance to consume the coroutine it was
+            # handed. Close bare coroutine objects in that case so they do
+            # not emit "never awaited" warnings or retain captured state.
+            if not acquired:
+                close = getattr(operation, "close", None)
+                if callable(close):
+                    close()
+            raise
+        finally:
+            if acquired:
+                gate.release()
 
     def stats(self) -> dict[str, Any]:
         return {

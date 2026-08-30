@@ -33,14 +33,32 @@ function hasOllama() {
 const venvPython = path.join(appRoot, ".venv", "bin", "python3");
 const python = fs.existsSync(venvPython) ? venvPython : "python3";
 
-// Load .env for GF token if present (so PM2 gf app can inherit it without --update-env quirks)
+// Load .env for GF token if present (so PM2 gf app can inherit it without
+// --update-env quirks). Parse the value like dotenv does: quoted values and
+// inline comments must not become part of the Discord token.
+function envValue(text, name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = text.match(
+    new RegExp(`^\\s*(?:export\\s+)?${escaped}\\s*=\\s*(.*?)\\s*$`, "m"),
+  );
+  if (!match) return "";
+  const raw = match[1].trim();
+  if (
+    raw.length >= 2 &&
+    ((raw.startsWith('"') && raw.endsWith('"')) ||
+      (raw.startsWith("'") && raw.endsWith("'")))
+  ) {
+    return raw.slice(1, -1);
+  }
+  return raw.replace(/\s+#.*$/, "").trim();
+}
+
 let gfToken = "";
 try {
   const envPath = path.join(appRoot, ".env");
   if (fs.existsSync(envPath)) {
     const envText = fs.readFileSync(envPath, "utf8");
-    const m = envText.match(/^GF_DISCORD_TOKEN\s*=\s*(.+)$/m);
-    if (m) gfToken = m[1].trim();
+    gfToken = envValue(envText, "GF_DISCORD_TOKEN");
   }
 } catch {}
 if (!gfToken) gfToken = process.env.GF_DISCORD_TOKEN || "";

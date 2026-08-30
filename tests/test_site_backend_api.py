@@ -79,7 +79,12 @@ def data_dir(tmp_path, monkeypatch):
     (tmp_path / "sites.json").write_text(
         json.dumps(
             {
-                "guest": {"user_id": "1", "title": "Guestbook", "backend": True},
+                "guest": {
+                    "user_id": "1",
+                    "title": "Guestbook",
+                    "backend": True,
+                    "server": True,
+                },
                 "plain": {"user_id": "1", "title": "Static"},
             }
         ),
@@ -175,6 +180,34 @@ def test_unknown_and_malformed_slugs_are_refused(data_dir):
     assert run(api.site_kv_get(FakeRequest(match={"slug": ""}))).status == 404
 
 
+def test_proxy_requires_live_server_metadata(data_dir, monkeypatch):
+    monkeypatch.setattr(api.site_server, "port_for", lambda dd, slug: 8801)
+    sites_path = data_dir / "sites.json"
+    sites = json.loads(sites_path.read_text(encoding="utf-8"))
+    sites["guest"]["server"] = False
+    sites_path.write_text(json.dumps(sites), encoding="utf-8")
+    resp = run(api.site_proxy(FakeRequest(match={"slug": "guest", "path": "notes"})))
+    assert resp.status == 404
+
+
+def test_admin_site_delete_cleans_real_backend(data_dir, tmp_path, monkeypatch):
+    site_root = tmp_path / "public"
+    (site_root / "guest").mkdir(parents=True)
+    (site_root / "guest" / "index.html").write_text("site", encoding="utf-8")
+    monkeypatch.setattr(api, "BASE_SITE_DIR", site_root)
+    destroyed = []
+
+    async def fake_server_destroy(dd, slug):
+        destroyed.append((dd, slug))
+
+    monkeypatch.setattr(api.site_server, "destroy", fake_server_destroy)
+    monkeypatch.setattr(api.site_backend, "destroy", lambda dd, slug: None)
+    resp = run(api.site_delete(FakeRequest(query={"slug": "guest"})))
+    assert resp.status == 200
+    assert not (site_root / "guest").exists()
+    assert destroyed == [(data_dir, "guest")]
+
+
 def test_writes_are_rate_limited(data_dir, monkeypatch):
     monkeypatch.setattr(api, "_SITE_RATE", site_backend.RateLimiter(rate=0, burst=2))
     codes = [
@@ -205,6 +238,41 @@ def test_collections_ring_buffer_at_the_cap(data_dir, monkeypatch):
 def test_bad_json_body_is_a_400(data_dir):
     resp = run(api.site_kv_put(FakeRequest(None, match={"slug": "guest"})))
     assert resp.status == 400
+
+
+def test_counters_reject_non_finite_values(data_dir):
+    for by in ("nan", "inf", float("-inf")):
+        with pytest.raises(site_backend.SiteBackendError, match="finite"):
+            site_backend.kv_bump(data_dir, "guest", "hits", by)
+
+
+def test_corrupt_collection_entries_are_ignored(data_dir):
+    path = site_backend.store_path(data_dir, "guest")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "kv": {},
+                "collections": {
+                    "notes": [
+                        {"id": "1", "data": "kept"},
+                        "not an item",
+                        None,
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert site_backend.items_list(data_dir, "guest", "notes") == [
+        {"id": "1", "data": "kept"}
+    ]
+
+
+def test_value_caps_count_utf8_bytes(data_dir, monkeypatch):
+    monkeypatch.setattr(site_backend, "MAX_VALUE_BYTES", 8)
+    with pytest.raises(site_backend.SiteBackendError, match="too large"):
+        site_backend.kv_set(data_dir, "guest", "emoji", "😀😀")
 
 
 # ── the proxy in front of a site's own backend server ─────────────────────

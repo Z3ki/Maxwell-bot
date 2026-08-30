@@ -15,6 +15,8 @@ import logging
 import os
 import random
 import re
+import shlex
+import signal
 import shutil
 import socket
 import ssl
@@ -5283,6 +5285,23 @@ class SiteServerTool(_SiteOwnedTool):
                 "status, logs, read, env, or delete."
             )
         except site_server.SiteServerError as e:
+            # A failed redeploy/start writes a non-running registry row, so
+            # keep the public site listing from claiming that its server is
+            # still live.
+            if act in {
+                "write",
+                "deploy",
+                "code",
+                "create",
+                "start",
+                "restart",
+                "reload",
+                "env",
+                "secrets",
+                "config",
+            }:
+                with contextlib.suppress(Exception):
+                    await self._mark_server(slug, entry, False)
             return f"Error: {e}"
 
     async def _mark_server(self, slug: str, entry: dict, on: bool) -> None:
@@ -6387,7 +6406,9 @@ _SHELL_BLOCKED_PATTERNS = [
 ]
 
 
-async def _run_docker_cmd(*args: str, timeout: int = 30):
+async def _run_docker_cmd(
+    *args: str, timeout: int = 30, output_limit: int | None = None
+):
     """Run one `docker` command. Returns ``((stdout, stderr), returncode)``.
 
     Shared by every sandboxed tool — the shell and the sub-agent both need
@@ -6400,9 +6421,29 @@ async def _run_docker_cmd(*args: str, timeout: int = 30):
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        return await asyncio.wait_for(
-            proc.communicate(), timeout=timeout
-        ), proc.returncode
+        if output_limit is None:
+            output = proc.communicate()
+        else:
+            limit = max(0, int(output_limit))
+
+            async def _read_limited(stream):
+                data = bytearray()
+                while True:
+                    chunk = await stream.read(4096)
+                    if not chunk:
+                        break
+                    if len(data) < limit:
+                        data.extend(chunk[: limit - len(data)])
+                return bytes(data)
+
+            output = asyncio.gather(
+                _read_limited(proc.stdout),
+                _read_limited(proc.stderr),
+                proc.wait(),
+            )
+            result = await asyncio.wait_for(output, timeout=timeout)
+            return (result[0], result[1]), result[2]
+        return await asyncio.wait_for(output, timeout=timeout), proc.returncode
     except (asyncio.TimeoutError, asyncio.CancelledError):
         # 2026-07-21: also catch CancelledError. If the parent
         # task is cancelled (channel lock timeout, bot shutdown,
@@ -6609,52 +6650,79 @@ class ShellTool(Tool):
         try:
             (stdout, _stderr), code = await self._run_docker(
                 "inspect",
+                "--type",
+                "container",
                 "-f",
-                '{{.State.Running}} {{index .Config.Labels "maxwell.shell.mode"}}',
+                '{{.State.Running}} {{index .Config.Labels "maxwell.shell.mode"}} '
+                '{{index .Config.Labels "maxwell.shell.init"}}',
                 self.CONTAINER_NAME,
                 timeout=10,
             )
             if code == 0:
-                parts = stdout.decode(errors="replace").strip().split(None, 1)
+                parts = stdout.decode(errors="replace").strip().split(None, 2)
                 running = (parts[0] if parts else "").lower() == "true"
                 mode = parts[1] if len(parts) > 1 else ""
-                if running and mode == desired_mode:
+                init = parts[2] if len(parts) > 2 else ""
+                if running and mode == desired_mode and init == "1":
                     return
-                if not running and mode == desired_mode:
+                if not running and mode == desired_mode and init == "1":
                     (_stdout, stderr), start_code = await self._run_docker(
                         "start", self.CONTAINER_NAME, timeout=15
                     )
                     if start_code == 0:
                         return
                 # Wrong mode or start failed — require a successful rm, then recreate.
-                (_stdout, stderr), rm_code = await self._run_docker(
+                (_stdout, _stderr), rm_code = await self._run_docker(
                     "rm", "-f", self.CONTAINER_NAME, timeout=10
                 )
-                if running and mode != desired_mode and rm_code != 0:
+                if rm_code != 0:
                     raise RuntimeError(
-                        "could not replace sandbox container with the desired isolation mode"
+                        "could not remove the existing sandbox container"
+                    )
+                # `docker rm -f` may return before the name is reusable.
+                # Confirm disappearance before building/running the
+                # replacement, otherwise the next run can hit a stale-name
+                # race and leave the sandbox unavailable.
+                for _ in range(100):
+                    (_stdout, _stderr), inspect_code = await self._run_docker(
+                        "inspect",
+                        "--type",
+                        "container",
+                        "-f",
+                        "{{.Id}}",
+                        self.CONTAINER_NAME,
+                        timeout=10,
+                    )
+                    if inspect_code != 0:
+                        break
+                    await asyncio.sleep(0.1)
+                else:
+                    raise RuntimeError(
+                        "sandbox container did not disappear after removal"
                     )
         except FileNotFoundError as exc:
             raise RuntimeError("docker is not installed or not on PATH") from exc
         except asyncio.TimeoutError as exc:
             raise RuntimeError("docker did not respond while checking sandbox") from exc
 
-        (_stdout, stderr), build_code = await self._run_docker(
-            "build", "-t", self.IMAGE_NAME, self.DOCKERFILE_DIR, timeout=600
-        )
-        if build_code != 0:
-            raise RuntimeError(
-                stderr.decode(errors="replace").strip() or "docker build failed"
-            )
+        try:
+            await _ensure_sandbox_image(self.IMAGE_NAME)
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"could not prepare sandbox image: {exc}") from exc
 
         shell_host = os.path.join(os.path.dirname(__file__), "shelldocker")
         run_args = [
             "run",
             "-d",
+            "--init",
             "--name",
             self.CONTAINER_NAME,
             "--label",
             f"maxwell.shell.mode={desired_mode}",
+            "--label",
+            "maxwell.shell.init=1",
             "--memory",
             "4g",
             "--cpus",
@@ -6783,6 +6851,21 @@ class ShellTool(Tool):
             raise RuntimeError("empty command")
         async with self._lifecycle_lock:
             await self._ensure_container()
+            exec_token = f"maxwell-exec-{uuid.uuid4().hex}"
+            pid_file = f"/tmp/{exec_token}.pid"
+            # Run the user's shell in its own session/process group and leave
+            # its leader PID in the container. Killing only the local
+            # `docker exec` client does not kill a child command; pipelines,
+            # background jobs, and `sleep` would otherwise survive every
+            # timeout and accumulate in the persistent sandbox.
+            inner = (
+                f"trap 'rm -f {shlex.quote(pid_file)}' EXIT; "
+                f"{sanitized}"
+            )
+            wrapped = (
+                f"echo $$ > {shlex.quote(pid_file)}; "
+                f"exec bash -lc {shlex.quote(inner)}"
+            )
             proc = await asyncio.create_subprocess_exec(
                 "docker",
                 "exec",
@@ -6791,14 +6874,19 @@ class ShellTool(Tool):
                 "--user",
                 "root",
                 self.CONTAINER_NAME,
+                "setsid",
+                "--wait",
                 "bash",
                 "-lc",
-                sanitized,
+                wrapped,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout_buf = bytearray()
             stderr_buf = bytearray()
+            max_output = self._max_output()
+            captured = 0
+            output_truncated = False
             started = time.monotonic()
             last_tick = 0.0
 
@@ -6824,7 +6912,17 @@ class ShellTool(Tool):
                     chunk = await stream.read(4096)
                     if not chunk:
                         break
-                    buf.extend(chunk)
+                    nonlocal captured, output_truncated
+                    if max_output:
+                        remaining = max_output - captured
+                        if remaining > 0:
+                            kept = chunk[:remaining]
+                            buf.extend(kept)
+                            captured += len(kept)
+                        if len(kept if remaining > 0 else b"") < len(chunk):
+                            output_truncated = True
+                    else:
+                        buf.extend(chunk)
                     await _emit()
 
             async def _heartbeat() -> None:
@@ -6848,15 +6946,18 @@ class ShellTool(Tool):
                     ),
                     timeout=self._timeout_seconds(),
                 )
-                return bytes(stdout_buf), bytes(stderr_buf), proc.returncode
             except asyncio.TimeoutError:
-                proc.kill()
+                await self._kill_container_exec(pid_file)
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
                 await proc.wait()
                 raise
             except asyncio.CancelledError:
                 # Outer autonomy wait_for or other cancel can hit here; always kill child.
+                await self._kill_container_exec(pid_file)
                 if proc.returncode is None:
-                    proc.kill()
+                    with contextlib.suppress(ProcessLookupError):
+                        proc.kill()
                     await proc.wait()
                 raise
             finally:
@@ -6866,10 +6967,39 @@ class ShellTool(Tool):
                 # Belt-and-suspenders: ensure no zombie if communicate didn't finish.
                 if proc.returncode is None:
                     try:
+                        await self._kill_container_exec(pid_file)
                         proc.kill()
                         await proc.wait()
                     except Exception:
                         pass
+            if output_truncated:
+                stderr_buf.extend(
+                    b"\n[output truncated at MAXWELL_SHELL_MAX_OUTPUT]"
+                )
+            return bytes(stdout_buf), bytes(stderr_buf), proc.returncode
+
+    async def _kill_container_exec(self, pid_file: str) -> None:
+        """Terminate the timed-out command, not just its docker client."""
+        quoted = shlex.quote(pid_file)
+        cleanup = (
+            f"pid=$(cat {quoted} 2>/dev/null); "
+            'case "$pid" in '
+            "''|*[!0-9]*) ;; "
+            f"*) kill -TERM -- -$pid 2>/dev/null; sleep 0.2; "
+            f"kill -KILL -- -$pid 2>/dev/null; rm -f {quoted} ;; "
+            "esac"
+        )
+        with contextlib.suppress(Exception):
+            await self._run_docker(
+                "exec",
+                "--user",
+                "root",
+                self.CONTAINER_NAME,
+                "bash",
+                "-lc",
+                cleanup,
+                timeout=10,
+            )
 
     def _shell_echo_text(self, command: str, *suffixes: str) -> str:
         """Build the body for a ```ansi block: a (truncated) command echo + suffix lines.
@@ -7006,7 +7136,10 @@ class ShellTool(Tool):
         sess = None
         slot = None
         # In DMs, never spam shell progress status messages
-        is_dm = not getattr(message, "guild", None)
+        # Real discord.Message always exposes ``guild`` (None for a DM).
+        # Lightweight callers/tests may omit it; treat those as channel-like
+        # so the durable progress message remains observable.
+        is_dm = hasattr(message, "guild") and not getattr(message, "guild", None)
         if not is_dm:
             try:
                 # Keep one durable, user-visible liveness message for this shell
@@ -7754,28 +7887,61 @@ class SubAgentTool(Tool):
                 "-lc",
                 command,
                 cwd=str(workspace),
+                start_new_session=True,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
         except Exception as e:
             return f"error: could not start command: {e}"
+        captured = bytearray()
+        truncated = False
+
+        async def _read_output():
+            nonlocal truncated
+            while True:
+                chunk = await proc.stdout.read(4096)
+                if not chunk:
+                    return
+                if len(captured) < 12_000:
+                    remaining = 12_000 - len(captured)
+                    captured.extend(chunk[:remaining])
+                    if len(chunk) > remaining:
+                        truncated = True
+                else:
+                    truncated = True
+
         try:
-            out, _ = await asyncio.wait_for(
-                proc.communicate(), timeout=Config.SUBAGENT_COMMAND_TIMEOUT_SECONDS
+            await asyncio.wait_for(
+                asyncio.gather(_read_output(), proc.wait()),
+                timeout=Config.SUBAGENT_COMMAND_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
-            with contextlib.suppress(ProcessLookupError):
-                proc.kill()
-            with contextlib.suppress(Exception):
-                await proc.wait()
+            await self._terminate_local_process(proc)
             return (
                 f"error: command timed out after "
                 f"{Config.SUBAGENT_COMMAND_TIMEOUT_SECONDS}s (it was killed)"
             )
-        text = (out or b"").decode("utf-8", errors="replace")
-        if len(text) > 12000:
-            text = text[:12000] + "\n… (output truncated)"
+        except asyncio.CancelledError:
+            await self._terminate_local_process(proc)
+            raise
+        except Exception:
+            await self._terminate_local_process(proc)
+            raise
+        text = bytes(captured).decode("utf-8", errors="replace")
+        if truncated:
+            text += "\n… (output truncated)"
         return f"exit={proc.returncode}\n{text or '(no output)'}"
+
+    @staticmethod
+    async def _terminate_local_process(proc) -> None:
+        """Kill a host-mode command and all of its descendants."""
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.wait()
 
     def _container_name(self, workspace: Path) -> str:
         # The workspace directory name already carries a random suffix, so it
@@ -7793,13 +7959,14 @@ class SubAgentTool(Tool):
             return name
         if code == 0:
             # Exists but stopped — a previous run of the same workspace.
-            await _run_docker_cmd("rm", "-f", name, timeout=15)
+            await self._remove_sandbox_container(name)
 
         await _ensure_sandbox_image()
         run_args = [
             "run",
             "-d",
             "--rm",
+            "--init",
             "--name",
             name,
             "--label",
@@ -7852,8 +8019,57 @@ class SubAgentTool(Tool):
         is findable meanwhile by its `maxwell.subagent` label.
         """
         with contextlib.suppress(Exception):
+            name = self._container_name(workspace)
+            (_stdout, _stderr), code = await _run_docker_cmd(
+                "stop", "-t", "2", name, timeout=30
+            )
+            if code != 0:
+                await self._remove_sandbox_container(name)
+
+    async def _remove_sandbox_container(self, name: str) -> None:
+        """Remove a stale sandbox and wait until Docker releases its name."""
+        (_stdout, stderr), code = await _run_docker_cmd(
+            "rm", "-f", name, timeout=15
+        )
+        for _ in range(100):
+            (_stdout, _stderr), inspect_code = await _run_docker_cmd(
+                "inspect",
+                "--type",
+                "container",
+                "-f",
+                "{{.Id}}",
+                name,
+                timeout=10,
+            )
+            if inspect_code != 0:
+                return
+            await asyncio.sleep(0.1)
+        raise RuntimeError(
+            "sandbox container did not disappear after removal: "
+            + stderr.decode(errors="replace").strip()[:200]
+        )
+
+    async def _kill_sandbox_exec(self, container: str, pid_file: str) -> None:
+        """Kill a timed-out command inside its sandbox container."""
+        quoted = shlex.quote(pid_file)
+        cleanup = (
+            f"pid=$(cat {quoted} 2>/dev/null); "
+            'case "$pid" in '
+            "''|*[!0-9]*) ;; "
+            f"*) kill -TERM -- -$pid 2>/dev/null; sleep 0.2; "
+            f"kill -KILL -- -$pid 2>/dev/null; rm -f {quoted} ;; "
+            "esac"
+        )
+        with contextlib.suppress(Exception):
             await _run_docker_cmd(
-                "stop", "-t", "2", self._container_name(workspace), timeout=30
+                "exec",
+                "--user",
+                "root",
+                container,
+                "bash",
+                "-lc",
+                cleanup,
+                timeout=10,
             )
 
     async def _run_command_docker(self, workspace: Path, command: str) -> str:
@@ -7869,23 +8085,38 @@ class SubAgentTool(Tool):
         except Exception as e:
             return f"error: could not start the sandbox container: {e}"
 
+        exec_token = f"maxwell-subagent-{uuid.uuid4().hex}"
+        pid_file = f"/tmp/{exec_token}.pid"
+        inner = f"trap 'rm -f {shlex.quote(pid_file)}' EXIT; {command}"
+        wrapped = (
+            f"echo $$ > {shlex.quote(pid_file)}; "
+            f"exec bash -lc {shlex.quote(inner)}"
+        )
         try:
             (out, err), code = await _run_docker_cmd(
                 "exec",
                 "-w",
                 self.SANDBOX_WORKDIR,
                 name,
+                "setsid",
+                "--wait",
                 "bash",
                 "-lc",
-                command,
+                wrapped,
                 timeout=Config.SUBAGENT_COMMAND_TIMEOUT_SECONDS,
+                output_limit=12_000,
             )
         except asyncio.TimeoutError:
+            await self._kill_sandbox_exec(name, pid_file)
             return (
                 f"error: command timed out after "
                 f"{Config.SUBAGENT_COMMAND_TIMEOUT_SECONDS}s (it was killed)"
             )
+        except asyncio.CancelledError:
+            await self._kill_sandbox_exec(name, pid_file)
+            raise
         except Exception as e:
+            await self._kill_sandbox_exec(name, pid_file)
             return f"error: could not run the command in the sandbox: {e}"
         text = (out or b"").decode("utf-8", errors="replace")
         errtext = (err or b"").decode("utf-8", errors="replace")
@@ -12948,8 +13179,13 @@ class ManagePluginTool(Tool):
 
         target_user = user_id
         if target_user:
-            target_user = re.sub(r"[^0-9]", "", str(target_user))
-            if not target_user:
+            raw_target = str(target_user).strip()
+            mention = re.fullmatch(r"<@!?(\d+)>", raw_target)
+            if mention:
+                target_user = mention.group(1)
+            elif raw_target.isdigit():
+                target_user = raw_target
+            else:
                 return "Error: user_id must be a numeric Discord user ID or mention."
             if not is_global and target_user != author_id and not is_admin:
                 return (

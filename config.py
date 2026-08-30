@@ -20,6 +20,7 @@ API key is missing quietly stay off instead of erroring on first use, and
 ``python3 doctor.py`` explains every decision.
 """
 
+import math
 import os
 import shutil
 import sys
@@ -60,6 +61,8 @@ def _float_env(
     try:
         value = float(os.getenv(name, str(default)))
     except (TypeError, ValueError):
+        value = default
+    if not math.isfinite(value):
         value = default
     if min_value is not None:
         value = max(min_value, value)
@@ -196,7 +199,7 @@ class Config:
     # max_tokens = max *output* tokens per completion (not context window).
     # minimax-m3 allows huge context but caps output ~131072; 8192 is a sane default.
     OLLAMA_MAX_TOKENS = _int_env(
-        "OLLAMA_MAX_TOKENS", 8192, min_value=1, max_value=131072
+        "OLLAMA_MAX_TOKENS", 16384, min_value=1, max_value=131072
     )
     # 0.7 rather than 1.0: at 1.0 the tail of the distribution is wide enough
     # that a chat model wanders — it picks a tic and rides it, which is the
@@ -288,6 +291,14 @@ class Config:
     GF_USER_ID = os.getenv("GF_USER_ID", "1496154562715848763").strip()
     MAXWELL_USER_ID = os.getenv("MAXWELL_USER_ID", "1382894657624866889").strip()
     PARTNER_USER_ID = os.getenv("PARTNER_USER_ID", "").strip()
+    # Partner-to-partner replies are intentionally finite.  A human message
+    # resets the budget; silence resets it after the configured window.
+    PARTNER_MAX_AUTO_TURNS = _int_env(
+        "PARTNER_MAX_AUTO_TURNS", 2, min_value=1, max_value=20
+    )
+    PARTNER_TURN_WINDOW_SECONDS = _float_env(
+        "PARTNER_TURN_WINDOW_SECONDS", 60.0, min_value=5.0, max_value=3600.0
+    )
     BOT_PERSONA_TYPE = os.getenv("BOT_PERSONA_TYPE", "maxwell").strip().lower()
     CREATOR_NAME = os.getenv("CREATOR_NAME", "Z3ki").strip() or "Z3ki"
     CREATOR_ID = os.getenv("CREATOR_ID", "1471821513824014480").strip() or "1471821513824014480"
@@ -571,7 +582,7 @@ class Config:
     SUBAGENT_MODEL = os.getenv("SUBAGENT_MODEL", "").strip()
     SUBAGENT_MAX_STEPS = _int_env("SUBAGENT_MAX_STEPS", 100, min_value=1, max_value=200)
     SUBAGENT_MAX_TOKENS = _int_env(
-        "SUBAGENT_MAX_TOKENS", 8192, min_value=256, max_value=128000
+        "SUBAGENT_MAX_TOKENS", 16384, min_value=256, max_value=128000
     )
     SUBAGENT_TIMEOUT_SECONDS = _int_env(
         "SUBAGENT_TIMEOUT_SECONDS", 900, min_value=30, max_value=7200

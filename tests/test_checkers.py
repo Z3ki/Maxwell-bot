@@ -54,6 +54,46 @@ def test_jump_capture_and_kinging():
     assert game.board[3][4] == RED_MAN
 
 
+def test_multi_jump_stays_with_capturing_piece():
+    game = CheckersGame()
+    for r in range(8):
+        for c in range(8):
+            game.board[r][c] = 0
+    game.board[5][2] = RED_MAN  # c3
+    game.board[5][0] = RED_MAN  # a3, another red piece
+    game.board[4][3] = BLACK_MAN  # d4
+    game.board[2][5] = BLACK_MAN  # f6
+
+    ok, _ = game.make_move("c3-e5")
+    assert ok
+    assert game.turn == "red"
+    assert game.get_legal_moves() == [(3, 4, 1, 6)]
+
+    other_ok, _ = game.make_move("a3-b4")
+    assert not other_ok
+    assert game.turn == "red"
+
+    ok, _ = game.make_move("e5-g7")
+    assert ok
+    assert game.turn == "black"
+
+
+def test_promotion_ends_a_jump_chain():
+    game = CheckersGame()
+    for r in range(8):
+        for c in range(8):
+            game.board[r][c] = 0
+    game.board[2][1] = RED_MAN  # b6
+    game.board[1][2] = BLACK_MAN  # c7
+    game.board[1][4] = BLACK_MAN  # e7, king jump would be available
+
+    ok, _ = game.make_move("b6-d8")
+    assert ok
+    assert game.board[0][3] == RED_KING
+    assert game.turn == "black"
+    assert game._forced_piece is None
+
+
 def test_board_rendering():
     game = CheckersGame()
     png_data = game.render_board_png()

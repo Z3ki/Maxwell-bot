@@ -21,51 +21,44 @@ Features tested:
 """
 
 import asyncio
-import base64
-import contextlib
 import dataclasses
 import json
 import logging
 import os
-import re
 import shutil
-import sqlite3
 import sys
 import tempfile
 import time
 import traceback
 from datetime import datetime, timezone
-from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
+from typing import Any, Callable, Coroutine, List, Optional
 
 import chess
-import numpy as np
 
 # Suppress noisy logs during test run
 logging.basicConfig(level=logging.ERROR)
 
 # Import Maxwell modules
-import config
-import control_defaults
-from api.state import _sanitize_control
-import rag_memory
-import context_budget
-import providers
-import tool_schemas
-import tool_registry
-import bot_tools
-import agent_events
-import chess_game
-import site_backend
-import site_server
-import x_client
-import inbox
-import email_inbox
-import response_guard
-import autonomy_social
-import watch_policy
-import concurrency_safety
+import config  # noqa: E402
+import control_defaults  # noqa: E402
+from api.state import _sanitize_control  # noqa: E402
+import rag_memory  # noqa: E402
+import context_budget  # noqa: E402
+import providers  # noqa: E402
+import tool_schemas  # noqa: E402
+import tool_registry  # noqa: E402
+import bot_tools  # noqa: E402
+import agent_events  # noqa: E402
+import chess_game  # noqa: E402
+import site_backend  # noqa: E402
+import x_client  # noqa: E402
+import inbox  # noqa: E402
+import email_inbox  # noqa: E402
+import response_guard  # noqa: E402
+import autonomy_social  # noqa: E402
+import watch_policy  # noqa: E402
+import concurrency_safety  # noqa: E402
 
 
 @dataclasses.dataclass
@@ -695,12 +688,12 @@ class DeepTestHarness:
 
         async def test_inbox_store_lifecycle():
             store = inbox.InboxStore(data_dir=temp_dir)
-            notice = await store.add_notice(
+            await store.add_notice(
                 kind="notice",
                 item_id="notice_001",
                 summary="Meeting at 3pm",
             )
-            req = await store.add_notice(
+            await store.add_notice(
                 kind="request",
                 item_id="req_001",
                 summary="User Dave wants to add you",

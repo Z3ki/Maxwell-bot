@@ -1,11 +1,10 @@
-import asyncio
 import json
 import logging
 import os
 import sys
 from importlib import import_module, reload
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("maxwell.plugins")
 
@@ -43,24 +42,61 @@ class PluginManager:
 
     def _load_state(self) -> None:
         """Load state from data/plugins.json."""
+        loaded = None
         if self.state_file.exists():
             try:
                 with open(self.state_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, dict):
-                        self.state = data
-                        if "plugins" not in self.state:
-                            self.state["plugins"] = {}
+                    loaded = json.load(f)
             except Exception as e:
                 logger.error(f"Failed to load plugins.json: {e}")
-                self.state = {"plugins": {}}
-        else:
-            self.state = {"plugins": {}}
+        raw_plugins = loaded.get("plugins") if isinstance(loaded, dict) else {}
+        if not isinstance(raw_plugins, dict):
+            raw_plugins = {}
+        plugins = {}
+        for name, raw_cfg in raw_plugins.items():
+            if not isinstance(raw_cfg, dict):
+                continue
+            allowed = raw_cfg.get("allowed_users", [])
+            denied = raw_cfg.get("denied_users", [])
+            plugins[str(name)] = {
+                "enabled_globally": self._as_bool(
+                    raw_cfg.get("enabled_globally"), False
+                ),
+                "allowed_users": self._user_ids(allowed),
+                "denied_users": self._user_ids(denied),
+            }
+        self.state = {"plugins": plugins}
+        if loaded is None or not isinstance(loaded, dict) or loaded.get("plugins") != plugins:
             self._save_state()
+
+    @staticmethod
+    def _as_bool(value, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return default
+
+    @staticmethod
+    def _user_ids(value) -> list[str]:
+        if not isinstance(value, (list, tuple, set)):
+            return []
+        result = []
+        for item in value:
+            uid = str(item).strip()
+            if uid and uid.isdigit() and uid not in result:
+                result.append(uid)
+        return result[:500]
 
     def _save_state(self) -> None:
         """Persist state to data/plugins.json atomically."""
         try:
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
             temp_file = self.state_file.with_suffix(".tmp")
             with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(self.state, f, indent=2)
@@ -91,6 +127,12 @@ class PluginManager:
             if not entry.is_dir() or entry.name.startswith((".", "_")):
                 continue
             plugin_name = entry.name
+            if not plugin_name.isidentifier():
+                logger.warning(
+                    "Skipping plugin %r: directory name is not a valid Python identifier",
+                    plugin_name,
+                )
+                continue
             try:
                 manifest = self._load_manifest(entry, plugin_name)
                 module_name = f"plugins.{plugin_name}"
@@ -103,7 +145,22 @@ class PluginManager:
                     continue
 
                 import importlib.util
-                spec = importlib.util.spec_from_file_location(module_name, str(target_file))
+                # Remove the package and its submodules before every reload.
+                # Re-executing only __init__.py otherwise leaves an old
+                # plugins.<name>.tools module in sys.modules, so edited tool
+                # code never reaches the live registry.
+                for loaded_name in list(sys.modules):
+                    if loaded_name == module_name or loaded_name.startswith(
+                        module_name + "."
+                    ):
+                        sys.modules.pop(loaded_name, None)
+                spec = importlib.util.spec_from_file_location(
+                    module_name,
+                    str(target_file),
+                    submodule_search_locations=[str(entry)]
+                    if target_file == init_py
+                    else None,
+                )
                 if spec and spec.loader:
                     mod = importlib.util.module_from_spec(spec)
                     sys.modules[module_name] = mod
@@ -142,17 +199,42 @@ class PluginManager:
                 # Initialize state entry if missing
                 if plugin_name not in self.state["plugins"]:
                     self.state["plugins"][plugin_name] = {
-                        "enabled_globally": bool(manifest.get("enabled_globally", False)),
-                        "allowed_users": [str(u) for u in manifest.get("allowed_users", [])],
-                        "denied_users": [str(u) for u in manifest.get("denied_users", [])],
+                        "enabled_globally": self._as_bool(
+                            manifest.get("enabled_globally"), False
+                        ),
+                        "allowed_users": self._user_ids(
+                            manifest.get("allowed_users", [])
+                        ),
+                        "denied_users": self._user_ids(
+                            manifest.get("denied_users", [])
+                        ),
                     }
                     self._save_state()
 
                 logger.info(f"Loaded plugin '{plugin_name}' with {len(tool_dict)} tool(s)")
             except Exception as e:
+                for loaded_name in list(sys.modules):
+                    if loaded_name == f"plugins.{plugin_name}" or loaded_name.startswith(
+                        f"plugins.{plugin_name}."
+                    ):
+                        sys.modules.pop(loaded_name, None)
                 logger.exception(f"Error loading plugin '{plugin_name}': {e}")
 
         return self.loaded_plugins
+
+    def reload_plugins(self) -> str:
+        """Reload the plugin directory and report the result to the caller."""
+        try:
+            loaded = self.load_plugins()
+        except Exception as exc:
+            logger.exception("Failed to reload plugins")
+            return f"Error reloading plugins: {exc}"
+        tool_count = sum(
+            len(data.get("tools") or {})
+            for data in loaded.values()
+            if isinstance(data, dict)
+        )
+        return f"Reloaded {len(loaded)} plugin(s) with {tool_count} tool(s)."
 
     def _load_manifest(self, plugin_dir: Path, plugin_name: str) -> Dict[str, Any]:
         manifest_file = plugin_dir / "plugin.json"
@@ -176,18 +258,18 @@ class PluginManager:
     def is_plugin_enabled_for_user(self, plugin_name: str, user_id: str | int | None) -> bool:
         """Check whether a plugin is enabled for a given user or globally."""
         cfg = self.state["plugins"].get(plugin_name)
-        if not cfg:
+        if not isinstance(cfg, dict):
             return False
         
         uid = str(user_id) if user_id is not None else ""
-        denied = set(str(u) for u in cfg.get("denied_users", []))
+        denied = set(self._user_ids(cfg.get("denied_users", [])))
         if uid and uid in denied:
             return False
 
-        if cfg.get("enabled_globally", False):
+        if self._as_bool(cfg.get("enabled_globally"), False):
             return True
 
-        allowed = set(str(u) for u in cfg.get("allowed_users", []))
+        allowed = set(self._user_ids(cfg.get("allowed_users", [])))
         if uid and uid in allowed:
             return True
 
@@ -217,6 +299,7 @@ class PluginManager:
 
     def enable_plugin(self, plugin_name: str, user_id: Optional[str | int] = None, is_global: bool = False) -> str:
         """Enable a plugin globally or for a specific user."""
+        is_global = self._as_bool(is_global, False)
         if plugin_name not in self.loaded_plugins:
             return f"Plugin '{plugin_name}' is not installed."
 
@@ -225,6 +308,15 @@ class PluginManager:
             "allowed_users": [],
             "denied_users": [],
         })
+        if not isinstance(cfg, dict):
+            cfg = {
+                "enabled_globally": False,
+                "allowed_users": [],
+                "denied_users": [],
+            }
+            self.state["plugins"][plugin_name] = cfg
+        cfg["allowed_users"] = self._user_ids(cfg.get("allowed_users", []))
+        cfg["denied_users"] = self._user_ids(cfg.get("denied_users", []))
 
         if is_global:
             cfg["enabled_globally"] = True
@@ -235,6 +327,11 @@ class PluginManager:
             return "user_id is required when not enabling globally."
 
         uid = str(user_id)
+        if (
+            uid not in cfg.get("allowed_users", [])
+            and len(cfg.get("allowed_users", [])) >= 500
+        ):
+            return "Error: plugin has reached its per-user enablement limit."
         if uid in cfg.get("denied_users", []):
             cfg["denied_users"].remove(uid)
         if uid not in cfg.setdefault("allowed_users", []):
@@ -245,6 +342,7 @@ class PluginManager:
 
     def disable_plugin(self, plugin_name: str, user_id: Optional[str | int] = None, is_global: bool = False) -> str:
         """Disable a plugin globally or for a specific user."""
+        is_global = self._as_bool(is_global, False)
         if plugin_name not in self.loaded_plugins:
             return f"Plugin '{plugin_name}' is not installed."
 
@@ -253,6 +351,15 @@ class PluginManager:
             "allowed_users": [],
             "denied_users": [],
         })
+        if not isinstance(cfg, dict):
+            cfg = {
+                "enabled_globally": False,
+                "allowed_users": [],
+                "denied_users": [],
+            }
+            self.state["plugins"][plugin_name] = cfg
+        cfg["allowed_users"] = self._user_ids(cfg.get("allowed_users", []))
+        cfg["denied_users"] = self._user_ids(cfg.get("denied_users", []))
 
         if is_global:
             cfg["enabled_globally"] = False
@@ -268,6 +375,8 @@ class PluginManager:
         if cfg.get("enabled_globally", False):
             # If enabled globally, add to denied list to explicitly opt out
             if uid not in cfg.setdefault("denied_users", []):
+                if len(cfg["denied_users"]) >= 500:
+                    return "Error: plugin has reached its per-user denial limit."
                 cfg["denied_users"].append(uid)
 
         self._save_state()
@@ -280,7 +389,7 @@ class PluginManager:
         for name, data in self.loaded_plugins.items():
             manifest = data["manifest"]
             cfg = self.state["plugins"].get(name, {})
-            globally_enabled = bool(cfg.get("enabled_globally", False))
+            globally_enabled = self._as_bool(cfg.get("enabled_globally"), False)
             user_enabled = self.is_plugin_enabled_for_user(name, uid) if uid else globally_enabled
 
             result.append({

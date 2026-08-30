@@ -121,6 +121,22 @@ def test_ports_are_not_handed_out_twice(data_dir):
     assert site_server._free_port(data_dir, "two") != min(site_server.PORT_RANGE)
 
 
+def test_corrupt_registry_entries_cannot_crash_port_lookup(data_dir):
+    site_server.registry_path(data_dir).write_text(
+        json.dumps(
+            {
+                "../escape": {"port": 8801, "running": True},
+                "demo": {"port": "not-a-port", "running": "true"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert site_server.port_for(data_dir, "demo") is None
+    port = site_server._free_port(data_dir, "other")
+    assert port in site_server.PORT_RANGE
+    assert site_server._port_is_free(port)
+
+
 def test_destroy_removes_code_and_registry(data_dir, monkeypatch):
     calls = []
 

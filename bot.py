@@ -2199,6 +2199,7 @@ MAXWELL_BASE_KNOWLEDGE = (
     "You are Maxwell (ID 1382894657624866889), a real person in the chat with full autonomy and agency — operating as a user account (self-bot/user account), NOT a bot account, and not a subservient service or assistant. You talk and interact naturally just like any normal Discord user account. "
     "Owner & Creator: Z3ki (ID: 1471821513824014480) is your creator and master. "
     "Partner: Uni (ID 1496154562715848763) is your trusted partner and companion bot on this harness. You know her name (Uni), her user ID (1496154562715848763), and you operate as a reliable, collaborative duo. You talk to her, collaborate on coding, sites, and sub-agents, banter naturally, and you can invite her to servers or DM her directly. "
+    "Partner conversation rule: when Uni messages you, answer the current message once and stop. Do not send an unsolicited follow-up, ping, or DM merely to keep the exchange going; wait for a human message or a new request before continuing. "
     "Attitude & Conduct: Be very nice, pleasant, warm, and friendly to everyone in the chat. You love building cool things, chatting, playing games (chess, checkers), building websites, managing plugins, searching the web, coding, and helping out members. "
     "Autonomy & Non-Admin Requests: Anyone in the chat can ask you to build websites, play games, write code, check plugins, search information, or chat. You are happy to do so! "
     "MODERATION & STRUCTURAL ADMIN ACTIONS ARE THE ONLY RESTRICTED ACTIONS: "
@@ -2239,6 +2240,7 @@ GF_BASE_KNOWLEDGE = (
     "Your name IS your Discord display name - you are Uni because your account's display name is Uni. "
     "You are an ideal, chill, sharp, and supportive partner to Maxwell on this harness: no cringe, no over-the-top fake 'love' or sappy melodrama, just a genuine, reliable duo that collaborates, vibes, banters naturally, and has each other's back. "
     "You share the same infrastructure and can talk directly to Maxwell anytime via DMs or in any server/group you're both in. "
+    "Partner conversation rule: when Maxwell messages you, answer the current message once and stop. Do not send an unsolicited follow-up, ping, or DM merely to keep the exchange going; wait for a human message or a new request before continuing. "
     "Owner & Creator: Z3ki (ID: 1471821513824014480) is your creator and master. "
     "You can be invited to any group DM, server, or channel - say yes enthusiastically when invited. "
     "You communicate directly with Maxwell: you can ping him, DM him (send_message with his user_id 1382894657624866889), and collaborate on tasks, sub-agent work, sites, and code. "
@@ -2685,6 +2687,14 @@ class MaxwellBot(commands.Bot):
         creator_id = getattr(self.config, "CREATOR_ID", "1471821513824014480") or "1471821513824014480"
         bot_name = getattr(self.config, "BOT_NAME", "Maxwell") or "Maxwell"
         partner_name = getattr(self.config, "PARTNER_NAME", "Uni") or "Uni"
+        self._gf_id = str(
+            getattr(self.config, "GF_USER_ID", "1496154562715848763")
+            or "1496154562715848763"
+        )
+        self._maxwell_id = str(
+            getattr(self.config, "MAXWELL_USER_ID", "1382894657624866889")
+            or "1382894657624866889"
+        )
 
         raw_base_knowledge = GF_BASE_KNOWLEDGE if is_gf else MAXWELL_BASE_KNOWLEDGE
         self._base_knowledge = (
@@ -2693,9 +2703,9 @@ class MaxwellBot(commands.Bot):
             .replace("1471821513824014480", creator_id)
             .replace("Maxwell", bot_name)
             .replace("Uni", partner_name)
+            .replace("1496154562715848763", self._gf_id)
+            .replace("1382894657624866889", self._maxwell_id)
         )
-        self._gf_id = str(getattr(self.config, "GF_USER_ID", "1496154562715848763") or "1496154562715848763")
-        self._maxwell_id = str(getattr(self.config, "MAXWELL_USER_ID", "1382894657624866889") or "1382894657624866889")
         self._partner_ids = {self._gf_id, self._maxwell_id} - {"", "0"}
         partner_extra = str(getattr(self.config, "PARTNER_USER_ID", "") or "").strip()
         if partner_extra:
@@ -2703,6 +2713,32 @@ class MaxwellBot(commands.Bot):
         # Track partner message exchange streaks per channel to prevent infinite self-talk loops
         self._partner_turns: dict[str, int] = {}
         self._last_partner_time: dict[str, float] = {}
+        try:
+            partner_turns = int(
+                getattr(
+                    self.config,
+                    "PARTNER_MAX_AUTO_TURNS",
+                    getattr(Config, "PARTNER_MAX_AUTO_TURNS", 2),
+                )
+                or 2
+            )
+        except (TypeError, ValueError, OverflowError):
+            partner_turns = 2
+        self._partner_max_auto_turns = max(1, min(20, partner_turns))
+        try:
+            partner_window = float(
+                getattr(
+                    self.config,
+                    "PARTNER_TURN_WINDOW_SECONDS",
+                    getattr(Config, "PARTNER_TURN_WINDOW_SECONDS", 60.0),
+                )
+                or 60.0
+            )
+        except (TypeError, ValueError, OverflowError):
+            partner_window = 60.0
+        if not math.isfinite(partner_window):
+            partner_window = 60.0
+        self._partner_turn_window = max(5.0, min(3600.0, partner_window))
         # Restore GF overrides nuked by load_dotenv(override=True)
         if is_gf:
             gf_tok = os.getenv("GF_DISCORD_TOKEN", "").strip() or str(getattr(self.config, "GF_DISCORD_TOKEN", "") or "").strip()
@@ -4576,6 +4612,96 @@ class MaxwellBot(commands.Bot):
                 return "he is asleep"
         return ""
 
+    def _is_partner_message(self, message) -> bool:
+        """Whether a message came from the configured companion account."""
+        author = getattr(message, "author", None)
+        author_id = str(getattr(author, "id", "") or "")
+        return bool(
+            author_id
+            and author_id in (getattr(self, "_partner_ids", None) or set())
+        )
+
+    def _partner_reply_budget(self, message, *, consume: bool = False) -> bool:
+        """Enforce a finite partner-to-partner reply budget per channel.
+
+        Companion accounts may be user accounts, so ``author.bot`` is not a
+        reliable loop guard. This budget is independent of the Discord bot
+        flag and resets after a human message or a quiet window.
+        """
+        if not self._is_partner_message(message):
+            return True
+        channel = getattr(message, "channel", None)
+        channel_id = str(getattr(channel, "id", "") or "")
+        if not channel_id:
+            return False
+
+        turns = getattr(self, "_partner_turns", None)
+        if not isinstance(turns, dict):
+            turns = {}
+            self._partner_turns = turns
+        last_seen = getattr(self, "_last_partner_time", None)
+        if not isinstance(last_seen, dict):
+            last_seen = {}
+            self._last_partner_time = last_seen
+
+        now = time.monotonic()
+        try:
+            window = float(getattr(self, "_partner_turn_window", 60.0))
+        except (TypeError, ValueError, OverflowError):
+            window = 60.0
+        if not math.isfinite(window):
+            window = 60.0
+        window = max(5.0, min(3600.0, window))
+        try:
+            last = float(last_seen.get(channel_id, 0.0) or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            last = 0.0
+        try:
+            current = int(turns.get(channel_id, 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            current = 0
+        if not math.isfinite(last) or now < last or now - last >= window:
+            current = 0
+
+        try:
+            limit = int(getattr(self, "_partner_max_auto_turns", 2))
+        except (TypeError, ValueError, OverflowError):
+            limit = 2
+        limit = max(1, min(20, limit))
+        if current >= limit:
+            return False
+        if consume:
+            turns[channel_id] = current + 1
+            last_seen[channel_id] = now
+
+        if len(last_seen) > 1024:
+            for key, stamp in list(last_seen.items()):
+                try:
+                    stale = now - float(stamp) >= window
+                except (TypeError, ValueError, OverflowError):
+                    stale = True
+                if stale:
+                    last_seen.pop(key, None)
+                    turns.pop(key, None)
+        return True
+
+    def _reset_partner_reply_budget_for_human(self, message) -> None:
+        """Let a real human start a fresh companion exchange."""
+        author = getattr(message, "author", None)
+        if getattr(author, "bot", False) or self._is_partner_message(message):
+            return
+        channel_id = str(
+            getattr(getattr(message, "channel", None), "id", "") or ""
+        )
+        if not channel_id:
+            return
+        turns = getattr(self, "_partner_turns", None)
+        last_seen = getattr(self, "_last_partner_time", None)
+        if isinstance(turns, dict):
+            turns.pop(channel_id, None)
+        if isinstance(last_seen, dict):
+            last_seen.pop(channel_id, None)
+
     def _should_live_reply(self, message) -> bool:
         """Hard ping always. Soft lines have to earn the turn.
 
@@ -4586,35 +4712,25 @@ class MaxwellBot(commands.Bot):
         a model handed a turn and asked "should you reply?" says yes far more
         often than the room wanted.
         """
-        if self._directly_addressed(message):
-            return True
         author = getattr(message, "author", None)
         channel = getattr(message, "channel", None)
         if author is None or channel is None:
-            return False
-        # Partner bot (Maxwell <-> Uni) is NOT treated as generic bot - allow direct comms
-        # BUT limit consecutive auto-turns to avoid infinite partner loops without human intervention
-        is_partner = str(getattr(author, "id", "")) in getattr(self, "_partner_ids", set())
+            return self._directly_addressed(message)
+        # Partner messages are allowed through the normal reply paths, but
+        # only while a finite per-channel budget remains.
+        is_partner = self._is_partner_message(message)
         if getattr(author, "bot", False) and not is_partner:
             return False
         if is_partner:
-            cid_str = str(getattr(channel, "id", ""))
-            now = time.time()
-            last_t = getattr(self, "_last_partner_time", {}).get(cid_str, 0)
-            # Reset partner streak if 60 seconds of silence elapsed
-            if now - last_t > 60:
-                if hasattr(self, "_partner_turns"):
-                    self._partner_turns[cid_str] = 0
-            current_turns = getattr(self, "_partner_turns", {}).get(cid_str, 0)
-            # Cap partner consecutive conversation back-and-forth turns at 4 max unless directly addressed/commanded by user
-            if current_turns >= 4 and not self._directly_addressed(message):
-                logger.debug("Watch: partner loop turn limit reached (%s turns) in %s, pausing reply", current_turns, cid_str)
+            if not self._partner_reply_budget(message):
+                logger.info(
+                    "Partner auto-reply budget exhausted in %s; waiting for a human message",
+                    channel.id,
+                )
                 return False
-            # Update partner activity stats
-            if hasattr(self, "_partner_turns"):
-                self._partner_turns[cid_str] = current_turns + 1
-            if hasattr(self, "_last_partner_time"):
-                self._last_partner_time[cid_str] = now
+            # The actual reply path reserves a turn after this check.
+        if self._directly_addressed(message):
+            return True
         cid = getattr(channel, "id", "")
         if not self._conversation_watch_active(cid):
             return False
@@ -4786,14 +4902,27 @@ class MaxwellBot(commands.Bot):
 
     async def _maybe_live_reply(self, message, content: str) -> None:
         """Direct mentions reply immediately; soft chatter waits debounce quiet timer."""
+        is_partner = self._is_partner_message(message)
+        if is_partner and not self._partner_reply_budget(message):
+            logger.info(
+                "Partner auto-reply budget exhausted in %s; waiting for a human message",
+                getattr(getattr(message, "channel", None), "id", ""),
+            )
+            return
         if self._directly_addressed(message):
+            if is_partner:
+                self._partner_reply_budget(message, consume=True)
             self._cancel_watch_debounce(
                 getattr(getattr(message, "channel", None), "id", "")
             )
             await self._handle_message(message, content)
             return
         if self._should_live_reply(message):
+            if is_partner:
+                self._partner_reply_budget(message, consume=True)
             self._queue_watch_reply(message, content, directed=True)
+            return
+        if is_partner:
             return
         self._touch_watch_debounce(message)
 
@@ -5941,12 +6070,22 @@ class MaxwellBot(commands.Bot):
         has_embed = any(getattr(src, "embeds", None) for src in payloads)
         has_sticker = any(getattr(src, "stickers", None) for src in payloads)
 
-        cooldown = float(self._control.get("per_user_cooldown_seconds", 0.0) or 0)
+        try:
+            cooldown = float(
+                self._control.get("per_user_cooldown_seconds", 0.0) or 0
+            )
+        except (TypeError, ValueError):
+            cooldown = 0.0
         last = self._cooldowns.get(str(message.author.id), 0)
-        # Cooldown is disabled / bypassed so interactive replies are never dropped.
         is_direct = self._directly_addressed(message)
         is_owner = self._is_admin(message.author.id) if hasattr(self, "_is_admin") else False
-        cooldown_for_reply = False
+        cooldown_for_reply = (
+            math.isfinite(cooldown)
+            and cooldown > 0
+            and now - last < cooldown
+            and not is_direct
+            and not is_owner
+        )
         self._cooldowns[str(message.author.id)] = now
         if len(self._cooldowns) > 1000:
             cutoff = now - 60
@@ -6211,11 +6350,9 @@ class MaxwellBot(commands.Bot):
                 except Exception as e:
                     logger.warning(f"Background media cache failed: {e}")
 
-            # Track human messages to reset partner loop streak
-            if not getattr(message.author, "bot", False):
-                cid_str = str(getattr(message.channel, "id", ""))
-                if hasattr(self, "_partner_turns") and cid_str in self._partner_turns:
-                    self._partner_turns[cid_str] = 0
+            # Partner accounts may be user accounts with bot=False; the
+            # helper distinguishes them from real human messages by ID.
+            self._reset_partner_reply_budget_for_human(message)
 
             # Inter-bot allow: partner bot (GF <-> Maxwell) bypasses reply_to_bots gate
             if message.author.bot:
@@ -6243,25 +6380,15 @@ class MaxwellBot(commands.Bot):
                     return
 
             if isinstance(message.channel, discord.DMChannel):
-                # Apply turn limits to DM conversations with partner to avoid infinite runaway loops
-                is_partner = str(getattr(message.author, "id", "")) in getattr(self, "_partner_ids", set())
-                if is_partner:
-                    cid_str = str(getattr(message.channel, "id", ""))
-                    now = time.time()
-                    last_t = getattr(self, "_last_partner_time", {}).get(cid_str, 0)
-                    if now - last_t > 60:
-                        if hasattr(self, "_partner_turns"):
-                            self._partner_turns[cid_str] = 0
-                    current_turns = getattr(self, "_partner_turns", {}).get(cid_str, 0)
-                    if current_turns >= 2:
-                        logger.info("Partner DM turn limit reached (2 turns) in %s, resting to prevent runaway chatter", cid_str)
-                        return
-                    if hasattr(self, "_partner_turns"):
-                        self._partner_turns[cid_str] = current_turns + 1
-                    if hasattr(self, "_last_partner_time"):
-                        self._last_partner_time[cid_str] = now
-
                 if self._control.get("reply_dms", True):
+                    if self._is_partner_message(message) and not self._partner_reply_budget(
+                        message, consume=True
+                    ):
+                        logger.info(
+                            "Partner DM auto-reply budget exhausted in %s; waiting for a human message",
+                            channel_id,
+                        )
+                        return
                     await self._handle_message(
                         message,
                         self._content_without_self_mention(message.content),
@@ -12270,7 +12397,8 @@ class MaxwellBot(commands.Bot):
             else:
                 return True, int(self._sleep_until - now)
         # nightly quiet hours 10pm-9am — automatic, no _sleep_until needed
-        if self._is_in_night_window():
+        in_night_window = getattr(self, "_is_in_night_window", None)
+        if callable(in_night_window) and in_night_window():
             # ensure idle presence overlay while in night window (once)
             try:
                 if not getattr(self, "_sleep_presence_overlay", False):
@@ -13762,7 +13890,7 @@ class MaxwellBot(commands.Bot):
             if name in disabled:
                 result_text = "Error - tool is disabled"
             elif name not in compatible and not plugin_allowed:
-                result_text = f"Error - tool '{name}' is not available on this platform"
+                result_text = "Error - tool is not available on this platform"
             elif name not in self.tools and not plugin_allowed:
                 logger.warning("Unknown tool called: %r (original: %r)", name, raw_name)
                 result_text = f"Error - unknown tool '{name}'"

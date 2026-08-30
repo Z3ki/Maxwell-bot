@@ -439,6 +439,8 @@ async def context_post(request):
         body = await request.json()
     except Exception:
         return _json_response({"error": "invalid json"}, 400)
+    if not isinstance(body, dict):
+        return _json_response({"error": "body must be an object"}, 400)
     content = _normalize_context_content(body.get("content", ""))
     if not content:
         return _json_response({"error": "empty"}, 400)
@@ -498,6 +500,8 @@ async def context_put(request):
         body = await request.json()
     except Exception:
         return _json_response({"error": "invalid json"}, 400)
+    if not isinstance(body, dict):
+        return _json_response({"error": "body must be an object"}, 400)
     context_id = str(body.get("id") or "").strip()
     if not context_id:
         return _json_response({"error": "id required"}, 400)
@@ -590,6 +594,8 @@ async def prompt_save(request):
         body = await request.json()
     except Exception:
         return _json_response({"error": "invalid json"}, 400)
+    if not isinstance(body, dict):
+        return _json_response({"error": "body must be an object"}, 400)
     pid = _clean_id(body.get("id", ""))
     text = str(body.get("text", "")).strip()[:MAX_PROMPT_CHARS]
     if not pid:
@@ -631,6 +637,8 @@ async def blacklist_post(request):
         body = await request.json()
     except Exception:
         return _json_response({"error": "invalid json"}, 400)
+    if not isinstance(body, dict):
+        return _json_response({"error": "body must be an object"}, 400)
     uid = _clean_id(body.get("id", ""))
     if not uid:
         return _json_response({"error": "empty"}, 400)
@@ -667,6 +675,8 @@ async def auto_channel_post(request):
         body = await request.json()
     except Exception:
         return _json_response({"error": "invalid json"}, 400)
+    if not isinstance(body, dict):
+        return _json_response({"error": "body must be an object"}, 400)
     # Accept both `id` (older clients) and `channel_id` (admin dashboard).
     cid = _clean_id(body.get("id") or body.get("channel_id") or "")
     if not cid:
@@ -711,6 +721,8 @@ async def site_update(request):
         body = await request.json()
     except Exception:
         return _json_response({"error": "invalid json"}, 400)
+    if not isinstance(body, dict):
+        return _json_response({"error": "body must be an object"}, 400)
     slug = _safe_site_slug(body.get("slug", ""))
     if not slug:
         return _json_response({"error": "bad slug"}, 400)
@@ -739,7 +751,12 @@ async def site_update(request):
             _atomic_json_write_sync(path, sites)
             return ("ok", site, 200)
 
-    kind, payload, code = await asyncio.to_thread(_do_update)
+    try:
+        kind, payload, code = await asyncio.to_thread(_do_update)
+    except FileLockTimeout as exc:
+        return _json_response({"error": str(exc)}, 409)
+    except OSError as exc:
+        return _json_response({"error": f"site update failed: {exc}"}, 500)
     if kind == "err":
         return _json_response({"error": payload}, code)
     if kind == "notfound":
@@ -770,7 +787,12 @@ async def site_delete(request):
             _atomic_json_write_sync(path, sites)
             return ("ok", None, 200)
 
-    kind, payload, code = await asyncio.to_thread(_do_delete)
+    try:
+        kind, payload, code = await asyncio.to_thread(_do_delete)
+    except FileLockTimeout as exc:
+        return _json_response({"error": str(exc)}, 409)
+    except OSError as exc:
+        return _json_response({"error": f"site delete failed: {exc}"}, 500)
     if kind == "err":
         return _json_response({"error": payload}, code)
     if kind == "notfound":
@@ -780,6 +802,10 @@ async def site_delete(request):
     # Drop the site's backend store too, or a slug reused later inherits the
     # old site's guestbook.
     await asyncio.to_thread(site_backend.destroy, DATA_DIR, slug)
+    # The real per-site server has its own code, data, image, container, and
+    # registry row; deleting only the static site would leave that service
+    # running and reachable through the proxy.
+    await site_server.destroy(DATA_DIR, slug)
     return _json_response({"ok": True})
 
 
@@ -810,10 +836,35 @@ def _site_backend_enabled(slug: str) -> bool:
     """A store exists only for a site whose metadata opted into one."""
     try:
         sites = json.loads((DATA_DIR / "sites.json").read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+    except (
+        FileNotFoundError,
+        json.JSONDecodeError,
+        OSError,
+        UnicodeError,
+        ValueError,
+    ):
         return False
     entry = sites.get(slug) if isinstance(sites, dict) else None
     return bool(isinstance(entry, dict) and entry.get("backend"))
+
+
+def _site_server_enabled(slug: str) -> bool:
+    """A proxy target is valid only while its site still exists and owns it."""
+    try:
+        sites = json.loads((DATA_DIR / "sites.json").read_text(encoding="utf-8"))
+    except (
+        FileNotFoundError,
+        json.JSONDecodeError,
+        OSError,
+        UnicodeError,
+        ValueError,
+    ):
+        return False
+    entry = sites.get(slug) if isinstance(sites, dict) else None
+    # ``server`` is set only after site_server.start() succeeds. Requiring the
+    # metadata flag prevents an orphaned registry row from keeping a deleted
+    # or never-published backend reachable.
+    return bool(isinstance(entry, dict) and entry.get("server") is True)
 
 
 async def _site_guard(request, write: bool):
@@ -1076,6 +1127,10 @@ async def site_proxy(request):
         return _site_json({"error": "bad slug"}, 404)
     if not _SITE_PROXY_RATE.allow(f"{_get_client_ip(request)}:{slug}"):
         return _site_json({"error": "slow down"}, 429)
+    if not await asyncio.to_thread(_site_server_enabled, slug):
+        return _site_json(
+            {"error": "this site has no backend server running"}, 404
+        )
     port = await asyncio.to_thread(site_server.port_for, DATA_DIR, slug)
     if not port:
         return _site_json(
@@ -1452,6 +1507,8 @@ async def autonomy_interval(request):
         body = await request.json()
     except Exception:
         return _json_response({"error": "invalid json"}, 400)
+    if not isinstance(body, dict):
+        return _json_response({"error": "body must be an object"}, 400)
     try:
         new_interval = max(30, int(body.get("interval_seconds", 300)))
     except (TypeError, ValueError):
@@ -1491,6 +1548,8 @@ async def autonomy_goal_add(request):
         body = await request.json()
     except Exception:
         return _json_response({"error": "invalid json"}, 400)
+    if not isinstance(body, dict):
+        return _json_response({"error": "body must be an object"}, 400)
     description = str(body.get("description", "")).strip()[:2000]
     if not description:
         return _json_response({"error": "description required"}, 400)
@@ -1595,6 +1654,8 @@ async def commands_post(request):
         body = await request.json()
     except Exception:
         return _json_response({"error": "invalid json"}, 400)
+    if not isinstance(body, dict):
+        return _json_response({"error": "body must be an object"}, 400)
     cmd_type = str(body.get("type", "")).strip()
     if not cmd_type:
         return _json_response({"error": "type is required"}, 400)
@@ -1753,6 +1814,7 @@ async def _pm2_json():
     now = time.time()
     if _pm2_cache is not None and (now - _pm2_cache_time) < 10.0:
         return _pm2_cache
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             "pm2",
@@ -1765,8 +1827,28 @@ async def _pm2_json():
         _pm2_cache = data if isinstance(data, list) else []
         _pm2_cache_time = now
         return _pm2_cache
+    except asyncio.CancelledError:
+        if proc is not None and proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
+        raise
+    except asyncio.TimeoutError:
+        if proc is not None and proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
+        return _pm2_cache if _pm2_cache is not None else []
     except Exception:
         return _pm2_cache if _pm2_cache is not None else []
+    finally:
+        if proc is not None and proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
 
 
 async def pm2_status(request):
@@ -2049,6 +2131,8 @@ async def login_post(request):
         body = await request.json()
     except Exception:
         return _json_response({"error": "invalid json"}, 400)
+    if not isinstance(body, dict):
+        return _json_response({"error": "body must be an object"}, 400)
     user = str(body.get("user", "")).strip()
     pwd = str(body.get("pass", "")).strip()
     if not user or not pwd:
@@ -2303,6 +2387,8 @@ async def memory_add(request):
         body = await request.json()
     except Exception:
         return _json_response({"error": "invalid json"}, 400)
+    if not isinstance(body, dict):
+        return _json_response({"error": "body must be an object"}, 400)
     content = _normalize_memory_line(body.get("content", ""))
     if not content:
         return _json_response({"error": "empty"}, 400)
@@ -2331,6 +2417,8 @@ async def memory_update(request):
         body = await request.json()
     except Exception:
         return _json_response({"error": "invalid json"}, 400)
+    if not isinstance(body, dict):
+        return _json_response({"error": "body must be an object"}, 400)
     target_id = str(body.get("id") or "").strip()
     if not target_id:
         return _json_response({"error": "id required"}, 400)
@@ -2470,9 +2558,17 @@ app.router.add_post("/api/pm2/restart", pm2_restart)
 app.router.add_get("/api/channels", channel_list)
 app.router.add_get("/api/chat/history", chat_history)
 async def plugins_get(request):
-    plugins_file = _data_path("plugins.json")
-    state = _load_for_read(plugins_file, dict, {"plugins": {}})
-    return _json_response({"ok": True, "plugins": state.get("plugins", {})})
+    # This is a read-only endpoint. Resolve DATA_DIR at request time so tests
+    # and deployments that override the data directory see the same state as
+    # the rest of the API, and treat a missing/corrupt file as empty rather
+    # than raising a NameError or returning a malformed payload.
+    state = _load(DATA_DIR / "plugins.json")
+    if not isinstance(state, dict):
+        state = {}
+    plugins = state.get("plugins")
+    if not isinstance(plugins, dict):
+        plugins = {}
+    return _json_response({"ok": True, "plugins": plugins})
 
 
 app.router.add_get("/api/plugins", plugins_get)

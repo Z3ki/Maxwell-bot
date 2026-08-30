@@ -23,9 +23,12 @@ only gets a store at all when it was created with ``backend=true``.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import math
 import re
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -54,12 +57,12 @@ class SiteBackendError(Exception):
 
 
 def valid_slug(slug: str) -> bool:
-    return bool(SLUG_RE.match(str(slug or "")))
+    return bool(SLUG_RE.fullmatch(str(slug or "")))
 
 
 def _check_name(name: str, what: str) -> str:
     name = str(name or "").strip()
-    if not NAME_RE.match(name):
+    if not NAME_RE.fullmatch(name):
         raise SiteBackendError(
             f"{what} must be 1-{MAX_NAME_LEN} chars of letters, digits, _ . : -"
         )
@@ -76,10 +79,23 @@ def _blank() -> dict[str, Any]:
     return {"kv": {}, "collections": {}}
 
 
+def _reject_json_constant(value: str):
+    raise ValueError(f"non-finite JSON constant {value!r}")
+
+
 def _read(path: Path) -> dict[str, Any]:
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+        raw = json.loads(
+            path.read_text(encoding="utf-8"),
+            parse_constant=_reject_json_constant,
+        )
+    except (
+        FileNotFoundError,
+        json.JSONDecodeError,
+        OSError,
+        UnicodeError,
+        ValueError,
+    ):
         return _blank()
     if not isinstance(raw, dict):
         return _blank()
@@ -88,7 +104,9 @@ def _read(path: Path) -> dict[str, Any]:
     return {
         "kv": kv if isinstance(kv, dict) else {},
         "collections": {
-            k: v for k, v in (cols or {}).items() if isinstance(v, list)
+            str(k): [item for item in v if isinstance(item, dict)]
+            for k, v in (cols or {}).items()
+            if isinstance(v, list)
         }
         if isinstance(cols, dict)
         else {},
@@ -97,8 +115,19 @@ def _read(path: Path) -> dict[str, Any]:
 
 def _sized(value: Any) -> int:
     try:
-        return len(json.dumps(value, ensure_ascii=False, default=str))
-    except (TypeError, ValueError):
+        # The limits are bytes, not Python characters.  Keep this serializer
+        # strict and identical to the atomic writer's formatting so values
+        # containing emoji cannot bypass a cap and NaN/Infinity never reach
+        # the JSON file.
+        return len(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                allow_nan=False,
+                indent=2,
+            ).encode("utf-8")
+        )
+    except (TypeError, UnicodeError, ValueError):
         raise SiteBackendError("value is not JSON-serializable") from None
 
 
@@ -151,6 +180,8 @@ def kv_bump(data_dir, slug: str, key: str, by: float = 1) -> float:
         by = float(by)
     except (TypeError, ValueError):
         raise SiteBackendError("`by` must be a number") from None
+    if not math.isfinite(by):
+        raise SiteBackendError("`by` must be a finite number")
     path = store_path(data_dir, slug)
     with FileLock(path, timeout=10.0):
         store = _read(path)
@@ -158,10 +189,14 @@ def kv_bump(data_dir, slug: str, key: str, by: float = 1) -> float:
             current = float(store["kv"].get(key) or 0)
         except (TypeError, ValueError):
             current = 0.0
+        if not math.isfinite(current):
+            current = 0.0
         if key not in store["kv"] and len(store["kv"]) >= MAX_KEYS:
             raise SiteBackendError(f"too many keys (max {MAX_KEYS})")
         total = current + by
-        if total == int(total):
+        if not math.isfinite(total):
+            raise SiteBackendError("counter result must be a finite number")
+        if total.is_integer():
             total = int(total)
         store["kv"][key] = total
         _commit(path, store)
@@ -198,7 +233,11 @@ def items_add(data_dir, slug: str, name: str, data: Any) -> dict:
             raise SiteBackendError(f"too many collections (max {MAX_COLLECTIONS})")
         bucket = cols.setdefault(name, [])
         item = {
-            "id": f"{int(time.time() * 1000)}-{len(bucket)}",
+            # The old timestamp-plus-list-length scheme collided whenever a
+            # full ring received two writes in the same millisecond (the
+            # length stays at the cap after each eviction). IDs are cursors,
+            # so collisions can make a client's `after` marker skip data.
+            "id": f"{time.time_ns()}-{uuid.uuid4().hex}",
             "at": time.time(),
             "data": data,
         }
@@ -224,6 +263,8 @@ def items_delete(
         else:
             if not item_id:
                 raise SiteBackendError("pass id= or all=1")
+            if name not in store["collections"]:
+                return 0
             store["collections"][name] = [
                 i for i in bucket if str(i.get("id")) != str(item_id)
             ]
@@ -261,11 +302,12 @@ def wipe(data_dir, slug: str) -> None:
 def destroy(data_dir, slug: str) -> None:
     """Remove the store file entirely (site deleted/expired)."""
     path = store_path(data_dir, slug)
-    for p in (path, Path(str(path) + ".lock")):
-        try:
-            p.unlink()
-        except (FileNotFoundError, OSError):
-            pass
+    # Never unlink the sidecar while another process holds it: doing so lets a
+    # concurrent writer create a new inode and defeats the lock entirely.
+    # Keeping an empty .lock file is harmless and avoids a release/delete race.
+    with contextlib.suppress(FileNotFoundError, OSError, TimeoutError):
+        with FileLock(path, timeout=10.0):
+            path.unlink()
 
 
 # ── abuse control ─────────────────────────────────────────────────────────
@@ -273,15 +315,33 @@ class RateLimiter:
     """Per-key token bucket. Public endpoints, so assume someone will try."""
 
     def __init__(self, rate: float = 1.0, burst: int = 30, max_keys: int = 4096):
-        self.rate = float(rate)
-        self.burst = int(burst)
-        self.max_keys = int(max_keys)
+        try:
+            parsed_rate = float(rate)
+        except (TypeError, ValueError):
+            parsed_rate = 0.0
+        self.rate = max(0.0, parsed_rate) if math.isfinite(parsed_rate) else 0.0
+        try:
+            parsed_burst = int(burst)
+        except (TypeError, ValueError, OverflowError):
+            parsed_burst = 30
+        try:
+            parsed_max_keys = int(max_keys)
+        except (TypeError, ValueError, OverflowError):
+            parsed_max_keys = 4096
+        self.burst = max(1, parsed_burst)
+        self.max_keys = max(1, parsed_max_keys)
         self._buckets: dict[str, tuple[float, float]] = {}
 
     def allow(self, key: str, cost: float = 1.0) -> bool:
+        try:
+            cost = float(cost)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(cost) or cost <= 0:
+            return False
         now = time.monotonic()
         tokens, last = self._buckets.get(key, (float(self.burst), now))
-        tokens = min(self.burst, tokens + (now - last) * self.rate)
+        tokens = min(self.burst, tokens + max(0.0, now - last) * self.rate)
         if tokens < cost:
             self._buckets[key] = (tokens, now)
             return False

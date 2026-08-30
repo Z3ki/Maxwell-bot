@@ -44,6 +44,8 @@ def _bot(*, watch_seconds=180, debounce_seconds=0.05):
     bot._watch_burst_prompt_lines = MaxwellBot._watch_burst_prompt_lines.__get__(bot)
     bot._message_addresses_self = MaxwellBot._message_addresses_self.__get__(bot)
     bot._directly_addressed = MaxwellBot._directly_addressed.__get__(bot)
+    bot._is_partner_message = MaxwellBot._is_partner_message.__get__(bot)
+    bot._partner_reply_budget = MaxwellBot._partner_reply_budget.__get__(bot)
     bot._content_without_self_mention = MaxwellBot._content_without_self_mention.__get__(
         bot
     )
@@ -670,3 +672,45 @@ def test_typing_expires_and_ignores_self_and_bots():
     assert [p["id"] for p in MaxwellBot._typing_in_channel(bot, channel.id)] == ["7"]
     bot._typing_users[str(channel.id)]["7"]["expires_at"] = 0
     assert MaxwellBot._typing_in_channel(bot, channel.id) == []
+
+
+def test_partner_self_accounts_hit_a_finite_reply_budget():
+    bot = _bot()
+    bot._partner_ids = {"1496154562715848763", str(bot.user.id)}
+    bot._partner_max_auto_turns = 2
+    bot._partner_turn_window = 60.0
+    handled = []
+
+    async def handle(message, content=None):
+        handled.append(content or message.content)
+
+    bot._handle_message = handle
+
+    async def run():
+        for text in ("first", "second", "third"):
+            message = _plain_followup(
+                content=text,
+                author_id=1496154562715848763,
+                display_name="Uni",
+            )
+            # Self-bot accounts commonly arrive with bot=False.
+            message.author.bot = False
+            message.mentions = [bot.user]
+            await MaxwellBot._maybe_live_reply(bot, message, text)
+
+        assert handled == ["first", "second"]
+        assert bot._partner_turns[str(message.channel.id)] == 2
+
+        human = _plain_followup(content="continue", author_id=7, display_name="Alice")
+        MaxwellBot._reset_partner_reply_budget_for_human(bot, human)
+        fresh = _plain_followup(
+            content="fresh",
+            author_id=1496154562715848763,
+            display_name="Uni",
+        )
+        fresh.author.bot = False
+        fresh.mentions = [bot.user]
+        await MaxwellBot._maybe_live_reply(bot, fresh, fresh.content)
+        assert handled == ["first", "second", "fresh"]
+
+    asyncio.run(run())

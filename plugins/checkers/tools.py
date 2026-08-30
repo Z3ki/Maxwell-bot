@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import io
 import logging
-import os
 from typing import Any, Optional
 
 import discord
@@ -32,6 +31,22 @@ def remove_game(channel_id: str):
     _ACTIVE_GAMES.pop(str(channel_id), None)
 
 
+def _run_maxwell_turn(game: CheckersGame) -> list[str]:
+    """Finish Maxwell's turn, including every forced jump in a chain."""
+    moves = []
+    for _ in range(32):  # a checkers position cannot need more than 32 captures
+        if game.winner or game.turn == game.human_color:
+            break
+        move = game.bot_ai_move()
+        if not move:
+            break
+        ok, _result = game.make_move(move)
+        if not ok:
+            break
+        moves.append(move)
+    return moves
+
+
 class CheckersStartTool(Tool):
     def __init__(self, bot=None):
         self.bot = bot
@@ -42,7 +57,7 @@ class CheckersStartTool(Tool):
     def get_description(self) -> str:
         return (
             "Start a new Checkers (draughts) match in this channel against Maxwell. "
-            "Red moves first (at the bottom). Maxwell plays Black."
+            "Red moves first; choose user_color red or black."
         )
 
     def get_parameters(self) -> dict:
@@ -59,23 +74,36 @@ class CheckersStartTool(Tool):
         }
 
     async def execute(self, message: Any, user_color: str = "red", **kwargs) -> str:
+        user_color = str(user_color or "red").strip().lower()
+        if user_color not in {"red", "black"}:
+            return "Error: user_color must be `red` or `black`."
         channel_id = str(message.channel.id)
         user_name = getattr(message.author, "display_name", "User")
-        game = CheckersGame(red_player=user_name, black_player="Maxwell")
-        set_game(channel_id, game)
-
+        user_id = getattr(message.author, "id", None)
+        game = CheckersGame(
+            red_player=user_name if user_color == "red" else "Maxwell",
+            black_player="Maxwell" if user_color == "red" else user_name,
+            human_color=user_color,
+            human_player_id=user_id,
+        )
+        opening_moves = _run_maxwell_turn(game)
+        opening = (
+            "Maxwell played " + " ".join(f"`{move}`" for move in opening_moves) + "."
+            if opening_moves
+            else ""
+        )
         png_bytes = game.render_board_png()
         file = discord.File(io.BytesIO(png_bytes), filename="checkers_board.png")
         await message.channel.send(
-            f"🔴 **Checkers match started!** {user_name} (Red) vs Maxwell (Black).\n"
-            f"Red moves first. Use `checkers_move(move='c3-d4')` or notation like `c3-d4`.",
+            f"🔴 **Checkers match started!** {game.red_player} (Red) vs "
+            f"{game.black_player} (Black).\n"
+            f"{opening + ' ' if opening else ''}"
+            f"It is {game.turn.capitalize()}'s turn. Use "
+            "`checkers_move(move='c3-d4')` or notation like `c3-d4`.",
             file=file,
         )
+        set_game(channel_id, game)
         legal_moves = game.get_legal_moves("red")
-        legal_str = ", ".join(
-            f"{game.history[-1] if False else ''}" or f"{m[0]},{m[1]}->{m[2]},{m[3]}"
-            for m in legal_moves[:6]
-        )
         return f"Checkers game started. Legal moves for Red: {len(legal_moves)} options available."
 
 
@@ -109,19 +137,28 @@ class CheckersMoveTool(Tool):
         game = get_game(channel_id)
         if not game:
             return "Error: No active Checkers game in this channel. Start one with `checkers_start`."
+        author_id = getattr(getattr(message, "author", None), "id", None)
+        if (
+            game.human_player_id is not None
+            and author_id is not None
+            and str(author_id) != game.human_player_id
+        ):
+            return "Error: only the player who started this match can move."
+        if game.turn != game.human_color:
+            return f"Error: it is {game.turn}'s turn; Maxwell is thinking."
 
         ok, msg = game.make_move(move)
         if not ok:
             return f"Move failed: {msg}"
 
-        # If it was user move and game is not over and it's Maxwell's turn (black)
+        # Let Maxwell finish every forced jump in one turn. American checkers
+        # requires a capture chain to stay with the same piece, so handing
+        # control back after only the first AI jump can strand the match on
+        # Maxwell's turn forever.
+        ai_moves = _run_maxwell_turn(game)
         ai_msg = ""
-        if not game.winner and game.turn == "black":
-            bot_move = game.bot_ai_move()
-            if bot_move:
-                bot_ok, bot_m = game.make_move(bot_move)
-                if bot_ok:
-                    ai_msg = f"\nMaxwell played `{bot_move}`."
+        if ai_moves:
+            ai_msg = "\n" + " ".join(f"Maxwell played `{item}`." for item in ai_moves)
 
         png_bytes = game.render_board_png()
         file = discord.File(io.BytesIO(png_bytes), filename="checkers_board.png")
@@ -185,6 +222,13 @@ class CheckersResignTool(Tool):
         if not game:
             return "No active Checkers game to resign."
 
+        author_id = getattr(getattr(message, "author", None), "id", None)
+        if (
+            game.human_player_id is not None
+            and author_id is not None
+            and str(author_id) != game.human_player_id
+        ):
+            return "Error: only the player who started this match can resign."
         user_name = getattr(message.author, "display_name", "Player")
         remove_game(channel_id)
         await message.channel.send(f"🏳️ {user_name} has resigned the Checkers match. Game over.")

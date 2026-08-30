@@ -64,6 +64,33 @@ def test_queue_is_bounded():
     asyncio.run(run())
 
 
+def test_idle_workers_are_reclaimed_and_close_cancels_queued_work():
+    async def run():
+        queues = ChannelWorkQueues(max_pending=2)
+        blocker = asyncio.Event()
+
+        async def blocked():
+            await blocker.wait()
+
+        first = asyncio.create_task(queues.submit(1, 1, blocked))
+        await asyncio.sleep(0)
+        second = asyncio.create_task(queues.submit(1, 1, blocked))
+        await asyncio.sleep(0)
+        await queues.close()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        with pytest.raises(asyncio.CancelledError):
+            await second
+        assert not queues._workers
+        assert not queues._queues
+
+        await queues.close()
+        with pytest.raises(RuntimeError, match="closed"):
+            await queues.submit(2, 2, lambda: asyncio.sleep(0))
+
+    asyncio.run(run())
+
+
 def test_tool_gate_enforces_deadline():
     async def run():
         gates = ToolConcurrency(provider=1)

@@ -970,6 +970,10 @@ def build_openai_tools(
     back to it. The contract is added AFTER the description is truncated, so
     a long description can never eat the part that changes the model's plan.
     """
+    try:
+        max_description_chars = max(1, int(max_description_chars))
+    except (TypeError, ValueError, OverflowError):
+        max_description_chars = 1024
     disabled = disabled_names or set()
     out: list[dict[str, Any]] = []
     for name, tool in tools.items():
@@ -984,20 +988,39 @@ def build_openai_tools(
         if len(desc) > max_description_chars:
             desc = desc[: max_description_chars - 1] + "…"
         desc = (desc or name) + result_contract(name)
-        params = dict(
-            TOOL_PARAMETERS.get(
-                name, {"type": "object", "properties": {}, "additionalProperties": True}
-            )
-        )
+        declared = TOOL_PARAMETERS.get(name)
+        if declared is None:
+            # Drop-in plugins are discovered at runtime, so their schemas
+            # cannot live in this module's static registry. Let a plugin
+            # provide the same get_parameters() contract as built-in tools;
+            # otherwise retain a permissive empty object for legacy plugins.
+            getter = getattr(tool, "get_parameters", None)
+            try:
+                declared = getter() if callable(getter) else None
+            except Exception:
+                declared = None
+        if not isinstance(declared, dict) or declared.get("type") != "object":
+            declared = {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": True,
+            }
+        params = dict(declared)
         # Inject reasoning onto a COPY so we never mutate TOOL_PARAMETERS.
-        props = dict(params.get("properties") or {})
+        raw_props = params.get("properties")
+        props = dict(raw_props) if isinstance(raw_props, dict) else {}
         props.setdefault("reasoning", REASONING_PARAM)
         params["properties"] = props
         # reasoning is ALWAYS required — no exceptions, no "terse on a trivial
         # call" carve-out. If the model thinks before it acts, we want the
         # trace. If it skips reasoning, the provider rejects the call instead
         # of silently dropping it (which is what bit us before).
-        required = [r for r in (params.get("required") or []) if r != "reasoning"]
+        raw_required = params.get("required")
+        required = (
+            [r for r in raw_required if isinstance(r, str) and r != "reasoning"]
+            if isinstance(raw_required, (list, tuple))
+            else []
+        )
         if "reasoning" not in required:
             required.append("reasoning")
         params["required"] = required

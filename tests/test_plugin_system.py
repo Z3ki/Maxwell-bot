@@ -2,9 +2,6 @@
 Unit tests for Maxwell's Plugin Architecture.
 """
 import json
-import os
-import shutil
-import tempfile
 import pytest
 
 from plugin_manager import PluginManager
@@ -96,3 +93,12 @@ def test_user_self_enable_disable(temp_plugin_env):
     # User 333 disables for self
     pm.disable_plugin("test_plugin", user_id="333")
     assert "test_tool" not in pm.get_available_tools(user_id="333")
+
+
+def test_reload_plugins_rebuilds_the_live_registry(temp_plugin_env):
+    plugins_dir, data_dir = temp_plugin_env
+    pm = PluginManager(
+        DummyBot(), plugins_dir=str(plugins_dir), state_file=str(data_dir / "plugins.json")
+    )
+    assert "test_tool" in pm.load_plugins()["test_plugin"]["tools"]
+    assert pm.reload_plugins() == "Reloaded 1 plugin(s) with 1 tool(s)."

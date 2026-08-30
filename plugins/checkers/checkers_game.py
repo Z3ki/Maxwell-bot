@@ -10,9 +10,7 @@ Implements standard American Checkers / English Draughts rules:
 from __future__ import annotations
 
 import io
-import json
 import logging
-import os
 from typing import Optional
 
 from PIL import Image, ImageDraw
@@ -49,12 +47,26 @@ def coord_to_square(r: int, c: int) -> str:
 
 
 class CheckersGame:
-    def __init__(self, red_player: str = "User", black_player: str = "Maxwell"):
+    def __init__(
+        self,
+        red_player: str = "User",
+        black_player: str = "Maxwell",
+        *,
+        human_color: str = "red",
+        human_player_id: str | None = None,
+    ):
         self.red_player = red_player
         self.black_player = black_player
+        self.human_color = human_color if human_color in {"red", "black"} else "red"
+        self.human_player_id = (
+            str(human_player_id) if human_player_id is not None else None
+        )
         self.turn = "red"  # "red" (bottom) or "black" (top)
         self.winner: Optional[str] = None
         self.history: list[str] = []
+        # A jump chain belongs to the piece that just captured. While this is
+        # set, no other piece may move and the turn must not change.
+        self._forced_piece: tuple[int, int] | None = None
         self.board = [[EMPTY for _ in range(8)] for _ in range(8)]
         self._setup_initial_board()
 
@@ -126,6 +138,9 @@ class CheckersGame:
     def get_legal_moves(self, turn: Optional[str] = None) -> list[tuple[int, int, int, int]]:
         if turn is None:
             turn = self.turn
+        if self._forced_piece is not None and turn == self.turn:
+            r, c = self._forced_piece
+            return self.get_jumps_for_piece(r, c)
         all_jumps = []
         all_simple = []
         for r in range(8):
@@ -179,19 +194,26 @@ class CheckersGame:
             self.board[mid_r][mid_c] = EMPTY
 
         # Kinging
+        promoted = False
         if p == RED_MAN and er == 0:
             self.board[er][ec] = RED_KING
+            promoted = True
         elif p == BLACK_MAN and er == 7:
             self.board[er][ec] = BLACK_KING
+            promoted = True
 
         self.history.append(f"{self.turn}: {move_str}")
 
         # Check multi-jump continuation for same piece
-        if is_jump:
+        # In American checkers a man that reaches the king row during a jump
+        # is crowned but the move ends; it cannot continue jumping as a king.
+        if is_jump and not promoted:
             further_jumps = self.get_jumps_for_piece(er, ec)
             if further_jumps:
+                self._forced_piece = (er, ec)
                 return True, f"Jump made! Multi-jump required with `{coord_to_square(er, ec)}`."
 
+        self._forced_piece = None
         # Switch turn
         self.turn = "black" if self.turn == "red" else "red"
 
