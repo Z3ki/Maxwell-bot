@@ -387,3 +387,34 @@ def test_container_lookups_are_scoped_to_containers(data_dir, monkeypatch):
     assert inspects, "expected inspect calls"
     for args in inspects:
         assert "--type" in args and "container" in args, args
+
+
+def test_wait_healthy_accepts_a_restarted_container_that_is_serving(monkeypatch):
+    """RestartCount is sticky; a serving container is healthy even after one crash."""
+
+    async def fake_docker(*args, **kw):
+        return 0, "true false 1 0", ""
+
+    async def fake_ping(_port):
+        return "ok"
+
+    monkeypatch.setattr(site_server, "_docker", fake_docker)
+    monkeypatch.setattr(site_server, "_http_ping", fake_ping)
+    assert run(site_server._wait_healthy(8800, "demo")) == "ok"
+
+
+def test_wait_healthy_reports_a_real_crash_loop(monkeypatch):
+    monkeypatch.setattr(site_server, "CRASH_GRACE_SECONDS", 0.0)
+    monkeypatch.setattr(site_server, "START_TIMEOUT", 2.0)
+
+    async def fake_docker(*args, **kw):
+        return 0, "false true 3 0", ""
+
+    async def fake_ping(_port):
+        return "ConnectionRefusedError"
+
+    monkeypatch.setattr(site_server, "_docker", fake_docker)
+    monkeypatch.setattr(site_server, "_http_ping", fake_ping)
+    out = run(site_server._wait_healthy(8800, "demo"))
+    assert "crashing" in out
+    assert "exit code 0" in out

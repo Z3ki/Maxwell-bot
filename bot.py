@@ -2595,6 +2595,24 @@ class TokenBudgetTracker:
         }
 
 
+def _prepare_tool_params(name: str, params: dict | None) -> dict:
+    """Drop kwargs that collide with ``tool.execute(message, **params)``.
+
+    Models alias ``send_message`` as ``message`` and then pass ``message=``
+    as the body. That becomes ``execute(discord_message, message=...)``
+    which TypeErrors. Same for a leftover ``self``.
+    """
+    out = dict(params or {})
+    leftover_message = out.pop("message", None)
+    out.pop("self", None)
+    if name == "send_message" and not str(out.get("content") or "").strip():
+        for alt in (leftover_message, out.pop("text", None), out.pop("body", None)):
+            if alt not in (None, ""):
+                out["content"] = alt
+                break
+    return out
+
+
 class MaxwellBot(commands.Bot):
     """AI-powered Discord bot."""
 
@@ -10707,6 +10725,11 @@ class MaxwellBot(commands.Bot):
         retried as a plain ``channel.send`` so the reply still lands.
         """
         await self._respect_slowmode(channel)
+        # Never forward a second `content`/`file` into discord.py — send()
+        # takes those as keywords, and a leaked kwarg becomes
+        # "got multiple values for keyword argument 'content'".
+        kwargs.pop("content", None)
+        kwargs.pop("file", None)
         stickers = kwargs.pop("stickers", None)
         if reply_to is not None:
             # Catch Forbidden (no perms) and every flavour of "the parent
@@ -13726,6 +13749,7 @@ class MaxwellBot(commands.Bot):
         reasoning, params = extract_reasoning(params)
         # Re-strip server-only _-keys AFTER extract so reasoning stays out too.
         params = {k: v for k, v in params.items() if not str(k).startswith("_")}
+        params = _prepare_tool_params(name, params)
         result_text = ""
         try:
             plugin_manager = getattr(self, "plugin_manager", None)
@@ -17040,6 +17064,22 @@ async def main():
         if not bot.config.DISCORD_TOKEN:
             raise RuntimeError("DISCORD_TOKEN is not configured")
         await bot.start(bot.config.DISCORD_TOKEN)
+    except discord.LoginFailure:
+        persona = str(getattr(bot, "_persona_type", "") or os.getenv("BOT_PERSONA_TYPE", "") or "")
+        which = (
+            "GF_DISCORD_TOKEN"
+            if persona in {"mommy_gf", "gf", "mommy", "luna", "mommygf"}
+            else "DISCORD_TOKEN"
+        )
+        logger.error(
+            "Discord rejected the token (%s). Not retrying in a tight loop — "
+            "update it in .env and restart. Sleeping 30s so a process manager "
+            "cannot 401-flood Discord.",
+            which,
+        )
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.sleep(30)
+        raise SystemExit(2) from None
     except KeyboardInterrupt:
         pass
     finally:

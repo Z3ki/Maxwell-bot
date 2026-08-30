@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import tempfile
 from contextlib import suppress
 from pathlib import Path
@@ -345,19 +346,66 @@ async def check_assets(urls: list[str]) -> list[str]:
     return errors
 
 
-async def _read_devtools_port(profile: str, proc: asyncio.subprocess.Process) -> int:
-    port_path = os.path.join(profile, "DevToolsActivePort")
-    for _ in range(50):
+def _free_loopback_port() -> int:
+    """Pick a local TCP port for Chromium's debugger.
+
+    Snap Chromium remaps ``/tmp``, so ``--remote-debugging-port=0`` writes
+    ``DevToolsActivePort`` somewhere Python cannot see. Binding the port
+    ourselves and polling ``/json/version`` over loopback avoids that.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+async def _wait_devtools(port: int, proc: asyncio.subprocess.Process, *, timeout: float = 10.0) -> str:
+    """Return a *page* target websocket URL once Chromium is listening.
+
+    ``/json/version`` exposes the browser-level debugger, which rejects
+    ``Runtime.enable``. Page targets from ``/json/list`` (or ``/json/new``)
+    are the ones that speak the page CDP methods we need.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    last = "timeout"
+    http_timeout = aiohttp.ClientTimeout(total=0.8, connect=0.4)
+    while asyncio.get_running_loop().time() < deadline:
         if proc.returncode is not None:
             raise RuntimeError("chromium exited before opening DevTools")
-        if os.path.isfile(port_path):
-            try:
-                first = open(port_path, encoding="utf-8").readline().strip()
-                return int(first)
-            except (OSError, ValueError):
-                pass
-        await asyncio.sleep(0.1)
-    raise RuntimeError("chromium never wrote DevToolsActivePort")
+        try:
+            async with aiohttp.ClientSession(timeout=http_timeout) as session:
+                async with session.get(f"http://127.0.0.1:{port}/json/list") as resp:
+                    targets = await resp.json(content_type=None)
+                if isinstance(targets, list):
+                    for target in targets:
+                        if not isinstance(target, dict):
+                            continue
+                        if target.get("type") not in {"page", "tab"}:
+                            continue
+                        ws_url = str(target.get("webSocketDebuggerUrl") or "")
+                        if ws_url:
+                            return ws_url
+                async with session.put(
+                    f"http://127.0.0.1:{port}/json/new?about:blank"
+                ) as resp:
+                    created = await resp.json(content_type=None)
+                if isinstance(created, dict):
+                    ws_url = str(created.get("webSocketDebuggerUrl") or "")
+                    if ws_url:
+                        return ws_url
+            last = "no page target"
+        except Exception as exc:
+            last = f"{type(exc).__name__}: {exc}"
+        await asyncio.sleep(0.15)
+    raise RuntimeError(f"chromium DevTools did not listen on {port} ({last})")
+
+
+async def _kill_proc(proc: asyncio.subprocess.Process | None) -> None:
+    if proc is None or proc.returncode is not None:
+        return
+    with suppress(Exception):
+        os.killpg(proc.pid, signal.SIGKILL)
+    with suppress(Exception):
+        await asyncio.wait_for(proc.wait(), timeout=3)
 
 
 async def probe_browser(
@@ -372,53 +420,55 @@ async def probe_browser(
     if not binary:
         return {"browser_error": "no chromium/chrome on PATH"}
     wait = max(0.2, min(float(wait or 2.0), 15.0))
-    profile = tempfile.mkdtemp(prefix="maxwell-site-test-")
-    proc: asyncio.subprocess.Process | None = None
     result: dict[str, Any] = {"browser": os.path.basename(binary)}
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            binary,
-            "--headless=new",
-            "--disable-gpu",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-extensions",
-            "--disable-background-networking",
-            "--hide-scrollbars",
-            "--window-size=1280,800",
-            "--remote-debugging-port=0",
-            "--remote-allow-origins=*",
-            f"--user-data-dir={profile}",
-            "about:blank",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        port = await _read_devtools_port(profile, proc)
-        timeout = aiohttp.ClientTimeout(total=25, connect=5)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(f"http://127.0.0.1:{port}/json/version") as resp:
-                meta = await resp.json(content_type=None)
-            ws_url = str(meta.get("webSocketDebuggerUrl") or "")
-            if not ws_url:
-                raise RuntimeError("chromium did not expose a debugger websocket")
-            async with session.ws_connect(ws_url, heartbeat=10) as ws:
-                collected = await _cdp_session(
-                    ws, url, wait=wait, screenshot=screenshot
-                )
-            result.update(collected)
-        return result
-    except Exception as exc:
-        logger.info("site_test browser probe failed: %s", exc)
-        result["browser_error"] = f"{type(exc).__name__}: {exc}"
-        return result
-    finally:
-        if proc is not None and proc.returncode is None:
-            with suppress(Exception):
-                os.killpg(proc.pid, signal.SIGKILL)
-            with suppress(Exception):
-                await asyncio.wait_for(proc.wait(), timeout=3)
-        shutil.rmtree(profile, ignore_errors=True)
+    last_error: Exception | None = None
+    common_flags = (
+        "--disable-gpu",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-extensions",
+        "--disable-background-networking",
+        "--hide-scrollbars",
+        "--window-size=1280,800",
+        "--remote-allow-origins=*",
+    )
+    # Snap Chromium often dies on --headless=new with a private /tmp; the
+    # older --headless flag still speaks CDP. Try new first, then old.
+    for headless in ("--headless=new", "--headless"):
+        profile = tempfile.mkdtemp(prefix="maxwell-site-test-")
+        proc: asyncio.subprocess.Process | None = None
+        try:
+            port = _free_loopback_port()
+            proc = await asyncio.create_subprocess_exec(
+                binary,
+                headless,
+                *common_flags,
+                f"--remote-debugging-port={port}",
+                f"--user-data-dir={profile}",
+                "about:blank",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            ws_url = await _wait_devtools(port, proc)
+            timeout = aiohttp.ClientTimeout(total=25, connect=5)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.ws_connect(ws_url, heartbeat=10) as ws:
+                    collected = await _cdp_session(
+                        ws, url, wait=wait, screenshot=screenshot
+                    )
+                result.update(collected)
+            return result
+        except Exception as exc:
+            last_error = exc
+            logger.info("site_test browser probe failed (%s): %s", headless, exc)
+        finally:
+            await _kill_proc(proc)
+            shutil.rmtree(profile, ignore_errors=True)
+    result["browser_error"] = (
+        f"{type(last_error).__name__}: {last_error}" if last_error else "chromium probe failed"
+    )
+    return result
 
 
 async def _cdp_session(
@@ -561,7 +611,7 @@ async def _cdp_session(
                 logger.info("site_test screenshot failed: %s", exc)
     finally:
         reader_task.cancel()
-        with suppress(Exception):
+        with suppress(asyncio.CancelledError, Exception):
             await reader_task
 
     out: dict[str, Any] = {

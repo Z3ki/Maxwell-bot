@@ -255,3 +255,55 @@ def test_send_message_explicit_channel_id():
 
     asyncio.run(run())
 
+
+def test_prepare_tool_params_maps_message_alias_to_content():
+    from bot import _prepare_tool_params
+
+    assert _prepare_tool_params("send_message", {"message": "hi"})["content"] == "hi"
+    assert "message" not in _prepare_tool_params("send_message", {"message": "hi"})
+    kept = _prepare_tool_params("send_message", {"content": "keep", "message": "drop"})
+    assert kept["content"] == "keep"
+    assert "message" not in kept
+    assert _prepare_tool_params("send_message", {"text": "yo"})["content"] == "yo"
+    # Other tools: just drop the colliding key, don't rename it.
+    shell = _prepare_tool_params("shell", {"command": "ls", "message": "nope"})
+    assert shell == {"command": "ls"}
+
+
+def test_send_message_does_not_forward_stray_kwargs_to_discord():
+    class Chan:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, text, **kwargs):
+            if "content" in kwargs:
+                raise TypeError("got multiple values for keyword argument 'content'")
+            stray = set(kwargs) - {"stickers"}
+            if stray:
+                raise TypeError(f"stray kwargs {stray}")
+            self.sent.append(text)
+
+    class Msg:
+        def __init__(self):
+            self.channel = Chan()
+            self.replies = []
+
+        async def reply(self, text, **kwargs):
+            if "content" in kwargs:
+                raise TypeError("got multiple values for keyword argument 'content'")
+            stray = set(kwargs) - {"stickers"}
+            if stray:
+                raise TypeError(f"stray kwargs {stray}")
+            self.replies.append(text)
+
+    async def run():
+        tool = SendMessageTool(SimpleNamespace())
+        msg = Msg()
+        result = await tool.execute(
+            msg, content="hi", reasoning="think", tts=True, body="nope"
+        )
+        assert "__MESSAGE_SENT__" in result
+        assert msg.replies == ["hi"]
+
+    asyncio.run(run())
+

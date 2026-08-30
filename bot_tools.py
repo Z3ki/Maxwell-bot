@@ -6248,6 +6248,8 @@ class SendMessageTool(Tool):
                         extra = {}
                         if chunk_stickers:
                             extra["stickers"] = chunk_stickers
+                        extra.pop("content", None)
+                        extra.pop("file", None)
                         if callable(send_fn):
                             sent = await send_fn(
                                 target_channel,

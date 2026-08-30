@@ -65,6 +65,11 @@ MAX_FILES = 20
 MAX_ENV_KEYS = 25
 MAX_ENV_VALUE = 4_000
 START_TIMEOUT = 25.0
+# How long a crash-loop must last before we give up. RestartCount stays
+# > 0 forever after a single restart, so treating it as fatal on the first
+# inspect false-failed apps that came up healthy on the second try — and
+# tore them down before docker flushed any logs.
+CRASH_GRACE_SECONDS = 1.5
 _LIFECYCLE_LOCK = asyncio.Lock()
 
 ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
@@ -694,6 +699,7 @@ async def _wait_healthy(port: int, slug: str) -> str:
     """Poll until the backend answers, or say why it never did."""
     deadline = asyncio.get_running_loop().time() + START_TIMEOUT
     last = "timeout"
+    crash_since: float | None = None
     while asyncio.get_running_loop().time() < deadline:
         code, out, _err = await _docker(
             "inspect",
@@ -712,15 +718,24 @@ async def _wait_healthy(port: int, slug: str) -> str:
         running, restarting = parts[0] == "true", parts[1] == "true"
         restarts = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
         exit_code = parts[3] if len(parts) > 3 else "?"
-        # --restart unless-stopped means a broken app flaps instead of staying
-        # dead, so a restart count is the signal that it is crash-looping.
-        if restarts > 0 or restarting:
-            return f"it keeps crashing on startup (exit code {exit_code})"
+        now = asyncio.get_running_loop().time()
         if running:
             last = await _http_ping(port)
             if last == "ok":
+                # RestartCount is sticky. A container that died once and then
+                # came up serving HTTP is healthy.
                 return "ok"
+            crash_since = None
+        elif restarts > 0 or restarting:
+            if crash_since is None:
+                crash_since = now
+            elif now - crash_since >= CRASH_GRACE_SECONDS:
+                return f"it keeps crashing on startup (exit code {exit_code})"
+        else:
+            crash_since = None
         await asyncio.sleep(0.4)
+    if crash_since is not None:
+        return f"it keeps crashing on startup (exit code {exit_code})"
     return last
 
 
@@ -828,6 +843,13 @@ async def _start_unlocked(
         tail = await logs(data_dir, slug, lines=30)
         with contextlib.suppress(Exception):
             await _remove_container(slug)
+        if not tail or tail.strip() in {"(no output yet)", ""}:
+            tail = (
+                "(no output yet) — app.py returned without printing. "
+                "It must start a server (waitress/uvicorn) on 0.0.0.0:$PORT "
+                "and stay in the foreground; falling off the end of the file "
+                "exits 0 and Docker restarts it."
+            )
         raise SiteServerError(
             f"the backend never came up: {health}.\n"
             "It must listen on 0.0.0.0:$PORT and stay in the foreground.\n"

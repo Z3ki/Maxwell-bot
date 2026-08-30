@@ -75,6 +75,9 @@ const apps = [
 		max_memory_restart: "1G",
 		kill_timeout: 15000, // 15s for graceful shutdown (memory/REM flush)
 		kill_signal: "SIGTERM",
+		// Exit 2 is LoginFailure — a bad token will never heal by restarting.
+		stop_exit_codes: [2],
+		exp_backoff_restart_delay: 2000,
 		env: {
 			PYTHONUNBUFFERED: "1",
 		},
@@ -138,6 +141,10 @@ const apps = [
 		max_memory_restart: "1G",
 		kill_timeout: 15000,
 		kill_signal: "SIGTERM",
+		stop_exit_codes: [2],
+		exp_backoff_restart_delay: 2000,
+		max_restarts: 10,
+		min_uptime: 10000,
 		env: {
 			PYTHONUNBUFFERED: "1",
 			DISCORD_TOKEN: gfToken,
