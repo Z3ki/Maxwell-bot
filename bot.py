@@ -12965,11 +12965,10 @@ class MaxwellBot(commands.Bot):
                 # Catalog already lives in _tool_system_prompt (XML mode).
                 # Only teach the bare-JSON wire format here.
                 disabled = set(self._control.get("disabled_tools", []) or [])
-                compatible = MaxwellBot._compatible_tool_names(self, platform)
                 names = [
                     name
-                    for name in self.tools
-                    if name in compatible and name not in disabled
+                    for name in self._turn_tool_names(platform, message, content)
+                    if name not in disabled
                 ]
                 tool_list = ", ".join(names) if names else "(none)"
                 snip = (
@@ -13625,6 +13624,40 @@ class MaxwellBot(commands.Bot):
         trace alongside the result, win or fail. This is the native (OpenAI
         function-calling) path; the XML path mirrors the same logic.
         """
+        # Resolve hallucinated or alternate tool names from conversation context
+        _TOOL_ALIASES: dict[str, str] = {
+            "local_shell_call": "shell",
+            "bash": "shell",
+            "terminal": "shell",
+            "exec": "shell",
+            "execute": "shell",
+            "run_command": "shell",
+            "command": "shell",
+            "web": "web_search",
+            "duckduckgo": "web_search",
+            "google": "web_search",
+            "search": "web_search",
+            "ddg": "web_search",
+            "browse": "fetch_url",
+            "scrape": "fetch_url",
+            "curl": "fetch_url",
+            "http_get": "fetch_url",
+            "fetch": "fetch_url",
+            "generate_image": "image_generator",
+            "gen_image": "image_generator",
+            "dalle": "image_generator",
+            "flux": "image_generator",
+            "image": "image_generator",
+            "msg": "send_message",
+            "message": "send_message",
+            "dm": "send_message",
+        }
+        raw_name = name
+        if name not in self.tools and name in _TOOL_ALIASES:
+            resolved = _TOOL_ALIASES[name]
+            logger.info("Aliasing hallucinated/alternate tool name %r -> %r", name, resolved)
+            name = resolved
+
         # Extract reasoning first. It is NOT a real tool argument; tools must
         # never receive it (some tools forward **kwargs straight to an API and
         # would happily post our internal field into some third-party request).
@@ -13633,6 +13666,26 @@ class MaxwellBot(commands.Bot):
         params = {k: v for k, v in params.items() if not str(k).startswith("_")}
         result_text = ""
         try:
+            plugin_manager = getattr(self, "plugin_manager", None)
+            plugin_tool = (
+                plugin_manager.get_tool(name)
+                if plugin_manager is not None
+                else None
+            )
+            plugin_allowed = False
+            if plugin_tool is not None:
+                author_id = getattr(
+                    getattr(message, "author", None), "id", None
+                )
+                try:
+                    plugin_allowed = name in plugin_manager.get_available_tools(
+                        user_id=author_id,
+                        platform=self._message_tool_platform(message),
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to check access for plugin tool %s", name
+                    )
             if name == "send_message" and isinstance(params.get("content"), str):
                 params = dict(params)
                 content = params.get("content", "")
@@ -13646,18 +13699,11 @@ class MaxwellBot(commands.Bot):
                 params["content"] = content
             if name in disabled:
                 result_text = "Error - tool is disabled"
-            elif name not in compatible and not (
-                hasattr(self, "plugin_manager")
-                and self.plugin_manager
-                and self.plugin_manager.get_tool(name)
-            ):
-                result_text = "Error - tool is not available on this platform"
-            elif name not in self.tools and not (
-                hasattr(self, "plugin_manager")
-                and self.plugin_manager
-                and self.plugin_manager.get_tool(name)
-            ):
-                result_text = "Error - unknown tool"
+            elif name not in compatible and not plugin_allowed:
+                result_text = f"Error - tool '{name}' is not available on this platform"
+            elif name not in self.tools and not plugin_allowed:
+                logger.warning("Unknown tool called: %r (original: %r)", name, raw_name)
+                result_text = f"Error - unknown tool '{name}'"
             elif self._tool_breaker.is_open(name):
                 result_text = (
                     "Error - tool temporarily disabled (too many recent failures)"
@@ -13671,8 +13717,8 @@ class MaxwellBot(commands.Bot):
                 # above. This is the single enforcement point instead of per-tool
                 # checks that previously read the model-controlled flag.
                 tool = self.tools.get(name)
-                if tool is None and hasattr(self, "plugin_manager") and self.plugin_manager:
-                    tool = self.plugin_manager.get_tool(name)
+                if tool is None and plugin_allowed:
+                    tool = plugin_tool
                 if (
                     getattr(tool, "is_destructive", False)
                     and self.is_message_tainted(message)
@@ -14498,13 +14544,18 @@ class MaxwellBot(commands.Bot):
         names = {n for n in compatible if n not in disabled}
 
         # Include enabled plugin tools for this user or global
-        if hasattr(self, "plugin_manager") and self.plugin_manager is not None:
+        plugin_manager = getattr(self, "plugin_manager", None)
+        if plugin_manager is not None:
             author_id = None
             if message is not None:
                 author_id = getattr(getattr(message, "author", None), "id", None)
-            plugin_tools = self.plugin_manager.get_available_tools(
-                user_id=author_id, platform=platform
-            )
+            try:
+                plugin_tools = plugin_manager.get_available_tools(
+                    user_id=author_id, platform=platform
+                )
+            except Exception:
+                logger.exception("Failed to load per-turn plugin tool names")
+                plugin_tools = {}
             for pt_name in plugin_tools:
                 if pt_name not in disabled:
                     names.add(pt_name)
@@ -14516,6 +14567,33 @@ class MaxwellBot(commands.Bot):
             if "send_message" in lean:
                 return lean
         return names
+
+    def _tools_for_turn(self, platform: str, message=None) -> dict[str, Any]:
+        """Return built-in tools plus plugins enabled for this caller.
+
+        Plugin tools are intentionally not copied into ``self.tools`` because
+        their availability is user-scoped. Callers that build schemas or
+        descriptions must nevertheless use the same per-turn view as
+        ``_turn_tool_names``; otherwise an enabled plugin can be dispatched
+        only if a model fabricates its function name.
+        """
+        tools = dict(getattr(self, "tools", {}) or {})
+        manager = getattr(self, "plugin_manager", None)
+        if manager is None:
+            return tools
+        author_id = getattr(getattr(message, "author", None), "id", None)
+        try:
+            # A plugin must never shadow a built-in tool. Dispatch gives the
+            # built-in registry precedence, so the schema must describe that
+            # same implementation or the model can receive the wrong contract.
+            for name, tool in manager.get_available_tools(
+                user_id=author_id,
+                platform=platform,
+            ).items():
+                tools.setdefault(name, tool)
+        except Exception:
+            logger.exception("Failed to load per-turn plugin tools")
+        return tools
 
     def _native_tools_enabled(self) -> bool:
         control = getattr(self, "_control", {}) or {}
@@ -14556,29 +14634,32 @@ class MaxwellBot(commands.Bot):
     def _build_openai_tools(
         self, platform: str = "discord", *, message=None, content: str | None = None
     ) -> list[dict]:
-        if not self.tools or not self._native_tools_enabled():
+        # Use the class implementation explicitly: a few lightweight callers
+        # (and tests) bind this method onto a SimpleNamespace rather than a
+        # fully constructed MaxwellBot instance.
+        tools = MaxwellBot._tools_for_turn(self, platform, message)
+        if not tools or not self._native_tools_enabled():
             return []
         # Chat turns carry the conversational subset; anything that asks for an
         # action (or a more_tools call) gets the whole catalog. See
         # _lean_chat_turn / _turn_tool_names.
         allowed = MaxwellBot._turn_tool_names(self, platform, message, content)
-        return build_openai_tools(self.tools, allowed_names=allowed)
+        return build_openai_tools(tools, allowed_names=allowed)
 
     def _tool_system_prompt(
         self, platform: str = "discord", *, message=None, content: str | None = None
     ) -> str:
-        if not self.tools or not self._control.get("tools_enabled", True):
+        # Keep this compatible with the same lightweight bot doubles accepted
+        # by _turn_tool_names and _build_openai_tools.
+        tools = MaxwellBot._tools_for_turn(self, platform, message)
+        if not tools or not self._control.get("tools_enabled", True):
             return ""
         allowed = MaxwellBot._turn_tool_names(self, platform, message, content)
-        names = [name for name in self.tools if name in allowed]
+        names = [name for name in tools if name in allowed]
         if not names:
             return ""
         disabled = set(self._control.get("disabled_tools", []) or [])
-        lean = allowed != {
-            n
-            for n in MaxwellBot._compatible_tool_names(self, platform)
-            if n not in disabled
-        }
+        lean = allowed != {n for n in tools if n not in disabled}
         # Group the catalog by result contract instead of dumping one flat
         # list. Same tokens, but the model reads "these hand output back,
         # those don't" as structure rather than having to remember it
@@ -14610,7 +14691,7 @@ class MaxwellBot(commands.Bot):
             )
         else:
             descriptions = [
-                f"{name}: {self.tools[name].get_description()}{result_contract(name)}"
+                f"{name}: {tools[name].get_description()}{result_contract(name)}"
                 for name in names
             ]
             header = (
