@@ -363,8 +363,6 @@ _TOOL_CLASS_HINTS: tuple[tuple[str, str], ...] = (
     ("browse", "web"),
     ("url", "web"),
     ("youtube", "web"),
-    ("sub_agent", "agent"),
-    ("subagent", "agent"),
 )
 
 

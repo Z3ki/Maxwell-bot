@@ -9,6 +9,8 @@ are exercised in the live bot.
 from __future__ import annotations
 
 
+from types import SimpleNamespace
+
 import chess
 import pytest
 
@@ -170,3 +172,140 @@ def test_endgame_detection():
     assert cg._endgame(b) is True
     b2 = chess.Board("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
     assert cg._endgame(b2) is False
+
+
+def _user(uid, *, name, display_name=None, nick=None):
+    return SimpleNamespace(
+        id=uid,
+        name=name,
+        display_name=display_name or name,
+        global_name=display_name or name,
+        nick=nick,
+    )
+
+
+def _msg(author, *, mentions=None, channel_id="c1", members=None):
+    guild = SimpleNamespace(
+        members=list(members or []),
+        get_member=lambda uid: next(
+            (m for m in (members or []) if int(m.id) == int(uid)), None
+        ),
+        get_user=lambda uid: next(
+            (m for m in (members or []) if int(m.id) == int(uid)), None
+        ),
+        get_member_named=lambda n: next(
+            (
+                m
+                for m in (members or [])
+                if str(getattr(m, "name", "")).lower() == str(n).lower()
+                or str(getattr(m, "display_name", "")).lower() == str(n).lower()
+            ),
+            None,
+        ),
+    )
+    return SimpleNamespace(
+        author=author,
+        mentions=list(mentions or []),
+        channel=SimpleNamespace(id=channel_id, guild=guild, recipients=[]),
+        guild=guild,
+    )
+
+
+def test_chess_bot_name_uses_live_persona():
+    import bot_tools
+
+    assert bot_tools._chess_bot_name(None) == "Maxwell"
+    assert bot_tools._chess_bot_name(SimpleNamespace(bot_name="Uni")) == "Uni"
+    assert (
+        bot_tools._chess_bot_name(
+            SimpleNamespace(bot_name=None, user=SimpleNamespace(display_name="Max"))
+        )
+        == "Max"
+    )
+
+
+def test_chess_resolve_player_defaults_to_asker():
+    import bot_tools
+
+    alice = _user(1, name="alice", display_name="Alice")
+    bot = _user(99, name="uni", display_name="Uni")
+    msg = _msg(alice)
+    uid, name = bot_tools._chess_resolve_player(msg, None, SimpleNamespace(user=bot, bot_name="Uni"))
+    assert uid == "1"
+    assert name == "Alice"
+
+
+def test_chess_resolve_player_picks_the_mentioned_human():
+    import bot_tools
+
+    alice = _user(1, name="alice", display_name="Alice")
+    bob = _user(2, name="bob", display_name="Bob")
+    bot = _user(99, name="uni", display_name="Uni")
+    msg = _msg(alice, mentions=[bot, bob])
+    uid, name = bot_tools._chess_resolve_player(
+        msg, None, SimpleNamespace(user=bot, bot_name="Uni")
+    )
+    assert uid == "2"
+    assert name == "Bob"
+
+
+def test_chess_resolve_player_explicit_name_and_mention():
+    import bot_tools
+
+    alice = _user(1, name="alice", display_name="Alice")
+    bob = _user(2, name="bob", display_name="Bob")
+    bot = _user(99, name="uni", display_name="Uni")
+    host = SimpleNamespace(user=bot, bot_name="Uni")
+    msg = _msg(alice, mentions=[bob], members=[alice, bob, bot])
+    uid, name = bot_tools._chess_resolve_player(msg, "Bob", host)
+    assert uid == "2" and name == "Bob"
+    uid, name = bot_tools._chess_resolve_player(msg, "<@2>", host)
+    assert uid == "2" and name == "Bob"
+    uid, name = bot_tools._chess_resolve_player(msg, "2", host)
+    assert uid == "2"
+
+
+def test_chess_resolve_player_refuses_the_bot_as_opponent():
+    import bot_tools
+    import pytest
+
+    alice = _user(1, name="alice", display_name="Alice")
+    bot = _user(99, name="uni", display_name="Uni")
+    host = SimpleNamespace(user=bot, bot_name="Uni")
+    msg = _msg(alice, mentions=[bot], members=[alice, bot])
+    with pytest.raises(ValueError, match="cannot play against Uni"):
+        bot_tools._chess_resolve_player(msg, "Uni", host)
+
+
+def test_chess_state_text_and_resign_use_bot_name():
+    import bot_tools
+
+    g = cg.ChessGame(
+        game_id="x",
+        channel_id="c",
+        player_id="p",
+        player_name="Alice",
+        bot_color=True,
+        started_at="",
+    )
+    text = bot_tools._chess_state_text(g, bot_name="Uni")
+    assert "Uni=white" in text
+    assert "Maxwell=" not in text
+    assert "It is Uni's move." in text
+    host = SimpleNamespace(bot_name="Uni")
+    assert bot_tools._chess_is_bot_resign("uni", host)
+    assert bot_tools._chess_is_bot_resign("bot", host)
+    assert not bot_tools._chess_is_bot_resign("maxwell", host)
+    assert bot_tools._chess_is_bot_resign(
+        "maxwell", SimpleNamespace(bot_name="Maxwell")
+    )
+
+
+def test_chess_start_description_uses_bot_name():
+    import bot_tools
+
+    tool = bot_tools.ChessStartTool(SimpleNamespace(bot_name="Uni"))
+    desc = tool.get_description()
+    assert "Uni" in desc
+    assert "Maxwell" not in desc
+    assert "opponent=" in desc

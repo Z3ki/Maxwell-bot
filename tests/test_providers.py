@@ -101,6 +101,13 @@ class FakeReasoningOnlyResponse(FakeResponse):
         }
 
 
+class FakeEmptyResponse(FakeResponse):
+    """HTTP 200 with a valid assistant envelope but no usable output."""
+
+    def _json_body(self):
+        return {"choices": [{"message": {"role": "assistant", "content": ""}}]}
+
+
 class FakeErrorResponse(FakeResponse):
     def __init__(self, status, text):
         self.status = status
@@ -259,6 +266,49 @@ def test_generate_chat_completion_retries_primary_before_fallback():
     ]
     assert session.payloads[0]["model"] == "primary-model"
     assert session.payloads[1]["model"] == "primary-model"
+
+
+def test_empty_200_gets_a_rotating_non_streaming_recovery_round():
+    """A blank 200 after normal retries must not immediately reach the user."""
+    provider = OllamaProvider(
+        "http://primary.test/v1",
+        "primary-model",
+        10,
+        0.5,
+        fallback_base_url="http://fallback.test/v1",
+        fallback_model="fallback-model",
+        empty_response_retries=1,
+    )
+    provider.available = True
+    session = FakeSequenceSession(
+        [
+            FakeEmptyResponse(),
+            FakeEmptyResponse(),
+            FakeEmptyResponse(),
+            FakeResponse(),
+        ]
+    )
+    provider._session = session
+
+    async def no_wait_retry(attempt, *args, **kwargs):
+        return attempt < 3
+
+    provider._retry_after_attempt = no_wait_retry
+
+    async def run():
+        return await provider.generate_chat_completion(
+            [{"role": "user", "content": "hi"}]
+        )
+
+    message = asyncio.run(run())
+    assert message["content"] == "ok"
+    assert session.urls == [
+        "http://primary.test/v1/chat/completions",
+        "http://primary.test/v1/chat/completions",
+        "http://fallback.test/v1/chat/completions",
+        "http://primary.test/v1/chat/completions",
+    ]
+    assert session.payloads[3]["stream"] is False
 
 
 def test_prefer_fallback_routes_first_request_to_fallback():
@@ -731,7 +781,13 @@ def test_reasoning_only_not_promoted_for_non_deepseek_models():
     # Discord as the user-visible reply. Non-deepseek models must NOT have
     # reasoning promoted — it falls through to the empty-response path instead
     # (leaking the scratchpad beats no answer at all, never sending it).
-    provider = OllamaProvider("http://example.test", "grok-4.6", 10, 0.5)
+    provider = OllamaProvider(
+        "http://example.test",
+        "grok-4.6",
+        10,
+        0.5,
+        empty_response_retries=0,
+    )
     provider.available = True
     session = FakeSession(FakeReasoningOnlyResponse())
     provider._session = session

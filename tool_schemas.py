@@ -502,49 +502,6 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         },
         ["command"],
     ),
-    "sub_agent_message": _obj(
-        {
-            "run_id": _str(
-                "The run_id the sub-agent gave you when it started. Find it in "
-                "the 'Started sub-agent (run X)' reply."
-            ),
-            "text": _str("Message to the sub-agent: a question, a requirement, or a steer."),
-        },
-        ["run_id", "text"],
-    ),
-    "sub_agent_status": _obj(
-        {
-            "run_id": _str(
-                "Optional. The run_id to inspect. Omit to list every live sub-agent "
-                "run (status, step, elapsed) so you can see what's in flight."
-            ),
-        }
-    ),
-    "sub_agent": _obj(
-        {
-            "task": _str(
-                "The complete task for the sub-agent. It cannot ask "
-                "questions, so include the goal, any constraints, and how it "
-                "should verify the result."
-            ),
-            "workdir": _str("Optional short name for the scratch directory"),
-            "max_steps": _int("Optional cap on sub-agent steps (default 100, budget not requirement — finish early when done)"),
-            "mode": _str(
-                "'background' (default for heavy work) returns immediately and "
-                "the sub-agent runs on its own, posting the result when done — "
-                "the turn is not blocked. 'foreground' waits here and hands the "
-                "report back to you now. Use background unless you genuinely "
-                "need the report to make the next decision this turn."
-            ),
-            "deliver": _str(
-                "Where to post the result. 'channel' (default) posts to the "
-                "channel where it was asked; 'dm' sends it to the person who "
-                "asked, in a direct message. Use 'dm' when a long result would "
-                "clutter a busy channel or when the work is private to them."
-            ),
-        },
-        ["task"],
-    ),
     "fetch_url": _obj(
         {
             "url": _str("URL to fetch"),
@@ -720,26 +677,31 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         ["action"],
     ),
 
-    # ---- Chess (Maxwell plays real chess against whoever starts a game) ----
+    # ---- Chess (this bot plays real chess against a chosen opponent) ----
     "chess_start": _obj(
         {
-            "bot_side": _str(
-                "white | black | auto (default white). The side Maxwell plays. "
-                "The player gets the other colour."
+            "opponent": _str(
+                "Who plays against this bot: a mention, Discord user id, or "
+                "display name. Omit to play the person who asked, or the "
+                "single @mentioned human in the message."
             ),
-            "depth": _int("Search depth for Maxwell's engine moves (1-4, default 3)"),
+            "bot_side": _str(
+                "white | black | auto (default white). The side this bot plays. "
+                "The opponent gets the other colour."
+            ),
+            "depth": _int("Search depth for this bot's engine moves (1-4, default 3)"),
         }
     ),
     "chess_move": _obj(
         {
             "move": _str(
                 "The move to play, in SAN (e4, Nf3, O-O, exd5, Qh5) or UCI "
-                "(e2e4, e7e8q). If it is Maxwell's turn and move is omitted, "
-                "Maxwell picks a move itself."
+                "(e2e4, e7e8q). If it is this bot's turn and move is omitted, "
+                "the engine picks a move itself."
             ),
             "respond": _bool(
-                "After a player move, automatically play Maxwell's reply in the "
-                "same call (default true). Set false to play Maxwell's move "
+                "After a player move, automatically play this bot's reply in the "
+                "same call (default true). Set false to play the bot's move "
                 "separately."
             ),
         }
@@ -748,7 +710,7 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     "chess_resign": _obj(
         {
             "side": _str(
-                "who resigns: maxwell | player (optional; default player)"
+                "who resigns: this bot's name | player (optional; default player)"
             ),
         }
     ),
@@ -803,9 +765,6 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "see_video",
         "youtube",
         "shell",
-        "sub_agent",
-        "sub_agent_message",
-        "sub_agent_status",
         "list_admin_servers",
         "create_category",
         "create_channel",
@@ -1758,7 +1717,7 @@ def recover_text_tool_calls(
 
 
 # ── tool-loop transcript bounds ──────────────────────────────────────────
-# Every agent loop in this repo (Discord, Telegram, sub_agent) replays the
+# Every agent loop in this repo (Discord, Telegram) replays the
 # whole assistant/tool transcript on every round, so an unbounded tail is how a
 # turn walks off the end of the context window mid-loop. Per-result truncation
 # is not enough on its own: 24 rounds of a 32k-capped result is still ~768k

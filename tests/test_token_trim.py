@@ -103,7 +103,6 @@ def test_action_turn_offers_every_registered_tool():
     assert "shell" in names
     assert "youtube" in names
     assert "web_search" in names
-    assert "sub_agent" not in names  # not registered on this stub
 
 
 def test_plain_chat_turn_carries_only_the_conversational_set():

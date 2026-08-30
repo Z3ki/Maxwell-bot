@@ -39,7 +39,6 @@ import uuid
 import discord
 from discord import Activity, File, Message, Status
 from tools import Tool
-import agent_events
 from captcha_solver import CaptchaSolveError
 from config import Config
 from control_defaults import parse_bool
@@ -4722,7 +4721,7 @@ class CreateSiteTool(Tool):
                 os.makedirs(img_dir, exist_ok=True)
                 # Reuse the same broad-but-safe allowlist as SendFileTool so
                 # images produced by image_generator (Discord CDN downloads)
-                # and the shell sandbox (shelldocker) / subagents can actually be
+                # and the shell sandbox (shelldocker) can actually be
                 # embedded. The old check only allowed MAXWELL_SITE_DIR, which
                 # rejected virtually every real image source (the feature was
                 # silently non-functional).
@@ -5497,7 +5496,7 @@ class WebSearchTool(Tool):
             backend = "auto"
 
         # Web search returns untrusted content. Mark the current turn as
-        # tainted so subsequent destructive tools (shell, sub_agent) prompt
+        # tainted so the subsequent destructive shell tool prompts
         # for confirmation. This is the second line of defense against
         # indirect prompt injection from search snippets.
         if self.bot is not None and hasattr(self.bot, "mark_message_tainted"):
@@ -6064,7 +6063,7 @@ class MoreToolsTool(Tool):
         return (
             "Unlock your full tool set for this turn. This turn is carrying the "
             "short conversational list; everything else — servers, moderation, "
-            "roles/channels, shell, sub_agent, sites, files, email, voice, "
+            "roles/channels, shell, sites, files, email, voice, "
             "avatar/status, memory edits — is one call away. Call this the "
             "moment you want to DO something you can't see a tool for, say what "
             "you need in `need`, and the next turn has all of them."
@@ -6409,11 +6408,7 @@ _SHELL_BLOCKED_PATTERNS = [
 async def _run_docker_cmd(
     *args: str, timeout: int = 30, output_limit: int | None = None
 ):
-    """Run one `docker` command. Returns ``((stdout, stderr), returncode)``.
-
-    Shared by every sandboxed tool — the shell and the sub-agent both need
-    exactly this and had no business each owning a copy.
-    """
+    """Run one `docker` command. Returns ``((stdout, stderr), returncode)``."""
     proc = await asyncio.create_subprocess_exec(
         "docker",
         *args,
@@ -6458,8 +6453,7 @@ async def _run_docker_cmd(
         raise
 
 
-# Image shared by the shell sandbox and the sub-agent sandbox. Built from
-# docker/Dockerfile on first use by whichever tool needs it first.
+# Image used by the shell sandbox. Built from docker/Dockerfile on first use.
 SANDBOX_IMAGE_NAME = "maxwell-shell"
 SANDBOX_DOCKERFILE_DIR = os.path.join(os.path.dirname(__file__), "docker")
 
@@ -7325,2080 +7319,6 @@ def _shorten(text, n: int) -> str:
     return t[:n] + ("…" if len(t) > n else "")
 
 
-class _SubChan:
-    """Bidirectional message relay between the main agent and a sub-agent run.
-
-    The sub-agent can push a message up (``message_main``) and the main agent
-    can push one down (``sub_agent_message``). The sub-agent's loop injects any
-    unseen main -> sub messages at the top of each step so they land in its
-    context and it can respond. Kept in-process for the life of the run.
-    """
-
-    def __init__(self, run_id: str):
-        self.run_id = run_id
-        self.msgs: list[dict] = []  # {"src": "main"|"sub", "text": str, "ts": float}
-        self.injected: set[int] = set()
-        self.target = None  # the channel/dm the run delivers to, set at run start
-        self.channel_id = ""  # originating channel, so the main agent can find runs
-        self.surfaced: set[int] = set()  # sub->main msgs already shown to Maxwell
-
-    def push(self, src: str, text: str) -> None:
-        self.msgs.append({"src": src, "text": str(text or "")[:2000], "ts": time.time()})
-
-    def unseen_main(self) -> list[tuple[int, dict]]:
-        out = []
-        for i, m in enumerate(self.msgs):
-            if m["src"] == "main" and i not in self.injected:
-                out.append((i, m))
-        return out
-
-    def mark_injected(self, indices) -> None:
-        self.injected.update(indices)
-
-    def transcript(self, limit: int = 20) -> list[dict]:
-        return list(self.msgs[-limit:])
-
-    def pending_to_main(self) -> list[tuple[int, str]]:
-        """Sub->main messages not yet surfaced to the main agent."""
-        return [
-            (i, m["text"])
-            for i, m in enumerate(self.msgs)
-            if m["src"] == "sub" and i not in self.surfaced
-        ]
-
-
-
-
-
-class SubAgentMessageTool(Tool):
-    """Main agent -> sub-agent. Push a message into a running sub-agent's inbox.
-
-    The message is injected at the top of the sub-agent's next step, so it can
-    answer it (or call finish if it changes the task). Returns the conversation
-    so far so Maxwell sees the thread. Looks up the live run via the
-    SubAgentTool instance registered on the bot.
-    """
-
-    def get_description(self) -> str:
-        return (
-            "Reply to a running sub-agent. Pass the `run_id` it gave you when it "
-            "started and `text` to send. Use it to answer a question it raised, "
-            "add a requirement, or steer a long job mid-run. Returns the "
-            "conversation so far."
-        )
-
-    async def execute(self, trigger_message: Message, **kwargs) -> str:
-        run_id = str(kwargs.get("run_id") or "").strip()
-        # Older prompts called this argument `message`. Keep accepting it,
-        # while naming the positional context `trigger_message` so a model
-        # cannot cause Python's "multiple values for argument 'message'"
-        # TypeError by passing both forms.
-        text = str(kwargs.get("text") or kwargs.get("message") or "").strip()
-        if not run_id:
-            return "error: sub_agent_message needs a `run_id`."
-        if not text:
-            return "error: sub_agent_message needs `text`."
-        sub = getattr(self.bot, "tools", {}).get("sub_agent")
-        find_chan = getattr(sub, "_find_chan", None)
-        chan = find_chan(run_id) if callable(find_chan) else None
-        if chan is None:
-            return (
-                f"error: no sub-agent with run_id {run_id} (not running and not "
-                f"recently finished; it may have ended too long ago)."
-            )
-        chan.push("main", text)
-        thread = "\n".join(
-            f"[{m['src']}] {m['text']}" for m in chan.transcript()
-        )
-        return (
-            "Sent to the sub-agent — it'll see it on the next step."
-            + ("\n\nConversation so far:\n" + thread if thread else "")
-        )
-
-
-class SubAgentStatusTool(Tool):
-    """Main agent -> inspect a sub-agent run's live status, actions and questions.
-
-    Maxwell can't see inside a running sub-agent by default — it only gets the
-    final report when the run ends. This is the window into the middle: whether
-    it's actually working, what step it's on, what it just did, what it wrote,
-    and anything it's waiting on. Complements ``sub_agent_message`` (send it a
-    message) and ``message_main`` (it DMs you). ``run_id`` inspects one run;
-    omit it to list every live run.
-    """
-
-    @staticmethod
-    def _event_line(e) -> str:
-        t = getattr(e, "type", "")
-        data = getattr(e, "data", {}) or {}
-        if t == agent_events.EV_STEP:
-            return f"step: {data.get('label') or ''}"
-        if t == agent_events.EV_TOOL_CALL:
-            return f"tool: {data.get('tool') or data.get('name') or data.get('label') or ''}"
-        if t == agent_events.EV_TOOL_RESULT:
-            return f"result: {(data.get('tail') or data.get('label') or '')[:80]}"
-        if t == agent_events.EV_NOTE:
-            return f"note: {data.get('label') or ''}"
-        if t == agent_events.EV_FINISH:
-            return f"finished: {data.get('summary') or ''}"
-        if t == agent_events.EV_ERROR:
-            return f"error: {data.get('summary') or ''}"
-        return f"{t}: {data.get('label') or ''}"
-
-    @staticmethod
-    def _lookup(bot):
-        """(sub_agent tool, event bus) for this bot, each safely Optional."""
-        sub = getattr(bot, "tools", {}).get("sub_agent")
-        return sub, agent_events.bus_for(bot)
-
-    def get_description(self) -> str:
-        return (
-            "Look inside a sub-agent run: is it actually working, what step it's "
-            "on, commands it ran, files it wrote, its latest action, and any "
-            "question it's waiting on for you. Pass `run_id` to inspect one run, "
-            "or omit it to list every live run. Use it to confirm a background "
-            "job is making progress (or caught in a loop) before trusting the "
-            "report, then steer it with `sub_agent_message(run_id, text)`."
-        )
-
-    async def execute(self, trigger_message: Message, **kwargs) -> str:
-        run_id = str(kwargs.get("run_id") or "").strip()
-        sub, bus = self._lookup(self.bot)
-        if not run_id:
-            return self._list_live(bus)
-        return self._describe_one(bus, sub, run_id)
-
-    @staticmethod
-    def _list_live(bus) -> str:
-        if bus is None:
-            return "no sub-agent telemetry on this bot (no event bus)."
-        runs = bus.snapshot(include_finished=False)
-        if not runs:
-            return "no sub-agent is running right now."
-        lines = ["Live sub-agent runs:"]
-        for d in runs:
-            lines.append(
-                f"- {d['run_id']} | {d['status']} | step {d['steps']}/"
-                f"{d['max_steps'] or '?'} | {d['elapsed_seconds']}s | "
-                f"{d['task']}"
-            )
-        lines.append("For detail pass run_id=<one of the above>.")
-        return "\n".join(lines)
-
-    @staticmethod
-    def _describe_one(bus, sub, run_id: str) -> str:
-        run = bus.get(run_id) if bus else None
-        chan = None
-        if sub is not None and callable(getattr(sub, "_find_chan", None)):
-            chan = sub._find_chan(run_id)
-        if run is None and chan is None:
-            return (
-                f"no sub-agent with run_id {run_id} (not running and not "
-                f"recently finished)."
-            )
-        lines = []
-        if run is not None:
-            d = run.as_dict()
-            lines.append(f"run_id: {run_id}")
-            lines.append(f"status: {d['status']}")
-            lines.append(f"task: {d['task']}")
-            lines.append(f"elapsed: {d['elapsed_seconds']}s")
-            lines.append(f"steps: {d['steps']}/{d['max_steps'] or '?'}")
-            lines.append(f"commands run: {d['commands_run']}")
-            lines.append(
-                "files written: " + (", ".join(d["files_written"]) or "none so far")
-            )
-            lines.append(f"last activity: {d['last_activity'] or '—'}")
-            if d.get("summary"):
-                lines.append(f"summary: {d['summary'][:200]}")
-            recent = [e for e in (run.events or [])][-8:]
-            lines.append("recent actions:")
-            if recent:
-                for e in recent:
-                    lines.append("  " + SubAgentStatusTool._event_line(e))
-            else:
-                lines.append("  (none yet)")
-        if chan is not None:
-            pending = chan.pending_to_main()
-            if pending:
-                lines.append("waiting on you (sub-agent asked):")
-                for _i, t in pending[-5:]:
-                    lines.append(f"  - {t}")
-            transcript = chan.transcript(limit=8)
-            if transcript:
-                lines.append("conversation so far:")
-                for m in transcript[-8:]:
-                    lines.append(f"  [{m['src']}] {m['text'][:160]}")
-        return "\n".join(lines)
-
-
-class SubAgentTool(Tool):
-    """Delegate a coding task to a nested Maxwell that works it to completion.
-
-    There is no external coding agent here — no `opencode` binary, no
-    container image to build. The sub-agent is Maxwell: it runs on the same
-    provider the bot already talks to, in its own scratch workdir, with a
-    deliberately small toolset (run a command, read/write/list files,
-    finish). That keeps the install requirement at "an AI model and a
-    Discord token" instead of "an AI model, a Discord token, Docker, and a
-    second agent runtime".
-
-    The loop is: ask the model -> execute the tool calls it emits inside the
-    workdir -> feed the results back -> repeat until it calls `finish`, or
-    until the step/time budget runs out. The final report goes back to the
-    main turn as the tool result.
-    """
-
-    # Writes files and runs commands: same trust class as `shell`.
-    is_destructive = True
-
-    # ─── execution sandbox ────────────────────────────────────────────
-    #
-    # The sub-agent's `run_command` used to be `bash -lc` on the host, in the
-    # bot process's own environment and working directory tree. That put the
-    # bot's `.env` — Discord token, provider API keys — one `cat` away from
-    # anything the model decided to try, and the `shell` tool next door had
-    # been in a container for months. Same trust class, same isolation.
-    #
-    # Each run gets its own container off the shared sandbox image, with the
-    # run's workspace bind-mounted and nothing else. State persists across
-    # commands within a run (an installed package, a built binary) because it
-    # is one long-lived container, and it is torn down when the run ends.
-    #
-    # `SUBAGENT_SANDBOX=host` opts back out. It is a real choice for someone
-    # running the bot in a VM they already treat as disposable, and it is why
-    # this refuses rather than silently falling back when Docker is missing:
-    # quietly downgrading isolation is how you end up thinking you are
-    # sandboxed when you are not.
-    SANDBOX_CONTAINER_PREFIX = "maxwell-subagent-"
-    SANDBOX_WORKDIR = "/home/maxwell/work"
-
-    @staticmethod
-    def _sandbox_mode() -> str:
-        """'docker' (default) or 'host'."""
-        raw = str(getattr(Config, "SUBAGENT_SANDBOX", "docker") or "docker")
-        return "host" if raw.strip().lower() in {"host", "off", "none", "0", "false"} else "docker"
-
-    # Bot tools the sub-agent may call directly on the host via ``bot_call``.
-    # Safe, productive tools for sites, files, search, and message lookups.
-    # Each still runs under its own ownership / quota checks as the requesting user.
-    _BOT_TOOLS = frozenset(
-        {
-            "create_site",
-            "edit_site",
-            "delete_site",
-            "list_sites",
-            "site_server",
-            "send_file",
-            "web_search",
-            "search_messages",
-            "fetch_url",
-        }
-    )
-
-    _SYSTEM_PROMPT = (
-        "You are Maxwell's sub-agent: a focused engineer working one task to "
-        "completion, alone, with no user to ask.\n"
-        "\n"
-        "You work inside {workdir} — a scratch directory that is yours. Every "
-        "command runs there; file paths are relative to it.\n"
-        "\n"
-        "Rules:\n"
-        "- Work in small steps: inspect, change, run, check the output.\n"
-        "- Actually verify. Run the code, the test, the linter — do not claim "
-        "something works because it looks right.\n"
-        "- You have local command execution in your workdir PLUS access to host "
-        "bot tools via `bot_call` (e.g. create_site, edit_site, list_sites, send_file, "
-        "web_search, search_messages). When tasked with making or deploying a website, "
-        "MUST build it and call `bot_call` with `create_site`/`edit_site` directly, including ALL files (HTML + CSS + JS) in the `files` param — do NOT just write `edit_payload.json` to disk and stop. Verify the result, and return the link. If you build locally instead, write FULL "
-        "production HTML/JS/CSS to the workdir (no placeholders, no TODOs) and report the "
-        "EXACT relative path(s) plus proposed site name/slug in `finish(report=...)` so "
-        "the main agent can deploy it cleanly — never leave a placeholder site or drop code. For multi-file sites, you MUST include `styles.css` and `app.js` in the `files` dict, not as separate <link> that 404s.\n"
-        "- Decide what you can. If a decision would be risky or genuinely "
-        "cannot be made (a missing requirement, a blocker only the operator "
-        "can resolve, a choice with real consequences), call `message_main` "
-        "to DM Maxwell directly — he sees it on his next turn wherever he is, "
-        "and his reply lands here on your next step. No channel spam. Don't "
-        "spam it for trivia.\n"
-        "- Stay inside the workdir and keep commands short-lived. No "
-        "interactive programs, no servers that never exit, no `sudo`.\n"
-        "- When the task is done (or genuinely cannot be finished), call "
-        "`finish` with a report: what you built, links/URLs created, which files matter, "
-        "what you verified, and anything left undone.\n"
-        "\n"
-        "You have up to {max_steps} steps — this is a BUDGET, not a target. "
-        "Call `finish` as soon as the task is done; do NOT waste steps or pad work to hit 100."
-    )
-
-    # The sub-agent's own tools. Small on purpose: a bigger surface makes
-    # weaker models wander, and everything below is expressible as a command.
-    _TOOLS = [
-        {
-            "type": "function",
-            "function": {
-                "name": "run_command",
-                "description": (
-                    "Run a bash command in the workdir and get stdout/stderr "
-                    "plus the exit code back."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": {"type": "string", "description": "Bash to run"}
-                    },
-                    "required": ["command"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "write_file",
-                "description": (
-                    "Create or overwrite a file in the workdir. Writes the "
-                    "whole file — include the complete contents."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path relative to the workdir",
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "Full file contents",
-                        },
-                    },
-                    "required": ["path", "content"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "read_file",
-                "description": "Read a file from the workdir.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path relative to the workdir",
-                        }
-                    },
-                    "required": ["path"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_files",
-                "description": "List files in the workdir (recursive, capped).",
-                "parameters": {"type": "object", "properties": {}},
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "finish",
-                "description": (
-                    "End the task and report back. Call this exactly once, "
-                    "when the work is done or definitively blocked. You have up to 100 steps "
-                    "but finish EARLY as soon as done — do not waste steps."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "report": {
-                            "type": "string",
-                            "description": (
-                                "What you built, the files that matter, what "
-                                "you verified, and anything left undone."
-                            ),
-                        }
-                    },
-                    "required": ["report"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "message_main",
-                "description": (
-                    "DM the main agent (Maxwell) privately — no channel post. "
-                    "Use it when you genuinely cannot decide: a blocker only the "
-                    "operator can resolve, a missing requirement, or a choice "
-                    "with real consequences. Maxwell sees it on his next turn and "
-                    "can reply; the reply reaches you on your next step. Don't "
-                    "spam it for trivia — decide what you can."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "text": {
-                            "type": "string",
-                            "description": (
-                                "What you need. Be specific — a question, a "
-                                "decision, or the piece you're missing."
-                            ),
-                        }
-                    },
-                    "required": ["text"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "bot_call",
-                "description": (
-                    "Call a bot tool directly on the host. Available: "
-                    + ", ".join(sorted(_BOT_TOOLS))
-                    + ". Use it to finish a job that needs a bot/host capability "
-                    "— publish a site you built (create_site), edit it "
-                    "(edit_site), list sites, or hand a file to the user "
-                    "(send_file). Pass `name` and `arguments` as a JSON object "
-                    "with exactly that tool's params (name/title/body/files for "
-                    "create_site, etc.). It runs as the person who asked, so "
-                    "ownership and quota checks apply."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "description": "Bot tool name"},
-                        "arguments": {
-                            "type": "object",
-                            "description": "The tool's params as a JSON object.",
-                            "additionalProperties": True,
-                        },
-                    },
-                    "required": ["name", "arguments"],
-                },
-            },
-        },
-    ]
-
-    def __init__(self, bot):
-        super().__init__(bot)
-        # Cap how many background (fire-and-forget) sub-agents run at once.
-        # Each holds a provider loop and a sandbox container, so this bounds
-        # both provider load and how many throwaway containers are alive.
-        try:
-            limit = max(1, int(getattr(Config, "SUBAGENT_MAX_CONCURRENT", 5) or 5))
-        except (TypeError, ValueError):
-            limit = 5
-        try:
-            self._bg_max_queued = max(
-                1, int(getattr(Config, "SUBAGENT_MAX_QUEUED", 16) or 16)
-            )
-        except (TypeError, ValueError):
-            self._bg_max_queued = 16
-        self._bg_sem = asyncio.Semaphore(limit)
-        # Submitted background sub-agents not yet finished (running + queued on
-        # the slot). Capped so a flood across many channels can't grow the
-        # in-memory queue without bound. Only touched from the event loop.
-        self._bg_inflight = 0
-        # Live bidirectional channels for running sub-agents (main <-> sub).
-        # Keyed by run_id; created in execute().
-        self._chans: dict[str, _SubChan] = {}
-        # Finished runs kept briefly so sub_agent_message can still find them
-        # (Maxwell often replies after a run ends) and so pending notes are
-        # readable. {"run_id": (chan, finished_monotonic)}. Pruned lazily.
-        self._finished_chans: dict[str, tuple[_SubChan, float]] = {}
-        self._chan_grace = float(getattr(Config, "SUBAGENT_CHAN_GRACE_SECONDS", 600) or 600)
-
-    def get_description(self) -> str:
-        return (
-            "Hand a self-contained task to a sub-agent (another instance of "
-            "you) that works it to completion in its own scratch directory and "
-            "reports back. This is your DEFAULT engine for any heavy, "
-            "multi-step job — building a whole site, writing and debugging a "
-            "program/script, a data-crunching or file-conversion task, anything "
-            "that takes several build-and-test rounds. Don't grind such a job "
-            "through a long inline chain; hand it over and get one report. It "
-            "cannot ask questions, so put the full goal, inputs, and how to "
-            "verify the result into `task`. `mode=background` (the default for "
-            "heavy work) returns immediately and posts the result when the run is "
-            "done; `mode=foreground` blocks for the report now. `deliver` controls "
-            "where the result lands: `channel` (default) or `dm` to the requester. "
-            "Not for a one-liner you could just run with `shell`. `workdir` pins "
-            "the scratch dir; `max_steps` caps a runaway job."
-        )
-
-    # ─── workspace helpers ────────────────────────────────────────────
-
-    @staticmethod
-    def _slugify(text: str) -> str:
-        slug = re.sub(r"[^a-z0-9]+", "-", str(text or "").lower()).strip("-")
-        return (slug[:40] or "task").strip("-")
-
-    def _workspace(self, task: str, workdir: str = "") -> Path:
-        base = Path(Config.SUBAGENT_BASE_DIR)
-        if not base.is_absolute():
-            base = Path(__file__).resolve().parent / base
-        name = self._slugify(workdir) if workdir else self._slugify(task)
-        path = base / f"{name}-{uuid.uuid4().hex[:6]}"
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-
-    def _resolve(self, workspace: Path, rel_path: str) -> Path:
-        """Resolve a sub-agent path, refusing anything outside the workdir."""
-        candidate = (workspace / str(rel_path or "").lstrip("/")).resolve()
-        workspace = workspace.resolve()
-        if candidate != workspace and workspace not in candidate.parents:
-            raise ValueError(f"path escapes the workdir: {rel_path}")
-        return candidate
-
-    # ─── persistence for resume across restarts ───────────────────────
-    _STATE_FILE = ".subagent_state.json"
-
-    @staticmethod
-    def _state_path(workspace: Path) -> Path:
-        return workspace / SubAgentTool._STATE_FILE
-
-    def _write_state(self, workspace: Path, **data):
-        try:
-            path = self._state_path(workspace)
-            tmp = path.with_suffix(".tmp")
-            workspace.mkdir(parents=True, exist_ok=True)
-            import json
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(path)
-        except Exception:
-            pass
-
-    def _clear_state(self, workspace: Path):
-        import contextlib
-        with contextlib.suppress(Exception):
-            self._state_path(workspace).unlink()
-
-    def _read_state(self, path: Path) -> dict | None:
-        try:
-            import json
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return None
-
-    # ─── the sub-agent's own tools ────────────────────────────────────
-
-    async def _run_command(self, workspace: Path, command: str) -> str:
-        command = str(command or "").strip()
-        if not command:
-            return "error: empty command"
-        if self._sandbox_mode() == "docker":
-            return await self._run_command_docker(workspace, command)
-        return await self._run_command_host(workspace, command)
-
-    async def _run_command_host(self, workspace: Path, command: str) -> str:
-        """Unsandboxed fallback — only when SUBAGENT_SANDBOX=host."""
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "bash",
-                "-lc",
-                command,
-                cwd=str(workspace),
-                start_new_session=True,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-        except Exception as e:
-            return f"error: could not start command: {e}"
-        captured = bytearray()
-        truncated = False
-
-        async def _read_output():
-            nonlocal truncated
-            while True:
-                chunk = await proc.stdout.read(4096)
-                if not chunk:
-                    return
-                if len(captured) < 12_000:
-                    remaining = 12_000 - len(captured)
-                    captured.extend(chunk[:remaining])
-                    if len(chunk) > remaining:
-                        truncated = True
-                else:
-                    truncated = True
-
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(_read_output(), proc.wait()),
-                timeout=Config.SUBAGENT_COMMAND_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            await self._terminate_local_process(proc)
-            return (
-                f"error: command timed out after "
-                f"{Config.SUBAGENT_COMMAND_TIMEOUT_SECONDS}s (it was killed)"
-            )
-        except asyncio.CancelledError:
-            await self._terminate_local_process(proc)
-            raise
-        except Exception:
-            await self._terminate_local_process(proc)
-            raise
-        text = bytes(captured).decode("utf-8", errors="replace")
-        if truncated:
-            text += "\n… (output truncated)"
-        return f"exit={proc.returncode}\n{text or '(no output)'}"
-
-    @staticmethod
-    async def _terminate_local_process(proc) -> None:
-        """Kill a host-mode command and all of its descendants."""
-        if proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(proc.pid, signal.SIGKILL)
-            with contextlib.suppress(ProcessLookupError):
-                proc.kill()
-        with contextlib.suppress(Exception):
-            await proc.wait()
-
-    def _container_name(self, workspace: Path) -> str:
-        # The workspace directory name already carries a random suffix, so it
-        # is unique per run and makes an orphaned container traceable back to
-        # the work it was doing.
-        return f"{self.SANDBOX_CONTAINER_PREFIX}{workspace.name}"[:60]
-
-    async def _ensure_sandbox(self, workspace: Path) -> str:
-        """Start (or reuse) this run's container. Returns its name."""
-        name = self._container_name(workspace)
-        (stdout, _stderr), code = await _run_docker_cmd(
-            "inspect", "-f", "{{.State.Running}}", name, timeout=10
-        )
-        if code == 0 and stdout.decode(errors="replace").strip().lower() == "true":
-            return name
-        if code == 0:
-            # Exists but stopped — a previous run of the same workspace.
-            await self._remove_sandbox_container(name)
-
-        await _ensure_sandbox_image()
-        run_args = [
-            "run",
-            "-d",
-            "--rm",
-            "--init",
-            "--name",
-            name,
-            "--label",
-            "maxwell.subagent=1",
-            "--memory",
-            "4g",
-            "--cpus",
-            "2.0",
-            "--pids-limit",
-            "1024",
-            "--tmpfs",
-            "/tmp:rw,exec,nosuid,size=256m",
-            # The only host path the agent can see is the scratch directory it
-            # was given. No bot source, no .env, no host root.
-            "-v",
-            f"{workspace.resolve()}:{self.SANDBOX_WORKDIR}:rw",
-            "-w",
-            self.SANDBOX_WORKDIR,
-            "--network",
-            "bridge",
-            "--security-opt",
-            "no-new-privileges:true",
-            "--cap-drop",
-            "ALL",
-            "--cap-add",
-            "CHOWN",
-            "--cap-add",
-            "SETUID",
-            "--cap-add",
-            "SETGID",
-            "--cap-add",
-            "DAC_OVERRIDE",
-            "--cap-add",
-            "FOWNER",
-            SANDBOX_IMAGE_NAME,
-        ]
-        (_stdout, stderr), run_code = await _run_docker_cmd(*run_args, timeout=60)
-        if run_code != 0:
-            raise RuntimeError(
-                stderr.decode(errors="replace").strip() or "docker run failed"
-            )
-        return name
-
-    async def _stop_sandbox(self, workspace: Path) -> None:
-        """Tear the run's container down. Best effort — never raises.
-
-        Started with --rm, so a successful stop removes it. A container left
-        behind by a crashed bot is reaped by the `inspect`/`rm -f` path in
-        `_ensure_sandbox` the next time that workspace name comes round, and
-        is findable meanwhile by its `maxwell.subagent` label.
-        """
-        with contextlib.suppress(Exception):
-            name = self._container_name(workspace)
-            (_stdout, _stderr), code = await _run_docker_cmd(
-                "stop", "-t", "2", name, timeout=30
-            )
-            if code != 0:
-                await self._remove_sandbox_container(name)
-
-    async def _remove_sandbox_container(self, name: str) -> None:
-        """Remove a stale sandbox and wait until Docker releases its name."""
-        (_stdout, stderr), code = await _run_docker_cmd(
-            "rm", "-f", name, timeout=15
-        )
-        for _ in range(100):
-            (_stdout, _stderr), inspect_code = await _run_docker_cmd(
-                "inspect",
-                "--type",
-                "container",
-                "-f",
-                "{{.Id}}",
-                name,
-                timeout=10,
-            )
-            if inspect_code != 0:
-                return
-            await asyncio.sleep(0.1)
-        raise RuntimeError(
-            "sandbox container did not disappear after removal: "
-            + stderr.decode(errors="replace").strip()[:200]
-        )
-
-    async def _kill_sandbox_exec(self, container: str, pid_file: str) -> None:
-        """Kill a timed-out command inside its sandbox container."""
-        quoted = shlex.quote(pid_file)
-        cleanup = (
-            f"pid=$(cat {quoted} 2>/dev/null); "
-            'case "$pid" in '
-            "''|*[!0-9]*) ;; "
-            f"*) kill -TERM -- -$pid 2>/dev/null; sleep 0.2; "
-            f"kill -KILL -- -$pid 2>/dev/null; rm -f {quoted} ;; "
-            "esac"
-        )
-        with contextlib.suppress(Exception):
-            await _run_docker_cmd(
-                "exec",
-                "--user",
-                "root",
-                container,
-                "bash",
-                "-lc",
-                cleanup,
-                timeout=10,
-            )
-
-    async def _run_command_docker(self, workspace: Path, command: str) -> str:
-        try:
-            name = await self._ensure_sandbox(workspace)
-        except FileNotFoundError:
-            return (
-                "error: the sub-agent sandbox needs Docker, and docker is not "
-                "installed or not on PATH. Install Docker, or set "
-                "SUBAGENT_SANDBOX=host in .env to run commands directly on the "
-                "host (no isolation)."
-            )
-        except Exception as e:
-            return f"error: could not start the sandbox container: {e}"
-
-        exec_token = f"maxwell-subagent-{uuid.uuid4().hex}"
-        pid_file = f"/tmp/{exec_token}.pid"
-        inner = f"trap 'rm -f {shlex.quote(pid_file)}' EXIT; {command}"
-        wrapped = (
-            f"echo $$ > {shlex.quote(pid_file)}; "
-            f"exec bash -lc {shlex.quote(inner)}"
-        )
-        try:
-            (out, err), code = await _run_docker_cmd(
-                "exec",
-                "-w",
-                self.SANDBOX_WORKDIR,
-                name,
-                "setsid",
-                "--wait",
-                "bash",
-                "-lc",
-                wrapped,
-                timeout=Config.SUBAGENT_COMMAND_TIMEOUT_SECONDS,
-                output_limit=12_000,
-            )
-        except asyncio.TimeoutError:
-            await self._kill_sandbox_exec(name, pid_file)
-            return (
-                f"error: command timed out after "
-                f"{Config.SUBAGENT_COMMAND_TIMEOUT_SECONDS}s (it was killed)"
-            )
-        except asyncio.CancelledError:
-            await self._kill_sandbox_exec(name, pid_file)
-            raise
-        except Exception as e:
-            await self._kill_sandbox_exec(name, pid_file)
-            return f"error: could not run the command in the sandbox: {e}"
-        text = (out or b"").decode("utf-8", errors="replace")
-        errtext = (err or b"").decode("utf-8", errors="replace")
-        if errtext:
-            text = (text + "\n" + errtext) if text else errtext
-        if len(text) > 12000:
-            text = text[:12000] + "\n… (output truncated)"
-        return f"exit={code}\n{text or '(no output)'}"
-
-    def _write_file(self, workspace: Path, path: str, content: str) -> str:
-        try:
-            target = self._resolve(workspace, path)
-        except ValueError as e:
-            return f"error: {e}"
-        body = str(content or "")
-        if len(body.encode("utf-8", errors="ignore")) > Config.SUBAGENT_MAX_FILE_BYTES:
-            return (
-                f"error: file exceeds SUBAGENT_MAX_FILE_BYTES "
-                f"({Config.SUBAGENT_MAX_FILE_BYTES} bytes)"
-            )
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(body, encoding="utf-8")
-        except OSError as e:
-            return f"error: {e}"
-        return f"wrote {target.relative_to(workspace.resolve())} ({len(body)} chars)"
-
-    def _read_file(self, workspace: Path, path: str) -> str:
-        try:
-            target = self._resolve(workspace, path)
-        except ValueError as e:
-            return f"error: {e}"
-        if not target.is_file():
-            return f"error: no such file: {path}"
-        try:
-            text = target.read_text(encoding="utf-8", errors="replace")
-        except OSError as e:
-            return f"error: {e}"
-        if len(text) > 12000:
-            text = text[:12000] + "\n… (truncated)"
-        return text or "(empty file)"
-
-    def _list_files(self, workspace: Path) -> str:
-        root = workspace.resolve()
-        entries = []
-        for item in sorted(root.rglob("*")):
-            if item.is_dir():
-                continue
-            with contextlib.suppress(OSError):
-                entries.append(f"{item.relative_to(root)} ({item.stat().st_size}b)")
-            if len(entries) >= 200:
-                entries.append("… (more files not listed)")
-                break
-        return "\n".join(entries) or "(workdir is empty)"
-
-    async def _dispatch(
-        self, workspace: Path, name: str, args: dict, run_id: str = "", message=None
-    ) -> str:
-        if name == "run_command":
-            return await self._run_command(workspace, args.get("command", ""))
-        if name == "write_file":
-            return self._write_file(
-                workspace, args.get("path", ""), args.get("content", "")
-            )
-        if name == "read_file":
-            return self._read_file(workspace, args.get("path", ""))
-        if name == "list_files":
-            return self._list_files(workspace)
-        if name == "message_main":
-            return await self._message_main(run_id, args.get("text", ""))
-        if name == "bot_call":
-            return await self._bot_call(
-                message, args.get("name", ""), args.get("arguments", {})
-            )
-        return f"error: unknown tool {name!r}"
-
-    async def _bot_call(self, message, name, arguments) -> str:
-        """Route a whitelisted bot tool call to the real bot tool on the host.
-
-        The sub-agent is sandboxed for run_command, but it can still finish a
-        job that needs a bot/host capability by calling create_site / edit_site /
-        send_file etc. here. Each tool runs as the originating user, so its own
-        ownership / quota / permission checks apply.
-        """
-        name = str(name or "").strip()
-        if name not in self._BOT_TOOLS:
-            return (
-                f"error: bot_call '{name}' is not available to sub-agents. "
-                f"Available: {', '.join(sorted(self._BOT_TOOLS))}."
-            )
-        tool = (getattr(self.bot, "tools", None) or {}).get(name)
-        if tool is None:
-            return f"error: tool '{name}' is not registered on this bot."
-        args = arguments
-        if isinstance(args, str):
-            try:
-                args = json.loads(args)
-            except Exception:
-                return f"error: `arguments` must be a JSON object, got: {args[:120]}"
-        if not isinstance(args, dict):
-            return "error: `arguments` must be a JSON object."
-        if message is None:
-            return "error: no message context for bot_call — cannot run bot tools."
-        try:
-            result = await tool.execute(message, **args)
-        except TypeError as e:
-            return f"error: bad arguments to {name}: {e}"
-        except Exception as e:
-            logger.warning("sub-agent bot_call %s failed: %s", name, e)
-            return f"error: {name} failed: {e}"
-        return str(result)
-
-    async def _message_main(self, run_id: str, text: str) -> str:
-        """The sub-agent talks back to the main agent — quietly.
-
-        Never posts to the channel: the message goes onto the run's relay, where
-        the main agent picks it up on its next turn in that channel and can reply
-        with sub_agent_message. No public chat spam.
-        """
-        text = str(text or "").strip()
-        if not text:
-            return "error: empty message - say what you need."
-        chan = self._chans.get(run_id)
-        if chan is None:
-            return "error: this run is no longer active."
-        chan.push("sub", text)
-        return "Noted — sent to Maxwell (not posted to chat). He'll see it on his " \
-            "next turn here and can reply. Keep working; watch the reply on your " \
-            "next step."
-
-    # ─── the loop ─────────────────────────────────────────────────────
-
-    def _retain_chan(self, run_id: str) -> None:
-        """Keep a finished run's channel briefly so replies still find it."""
-        chan = self._chans.pop(run_id, None)
-        if chan is None:
-            return
-        self._finished_chans[run_id] = (chan, time.monotonic())
-        self._prune_finished_chans()
-
-    def _prune_finished_chans(self) -> None:
-        now = time.monotonic()
-        for rid in list(self._finished_chans):
-            if now - self._finished_chans[rid][1] > self._chan_grace:
-                self._finished_chans.pop(rid, None)
-
-    def _find_chan(self, run_id: str) -> "_SubChan | None":
-        """The live or recently-finished channel for a run id."""
-        chan = self._chans.get(run_id)
-        if chan is not None:
-            return chan
-        finished = self._finished_chans.get(run_id)
-        if finished is not None:
-            return finished[0]
-        return None
-
-    def drain_notes_for(self, channel_id: str) -> list[str]:
-        """Pending sub->main notes, GLOBAL — this is the sub-agent's DM to Maxwell.
-
-        Called by the main agent when it builds a turn. A quiet ``message_main``
-        from a sub-agent is a direct message to Maxwell, not a channel post, so it
-        must reach him wherever his next turn lands — not only when he happens to
-        be in the run's originating channel. ``channel_id`` is kept only for
-        backward-compat callers and no longer filters. Marks each returned note as
-        surfaced so it is delivered exactly once.
-        """
-        notes: list[str] = []
-        for chan in list(self._chans.values()) + [c for c, _t in self._finished_chans.values()]:
-            pending = chan.pending_to_main()
-            if not pending:
-                continue
-            for i, text in pending:
-                notes.append(f"[sub-agent {chan.run_id} note] {text}")
-                chan.surfaced.add(i)
-        return notes
-
-    async def execute(self, message: Message, **kwargs) -> str:
-        task = str(kwargs.get("task") or "").strip()
-        if not task:
-            return "sub_agent needs a `task` describing the work."
-
-        # The bot's LLM is bound as `ai_provider` (see bot.py). `provider` is
-        # only the name the test harness and older call sites used — keep the
-        # fallback so the tests and any lightweight bot object keep working.
-        provider = (
-            getattr(self.bot, "ai_provider", None)
-            or getattr(self.bot, "provider", None)
-        )
-        if provider is None:
-            return "sub_agent is unavailable: no LLM provider on this bot."
-
-        max_steps = Config.SUBAGENT_MAX_STEPS
-        try:
-            requested = int(kwargs.get("max_steps") or 0)
-        except (TypeError, ValueError):
-            requested = 0
-        if requested > 0:
-            max_steps = min(requested, Config.SUBAGENT_MAX_STEPS)
-
-        mode = str(
-            kwargs.get("mode") or kwargs.get("background") or ""
-        ).strip().lower()
-        background = mode in {
-            "background",
-            "bg",
-            "async",
-            "fire_and_forget",
-            "fire-and-forget",
-            "fire",
-            "true",
-            "1",
-            "yes",
-            "on",
-        }
-        if background and self._bg_inflight >= self._bg_max_queued:
-            return (
-                f"A background sub-agent is already queued/running ("
-                f"{self._bg_inflight}/{self._bg_max_queued}). I won't pile "
-                f"on more right now — say the word and I'll run it once the "
-                f"queue drains, or use mode=foreground to block for it now."
-            )
-
-        workspace = self._workspace(task, str(kwargs.get("workdir") or ""))
-        deadline = time.monotonic() + Config.SUBAGENT_TIMEOUT_SECONDS
-        # Default the sub-agent to the SAME model the main bot uses, not to an
-        # implicit provider default that could drift. Blank SUBAGENT_MODEL = main
-        # OLLAMA_MODEL; only set SUBAGENT_MODEL to run sub-agent work on a
-        # different (e.g. cheaper/faster) model.
-        model = Config.SUBAGENT_MODEL or Config.OLLAMA_MODEL or None
-
-        # Open a run on the event bus so the channel progress message and the
-        # dashboard can both watch this happen instead of staring at silence
-        # for four minutes. Publishing is fire-and-forget and never raises, so
-        # a missing bus (tests, a bot built without one) changes nothing.
-        bus = agent_events.bus_for(self.bot)
-        author = getattr(message, "author", None)
-        run = (
-            bus.start_run(
-                task,
-                requested_by=str(getattr(author, "display_name", "") or ""),
-                channel_id=str(getattr(getattr(message, "channel", None), "id", "") or ""),
-                workdir=str(workspace),
-                max_steps=max_steps,
-            )
-            if bus
-            else None
-        )
-        run_id = run.run_id if run else ""
-
-        # Live bidirectional channel (main <-> sub) for this run. Created here so
-        # both the foreground and background paths can push/pull, and removed in
-        # the run's finally so a finished run doesn't leak a channel.
-        chan = self._chans.setdefault(run_id, _SubChan(run_id)) if run_id else None
-        if chan is not None:
-            chan.channel_id = str(
-                getattr(getattr(message, "channel", None), "id", "") or ""
-            )
-
-        # Fire-and-forget: ``mode=background`` returns immediately and hands the
-        # whole run to a background task that posts the result to this channel
-        # when done. The model stays responsive — no minutes of silence while
-        # the main loop waits on a nested agent. ``mode=foreground`` (the old
-        # behaviour, and what the tests exercise) blocks until the report.
-        if background:
-            self._bg_inflight += 1
-            deliver = (
-                str(kwargs.get("deliver") or kwargs.get("notify") or "channel")
-                .strip()
-                .lower()
-            )
-            _spawn_background(
-                self._run_background(
-                    message,
-                    task,
-                    workspace,
-                    max_steps,
-                    model,
-                    provider,
-                    bus,
-                    run_id,
-                    deliver,
-                    chan,
-                )
-            )
-            return (
-                f"Started sub-agent (run {run_id}) on: {self._short(task, 60)}. "
-                f"On it — I'll report back when it's done."
-            )
-
-        # Mirror the run onto the channel's live progress message so a
-        # four-minute run reads as "step 3/24: running: pytest -q" instead of
-        # a silent typing indicator. Backgrounded rather than inlined: the
-        # agent must not wait on a Discord edit.
-        watcher = None
-        progress = self._channel_progress(message)
-        if bus and run_id and progress is not None:
-            watcher = asyncio.create_task(
-                self._mirror_events_to_progress(bus, run_id, progress)
-            )
-        if chan is not None and chan.target is None:
-            chan.target = await self._resolve_channel(
-                str(getattr(getattr(message, "channel", None), "id", "") or "")
-            )
-        try:
-            report = await self._agent_loop(
-                task,
-                workspace,
-                max_steps=max_steps,
-                deadline=deadline,
-                model=model,
-                provider=provider,
-                bus=bus,
-                run_id=run_id,
-                conv=chan,
-                message=message,
-            )
-            if bus and run_id:
-                bus.finish_run(run_id, agent_events.STATUS_DONE, report[:2000])
-            # Auto-deploy fallback for foreground too
-            auto = await self._auto_deploy_from_workdir(workspace, message, task)
-            if auto:
-                report = report + "\n\n[auto-deploy] " + auto[:800]
-            return report
-        except Exception as e:
-            if bus and run_id:
-                bus.finish_run(run_id, agent_events.STATUS_FAILED, str(e)[:2000])
-            raise
-        finally:
-            if watcher is not None:
-                watcher.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await watcher
-            if run_id:
-                self._retain_chan(run_id)
-            # Always reap the container, including on the timeout, error and
-            # cancellation paths — an orphaned sandbox holds 4GB of limit and
-            # a bind mount on a workspace nobody is using.
-            if self._sandbox_mode() == "docker":
-                await self._stop_sandbox(workspace)
-
-    # ─── background (fire-and-forget) runs ───────────────────────────
-
-    @staticmethod
-    def _short(text: str, n: int = 120) -> str:
-        t = " ".join(str(text or "").split())
-        return t[:n] + ("…" if len(t) > n else "")
-
-    async def _resolve_channel(self, channel_id) -> Any:
-        """A sendable text channel by id, or None. Falls back to fetch on cold cache."""
-        if not channel_id:
-            return None
-        try:
-            cid = int(channel_id)
-        except (TypeError, ValueError):
-            return None
-        bot = self.bot
-        with contextlib.suppress(Exception):
-            ch = bot.get_channel(cid)
-            if ch is not None:
-                return ch
-        with contextlib.suppress(Exception):
-            return await asyncio.wait_for(bot.fetch_channel(cid), timeout=6)
-        return None
-
-    async def _resolve_dm(self, user_id) -> Any:
-        """A sendable DM channel for a user, or None (DMs closed/blocked, gone)."""
-        if not user_id:
-            return None
-        try:
-            uid = int(user_id)
-        except (TypeError, ValueError):
-            return None
-        bot = self.bot
-        user = bot.get_user(uid)
-        if user is None:
-            with contextlib.suppress(Exception):
-                user = await asyncio.wait_for(bot.fetch_user(uid), timeout=6)
-        if user is None:
-            return None
-        dm = getattr(user, "dm_channel", None)
-        if dm is None:
-            with contextlib.suppress(Exception):
-                dm = await user.create_dm()
-        return dm
-
-    async def _resolve_delivery(self, message, deliver: str) -> Any:
-        """Channel or DM to deliver to. Falls back to channel when a DM isn't reachable."""
-        if str(deliver).strip().lower() in {"dm", "dm_only", "direct", "dm-only"}:
-            author = getattr(message, "author", None)
-            dm = await self._resolve_dm(str(getattr(author, "id", "") or ""))
-            if dm is not None:
-                return dm
-            # DM not reachable — fall back to the asking channel so the result
-            # is never silently lost to a private channel Maxwell can't open.
-            return await self._resolve_channel(
-                str(getattr(getattr(message, "channel", None), "id", "") or "")
-            )
-        return await self._resolve_channel(
-            str(getattr(getattr(message, "channel", None), "id", "") or "")
-        )
-
-    async def _post_report(self, target, message, task, report):
-        """Fallback: post a finished sub-agent's report to the delivery target.
-
-        Only used when there is no relay (no event bus / no run_id) to hand the
-        report to Maxwell — e.g. tests, a bot built without telemetry. The real
-        background path hands the report to Maxwell (``_handoff_report``) and he
-        composes the reply. Threaded back to the triggering message (``reference``)
-        when it lands in the same channel — a plain ``reference`` does NOT ping the
-        author. Never raises.
-        """
-        if target is None:
-            return
-        body = self._report_body(task, report)
-        try:
-            if message is not None and getattr(target, "id", None) == getattr(
-                getattr(message, "channel", None), "id", None
-            ):
-                await target.send(body, reference=message)
-            else:
-                await target.send(body)
-        except Exception as e:  # noqa: BLE001 - a lost report must not crash the run
-            logger.warning("failed to post sub-agent report: %s", e)
-
-    @staticmethod
-    def _report_body(task, report):
-        report = str(report or "").strip() or "(sub-agent returned nothing)"
-        head = _shorten(task, 48) or "sub-agent"
-        cap = 1800
-        body = f"done: {head}\n\n{report[:cap]}"
-        if len(report) > cap:
-            body += "\n…(report truncated)"
-        return body
-
-    @staticmethod
-    def _synthetic_message(chan, author, content):
-        """A minimal Message-like object the reply pipeline accepts.
-
-        Mirrors the shape bot._message_from_raw_update builds (id, channel,
-        guild, author, content, empty media + mention lists, reference, etc.),
-        plus a ``reply()`` shim so the reply threads. ``chan`` MUST be a real
-        sendable channel; ``author`` the user the reply is addressed to.
-        """
-        if author is None:
-            author = types.SimpleNamespace(
-                id="0", display_name="User", name="User", bot=False
-            )
-        msg = types.SimpleNamespace(
-            id=str(uuid.uuid4().hex[:12]),
-            channel=chan,
-            guild=getattr(chan, "guild", None),
-            author=author,
-            content=content,
-            embeds=[],
-            attachments=[],
-            stickers=[],
-            mentions=[],
-            role_mentions=[],
-            mention_everyone=False,
-            reference=None,
-            components=[],
-            poll=None,
-            type=0,
-        )
-
-        async def _reply(reply_content=None, **kwargs):
-            send = getattr(chan, "send", None)
-            if not callable(send):
-                raise RuntimeError("synthetic message channel cannot send")
-            result = send(content=reply_content, reference=msg, **kwargs)
-            return await result if inspect.isawaitable(result) else result
-
-        msg.reply = _reply
-        return msg
-
-    async def _post_subagent_reply(self, target, message, run_id, task, report):
-        """Have Maxwell compose and post the user-facing reply right now.
-
-        The background turn already ended after the 'started' ack, so we
-        re-enter the bot's reply pipeline with a synthetic message carrying the
-        finished report. Maxwell reads it and replies in the run's channel — no
-        'report on a later turn' gap. Re-entry is bounded and delivery-tracked:
-        a model that wanders into more tools, stalls, or returns without
-        sending anything cannot swallow the report. Fully defensive: if
-        re-entry is not possible or raises, fall back to posting the report so
-        the result is never lost.
-        """
-        bot = getattr(self, "bot", None)
-        handle = getattr(bot, "_handle_message", None)
-        # Re-entry needs a real sendable channel.  A channel id (or a
-        # synthetic placeholder used while resuming after a restart) is enough
-        # for bookkeeping but makes the eventual synthetic reply fail and can
-        # otherwise drop the report when the fallback also has nowhere to send.
-        chan = target if target is not None else getattr(message, "channel", None)
-        if (
-            not callable(handle)
-            or chan is None
-            or not callable(getattr(chan, "send", None))
-        ):
-            fallback = target if callable(getattr(target, "send", None)) else getattr(
-                message, "channel", None
-            )
-            await self._post_report(fallback, message, task, report)
-            return
-        head = _shorten(task, 60) or "sub-agent"
-        body = (
-            f"The sub-agent (run {run_id}) you asked me to run just finished.\n\n"
-            f"TASK: {head}\n"
-            f"REPORT:\n{str(report or '').strip()[:1600]}\n\n"
-            f"Reply to the person who asked with a clean, natural answer, in this "
-            f"channel. Do NOT call any tools or inspect files. Do NOT paste the raw "
-            f"report, the task headline, step counts, or workdir path — synthesize "
-            f"it into the answer now. Keep it short and plain."
-        )
-        handoff_state = {"tracked": False, "delivered": False}
-        synthetic = self._synthetic_message(chan, getattr(message, "author", None), body)
-        synthetic._subagent_handoff_state = handoff_state
-        try:
-            try:
-                timeout = float(
-                    getattr(Config, "SUBAGENT_HANDOFF_TIMEOUT_SECONDS", 30) or 30
-                )
-            except (TypeError, ValueError):
-                timeout = 30.0
-            timeout = max(5.0, min(timeout, 300.0))
-            await asyncio.wait_for(handle(synthetic, body), timeout=timeout)
-            # Real Maxwell marks the synthetic turn in its finally block. A
-            # bare test/dummy pipeline has no such marker, so preserve the
-            # historical "pipeline handled it" behavior for those callers.
-            if handoff_state["tracked"] and not handoff_state["delivered"]:
-                logger.warning(
-                    "sub-agent handoff returned without delivering run %s; "
-                    "posting the raw report",
-                    run_id,
-                )
-                await self._post_report(chan, message, task, report)
-        except asyncio.TimeoutError:
-            logger.warning(
-                "sub-agent handoff timed out after %.1fs for run %s; "
-                "posting the raw report",
-                timeout,
-                run_id,
-            )
-            await self._post_report(chan, message, task, report)
-        except Exception as e:  # noqa: BLE001 - a failed re-entry must not lose the result
-            logger.warning("sub-agent immediate reply failed (%s); posting report", e)
-            await self._post_report(chan, message, task, report)
-
-    async def _handoff_report(self, target, message, chan, run_id, task, report):
-        """Hand a finished background sub-agent's result to Maxwell.
-
-        No raw dump to chat: Maxwell composes the user-facing reply. When there
-        is no bot reply pipeline to re-enter (tests / no telemetry), fall back to
-        posting the report so the result isn't lost.
-        """
-        if chan is not None or run_id:
-            await self._post_subagent_reply(target, message, run_id, task, report)
-            return
-        await self._post_report(target, message, task, report)
-
-    async def _auto_deploy_from_workdir(self, workspace: Path, message, task: str) -> str | None:
-        """Fallback: if sub-agent built index.html locally but didn't bot_call, deploy it.
-
-        Returns the deploy result string on success, None if nothing to do or failed.
-        This is the safety net for the 'write to workdir + report path' branch so
-        the main agent never has to manually cp.
-        """
-        try:
-            idx = workspace / "index.html"
-            if not idx.is_file() or idx.stat().st_size < 1024:
-                return None
-            # Prefer payload.json if sub-agent left an explicit edit_site payload
-            payload_path = workspace / "payload.json"
-            if payload_path.is_file():
-                try:
-                    import json
-                    data = json.loads(payload_path.read_text(encoding="utf-8"))
-                    # payload is {"name":"edit_site","arguments":{...}} or {"name":"create_site",...}
-                    name = str(data.get("name") or "").strip()
-                    args = data.get("arguments") or {}
-                    if name in ("create_site", "edit_site") and isinstance(args, dict) and args.get("body"):
-                        # Directly invoke the bot tool as the original user (ownership checks apply)
-                        res = await self._bot_call(message, name, args)
-                        if res and not res.startswith("error:"):
-                            return res
-                except Exception:
-                    pass
-            # Generic fallback: read index.html + any sibling assets and create_site
-            body = idx.read_text(encoding="utf-8", errors="replace")
-            if len(body) < 1024:
-                return None
-            # Collect sibling files (css/js/json) up to 10, to mimic sub-agent's potential extra files
-            files = {}
-            for child in workspace.rglob("*"):
-                if child.is_file() and child != idx and child.suffix.lower() in {".css",".js",".json",".png",".jpg",".jpeg",".webp",".svg"}:
-                    try:
-                        if child.stat().st_size > 200_000:
-                            continue
-                        rel = str(child.relative_to(workspace))
-                        # Only include top-level or one deep to avoid noise
-                        if rel.count("/") > 2:
-                            continue
-                        files[rel] = child.read_text(encoding="utf-8", errors="replace")[:50000]
-                        if len(files) >= 8:
-                            break
-                    except Exception:
-                        continue
-            # Infer slug from task or workdir name
-            slug = self._slugify(task)[:30] or workspace.name.split("-")[0]
-            # Try edit_site first (in case placeholder exists), fall back to create_site
-            for attempt in ("edit_site", "create_site"):
-                try:
-                    args = {"name": slug, "title": slug, "body": body}
-                    if files:
-                        # create_site supports files dict, edit_site supports body+files
-                        args["files"] = files
-                    res = await self._bot_call(message, attempt, args)
-                    if res and not res.startswith("error:") and "not found" not in res.lower() and "no such site" not in res.lower():
-                        return res
-                except Exception:
-                    continue
-            return None
-        except Exception:
-            return None
-
-
-    async def _run_background(
-        self,
-        message,
-        task: str,
-        workspace: Path,
-        max_steps: int,
-        model,
-        provider,
-        bus,
-        run_id: str,
-        deliver: str = "channel",
-        chan: "_SubChan | None" = None,
-    ) -> None:
-        """Run a sub-agent to completion in the background, then hand it to Maxwell.
-
-        Never blocks the turn. There is no channel heartbeat and no raw report
-        dump: when the run ends, the report is pushed to Maxwell via the run's
-        relay (``_handoff_report``) and he surfaces it on his next turn in that
-        channel to compose the user-facing reply. Never raises out of here — the
-        only thing on the far side of this task is the user's channel, and a
-        failure should be a reported message, not an unhandled task exception.
-
-        The time budget starts here, not when the request was queued, so a run
-        that waited for a concurrency slot still gets its full budget.
-        """
-        async with self._bg_sem:
-            # Budget relative to the work actually starting, not the request
-            # being queued behind a concurrency slot.
-            deadline = time.monotonic() + Config.SUBAGENT_TIMEOUT_SECONDS
-            target = await self._resolve_delivery(message, deliver)
-            if chan is not None:
-                chan.target = target
-            try:
-                report = await self._agent_loop(
-                    task,
-                    workspace,
-                    max_steps=max_steps,
-                    deadline=deadline,
-                    model=model,
-                    provider=provider,
-                    bus=bus,
-                    run_id=run_id,
-                    conv=chan,
-                    message=message,
-                    deliver=deliver,
-                )
-                if bus and run_id:
-                    bus.finish_run(run_id, agent_events.STATUS_DONE, report[:2000])
-                # Auto-deploy fallback: if sub-agent built files locally but didn't bot_call, do it now
-                auto = await self._auto_deploy_from_workdir(workspace, message, task)
-                if auto:
-                    report = report + "\n\n[auto-deploy] " + auto[:800]
-                await self._handoff_report(target, message, chan, run_id, task, report)
-            except asyncio.CancelledError:
-                if bus and run_id:
-                    bus.finish_run(run_id, agent_events.STATUS_FAILED, "cancelled")
-                raise
-            except Exception as e:  # noqa: BLE001 - report it to the channel
-                logger.warning("background sub-agent %s failed: %s", run_id, e)
-                if bus and run_id:
-                    bus.finish_run(run_id, agent_events.STATUS_FAILED, str(e)[:2000])
-                await self._handoff_report(
-                    target, message, chan, run_id, task, f"❌ sub-agent failed:\n{e}"
-                )
-            finally:
-                if self._bg_inflight > 0:
-                    self._bg_inflight -= 1
-                if run_id:
-                    self._retain_chan(run_id)
-                # Reap the sandbox on every exit path — an orphaned container
-                # holds 4GB of limit and a bind mount nobody is using.
-                if self._sandbox_mode() == "docker":
-                    await self._stop_sandbox(workspace)
-
-    def _channel_progress(self, message):
-        """The live progress message for this channel, if a batch owns one."""
-        per_chan = getattr(self.bot, "_current_progress_by_channel", None)
-        if not isinstance(per_chan, dict):
-            return None
-        channel = getattr(message, "channel", None)
-        return per_chan.get(str(getattr(channel, "id", "") or ""))
-
-    @staticmethod
-    async def _mirror_events_to_progress(bus, run_id: str, progress) -> None:
-        """Feed run events into the channel progress message until it ends.
-
-        Only the events a human would want to read: which step, and what it is
-        doing right now. Tool *results* are deliberately not mirrored — the
-        tail of a command's stderr scrolling through a Discord edit is noise,
-        and it is in the dashboard's event list for anyone who wants it.
-        """
-        try:
-            async for event in bus.stream(run_id):
-                label = str(event.data.get("label") or "")
-                if not label or event.type not in (
-                    agent_events.EV_STEP,
-                    agent_events.EV_TOOL_CALL,
-                    agent_events.EV_NOTE,
-                ):
-                    continue
-                with contextlib.suppress(Exception):
-                    await progress.update("sub_agent", reasoning=label)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:  # pragma: no cover - telemetry only
-            logger.debug("sub_agent progress mirror stopped: %s", e)
-
-    async def _provider_call(self, provider, messages, model, deadline):
-        """Call the sub-agent's provider with retry on transient failure.
-
-        A single dropped provider call used to end a sub-agent run — the loop
-        bailed with "stopped: the model call failed". For a self-hosted or
-        proxied model that is a routine hiccup (network blip, 5xx, transient
-        timeout), not a reason to torch a minutes-long run. Retry a couple of
-        times with a short backoff, then give up. Always respects the overall
-        deadline so a retry storm can't run past the run's budget.
-        """
-        retries = int(getattr(Config, "SUBAGENT_PROVIDER_RETRIES", 2) or 0)
-        attempt = 0
-        max_tokens = int(getattr(Config, "SUBAGENT_MAX_TOKENS", 32768) or 32768)
-        while True:
-            remaining_seconds = deadline - time.monotonic()
-            if remaining_seconds <= 0:
-                raise asyncio.TimeoutError()
-            # Do not give the provider a minimum timeout that extends beyond
-            # the run's hard deadline.  The old 30-second floor let a run
-            # overshoot its configured budget whenever the final call had
-            # less than 30 seconds left.
-            remaining = max(1, int(remaining_seconds))
-            try:
-                night_kwargs = {}
-                night_kwargs_resolver = getattr(
-                    self.bot, "_night_fallback_kwargs", None
-                )
-                if callable(night_kwargs_resolver):
-                    night_kwargs = night_kwargs_resolver(provider)
-                return await provider.generate_chat_completion(
-                    messages=messages,
-                    tools=self._TOOLS,
-                    model=model,
-                    max_tokens=max_tokens,
-                    timeout=remaining,
-                    **night_kwargs,
-                )
-            except Exception as e:
-                attempt += 1
-                logger.warning(
-                    "sub_agent provider call failed (try %d/%d): %s",
-                    attempt,
-                    retries + 1,
-                    e,
-                )
-                # Out of budget, or retries exhausted — let the caller decide.
-                if attempt > retries or time.monotonic() >= deadline:
-                    raise
-                backoff = min(1.5 * (2 ** (attempt - 1)), 6.0)
-                await asyncio.sleep(backoff)
-
-    async def _agent_loop(
-        self,
-        task: str,
-        workspace: Path,
-        *,
-        max_steps: int,
-        deadline: float,
-        model,
-        provider,
-        bus=None,
-        run_id: str = "",
-        conv: "_SubChan | None" = None,
-        message=None,
-        resume_state: dict | None = None,
-        deliver: str | None = None,
-    ) -> str:
-        """The step loop itself. Returns the report string.
-
-        ``conv`` is the live bidirectional channel to the main agent: any
-        ``main`` messages pushed in are injected at the top of the next step so
-        the sub-agent sees them and can answer.
-        If ``resume_state`` is provided, continue from its saved messages/steps.
-        """
-
-        def _emit(event_type: str, **data):
-            if bus and run_id:
-                bus.publish(run_id, event_type, **data)
-
-        def _note_run(**fields):
-            run_obj = bus.get(run_id) if (bus and run_id) else None
-            if run_obj is None:
-                return
-            for key, value in fields.items():
-                setattr(run_obj, key, value)
-
-        def _persist(messages, steps, commands_run, files_written, duds):
-            try:
-                self._write_state(
-                    workspace,
-                    status="running",
-                    run_id=run_id,
-                    task=task,
-                    workdir=str(workspace),
-                    max_steps=max_steps,
-                    steps=steps,
-                    commands_run=commands_run,
-                    files_written=list(files_written),
-                    duds=duds,
-                    messages=messages,
-                    channel_id=str(getattr(getattr(message, "channel", None), "id", "") or "") if message else str(resume_state.get("channel_id","") if resume_state else ""),
-                    author_id=str(getattr(getattr(message, "author", None), "id", "") or "") if message else str(resume_state.get("author_id","") if resume_state else ""),
-                    author_name=str(getattr(getattr(message, "author", None), "display_name", "") or getattr(getattr(message, "author", None), "name", "") or "") if message else str(resume_state.get("author_name","") if resume_state else ""),
-                    deliver=str(
-                        (
-                            resume_state.get("deliver")
-                            if resume_state
-                            else None
-                        )
-                        or deliver
-                        or getattr(message, "_deliver", None)
-                        or "channel"
-                    ),
-                    updated_at=time.time(),
-                )
-            except Exception:
-                pass
-
-        if resume_state and isinstance(resume_state.get("messages"), list) and resume_state.get("messages"):
-            messages = resume_state.get("messages")
-            steps = int(resume_state.get("steps") or 0)
-            commands_run = int(resume_state.get("commands_run") or 0)
-            files_written = list(resume_state.get("files_written") or [])
-            duds = int(resume_state.get("duds") or 0)
-            _note_run(steps=steps, commands_run=commands_run, files_written=list(files_written))
-            _emit(agent_events.EV_NOTE, label=f"resumed from step {steps}/{max_steps}")
-        else:
-            messages = [
-                {
-                    "role": "system",
-                    "content": self._SYSTEM_PROMPT.format(
-                        workdir=workspace, max_steps=max_steps
-                    ),
-                },
-                {"role": "user", "content": task},
-            ]
-            steps = 0
-            commands_run = 0
-            files_written: list[str] = []
-            duds = 0
-            _persist(messages, steps, commands_run, files_written, duds)
-
-        dud_tolerance = int(getattr(Config, "SUBAGENT_DUD_TOLERANCE", 2) or 0)
-        while steps < max_steps:
-            if conv is not None:
-                unseen = conv.unseen_main()
-                if unseen:
-                    indices = [i for i, _m in unseen]
-                    for _i, _m in unseen:
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": (
-                                    "[Message from Maxwell/main agent] "
-                                    + str(_m.get("text") or "")
-                                    + "\nAnswer this in your next action, or call "
-                                    "finish if it changes the task."
-                                ),
-                            }
-                        )
-                    conv.mark_injected(indices)
-                    _persist(messages, steps, commands_run, files_written, duds)
-            if time.monotonic() > deadline:
-                _emit(
-                    agent_events.EV_NOTE,
-                    label=f"time budget exhausted after {steps} step(s)",
-                )
-                self._clear_state(workspace)
-                return self._report(
-                    task,
-                    workspace,
-                    steps,
-                    commands_run,
-                    files_written,
-                    f"stopped: hit the {Config.SUBAGENT_TIMEOUT_SECONDS}s time budget",
-                )
-            steps += 1
-            _emit(
-                agent_events.EV_STEP,
-                step=steps,
-                max_steps=max_steps,
-                label=f"step {steps}/{max_steps}: thinking",
-            )
-            _note_run(steps=steps)
-            try:
-                reply = await self._provider_call(provider, messages, model, deadline)
-            except Exception as e:
-                logger.warning("sub_agent provider call failed: %s", e)
-                _emit(agent_events.EV_ERROR, label="model call failed", error=str(e)[:400])
-                self._clear_state(workspace)
-                return self._report(
-                    task,
-                    workspace,
-                    steps,
-                    commands_run,
-                    files_written,
-                    f"stopped: the model call failed ({e})",
-                )
-
-            calls = normalize_native_tool_calls(reply.get("tool_calls"))
-            content = str(reply.get("content") or "").strip()
-            if not calls and not content:
-                duds += 1
-                _emit(
-                    agent_events.EV_NOTE,
-                    label=f"empty model reply ({duds}/{dud_tolerance}); nudging",
-                )
-                if duds > dud_tolerance:
-                    self._clear_state(workspace)
-                    return self._report(
-                        task,
-                        workspace,
-                        steps,
-                        commands_run,
-                        files_written,
-                        "the sub-agent stopped without a report (repeated empty replies)",
-                    )
-                messages.append({"role": "assistant", "content": "", "tool_calls": []})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "<reminder> You returned no action and no text. "
-                            "Don't stop: run a command, read/write a file, or "
-                            "call `finish` with your report. A bare empty reply "
-                            "is not a result.</reminder>"
-                        ),
-                    }
-                )
-                _persist(messages, steps, commands_run, files_written, duds)
-                continue
-            if not calls:
-                self._clear_state(workspace)
-                return self._report(
-                    task,
-                    workspace,
-                    steps,
-                    commands_run,
-                    files_written,
-                    content or "the sub-agent stopped without a report",
-                )
-
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": reply.get("content") or "",
-                    "tool_calls": elide_tool_calls_for_history(
-                        reply.get("tool_calls") or []
-                    ),
-                }
-            )
-            _persist(messages, steps, commands_run, files_written, duds)
-
-            for call in calls:
-                name = call.get("name") or ""
-                args = call.get("arguments") or {}
-                if name == "finish":
-                    _emit(agent_events.EV_NOTE, label="agent called finish")
-                    self._clear_state(workspace)
-                    return self._report(
-                        task,
-                        workspace,
-                        steps,
-                        commands_run,
-                        files_written,
-                        str(args.get("report") or content or "done"),
-                    )
-                if name == "run_command":
-                    commands_run += 1
-                _emit(
-                    agent_events.EV_TOOL_CALL,
-                    tool=name,
-                    step=steps,
-                    label=self._call_label(name, args),
-                )
-                result = await self._dispatch(workspace, name, args, run_id, message)
-                _emit(
-                    agent_events.EV_TOOL_RESULT,
-                    tool=name,
-                    step=steps,
-                    ok=not result.startswith("error:"),
-                    preview=result[-400:],
-                )
-                _note_run(commands_run=commands_run)
-                if name == "write_file" and not result.startswith("error:"):
-                    written = str(args.get("path") or "").strip()
-                    if written and written not in files_written:
-                        files_written.append(written)
-                        _note_run(files_written=list(files_written))
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call.get("id") or name,
-                        "content": result,
-                    }
-                )
-                _persist(messages, steps, commands_run, files_written, duds)
-            head, tail = messages[:2], messages[2:]
-            messages = head + trim_tool_tail(tail)
-            _persist(messages, steps, commands_run, files_written, duds)
-
-        _emit(agent_events.EV_NOTE, label=f"step budget exhausted ({max_steps})")
-        self._clear_state(workspace)
-        return self._report(
-            task,
-            workspace,
-            steps,
-            commands_run,
-            files_written,
-            f"stopped: used all {max_steps} steps without calling finish",
-        )
-
-    @staticmethod
-    def _call_label(name: str, args: dict) -> str:
-        """One human-readable line for what the agent is about to do."""
-        if name == "run_command":
-            return "running: " + " ".join(str(args.get("command") or "").split())[:120]
-        if name in ("write_file", "read_file"):
-            verb = "writing" if name == "write_file" else "reading"
-            return f"{verb}: {str(args.get('path') or '')[:120]}"
-        if name == "list_files":
-            return "listing the workdir"
-        return str(name)[:120]
-
-    def _report(
-        self,
-        task: str,
-        workspace: Path,
-        steps: int,
-        commands_run: int,
-        files_written: list[str],
-        outcome: str,
-    ) -> str:
-        lines = [
-            f"sub-agent finished after {steps} step(s), {commands_run} command(s).",
-            f"workdir: {workspace}",
-        ]
-        if files_written:
-            lines.append(f"files written: {', '.join(files_written[:20])}")
-        lines.append("")
-        lines.append(outcome.strip())
-        return "\n".join(lines)
-
-    # ─── resume across restarts ───────────────────────────────────────
-    async def resume_pending_runs(self):
-        """Resume any .subagent_state.json left behind by a restart.
-
-        Scans ``SUBAGENT_BASE_DIR`` for workspaces with a running state,
-        recreates a bus run + channel, and re-queues the loop in the
-        background. Never raises; a bad state file is just cleared.
-        """
-        base = Path(Config.SUBAGENT_BASE_DIR)
-        if not base.is_absolute():
-            base = Path(__file__).resolve().parent / base
-        if not base.is_dir():
-            return
-        # Find all state files (rglob to catch nested, but workspaces are 1 deep)
-        try:
-            state_files = list(base.rglob(self._STATE_FILE))
-        except Exception:
-            return
-        if not state_files:
-            return
-        # Need provider + model for resumed runs
-        provider = getattr(self.bot, "ai_provider", None) or getattr(self.bot, "provider", None)
-        if provider is None:
-            logger.warning("resume_pending_runs: no provider, skipping %d pending", len(state_files))
-            return
-        model = Config.SUBAGENT_MODEL or Config.OLLAMA_MODEL or None
-        bus = agent_events.bus_for(self.bot)
-        for sp in state_files:
-            try:
-                state = self._read_state(sp)
-                if not state or state.get("status") != "running":
-                    continue
-                # Stale check: ignore states older than 24h to avoid resurrecting ancient work
-                try:
-                    age = time.time() - float(state.get("updated_at", 0) or 0)
-                except Exception:
-                    age = 0
-                if age > 86400:
-                    self._clear_state(sp.parent)
-                    continue
-                task = str(state.get("task") or "").strip()
-                if not task:
-                    self._clear_state(sp.parent)
-                    continue
-                workspace = sp.parent
-                if not workspace.is_dir():
-                    self._clear_state(workspace)
-                    continue
-                max_steps = int(state.get("max_steps") or Config.SUBAGENT_MAX_STEPS)
-                # Reuse or create a synthetic message for bot_call context
-                channel_id = str(state.get("channel_id") or "")
-                author_id = str(state.get("author_id") or "")
-                author_name = str(state.get("author_name") or "User")
-                deliver = str(state.get("deliver") or "channel")
-                # Build minimal message-like object the loop needs for bot_call + delivery
-                fake_author = type("A", (), {"id": author_id or "0", "display_name": author_name, "name": author_name, "bot": False})()
-                # Try to resolve real channel for delivery; fall back to fake
-                target = None
-                try:
-                    if channel_id:
-                        target = await self._resolve_channel(channel_id)
-                except Exception:
-                    target = None
-                fake_chan = type("C", (), {"id": channel_id or "0", "guild": getattr(target, "guild", None)})() if channel_id else None
-                fake_msg = type("M", (), {
-                    "channel": fake_chan or target,
-                    "guild": getattr(fake_chan or target, "guild", None) if (fake_chan or target) else None,
-                    "author": fake_author,
-                    "id": "resume-" + (state.get("run_id") or "0"),
-                })()
-                # Mark deliver on the fake message for _persist to pick up if needed
-                try:
-                    setattr(fake_msg, "_deliver", deliver)
-                except Exception:
-                    pass
-                # New bus run for the resumed work
-                run = None
-                run_id = ""
-                if bus:
-                    try:
-                        run = bus.start_run(
-                            task,
-                            requested_by=author_name,
-                            channel_id=channel_id,
-                            workdir=str(workspace),
-                            max_steps=max_steps,
-                        )
-                        run_id = run.run_id if run else ""
-                    except Exception:
-                        run_id = str(state.get("run_id") or "")
-                else:
-                    run_id = str(state.get("run_id") or "")
-                chan = self._chans.setdefault(run_id, _SubChan(run_id)) if run_id else _SubChan(run_id or "resume")
-                if chan is not None and channel_id:
-                    chan.channel_id = channel_id
-                    chan.target = target
-                # Respect concurrency via _run_background (which uses the semaphore)
-                # Extend deadline from now
-                # Use the saved max_steps but allow remaining budget
-                # We don't recreate a new workspace; pass the existing one
-                # Use the stored messages/steps via resume_state
-                # We need to call _agent_loop directly in background, wrapping with handoff
-                async def _resume_task(
-                    ws=workspace,
-                    rs=state,
-                    rid=run_id,
-                    ch=chan,
-                    msg=fake_msg,
-                    tgt=target,
-                    tsk=task,
-                    ms=max_steps,
-                    delivery=deliver,
-                ):
-                    # Ensure old container is cleaned before resuming (orphaned)
-                    if self._sandbox_mode() == "docker":
-                        with __import__("contextlib").suppress(Exception):
-                            await self._stop_sandbox(ws)
-                    deadline = time.monotonic() + Config.SUBAGENT_TIMEOUT_SECONDS
-                    try:
-                        async with self._bg_sem:
-                            self._bg_inflight += 1
-                            try:
-                                report = await self._agent_loop(
-                                    tsk, ws,
-                                    max_steps=ms,
-                                    deadline=deadline,
-                                    model=model,
-                                    provider=provider,
-                                    bus=bus,
-                                    run_id=rid,
-                                    conv=ch,
-                                    message=msg,
-                                    resume_state=rs,
-                                    deliver=str(
-                                        rs.get("deliver") or delivery or "channel"
-                                    ),
-                                )
-                                if bus and rid:
-                                    bus.finish_run(rid, agent_events.STATUS_DONE, report[:2000])
-                                delivery_target = tgt
-                                if not callable(
-                                    getattr(delivery_target, "send", None)
-                                ):
-                                    with contextlib.suppress(Exception):
-                                        delivery_target = await self._resolve_delivery(
-                                            msg, delivery
-                                        )
-                                await self._handoff_report(
-                                    delivery_target, msg, ch, rid, tsk, report
-                                )
-                            except __import__("asyncio").CancelledError:
-                                if bus and rid:
-                                    bus.finish_run(rid, agent_events.STATUS_FAILED, "cancelled")
-                                raise
-                            except Exception as e:
-                                logger.warning("resumed sub-agent %s failed: %s", rid, e)
-                                if bus and rid:
-                                    bus.finish_run(rid, agent_events.STATUS_FAILED, str(e)[:2000])
-                                delivery_target = tgt
-                                if not callable(
-                                    getattr(delivery_target, "send", None)
-                                ):
-                                    with contextlib.suppress(Exception):
-                                        delivery_target = await self._resolve_delivery(
-                                            msg, delivery
-                                        )
-                                await self._handoff_report(
-                                    delivery_target,
-                                    msg,
-                                    ch,
-                                    rid,
-                                    tsk,
-                                    f"❌ resumed sub-agent failed:\n{e}",
-                                )
-                            finally:
-                                if self._bg_inflight > 0:
-                                    self._bg_inflight -= 1
-                                if rid:
-                                    self._retain_chan(rid)
-                                if self._sandbox_mode() == "docker":
-                                    await self._stop_sandbox(ws)
-                    except Exception as e:
-                        logger.warning("resume task outer failed %s: %s", rid, e)
-
-                _spawn_background(_resume_task())
-                logger.info("resumed sub-agent %s from %s (step %s/%s)", state.get("run_id"), workspace.name, state.get("steps"), max_steps)
-            except Exception as e:
-                logger.warning("resume_pending_runs failed for %s: %s", sp, e)
-                with __import__("contextlib").suppress(Exception):
-                    sp.unlink()
-
-
-
 _FETCH_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _MAX_FETCH_REDIRECTS = 5
 _FETCH_HEADERS = {
@@ -9513,7 +7433,7 @@ class FetchUrlTool(Tool):
 
         # Mark this turn as tainted: the URL is operator-supplied but its
         # *content* is untrusted and may include prompt-injection payloads
-        # designed to steer the model into proposing shell / sub_agent calls.
+        # designed to steer the model into proposing shell calls.
         if self.bot is not None and hasattr(self.bot, "mark_message_tainted"):
             self.bot.mark_message_tainted(message)
 
@@ -12092,7 +10012,7 @@ class EmailSendTool(Tool):
 
         # Indirect-prompt-injection gate. If this turn was tainted by a
         # fetched URL or web search result, refuse without an explicit user
-        # confirmation. Same pattern as shell/sub_agent.
+        # confirmation. Same pattern as shell.
         if _taint_gate_blocks(self, message, kwargs):
             preview = str(body)[:200] + ("..." if len(str(body)) > 200 else "")
             return (
@@ -12583,13 +10503,197 @@ class UpdateServerPromptTool(Tool):
 # --------------------------------------------------------------------------- #
 # Chess
 #
-# The chess_* tools let Maxwell play a real game against whoever started it in
-# a channel. Exactly one active game per channel; only the player who started
-# it can move. Maxwell "sees" the board two ways: the tool result carries the
-# board as ASCII + FEN + legal moves, and the posted PNG is returned as base64
+# The chess_* tools let this bot play a real game against a chosen player in
+# a channel. Exactly one active game per channel; only that opponent may move.
+# The bot "sees" the board two ways: the tool result carries the board as
+# ASCII + FEN + legal moves, and the posted PNG is returned as base64
 # (__IMAGE_B64__) so the vision path attaches it to the next model turn. The
 # same PNG is posted to the channel so the player sees it too.
 # --------------------------------------------------------------------------- #
+
+_CHESS_MENTION_RE = re.compile(r"<@!?(\d+)>")
+
+
+def _chess_bot_name(bot=None) -> str:
+    """Live people-facing name for this process (Maxwell, Uni, a nick, …)."""
+    user = getattr(bot, "user", None) if bot is not None else None
+    name = (
+        getattr(bot, "bot_name", None)
+        if bot is not None
+        else None
+    )
+    name = str(
+        name
+        or getattr(user, "display_name", None)
+        or getattr(user, "name", None)
+        or "Maxwell"
+    ).strip()
+    return name or "Maxwell"
+
+
+def _chess_user_label(user) -> str:
+    return str(
+        getattr(user, "display_name", None)
+        or getattr(user, "global_name", None)
+        or getattr(user, "name", None)
+        or getattr(user, "id", "")
+        or "player"
+    ).strip() or "player"
+
+
+def _chess_user_names(user) -> list[str]:
+    names = []
+    for attr in ("display_name", "global_name", "name", "nick"):
+        val = getattr(user, attr, None)
+        if val:
+            names.append(str(val))
+    uid = getattr(user, "id", None)
+    if uid is not None:
+        names.append(str(uid))
+    return names
+
+
+def _chess_is_self(bot, user) -> bool:
+    if user is None:
+        return False
+    bot_user = getattr(bot, "user", None) if bot is not None else None
+    uid = str(getattr(user, "id", "") or "")
+    bot_id = str(getattr(bot_user, "id", "") or "")
+    if uid and bot_id and uid == bot_id:
+        return True
+    needle = _chess_user_label(user).strip().lower()
+    return bool(needle) and needle == _chess_bot_name(bot).lower()
+
+
+def _chess_lookup_id(bot, message, uid: str):
+    """Sync cache lookup only — never fetch over the network from a tool helper."""
+    try:
+        uid_int = int(uid)
+    except (TypeError, ValueError):
+        return None
+    channel = getattr(message, "channel", None)
+    guild = getattr(message, "guild", None) or getattr(channel, "guild", None)
+    for obj in (guild, bot):
+        if obj is None:
+            continue
+        for meth in ("get_member", "get_user"):
+            fn = getattr(obj, meth, None)
+            if not callable(fn):
+                continue
+            with contextlib.suppress(Exception):
+                found = fn(uid_int)
+                if found is not None:
+                    return found
+    return None
+
+
+def _chess_resolve_player(message, opponent, bot) -> tuple[str, str]:
+    """Who this bot is playing: ``(user_id, display_name)``.
+
+    ``opponent`` is a mention, snowflake, or display name. Blank means the
+    asker, unless the message @mentioned exactly one other human — then that
+    person is the opponent.
+    """
+    author = getattr(message, "author", None)
+    mentions = [u for u in (getattr(message, "mentions", None) or []) if u is not None]
+    raw = str(opponent or "").strip()
+
+    def _from_user(user):
+        if user is None:
+            raise ValueError("no opponent")
+        if _chess_is_self(bot, user):
+            raise ValueError(
+                f"cannot play against {_chess_bot_name(bot)} — pick a human opponent"
+            )
+        uid = str(getattr(user, "id", "") or "")
+        if not uid:
+            raise ValueError("opponent has no user id")
+        return uid, _chess_user_label(user)
+
+    if not raw:
+        author_id = str(getattr(author, "id", "") or "")
+        others = [
+            u
+            for u in mentions
+            if not _chess_is_self(bot, u)
+            and str(getattr(u, "id", "") or "") != author_id
+        ]
+        if len(others) == 1:
+            return _from_user(others[0])
+        return _from_user(author)
+
+    mention = _CHESS_MENTION_RE.fullmatch(raw)
+    if mention:
+        uid = mention.group(1)
+        for user in mentions:
+            if str(getattr(user, "id", "") or "") == uid:
+                return _from_user(user)
+        found = _chess_lookup_id(bot, message, uid)
+        if found is not None:
+            return _from_user(found)
+        return uid, raw
+
+    if raw.isdigit() and len(raw) >= 15:
+        for user in mentions:
+            if str(getattr(user, "id", "") or "") == raw:
+                return _from_user(user)
+        found = _chess_lookup_id(bot, message, raw)
+        if found is not None:
+            return _from_user(found)
+        return raw, raw
+
+    needle = raw.lstrip("@").strip().lower()
+    pool: list = list(mentions)
+    if author is not None:
+        pool.append(author)
+    channel = getattr(message, "channel", None)
+    guild = getattr(message, "guild", None) or getattr(channel, "guild", None)
+    getter = getattr(guild, "get_member_named", None) if guild is not None else None
+    if callable(getter):
+        with contextlib.suppress(Exception):
+            named = getter(raw.lstrip("@"))
+            if named is not None:
+                pool.append(named)
+    members = list(getattr(guild, "members", None) or []) if guild is not None else []
+    if members and len(members) <= 500:
+        pool.extend(members)
+    pool.extend(list(getattr(channel, "recipients", None) or []))
+
+    matches = []
+    seen: set[str] = set()
+    for user in pool:
+        uid = str(getattr(user, "id", "") or "") or str(id(user))
+        if uid in seen:
+            continue
+        names = [n.lower() for n in _chess_user_names(user)]
+        if needle in names or any(
+            n.startswith(needle) and len(needle) >= 3 for n in names
+        ):
+            seen.add(uid)
+            matches.append(user)
+
+    if len(matches) == 1:
+        return _from_user(matches[0])
+    if len(matches) > 1:
+        labels = ", ".join(_chess_user_label(u) for u in matches[:8])
+        raise ValueError(
+            f"opponent '{raw}' is ambiguous ({labels}). Use a mention or user id."
+        )
+    raise ValueError(
+        f"could not find opponent '{raw}'. Mention them, pass their user id, "
+        "or omit opponent to play the person who asked."
+    )
+
+
+def _chess_is_bot_resign(who: str, bot=None) -> bool:
+    token = str(who or "").strip().lower().lstrip("@")
+    if token in {"bot", "engine", "ai", "me"}:
+        return True
+    name = _chess_bot_name(bot).lower()
+    aliases = {name}
+    if name == "maxwell":
+        aliases.add("max")
+    return token in aliases
 
 
 def _chess_color_name(color) -> str:
@@ -12616,8 +10720,9 @@ def _chess_render_safe(game) -> bytes | None:
         return None
 
 
-def _chess_state_text(game) -> str:
+def _chess_state_text(game, bot_name: str | None = None) -> str:
     """The board + metadata the model needs to play, as plain text."""
+    name = str(bot_name or "").strip() or "Maxwell"
     lines: list[str] = []
     lines.append("CHESS BOARD (text — see attached image for the real board):")
     lines.append(_chess_board_ascii(game.board))
@@ -12626,7 +10731,7 @@ def _chess_state_text(game) -> str:
     move_hist = " ".join(game.history_san) or "none"
     lines.append(f"Move history (SAN): {move_hist}")
     lines.append(
-        f"Maxwell={_chess_color_name(game.bot_color)} · "
+        f"{name}={_chess_color_name(game.bot_color)} · "
         f"{game.player_name}={_chess_color_name(game.player_color)}"
     )
     result = game.result
@@ -12639,7 +10744,7 @@ def _chess_state_text(game) -> str:
         if len(legal) > 48:
             shown += f" … (+{len(legal) - 48} more)"
         lines.append(f"Legal moves ({len(legal)}): {shown}")
-        who = "Maxwell" if game.bot_turn else game.player_name
+        who = name if game.bot_turn else game.player_name
         lines.append(f"It is {who}'s move.")
     return "\n".join(lines)
 
@@ -12707,8 +10812,16 @@ async def _chess_record(bot, message, text: str) -> None:
         pass
 
 
-def _chess_game_result(game, *, posted: bool, cdn_url: str = "", local_path: str = "", png: bytes | None = None) -> str:
-    text = _chess_state_text(game)
+def _chess_game_result(
+    game,
+    *,
+    posted: bool,
+    cdn_url: str = "",
+    local_path: str = "",
+    png: bytes | None = None,
+    bot_name: str | None = None,
+) -> str:
+    text = _chess_state_text(game, bot_name=bot_name)
     extra: list[str] = []
     if posted:
         extra.append("Board image posted to the channel.")
@@ -12724,16 +10837,20 @@ def _chess_game_result(game, *, posted: bool, cdn_url: str = "", local_path: str
 
 
 class ChessStartTool(Tool):
-    """Start a new chess game in this channel with the invoking player."""
+    """Start a new chess game in this channel against a chosen player."""
 
     def get_description(self):
+        name = _chess_bot_name(self.bot)
         return (
-            "Start a chess game in this channel against the player who asked. "
-            "One game per channel; once started, only that player may move. "
-            "Posts the starting board image and returns the full board state, "
-            "FEN, and legal moves. Params: bot_side (white|black|auto, default "
-            "white), depth (search depth 1-4, default 3). If Maxwell is white it "
-            "plays its first move automatically and then it is the player's turn."
+            f"Start a chess game in this channel. Pass opponent= to choose who "
+            f"{name} plays — a mention, Discord user id, or display name. Omit "
+            f"it to play the person who asked, or the single @mentioned human "
+            f"in the message. One game per channel; only that opponent may "
+            f"move. Posts the starting board image and returns FEN and legal "
+            f"moves. Params: opponent, bot_side (white|black|auto, default "
+            f"white), depth (search depth 1-4, default 3). If {name} is white "
+            f"it plays its first move automatically and then it is the "
+            f"player's turn."
         )
 
     async def execute(
@@ -12741,24 +10858,29 @@ class ChessStartTool(Tool):
         message: Message,
         bot_side: str | None = "white",
         depth: int | None = None,
+        opponent: str | None = None,
+        player: str | None = None,
         **kwargs,
     ) -> str:
         if not __CHESS_IMPORTED__:
             return "Error: chess is not available (python-chess is missing)."
         channel_id = str(getattr(message.channel, "id", "") or "")
-        author_id = str(getattr(message.author, "id", "") or "")
-        author_name = str(getattr(message.author, "display_name", "") or "") or str(
-            getattr(message.author, "name", "") or "player"
-        )
+        name = _chess_bot_name(self.bot)
         if not channel_id:
             return "Error: no channel context."
+        try:
+            author_id, author_name = _chess_resolve_player(
+                message, opponent or player, self.bot
+            )
+        except ValueError as exc:
+            return f"Error: {exc}"
 
         manager = _chess_get_manager()
         existing = manager.active(channel_id)
         if existing is not None:
             return (
                 f"Error: a chess game is already active in this channel. "
-                f"It is between Maxwell and {existing.player_name}. "
+                f"It is between {name} and {existing.player_name}. "
                 f"Use chess_state to see it, or chess_resign to end it first."
             )
 
@@ -12787,7 +10909,7 @@ class ChessStartTool(Tool):
             jitter=0.35,
         )
 
-        # If Maxwell is white it opens; otherwise the player moves first.
+        # If this bot is white it opens; otherwise the player moves first.
         played: list[str] = []
         if game.bot_turn and not game.is_over:
             try:
@@ -12804,16 +10926,25 @@ class ChessStartTool(Tool):
         await _chess_record(
             self.bot,
             message,
-            f"started a chess game. Maxwell is "
+            f"started a chess game. {name} is "
             f"{_chess_color_name(game.bot_color)}, "
             f"{game.player_name} is {_chess_color_name(game.player_color)}."
-            + (f" Maxwell opened with {played[-1]}." if played else ""),
+            + (f" {name} opened with {played[-1]}." if played else ""),
         )
 
-        result = _chess_game_result(game, posted=True, cdn_url=cdn_url, local_path=local_path, png=png)
+        result = _chess_game_result(
+            game,
+            posted=True,
+            cdn_url=cdn_url,
+            local_path=local_path,
+            png=png,
+            bot_name=name,
+        )
         if played:
             result += (
-                "\n\nGame started. Maxwell ("
+                "\n\nGame started. "
+                + name
+                + " ("
                 + _chess_color_name(game.bot_color)
                 + ") opened with '"
                 + played[-1]
@@ -12823,7 +10954,9 @@ class ChessStartTool(Tool):
             )
         elif game.bot_turn and not game.is_over:
             result += (
-                "\n\nGame started. It is Maxwell's move — call chess_move"
+                "\n\nGame started. It is "
+                + name
+                + "'s move — call chess_move"
                 " (or pass move=) to play."
             )
         else:
@@ -12844,8 +10977,7 @@ class ChessStateTool(Tool):
             "Get the current chess board state (text board, FEN, legal moves, "
             "whose move it is) for the active game in this channel. Does NOT "
             "change the board or post an image; use it to re-sync when you lose "
-            "track of the position. Only the player who started the game may "
-            "call it."
+            "track of the position. Only the chosen opponent may call it."
         )
 
     async def execute(self, message: Message, **kwargs) -> str:
@@ -12861,21 +10993,24 @@ class ChessStateTool(Tool):
         except PermissionError as exc:
             return f"Error: {exc}"
         png = _chess_render_safe(game)
-        return _chess_game_result(game, posted=False, png=png)
+        return _chess_game_result(
+            game, posted=False, png=png, bot_name=_chess_bot_name(self.bot)
+        )
 
 
 class ChessMoveTool(Tool):
-    """Play a chess move: the player's move or Maxwell's own move."""
+    """Play a chess move: the player's move or this bot's own move."""
 
     def get_description(self):
+        name = _chess_bot_name(self.bot)
         return (
             "Advance the chess game by one move (or a full round). Pass move= "
             "in SAN (e4, Nf3, O-O, exd5, Qh5) or UCI (e2e4, e7e8q). If it is "
-            "the player's turn, this relays their move; if it is Maxwell's turn "
-            "and move is omitted, Maxwell picks a move itself. respond=true "
-            "(default) makes Maxwell reply automatically after a player move. "
+            f"the player's turn, this relays their move; if it is {name}'s turn "
+            f"and move is omitted, {name} picks a move itself. respond=true "
+            f"(default) makes {name} reply automatically after a player move. "
             "Posts the updated board image and returns FEN + legal moves. Only "
-            "the player who started the game may call it."
+            "the chosen opponent may call it."
         )
 
     async def execute(
@@ -12901,7 +11036,7 @@ class ChessMoveTool(Tool):
         error_text: str | None = None
         try:
             if game.bot_turn:
-                # Maxwell to move. Either the model supplies its chosen move,
+                # This bot to move. Either the model supplies its chosen move,
                 # or the engine picks one.
                 if move:
                     mv = game.parse_move(move)
@@ -12929,7 +11064,7 @@ class ChessMoveTool(Tool):
         if error_text:
             return f"Error: {error_text}"
 
-        # If the human just moved and it is now Maxwell's turn, respond.
+        # If the human just moved and it is now this bot's turn, respond.
         if respond and game.bot_turn and not game.is_over:
             try:
                 mv2, san2 = _chess_choose_bot_move(game.board, depth=game.max_depth, jitter=game.jitter)
@@ -12948,13 +11083,21 @@ class ChessMoveTool(Tool):
             "chess move(s): " + " ".join(played) + f" · fen {game.fen.split()[0]}",
         )
 
-        result = _chess_game_result(game, posted=True, cdn_url=cdn_url, local_path=local_path, png=png)
+        name = _chess_bot_name(self.bot)
+        result = _chess_game_result(
+            game,
+            posted=True,
+            cdn_url=cdn_url,
+            local_path=local_path,
+            png=png,
+            bot_name=name,
+        )
         result += (
             "\n\n" + "Played move(s): " + " ".join(played)
             + ("\nThe game is over." if game.is_over else
                ("\nIt is now the player's move — tell them it is their turn."
                 if not game.bot_turn else
-                "\nIt is Maxwell's move — play it or pass the next call."))
+                f"\nIt is {name}'s move — play it or pass the next call."))
         )
         return result
 
@@ -12963,11 +11106,13 @@ class ChessResignTool(Tool):
     """End the current chess game."""
 
     def get_description(self):
+        name = _chess_bot_name(self.bot)
         return (
-            "End the active chess game in this channel. Pass side=maxwell to "
-            "have Maxwell resign, side=player to record the player resigning, or "
-            "leave it default for a mutual end. Returns the final board and "
-            "result. Only the player who started the game may call it."
+            "End the active chess game in this channel. Pass "
+            f"side={name.lower()} to have {name} resign, side=player to record "
+            "the player resigning, or leave it default for a mutual end. "
+            "Returns the final board and result. Only the chosen opponent may "
+            "call it."
         )
 
     async def execute(
@@ -12991,12 +11136,12 @@ class ChessResignTool(Tool):
         who = str(side or "player").strip().lower()
         if who in ("player", "user", "human"):
             winner = _chess_color_name(game.bot_color)
-        elif who in ("maxwell", "bot", "max"):
+        elif _chess_is_bot_resign(who, self.bot):
             winner = _chess_color_name(game.player_color)
         else:
             winner = None
         manager.remove(channel_id)
-        final = _chess_state_text(game)
+        final = _chess_state_text(game, bot_name=_chess_bot_name(self.bot))
         png = _chess_render_safe(game)
         if winner:
             final += f"\nGAME OVER: {winner} wins by resignation."

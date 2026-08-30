@@ -1000,6 +1000,10 @@ async def _read_sse_response(
 # pooled free keys) that is already rate-limiting us, which only makes the
 # limit worse. Override via OLLAMA_ENDPOINT_COOLDOWN_SECONDS.
 DEFAULT_ENDPOINT_COOLDOWN_SECONDS = 60.0
+# A provider can acknowledge a request with HTTP 200 and still emit no
+# assistant content or tool call. Keep ordinary retries small, but give this
+# specific transient response a separate, bounded recovery round.
+DEFAULT_EMPTY_RESPONSE_RETRIES = 2
 
 USAGE_EXHAUSTED_MESSAGE = (
     "The api is down cuz yall drained the usage and im not rich so wait like 2 hours"
@@ -1048,6 +1052,14 @@ class ProviderRequestError(RuntimeError):
     Retrying with the same payload reproduces it exactly, so the retry loop
     re-raises this instead of sleeping through its remaining attempts.
     """
+
+
+class ProviderEmptyResponseError(RuntimeError):
+    """Every provider attempt completed without a usable assistant response."""
+
+    user_message = (
+        "The model returned an empty response after retries. Please try again in a moment."
+    )
 
 
 class ProviderResult(str):
@@ -1359,6 +1371,7 @@ class OllamaProvider:
         vision_model: str = "",
         vision_api_key: str = "",
         vision_disable_reasoning: bool = True,
+        empty_response_retries: int | None = None,
     ):
         self.base_url = normalize_base_url(base_url)
         self.model = model
@@ -1366,6 +1379,18 @@ class OllamaProvider:
         self.temperature = temperature
         self.api_key = api_key.strip()
         self.retry_attempts = max(1, retry_attempts)
+        if empty_response_retries is None:
+            try:
+                empty_response_retries = int(
+                    os.getenv(
+                        "OLLAMA_EMPTY_RESPONSE_RETRIES",
+                        str(DEFAULT_EMPTY_RESPONSE_RETRIES),
+                    )
+                    or DEFAULT_EMPTY_RESPONSE_RETRIES
+                )
+            except (TypeError, ValueError):
+                empty_response_retries = DEFAULT_EMPTY_RESPONSE_RETRIES
+        self.empty_response_retries = max(0, min(int(empty_response_retries), 5))
         self.enable_audio_input = bool(enable_audio_input)
         self._endpoints = [
             ProviderEndpoint(
@@ -1919,15 +1944,31 @@ class OllamaProvider:
         # `attempt_ceiling` keeps a pathological provider (one that answers
         # every payload with a fresh deterministic 400) from looping forever.
         attempt = 0
-        attempt_ceiling = max_attempts + 2 * len(self._endpoints) + 2
+        empty_response_recoveries = 0
+        # Leave room for the explicitly configured empty-response recoveries in
+        # addition to the bounded deterministic failover extensions below.
+        attempt_ceiling = (
+            max_attempts
+            + 2 * len(self._endpoints)
+            + 2
+            + self.empty_response_retries
+        )
+        recovery_endpoint: ProviderEndpoint | None = None
         while attempt < min(max_attempts, attempt_ceiling):
             attempt += 1
-            endpoint = self._attempt_endpoint(
-                attempt,
-                fast_fallback=fast_fallback,
-                has_media=has_media,
-                prefer_fallback=prefer_fallback,
-            )
+            if recovery_endpoint is not None:
+                # The normal schedule intentionally spends its first attempts
+                # on the primary. Once it is exhausted, rotate explicitly so
+                # a blank fallback response does not leave the primary unused.
+                endpoint = recovery_endpoint
+                recovery_endpoint = None
+            else:
+                endpoint = self._attempt_endpoint(
+                    attempt,
+                    fast_fallback=fast_fallback,
+                    has_media=has_media,
+                    prefer_fallback=prefer_fallback,
+                )
             if endpoint.name in media_broken or endpoint.name in dead:
                 order = self._media_endpoint_order() if has_media else self._endpoints
                 usable = [
@@ -1946,6 +1987,13 @@ class OllamaProvider:
                 temperature=temperature,
                 disable_reasoning=disable_reasoning,
             )
+            if empty_response_recoveries:
+                # A blank streamed 200 can be caused by a flaky SSE gateway
+                # even when the provider is healthy. Use a normal JSON response
+                # for recovery so the stream assembler is no longer part of the
+                # failure path. Keep the caller's reasoning preference intact:
+                # some models reject an explicit reasoning-disabled parameter.
+                data["stream"] = False
             request_start = time.perf_counter()
             media_parts = sum(
                 1
@@ -1965,7 +2013,11 @@ class OllamaProvider:
                 media_parts,
                 timeout,
                 data.get("max_tokens"),
-                bool(data.get("reasoning")),
+                data.get("reasoning_effort") == "none"
+                or (
+                    isinstance(data.get("thinking"), dict)
+                    and data["thinking"].get("type") == "disabled"
+                ),
                 len(data.get("tools") or []),
             )
             try:
@@ -2478,7 +2530,53 @@ class OllamaProvider:
                             prefer_fallback=prefer_fallback,
                         ):
                             continue
-                        raise RuntimeError("Empty response from provider")
+                        if empty_response_recoveries < self.empty_response_retries:
+                            empty_response_recoveries += 1
+                            max_attempts = min(
+                                attempt_ceiling, max(max_attempts, attempt + 1)
+                            )
+                            order = (
+                                self._media_endpoint_order()
+                                if has_media
+                                else [
+                                    e for e in self._endpoints if e.name != "vision"
+                                ]
+                            )
+                            usable = [
+                                e
+                                for e in order
+                                if e.name not in media_broken
+                                and e.name not in dead
+                            ]
+                            alternatives = [
+                                e for e in usable if e.name != endpoint.name
+                            ]
+                            if alternatives:
+                                healthy = [
+                                    e
+                                    for e in alternatives
+                                    if not self._is_endpoint_cooling(e.name)
+                                ]
+                                recovery_endpoint = (healthy or alternatives)[0]
+                            else:
+                                recovery_endpoint = endpoint
+                            logger.warning(
+                                "Provider %s returned an empty response after the "
+                                "normal retry budget; recovery %s/%s using %s "
+                                "(non-streaming)",
+                                endpoint.name,
+                                empty_response_recoveries,
+                                self.empty_response_retries,
+                                recovery_endpoint.name,
+                            )
+                            if recovery_endpoint.name == endpoint.name:
+                                await asyncio.sleep(
+                                    min(2 * empty_response_recoveries, 6)
+                                )
+                            continue
+                        raise ProviderEmptyResponseError(
+                            "Empty response from provider"
+                        )
 
                     usage = result.get("usage", {})
                     self._last_usage = {

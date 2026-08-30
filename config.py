@@ -224,6 +224,12 @@ class Config:
     OLLAMA_RETRY_ATTEMPTS = _int_env(
         "OLLAMA_RETRY_ATTEMPTS", 3, min_value=1, max_value=10
     )
+    # Extra bounded recovery attempts for HTTP 200 responses that contain
+    # neither assistant text nor tool calls. These use a different endpoint
+    # when available and a non-streaming request to bypass flaky SSE gateways.
+    OLLAMA_EMPTY_RESPONSE_RETRIES = _int_env(
+        "OLLAMA_EMPTY_RESPONSE_RETRIES", 2, min_value=0, max_value=5
+    )
 
     # Toggle for "omni" (audio+vision capable) model input. On by default:
     # Gemini behind the current proxy transcribes wav/mp3; endpoints that
@@ -328,16 +334,6 @@ class Config:
     # this is THE security-relevant switch: `shell` runs commands as the bot
     # user. validate() warns loudly at startup so it is never a surprise.
     ENABLE_SHELL = _feature_env("ENABLE_SHELL")
-    # Native sub-agent: Maxwell spawns a nested copy of itself (same
-    # provider, restricted toolset, its own workdir) to work a coding task
-    # to completion. It writes and runs code, so it inherits ENABLE_SHELL's
-    # trust decision unless set explicitly.
-    ENABLE_SUBAGENT = _feature_env(
-        "ENABLE_SUBAGENT",
-        lambda _sh=ENABLE_SHELL: _sh,
-        on_text="auto: follows ENABLE_SHELL",
-        off_text="auto: off, follows ENABLE_SHELL=false",
-    )
 
     # RAG vector memory. Needs a reachable embedding endpoint (see
     # EMBED_* below); without one the bot still works, it just loses
@@ -398,11 +394,8 @@ class Config:
 
     # Live tool progress messages. OFF by default: a per-server `,progress on`
     # opts a server in, and MAXWELL_PROGRESS_MESSAGES=true enables it for every
-    # server as a baseline. The sub-agent does NOT post a per-step "working on
-    # it" heartbeat anymore — Maxwell watches the run on the event bus via
-    # sub_agent_status and reports/steers it itself; only the final report lands
-    # in the channel. `,progress off` silences a noisy server even under the env
-    # baseline; DMs never get them. See tool_progress.py.
+    # server as a baseline. `,progress off` silences a noisy server even under
+    # the env baseline; DMs never get them. See tool_progress.py.
     PROGRESS_MESSAGES = _bool_env("MAXWELL_PROGRESS_MESSAGES", False)
 
     # Custom streaming tool-call protocol. Native OpenAI-style tools= doesn't
@@ -570,75 +563,6 @@ class Config:
         "MAXWELL_EMAIL_IGNORE_SENDERS", ""
     ).strip()
 
-    # -------------------------------------------------------------------------
-    # Native sub-agent (only used if ENABLE_SUBAGENT resolves true).
-    # Maxwell runs the task itself on its own provider inside a scratch
-    # workdir — no external coding-agent binary, no container image.
-    # -------------------------------------------------------------------------
-    SUBAGENT_BASE_DIR = os.getenv("SUBAGENT_BASE_DIR", "data/subagents").strip()
-    # MODEL for sub-agent work. Blank means the main OLLAMA_MODEL — the sub-
-    # agent runs on the SAME model the chat uses by default. Only set this to
-    # run sub-agent jobs on a different (typically cheaper/faster) model.
-    SUBAGENT_MODEL = os.getenv("SUBAGENT_MODEL", "").strip()
-    SUBAGENT_MAX_STEPS = _int_env("SUBAGENT_MAX_STEPS", 100, min_value=1, max_value=200)
-    SUBAGENT_MAX_TOKENS = _int_env(
-        "SUBAGENT_MAX_TOKENS", 16384, min_value=256, max_value=128000
-    )
-    SUBAGENT_TIMEOUT_SECONDS = _int_env(
-        "SUBAGENT_TIMEOUT_SECONDS", 900, min_value=30, max_value=7200
-    )
-    SUBAGENT_COMMAND_TIMEOUT_SECONDS = _int_env(
-        "SUBAGENT_COMMAND_TIMEOUT_SECONDS", 120, min_value=5, max_value=3600
-    )
-    # How many background (fire-and-forget) sub-agents may run at once. Each
-    # one holds a provider loop and a sandbox container, so this caps both the
-    # provider load and how many throwaway containers are alive. Foreground
-    # (blocking) sub-agent calls are not limited by this — the model only ever
-    # runs one of those per turn.
-    SUBAGENT_MAX_CONCURRENT = _int_env(
-        "SUBAGENT_MAX_CONCURRENT", 5, min_value=1, max_value=16
-    )
-    # Hard ceiling on background sub-agents submitted but not yet finished
-    # (running + waiting on a concurrency slot). Past this, new background
-    # requests are refused with a clear "too busy" so a channel flood can't
-    # grow the in-memory queue without bound. Foreground calls are unaffected.
-    SUBAGENT_MAX_QUEUED = _int_env("SUBAGENT_MAX_QUEUED", 16, min_value=1, max_value=128)
-    # How long a finished sub-agent's message channel is kept so the main agent
-    # can still reply to it (sub_agent_message) and read its pending notes.
-    SUBAGENT_CHAN_GRACE_SECONDS = _int_env(
-        "SUBAGENT_CHAN_GRACE_SECONDS", 600, min_value=30, max_value=7200
-    )
-    # Maximum time Maxwell gets to compose a finished background-run reply.
-    # If he wanders into tools or stalls, SubAgentTool posts the report itself
-    # so completion can never be lost behind a second long-running turn.
-    SUBAGENT_HANDOFF_TIMEOUT_SECONDS = _int_env(
-        "SUBAGENT_HANDOFF_TIMEOUT_SECONDS", 30, min_value=5, max_value=300
-    )
-    # Where the sub-agent's `run_command` executes. "docker" (default) runs
-    # each run in its own throwaway container with only the run's scratch
-    # workspace mounted — the bot's .env and source are not visible to it.
-    # "host" runs `bash -lc` in the bot's own environment: no isolation, and
-    # only sensible if the whole machine is already disposable.
-    SUBAGENT_SANDBOX = os.getenv("SUBAGENT_SANDBOX", "docker").strip().lower()
-    SUBAGENT_MAX_FILE_BYTES = _int_env(
-        "SUBAGENT_MAX_FILE_BYTES", 200_000, min_value=1000, max_value=5_000_000
-    )
-    # How many times a sub-agent retries a provider call that fails before it
-    # gives up the whole run. A self-hosted or proxied model drops a call now
-    # and then (network blip, 5xx, transient timeout) — that used to end a
-    # minutes-long run with "the model call failed". Retries with backoff make
-    # a hiccup cost a step, not the run. 0 disables and keeps the old behaviour.
-    SUBAGENT_PROVIDER_RETRIES = _int_env(
-        "SUBAGENT_PROVIDER_RETRIES", 2, min_value=0, max_value=6
-    )
-    # How many consecutive "dud" replies (no tool call AND no content) a
-    # sub-agent tolerates before it ends the run. A model that returns nothing
-    # at all is stalled or glitched; instead of ending the run we nudge it once
-    # or twice to take an action, then give up. 0 keeps the old behaviour.
-    SUBAGENT_DUD_TOLERANCE = _int_env(
-        "SUBAGENT_DUD_TOLERANCE", 2, min_value=0, max_value=6
-    )
-
     # Admin / owner allowlists. Re-exported here so Config is the single
     # source of truth; bot_tools.refresh_owner_ids() still does a runtime
     # reload but the initial parse lives here.
@@ -668,7 +592,6 @@ class Config:
         ("ENABLE_EMAIL_TOOLS", "email tools"),
         ("ENABLE_X", "X (Twitter)"),
         ("ENABLE_SHELL", "shell (docker sandbox)"),
-        ("ENABLE_SUBAGENT", "native sub-agent"),
         ("ENABLE_RAG", "RAG vector memory"),
         ("ENABLE_TELEGRAM", "Telegram transport"),
         ("ENABLE_AUTONOMY", "autonomy engine"),

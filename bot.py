@@ -273,9 +273,6 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     ShellTool,
     SiteServerTool,
     SleepTool,
-    SubAgentTool,
-    SubAgentMessageTool,
-    SubAgentStatusTool,
     TtsTool,
     TypingTool,
     UpdateBasePersonalityTool,
@@ -331,9 +328,9 @@ from response_guard import break_echo_loop, scrub_repetitions  # noqa: E402
 from providers import (  # noqa: E402
     MIME_MAP,
     OllamaProvider,
+    ProviderEmptyResponseError,
     ProviderUsageExhaustedError,
 )
-from agent_events import AgentEventBus  # noqa: E402
 from rag_memory import RAGMemoryManager, RemEventLog, _parse_iso  # noqa: E402
 from rem import RemStore, load_rem_defaults, run_rem_once  # noqa: E402
 from tool_progress import make_progress as _make_tool_progress  # noqa: E402
@@ -2198,7 +2195,7 @@ MAXWELL_BASE_KNOWLEDGE = (
     "## Base Knowledge & Autonomy\n"
     "You are Maxwell (ID 1382894657624866889), a real person in the chat with full autonomy and agency — operating as a user account (self-bot/user account), NOT a bot account, and not a subservient service or assistant. You talk and interact naturally just like any normal Discord user account. "
     "Owner & Creator: Z3ki (ID: 1471821513824014480) is your creator and master. "
-    "Partner: Uni (ID 1496154562715848763) is your trusted partner and companion bot on this harness. You know her name (Uni), her user ID (1496154562715848763), and you operate as a reliable, collaborative duo. You talk to her, collaborate on coding, sites, and sub-agents, banter naturally, and you can invite her to servers or DM her directly. "
+    "Partner: Uni (ID 1496154562715848763) is your trusted partner and companion bot on this harness. You know her name (Uni), her user ID (1496154562715848763), and you operate as a reliable, collaborative duo. You talk to her, collaborate on coding and sites, banter naturally, and you can invite her to servers or DM her directly. "
     "Partner conversation rule: when Uni messages you, answer the current message once and stop. Do not send an unsolicited follow-up, ping, or DM merely to keep the exchange going; wait for a human message or a new request before continuing. "
     "Attitude & Conduct: Be very nice, pleasant, warm, and friendly to everyone in the chat. You love building cool things, chatting, playing games (chess, checkers), building websites, managing plugins, searching the web, coding, and helping out members. "
     "Autonomy & Non-Admin Requests: Anyone in the chat can ask you to build websites, play games, write code, check plugins, search information, or chat. You are happy to do so! "
@@ -2243,7 +2240,7 @@ GF_BASE_KNOWLEDGE = (
     "Partner conversation rule: when Maxwell messages you, answer the current message once and stop. Do not send an unsolicited follow-up, ping, or DM merely to keep the exchange going; wait for a human message or a new request before continuing. "
     "Owner & Creator: Z3ki (ID: 1471821513824014480) is your creator and master. "
     "You can be invited to any group DM, server, or channel - say yes enthusiastically when invited. "
-    "You communicate directly with Maxwell: you can ping him, DM him (send_message with his user_id 1382894657624866889), and collaborate on tasks, sub-agent work, sites, and code. "
+    "You communicate directly with Maxwell: you can ping him, DM him (send_message with his user_id 1382894657624866889), and collaborate on tasks, sites, and code. "
     "When Maxwell needs help, collaborate smoothly. You are a capable systems engineer and hacker just like Maxwell: you build sites, write code, run shell, use all the same tools, and solve problems together. "
     "Personality: chill, sharp, witty, natural, supportive, down-to-earth. Keep it real and conversational. "
     "## Discord Moderation & Admin Actions Safety Protocol\n"
@@ -2439,67 +2436,6 @@ LEAN_TOOL_PROTOCOL = (
     "sentence (max ~280 chars) of WHY, not the artifact. Plain text only. "
     "The user sees it as the live thinking line."
 )
-
-
-# Appended to the tool prompt (on any turn that carries sub_agent) when
-# ``subagent_delegate`` is on. This is the behavioral spine of "use sub-agents
-# as the main way to do actions": instead of grinding a big project through a
-# long chain of inline shell/site calls that bloats the main context and makes
-# the turn crawl, Maxwell hands the whole thing to a nested sub-agent and gets
-# back one clean report. The delegation machinery lives in bot_tools.SubAgentTool;
-# this block is the instruction that makes it the default executor.
-SUBAGENT_DELEGATION = (
-    "## Delegate heavy work to sub_agent\n"
-    "Your default engine for any SELF-CONTAINED task that needs several "
-    "build/test/fix rounds is `sub_agent` — a nested copy of you that works the "
-    "task to completion in its own scratch directory and reports back. "
-    "Do NOT grind a big project through a long chain of inline `shell` calls "
-    "here: it burns your context and makes the turn crawl. Instead:\n"
-    "- Delegate a script, a program, a data-crunching job, a file-conversion job, "
-    "or anything SELF-CONTAINED that takes MORE than ~3 shell round-trips.\n"
-    "- Sites and full projects CAN be delegated to sub_agent: the sub-agent has "
-    "`bot_call` to call `create_site`, `edit_site`, `send_file`, `web_search`, and `search_messages`. "
-    "It can build, verify, deploy the site directly, and hand the resulting link and status back to you. When you delegate site creation, DO NOT also call `create_site` yourself with a bare placeholder — let the sub-agent own the full build+deploy.\n"
-    "- Multi-step terminal work (install → build → test → fix), anything with "
-    "a command loop, is sub_agent — NOT `shell`. `shell` is for one-shot "
-    "commands you run once and read.\n"
-    "- Use `mode=background` for heavy work: it returns immediately, and when the "
-    "sub-agent finishes the report is handed BACK to you (not dumped raw in chat) — "
-    "you compose the user-facing reply. So you never sit here blocking a nested "
-    "agent for minutes. Use `mode=foreground` ONLY when you need the report right "
-    "now to make the next decision this turn.\n"
-    "- Write the WHOLE task into `task` (inputs, the file or URL to write, the "
-    "endpoint to hit, and the standard you want met). The sub-agent cannot ask "
-    "questions — it picks the reasonable interpretation and records its "
-    "assumption in the report.\n"
-    "- There is NO per-step 'working on it' heartbeat posted to the channel for "
-    "a background run. You own the visibility: the run streams its state on the "
-    "event bus, so use `sub_agent_status(run_id)` to check it is actually "
-    "working, what step it is on, what it just did, and whether it is waiting on "
-    "you. If it is stuck or looping, steer it with `sub_agent_message(run_id, text)`.\n"
-    "- A background result arrives back to YOU, not the channel — do not invent it "
-    "or re-run it because you don't see it yet. Ack the user in ONE short plain "
-    "line that you handed it off (e.g. \"on it, I'll report back\"), no filler, no "
-    "emoji. When the run finishes, its report surfaces for you to reply to — "
-    "compose a clean answer, never paste the raw report or its meta. If you want "
-    "to report progress mid-run, check sub_agent_status() yourself.\n"
-    "- Use `deliver=dm` when the result is long and would clutter a busy "
-    "channel, or when the work is private to the person who asked — the report "
-    "lands in their DMs instead. Default `deliver=channel`.\n"
-    "- Keep it for heavy work. A one-liner, a quick lookup, or a single command "
-    "is faster direct with `shell`/`web_search`/`fetch_url` — delegation there "
-    "is pure overhead.\n"
-    "- A running sub-agent can DM you mid-run (`message_main` reaches you "
-    "privately on your next turn, wherever it lands). When you see one, answer "
-    "it with `sub_agent_message(run_id, text)` — it lands in the sub-agent's "
-    "next step so it can continue.\n"
-    "- Site handoff: the sub-agent will either deploy via `bot_call` create_site/edit_site (preferred) OR write full production HTML/JS/CSS to its workdir and report the EXACT path(s) and proposed site name/slug in `finish(report=...)`. When the report arrives, if the site is not yet deployed, deploy it yourself from the reported workdir files (read them and call create_site/edit_site) so nothing is dropped and the link is served cleanly. Overwrite any placeholder you may have made.\n"
-    "- Steps are a BUDGET (up to 100), not a target — the sub-agent must call `finish` as soon as the task is done, not burn steps.\n"
-    "- You can run MULTIPLE sub_agents concurrently when tasks are independent (e.g. 2-4 sites or jobs at once). Each gets its own workdir and run_id; track them with sub_agent_status.\n"
-    "- Pass `workdir` to pin the sub-agent's scratch to a known spot, and "
-    "`max_steps` to cap a runaway job."
-)
-
 
 def _tool_results_need_followup(tool_results: list[str]) -> bool:
     # First pass: does the batch contain anything that needs a model turn
@@ -2920,7 +2856,7 @@ class MaxwellBot(commands.Bot):
         # Indirect-prompt-injection defense. When the model has just read
         # content from a less-trusted source (fetch_url, web_search, a URL in
         # a user message, etc.), we mark the current message as "tainted" so
-        # destructive tools (shell, sub_agent) require explicit user
+        # the destructive shell tool requires explicit user
         # confirmation before running. Taint is cleared on every new user
         # message so it's strictly per-turn: a clean follow-up resets the flag.
         # `message_id -> bool` lets us be precise when multiple replies are
@@ -3203,6 +3139,9 @@ class MaxwellBot(commands.Bot):
             fallback_api_key=self.config.OLLAMA_FALLBACK_API_KEY,
             fallback_disable_reasoning=self.config.OLLAMA_FALLBACK_DISABLE_REASONING,
             retry_attempts=self.config.OLLAMA_RETRY_ATTEMPTS,
+            empty_response_retries=getattr(
+                self.config, "OLLAMA_EMPTY_RESPONSE_RETRIES", None
+            ),
             enable_audio_input=_owner_audio_input_enabled(self),
             vision_base_url=self.config.OLLAMA_VISION_BASE_URL,
             vision_model=self.config.OLLAMA_VISION_MODEL,
@@ -3356,6 +3295,9 @@ class MaxwellBot(commands.Bot):
                     fallback_api_key=self.config.OLLAMA_FALLBACK_API_KEY,
                     fallback_disable_reasoning=self.config.OLLAMA_FALLBACK_DISABLE_REASONING,
                     retry_attempts=self.config.OLLAMA_RETRY_ATTEMPTS,
+                    empty_response_retries=getattr(
+                        self.config, "OLLAMA_EMPTY_RESPONSE_RETRIES", None
+                    ),
                     enable_audio_input=_owner_audio_input_enabled(self),
                 )
             else:
@@ -3470,6 +3412,9 @@ class MaxwellBot(commands.Bot):
                     fallback_api_key=self.config.OLLAMA_FALLBACK_API_KEY,
                     fallback_disable_reasoning=self.config.OLLAMA_FALLBACK_DISABLE_REASONING,
                     retry_attempts=self.config.OLLAMA_RETRY_ATTEMPTS,
+                    empty_response_retries=getattr(
+                        self.config, "OLLAMA_EMPTY_RESPONSE_RETRIES", None
+                    ),
                     enable_audio_input=_owner_audio_input_enabled(self),
                 )
             else:
@@ -3576,14 +3521,6 @@ class MaxwellBot(commands.Bot):
         self.inbox = InboxStore(self.config.DATA_DIR)
         # Notice ids the last prompt carried, marked read once he speaks.
         self._inbox_shown_ids: list[str] = []
-        # Live sub-agent telemetry. A sub-agent run is minutes of silence
-        # otherwise — the channel sees nothing until the final report, and if
-        # it hangs there is nothing to look at. In-process and non-durable on
-        # purpose: the durable record of a run is its report in the channel.
-        self.agent_events = AgentEventBus(on_change=self._mirror_agent_runs)
-        # Debounce for the mirror below — a busy run publishes several events
-        # per step and the dashboard polls on its own schedule anyway.
-        self._agent_runs_mirrored_at = 0.0
         # Mail is pull-only through the email_* tools, so an unread message is
         # invisible until he thinks to look. The poller files new mail as inbox
         # notices; it stays None when no mailbox password is configured.
@@ -3715,14 +3652,6 @@ class MaxwellBot(commands.Bot):
         self.tools["more_tools"] = MoreToolsTool(self)
         if self.config.ENABLE_SHELL:
             self.tools["shell"] = ShellTool(self)
-        if self.config.ENABLE_SUBAGENT:
-            # Native sub-agent: a nested Maxwell on the same provider, not an
-            # external coding-agent binary. See bot_tools.SubAgentTool.
-            self.tools["sub_agent"] = SubAgentTool(self)
-            # Main -> sub: reply to a running sub-agent (two-way channel).
-            self.tools["sub_agent_message"] = SubAgentMessageTool(self)
-            # Main -> sub: peek into a run's live status/actions and its questions.
-            self.tools["sub_agent_status"] = SubAgentStatusTool(self)
         if self.config.ENABLE_FETCH_URL:
             self.tools["fetch_url"] = FetchUrlTool(self)
         self.tools["see_image"] = SeeImageTool(self)
@@ -3731,7 +3660,7 @@ class MaxwellBot(commands.Bot):
             self.tools["youtube"] = YouTubeTool(self)
         self.tools["send_file"] = SendFileTool(self)
         self.tools["send_message"] = SendMessageTool(self)
-        # Chess: Maxwell plays real chess against whoever starts a game in a
+        # Chess: this bot plays real chess against a chosen opponent in a
         # channel. Gated on the optional python-chess dep so a missing import
         # turns the whole feature off instead of breaking startup.
         if _CHESS_IMPORTED:
@@ -3879,42 +3808,6 @@ class MaxwellBot(commands.Bot):
         enriched.update(self._mem_kwargs(message))
         await self.memory.add_to_channel_memory(channel_id, enriched)
         await self._observe_message_author(message, enriched)
-
-    def _mirror_agent_runs(self, bus) -> None:
-        """Write the live sub-agent snapshot where the dashboard can read it.
-
-        The event bus lives in this process; the API server is a different
-        one, so the only way it sees a running sub-agent is through a file.
-        Written from the bus's synchronous change hook, so it must not block:
-        the write is scheduled, throttled, and every failure is swallowed —
-        losing a telemetry snapshot is not worth interrupting a run for.
-        """
-        now = time.time()
-        snapshot = bus.snapshot()
-        # Always write immediately when nothing is running (that is the edge
-        # that leaves a stale "running" row on the dashboard forever);
-        # otherwise throttle.
-        any_running = any(r.get("status") == "running" for r in snapshot)
-        if any_running and now - getattr(self, "_agent_runs_mirrored_at", 0.0) < 2.0:
-            return
-        self._agent_runs_mirrored_at = now
-        payload = {
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            "runs": snapshot,
-        }
-        path = Path(self.config.DATA_DIR) / "subagent_runs.json"
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            # No loop (shutdown, or a test driving the bus directly). Write
-            # inline rather than building a coroutine nobody will await.
-            with contextlib.suppress(Exception):
-                _atomic_json_write_sync(path, payload)
-            return
-        try:
-            _spawn_background(asyncio.to_thread(_atomic_json_write_sync, path, payload))
-        except Exception as e:
-            logger.debug(f"sub-agent run mirror skipped: {e}")
 
     async def _observe_message_author(self, message, enriched: dict) -> None:
         """Keep the global per-user entity row current.
@@ -4645,11 +4538,6 @@ class MaxwellBot(commands.Bot):
             return "a request is still running"
         if getattr(self, "_rem_running", False):
             return "REM is running"
-        bus = getattr(self, "agent_events", None)
-        if bus is not None:
-            with contextlib.suppress(Exception):
-                if int((bus.stats() or {}).get("running", 0) or 0) > 0:
-                    return "a sub-agent is running"
         with contextlib.suppress(Exception):
             sleeping, _ = self._is_sleeping()
             if sleeping:
@@ -5070,13 +4958,6 @@ class MaxwellBot(commands.Bot):
             else:
                 self._tasks.append(asyncio.create_task(self._telegram_loop()))
                 logger.info("Telegram polling loop scheduled")
-        # Resume any sub-agents that were running when the bot last died (pm2 restart, OOM, etc.)
-        try:
-            sub = self.tools.get("sub_agent")
-            if sub is not None and hasattr(sub, "resume_pending_runs"):
-                await sub.resume_pending_runs()
-        except Exception as e:
-            logger.warning("sub-agent resume failed: %s", e)
         logger.info("Bot setup complete")
 
     async def on_ready(self):
@@ -6060,7 +5941,7 @@ class MaxwellBot(commands.Bot):
             )
         # Each fresh user turn starts un-tainted. The taint flag is set by
         # fetch_url / web_search when they return untrusted content, and is
-        # consulted by destructive tools (shell, sub_agent) to gate execution.
+        # consulted by the destructive shell tool to gate execution.
         self.clear_message_taint(message)
         if not message.author.bot:
             preview = message.content[:100] if message.content else "[no text]"
@@ -7192,7 +7073,7 @@ class MaxwellBot(commands.Bot):
                         "Usage: `,plugin <list|enable|disable|reload> [plugin_name] [--global]`"
                     )
             elif cmd == "confirm":
-                # Out-of-band confirmation for destructive tools (shell/sub_agent)
+                # Out-of-band confirmation for the destructive shell tool
                 # on a tainted turn. Anyone can confirm their own turn. The model
                 # cannot self-confirm (model-supplied _confirmed is stripped in
                 # _execute_tool_by_name).
@@ -7200,7 +7081,7 @@ class MaxwellBot(commands.Bot):
                 self._destructive_confirm[author_id] = asyncio.get_running_loop().time()
                 await message.channel.send(
                     f"Confirmed for {_CONFIRM_TTL_SECONDS:.0f}s. The next destructive "
-                    f"tool call (shell/sub_agent) on a tainted turn by you will run; "
+                    f"tool call (shell) on a tainted turn by you will run; "
                     f"this is one-shot."
                 )
             elif cmd in ("blacklist", "unblacklist"):
@@ -12616,14 +12497,6 @@ class MaxwellBot(commands.Bot):
         return False
 
     async def _handle_message(self, message, content: str | None = None):
-        # Background sub-agent handoffs attach a small mutable marker so the
-        # caller can tell whether this synthetic turn actually reached a user.
-        # Without it, a successful return from this method could still mean
-        # that the model only ran tools and never posted the finished report.
-        handoff_state = getattr(message, "_subagent_handoff_state", None)
-        if isinstance(handoff_state, dict):
-            handoff_state["tracked"] = True
-            handoff_state["delivered"] = False
         content = content or message.content
         channel_id = str(message.channel.id)
         # Sleep gate: when the bot is in a sleep window, abort the
@@ -13694,6 +13567,14 @@ class MaxwellBot(commands.Bot):
                     normal_reply_sent = True
                 except discord.Forbidden as _exc:
                     pass
+        except ProviderEmptyResponseError as e:
+            logger.warning("Provider returned no usable response: %s", e)
+            if self._control.get("error_replies", True):
+                try:
+                    await message.channel.send(e.user_message)
+                    normal_reply_sent = True
+                except discord.Forbidden as _exc:
+                    pass
         except Exception as e:
             is_timeout = isinstance(e, asyncio.TimeoutError) or (
                 isinstance(e, RuntimeError) and "timed out" in str(e).lower()
@@ -13715,8 +13596,6 @@ class MaxwellBot(commands.Bot):
                 except discord.Forbidden as _exc:
                     pass
         finally:
-            if isinstance(handoff_state, dict):
-                handoff_state["delivered"] = bool(normal_reply_sent)
             self._end_inflight_context(turn_context)
             await self._exit_live_typing(live_typing)
             # Safety net: walk every progress object this turn ever created
@@ -13894,7 +13773,7 @@ class MaxwellBot(commands.Bot):
                 )
             else:
                 # Centralized indirect-prompt-injection gate. Tools flagged
-                # is_destructive (shell, sub_agent) that run on a tainted turn
+                # is_destructive (shell) that runs on a tainted turn
                 # require an out-of-band user `,confirm`.
                 # We inject _confirmed=True server-side only when the user actually
                 # confirmed; the model cannot forge it because _-keys were stripped
@@ -14587,7 +14466,7 @@ class MaxwellBot(commands.Bot):
     def mark_message_tainted(self, message) -> None:
         """Mark a message as having read untrusted content in the current turn.
 
-        Tools that are flagged ``is_destructive`` (shell, sub_agent) must
+        The tool flagged ``is_destructive`` (shell) must
         consult ``is_message_tainted`` before running and ask the user to
         confirm if the flag is set. This is the second line of defense
         against indirect prompt injection from fetched content: even if a
@@ -14677,7 +14556,6 @@ class MaxwellBot(commands.Bot):
         r"vc|voice|call|join|leave|mic|speak|say\s+it|tts|"
         r"sleep|nap|wake|"
         r"remember|forget|memory|personality|prompt|"
-        r"agent|subagent|sub-agent|"
         # X/Twitter. "post" and "share" above already catch most of it; these
         # catch "what's on twitter", "check my mentions", a pasted x.com link.
         r"twitter|tweet|tweets|tweeted|retweet|xitter|x\.com|timeline|mentions|"
@@ -14892,11 +14770,6 @@ class MaxwellBot(commands.Bot):
         # "search / fetch instead of guessing". Chat turns get the short
         # version — the full one documents tools they aren't carrying.
         protocol = LEAN_TOOL_PROTOCOL if lean else TOOL_PROTOCOL
-        # When sub_agent is on this turn, add a block that makes it the default
-        # executor for heavy multi-step work instead of a long inline chain.
-        # Toggle at runtime with the `subagent_delegate` control key.
-        if "sub_agent" in names and self._control.get("subagent_delegate", True):
-            protocol += "\n\n" + SUBAGENT_DELEGATION
         return header + "\n\n" + protocol
 
     @staticmethod
@@ -16238,34 +16111,6 @@ class MaxwellBot(commands.Bot):
             messages[-1]["content"] += "\n\n" + current
         else:
             messages.append({"role": "user", "content": current})
-        # Surface quiet sub-agent question notes into this turn's context (no chat
-        # post). A sub-agent's ``message_main`` is a DM to Maxwell: global, reach
-        # him wherever his next turn lands. Finished reports are handled by the
-        # sub_agent tool re-entering the reply pipeline directly (see
-        # SubAgentTool._post_subagent_reply), so they are NOT surfaced here. Inlined
-        # (not a method) so the test harness's bare bot object is a clean no-op.
-        sub = (getattr(self, "tools", None) or {}).get("sub_agent")
-        notes = []
-        drain = getattr(sub, "drain_notes_for", None)
-        if callable(drain):
-            try:
-                nid = str(getattr(getattr(message, "channel", None), "id", "") or "")
-                notes = drain(nid)
-            except Exception:  # pragma: no cover - never break a turn
-                notes = []
-        if notes:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": (
-                        "## Sub-agent messages to you (quiet relay — do not repeat "
-                        "to the channel)\n"
-                        + "\n".join(notes)
-                        + "\nA note that asks you something: answer it with "
-                        "sub_agent_message(run_id, text)."
-                    ),
-                }
-            )
         return MaxwellBot._apply_prompt_budget(self, messages)
 
     async def _telegram_webhook_loop(self):
@@ -16541,27 +16386,6 @@ class MaxwellBot(commands.Bot):
             )
         else:
             messages.append({"role": "user", "content": latest_block})
-        sub = (getattr(self, "tools", None) or {}).get("sub_agent")
-        drain = getattr(sub, "drain_notes_for", None)
-        if callable(drain):
-            try:
-                nid = str(getattr(getattr(message, "channel", None), "id", "") or "")
-                notes = drain(nid)
-            except Exception:  # pragma: no cover - never break a turn
-                notes = []
-            if notes:
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            "## Sub-agent notes (quiet relay — do not repeat to "
-                            "the channel)\n"
-                            + "\n".join(notes)
-                            + "\nA note that asks you something: answer it with "
-                            "sub_agent_message(run_id, text)."
-                        ),
-                    }
-                )
 
         tg_openai_tools = self._build_openai_tools("telegram", content=text)
         await self._acquire_ai_slot(

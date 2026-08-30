@@ -1,7 +1,7 @@
-"""Chess game engine + board rendering for Maxwell.
+"""Chess game engine + board rendering.
 
 Owns the board state for one (channel, player) chess game, renders the board
-to a PNG (Pillow + the DejaVu chess glyphs), picks Maxwell's moves with a
+to a PNG (Pillow + the DejaVu chess glyphs), picks the bot's moves with a
 small alpha-beta search, and persists games to ``data/chess_games.json`` so a
 restart does not wipe an in-progress game.
 
@@ -426,7 +426,7 @@ def _search(board: chess.Board, depth: int, alpha: float, beta: float) -> float:
 def choose_bot_move(
     board: chess.Board, depth: int = 3, *, jitter: float = 0.0
 ) -> tuple[chess.Move, str]:
-    """Pick Maxwell's move. Returns ``(move_uci, san)``.
+    """Pick the bot's move. Returns ``(move, san)``.
 
     ``jitter`` in [0,1] adds strength-varying randomness among near-equal moves
     so opening play is not sterile. ``depth<=0`` or no legal moves -> random.
@@ -574,7 +574,7 @@ def _opening_move(board: chess.Board) -> chess.Move | None:
 # --------------------------------------------------------------------------- #
 
 class ChessGame:
-    """A single game of chess between Maxwell and one Discord user in a channel."""
+    """A single game of chess between this bot and one Discord user in a channel."""
 
     def __init__(
         self,
@@ -808,8 +808,8 @@ class ChessManager:
             if key in self._games and not force:
                 existing = self._games[key]
                 raise ValueError(
-                    f"A chess game is already active in this channel between "
-                    f"Maxwell and {existing.player_name}. End it first."
+                    f"A chess game is already active in this channel with "
+                    f"{existing.player_name}. End it first."
                 )
             if bot_color is None:
                 bot_color = bool(random.getrandbits(1))

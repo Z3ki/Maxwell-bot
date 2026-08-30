@@ -189,15 +189,6 @@ DEFAULT_CONTROL = {
     # the full catalog only when the turn actually asks for something (or the
     # model calls more_tools). Saves the tokens ~60 tool schemas cost on "lol".
     "lean_chat_tools": True,
-    # Make sub_agent the DEFAULT executor for heavy multi-step work (site
-    # builds, scripts/programs, data-crunching, anything needing several
-    # build/test rounds). When on, the tool prompt carries a "Delegate heavy
-    # work to sub_agent" block so Maxwell hands the whole job to a nested
-    # sub-agent and returns one report, instead of grinding a long inline
-    # chain that bloats context and crawls. Off keeps the old inline-first
-    # behaviour. Only matters when ENABLE_SUBAGENT is on and sub_agent is in
-    # the turn's tool set.
-    "subagent_delegate": True,
     # When a new support/ticket-style channel is created in a server Maxwell is
     # in, post a short opening line so he is present in the room and it enters
     # his memory / conversation-watch scope. Off and he only observes new
@@ -328,10 +319,11 @@ DEAD_CONTROL_KEYS = frozenset(
         "context_cleanup_ltm_enabled",
         # Leftovers found in live bot_control.json with zero read sites in the
         # codebase. Progress is per-server via _progress_servers now (see the
-        # note in bot._load_control); the subagent_* knobs moved to SUBAGENT_*
-        # env vars; cross_context_budget was superseded by
+        # note in bot._load_control); the removed sub-agent knobs used to live
+        # here; cross_context_budget was superseded by
         # cross_context_max_items + memory_context_budget.
         "progress_messages",
+        "subagent_delegate",
         "subagent_docker",
         "subagent_max_concurrent_per_user",
         "subagent_max_timeout_minutes",
@@ -365,10 +357,6 @@ KNOWN_TOOLS = [
     "list_servers",
     "list_admin_servers",
     "server_setup",
-    # These three were registered in bot.py and missing here, so the dashboard
-    # never listed them and api/state.py's sanitizer silently dropped them
-    # from disabled_tools — sub_agent, which writes and runs code, had no off
-    # switch anywhere but ENABLE_SUBAGENT in .env.
     "join_server",
     "leave_server",
     "create_category",
@@ -399,9 +387,6 @@ KNOWN_TOOLS = [
     "web_search",
     "no_response",
     "shell",
-    "sub_agent",
-    "sub_agent_message",
-    "sub_agent_status",
     "fetch_url",
     "see_image",
     "see_video",

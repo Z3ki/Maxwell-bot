@@ -8,7 +8,7 @@ Features tested:
   1. Config & Environment System (Tri-state feature resolution, system binaries)
   2. Providers & LLM Engine (Completions, fallbacks, tool parsing, recovery, streaming)
   3. Tool Registry & Schemas (All tools registration, ENABLE_* gates, schema validity)
-  4. Shell & Sub-agent Engine (Sandboxing, commands, limits, events bus, two-way messaging)
+  4. Shell Engine (Sandboxing, commands, limits)
   5. RAG Vector Memory & Context Budgeting (SQLite vector DB, similarity, entity memory, tier budget)
   6. Autonomy Engine & Turn-Taking (4 stages, 8 room states, floor verdicts, blacklists, solo)
   7. Chess Engine & Board Mechanics (SAN/UCI, alpha-beta negamax, FEN, image rendering)
@@ -16,7 +16,7 @@ Features tested:
   9. X (Twitter) Client (Backends fallback, rate limits, GraphQL, mention poller)
  10. Email & Inbox System (Notices, requests, self-mail filtering, ignored senders)
  11. Security Guardrails & Response Guard (Taint gates, repetition scrubbing, echo loops, code safety)
- 12. API Server & Dashboard Controls (HTTP Basic auth, login, /api/control clamping, RAG/subagent endpoints)
+ 12. API Server & Dashboard Controls (HTTP Basic auth, login, /api/control clamping, RAG endpoints)
  13. Concurrency Safety & Bot Commands (,stop, ,prompt, ,solo, ,drug, ,jailbreak, ,context, ,rem, ,x, ,vc)
 """
 
@@ -49,7 +49,6 @@ import providers  # noqa: E402
 import tool_schemas  # noqa: E402
 import tool_registry  # noqa: E402
 import bot_tools  # noqa: E402
-import agent_events  # noqa: E402
 import chess_game  # noqa: E402
 import site_backend  # noqa: E402
 import x_client  # noqa: E402
@@ -249,7 +248,7 @@ class DeepTestHarness:
         print(f"\n\033[1;34m=== SUITE 3: {self.current_suite} ===\033[0m")
 
         def test_tool_schema_building():
-            names = ["shell", "sub_agent", "create_site", "chess_move", "web_search", "send_file"]
+            names = ["shell", "create_site", "chess_move", "web_search", "send_file"]
             tools_dict = {
                 name: SimpleNamespace(get_description=lambda n=name: f"Description for {n}")
                 for name in names
@@ -310,10 +309,10 @@ class DeepTestHarness:
         self.run_sync_test("Reasoning extraction and length clamping", test_reasoning_extraction_and_clamping)
 
     # =========================================================================
-    # SUITE 4: Shell & Sub-agent Engine
+    # SUITE 4: Shell Engine
     # =========================================================================
-    async def test_suite_shell_subagent(self):
-        self.current_suite = "Shell & Subagent Systems"
+    async def test_suite_shell(self):
+        self.current_suite = "Shell System"
         print(f"\n\033[1;34m=== SUITE 4: {self.current_suite} ===\033[0m")
 
         def test_shell_command_validation():
@@ -339,27 +338,8 @@ class DeepTestHarness:
             assert tool._command_arg(script="pytest") == "pytest"
             return "Shell aliases & markdown fences normalized"
 
-        def test_agent_events_bus():
-            bus = agent_events.AgentEventBus()
-            run = bus.start_run(task="Run deep testing suite", requested_by="user_bob", channel_id="12345", max_steps=10)
-            assert run.run_id is not None
-            assert run.task == "Run deep testing suite"
-            assert run.status == agent_events.STATUS_RUNNING
-
-            bus.publish(run.run_id, agent_events.EV_STEP, step=1, action="pytest")
-            bus.publish(run.run_id, agent_events.EV_NOTE, text="Running unit tests")
-            bus.finish_run(run.run_id, status=agent_events.STATUS_DONE, summary="All 10 tests passed")
-
-            fetched = bus._runs.get(run.run_id)
-            assert fetched is not None
-            assert fetched.status == agent_events.STATUS_DONE
-            assert fetched.summary == "All 10 tests passed"
-            assert len(fetched.events) >= 3
-            return "AgentEventBus tracks run lifecycle and steps"
-
         self.run_sync_test("Shell command validator & blocked escape patterns", test_shell_command_validation)
         self.run_sync_test("Shell command normalization & arg extraction", test_shell_command_normalization)
-        self.run_sync_test("Subagent AgentEventBus run lifecycle & events", test_agent_events_bus)
 
     # =========================================================================
     # SUITE 5: RAG Vector Memory & Context Budgeting
@@ -861,7 +841,7 @@ class DeepTestHarness:
         self.test_suite_config()
         self.test_suite_providers()
         self.test_suite_tools()
-        await self.test_suite_shell_subagent()
+        await self.test_suite_shell()
         await self.test_suite_rag_memory()
         self.test_suite_autonomy()
         self.test_suite_chess()

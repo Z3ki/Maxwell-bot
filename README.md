@@ -35,11 +35,11 @@ python3 bot.py
 `python3 doctor.py --probe` also calls your model and embedding endpoints, so
 you find out the URL or key is wrong before the bot does.
 
-One thing is worth knowing up front: the `shell` and `sub_agent` tools run
-inside a Docker container, so they need a working Docker daemon your user can
-reach. Everything else works without it. `doctor.py` reports the daemon
-alongside the rest, and `ENABLE_SHELL=false` turns both tools off if you would
-rather not install Docker at all.
+One thing is worth knowing up front: the `shell` tool runs inside a Docker
+container, so it needs a working Docker daemon your user can reach.
+Everything else works without it. `doctor.py` reports the daemon alongside
+the rest, and `ENABLE_SHELL=false` turns the tool off if you would rather
+not install Docker at all.
 
 ### The minimum .env
 
@@ -136,44 +136,6 @@ for videos that trigger YouTube bot checks. Never commit that file.
 - Site building: `create_site` publishes a whole directory (index plus any CSS/JS/subpages/data files) byte-for-byte under a configurable public URL, `edit_site` patches a published site in place, `delete_site` takes it down. Pass `backend=true` and the page gets a real server side — named values and append-only lists at `/api/site/<slug>/`, same origin, no key — so a guestbook, counter, poll, or saved state is one `fetch()` away.
 - Lean chat turns: ordinary conversation ships a small conversational tool set instead of the whole catalog (~83% fewer tool tokens per message). Anything that asks for an action gets everything, and `more_tools` reopens the catalog mid-turn. Turn it off with `lean_chat_tools` in the dashboard.
 
-## Sub-agent
-
-`sub_agent` hands a self-contained coding task to another instance of Maxwell:
-same provider, its own scratch directory under `SUBAGENT_BASE_DIR`, and a small
-toolset (run a command, read/write/list files, finish). It writes the code, runs
-it, fixes what breaks, and reports back — then that report comes back into the
-conversation as the tool result.
-
-There is no external coding-agent binary: the sub-agent is Maxwell, so it
-follows `ENABLE_SHELL` unless you set `ENABLE_SUBAGENT` explicitly, and it
-refuses any path outside its workdir. Budgets: `SUBAGENT_MAX_STEPS` (100),
-`SUBAGENT_TIMEOUT_SECONDS` (900), `SUBAGENT_COMMAND_TIMEOUT_SECONDS` (120).
-
-`run_command` executes inside a throwaway Docker container, one per run, off
-the same `docker/Dockerfile` image the shell tool uses. Only the run's own
-scratch workspace is mounted (at `/home/maxwell/work`); the bot's source and
-`.env` are not visible to it. The container is hardened the same way as the
-shell sandbox — bridge network, `--cap-drop ALL` plus a small add-back set,
-`no-new-privileges`, 4 GB / 2 CPU / 1024 pids — and is torn down when the run
-ends. State does persist *within* a run, so an installed package or a built
-binary survives to the next step.
-
-`SUBAGENT_SANDBOX=host` opts back out and runs `bash -lc` in the bot's own
-environment instead. That is a real choice on a machine you already treat as
-disposable, and it has to be made explicitly: with the default setting and no
-Docker daemon, the tool returns an error rather than quietly running
-unsandboxed.
-
-### Watching a run
-
-A sub-agent run is minutes of work, and it used to be minutes of silence — the
-channel saw nothing until the final report. Runs now publish events as they
-happen (`agent_events.py`): the channel progress message shows the current step
-and what it is doing (`step 3/100 · running: pytest -q`), and the dashboard's
-Autonomy tab lists live and recent runs with their step counts, files written,
-and final reports. The stream is in-process and non-durable — the durable
-record of a run is its report in the channel.
-
 ## Project Structure
 
 ```
@@ -183,7 +145,6 @@ providers.py        OpenAI-compatible provider wrapper
 config.py           Environment-backed configuration (incl. feature detection)
 rag_memory.py       RAG vector memory (SQLite + numpy + embeddings API)
 context_budget.py   Splits the prompt's memory chars across the memory tiers
-agent_events.py     Live event bus for sub-agent runs (progress + dashboard)
 x_client.py         X (Twitter): read backends, posting, mention poller
 site_backend.py     Per-site datastore behind /api/site/<slug>/ (generated sites)
 site_server.py      Per-site backend containers behind /bot/<slug>/api/
@@ -231,6 +192,7 @@ required values are the first thing in the file. The ones that matter:
 | `OLLAMA_FALLBACK_*` | Optional secondary endpoint, rotates with primary |
 | `OLLAMA_VISION_*` | Optional vision/omni model for image/video turns (blank base/key inherit primary) |
 | `OLLAMA_RETRY_ATTEMPTS` | Total attempts per request (default: `3`) |
+| `OLLAMA_EMPTY_RESPONSE_RETRIES` | Extra recovery attempts after an HTTP 200 with no text/tool call; rotates endpoints and retries with non-streaming JSON (default: `2`) |
 | `AUTONOMY_BASE_URL` / `AUTONOMY_API_KEY` / `AUTONOMY_MODEL` | Override the autonomy engine endpoint; blank = use main |
 | `AUX_BASE_URL` / `AUX_API_KEY` / `AUX_MODEL` | Background context agents; blank = fall back to autonomy, then main |
 
@@ -256,7 +218,6 @@ present). Restart to re-detect. `python3 doctor.py` shows the resolved state.
 | `ENABLE_EMAIL_TOOLS` | The four `email_*` tools | `MAXWELL_EMAIL_PASSWORD` set |
 | `ENABLE_X` | `x_read` / `x_post` | — (public reads need no credentials) |
 | `ENABLE_SHELL` | `shell` tool (host access — only enable if you trust the model) | — |
-| `ENABLE_SUBAGENT` | `sub_agent` tool (writes and runs code) | follows `ENABLE_SHELL` |
 | `ENABLE_RAG` | RAG vector memory; `false` makes no embedding calls at all | — |
 | `ENABLE_TELEGRAM` | Auto-start Telegram polling/webhook when `TELEGRAM_TOKEN` is set | — |
 | `ENABLE_AUTONOMY` | Autonomy engine; `false` never starts the loop (the dashboard's `autonomy_enabled` is the runtime toggle) | opt-in in `.env.example` |
@@ -339,47 +300,6 @@ present). Restart to re-detect. `python3 doctor.py` shows the resolved state.
 | `X_TIMEOUT_SECONDS` | Per-request timeout (default `20`) |
 | `X_GRAPHQL_FILE` | Where the internal query ids live (default `data/x_graphql.json`) |
 
-### Sub-agent (only used if `ENABLE_SUBAGENT` is on)
-
-| Variable | Description |
-|---|---|
-| `SUBAGENT_BASE_DIR` | Where sub-agent workdirs are created (default `data/subagents`, gitignored) |
-| `SUBAGENT_MODEL` | Model for sub-agent work; **blank = the main `OLLAMA_MODEL`** (the sub-agent runs on the same model as the chat) |
-| `SUBAGENT_MAX_STEPS` | Tool-call steps before it must report back (default `100`, budget not target — finish early) |
-| `SUBAGENT_TIMEOUT_SECONDS` | Wall-clock budget for one task (default `900`) |
-| `SUBAGENT_COMMAND_TIMEOUT_SECONDS` | Per-command timeout (default `120`) |
-| `SUBAGENT_MAX_FILE_BYTES` | Largest file the sub-agent may write (default `200000`) |
-| `SUBAGENT_MAX_CONCURRENT` | How many background (fire-and-forget) sub-agents run at once (default `5`) |
-| `SUBAGENT_MAX_QUEUED` | Hard ceiling on background sub-agents submitted but not finished; past this new ones are refused (default `16`) |
-| `SUBAGENT_HANDOFF_TIMEOUT_SECONDS` | Maximum time Maxwell gets to compose a finished-run reply before the report is posted directly (default `30`) |
-| `SUBAGENT_SANDBOX` | `docker` (default) runs each sub-agent run in its own container; `host` runs commands in the bot's own environment with no isolation |
-
-By default Maxwell **delegates heavy multi-step work to `sub_agent`** — a full
-site build, a program/script, a data-crunching or file-conversion job, anything
-needing several build/test rounds — instead of grinding a long inline `shell`
-chain that bloats the main context and crawls. Toggle this at runtime
-with the `subagent_delegate` control key (API `POST /api/control`); `true`
-(default) prefers delegation, `false` restores the old inline-first behaviour.
-Only matters when `ENABLE_SUBAGENT` is on and `sub_agent` is in the turn's tool set.
-
-Sub-agent runs have two modes. `mode=background` (the default for heavy work)
-returns immediately — Maxwell keeps the turn going and the run posts the result
-when it finishes, so nobody stares at a silent typing indicator for minutes.
-`mode=foreground` blocks for the report and hands it back in-turn. `deliver`
-controls where the result lands: `channel` (default, where it was asked) or
-`dm` to the person who asked (used for long or private results in a busy
-channel). Background runs are capped by `SUBAGENT_MAX_CONCURRENT`, and a
-channel flood can't pile them up without bound — past `SUBAGENT_MAX_QUEUED` new
-ones are refused. Both run in-process and are lost on a process restart (the
-durable record of what one did is its report on the channel). Multi-step
-terminal work (install → build → test, a command loop) is `sub_agent`, not
-`shell` — the sub-agent owns the live channel progress.
-
-Sub-agents are two-way now: a running sub-agent can `message_main` to flag a
-blocker or ask for a decision (posted to the channel), and Maxwell can reply
-with `sub_agent_message(run_id, text)`, which is injected into the sub-agent's
-next step so it answers and carries on.
-
 ### Temporary Free Model
 
 For a temporary free OpenRouter fallback, the current recommended model is Moonshot AI Kimi K2.6:
@@ -420,7 +340,7 @@ All commands use the `,` prefix. Admin commands require the user to be in the ad
 | `,context forget <id>` | Yes | Delete a shared context fact |
 | `,context private <id>` | Yes | Mark a shared context fact private |
 | `,context global <id>` | Yes | Promote a fact to global shared context |
-| `,progress on` / `,progress off` / `,progress status` | Yes | Toggle live "thinking: …" tool progress messages, per server (off by default; the sub-agent posts no heartbeat — Maxwell checks it via `sub_agent_status`; DMs never get them) |
+| `,progress on` / `,progress off` / `,progress status` | Yes | Toggle live "thinking: …" tool progress messages, per server (off by default; DMs never get them) |
 | `,rem` | Yes | Show REM status and last audit preview |
 | `,rem now` | Yes | Trigger one REM dream pass immediately |
 | `,rem on` / `,rem off` | Yes | Enable or disable REM for this process |
@@ -886,8 +806,8 @@ python3 doctor.py        # config/feature sanity
 > `context_cleanup.py` (its `context_cleanup_*` control keys are stripped the
 > same way; the `/api/context_cleanup/*` routes stay as no-op stubs so
 > external callers do not 404), and the OpenCode sub-agent backend. RAG
-> vector memory handles memory upkeep, and `sub_agent` now runs inside
-> Maxwell itself (in its own Docker sandbox). The `autonomy` engine still writes fresh facts into
+> vector memory handles memory upkeep, and multi-step work uses the `shell`
+> sandbox. The `autonomy` engine still writes fresh facts into
 > long-term memory on its own cadence.
 
 ## Dashboard / API
@@ -914,12 +834,9 @@ input in the panel is listed in that panel's "Not surfaced" card rather than
 quietly going missing.
 
 Read-only routes worth knowing: `GET /api/rag/memory` is aggregate vector
-counters, `GET /api/rag/ltm` is the long-term-memory rows, `GET
+counters, `GET /api/rag/ltm` is the long-term-memory rows, and `GET
 /api/rag/entities` is the global per-user roster (`?user_id=` for one person
-with their facts), and `GET /api/subagents` is live and recent sub-agent runs
-(`?run_id=` for one). The sub-agent event bus lives in the bot process, so that
-last one reads `data/subagent_runs.json`, which the bot rewrites as runs start,
-step and finish.
+with their facts).
 
 The dashboard loads every panel's data independently (`Promise.allSettled`), so
 one failing endpoint degrades that panel and names itself in the header instead
@@ -932,7 +849,7 @@ Static files (`web/index.html`, `web/admin/index.html`) should be copied to a we
 - Never commit `.env`, `data/`, logs, PM2 dumps, or generated sites.
 - Set real values for `MAXWELL_ADMIN_USER` and `MAXWELL_ADMIN_PASSWORD`. The API does not persist or bootstrap credentials.
 - Generated bot sites serve arbitrary HTML. Host them on a separate origin from admin pages to prevent credential theft via XSS.
-- The shell tool runs `bash -lc` inside the `maxwell-shell` Docker container (`docker/Dockerfile`), not on the host. By default that container is isolated: bridge network, `--cap-drop ALL` (plus a small add-back set), `no-new-privileges`, 4 GB / 2 CPU / 1024 pids, no docker socket, and no host filesystem — only `shelldocker/` is bind-mounted as its working directory at `/home/maxwell`. Setting `MAXWELL_SHELL_FULL_HOST=true` deliberately drops that wall: host network plus `/:/host:rw`, which is documented root-equivalent access for admins. The sub-agent runs under the same isolation: one throwaway container per run, off the same image, with only that run's scratch workspace mounted — so the bot's `.env` and source are not reachable from code it writes. `SUBAGENT_SANDBOX=host` opts out explicitly; with the default and no Docker daemon the tool errors rather than silently running on the host. Both tools are on by default; set `ENABLE_SHELL=false` (which also turns off `sub_agent`) to withhold that access entirely. The bot logs a warning at startup whenever shell is enabled.
+- The shell tool runs `bash -lc` inside the `maxwell-shell` Docker container (`docker/Dockerfile`), not on the host. By default that container is isolated: bridge network, `--cap-drop ALL` (plus a small add-back set), `no-new-privileges`, 4 GB / 2 CPU / 1024 pids, no docker socket, and no host filesystem — only `shelldocker/` is bind-mounted as its working directory at `/home/maxwell`. Setting `MAXWELL_SHELL_FULL_HOST=true` deliberately drops that wall: host network plus `/:/host:rw`, which is documented root-equivalent access for admins. The tool is on by default; set `ENABLE_SHELL=false` to withhold that access entirely. The bot logs a warning at startup whenever shell is enabled.
 - Running `shell` needs a working Docker daemon the bot user can reach. Without one the tool reports the failure rather than silently falling back to the host. `python3 doctor.py` tells you which side you are on.
 - `DISABLE_TAINT_GATE=false` (the default) makes `shell` require an out-of-band `,confirm` on any turn that read fetched web content — the second line of defence against indirect prompt injection. Only disable it on a single-user install you fully trust.
 

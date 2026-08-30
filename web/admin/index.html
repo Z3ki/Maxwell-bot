@@ -687,7 +687,6 @@
         memoryEntries: [],
         memoryStats: {},
         entities: [],
-        subagents: [],
         context: [],
         sites: {},
         prompts: {},
@@ -899,13 +898,6 @@
           key: "entities",
           url: "/api/rag/entities",
           norm: (d) => (Array.isArray(d?.entities) ? d.entities : []),
-        },
-        {
-          // Live + recent sub-agent runs, mirrored to disk by the bot (the
-          // event bus itself lives in the bot process, not this one).
-          key: "subagents",
-          url: "/api/subagents",
-          norm: (d) => (Array.isArray(d?.runs) ? d.runs : []),
         },
         {
           key: "context",
@@ -1297,28 +1289,6 @@
           `<div class="grid two" style="margin-top:12px"><div class="card"><h3>What REM Does</h3><p class="muted">REM is Maxwell's background review loop. It reads recent visible events and writes an audit. It does not currently edit long-term memory/context; that old promise was documentation fan fiction.</p><div class="item">${badge(S.rem?.enabled ? "enabled" : "disabled", S.rem?.enabled ? "ok" : "")}<div class="muted">running ${S.rem?.running ? "yes" : "no"} · interval ${esc(S.rem?.interval_s ?? 0)}s · buffered events ${esc(S.rem?.events_buffered ?? 0)}</div></div><div class="row"><button class="btn small" data-rem="run">Run now</button><button class="btn small green" data-rem="enable">Enable</button><button class="btn small red" data-rem="disable">Disable</button></div></div><div class="card"><h3>REM Model</h3><p class="muted">REM shares the Autonomy model config — it uses the same provider, base_url, api key, and model set in the <b>Autonomy</b> tab ("Autonomy Model" card). If that is blank, REM falls back to the configured <code>OLLAMA_REM_MODEL</code>, then the main bot model.</p><div class="item"><b class="mono">${esc(S.control.autonomy_model || "(unset — using OLLAMA_REM_MODEL / main)")}</b><div class="muted">model currently resolved for both REM and autonomy</div></div><div class="row"><button class="btn small" onclick="S.tab='autonomy';render()">Open Autonomy model config</button></div></div><div class="card"><h3>Last Audit</h3><pre>${esc(S.rem?.last_audit_preview || "No REM audit yet.")}</pre></div></div>`;
         bindOps();
       }
-      // Sub-agent runs. A run is minutes of a nested agent working alone, and
-      // until it publishes events there is nothing to look at while it does —
-      // this is that stream. Live rows first; finished ones stay briefly so a
-      // failure can be read after the fact.
-      function subagentsCard() {
-        const runs = S.subagents || [];
-        if (!runs.length && (S.failedFeeds || []).includes("subagents")) {
-          return `<div class="card" style="margin-top:12px"><h3>Sub-agents</h3><div class="muted">Could not load /api/subagents.</div></div>`;
-        }
-        const statusClass = (s) =>
-          s === "running" ? "" : s === "done" ? "ok" : "bad";
-        const rows = runs
-          .map((r) => {
-            const steps =
-              r.max_steps ? `${r.steps || 0}/${r.max_steps}` : String(r.steps || 0);
-            const files = (r.files_written || []).length;
-            return `<div class="item"><div class="row"><span class="badge ${statusClass(r.status)}">${esc(r.status || "?")}</span><span class="mono muted">${esc(sid(r.run_id, 12))}</span><span class="muted">step ${esc(steps)} · ${Number(r.commands_run || 0)} cmd${files ? ` · ${files} file(s)` : ""} · ${Number(r.elapsed_seconds || 0).toFixed(0)}s</span></div><div><b>${esc(r.task || "")}</b></div>${r.last_activity ? `<div class="mono muted">${esc(r.last_activity)}</div>` : ""}${r.summary && r.status !== "running" ? `<details><summary class="muted" style="cursor:pointer;font-size:11px">report</summary><pre style="font-size:11px;margin-top:4px;max-height:200px;overflow:auto">${esc(r.summary)}</pre></details>` : ""}</div>`;
-          })
-          .join("");
-        const live = runs.filter((r) => r.status === "running").length;
-        return `<div class="card" style="margin-top:12px"><h3>Sub-agents (${runs.length}${live ? `, ${live} running` : ""})</h3><p class="muted">Nested agents working a task to completion in their own Docker sandbox. Live progress; finished runs are kept briefly, then only the report in the channel remains.</p><div class="list">${rows || '<div class="muted">No sub-agent runs recorded.</div>'}</div></div>`;
-      }
       function autonomy() {
         const a = S.autonomyStatus || {};
         const on = !!a.enabled;
@@ -1355,7 +1325,7 @@
                   })()}</div>${e.thought ? `<details><summary class="muted" style="cursor:pointer;font-size:11px">thought</summary><div class="mono" style="font-size:11px;margin-top:4px">${esc(e.thought)}</div></details>` : ""}${e.error ? `<div style="color:var(--red);font-size:12px;margin-top:4px">${esc(e.error)}</div>` : ""}</div>`,
               )
               .join("") || '<div class="muted">No actions yet.</div>'
-          }</div></div></div>${subagentsCard()}`;
+          }</div></div></div>`;
         const toggle = $("autoToggle");
         if (toggle)
           toggle.onchange = async () => {

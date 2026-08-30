@@ -363,41 +363,6 @@ def _entity_row(row) -> dict:
     }
 
 
-async def subagents_list(request):
-    """Live and recent sub-agent runs, newest first.
-
-    Served from `data/subagent_runs.json`, which the bot rewrites as runs
-    start, step and finish. The event bus itself lives in the bot process —
-    the API server is a separate process and cannot reach it — so this is the
-    snapshot the bot publishes, not the bus.
-    """
-    if not _has_admin_auth(request):
-        return _json_response({"error": "unauthorized"}, 401)
-    path = Path(DATA_DIR) / "subagent_runs.json"
-    if not path.exists():
-        return _json_response({"runs": [], "running": 0})
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, ValueError):
-        return _json_response({"error": "read failed"}, 500)
-    runs = data.get("runs") if isinstance(data, dict) else data
-    if not isinstance(runs, list):
-        runs = []
-    run_id = str(request.query.get("run_id") or "").strip()
-    if run_id:
-        for run in runs:
-            if str(run.get("run_id")) == run_id:
-                return _json_response(run)
-        return _json_response({"error": "no such run"}, 404)
-    return _json_response(
-        {
-            "runs": runs[:50],
-            "running": sum(1 for r in runs if r.get("status") == "running"),
-            "updated_at": data.get("updated_at", "") if isinstance(data, dict) else "",
-        }
-    )
-
-
 async def context_get(request):
     """List shared-context facts from the live RAG SQLite DB.
 
@@ -2475,7 +2440,6 @@ app.router.add_options(
 app.router.add_get("/api/rag/memory", rag_memory_stats)
 app.router.add_get("/api/rag/ltm", rag_ltm_list)
 app.router.add_get("/api/rag/entities", rag_entities_list)
-app.router.add_get("/api/subagents", subagents_list)
 app.router.add_post("/api/memory", memory_add)
 app.router.add_put("/api/memory", memory_update)
 app.router.add_delete("/api/memory", memory_delete)

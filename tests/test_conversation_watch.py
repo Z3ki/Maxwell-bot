@@ -26,7 +26,6 @@ def _bot(*, watch_seconds=180, debounce_seconds=0.05):
         _active_requests={},
         _active_request_user={},
         _rem_running=False,
-        agent_events=None,
         user=SimpleNamespace(
             id=1382894657624866889, display_name="Maxwell", name="maxwell"
         ),
@@ -215,7 +214,7 @@ def test_watch_yields_while_he_is_busy():
     asyncio.run(run())
 
 
-def test_busy_covers_sub_agents_and_rem():
+def test_busy_covers_rem():
     bot = _bot()
 
     async def run():
@@ -226,10 +225,6 @@ def test_busy_covers_sub_agents_and_rem():
         assert MaxwellBot._busy_reason(bot, cid) == "REM is running"
         assert MaxwellBot._should_live_reply(bot, named) is False
         bot._rem_running = False
-        bot.agent_events = SimpleNamespace(stats=lambda: {"running": 1})
-        assert MaxwellBot._busy_reason(bot, cid) == "a sub-agent is running"
-        assert MaxwellBot._should_live_reply(bot, named) is False
-        bot.agent_events = SimpleNamespace(stats=lambda: {"running": 0})
         assert MaxwellBot._busy_reason(bot, cid) == ""
         assert MaxwellBot._should_live_reply(bot, named) is True
 
