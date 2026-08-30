@@ -9,6 +9,7 @@ sent directly to their target.
 import contextlib
 import html
 import ipaddress
+import inspect
 import json
 import logging
 import os
@@ -5314,7 +5315,14 @@ class DeleteSiteTool(_SiteOwnedTool):
             target = None
         if target is not None and (base in target.parents) and target.is_dir():
             await asyncio.to_thread(shutil.rmtree, target, True)
-        await asyncio.to_thread(self._save_entry, slug, None)
+        save_error = None
+        try:
+            await asyncio.to_thread(self._save_entry, slug, None)
+        except Exception as exc:
+            # Still tear down the backend below. Leaving a live container and
+            # its secrets behind because metadata persistence failed is worse
+            # than returning an error for a partially completed delete.
+            save_error = exc
         with contextlib.suppress(Exception):
             await asyncio.to_thread(
                 site_backend.destroy, self.bot.config.DATA_DIR, slug
@@ -5322,6 +5330,8 @@ class DeleteSiteTool(_SiteOwnedTool):
         # Container, server code, database, and secrets go too.
         with contextlib.suppress(Exception):
             await site_server.destroy(self.bot.config.DATA_DIR, slug)
+        if save_error is not None:
+            return f"Error deleting site '{slug}': {save_error}"
         return f"Deleted site '{slug}' ({entry.get('title') or 'untitled'}). URL is gone."
 
 
@@ -5928,9 +5938,9 @@ class SendMessageTool(Tool):
                                     raise
                                 if not parent_gone:
                                     raise
-                                await target_channel.send(content=chunk, **extra)
+                                await target_channel.send(chunk, **extra)
                         else:
-                            await target_channel.send(content=chunk, **extra)
+                            await target_channel.send(chunk, **extra)
                         sent_any = True
                         sent_chunks.append(chunk)
                     except Exception:
@@ -6993,11 +7003,54 @@ class ShellTool(Tool):
                 f"Command preview: {preview}"
             )
 
+        sess = None
+        slot = None
+        # In DMs, never spam shell progress status messages
+        is_dm = not getattr(message, "guild", None)
+        if not is_dm:
+            try:
+                # Keep one durable, user-visible liveness message for this shell
+                # call. The normal tool-progress message is owned by bot.py and
+                # may be stopped as soon as the tool posts; shell commands need
+                # their own turn-scoped message.
+                sess, slot = await self._begin_shell_progress(message, "working on it…")
+            except Exception:
+                # A progress post must never prevent the command itself from
+                # running in a restricted channel or a non-Discord caller.
+                sess, slot = None, None
+        self._signal_streaming(message)
+
+        async def _on_progress(stdout_b, stderr_b, elapsed) -> None:
+            if sess is None or slot is None:
+                return
+            # Keep the channel indicator terse. Captured output belongs in the
+            # tool result; mirroring it into Discord can expose secrets and
+            # turns a long command into an edit-rate-limit stream.
+            del stdout_b, stderr_b, elapsed
+            await self._finish_shell_progress(
+                message, sess, slot, "working on it…"
+            )
+
         try:
-            stdout, stderr, exit_code = await self._run_shell_command(normalized)
+            stdout, stderr, exit_code = await self._run_shell_command(
+                normalized, on_progress=_on_progress
+            )
         except asyncio.TimeoutError:
+            if sess is not None and slot is not None:
+                with contextlib.suppress(Exception):
+                    await self._finish_shell_progress(
+                        message,
+                        sess,
+                        slot,
+                        f"Command timed out after {self._timeout_seconds()}s",
+                    )
             return f"Error: Command timed out after {self._timeout_seconds()}s"
         except Exception as e:
+            if sess is not None and slot is not None:
+                with contextlib.suppress(Exception):
+                    await self._finish_shell_progress(
+                        message, sess, slot, f"Error: {e}"
+                    )
             return f"Error executing command: {e}"
 
         out = stdout.decode(errors="replace")
@@ -7192,8 +7245,7 @@ class SubAgentMessageTool(Tool):
             "conversation so far."
         )
 
-    async def execute(self, message: Message, **kwargs) -> str:
-        kwargs.pop("message", None)
+    async def execute(self, trigger_message: Message, **kwargs) -> str:
         run_id = str(kwargs.get("run_id") or "").strip()
         text = str(kwargs.get("text") or "").strip()
         if not run_id:
@@ -7263,8 +7315,7 @@ class SubAgentStatusTool(Tool):
             "report, then steer it with `sub_agent_message(run_id, text)`."
         )
 
-    async def execute(self, message: Message, **kwargs) -> str:
-        kwargs.pop("message", None)
+    async def execute(self, trigger_message: Message, **kwargs) -> str:
         run_id = str(kwargs.get("run_id") or "").strip()
         sub, bus = self._lookup(self.bot)
         if not run_id:
@@ -8034,6 +8085,29 @@ class SubAgentTool(Tool):
         if requested > 0:
             max_steps = min(requested, Config.SUBAGENT_MAX_STEPS)
 
+        mode = str(
+            kwargs.get("mode") or kwargs.get("background") or ""
+        ).strip().lower()
+        background = mode in {
+            "background",
+            "bg",
+            "async",
+            "fire_and_forget",
+            "fire-and-forget",
+            "fire",
+            "true",
+            "1",
+            "yes",
+            "on",
+        }
+        if background and self._bg_inflight >= self._bg_max_queued:
+            return (
+                f"A background sub-agent is already queued/running ("
+                f"{self._bg_inflight}/{self._bg_max_queued}). I won't pile "
+                f"on more right now — say the word and I'll run it once the "
+                f"queue drains, or use mode=foreground to block for it now."
+            )
+
         workspace = self._workspace(task, str(kwargs.get("workdir") or ""))
         deadline = time.monotonic() + Config.SUBAGENT_TIMEOUT_SECONDS
         # Default the sub-agent to the SAME model the main bot uses, not to an
@@ -8075,29 +8149,7 @@ class SubAgentTool(Tool):
         # when done. The model stays responsive — no minutes of silence while
         # the main loop waits on a nested agent. ``mode=foreground`` (the old
         # behaviour, and what the tests exercise) blocks until the report.
-        mode = str(kwargs.get("mode") or kwargs.get("background") or "").strip().lower()
-        background = mode in {
-            "background",
-            "bg",
-            "async",
-            "fire_and_forget",
-            "fire-and-forget",
-            "fire",
-            "true",
-            "1",
-            "yes",
-            "on",
-        }
         if background:
-            # Refuse rather than grow without bound when a channel flood keeps
-            # submitting heavy work faster than runs finish.
-            if self._bg_inflight >= self._bg_max_queued:
-                return (
-                    f"A background sub-agent is already queued/running ("
-                    f"{self._bg_inflight}/{self._bg_max_queued}). I won't pile "
-                    f"on more right now — say the word and I'll run it once the "
-                    f"queue drains, or use mode=foreground to block for it now."
-                )
             self._bg_inflight += 1
             deliver = (
                 str(kwargs.get("deliver") or kwargs.get("notify") or "channel")
@@ -8299,10 +8351,14 @@ class SubAgentTool(Tool):
             type=0,
         )
 
-        def _reply(reply_content=None, **kwargs):
-            return chan.send(content=reply_content, reference=msg, **kwargs)
+        async def _reply(reply_content=None, **kwargs):
+            send = getattr(chan, "send", None)
+            if not callable(send):
+                raise RuntimeError("synthetic message channel cannot send")
+            result = send(content=reply_content, reference=msg, **kwargs)
+            return await result if inspect.isawaitable(result) else result
 
-        setattr(msg, "reply", _reply)
+        msg.reply = _reply
         return msg
 
     async def _post_subagent_reply(self, target, message, run_id, task, report):
@@ -8317,9 +8373,20 @@ class SubAgentTool(Tool):
         """
         bot = getattr(self, "bot", None)
         handle = getattr(bot, "_handle_message", None)
-        chan = target if target is not None else getattr(getattr(message, "channel", None), "id", None)
-        if not callable(handle) or chan is None:
-            await self._post_report(target, message, task, report)
+        # Re-entry needs a real sendable channel.  A channel id (or a
+        # synthetic placeholder used while resuming after a restart) is enough
+        # for bookkeeping but makes the eventual synthetic reply fail and can
+        # otherwise drop the report when the fallback also has nowhere to send.
+        chan = target if target is not None else getattr(message, "channel", None)
+        if (
+            not callable(handle)
+            or chan is None
+            or not callable(getattr(chan, "send", None))
+        ):
+            fallback = target if callable(getattr(target, "send", None)) else getattr(
+                message, "channel", None
+            )
+            await self._post_report(fallback, message, task, report)
             return
         head = _shorten(task, 60) or "sub-agent"
         body = (
@@ -8335,7 +8402,7 @@ class SubAgentTool(Tool):
             await handle(synthetic, body)
         except Exception as e:  # noqa: BLE001 - a failed re-entry must not lose the result
             logger.warning("sub-agent immediate reply failed (%s); posting report", e)
-            await self._post_report(target, message, task, report)
+            await self._post_report(chan, message, task, report)
 
     async def _handoff_report(self, target, message, chan, run_id, task, report):
         """Hand a finished background sub-agent's result to Maxwell.
@@ -8459,6 +8526,7 @@ class SubAgentTool(Tool):
                     run_id=run_id,
                     conv=chan,
                     message=message,
+                    deliver=deliver,
                 )
                 if bus and run_id:
                     bus.finish_run(run_id, agent_events.STATUS_DONE, report[:2000])
@@ -8535,7 +8603,14 @@ class SubAgentTool(Tool):
         attempt = 0
         max_tokens = int(getattr(Config, "SUBAGENT_MAX_TOKENS", 32768) or 32768)
         while True:
-            remaining = int(max(30, deadline - time.monotonic()))
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                raise asyncio.TimeoutError()
+            # Do not give the provider a minimum timeout that extends beyond
+            # the run's hard deadline.  The old 30-second floor let a run
+            # overshoot its configured budget whenever the final call had
+            # less than 30 seconds left.
+            remaining = max(1, int(remaining_seconds))
             try:
                 return await provider.generate_chat_completion(
                     messages=messages,
@@ -8572,6 +8647,7 @@ class SubAgentTool(Tool):
         conv: "_SubChan | None" = None,
         message=None,
         resume_state: dict | None = None,
+        deliver: str | None = None,
     ) -> str:
         """The step loop itself. Returns the report string.
 
@@ -8609,7 +8685,16 @@ class SubAgentTool(Tool):
                     channel_id=str(getattr(getattr(message, "channel", None), "id", "") or "") if message else str(resume_state.get("channel_id","") if resume_state else ""),
                     author_id=str(getattr(getattr(message, "author", None), "id", "") or "") if message else str(resume_state.get("author_id","") if resume_state else ""),
                     author_name=str(getattr(getattr(message, "author", None), "display_name", "") or getattr(getattr(message, "author", None), "name", "") or "") if message else str(resume_state.get("author_name","") if resume_state else ""),
-                    deliver=str(getattr(message, "_deliver", "channel") or resume_state.get("deliver","channel") if resume_state else "channel"),
+                    deliver=str(
+                        (
+                            resume_state.get("deliver")
+                            if resume_state
+                            else None
+                        )
+                        or deliver
+                        or getattr(message, "_deliver", None)
+                        or "channel"
+                    ),
                     updated_at=time.time(),
                 )
             except Exception:
@@ -8903,12 +8988,6 @@ class SubAgentTool(Tool):
                         target = await self._resolve_channel(channel_id)
                 except Exception:
                     target = None
-                if target is None and channel_id:
-                    # fake channel that at least carries id
-                    target = type("C", (), {"id": channel_id, "guild": None, "send": lambda *a, **k: None})()
-                else:
-                    # if no channel, use any
-                    target = target
                 fake_chan = type("C", (), {"id": channel_id or "0", "guild": getattr(target, "guild", None)})() if channel_id else None
                 fake_msg = type("M", (), {
                     "channel": fake_chan or target,
@@ -8945,13 +9024,20 @@ class SubAgentTool(Tool):
                 # Respect concurrency via _run_background (which uses the semaphore)
                 # Extend deadline from now
                 # Use the saved max_steps but allow remaining budget
-                remaining = max(1, max_steps - int(state.get("steps") or 0))
                 # We don't recreate a new workspace; pass the existing one
-                # Spawn background resume
-                import asyncio as _asyncio
                 # Use the stored messages/steps via resume_state
                 # We need to call _agent_loop directly in background, wrapping with handoff
-                async def _resume_task(ws=workspace, rs=state, rid=run_id, ch=chan, msg=fake_msg, tgt=target, tsk=task, ms=max_steps):
+                async def _resume_task(
+                    ws=workspace,
+                    rs=state,
+                    rid=run_id,
+                    ch=chan,
+                    msg=fake_msg,
+                    tgt=target,
+                    tsk=task,
+                    ms=max_steps,
+                    delivery=deliver,
+                ):
                     # Ensure old container is cleaned before resuming (orphaned)
                     if self._sandbox_mode() == "docker":
                         with __import__("contextlib").suppress(Exception):
@@ -8972,10 +9058,23 @@ class SubAgentTool(Tool):
                                     conv=ch,
                                     message=msg,
                                     resume_state=rs,
+                                    deliver=str(
+                                        rs.get("deliver") or delivery or "channel"
+                                    ),
                                 )
                                 if bus and rid:
                                     bus.finish_run(rid, agent_events.STATUS_DONE, report[:2000])
-                                await self._handoff_report(tgt, msg, ch, rid, tsk, report)
+                                delivery_target = tgt
+                                if not callable(
+                                    getattr(delivery_target, "send", None)
+                                ):
+                                    with contextlib.suppress(Exception):
+                                        delivery_target = await self._resolve_delivery(
+                                            msg, delivery
+                                        )
+                                await self._handoff_report(
+                                    delivery_target, msg, ch, rid, tsk, report
+                                )
                             except __import__("asyncio").CancelledError:
                                 if bus and rid:
                                     bus.finish_run(rid, agent_events.STATUS_FAILED, "cancelled")
@@ -8984,7 +9083,22 @@ class SubAgentTool(Tool):
                                 logger.warning("resumed sub-agent %s failed: %s", rid, e)
                                 if bus and rid:
                                     bus.finish_run(rid, agent_events.STATUS_FAILED, str(e)[:2000])
-                                await self._handoff_report(tgt, msg, ch, rid, tsk, f"❌ resumed sub-agent failed:\n{e}")
+                                delivery_target = tgt
+                                if not callable(
+                                    getattr(delivery_target, "send", None)
+                                ):
+                                    with contextlib.suppress(Exception):
+                                        delivery_target = await self._resolve_delivery(
+                                            msg, delivery
+                                        )
+                                await self._handoff_report(
+                                    delivery_target,
+                                    msg,
+                                    ch,
+                                    rid,
+                                    tsk,
+                                    f"❌ resumed sub-agent failed:\n{e}",
+                                )
                             finally:
                                 if self._bg_inflight > 0:
                                     self._bg_inflight -= 1
@@ -12742,16 +12856,29 @@ class ManagePluginTool(Tool):
 
         plugin_name = plugin.strip().lower()
 
+        is_global = parse_bool(is_global, False)
+        author_id = str(author_id or "")
+        is_admin = bool(
+            author_id
+            and getattr(self.bot, "_is_admin", lambda _uid: False)(author_id)
+        )
         # Admin gate check for global modifications
         if is_global:
-            if author_id is None or not self.bot._is_admin(author_id):
+            if not is_admin:
                 return "Error: Modifying global plugin status requires Maxwell admin permissions."
 
         target_user = user_id
         if target_user:
             target_user = re.sub(r"[^0-9]", "", str(target_user))
+            if not target_user:
+                return "Error: user_id must be a numeric Discord user ID or mention."
+            if not is_global and target_user != author_id and not is_admin:
+                return (
+                    "Error: you can only change plugin status for yourself; "
+                    "admins may target another user."
+                )
         elif not is_global and author_id:
-            target_user = str(author_id)
+            target_user = author_id
 
         if act == "enable":
             return pm.enable_plugin(plugin_name, user_id=target_user, is_global=is_global)

@@ -12855,7 +12855,8 @@ class MaxwellBot(commands.Bot):
         # awaitable form (start()) would block the LLM call for 800ms which
         # defeats the point.
         gen_progress = None
-        if self._progress_enabled(str(message.guild.id) if message.guild else "DM"):
+        # In DMs, disable progress messages so it doesn't spam 'working on it…' to the user
+        if message.guild and self._progress_enabled(str(message.guild.id)):
             gen_progress = _make_tool_progress(message)
             with contextlib.suppress(Exception):
                 await gen_progress.start_defer()
@@ -13164,9 +13165,7 @@ class MaxwellBot(commands.Bot):
                     # _handle_message finally block, then the reply — the
                     # exact flicker the user complained about.
                     followup_progress = None
-                    if self._progress_enabled(
-                        str(message.guild.id) if message.guild else "DM"
-                    ):
+                    if message.guild and self._progress_enabled(str(message.guild.id)):
                         followup_progress = _make_tool_progress(message)
                         with contextlib.suppress(Exception):
                             await followup_progress.start_defer()
@@ -13921,9 +13920,7 @@ class MaxwellBot(commands.Bot):
         if existing_progress is not None:
             progress = existing_progress
         else:
-            progress_enabled = bool(non_terminal) and self._progress_enabled(
-                str(message.guild.id) if message.guild else "DM"
-            )
+            progress_enabled = bool(non_terminal) and bool(message.guild) and self._progress_enabled(str(message.guild.id))
             progress = _make_tool_progress(message) if progress_enabled else None
 
         # 2026-07-21: pick a per-tool "artifact" field for the progress
