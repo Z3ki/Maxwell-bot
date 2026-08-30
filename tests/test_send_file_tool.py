@@ -1,5 +1,6 @@
 import asyncio
 import base64
+from types import SimpleNamespace
 
 from bot_tools import SendFileTool
 from bot_tools import ShellTool
@@ -134,6 +135,30 @@ def test_shell_tool_truncates_captured_output_to_max_output(monkeypatch):
         assert len(message.channel.sent) == 1
         posted = message.channel.sent[0]
         assert posted.content == "working on it…"
+
+    asyncio.run(run())
+
+
+def test_shell_progress_respects_shared_server_setting():
+    class FakeBot:
+        def _is_admin(self, user_id):
+            return True
+
+        def _progress_enabled(self, server_id):
+            return False
+
+    tool = ShellTool(bot=FakeBot())
+    message = FakeMessage()
+    message.guild = SimpleNamespace(id=99)
+
+    async def run():
+        async def fake_run_shell(command, on_progress=None):
+            return b"quiet", b"", 0
+
+        tool._run_shell_command = fake_run_shell
+        result = await tool.execute(message, command="printf quiet")
+        assert result == "quiet"
+        assert message.channel.sent == []
 
     asyncio.run(run())
 

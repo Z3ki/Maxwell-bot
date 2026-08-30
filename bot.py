@@ -3210,6 +3210,50 @@ class MaxwellBot(commands.Bot):
             vision_disable_reasoning=self.config.OLLAMA_VISION_DISABLE_REASONING,
         )
 
+    def _is_in_night_fallback_window(self) -> bool:
+        """Return whether local time is inside the nightly fallback window."""
+        try:
+            control = getattr(self, "_control", None) or {}
+            if not parse_bool(control.get("enable_night_fallback"), True):
+                return False
+            start = max(
+                0, min(23, _safe_int(control.get("night_fallback_start_hour"), 22))
+            )
+            end = max(
+                0, min(23, _safe_int(control.get("night_fallback_end_hour"), 9))
+            )
+            hour = time.localtime().tm_hour
+            if start == end:
+                return False
+            if start < end:
+                return start <= hour < end
+            return hour >= start or hour < end
+        except Exception:
+            return False
+
+    def _night_fallback_active(self) -> bool:
+        """Return whether the configured fallback should serve this request."""
+        if not self._is_in_night_fallback_window():
+            return False
+        config = getattr(self, "config", None)
+        return bool(
+            str(getattr(config, "OLLAMA_FALLBACK_BASE_URL", "") or "").strip()
+            and str(getattr(config, "OLLAMA_FALLBACK_MODEL", "") or "").strip()
+        )
+
+    def _night_fallback_kwargs(self, provider=None) -> dict[str, bool]:
+        """Return provider kwargs for the main provider's night routing."""
+        main_provider = getattr(self, "ai_provider", None)
+        if provider is not None and provider is not main_provider:
+            return {}
+        return {"prefer_fallback": True} if self._night_fallback_active() else {}
+
+    async def _generate_response(self, messages: list[dict], **kwargs):
+        """Generate through the main provider, preferring fallback at night."""
+        for key, value in self._night_fallback_kwargs().items():
+            kwargs.setdefault(key, value)
+        return await self.ai_provider.generate_response(messages, **kwargs)
+
     async def _get_autonomy_provider(self):
         """Return a provider for the autonomy loop.
 
@@ -3485,7 +3529,7 @@ class MaxwellBot(commands.Bot):
                 )
                 # generate_response is async + streaming-friendly; pass
                 # max_tokens=1200 to bound the summary length.
-                resp = await self.ai_provider.generate_response(
+                resp = await self._generate_response(
                     [{"role": "user", "content": prompt}],
                     max_tokens=1200,
                     temperature=0.2,
@@ -6525,7 +6569,7 @@ class MaxwellBot(commands.Bot):
                 key=str(getattr(channel, "id", "") or ""),
             )
             try:
-                resp = await self.ai_provider.generate_response(
+                resp = await self._generate_response(
                     messages,
                     timeout=8,
                     max_tokens=8,
@@ -7824,7 +7868,7 @@ class MaxwellBot(commands.Bot):
         )
         try:
             async with self._vc_ai_semaphore:
-                return await self.ai_provider.generate_response(
+                return await self._generate_response(
                     messages,
                     media=[],
                     timeout=vc_timeout,
@@ -8589,7 +8633,7 @@ class MaxwellBot(commands.Bot):
                     "content": f"Challenge details: {summary}\nSolve link: {url}",
                 },
             ]
-            text = await self.ai_provider.generate_response(
+            text = await self._generate_response(
                 messages,
                 timeout=45,
                 max_tokens=300,
@@ -8695,7 +8739,7 @@ class MaxwellBot(commands.Bot):
         """One short model turn that picks onboarding options. Never raises."""
         await self._acquire_ai_slot(timeout=20, priority="user", key="onboarding")
         try:
-            resp = await self.ai_provider.generate_response(
+            resp = await self._generate_response(
                 messages,
                 timeout=45,
                 max_tokens=400,
@@ -9921,6 +9965,7 @@ class MaxwellBot(commands.Bot):
                     ],
                     timeout=extract_timeout,
                     model=context_model,
+                    **self._night_fallback_kwargs(context_provider),
                 )
             finally:
                 await self._release_ai_slot()
@@ -12336,88 +12381,26 @@ class MaxwellBot(commands.Bot):
         control = getattr(self, "_control", None) or {}
         return parse_bool(control.get("process_images"), True)
 
-    def _is_in_night_window(self) -> bool:
-        """True when local time is inside the nightly quiet window 22:00-09:00."""
-        try:
-            ctrl = getattr(self, "_control", None) or {}
-            if not parse_bool(ctrl.get("enable_night_sleep", True), True):
-                return False
-            # Use control-configurable hours so the owner can tweak without code change
-            start = int(ctrl.get("night_sleep_start_hour", 22))
-            end = int(ctrl.get("night_sleep_end_hour", 9))
-            # Clamp to 0-23
-            start = max(0, min(23, start))
-            end = max(0, min(23, end))
-            now_hour = datetime.now().hour  # local time is America/Puerto_Rico (AST -0400) on this host
-            if start == end:
-                return False
-            if start < end:
-                return start <= now_hour < end
-            # wraps midnight: e.g. 22-09
-            return now_hour >= start or now_hour < end
-        except Exception:
-            return False
-
-    def _night_seconds_remaining(self) -> int:
-        """Seconds until the nightly window ends (next 09:00 local)."""
-        try:
-            ctrl = getattr(self, "_control", None) or {}
-            end = int(ctrl.get("night_sleep_end_hour", 9))
-            end = max(0, min(23, end))
-            now = datetime.now()
-            # next end time
-            end_dt = now.replace(hour=end, minute=0, second=0, microsecond=0)
-            if now.hour >= end and now.hour >= int(ctrl.get("night_sleep_start_hour", 22)):
-                # we are in 22-23:59, end is tomorrow 09:00
-                end_dt = end_dt + timedelta(days=1)
-            elif now >= end_dt:
-                end_dt = end_dt + timedelta(days=1)
-            delta = (end_dt - now).total_seconds()
-            return max(1, int(delta))
-        except Exception:
-            return 3600
-
     def _is_sleeping(self) -> tuple[bool, int]:
-        """Return (sleeping, seconds_remaining). Auto-clears expired
-        state so callers don't have to check the deadline themselves.
-        Checks manual sleep first, then nightly quiet hours 22:00-09:00.
+        """Return (sleeping, seconds_remaining) for manual sleep only.
+
+        Night hours select the configured fallback model; they never block
+        dispatch or alter Discord presence.
         """
-        if self._sleep_until > 0:
-            now = asyncio.get_running_loop().time()
-            if now >= self._sleep_until:
-                self._sleep_until = 0.0
-                self._sleep_notified_at.clear()
-                cancel = getattr(self, "_cancel_sleep_wake", None)
-                if callable(cancel):
-                    cancel()
-                schedule = getattr(self, "_schedule_sleep_presence", None)
-                if callable(schedule):
-                    schedule(asleep=False)
-                # fall through to check nightly window below
-            else:
-                return True, int(self._sleep_until - now)
-        # nightly quiet hours 10pm-9am — automatic, no _sleep_until needed
-        in_night_window = getattr(self, "_is_in_night_window", None)
-        if callable(in_night_window) and in_night_window():
-            # ensure idle presence overlay while in night window (once)
-            try:
-                if not getattr(self, "_sleep_presence_overlay", False):
-                    sched = getattr(self, "_schedule_sleep_presence", None)
-                    if callable(sched):
-                        sched(asleep=True)
-            except Exception:
-                pass
-            return True, self._night_seconds_remaining()
-        else:
-            # we were in night overlay but night just ended and no manual sleep is active — restore
-            try:
-                if getattr(self, "_sleep_presence_overlay", False) and self._sleep_until <= 0:
-                    sched = getattr(self, "_schedule_sleep_presence", None)
-                    if callable(sched):
-                        sched(asleep=False)
-            except Exception:
-                pass
-        return False, 0
+        if self._sleep_until <= 0:
+            return False, 0
+        now = asyncio.get_running_loop().time()
+        if now >= self._sleep_until:
+            self._sleep_until = 0.0
+            self._sleep_notified_at.clear()
+            cancel = getattr(self, "_cancel_sleep_wake", None)
+            if callable(cancel):
+                cancel()
+            schedule = getattr(self, "_schedule_sleep_presence", None)
+            if callable(schedule):
+                schedule(asleep=False)
+            return False, 0
+        return True, int(self._sleep_until - now)
 
     async def set_sleep(self, duration_minutes: int) -> str:
         """Set a sleep window. Max 60 minutes (clamped). Returns a
@@ -13184,7 +13167,7 @@ class MaxwellBot(commands.Bot):
                 timeout=ai_timeout, priority="user", key=channel_id
             )
             try:
-                response = await self.ai_provider.generate_response(
+                response = await self._generate_response(
                     messages,
                     media=active_media,
                     timeout=ai_timeout,
@@ -13388,7 +13371,7 @@ class MaxwellBot(commands.Bot):
                             )
 
                     try:
-                        followup = await self.ai_provider.generate_response(
+                        followup = await self._generate_response(
                             result_messages,
                             images=followup_images,
                             media=all_tool_media,
@@ -16575,7 +16558,7 @@ class MaxwellBot(commands.Bot):
         )
         try:
             try:
-                response_text = await self.ai_provider.generate_response(
+                response_text = await self._generate_response(
                     messages,
                     media=tg_media,
                     timeout=ai_timeout,
@@ -17156,7 +17139,7 @@ class MaxwellBot(commands.Bot):
                 timeout=ai_timeout, priority="user", key=f"tg:{chat_id}"
             )
             try:
-                followup = await self.ai_provider.generate_response(
+                followup = await self._generate_response(
                     result_messages,
                     media=[],
                     timeout=ai_timeout,

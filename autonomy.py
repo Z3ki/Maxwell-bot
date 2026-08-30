@@ -2904,6 +2904,12 @@ class AutonomyEngine:
                 autonomy_disable_reasoning = bool(
                     control.get("autonomy_disable_reasoning", True)
                 )
+                night_kwargs = {}
+                night_kwargs_resolver = getattr(
+                    self.bot, "_night_fallback_kwargs", None
+                )
+                if callable(night_kwargs_resolver):
+                    night_kwargs = night_kwargs_resolver(ai_provider)
                 assert ai_provider is not None  # narrowed by callable check above
                 raw_response = await ai_provider.generate_response(
                     messages,
@@ -2914,6 +2920,7 @@ class AutonomyEngine:
                     # minimax-m3 caps at 131072) and waste quota/tokens.
                     max_tokens=8192,
                     disable_reasoning=autonomy_disable_reasoning,
+                    **night_kwargs,
                 )
             finally:
                 await self.bot._release_ai_slot()

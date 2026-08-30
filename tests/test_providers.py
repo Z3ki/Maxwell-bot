@@ -261,6 +261,66 @@ def test_generate_chat_completion_retries_primary_before_fallback():
     assert session.payloads[1]["model"] == "primary-model"
 
 
+def test_prefer_fallback_routes_first_request_to_fallback():
+    provider = OllamaProvider(
+        "http://primary.test/v1",
+        "primary-model",
+        10,
+        0.5,
+        fallback_base_url="http://fallback.test/v1",
+        fallback_model="fallback-model",
+    )
+    provider.available = True
+    session = FakeSession()
+    provider._session = session
+
+    async def run():
+        message = await provider.generate_response(
+            [{"role": "user", "content": "hi"}],
+            prefer_fallback=True,
+        )
+        assert message == "ok"
+
+    asyncio.run(run())
+    assert session.urls == ["http://fallback.test/v1/chat/completions"]
+    assert session.payloads[0]["model"] == "fallback-model"
+
+
+def test_prefer_fallback_fails_over_to_primary():
+    provider = OllamaProvider(
+        "http://primary.test/v1",
+        "primary-model",
+        10,
+        0.5,
+        fallback_base_url="http://fallback.test/v1",
+        fallback_model="fallback-model",
+    )
+    provider.available = True
+    session = FakeSequenceSession(
+        [
+            FakeErrorResponse(404, '{"error":{"message":"fallback unavailable"}}'),
+            FakeResponse(),
+        ]
+    )
+    provider._session = session
+
+    async def run():
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "hi"}],
+            fast_fallback=True,
+            prefer_fallback=True,
+        )
+        assert message["content"] == "ok"
+
+    asyncio.run(run())
+    assert session.urls == [
+        "http://fallback.test/v1/chat/completions",
+        "http://primary.test/v1/chat/completions",
+    ]
+    assert session.payloads[0]["model"] == "fallback-model"
+    assert session.payloads[1]["model"] == "primary-model"
+
+
 def test_429_rate_limit_skips_to_fallback_without_doomed_retry():
     provider = OllamaProvider(
         "http://primary.test/v1",

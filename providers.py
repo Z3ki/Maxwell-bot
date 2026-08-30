@@ -1485,6 +1485,7 @@ class OllamaProvider:
         *,
         fast_fallback: bool = False,
         has_media: bool = False,
+        prefer_fallback: bool = False,
     ) -> ProviderEndpoint:
         primary = self._endpoint_named("primary") or self._endpoints[0]
         fallback = self._endpoint_named("fallback")
@@ -1495,20 +1496,37 @@ class OllamaProvider:
             # option; sending it an image_url just buys another 404.
             if fallback is not None and fallback.name in self._media_incapable:
                 fallback = None
-            if fast_fallback:
+            if prefer_fallback and fallback is not None:
+                natural = (
+                    fallback
+                    if (attempt == 1 if fast_fallback else attempt <= 2)
+                    else (vision or primary)
+                )
+            elif fast_fallback:
                 natural = vision if attempt == 1 else (fallback or vision)
             else:
                 # Attempts 1-2: vision model; 3+: text fallback if configured.
                 natural = vision if attempt <= 2 else (fallback or vision)
             if self._is_endpoint_cooling(natural.name):
-                for ep in (vision, fallback, primary):
+                candidates = (
+                    (fallback, vision, primary)
+                    if prefer_fallback
+                    else (vision, fallback, primary)
+                )
+                for ep in candidates:
                     if ep is not None and not self._is_endpoint_cooling(ep.name):
                         return ep
             return natural
 
         if fallback is None:
             return primary
-        if fast_fallback:
+        if prefer_fallback:
+            natural = (
+                fallback
+                if (attempt == 1 if fast_fallback else attempt <= 2)
+                else primary
+            )
+        elif fast_fallback:
             natural = primary if attempt == 1 else fallback
         else:
             # Attempt 1 and 2: primary (main)
@@ -1678,6 +1696,7 @@ class OllamaProvider:
         on_tool_call_name=None,
         on_token=None,
         custom_tool_calls: bool = False,
+        prefer_fallback: bool = False,
         **kwargs,
     ) -> str:
         """Generate response. images is legacy b64 list, media is list of {b64, mime_type}.
@@ -1704,6 +1723,7 @@ class OllamaProvider:
                 on_tool_call_name=on_tool_call_name,
                 on_token=on_token,
                 custom_tool_calls=custom_tool_calls,
+                prefer_fallback=prefer_fallback,
                 **kwargs,
             )
         except RuntimeError as e:
@@ -1722,7 +1742,12 @@ class OllamaProvider:
                 kwargs = dict(kwargs)
                 kwargs.pop("tools", None)
                 message = await self.generate_chat_completion(
-                    messages, images=images, media=media, timeout=timeout, **kwargs
+                    messages,
+                    images=images,
+                    media=media,
+                    timeout=timeout,
+                    prefer_fallback=prefer_fallback,
+                    **kwargs,
                 )
             else:
                 raise
@@ -1773,6 +1798,7 @@ class OllamaProvider:
         on_tool_call_name=None,
         on_token=None,
         custom_tool_calls: bool = False,
+        prefer_fallback: bool = False,
     ) -> dict:
         """Generate an OpenAI-compatible assistant message, optionally with tools.
 
@@ -1897,7 +1923,10 @@ class OllamaProvider:
         while attempt < min(max_attempts, attempt_ceiling):
             attempt += 1
             endpoint = self._attempt_endpoint(
-                attempt, fast_fallback=fast_fallback, has_media=has_media
+                attempt,
+                fast_fallback=fast_fallback,
+                has_media=has_media,
+                prefer_fallback=prefer_fallback,
             )
             if endpoint.name in media_broken or endpoint.name in dead:
                 order = self._media_endpoint_order() if has_media else self._endpoints
@@ -1963,6 +1992,7 @@ class OllamaProvider:
                             max_attempts=max_attempts,
                             fast_fallback=fast_fallback,
                             has_media=has_media,
+                            prefer_fallback=prefer_fallback,
                         ):
                             continue
                         raise RuntimeError(
@@ -1991,6 +2021,7 @@ class OllamaProvider:
                                 max_attempts=max_attempts,
                                 fast_fallback=fast_fallback,
                                 has_media=has_media,
+                                prefer_fallback=prefer_fallback,
                             ):
                                 continue
                             raise last_usage_error
@@ -2001,6 +2032,7 @@ class OllamaProvider:
                             max_attempts=max_attempts,
                             fast_fallback=fast_fallback,
                             has_media=has_media,
+                            prefer_fallback=prefer_fallback,
                         ):
                             continue
                         raise RuntimeError(
@@ -2070,6 +2102,7 @@ class OllamaProvider:
                                 max_attempts=max_attempts,
                                 fast_fallback=fast_fallback,
                                 has_media=has_media,
+                                prefer_fallback=prefer_fallback,
                             ):
                                 continue
                             raise RuntimeError(
@@ -2091,6 +2124,7 @@ class OllamaProvider:
                                 max_attempts=max_attempts,
                                 fast_fallback=True,
                                 has_media=has_media,
+                                prefer_fallback=prefer_fallback,
                             ):
                                 continue
                             raise RuntimeError(
@@ -2119,6 +2153,7 @@ class OllamaProvider:
                                 max_attempts=max_attempts,
                                 fast_fallback=True,
                                 has_media=has_media,
+                                prefer_fallback=prefer_fallback,
                             ):
                                 continue
                             raise RuntimeError(
@@ -2169,6 +2204,7 @@ class OllamaProvider:
                                         max_attempts=max_attempts,
                                         fast_fallback=fast_fallback,
                                         has_media=has_media,
+                                        prefer_fallback=prefer_fallback,
                                     ):
                                         continue
                         # max_tokens is *output* length, not context. Models like
@@ -2220,6 +2256,7 @@ class OllamaProvider:
                                         max_attempts=max_attempts,
                                         fast_fallback=True,
                                         has_media=has_media,
+                                        prefer_fallback=prefer_fallback,
                                     ):
                                         continue
                         # Some models accept exactly one temperature and 400 on
@@ -2308,6 +2345,7 @@ class OllamaProvider:
                             max_attempts=max_attempts,
                             fast_fallback=fast_fallback,
                             has_media=has_media,
+                            prefer_fallback=prefer_fallback,
                         ):
                             continue
                         raise RuntimeError(
@@ -2413,6 +2451,7 @@ class OllamaProvider:
                             max_attempts=max_attempts,
                             fast_fallback=True,
                             has_media=has_media,
+                            prefer_fallback=prefer_fallback,
                         ):
                             continue
                         raise RuntimeError(
@@ -2436,6 +2475,7 @@ class OllamaProvider:
                             max_attempts=max_attempts,
                             fast_fallback=fast_fallback,
                             has_media=has_media,
+                            prefer_fallback=prefer_fallback,
                         ):
                             continue
                         raise RuntimeError("Empty response from provider")
@@ -2473,6 +2513,7 @@ class OllamaProvider:
                     max_attempts=max_attempts,
                     fast_fallback=fast_fallback,
                     has_media=has_media,
+                    prefer_fallback=prefer_fallback,
                 ):
                     continue
                 raise RuntimeError(
@@ -2492,6 +2533,7 @@ class OllamaProvider:
                     max_attempts=max_attempts,
                     fast_fallback=fast_fallback,
                     has_media=has_media,
+                    prefer_fallback=prefer_fallback,
                 ):
                     continue
                 raise
@@ -2504,6 +2546,7 @@ class OllamaProvider:
                     max_attempts=max_attempts,
                     fast_fallback=fast_fallback,
                     has_media=has_media,
+                    prefer_fallback=prefer_fallback,
                 ):
                     continue
                 raise RuntimeError(f"Provider call failed: {last_error}") from e
@@ -2520,12 +2563,16 @@ class OllamaProvider:
         max_attempts: int = None,
         fast_fallback: bool = False,
         has_media: bool = False,
+        prefer_fallback: bool = False,
     ) -> bool:
         max_attempts = max_attempts or self.retry_attempts
         if attempt >= max_attempts:
             return False
         next_endpoint = self._attempt_endpoint(
-            attempt + 1, fast_fallback=fast_fallback, has_media=has_media
+            attempt + 1,
+            fast_fallback=fast_fallback,
+            has_media=has_media,
+            prefer_fallback=prefer_fallback,
         )
         if self._should_wait_before_retry(endpoint, next_endpoint):
             wait = attempt * 2

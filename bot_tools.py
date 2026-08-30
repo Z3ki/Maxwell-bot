@@ -7140,12 +7140,21 @@ class ShellTool(Tool):
         # Lightweight callers/tests may omit it; treat those as channel-like
         # so the durable progress message remains observable.
         is_dm = hasattr(message, "guild") and not getattr(message, "guild", None)
-        if not is_dm:
+        progress_enabled = not is_dm
+        progress_checker = getattr(self.bot, "_progress_enabled", None)
+        if progress_enabled and callable(progress_checker):
+            guild = getattr(message, "guild", None)
+            if guild is not None:
+                progress_enabled = bool(
+                    progress_checker(str(getattr(guild, "id", "") or ""))
+                )
+        if progress_enabled:
             try:
                 # Keep one durable, user-visible liveness message for this shell
-                # call. The normal tool-progress message is owned by bot.py and
-                # may be stopped as soon as the tool posts; shell commands need
-                # their own turn-scoped message.
+                # call when the shared per-server progress setting permits it.
+                # The normal tool-progress message is owned by bot.py and may
+                # be stopped as soon as the tool posts; shell commands need
+                # their own turn-scoped message when progress is enabled.
                 sess, slot = await self._begin_shell_progress(message, "working on it…")
             except Exception:
                 # A progress post must never prevent the command itself from
@@ -8843,12 +8852,19 @@ class SubAgentTool(Tool):
             # less than 30 seconds left.
             remaining = max(1, int(remaining_seconds))
             try:
+                night_kwargs = {}
+                night_kwargs_resolver = getattr(
+                    self.bot, "_night_fallback_kwargs", None
+                )
+                if callable(night_kwargs_resolver):
+                    night_kwargs = night_kwargs_resolver(provider)
                 return await provider.generate_chat_completion(
                     messages=messages,
                     tools=self._TOOLS,
                     model=model,
                     max_tokens=max_tokens,
                     timeout=remaining,
+                    **night_kwargs,
                 )
             except Exception as e:
                 attempt += 1

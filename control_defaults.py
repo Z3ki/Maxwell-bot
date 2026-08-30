@@ -153,14 +153,13 @@ DEFAULT_CONTROL = {
     # Operators who want the bot to always be available can flip this
     # to False in dashboard.
     "enable_sleep": True,
-    # ─── nightly quiet hours ─────────────────────────────────────────────
-    # Automatic sleep window 10pm–9am (local server time, America/Puerto_Rico).
-    # When enabled, Maxwell refuses to answer (via the same sleep gate) during
-    # the night, showing "max is sleeping, back in ~X". z3ki can still clear
-    # with ,sleep clear or disable via enable_night_sleep=False.
-    "enable_night_sleep": True,
-    "night_sleep_start_hour": 22,
-    "night_sleep_end_hour": 9,
+    # ─── nightly fallback model ─────────────────────────────────────────
+    # During local 22:00–09:00 hours, start requests on the configured
+    # OLLAMA_FALLBACK_* endpoint/model instead of putting Maxwell to sleep.
+    # If no fallback is configured, the primary provider is used normally.
+    "enable_night_fallback": True,
+    "night_fallback_start_hour": 22,
+    "night_fallback_end_hour": 9,
     "ai_timeout_seconds": 3600,
     "ai_concurrency": 2,
     "memory_history_messages": 60,
@@ -337,6 +336,12 @@ DEAD_CONTROL_KEYS = frozenset(
         "subagent_max_concurrent_per_user",
         "subagent_max_timeout_minutes",
         "cross_context_budget",
+        # Replaced by the nightly fallback model routing above. These keys can
+        # remain in persisted control files from the old automatic sleep code,
+        # but must not re-enable the removed night-sleep behavior.
+        "enable_night_sleep",
+        "night_sleep_start_hour",
+        "night_sleep_end_hour",
     }
 )
 
