@@ -91,6 +91,38 @@ def test_rewriting_replaces_source_but_keeps_the_database(data_dir):
     assert db.read_text() == "rows"  # /data survived the redeploy
 
 
+def test_merge_code_overwrites_given_files_and_keeps_the_rest(data_dir):
+    site_server.write_code(
+        data_dir, "demo", {"app.py": "v1", "helpers.py": "keep", "old.py": "x"}
+    )
+    written = site_server.merge_code(data_dir, "demo", {"app.py": "v2"})
+    assert written == ["app.py"]
+    assert site_server.read_code(data_dir, "demo", "app.py") == "v2"
+    assert site_server.read_code(data_dir, "demo", "helpers.py") == "keep"
+    names = [n for n, _ in site_server.list_code(data_dir, "demo")]
+    assert names == ["app.py", "helpers.py", "old.py"]
+
+
+def test_patch_code_swaps_exact_text(data_dir):
+    site_server.write_code(data_dir, "demo", {"app.py": "alpha beta alpha"})
+    one = site_server.patch_code(data_dir, "demo", "app.py", "alpha", "gamma")
+    assert "Patched app.py" in one
+    assert site_server.read_code(data_dir, "demo", "app.py") == "gamma beta alpha"
+    all_hits = site_server.patch_code(
+        data_dir, "demo", "app.py", "a", "A", all_hits=True
+    )
+    assert "5 occurrence" in all_hits
+    assert site_server.read_code(data_dir, "demo", "app.py") == "gAmmA betA AlphA"
+
+
+def test_delete_code_file_refuses_app_py(data_dir):
+    site_server.write_code(data_dir, "demo", {"app.py": "x", "helpers.py": "y"})
+    assert site_server.delete_code_file(data_dir, "demo", "helpers.py") == "Deleted helpers.py"
+    with pytest.raises(site_server.SiteServerError, match="app.py"):
+        site_server.delete_code_file(data_dir, "demo", "app.py")
+    assert [n for n, _ in site_server.list_code(data_dir, "demo")] == ["app.py"]
+
+
 def test_read_cannot_escape_the_server_directory(data_dir, tmp_path):
     site_server.write_code(data_dir, "demo", {"app.py": "x"})
     (tmp_path / "secret.txt").write_text("token")
@@ -207,6 +239,25 @@ def test_write_deploys_and_flags_the_site(tool):
     assert "/bot/demo/api/" in out
     assert tool.bot._sites["demo"]["server"] is True
     assert tool._started == [("demo", {"API_KEY": "sekrit"}, None)]
+
+
+def test_write_merges_helpers_instead_of_wiping_them(tool):
+    run(
+        tool.execute(
+            _msg(),
+            name="demo",
+            action="write",
+            files={"app.py": "from helpers import x", "helpers.py": "x = 1"},
+        )
+    )
+    out = run(
+        tool.execute(
+            _msg(), name="demo", action="write", files={"app.py": "from helpers import x\n# patched"}
+        )
+    )
+    assert "other source files kept" in out
+    assert site_server.read_code(tool.bot.config.DATA_DIR, "demo", "helpers.py") == "x = 1"
+    assert "# patched" in site_server.read_code(tool.bot.config.DATA_DIR, "demo", "app.py")
 
 
 def test_secret_values_are_never_echoed_back(tool):

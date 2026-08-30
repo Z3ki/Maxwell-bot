@@ -389,8 +389,14 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             ),
             "path": _str("File inside the site, default index.html"),
             "content": _str("New file contents for write"),
+            "files": _str(
+                'Optional extra files to write at once: {"style.css": "...", "app.js": "..."}'
+            ),
             "find": _str("For replace: exact existing text to swap out"),
             "replace": _str("For replace: what to put there (empty string deletes it)"),
+            "all": _bool(
+                "For replace: true = every occurrence, false = first only (default)"
+            ),
             "title": _str("For rename: the new title"),
             "encoding": _str("text (default) or base64 for write"),
             "backend": _str("For backend: true | false | status | clear"),
@@ -402,20 +408,31 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         {
             "name": _str("Slug of the site this backend belongs to"),
             "action": _str(
-                "write | start | stop | restart | status | logs | read | env | delete"
+                "list | read | write | replace | deploy | start | stop | restart | "
+                "status | logs | env | rm | delete"
             ),
             "files": _str(
                 'Server source as JSON: {"app.py": "...", "helpers.py": "..."}. '
+                "write merges these into the existing source (other files stay). "
+                "deploy replaces the whole snapshot — missing files disappear. "
                 "app.py is the entry and must listen on 0.0.0.0:$PORT. flask, "
                 "waitress, fastapi, uvicorn, websockets, sqlalchemy, bcrypt, "
                 "pyjwt, requests, httpx, jinja2, pillow and the stdlib are "
                 "installed. Use fastapi+uvicorn instead of flask+waitress when "
-                "the app needs WebSockets (multiplayer, live chat, anything "
-                "pushed to clients) — waitress cannot do sockets. Only /data is "
-                "writable and only /data survives a restart — put the database at "
-                "/data/app.db. Routes are served under /bot/<name>/api/, with "
-                "that prefix stripped: @app.get('/notes') answers at "
-                "/bot/<name>/api/notes."
+                "the app needs WebSockets. Only /data is writable and only /data "
+                "survives a restart — put the database at /data/app.db. Routes "
+                "are served under /bot/<name>/api/."
+            ),
+            "path": _str(
+                "For read/replace/rm/write-one-file: which server file (default app.py)"
+            ),
+            "content": _str(
+                "For write of a single file: the new contents (or use files=)"
+            ),
+            "find": _str("For replace: exact existing text to swap out"),
+            "replace": _str("For replace: what to put there"),
+            "all": _bool(
+                "For replace: true = every occurrence, false = first only (default)"
             ),
             "env": _str(
                 'Secrets and config as JSON: {"API_KEY": "sk-..."}. Held outside '
@@ -424,12 +441,9 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             ),
             "packages": _str(
                 'Extra pip packages as a JSON list, e.g. ["redis==5.0.1"]. Only '
-                "needed for something outside the installed set (flask, waitress, "
-                "fastapi, uvicorn, websockets, sqlalchemy, bcrypt, pyjwt, requests, "
-                "httpx, jinja2, pillow). Builds a per-site image, so the first "
-                "deploy takes longer."
+                "needed for something outside the installed set. Builds a per-site "
+                "image, so the first deploy takes longer."
             ),
-            "path": _str("For read: which server file (default app.py)"),
             "lines": _int("For logs: how many lines (default 40, max 200)"),
         },
         ["name", "action"],
@@ -442,6 +456,23 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         {
             "all_users": _bool("Optional boolean. If true, list all published sites across all users."),
         },
+    ),
+    "site_test": _obj(
+        {
+            "name": _str("Slug of the site to test (see list_sites)"),
+            "path": _str(
+                "Optional subpage (about/) or this site's full public URL. "
+                "Default is the homepage."
+            ),
+            "url": _str("Alias of path: this site's full public URL"),
+            "wait": _num(
+                "Seconds to let JavaScript run after load (default 2, max 15)"
+            ),
+            "screenshot": _bool(
+                "Attach a screenshot of the loaded page (default true)"
+            ),
+        },
+        ["name"],
     ),
     "web_search": _obj(
         {
@@ -758,6 +789,7 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "edit_site",
         "delete_site",
         "site_server",
+        "site_test",
         "list_sites",
         "web_search",
         "fetch_url",
@@ -1798,19 +1830,43 @@ def trim_tool_tail(
     return [msg for group in groups for msg in group]
 
 
+# Site tools carry the page itself in arguments. Replacing that with
+# ``[large content omitted, N chars]`` made the follow-up model write the
+# placeholder onto the live site. Keep the real HTML for these.
+KEEP_FULL_TOOL_ARGS: frozenset[str] = frozenset(
+    {
+        "create_site",
+        "edit_site",
+        "site_server",
+        "site_test",
+    }
+)
+
+
 def elide_tool_calls_for_history(
     tool_calls: list[dict],
     *,
     heavy_keys: tuple[str, ...] = ("body", "content", "code", "html", "data"),
     max_chars: int = 2000,
 ) -> list[dict]:
-    """Copy tool_calls with huge argument strings elided for context budget."""
+    """Copy tool_calls with huge argument strings elided for context budget.
+
+    Site-building tools are left intact: the next turn needs the real HTML
+    to keep editing, and an omitted-placeholder looks like page content.
+    """
     import copy
     import json
 
     out = copy.deepcopy(tool_calls or [])
     for call in out:
         fn = call.get("function")
+        name = ""
+        if isinstance(fn, dict):
+            name = str(fn.get("name") or "")
+        elif isinstance(call.get("name"), str):
+            name = call["name"]
+        if name in KEEP_FULL_TOOL_ARGS:
+            continue
         if not isinstance(fn, dict):
             continue
         raw_args = fn.get("arguments")

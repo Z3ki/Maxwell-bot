@@ -49,6 +49,7 @@ from tool_schemas import (
 )
 import site_backend
 import site_server
+import site_test
 from utils import (  # single source of truth, fd-safe
     FileLock,
     _atomic_json_write_sync,
@@ -4302,9 +4303,34 @@ def _normalize_site_body_text_escapes(body: str) -> str:
 
 SITE_MAX_FILES = 60
 SITE_MAX_TOTAL_BYTES = 12_000_000
+# History used to replace huge create_site/edit_site payloads with this
+# marker. If that string is ever sent back as the page, refuse to write it.
+_ELIDED_SITE_PAYLOAD_RE = re.compile(
+    r"^\[large \w+ omitted, \d+ chars\]$",
+    re.IGNORECASE,
+)
 # Extensions a static host will serve as-is. Anything executable server-side
 # (.php, .cgi) is pointless here and only invites confusion about what runs.
 SITE_BLOCKED_SUFFIXES = {".php", ".php5", ".phtml", ".cgi", ".pl", ".jsp", ".asp", ".aspx"}
+
+
+def _elided_site_payload_error(text: Any) -> str:
+    """Error if ``text`` is a context-elision marker, not real site source."""
+    if not isinstance(text, str):
+        return ""
+    stripped = text.strip()
+    if len(stripped) > 240:
+        return ""
+    if _ELIDED_SITE_PAYLOAD_RE.match(stripped) or stripped in {
+        "[large body elided]",
+        "[large HTML/asset body elided to protect context budget; site creation succeeded from the original full body]",
+    }:
+        return (
+            "Error: that text is a truncated-history placeholder, not the page. "
+            "The real files are already on disk — use edit_site action=replace "
+            "with a short find/replace, or send the actual HTML again."
+        )
+    return ""
 
 
 def _safe_site_relpath(raw: Any) -> str | None:
@@ -4599,8 +4625,8 @@ class CreateSiteTool(Tool):
             "encoding (text|base64), permanent (true to skip auto-expiry). "
             "Generate images in a prior turn and paste CDN URLs "
             "into the HTML — don't batch image_generator with create_site. "
-            "Use edit_site to change a published site instead of re-sending it whole. "
-            "Never paste HTML into chat."
+            "Keep working via edit_site / site_server; site_test loads it "
+            "(console, screenshot). Never paste HTML into chat."
         )
 
     async def execute(
@@ -4692,6 +4718,15 @@ class CreateSiteTool(Tool):
 
         if len(body) > self.MAX_CONTENT_SIZE:
             return f"Error: content too long ({len(body)} chars, max {self.MAX_CONTENT_SIZE})"
+        blocked = _elided_site_payload_error(body)
+        if blocked:
+            return blocked
+        for entry in extra_files:
+            blob = entry.get("bytes") or b""
+            with contextlib.suppress(UnicodeDecodeError):
+                blocked = _elided_site_payload_error(blob.decode("utf-8"))
+                if blocked:
+                    return blocked
         extra_bytes = sum(len(f["bytes"] or b"") for f in extra_files)
         if len(body.encode("utf-8")) + extra_bytes > SITE_MAX_TOTAL_BYTES:
             return f"Error: site too large (max {SITE_MAX_TOTAL_BYTES // 1000}KB across all files)"
@@ -4851,6 +4886,11 @@ class CreateSiteTool(Tool):
             if wants_backend:
                 result += "\n" + site_backend.client_guide(f"/api/site/{slug}")
             result += f"\nLifetime: {site_expiry_label(site_entry, control)}."
+            result += (
+                f"\nTest it with site_test(name=\"{slug}\") before telling "
+                "the user it works — that loads the page, catches console "
+                "errors, and returns a screenshot."
+            )
             if image_urls:
                 result += f"\nEmbedded images ({len(image_urls)}):\n" + "\n".join(
                     f"  - {url}" for url in image_urls
@@ -4995,16 +5035,20 @@ class EditSiteTool(_SiteOwnedTool):
 
     def get_description(self):
         return (
-            "Edit a site you already published, at its existing URL. "
-            "action=list (files + sizes), read (one file back), write (replace or "
-            "add a file — path defaults to index.html), replace (swap the first "
-            "occurrence of `find` with `replace` in one file; the cheap way to "
-            "fix a typo, color, or line without resending the page), delete "
-            "(remove a file), rename (slug stays, `title` changes), backend "
-            "(on/off/status/clear the site's server-side store), extend (reset "
-            "the expiry clock; permanent=true to stop it expiring). "
-            "Params: name (slug), action, path, content, find, replace, title, "
-            "encoding (text|base64), backend, permanent. "
+            "Edit a site you already published, at its existing URL. Use this "
+            "to keep working on the frontend (HTML/CSS/JS) — do not recreate "
+            "the site. "
+            "action=list (files + sizes; notes a Python backend if one is running), "
+            "read (one file back), write (replace or add a file — path defaults "
+            "to index.html; or pass files={...} to write several at once), "
+            "replace (swap `find` with `replace` in one file; all=true for every "
+            "occurrence), delete (remove a file), rename, backend (on/off/status/"
+            "clear the KV store — not the Python server), extend. "
+            "Python backend code is site_server (write/replace/read), not this. "
+            "After an edit, site_test loads the live page (JS console, failed "
+            "requests, screenshot). "
+            "Params: name, action, path, content, files, find, replace, all, "
+            "title, encoding, backend, permanent. "
             "Prefer this over re-running create_site for a tweak."
         )
 
@@ -5015,8 +5059,11 @@ class EditSiteTool(_SiteOwnedTool):
         action: str = "list",
         path: str | None = None,
         content: Any = None,
+        files: Any = None,
         find: str | None = None,
         replace: str | None = None,
+        all: Any = None,
+        replace_all: Any = None,
         title: str | None = None,
         encoding: str = "text",
         backend: Any = None,
@@ -5037,8 +5084,15 @@ class EditSiteTool(_SiteOwnedTool):
             out = f"{url}\n" + "\n".join(lines)
             out += f"\nLifetime: {site_expiry_label(entry, self._control())}."
             if entry.get("backend"):
-                out += "\nBackend: on — " + site_backend.summarize(
+                out += "\nKV store: on — " + site_backend.summarize(
                     self.bot.config.DATA_DIR, slug
+                )
+            if entry.get("server"):
+                server_files = site_server.list_code(self.bot.config.DATA_DIR, slug)
+                names = ", ".join(rel for rel, _ in server_files) or "no source"
+                out += (
+                    f"\nPython backend: on at {url}api/ ({names}). "
+                    "Edit it with site_server (list/read/write/replace), not this tool."
                 )
             return out
 
@@ -5053,33 +5107,58 @@ class EditSiteTool(_SiteOwnedTool):
                 text = target.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as e:
                 return f"Error reading {rel}: {e}"
-            if len(text) > 60000:
-                return (
-                    f"{rel} is {len(text)} chars — too big to return whole. "
-                    "Use action=replace with a `find` string to patch it."
-                )
             return f"{rel} ({len(text)} chars):\n{text}"
 
         if act in {"write", "put", "set", "update"}:
-            rel = _safe_site_relpath(path or "index.html")
-            if not rel:
-                return f"Error: bad path {path!r}"
-            blob, derr = _decode_site_file(content, encoding)
-            if derr:
-                return f"Error: {derr}"
-            if rel.endswith(".html") and str(encoding or "text").lower() in {
-                "text",
-                "utf8",
-                "utf-8",
-                "",
-            }:
-                blob = _normalize_site_body_text_escapes(
-                    blob.decode("utf-8", "replace")
-                ).encode("utf-8")
-            werr = await _write_site_file(site_dir, rel, blob or b"")
-            if werr:
-                return f"Error: {werr}"
-            return f"Wrote {rel} ({len(blob or b'')} bytes) → {url}"
+            extra_files, files_err = _parse_site_files(files)
+            if files_err:
+                return f"Error: {files_err}"
+            for entry_file in extra_files:
+                blob = entry_file.get("bytes") or b""
+                with contextlib.suppress(UnicodeDecodeError):
+                    blocked = _elided_site_payload_error(blob.decode("utf-8"))
+                    if blocked:
+                        return blocked
+            if content is not None:
+                blocked = _elided_site_payload_error(
+                    content if isinstance(content, str) else json.dumps(content)
+                )
+                if blocked:
+                    return blocked
+            written: list[str] = []
+            if extra_files:
+                for entry_file in extra_files:
+                    werr = await _write_site_file(
+                        site_dir, entry_file["path"], entry_file["bytes"] or b""
+                    )
+                    if werr:
+                        return f"Error: {werr}"
+                    written.append(entry_file["path"])
+            if content is not None or not extra_files:
+                rel = _safe_site_relpath(path or "index.html")
+                if not rel:
+                    return f"Error: bad path {path!r}"
+                blob, derr = _decode_site_file(content, encoding)
+                if derr:
+                    return f"Error: {derr}"
+                if rel.endswith(".html") and str(encoding or "text").lower() in {
+                    "text",
+                    "utf8",
+                    "utf-8",
+                    "",
+                }:
+                    blob = _normalize_site_body_text_escapes(
+                        blob.decode("utf-8", "replace")
+                    ).encode("utf-8")
+                werr = await _write_site_file(site_dir, rel, blob or b"")
+                if werr:
+                    return f"Error: {werr}"
+                if rel not in written:
+                    written.append(rel)
+            return (
+                f"Wrote {', '.join(written)} → {url}\n"
+                f'Call site_test(name="{slug}") to load it and check the console.'
+            )
 
         if act in {"replace", "patch", "sub"}:
             rel = _safe_site_relpath(path or "index.html")
@@ -5100,12 +5179,24 @@ class EditSiteTool(_SiteOwnedTool):
                     "Use action=read to see the current file."
                 )
             hits = text.count(find)
-            updated = text.replace(find, replace or "", 1)
+            all_hits = parse_bool(
+                replace_all if replace_all is not None else all, False
+            )
+            if all_hits:
+                updated = text.replace(find, replace or "")
+            else:
+                updated = text.replace(find, replace or "", 1)
             werr = await _write_site_file(site_dir, rel, updated.encode("utf-8"))
             if werr:
                 return f"Error: {werr}"
-            extra = f" ({hits - 1} more occurrence(s) left alone)" if hits > 1 else ""
-            return f"Patched {rel}{extra} → {url}"
+            if all_hits:
+                extra = f" ({hits} occurrence(s))"
+            else:
+                extra = f" ({hits - 1} more occurrence(s) left alone)" if hits > 1 else ""
+            return (
+                f"Patched {rel}{extra} → {url}\n"
+                f'Call site_test(name="{slug}") to load it and check the console.'
+            )
 
         if act in {"delete", "rm", "remove"}:
             rel = _safe_site_relpath(path or "")
@@ -5172,19 +5263,21 @@ class SiteServerTool(_SiteOwnedTool):
 
     def get_description(self):
         return (
-            "Run a real backend server for one of your sites — your own Python, "
-            "your own routes, your own database, your own secrets, in its own "
-            "sandboxed container reached at /bot/<name>/api/... "
-            "Use this when the site needs server-side logic: user accounts and "
-            "login, WebSockets for multiplayer or live chat, a hidden API key, "
-            "anything a static page cannot enforce. "
-            "action=write (files={\"app.py\": ...} then it starts), start, stop, "
-            "restart, status, logs, read, env (set secrets), delete. "
+            "Run and edit a real backend server for one of your sites — your own "
+            "Python, routes, database, and secrets, in a sandboxed container at "
+            "/bot/<name>/api/... "
+            "Use this when the site needs server-side logic: accounts, WebSockets, "
+            "a hidden API key, anything a static page cannot enforce. "
+            "Keep working on a live backend with these actions instead of recreating it: "
+            "list (source files), read (one file), write (merge files — helpers stay; "
+            "pass path+content for one file or files={...} for several), replace "
+            "(exact-text patch in one file, like edit_site), deploy (full snapshot, "
+            "missing files disappear), start, stop, restart, status, logs, env, "
+            "rm (delete a helper file, not app.py), delete (tear the server down). "
             "app.py listens on 0.0.0.0:$PORT. flask+waitress for plain HTTP, "
-            "fastapi+uvicorn when you need WebSockets; sqlalchemy, bcrypt, pyjwt, "
-            "httpx, pillow are installed, packages=[...] adds more. Only /data is "
-            "writable and only /data persists. "
-            "Write the page with create_site, the server with this."
+            "fastapi+uvicorn for WebSockets. Only /data is writable and persists. "
+            "Frontend pages: edit_site. This tool is the server. "
+            "After a change, site_test loads the page and shows console errors."
         )
 
     async def execute(
@@ -5196,6 +5289,11 @@ class SiteServerTool(_SiteOwnedTool):
         env: Any = None,
         packages: Any = None,
         path: str | None = None,
+        content: Any = None,
+        find: str | None = None,
+        replace: str | None = None,
+        all: Any = None,
+        replace_all: Any = None,
         lines: int = 40,
         **kwargs,
     ) -> str:
@@ -5204,14 +5302,61 @@ class SiteServerTool(_SiteOwnedTool):
             return err
         data_dir = self.bot.config.DATA_DIR
         act = str(action or "status").strip().lower()
+        all_hits = parse_bool(
+            replace_all if replace_all is not None else all, False
+        )
         try:
-            if act in {"write", "deploy", "code", "create"}:
+            if act in {"write", "update", "patch_file", "code"}:
+                payload = files
+                if not payload and content is not None:
+                    payload = {str(path or "app.py"): content}
+                if not payload:
+                    return (
+                        "Error: write needs files={\"app.py\": \"...\"} or "
+                        "path+content for one file.\n" + site_server.contract(slug)
+                    )
+                parsed = await asyncio.to_thread(site_server.parse_files, payload)
+                for source in parsed.values():
+                    blocked = _elided_site_payload_error(source)
+                    if blocked:
+                        return blocked
+                existing_app = (
+                    site_server.code_dir(data_dir, slug) / "app.py"
+                ).is_file()
+                if "app.py" not in parsed and not existing_app:
+                    return "Error: the entry file must be called app.py."
+                new_env = (
+                    await asyncio.to_thread(site_server.parse_env, env)
+                    if env
+                    else None
+                )
+                extra = await asyncio.to_thread(site_server.parse_packages, packages)
+                written = await asyncio.to_thread(
+                    site_server.merge_code, data_dir, slug, parsed
+                )
+                await site_server.start(
+                    data_dir, slug, env=new_env, packages=extra or None
+                )
+                await self._mark_server(slug, entry, True)
+                return (
+                    f"Backend server live: {self.base_url}/{slug}/api/ "
+                    f"(updated {', '.join(written)}; other source files kept)\n"
+                    + site_server.contract(slug)
+                )
+
+            if act in {"deploy", "create", "snapshot"}:
                 if not files:
                     return (
-                        "Error: write needs files, e.g. "
-                        'files={"app.py": "..."}.\n' + site_server.contract(slug)
+                        "Error: deploy needs the full snapshot in files, e.g. "
+                        'files={"app.py": "..."}. Missing files are deleted. '
+                        "Use action=write to change one file without wiping the rest.\n"
+                        + site_server.contract(slug)
                     )
                 parsed = await asyncio.to_thread(site_server.parse_files, files)
+                for source in parsed.values():
+                    blocked = _elided_site_payload_error(source)
+                    if blocked:
+                        return blocked
                 if "app.py" not in parsed:
                     return "Error: the entry file must be called app.py."
                 new_env = (
@@ -5229,8 +5374,32 @@ class SiteServerTool(_SiteOwnedTool):
                 await self._mark_server(slug, entry, True)
                 return (
                     f"Backend server live: {self.base_url}/{slug}/api/ "
-                    f"(wrote {', '.join(written)})\n" + site_server.contract(slug)
+                    f"(full snapshot: {', '.join(written)})\n"
+                    + site_server.contract(slug)
                 )
+
+            if act in {"replace", "patch", "sub"}:
+                rel = path or "app.py"
+                note = await asyncio.to_thread(
+                    site_server.patch_code,
+                    data_dir,
+                    slug,
+                    rel,
+                    find or "",
+                    replace,
+                    all_hits=all_hits,
+                )
+                await site_server.start(data_dir, slug)
+                await self._mark_server(slug, entry, True)
+                return f"{note} and restarted → {self.base_url}/{slug}/api/"
+
+            if act in {"rm", "unlink"}:
+                note = await asyncio.to_thread(
+                    site_server.delete_code_file, data_dir, slug, path or ""
+                )
+                await site_server.start(data_dir, slug)
+                await self._mark_server(slug, entry, True)
+                return f"{note} and restarted → {self.base_url}/{slug}/api/"
 
             if act in {"start", "restart", "reload"}:
                 await site_server.start(data_dir, slug)
@@ -5246,7 +5415,22 @@ class SiteServerTool(_SiteOwnedTool):
                     else f"{slug} had no backend server running."
                 )
 
-            if act in {"status", "info", "list"}:
+            if act in {"list", "ls", "files"}:
+                tree = await asyncio.to_thread(site_server.list_code, data_dir, slug)
+                if not tree:
+                    return (
+                        f"{slug} has no backend source. Write app.py with "
+                        "site_server(action=write) first."
+                    )
+                lines_out = [f"  • {rel} ({size} bytes)" for rel, size in tree]
+                return (
+                    f"{self.base_url}/{slug}/api/\n"
+                    + "\n".join(lines_out)
+                    + "\nUse action=read / write / replace to edit. "
+                    "write merges; deploy replaces the whole snapshot."
+                )
+
+            if act in {"status", "info"}:
                 return await site_server.status(data_dir, slug)
 
             if act in {"logs", "log", "tail"}:
@@ -5255,9 +5439,11 @@ class SiteServerTool(_SiteOwnedTool):
                 )
 
             if act in {"read", "cat"}:
-                return await asyncio.to_thread(
-                    site_server.read_code, data_dir, slug, path or "app.py"
+                rel = path or "app.py"
+                text = await asyncio.to_thread(
+                    site_server.read_code, data_dir, slug, rel
                 )
+                return f"{rel} ({len(text)} chars):\n{text}"
 
             if act in {"env", "secrets", "config"}:
                 if not env:
@@ -5280,8 +5466,8 @@ class SiteServerTool(_SiteOwnedTool):
                 return f"Deleted the backend server for {slug} — code, database, and secrets."
 
             return (
-                f"Error: unknown action '{act}'. Use write, start, stop, restart, "
-                "status, logs, read, env, or delete."
+                f"Error: unknown action '{act}'. Use list, read, write, replace, "
+                "deploy, start, stop, restart, status, logs, env, rm, or delete."
             )
         except site_server.SiteServerError as e:
             # A failed redeploy/start writes a non-running registry row, so
@@ -5289,9 +5475,17 @@ class SiteServerTool(_SiteOwnedTool):
             # still live.
             if act in {
                 "write",
-                "deploy",
+                "update",
+                "patch_file",
                 "code",
+                "deploy",
                 "create",
+                "snapshot",
+                "replace",
+                "patch",
+                "sub",
+                "rm",
+                "unlink",
                 "start",
                 "restart",
                 "reload",
@@ -5310,6 +5504,130 @@ class SiteServerTool(_SiteOwnedTool):
             return
         updated["server"] = on
         await asyncio.to_thread(self._save_entry, slug, updated)
+
+
+class SiteTestTool(_SiteOwnedTool):
+    """Load a published site in a real browser and report what broke."""
+
+    def get_description(self):
+        return (
+            "Load one of your published sites the way a visitor's browser would: "
+            "JS console errors, uncaught exceptions, failed network requests, "
+            "broken CSS/JS/images, HTTP status, and a screenshot (vision). "
+            "Always call this after create_site / edit_site / site_server before "
+            "telling the user it works. fetch_url only sees HTML — this sees "
+            "runtime. Params: name (slug), path (optional subpage or this site's "
+            "full URL), wait (seconds for JS, default 2), screenshot (default true). "
+            "Fix what it finds with edit_site or site_server, then test again."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        name: str | None = None,
+        path: str | None = None,
+        url: str | None = None,
+        wait: Any = None,
+        screenshot: Any = None,
+        **kwargs,
+    ) -> str:
+        slug, entry, site_dir, err = self._resolve(message, name)
+        if err:
+            return err
+        try:
+            target = site_test.page_url(
+                self.base_url, slug, path or url
+            )
+        except ValueError as e:
+            return f"Error: {e}. path must be a page on this site."
+        try:
+            wait_s = float(wait) if wait is not None and str(wait).strip() != "" else 2.0
+        except (TypeError, ValueError):
+            wait_s = 2.0
+        wait_s = max(0.2, min(wait_s, 15.0))
+        want_shot = parse_bool(screenshot, True)
+
+        html = ""
+        local = site_test.html_path_for_url(site_dir, slug, target)
+        if local.is_file():
+            with contextlib.suppress(OSError, UnicodeDecodeError):
+                html = local.read_text(encoding="utf-8")
+
+        asset_errors = [
+            f"missing on disk: {rel}"
+            for rel in site_test.missing_local_assets(html, site_dir, slug=slug)
+        ]
+
+        status, body, http_err = await site_test.http_get(target)
+        if body and not html:
+            with contextlib.suppress(UnicodeDecodeError):
+                html = body.decode("utf-8")
+        if html:
+            linked = site_test.extract_assets(html, target)
+            for item in await site_test.check_assets(linked):
+                if item not in asset_errors:
+                    asset_errors.append(item)
+
+        backend_bits: list[str] = []
+        if entry.get("server"):
+            api_url = f"{self.base_url}/{slug}/api/"
+            api_status, _, api_err = await site_test.http_get(api_url)
+            if api_err:
+                backend_bits.append(f"Python API {api_url} unreachable: {api_err}")
+            else:
+                backend_bits.append(f"Python API {api_url} HTTP {api_status}")
+            try:
+                log_text = await site_server.logs(
+                    self.bot.config.DATA_DIR, slug, lines=20
+                )
+                clipped = (log_text or "").strip()[:2000]
+                if clipped:
+                    backend_bits.append("Recent logs:\n" + clipped)
+            except Exception as e:
+                backend_bits.append(f"logs: {e}")
+        if entry.get("backend"):
+            public = getattr(
+                self.bot.config, "MAXWELL_PUBLIC_BASE_URL", ""
+            ).rstrip("/")
+            kv_url = f"{public}/api/site/{slug}/kv"
+            kv_status, _, kv_err = await site_test.http_get(kv_url)
+            if kv_err:
+                backend_bits.append(f"KV store {kv_url} unreachable: {kv_err}")
+            else:
+                backend_bits.append(f"KV store {kv_url} HTTP {kv_status}")
+
+        browser = await site_test.probe_browser(
+            target, wait=wait_s, screenshot=want_shot
+        )
+
+        probe: dict[str, Any] = {
+            "url": target,
+            "http_status": (
+                browser["http_status"]
+                if browser.get("http_status") is not None
+                else status
+            ),
+            "http_error": http_err,
+            "title": browser.get("title") or "",
+            "console_errors": list(browser.get("console_errors") or []),
+            "console_warnings": list(browser.get("console_warnings") or []),
+            "page_errors": list(browser.get("page_errors") or []),
+            "failed_requests": list(browser.get("failed_requests") or []),
+            "asset_errors": asset_errors,
+            "backend": "\n".join(backend_bits),
+            "screenshot_png": browser.get("screenshot_png"),
+        }
+        if browser.get("browser"):
+            probe["browser"] = browser["browser"]
+        if browser.get("browser_error"):
+            probe["browser_error"] = browser["browser_error"]
+        if not probe["title"] and html:
+            title_match = re.search(
+                r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL
+            )
+            if title_match:
+                probe["title"] = re.sub(r"\s+", " ", title_match.group(1)).strip()[:120]
+        return site_test.format_report(probe)
 
 
 class DeleteSiteTool(_SiteOwnedTool):
@@ -5359,8 +5677,8 @@ class ListSitesTool(Tool):
     def get_description(self):
         return (
             "List the sites you published: slug, URL, title, time left, and "
-            "whether each has a backend store. The slug is what edit_site and "
-            "delete_site take. No params."
+            "whether each has a KV store or a Python server. The slug is what "
+            "edit_site, site_server, site_test, and delete_site take. No params."
         )
 
     async def execute(self, message: Message, all_users: bool = False, **kwargs) -> str:

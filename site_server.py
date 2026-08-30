@@ -522,6 +522,115 @@ def write_code(data_dir, slug: str, files: dict[str, str]) -> list[str]:
     return sorted(written)
 
 
+def merge_code(data_dir, slug: str, files: dict[str, str]) -> list[str]:
+    """Write or overwrite the given server files; leave every other source file alone.
+
+    ``write_code`` is a full snapshot (missing files disappear). This is the
+    edit path: fix ``app.py`` without deleting ``helpers.py``.
+    """
+    slug = _check_slug(slug)
+    if not isinstance(files, dict) or not files:
+        raise SiteServerError("no server files given")
+    checked: dict[str, str] = {}
+    for rel, content in files.items():
+        safe = _safe_rel(rel)
+        if not safe:
+            raise SiteServerError(f"unsafe server file path: {rel!r}")
+        if not safe.endswith(
+            (".py", ".txt", ".json", ".sql", ".html", ".css", ".js")
+        ):
+            raise SiteServerError(
+                f"{safe}: server files must be .py/.json/.txt/.sql/.html/.css/.js"
+            )
+        if not isinstance(content, str):
+            raise SiteServerError(f"{safe}: server file content must be a string")
+        checked[safe] = content
+
+    target = code_dir(data_dir, slug)
+    target.mkdir(parents=True, exist_ok=True)
+    state_dir(data_dir, slug).mkdir(parents=True, exist_ok=True)
+    if "app.py" not in checked and not (target / "app.py").is_file():
+        raise SiteServerError("the entry file must be called app.py")
+
+    existing = {rel: size for rel, size in list_code(data_dir, slug)}
+    kept = {rel: size for rel, size in existing.items() if rel not in checked}
+    if len(kept) + len(checked) > MAX_FILES:
+        raise SiteServerError(f"too many server files (max {MAX_FILES})")
+    new_bytes = sum(len(content.encode("utf-8")) for content in checked.values())
+    kept_bytes = sum(kept.values())
+    if kept_bytes + new_bytes > MAX_CODE_BYTES:
+        raise SiteServerError(
+            f"server code too large ({kept_bytes + new_bytes} bytes, max {MAX_CODE_BYTES})"
+        )
+
+    for rel, content in checked.items():
+        dest = (target / rel).resolve()
+        if target.resolve() not in dest.parents:
+            raise SiteServerError(f"{rel}: path escapes the server directory")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + ".tmp")
+        try:
+            tmp.write_text(content, encoding="utf-8")
+            os.replace(tmp, dest)
+        except Exception as exc:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            raise SiteServerError(f"could not write {rel}: {exc}") from exc
+    with contextlib.suppress(OSError):
+        os.chown(state_dir(data_dir, slug), 10001, 10001)
+    return sorted(checked)
+
+
+def patch_code(
+    data_dir,
+    slug: str,
+    rel: str,
+    find: str,
+    replace: str | None = None,
+    *,
+    all_hits: bool = False,
+) -> str:
+    """Swap exact text in one backend file. Returns a one-line result."""
+    if not str(find or ""):
+        raise SiteServerError("replace needs `find` (the exact text to swap out)")
+    safe = _safe_rel(rel or "app.py") or "app.py"
+    text = read_code(data_dir, slug, safe)
+    if find not in text:
+        raise SiteServerError(
+            f"`find` text is not in {safe} — it must match byte-for-byte. "
+            "Use action=read to see the current file."
+        )
+    hits = text.count(find)
+    if all_hits:
+        updated = text.replace(find, replace or "")
+    else:
+        updated = text.replace(find, replace or "", 1)
+    merge_code(data_dir, slug, {safe: updated})
+    extra = ""
+    if all_hits:
+        extra = f" ({hits} occurrence(s))"
+    elif hits > 1:
+        extra = f" ({hits - 1} more occurrence(s) left alone)"
+    return f"Patched {safe}{extra}"
+
+
+def delete_code_file(data_dir, slug: str, rel: str) -> str:
+    """Remove one helper file. ``app.py`` has to stay."""
+    safe = _safe_rel(rel)
+    if not safe:
+        raise SiteServerError(f"bad path {rel!r}")
+    if safe == "app.py":
+        raise SiteServerError("refusing to delete app.py — write a new one instead")
+    base = code_dir(data_dir, slug).resolve()
+    path = (base / safe).resolve()
+    if base not in path.parents:
+        raise SiteServerError(f"{safe} is not in this site's server")
+    if not path.is_file():
+        raise SiteServerError(f"{safe} is not in this site's server")
+    path.unlink()
+    return f"Deleted {safe}"
+
+
 def read_code(data_dir, slug: str, rel: str) -> str:
     safe = _safe_rel(rel)
     if not safe:
@@ -896,7 +1005,10 @@ def contract(slug: str) -> str:
         "  Outbound    : allowed, so this is where a key-carrying API call belongs.\n"
         "  Limits      : 256MB, half a core, 128 processes, no capabilities, "
         "32MB uploads.\n"
-        "  Logs        : site_server(action=logs) — stdout/stderr, your prints included."
+        "  Logs        : site_server(action=logs) — stdout/stderr, your prints included.\n"
+        "  Edit        : action=write merges files (helpers stay). action=replace "
+        "patches exact text. action=deploy replaces the whole snapshot. "
+        "Always restart happens for you after a code change."
     )
 
 

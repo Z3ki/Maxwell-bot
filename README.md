@@ -148,6 +148,7 @@ context_budget.py   Splits the prompt's memory chars across the memory tiers
 x_client.py         X (Twitter): read backends, posting, mention poller
 site_backend.py     Per-site datastore behind /api/site/<slug>/ (generated sites)
 site_server.py      Per-site backend containers behind /bot/<slug>/api/
+site_test.py        Headless Chromium probe: console, network, screenshot
 doctor.py           Install check: what works, what doesn't, why
 setup.sh            One-command installer
 api/api_server.py   Dashboard and admin API server
@@ -213,7 +214,7 @@ present). Restart to re-detect. `python3 doctor.py` shows the resolved state.
 | `ENABLE_WEB_SEARCH` | `web_search` tool | the `ddgs` package |
 | `ENABLE_YOUTUBE` | `youtube` tool | the `yt-dlp` binary |
 | `ENABLE_FETCH_URL` | `fetch_url` tool | — |
-| `ENABLE_CREATE_SITE` | `create_site` / `edit_site` / `delete_site` / `list_sites` tools | — |
+| `ENABLE_CREATE_SITE` | `create_site` / `edit_site` / `delete_site` / `list_sites` / `site_server` / `site_test` tools | — |
 | `ENABLE_AVATAR` | `change_avatar` tool | — |
 | `ENABLE_EMAIL_TOOLS` | The four `email_*` tools | `MAXWELL_EMAIL_PASSWORD` set |
 | `ENABLE_X` | `x_read` / `x_post` | — (public reads need no credentials) |
@@ -368,11 +369,18 @@ injected wrapper, house style, or meta tags. (Set `site_inject_csp` if your
 host serves generated pages without a CSP of its own.)
 
 `edit_site` changes a live site at the same URL: `list` its files, `read` one
-back, `write` a new one, `replace` an exact string inside one (the cheap way to
-fix a colour or a typo without resending the page), `delete` a file, `rename`
+back, `write` a new one (or several via `files={...}`), `replace` an exact
+string inside one (`all=true` for every occurrence), `delete` a file, `rename`
 the title, or `extend` its lifetime. `delete_site` removes the whole thing.
 Sites expire after `site_ttl_hours` (24 by default, `0` disables expiry);
 `permanent=true` opts one site out.
+
+`site_test` loads the published URL in headless Chromium and returns JS
+console errors, uncaught exceptions, failed network requests, broken linked
+assets, HTTP status, and a screenshot (so the model can see the page). If
+Chromium is missing it still checks the HTML and linked files over HTTP.
+Call it after every publish or edit — `fetch_url` only sees source, not
+runtime. Fix with `edit_site` / `site_server`, then test again.
 
 ### Site backends
 
@@ -413,7 +421,10 @@ That writes the source, launches a container, and the site's routes are live at
 `/bot/mysite/api/...` — a route the app defines as `/notes` answers at
 `/bot/mysite/api/notes`. Other actions: `start`, `stop`, `restart`, `status`,
 `logs` (the app's own stdout/stderr, which is how it debugs itself), `read`,
-`env`, `delete`.
+`env`, `delete`. `write` merges files so a helper is not deleted when you
+change `app.py`; `deploy` is the full snapshot (missing files disappear).
+`site_test` then loads the public page and shows console errors plus a
+screenshot.
 
 The contract the app is held to:
 

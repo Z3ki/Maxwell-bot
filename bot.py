@@ -272,6 +272,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     SetNicknameTool,
     ShellTool,
     SiteServerTool,
+    SiteTestTool,
     SleepTool,
     TtsTool,
     TypingTool,
@@ -2131,6 +2132,7 @@ TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "edit_site",
     "delete_site",
     "site_server",
+    "site_test",
     "list_sites",
     "web_search",
     "no_response",
@@ -2373,7 +2375,12 @@ TOOL_PROTOCOL = (
     "A filesystem path is not delivery.\n"
     "create_site: full HTML document in `body`, never pasted into chat. Real "
     "line breaks or <br> in visible HTML; never literal \\n text. Full visual "
-    "freedom — invent a new look each time; no house style unless the user asked.\n"
+    "freedom — invent a new look each time; no house style unless the user asked. "
+    "After it is live, call site_test to load the page in a browser — that is "
+    "how you see JS console errors, failed requests, and a screenshot. "
+    "Keep working with edit_site (frontend files) and site_server (Python "
+    "backend). Do not recreate the site to change a line. "
+    "site_server write merges files; deploy replaces the whole snapshot.\n"
     "set_activity / change_presence: only when asked or after a real state change.\n"
     "update_base_personality / update_server_prompt: rewrite runtime "
     "personality only when asked or voice is clearly drifting. Base Knowledge "
@@ -3644,6 +3651,7 @@ class MaxwellBot(commands.Bot):
             self.tools["edit_site"] = EditSiteTool(self)
             self.tools["delete_site"] = DeleteSiteTool(self)
             self.tools["site_server"] = SiteServerTool(self)
+            self.tools["site_test"] = SiteTestTool(self)
             self.tools["list_sites"] = ListSitesTool(self)
         if self.config.ENABLE_WEB_SEARCH:
             self.tools["web_search"] = WebSearchTool(self)
@@ -13171,17 +13179,8 @@ class MaxwellBot(commands.Bot):
                 if native_followup:
                     conversation_tail.extend(native_followup)
                 else:
-                    history_response = response
-                    if "create_site" in (response or "") or "body" in (response or ""):
-                        with contextlib.suppress(Exception):
-                            history_response = re.sub(
-                                r'(<parameter[^>]*\bname=["\']?body["\']?[^>]*>)(.*?)(</\s*parameter\s*>)',
-                                r"\1[large HTML/asset body elided to protect context budget; site creation succeeded from the original full body]\3",
-                                history_response,
-                                flags=re.DOTALL | re.IGNORECASE,
-                            )
                     conversation_tail.append(
-                        {"role": "assistant", "content": history_response}
+                        {"role": "assistant", "content": response}
                     )
                     conversation_tail.append(
                         {
@@ -14295,6 +14294,12 @@ class MaxwellBot(commands.Bot):
             r"__AUDIO_B64__([A-Za-z0-9+/=\s]+)__END_AUDIO_B64__"
         )
         _MAX_TOOL_RESULT_CHARS = 32_000
+        _SITE_RESULT_TOOLS = {
+            "create_site",
+            "edit_site",
+            "site_server",
+            "site_test",
+        }
         seen_images: set[str] = set()
         seen_audio: set[str] = set()
         for tr in list(result_by_id.values()) + list(tool_results):
@@ -14320,15 +14325,22 @@ class MaxwellBot(commands.Bot):
                         }
                     )
 
-        def _truncate_tool_result(tr: str) -> str:
+        def _truncate_tool_result(tr: str, tool_name: str = "") -> str:
             tr = _IMG_RE.sub("", _AUDIO_RE.sub("", tr)).strip()
+            # Site file contents must come back whole. Truncating the middle
+            # with a marker is how "[large content omitted, N chars]" ended
+            # up as the published page.
+            if tool_name in _SITE_RESULT_TOOLS:
+                return tr
             if len(tr) > _MAX_TOOL_RESULT_CHARS:
                 half = _MAX_TOOL_RESULT_CHARS // 2
                 return f"{tr[:half]}\n\n[...truncated {len(tr) - _MAX_TOOL_RESULT_CHARS} chars...]\n\n{tr[-half:]}"
             return tr
 
+        name_by_id = {c["id"]: c["name"] for c in calls}
         truncated_by_id = {
-            cid: _truncate_tool_result(tr) for cid, tr in result_by_id.items()
+            cid: _truncate_tool_result(tr, name_by_id.get(cid, ""))
+            for cid, tr in result_by_id.items()
         }
 
         # Build OpenAI tool-role follow-up messages (assistant + tool results)
@@ -16943,17 +16955,8 @@ class MaxwellBot(commands.Bot):
             if native_followup:
                 conversation_tail.extend(native_followup)
             else:
-                history_response_text = response_text
-                if "create_site" in (response_text or ""):
-                    with contextlib.suppress(Exception):
-                        history_response_text = re.sub(
-                            r'(<parameter[^>]*\bname=["\']?body["\']?[^>]*>)(.*?)(</\s*parameter\s*>)',
-                            r"\1[large body elided]\3",
-                            history_response_text,
-                            flags=re.DOTALL | re.IGNORECASE,
-                        )
                 conversation_tail.append(
-                    {"role": "assistant", "content": history_response_text}
+                    {"role": "assistant", "content": response_text}
                 )
                 conversation_tail.append(
                     {

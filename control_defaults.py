@@ -383,6 +383,7 @@ KNOWN_TOOLS = [
     "edit_site",
     "delete_site",
     "site_server",
+    "site_test",
     "list_sites",
     "web_search",
     "no_response",

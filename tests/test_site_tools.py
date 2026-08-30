@@ -74,6 +74,7 @@ def test_extra_files_land_next_to_index(bot, tmp_path):
     assert (root / "app.js").read_text() == "console.log(1)"
     assert (root / "about" / "index.html").read_text() == "<p>about</p>"
     assert "style.css" in out
+    assert "site_test" in out
 
 
 def test_files_accepts_a_list_of_objects(bot, tmp_path):
@@ -156,6 +157,31 @@ def test_edit_read_write_replace_and_list(bot, tmp_path):
     )
     assert wrote.startswith("Wrote s.css")
     assert (tmp_path / "public" / "bot" / "edits" / "s.css").read_text() == "a{}"
+
+    multi = run(
+        edit.execute(
+            _msg(),
+            name="edits",
+            action="write",
+            files={"a.js": "1", "b.js": "2"},
+        )
+    )
+    assert "a.js" in multi and "b.js" in multi
+    assert (tmp_path / "public" / "bot" / "edits" / "a.js").read_text() == "1"
+
+    twice = run(
+        edit.execute(
+            _msg(),
+            name="edits",
+            action="replace",
+            path="a.js",
+            find="1",
+            replace="one",
+            all=True,
+        )
+    )
+    assert "1 occurrence" in twice or "occurrence" in twice
+    assert (tmp_path / "public" / "bot" / "edits" / "a.js").read_text() == "one"
 
 
 def test_replace_that_does_not_match_says_so(bot):
@@ -272,3 +298,35 @@ def test_unknown_site_points_at_list_sites(bot):
     out = run(EditSiteTool(bot).execute(_msg(), name="ghost", action="list"))
     assert "no site named 'ghost'" in out
     assert "list_sites" in out
+
+
+def test_refuses_to_publish_a_history_placeholder_as_the_page(bot, tmp_path):
+    marker = "[large content omitted, 63199 chars]"
+    out = run(
+        CreateSiteTool(bot).execute(
+            _msg(), name="oops", title="Oops", body=marker
+        )
+    )
+    assert out.startswith("Error:")
+    assert "placeholder" in out.lower()
+    assert not (tmp_path / "public" / "bot" / "oops" / "index.html").exists()
+
+    run(CreateSiteTool(bot).execute(_msg(), name="ok", title="Ok", body=PAGE))
+    wrote = run(
+        EditSiteTool(bot).execute(
+            _msg(), name="ok", action="write", content=marker
+        )
+    )
+    assert wrote.startswith("Error:")
+    page = (tmp_path / "public" / "bot" / "ok" / "index.html").read_text()
+    assert PAGE in page
+    assert marker not in page
+
+
+def test_edit_site_read_returns_a_page_over_60k(bot, tmp_path):
+    huge = "<!DOCTYPE html><html><body>" + ("x" * 63_199) + "</body></html>"
+    run(CreateSiteTool(bot).execute(_msg(), name="big", title="Big", body=huge))
+    out = run(EditSiteTool(bot).execute(_msg(), name="big", action="read"))
+    assert "too big to return" not in out
+    assert "63199" in out or str(len(huge)) in out
+    assert huge in out

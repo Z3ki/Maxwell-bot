@@ -18,6 +18,7 @@ from tool_registry import extract_reasoning, _sanitize_reasoning, record_reasoni
 from tool_schemas import (
     REASONING_PARAM,
     build_openai_tools,
+    elide_tool_calls_for_history,
     normalize_native_tool_calls,
 )
 
@@ -374,3 +375,44 @@ def test_record_reasoning_does_not_raise_on_bot_failure():
         )
 
     asyncio.run(run())  # no exception = pass
+
+
+def test_elide_keeps_create_site_and_edit_site_html():
+    html = "<!DOCTYPE html><html><body>" + ("n" * 20_000) + "</body></html>"
+    calls = [
+        {
+            "id": "1",
+            "type": "function",
+            "function": {
+                "name": "create_site",
+                "arguments": json.dumps({"name": "x", "title": "t", "body": html}),
+            },
+        },
+        {
+            "id": "2",
+            "type": "function",
+            "function": {
+                "name": "edit_site",
+                "arguments": json.dumps(
+                    {"name": "x", "action": "write", "content": html}
+                ),
+            },
+        },
+        {
+            "id": "3",
+            "type": "function",
+            "function": {
+                "name": "send_message",
+                "arguments": json.dumps({"content": html}),
+            },
+        },
+    ]
+    out = elide_tool_calls_for_history(calls)
+    create_args = json.loads(out[0]["function"]["arguments"])
+    edit_args = json.loads(out[1]["function"]["arguments"])
+    send_args = json.loads(out[2]["function"]["arguments"])
+    assert create_args["body"] == html
+    assert edit_args["content"] == html
+    assert "omitted" not in create_args["body"]
+    assert send_args["content"].startswith("[large content omitted,")
+    assert "20000" in send_args["content"] or str(len(html)) in send_args["content"]
