@@ -1740,8 +1740,8 @@ def recover_text_tool_calls(
 # turn walks off the end of the context window mid-loop. Per-result truncation
 # is not enough on its own: 24 rounds of a 32k-capped result is still ~768k
 # chars riding on top of an already-full prompt.
-TOOL_TAIL_MAX_MESSAGES = 24
-TOOL_TAIL_MAX_CHARS = 96_000
+TOOL_TAIL_MAX_MESSAGES = 12
+TOOL_TAIL_MAX_CHARS = 48_000
 
 
 def message_chars(message: dict) -> int:

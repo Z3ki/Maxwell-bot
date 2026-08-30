@@ -571,7 +571,7 @@ class Config:
     SUBAGENT_MODEL = os.getenv("SUBAGENT_MODEL", "").strip()
     SUBAGENT_MAX_STEPS = _int_env("SUBAGENT_MAX_STEPS", 100, min_value=1, max_value=200)
     SUBAGENT_MAX_TOKENS = _int_env(
-        "SUBAGENT_MAX_TOKENS", 32768, min_value=256, max_value=128000
+        "SUBAGENT_MAX_TOKENS", 8192, min_value=256, max_value=128000
     )
     SUBAGENT_TIMEOUT_SECONDS = _int_env(
         "SUBAGENT_TIMEOUT_SECONDS", 900, min_value=30, max_value=7200
