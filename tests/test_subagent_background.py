@@ -323,6 +323,30 @@ def test_post_subagent_reply_reenters_bot_when_available(tmp_path, monkeypatch):
     assert callable(getattr(message, "reply", None))
 
 
+def test_post_subagent_reply_falls_back_when_pipeline_sends_nothing(tmp_path, monkeypatch):
+    """A successful handler return is not proof that a report was delivered."""
+    class _ReplyBot:
+        def __init__(self):
+            self.tools = {}
+
+        async def _handle_message(self, message, content=None):
+            state = message._subagent_handoff_state
+            state["tracked"] = True
+            # Simulate a handler that consumed the synthetic turn but never
+            # posted a user-facing answer.
+            state["delivered"] = False
+
+    bot = _ReplyBot()
+    tool = SubAgentTool(bot)
+    chan = _FakeChannel(123)
+    msg = _Message(chan)
+    asyncio.run(
+        tool._post_subagent_reply(chan, msg, "r2", "say hi", "Hi Z3ki! 👋")
+    )
+    assert chan.last_message is not None
+    assert "Hi Z3ki" in chan.last_message.content
+
+
 def test_post_subagent_reply_falls_back_when_no_pipeline(tmp_path, monkeypatch):
     """No bot reply pipeline (tests / a bare bot): fall back to posting the report
     so the result is never lost."""

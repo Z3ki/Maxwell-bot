@@ -7389,7 +7389,11 @@ class SubAgentMessageTool(Tool):
 
     async def execute(self, trigger_message: Message, **kwargs) -> str:
         run_id = str(kwargs.get("run_id") or "").strip()
-        text = str(kwargs.get("text") or "").strip()
+        # Older prompts called this argument `message`. Keep accepting it,
+        # while naming the positional context `trigger_message` so a model
+        # cannot cause Python's "multiple values for argument 'message'"
+        # TypeError by passing both forms.
+        text = str(kwargs.get("text") or kwargs.get("message") or "").strip()
         if not run_id:
             return "error: sub_agent_message needs a `run_id`."
         if not text:
@@ -8607,9 +8611,11 @@ class SubAgentTool(Tool):
         The background turn already ended after the 'started' ack, so we
         re-enter the bot's reply pipeline with a synthetic message carrying the
         finished report. Maxwell reads it and replies in the run's channel — no
-        'report on a later turn' gap. Fully defensive: if re-entry is not
-        possible (tests, a bare bot) or raises, fall back to posting the report
-        so the result is never lost.
+        'report on a later turn' gap. Re-entry is bounded and delivery-tracked:
+        a model that wanders into more tools, stalls, or returns without
+        sending anything cannot swallow the report. Fully defensive: if
+        re-entry is not possible or raises, fall back to posting the report so
+        the result is never lost.
         """
         bot = getattr(self, "bot", None)
         handle = getattr(bot, "_handle_message", None)
@@ -8634,12 +8640,40 @@ class SubAgentTool(Tool):
             f"TASK: {head}\n"
             f"REPORT:\n{str(report or '').strip()[:1600]}\n\n"
             f"Reply to the person who asked with a clean, natural answer, in this "
-            f"channel. Do NOT paste the raw report, the task headline, step counts, "
-            f"or workdir path — synthesize it into the answer. Keep it short and plain."
+            f"channel. Do NOT call any tools or inspect files. Do NOT paste the raw "
+            f"report, the task headline, step counts, or workdir path — synthesize "
+            f"it into the answer now. Keep it short and plain."
         )
+        handoff_state = {"tracked": False, "delivered": False}
         synthetic = self._synthetic_message(chan, getattr(message, "author", None), body)
+        synthetic._subagent_handoff_state = handoff_state
         try:
-            await handle(synthetic, body)
+            try:
+                timeout = float(
+                    getattr(Config, "SUBAGENT_HANDOFF_TIMEOUT_SECONDS", 30) or 30
+                )
+            except (TypeError, ValueError):
+                timeout = 30.0
+            timeout = max(5.0, min(timeout, 300.0))
+            await asyncio.wait_for(handle(synthetic, body), timeout=timeout)
+            # Real Maxwell marks the synthetic turn in its finally block. A
+            # bare test/dummy pipeline has no such marker, so preserve the
+            # historical "pipeline handled it" behavior for those callers.
+            if handoff_state["tracked"] and not handoff_state["delivered"]:
+                logger.warning(
+                    "sub-agent handoff returned without delivering run %s; "
+                    "posting the raw report",
+                    run_id,
+                )
+                await self._post_report(chan, message, task, report)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "sub-agent handoff timed out after %.1fs for run %s; "
+                "posting the raw report",
+                timeout,
+                run_id,
+            )
+            await self._post_report(chan, message, task, report)
         except Exception as e:  # noqa: BLE001 - a failed re-entry must not lose the result
             logger.warning("sub-agent immediate reply failed (%s); posting report", e)
             await self._post_report(chan, message, task, report)

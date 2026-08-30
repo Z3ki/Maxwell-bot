@@ -369,6 +369,12 @@ def test_sub_agent_message_main_tool(tmp_path, monkeypatch):
     assert chan.msgs[-1]["text"] == "do X"
     assert "do X" in result
 
+    # Keep compatibility with older model prompts that used `message` instead
+    # of the current `text` parameter.
+    legacy = asyncio.run(main_tool.execute(None, run_id="r2", message="legacy"))
+    assert "Sent to the sub-agent" in legacy
+    assert chan.msgs[-1]["text"] == "legacy"
+
     # Unknown run id is a clear error, not a crash.
     bad = asyncio.run(main_tool.execute(None, run_id="nope", text="hi"))
     assert "no sub-agent with run_id nope" in bad

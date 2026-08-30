@@ -608,6 +608,12 @@ class Config:
     SUBAGENT_CHAN_GRACE_SECONDS = _int_env(
         "SUBAGENT_CHAN_GRACE_SECONDS", 600, min_value=30, max_value=7200
     )
+    # Maximum time Maxwell gets to compose a finished background-run reply.
+    # If he wanders into tools or stalls, SubAgentTool posts the report itself
+    # so completion can never be lost behind a second long-running turn.
+    SUBAGENT_HANDOFF_TIMEOUT_SECONDS = _int_env(
+        "SUBAGENT_HANDOFF_TIMEOUT_SECONDS", 30, min_value=5, max_value=300
+    )
     # Where the sub-agent's `run_command` executes. "docker" (default) runs
     # each run in its own throwaway container with only the run's scratch
     # workspace mounted — the bot's .env and source are not visible to it.

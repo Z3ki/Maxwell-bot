@@ -351,6 +351,7 @@ present). Restart to re-detect. `python3 doctor.py` shows the resolved state.
 | `SUBAGENT_MAX_FILE_BYTES` | Largest file the sub-agent may write (default `200000`) |
 | `SUBAGENT_MAX_CONCURRENT` | How many background (fire-and-forget) sub-agents run at once (default `5`) |
 | `SUBAGENT_MAX_QUEUED` | Hard ceiling on background sub-agents submitted but not finished; past this new ones are refused (default `16`) |
+| `SUBAGENT_HANDOFF_TIMEOUT_SECONDS` | Maximum time Maxwell gets to compose a finished-run reply before the report is posted directly (default `30`) |
 | `SUBAGENT_SANDBOX` | `docker` (default) runs each sub-agent run in its own container; `host` runs commands in the bot's own environment with no isolation |
 
 By default Maxwell **delegates heavy multi-step work to `sub_agent`** — a full

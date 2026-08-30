@@ -12616,6 +12616,14 @@ class MaxwellBot(commands.Bot):
         return False
 
     async def _handle_message(self, message, content: str | None = None):
+        # Background sub-agent handoffs attach a small mutable marker so the
+        # caller can tell whether this synthetic turn actually reached a user.
+        # Without it, a successful return from this method could still mean
+        # that the model only ran tools and never posted the finished report.
+        handoff_state = getattr(message, "_subagent_handoff_state", None)
+        if isinstance(handoff_state, dict):
+            handoff_state["tracked"] = True
+            handoff_state["delivered"] = False
         content = content or message.content
         channel_id = str(message.channel.id)
         # Sleep gate: when the bot is in a sleep window, abort the
@@ -13524,6 +13532,7 @@ class MaxwellBot(commands.Bot):
                             await message.reply(site_result)
                         except (discord.NotFound, discord.Forbidden):
                             await message.channel.send(site_result)
+                        normal_reply_sent = True
                         # Record the auto-routed site link in memory so
                         # the user can come back and ask "where did you
                         # put my site?" without maxwell drawing a blank.
@@ -13706,6 +13715,8 @@ class MaxwellBot(commands.Bot):
                 except discord.Forbidden as _exc:
                     pass
         finally:
+            if isinstance(handoff_state, dict):
+                handoff_state["delivered"] = bool(normal_reply_sent)
             self._end_inflight_context(turn_context)
             await self._exit_live_typing(live_typing)
             # Safety net: walk every progress object this turn ever created
