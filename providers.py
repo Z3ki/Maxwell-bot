@@ -1089,6 +1089,16 @@ def _is_usage_exhausted_error(status: int, error_text: str) -> bool:
 
     Transient 429 rate limits must still get normal retry/backoff. Only treat as
     exhausted when the body clearly indicates cooldown, quota, or credits.
+
+    2026-08-30 fix for Google Antigravity pooled false positive:
+    - Antigravity-manager pools 5 Google accounts; a single 429 with
+      reason=QuotaExhausted for gemini-3-flash on ONE account is NOT global
+      exhaustion — combined quota may still be 70% (observed 2026-08-30).
+      The manager still serves other accounts/models, so the provider must
+      treat this as transient and fall back, not raise USAGE_EXHAUSTED.
+    - Google's error is "QuotaExhausted" (no space) not "quota exceeded",
+      so the old marker list missed it (false negative) while also flagging
+      single-model hits as global (false positive). Both are fixed here.
     """
     text = (error_text or "").lower()
     # Explicit exhaustion / cooldown markers (avoid bare "usage" / "rate limit").
@@ -1099,6 +1109,10 @@ def _is_usage_exhausted_error(status: int, error_text: str) -> bool:
         "insufficient credits",
         "credit balance",
         "quota exceeded",
+        "quotaexhausted",  # Google Antigravity: QuotaExhausted (no space)
+        "quota_exhausted",
+        "resource_exhausted",
+        "resource exhausted",
         "out of credits",
         "out of quota",
         "billing hard limit",
@@ -1106,15 +1120,31 @@ def _is_usage_exhausted_error(status: int, error_text: str) -> bool:
     )
     if status != 429:
         return False
-    # Ordinary rate limiting is NOT exhausted. Only flag as exhausted when
-    # the body also clearly mentions quota/credit markers; rate-limit alone
-    # means transient and the caller should keep retrying.
     is_rate_limit = (
         "rate limit" in text or "rate_limit" in text or "too many requests" in text
     )
     is_quota_marker = any(m in text for m in markers)
     if is_rate_limit and not is_quota_marker:
         return False
+    # Antigravity pooled false-positive guard: single-model QuotaExhausted
+    # (e.g. gemini-3-flash, gemini-2.5-pro) on one pooled account should be
+    # transient, not global. Only treat as global exhausted if the error
+    # carries a stronger billing/credit signal or no specific model is named.
+    if is_quota_marker:
+        # If the text names a specific Gemini/Claude model, it's likely per-model
+        # cooldown from the pool, not the whole API being drained.
+        has_model = any(tok in text for tok in ("gemini", "claude", "flash", "pro", "quotaexhausted", "quota_exhausted"))
+        has_global = any(g in text for g in ("billing", "credit", "insufficient", "out of", "spend limit", "model_cooldown", "cooling down"))
+        if has_model and not has_global and not is_rate_limit:
+            # Single entry like 'QuotaExhausted for gemini-3-flash' — transient, fall back to Grok/other model
+            # unless the payload explicitly says combined/global is exhausted.
+            # Check for combined/global hint: if manager said so, it would mention billing or multiple accounts
+            return False
+        if has_model and is_rate_limit:
+            # "rate limited ... QuotaExhausted ... gemini-3-flash" — also transient pooled case
+            # Only global if billing/credit is mentioned
+            if not has_global:
+                return False
     return is_quota_marker
 
 

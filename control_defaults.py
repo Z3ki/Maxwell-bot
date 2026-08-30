@@ -153,6 +153,14 @@ DEFAULT_CONTROL = {
     # Operators who want the bot to always be available can flip this
     # to False in dashboard.
     "enable_sleep": True,
+    # ─── nightly quiet hours ─────────────────────────────────────────────
+    # Automatic sleep window 10pm–9am (local server time, America/Puerto_Rico).
+    # When enabled, Maxwell refuses to answer (via the same sleep gate) during
+    # the night, showing "max is sleeping, back in ~X". z3ki can still clear
+    # with ,sleep clear or disable via enable_night_sleep=False.
+    "enable_night_sleep": True,
+    "night_sleep_start_hour": 22,
+    "night_sleep_end_hour": 9,
     "ai_timeout_seconds": 3600,
     "ai_concurrency": 2,
     "memory_history_messages": 60,

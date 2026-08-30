@@ -12209,24 +12209,87 @@ class MaxwellBot(commands.Bot):
         control = getattr(self, "_control", None) or {}
         return parse_bool(control.get("process_images"), True)
 
+    def _is_in_night_window(self) -> bool:
+        """True when local time is inside the nightly quiet window 22:00-09:00."""
+        try:
+            ctrl = getattr(self, "_control", None) or {}
+            if not parse_bool(ctrl.get("enable_night_sleep", True), True):
+                return False
+            # Use control-configurable hours so the owner can tweak without code change
+            start = int(ctrl.get("night_sleep_start_hour", 22))
+            end = int(ctrl.get("night_sleep_end_hour", 9))
+            # Clamp to 0-23
+            start = max(0, min(23, start))
+            end = max(0, min(23, end))
+            now_hour = datetime.now().hour  # local time is America/Puerto_Rico (AST -0400) on this host
+            if start == end:
+                return False
+            if start < end:
+                return start <= now_hour < end
+            # wraps midnight: e.g. 22-09
+            return now_hour >= start or now_hour < end
+        except Exception:
+            return False
+
+    def _night_seconds_remaining(self) -> int:
+        """Seconds until the nightly window ends (next 09:00 local)."""
+        try:
+            ctrl = getattr(self, "_control", None) or {}
+            end = int(ctrl.get("night_sleep_end_hour", 9))
+            end = max(0, min(23, end))
+            now = datetime.now()
+            # next end time
+            end_dt = now.replace(hour=end, minute=0, second=0, microsecond=0)
+            if now.hour >= end and now.hour >= int(ctrl.get("night_sleep_start_hour", 22)):
+                # we are in 22-23:59, end is tomorrow 09:00
+                end_dt = end_dt + timedelta(days=1)
+            elif now >= end_dt:
+                end_dt = end_dt + timedelta(days=1)
+            delta = (end_dt - now).total_seconds()
+            return max(1, int(delta))
+        except Exception:
+            return 3600
+
     def _is_sleeping(self) -> tuple[bool, int]:
         """Return (sleeping, seconds_remaining). Auto-clears expired
         state so callers don't have to check the deadline themselves.
+        Checks manual sleep first, then nightly quiet hours 22:00-09:00.
         """
-        if self._sleep_until <= 0:
-            return False, 0
-        now = asyncio.get_running_loop().time()
-        if now >= self._sleep_until:
-            self._sleep_until = 0.0
-            self._sleep_notified_at.clear()
-            cancel = getattr(self, "_cancel_sleep_wake", None)
-            if callable(cancel):
-                cancel()
-            schedule = getattr(self, "_schedule_sleep_presence", None)
-            if callable(schedule):
-                schedule(asleep=False)
-            return False, 0
-        return True, int(self._sleep_until - now)
+        if self._sleep_until > 0:
+            now = asyncio.get_running_loop().time()
+            if now >= self._sleep_until:
+                self._sleep_until = 0.0
+                self._sleep_notified_at.clear()
+                cancel = getattr(self, "_cancel_sleep_wake", None)
+                if callable(cancel):
+                    cancel()
+                schedule = getattr(self, "_schedule_sleep_presence", None)
+                if callable(schedule):
+                    schedule(asleep=False)
+                # fall through to check nightly window below
+            else:
+                return True, int(self._sleep_until - now)
+        # nightly quiet hours 10pm-9am — automatic, no _sleep_until needed
+        if self._is_in_night_window():
+            # ensure idle presence overlay while in night window (once)
+            try:
+                if not getattr(self, "_sleep_presence_overlay", False):
+                    sched = getattr(self, "_schedule_sleep_presence", None)
+                    if callable(sched):
+                        sched(asleep=True)
+            except Exception:
+                pass
+            return True, self._night_seconds_remaining()
+        else:
+            # we were in night overlay but night just ended and no manual sleep is active — restore
+            try:
+                if getattr(self, "_sleep_presence_overlay", False) and self._sleep_until <= 0:
+                    sched = getattr(self, "_schedule_sleep_presence", None)
+                    if callable(sched):
+                        sched(asleep=False)
+            except Exception:
+                pass
+        return False, 0
 
     async def set_sleep(self, duration_minutes: int) -> str:
         """Set a sleep window. Max 60 minutes (clamped). Returns a

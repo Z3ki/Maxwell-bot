@@ -12801,11 +12801,90 @@ class UsageTool(Tool):
                         parts.append(f"{window}: {name} (resets {reset})")
                 if parts:
                     lines.append(f"- {family}: " + " · ".join(parts))
-        # Include a trimmed raw copy so unusual fields are still available.
-        rendered = json.dumps(data, indent=2, ensure_ascii=False)
-        if len(rendered) > 4000:
-            rendered = rendered[:4000] + "\n… [truncated]"
-        lines.append("\nRaw payload:" + rendered)
+        # Antigravity pooled accounts: summarize rate-limited models WITHOUT leaking emails.
+        # Previously the raw payload included per_account[].email and rate_limited[].email
+        # which the LLM then echoed into the channel, exposing owner addresses.
+        # We now redact emails and only show counts / anonymized summaries.
+        rate_limited = data.get("rate_limited")
+        # Filter to *active* limits only — antigravity-manager keeps stale entries for ~1m after expiry
+        # and marks weekly 0% as rate_limited even when 5h is 100% (not actually blocked for 5h). That was
+        # the "one acc always marked as rate limited" false positive (zequielwolf weekly 0% but 5h 100%).
+        active_limited = []
+        stale_count = 0
+        if isinstance(rate_limited, list) and rate_limited:
+            now_ts = int(time.time())
+            for entry in rate_limited:
+                if not isinstance(entry, dict):
+                    continue
+                until = entry.get("until")
+                # until is epoch seconds; if in the past it's stale, ignore
+                try:
+                    until_int = int(until) if until is not None else 0
+                except (ValueError, TypeError):
+                    until_int = 0
+                if until_int and until_int < now_ts - 5:
+                    stale_count += 1
+                    continue
+                active_limited.append(entry)
+        if active_limited:
+            from collections import Counter
+            models = Counter()
+            for entry in active_limited:
+                m = str(entry.get("model") or entry.get("reason") or "unknown")
+                models[m] += 1
+            summary = ", ".join(f"{model} x{cnt}" if cnt > 1 else model for model, cnt in models.items())
+            lines.append(f"Rate-limited models (pooled, {len(active_limited)} active): {summary}")
+            lines.append("Note: single-model QuotaExhausted on one pooled account is NOT global exhaustion — other accounts still serve.")
+            if stale_count:
+                lines.append(f"({stale_count} stale/expired rate-limit entries ignored)")
+        elif isinstance(rate_limited, list) and rate_limited:
+            # All entries were stale/weekly-only — not actually rate limited for current window
+            if stale_count:
+                lines.append(f"Rate-limited: none (currently) — {stale_count} stale entry expired, pooled quota still available")
+            else:
+                lines.append("Rate-limited: none")
+        else:
+            lines.append("Rate-limited: none")
+        # Per-account remainings are useful but must not expose emails. Anonymize to Account 1..N.
+        per_account = data.get("per_account")
+        if isinstance(per_account, list) and per_account:
+            lines.append(f"Per-account pools: {len(per_account)} accounts (emails redacted)")
+            # Optionally show anonymized quota spread without emails
+            for idx, acct in enumerate(per_account[:5], start=1):
+                if not isinstance(acct, dict):
+                    continue
+                tier = acct.get("tier", "")
+                live = acct.get("live_limited") or []
+                lim_str = f" live_limited={live}" if live else ""
+                # Show only remaining %s anonymized
+                rem = acct.get("remaining") or {}
+                parts = []
+                if isinstance(rem, dict):
+                    for k, v in list(rem.items())[:2]:
+                        if isinstance(v, dict) and "remaining_pct" in v:
+                            parts.append(f"{k}:{v['remaining_pct']:.0f}%")
+                extra = " " + " ".join(parts) if parts else ""
+                lines.append(f"  - Account {idx} ({tier}){lim_str}{extra}")
+            if len(per_account) > 5:
+                lines.append(f"  … +{len(per_account)-5} more")
+        # Build a sanitized copy for the raw payload fallback — strip every email field recursively
+        def _sanitize(obj):
+            if isinstance(obj, dict):
+                out = {}
+                for k, v in obj.items():
+                    if k.lower() == "email":
+                        out[k] = f"redacted_{hash(str(v)) % 10000:04d}@redacted.local"
+                    else:
+                        out[k] = _sanitize(v)
+                return out
+            if isinstance(obj, list):
+                return [_sanitize(x) for x in obj]
+            return obj
+        sanitized = _sanitize(data)
+        rendered = json.dumps(sanitized, indent=2, ensure_ascii=False)
+        if len(rendered) > 2500:
+            rendered = rendered[:2500] + "\n… [truncated, emails redacted]"
+        lines.append("\nSanitized payload (emails redacted):" + rendered)
         return "\n".join(lines)
 
 
