@@ -89,6 +89,7 @@ def _discord_token_authed(request) -> bool:
     info = _DISCORD_TOKENS.get(token)
     return bool(info and info.get("expires", 0) >= time.time())
 
+
 def _json_response(data, status=200):
     return web.json_response(
         data,
@@ -119,6 +120,8 @@ PUBLIC_PATH_RE = re.compile(r"^/bot/[a-z0-9-]{2,30}/api(?:/|$)")
 def _needs_auth(request) -> bool:
     """All requests need auth except OPTIONS preflight, /api/login, and the
     public per-site backends."""
+    if request.path in ("/health", "/api/health"):
+        return False
     if request.path.startswith(PUBLIC_PATH_PREFIXES):
         return False
     if PUBLIC_PATH_RE.match(request.path):
@@ -263,9 +266,7 @@ async def _auth_middleware_unless_login(request, handler):
 def _prune_discord_tokens():
     """Drop expired bearer tokens so the in-memory table can't grow forever."""
     now = time.time()
-    expired = [
-        t for t, info in _DISCORD_TOKENS.items() if info.get("expires", 0) < now
-    ]
+    expired = [t for t, info in _DISCORD_TOKENS.items() if info.get("expires", 0) < now]
     for t in expired:
         _DISCORD_TOKENS.pop(t, None)
 
