@@ -9,6 +9,8 @@ import re
 import time
 from dataclasses import dataclass
 
+import random as _random
+
 import aiohttp
 
 logger = logging.getLogger(__name__)
@@ -1061,9 +1063,7 @@ class ProviderRequestError(RuntimeError):
 class ProviderEmptyResponseError(RuntimeError):
     """Every provider attempt completed without a usable assistant response."""
 
-    user_message = (
-        "The model returned an empty response after retries. Please try again in a moment."
-    )
+    user_message = "The model returned an empty response after retries. Please try again in a moment."
 
 
 class ProviderResult(str):
@@ -1149,8 +1149,29 @@ def _is_usage_exhausted_error(status: int, error_text: str) -> bool:
     if is_quota_marker:
         # If the text names a specific Gemini/Claude model, it's likely per-model
         # cooldown from the pool, not the whole API being drained.
-        has_model = any(tok in text for tok in ("gemini", "claude", "flash", "pro", "quotaexhausted", "quota_exhausted"))
-        has_global = any(g in text for g in ("billing", "credit", "insufficient", "out of", "spend limit", "model_cooldown", "cooling down"))
+        has_model = any(
+            tok in text
+            for tok in (
+                "gemini",
+                "claude",
+                "flash",
+                "pro",
+                "quotaexhausted",
+                "quota_exhausted",
+            )
+        )
+        has_global = any(
+            g in text
+            for g in (
+                "billing",
+                "credit",
+                "insufficient",
+                "out of",
+                "spend limit",
+                "model_cooldown",
+                "cooling down",
+            )
+        )
         if has_model and not has_global and not is_rate_limit:
             # Single entry like 'QuotaExhausted for gemini-3-flash' — transient, fall back to Grok/other model
             # unless the payload explicitly says combined/global is exhausted.
@@ -1682,8 +1703,16 @@ class OllamaProvider:
             # The provider is operator-configured via env vars, not user input.
             # SSRF protection belongs on the shared session used by tools like
             # fetch_url, which DO accept untrusted URLs.
-            connector = aiohttp.TCPConnector(limit=10, limit_per_host=3)
-            self._session = aiohttp.ClientSession(connector=connector)
+            connector = aiohttp.TCPConnector(
+                limit=16,
+                limit_per_host=6,
+                ttl_dns_cache=300,
+                enable_cleanup_closed=True,
+                keepalive_timeout=30,
+            )
+            self._session = aiohttp.ClientSession(
+                connector=connector, timeout=aiohttp.ClientTimeout(total=None)
+            )
         return self._session
 
     async def close(self):
@@ -1956,10 +1985,7 @@ class OllamaProvider:
         # Leave room for the explicitly configured empty-response recoveries in
         # addition to the bounded deterministic failover extensions below.
         attempt_ceiling = (
-            max_attempts
-            + 2 * len(self._endpoints)
-            + 2
-            + self.empty_response_retries
+            max_attempts + 2 * len(self._endpoints) + 2 + self.empty_response_retries
         )
         recovery_endpoint: ProviderEndpoint | None = None
         while attempt < min(max_attempts, attempt_ceiling):
@@ -2546,15 +2572,12 @@ class OllamaProvider:
                             order = (
                                 self._media_endpoint_order()
                                 if has_media
-                                else [
-                                    e for e in self._endpoints if e.name != "vision"
-                                ]
+                                else [e for e in self._endpoints if e.name != "vision"]
                             )
                             usable = [
                                 e
                                 for e in order
-                                if e.name not in media_broken
-                                and e.name not in dead
+                                if e.name not in media_broken and e.name not in dead
                             ]
                             alternatives = [
                                 e for e in usable if e.name != endpoint.name
@@ -2582,9 +2605,7 @@ class OllamaProvider:
                                     min(2 * empty_response_recoveries, 6)
                                 )
                             continue
-                        raise ProviderEmptyResponseError(
-                            "Empty response from provider"
-                        )
+                        raise ProviderEmptyResponseError("Empty response from provider")
 
                     usage = result.get("usage", {})
                     self._last_usage = {
@@ -2681,7 +2702,9 @@ class OllamaProvider:
             prefer_fallback=prefer_fallback,
         )
         if self._should_wait_before_retry(endpoint, next_endpoint):
-            wait = attempt * 2
+            base = min(8, attempt * 1.5)
+            jitter = _random.uniform(0, 0.7)
+            wait = round(base + jitter, 2)
             logger.warning(
                 f"{reason} (attempt {attempt}/{self.retry_attempts}), retrying in {wait}s..."
             )
@@ -2690,4 +2713,5 @@ class OllamaProvider:
             logger.warning(
                 f"{reason} (attempt {attempt}/{self.retry_attempts}), retrying with {next_endpoint.name} provider..."
             )
+            await asyncio.sleep(_random.uniform(0.05, 0.25))
         return True

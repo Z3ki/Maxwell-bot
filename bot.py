@@ -5236,6 +5236,15 @@ class MaxwellBot(commands.Bot):
                 logger.info("Telegram polling loop scheduled")
         logger.info("Bot setup complete")
 
+    async def on_error(self, event, *args, **kwargs):
+        logger.exception("discord event %s failed", event)
+
+    async def on_disconnect(self):
+        logger.warning("discord gateway disconnected")
+
+    async def on_resumed(self):
+        logger.info("discord gateway resumed")
+
     async def on_ready(self):
         if self.user:
             self.bot_name = self.user.display_name
@@ -17581,11 +17590,30 @@ class MaxwellBot(commands.Bot):
 
 
 async def main():
+    loop = asyncio.get_running_loop()
+
+    def _loop_exception_handler(loop_, ctx):
+        msg = ctx.get("message", "")
+        exc = ctx.get("exception")
+        if exc is not None:
+            logger.error(
+                "unhandled loop exception %s: %s",
+                msg,
+                exc,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+        else:
+            logger.error("unhandled loop error: %s %s", msg, ctx)
+
+    try:
+        loop.set_exception_handler(_loop_exception_handler)
+    except Exception:
+        pass
     bot = MaxwellBot()
     _shutdown_called = False
-    # Start the event-loop watchdog. The channel work queues and tool gates are
-    # built once in MaxwellBot.__init__; stop the watchdog on shutdown below.
-    watchdog_task = asyncio.create_task(loop_watchdog(), name="loop-watchdog")
+    watchdog_task = asyncio.create_task(
+        loop_watchdog(interval=0.1, warning=0.5), name="loop-watchdog"
+    )
 
     def _request_shutdown(sig):
         nonlocal _shutdown_called
@@ -17597,7 +17625,6 @@ async def main():
         with contextlib.suppress(RuntimeError):
             _spawn_background(bot.close())
 
-    loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, _request_shutdown, sig)
 

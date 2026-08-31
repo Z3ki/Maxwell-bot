@@ -23,6 +23,21 @@ from aiohttp import web
 logger = logging.getLogger("maxwell_api")
 logging.basicConfig(level=logging.INFO)
 
+_API_MAX_CONCURRENT = int(os.getenv("MAXWELL_API_MAX_CONCURRENT", "64"))
+_API_CONCURRENCY_SEM = asyncio.Semaphore(max(8, _API_MAX_CONCURRENT))
+_API_REQUEST_TIMEOUT = float(os.getenv("MAXWELL_API_REQUEST_TIMEOUT", "30"))
+_API_GLOBAL_RPS = float(os.getenv("MAXWELL_API_GLOBAL_RPS", "120"))
+_API_GLOBAL_BURST = int(os.getenv("MAXWELL_API_GLOBAL_BURST", "240"))
+try:
+    import site_backend as _site_backend_for_api
+
+    _API_GLOBAL_LIMITER = _site_backend_for_api.RateLimiter(
+        rate=_API_GLOBAL_RPS, burst=_API_GLOBAL_BURST
+    )
+except Exception:
+    _API_GLOBAL_LIMITER = None
+_HEALTH_START = time.monotonic()
+
 import sys as _sys  # noqa: E402
 
 _sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -62,7 +77,9 @@ DATA_DIR = Path(os.getenv("DATA_DIR", APP_ROOT / "data"))
 # use a fresh connection per request with check_same_thread=False so we never
 # share a cursor across the aiohttp event-loop's thread pool.
 RAG_DB_PATH = DATA_DIR / "maxwell_rag.db"
-RAG_EMBED_MODEL = os.getenv("MAXWELL_EMBED_MODEL", os.getenv("EMBED_MODEL", "qwen3-embedding:0.6b"))
+RAG_EMBED_MODEL = os.getenv(
+    "MAXWELL_EMBED_MODEL", os.getenv("EMBED_MODEL", "qwen3-embedding:0.6b")
+)
 
 
 def _rag_db() -> sqlite3.Connection:
@@ -73,9 +90,7 @@ def _rag_db() -> sqlite3.Connection:
     one writer from the bot process coexist safely; busy_timeout prevents
     "database is locked" errors when the bot holds a write lock.
     """
-    conn = sqlite3.connect(
-        str(RAG_DB_PATH), check_same_thread=False, timeout=10.0
-    )
+    conn = sqlite3.connect(str(RAG_DB_PATH), check_same_thread=False, timeout=10.0)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA journal_mode=WAL")
@@ -290,9 +305,7 @@ async def rag_entities_list(request):
     try:
         limit = max(1, min(_safe_int(request.query.get("limit"), 200), 1000))
         if user_id:
-            rows = _rag_query(
-                "SELECT * FROM user_entities WHERE user_id=?", (user_id,)
-            )
+            rows = _rag_query("SELECT * FROM user_entities WHERE user_id=?", (user_id,))
             facts = _rag_query(
                 "SELECT id, content, importance, timestamp, metadata FROM vectors "
                 "WHERE kind='entity' AND author_id=? "
@@ -457,7 +470,12 @@ async def context_post(request):
         )
     except sqlite3.Error as e:
         return _json_response({"error": f"rag db: {e}"}, 500)
-    entry = {"id": cid, "content": content, "scope": str(body.get("scope") or "global"), **metadata}
+    entry = {
+        "id": cid,
+        "content": content,
+        "scope": str(body.get("scope") or "global"),
+        **metadata,
+    }
     return _json_response({"ok": True, "id": cid, "entry": entry})
 
 
@@ -866,7 +884,9 @@ async def site_kv_get(request):
     key = request.query.get("key")
     try:
         if key is None:
-            return _site_json(await asyncio.to_thread(site_backend.kv_get, DATA_DIR, slug))
+            return _site_json(
+                await asyncio.to_thread(site_backend.kv_get, DATA_DIR, slug)
+            )
         value = await asyncio.to_thread(site_backend.kv_get, DATA_DIR, slug, key)
     except site_backend.SiteBackendError as exc:
         return _site_error(exc)
@@ -948,7 +968,11 @@ async def site_items_post(request):
         return err
     try:
         item = await asyncio.to_thread(
-            site_backend.items_add, DATA_DIR, slug, request.match_info.get("name", ""), body
+            site_backend.items_add,
+            DATA_DIR,
+            slug,
+            request.match_info.get("name", ""),
+            body,
         )
     except site_backend.SiteBackendError as exc:
         return _site_error(exc)
@@ -983,8 +1007,16 @@ async def site_items_delete(request):
 # this process assigned — a slug cannot steer the proxy anywhere else.
 _SITE_PROXY_RATE = site_backend.RateLimiter(rate=20.0, burst=200)
 _SITE_PROXY_HOP_HEADERS = {
-    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-    "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+    "host",
+    "content-length",
 }
 # Uploads are bounded by the /bot sub-app's client_max_size, not by holding the
 # body in memory here. sock_read is a per-chunk idle limit, not a total: an SSE
@@ -1061,7 +1093,9 @@ async def _proxy_websocket(request, slug: str, target: str):
                 elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING):
                     break
                 elif msg.type == aiohttp.WSMsgType.ERROR:
-                    logger.warning("site %s ws %s error: %s", slug, direction, src.exception())
+                    logger.warning(
+                        "site %s ws %s error: %s", slug, direction, src.exception()
+                    )
                     break
         except Exception as e:
             # Never silent: a bug in here used to look exactly like a browser
@@ -1094,14 +1128,10 @@ async def site_proxy(request):
     if not _SITE_PROXY_RATE.allow(f"{_get_client_ip(request)}:{slug}"):
         return _site_json({"error": "slow down"}, 429)
     if not await asyncio.to_thread(_site_server_enabled, slug):
-        return _site_json(
-            {"error": "this site has no backend server running"}, 404
-        )
+        return _site_json({"error": "this site has no backend server running"}, 404)
     port = await asyncio.to_thread(site_server.port_for, DATA_DIR, slug)
     if not port:
-        return _site_json(
-            {"error": "this site has no backend server running"}, 404
-        )
+        return _site_json({"error": "this site has no backend server running"}, 404)
     tail = request.match_info.get("path", "") or ""
     target = f"http://127.0.0.1:{port}/{tail.lstrip('/')}"
     if request.query_string:
@@ -1144,7 +1174,10 @@ async def site_proxy(request):
     session = aiohttp.ClientSession(timeout=timeout, auto_decompress=False)
     try:
         upstream = await session.request(
-            request.method, target, headers=headers, data=body,
+            request.method,
+            target,
+            headers=headers,
+            data=body,
             allow_redirects=False,
         )
     except asyncio.TimeoutError:
@@ -1361,7 +1394,6 @@ async def rem_disable(request):
 
 
 # ---------- Autonomy ----------
-
 
 
 async def autonomy_status(request):
@@ -2425,9 +2457,7 @@ async def memory_delete(request):
     if not target_id:
         return _json_response({"error": "id required"}, 400)
     try:
-        cur = _rag_exec(
-            "DELETE FROM vectors WHERE id=? AND kind='ltm'", (target_id,)
-        )
+        cur = _rag_exec("DELETE FROM vectors WHERE id=? AND kind='ltm'", (target_id,))
     except sqlite3.Error as e:
         return _json_response({"error": f"rag db: {e}"}, 500)
     if cur.rowcount == 0:
@@ -2435,9 +2465,48 @@ async def memory_delete(request):
     return _json_response({"ok": True})
 
 
+async def health_check(request):
+    uptime = time.monotonic() - _HEALTH_START
+    return _json_response(
+        {"ok": True, "uptime": round(uptime, 1), "service": "maxwell-api"}
+    )
+
+
+@web.middleware
+async def _reliability_middleware(request, handler):
+    if (
+        _API_GLOBAL_LIMITER is not None
+        and request.path.startswith("/api/")
+        and request.path not in ("/api/health", "/health")
+    ):
+        ip = _get_client_ip(request)
+        if not _API_GLOBAL_LIMITER.allow(f"global:{ip}"):
+            return web.json_response(
+                {"error": "slow down"}, status=429, headers={"Retry-After": "2"}
+            )
+    try:
+        async with _API_CONCURRENCY_SEM:
+            return await asyncio.wait_for(
+                handler(request), timeout=_API_REQUEST_TIMEOUT
+            )
+    except asyncio.TimeoutError:
+        logger.warning("request timeout %s %s", request.method, request.path)
+        return web.json_response({"error": "request timed out"}, status=504)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.exception(
+            "unhandled error on %s %s: %s", request.method, request.path, e
+        )
+        return web.json_response({"error": "internal error"}, status=500)
+
+
 app = web.Application(
-    middlewares=[_auth_middleware_unless_login], client_max_size=256 * 1024
+    middlewares=[_reliability_middleware, _auth_middleware_unless_login],
+    client_max_size=256 * 1024,
 )
+app.router.add_get("/health", health_check)
+app.router.add_get("/api/health", health_check)
 app.router.add_get("/data/{file}", data_file)
 app.router.add_options(
     "/data/{file}",
@@ -2527,6 +2596,8 @@ app.router.add_get("/api/pm2/logs", pm2_logs)
 app.router.add_post("/api/pm2/restart", pm2_restart)
 app.router.add_get("/api/channels", channel_list)
 app.router.add_get("/api/chat/history", chat_history)
+
+
 async def plugins_get(request):
     # This is a read-only endpoint. Resolve DATA_DIR at request time so tests
     # and deployments that override the data directory see the same state as
@@ -2550,4 +2621,11 @@ app.router.add_options(
 )
 
 if __name__ == "__main__":
-    web.run_app(app, host=API_HOST, port=API_PORT, access_log=None)
+    web.run_app(
+        app,
+        host=API_HOST,
+        port=API_PORT,
+        access_log=None,
+        handle_signals=True,
+        backlog=256,
+    )

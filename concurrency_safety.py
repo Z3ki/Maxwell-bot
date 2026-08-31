@@ -4,11 +4,13 @@ The queue is intentionally keyed by guild and channel: work in one room cannot
 hold a global lock while a provider or tool is slow. Blocking filesystem work
 should be passed through ``offload`` at its call site.
 """
+
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import logging
+import os
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -42,8 +44,9 @@ class ChannelWorkQueues:
         self._lock = asyncio.Lock()
         self._closed = False
 
-    async def submit(self, guild_id: int, channel_id: int,
-                     callback: Callable[[], Awaitable[Any]]) -> Any:
+    async def submit(
+        self, guild_id: int, channel_id: int, callback: Callable[[], Awaitable[Any]]
+    ) -> Any:
         key = (int(guild_id), int(channel_id))
         result: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         async with self._lock:
@@ -53,7 +56,9 @@ class ChannelWorkQueues:
             queue = self._queues.setdefault(key, asyncio.Queue(self.max_pending))
             worker = self._workers.get(key)
             if worker is None or worker.done():
-                worker = asyncio.create_task(self._run(key, queue), name=f"channel-worker-{key[0]}-{key[1]}")
+                worker = asyncio.create_task(
+                    self._run(key, queue), name=f"channel-worker-{key[0]}-{key[1]}"
+                )
                 self._workers[key] = worker
             try:
                 queue.put_nowait(_Work(callback, result))
@@ -62,7 +67,9 @@ class ChannelWorkQueues:
                 raise RuntimeError("channel queue is full; try again shortly") from None
         return await result
 
-    async def _run(self, key: tuple[int, int], queue: asyncio.Queue[_Work | None]) -> None:
+    async def _run(
+        self, key: tuple[int, int], queue: asyncio.Queue[_Work | None]
+    ) -> None:
         current = asyncio.current_task()
         try:
             while True:
@@ -91,10 +98,7 @@ class ChannelWorkQueues:
                 # same lock as submit prevents a new item from being lost
                 # between the empty check and worker teardown.
                 async with self._lock:
-                    if (
-                        self._workers.get(key) is current
-                        and queue.empty()
-                    ):
+                    if self._workers.get(key) is current and queue.empty():
                         self._workers.pop(key, None)
                         if self._queues.get(key) is queue:
                             self._queues.pop(key, None)
@@ -227,10 +231,7 @@ class FairSemaphore:
             self._waiters.append(waiter)
             try:
                 while True:
-                    if (
-                        self._active < self._capacity
-                        and self._next_waiter() is waiter
-                    ):
+                    if self._active < self._capacity and self._next_waiter() is waiter:
                         self._active += 1
                         self._mark_served(waiter["key"], loop.time())
                         return
@@ -393,18 +394,20 @@ class ToolConcurrency:
 
     def __init__(self, **limits: int) -> None:
         defaults = {
-            "provider": 8,
-            "media": 2,
-            "tts": 2,
-            "shell": 2,
-            "site": 2,
-            "web": 6,
-            "agent": 2,
-            "default": 16,
+            "provider": int(os.getenv("MAXWELL_CONCURRENCY_PROVIDER", "8")),
+            "media": int(os.getenv("MAXWELL_CONCURRENCY_MEDIA", "3")),
+            "tts": int(os.getenv("MAXWELL_CONCURRENCY_TTS", "2")),
+            "shell": int(os.getenv("MAXWELL_CONCURRENCY_SHELL", "2")),
+            "site": int(os.getenv("MAXWELL_CONCURRENCY_SITE", "3")),
+            "web": int(os.getenv("MAXWELL_CONCURRENCY_WEB", "8")),
+            "agent": int(os.getenv("MAXWELL_CONCURRENCY_AGENT", "2")),
+            "default": int(os.getenv("MAXWELL_CONCURRENCY_DEFAULT", "16")),
         }
         defaults.update(limits)
         self._limits = dict(defaults)
-        self._semaphores = {name: asyncio.Semaphore(value) for name, value in defaults.items()}
+        self._semaphores = {
+            name: asyncio.Semaphore(value) for name, value in defaults.items()
+        }
         self._waiting: dict[str, int] = {}
 
     def gate(self, name: str) -> asyncio.Semaphore:
