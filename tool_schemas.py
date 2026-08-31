@@ -488,6 +488,13 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         },
         ["name"],
     ),
+    "guide": _obj(
+        {
+            "goal": _str(
+                "Short description of what the user wants built (e.g. 'coop neural worm maze with backend sync'). Used as thread title and to tailor the 5 clarifying questions."
+            ),
+        },
+    ),
     "web_search": _obj(
         {
             "query": _str("Search query"),

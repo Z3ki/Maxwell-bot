@@ -259,6 +259,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     EditServerTool,
     AuditLogTool,
     ListSitesTool,
+    GuideTool,
     LookupUserTool,
     ManagePluginTool,
     MoreToolsTool,
@@ -2439,6 +2440,11 @@ TOOL_PROTOCOL = (
     "from /bot/<slug>/api/ws — never recompute physics/weights client-side and "
     "call it synced. The coop-maze-ai failure (client Brain + local maze, "
     "ignoring its live Python backend) is exactly what not to do.\n"
+    "GUIDED BUILD: if a site/app request is vague (under 3 concrete features, no "
+    "style/tech, or 'build a maze' with no spec) — do NOT one-shot create_site. "
+    "Call guide(goal=...) to create a thread and ask the 5 clarifying questions, "
+    "or tell the user to run ,guide <goal> / ,guided-goal. You can also trigger it "
+    "yourself when you detect vagueness. Build only after the thread replies.\n"
     "chess: you play your own moves. chess_move returns every legal move "
     "annotated with what it captures, whether it checks or mates, and whether "
     "the piece would just be taken — read it, pick the strongest move, and pass "
@@ -3875,6 +3881,7 @@ class MaxwellBot(commands.Bot):
             self.tools["site_server"] = SiteServerTool(self)
             self.tools["site_test"] = SiteTestTool(self)
             self.tools["list_sites"] = ListSitesTool(self)
+            self.tools["guide"] = GuideTool(self)
         if self.config.ENABLE_WEB_SEARCH:
             self.tools["web_search"] = WebSearchTool(self)
         self.tools["no_response"] = NoResponseTool(self)
@@ -7383,11 +7390,22 @@ class MaxwellBot(commands.Bot):
                         self._admins.add(uid)
                         self._save_admins()
                         await message.channel.send(f"Added <@{uid}> to admins.")
+            elif cmd in ("guide", "guided", "guided-goal", "guided_goal"):
+                goal = (args or "").strip() or "your project"
+                tool = self.tools.get("guide")
+                if tool:
+                    res = await tool.execute(message, goal=goal)
+                    await message.channel.send(res[:1900])
+                else:
+                    await message.channel.send(
+                        "Guide tool not available (ENABLE_CREATE_SITE off)."
+                    )
             elif cmd == "solo":
                 await self._handle_solo_command(message, args)
             elif cmd == "help":
                 await message.channel.send(
                     "Commands:\n"
+                    "` ,guide [goal]` / `,guided-goal [goal]` - create a thread and ask 5 clarifying questions before building (use when request is vague)\n"
                     "` ,help` - show this list\n"
                     "` ,stop` - stop active response in this channel\n"
                     "` ,prompt [text]` - view/set server prompt (admin)\n"

@@ -351,6 +351,7 @@ All commands use the `,` prefix. Admin commands require the user to be in the ad
 | `,x read [@handle]` | Yes | Home timeline, or that account's posts |
 | `,x search <query>` / `,x tweet <id\|url>` | Yes | One search or one post |
 | `,x post <text>` | Yes | Post to X by hand (spends the hourly budget) |
+| `,guide [goal]` / `,guided-goal [goal]` | No | Create a thread `guide: <goal>` and ask 5 clarifying questions before building — use when your site/app request is vague; Maxwell also auto-triggers `guide` tool when you say "build a maze" with no spec |
 | `,vc join` | No | Join your current VC and start live listening |
 | `,vc leave` | No | Stop listening and disconnect from VC |
 | `,vc listen` | No | Start live VC listening while staying connected |
@@ -381,6 +382,8 @@ assets, HTTP status, and a screenshot (so the model can see the page). If
 Chromium is missing it still checks the HTML and linked files over HTTP.
 Call it after every publish or edit — `fetch_url` only sees source, not
 runtime. Fix with `edit_site` / `site_server`, then test again.
+
+Maxwell can now edit **any** site (ownership check removed for `edit_site`/`site_server`/`site_test` so he can fix a site even if you didn't create it), and `create_site`/`site_server` is enforced for neural/synced builds. For vague requests (`"build a maze"` with no spec) use `,guide <goal>` or `,guided-goal` — Maxwell creates a thread `guide: <goal>` and asks 5 clarifying questions (purpose, must-have features, style, realtime/backend, data). He also auto-calls the `guide` tool himself when he detects vagueness instead of one-shot building.
 
 ### Site backends
 
