@@ -5233,11 +5233,16 @@ class MaxwellBot(commands.Bot):
 
     async def on_disconnect(self):
         logger.warning("discord gateway disconnected")
+        self._gateway_last_disconnect = time.monotonic()
 
     async def on_resumed(self):
         logger.info("discord gateway resumed")
+        self._gateway_last_disconnect = None
+        self._gateway_last_ok = time.monotonic()
 
     async def on_ready(self):
+        self._gateway_last_ok = time.monotonic()
+        self._gateway_last_disconnect = None
         if self.user:
             self.bot_name = self.user.display_name
             logger.info(f"Logged in as {self.bot_name} ({self.user.id})")
@@ -17602,9 +17607,38 @@ async def main():
     except Exception:
         pass
     bot = MaxwellBot()
+    bot._gateway_last_ok = time.monotonic()
+    bot._gateway_last_disconnect = None
     _shutdown_called = False
     watchdog_task = asyncio.create_task(
         loop_watchdog(interval=0.1, warning=0.5), name="loop-watchdog"
+    )
+
+    async def _gateway_watchdog():
+        threshold = float(os.getenv("MAXWELL_GATEWAY_TIMEOUT", "90"))
+        interval = 15
+        while True:
+            await asyncio.sleep(interval)
+            if bot.is_closed() or _shutdown_called:
+                return
+            last_disc = getattr(bot, "_gateway_last_disconnect", None)
+            if last_disc is not None and not bot.is_connected():
+                down = time.monotonic() - last_disc
+                if down > threshold:
+                    logger.error(
+                        f"gateway down {down:.0f}s > {threshold}s — forcing restart for PM2"
+                    )
+                    with contextlib.suppress(Exception):
+                        await bot.close()
+                    await asyncio.sleep(1)
+                    with contextlib.suppress(Exception):
+                        import os as _os
+
+                        _os._exit(1)
+                    return
+
+    gateway_watchdog_task = asyncio.create_task(
+        _gateway_watchdog(), name="gateway-watchdog"
     )
 
     def _request_shutdown(sig):
@@ -17654,6 +17688,10 @@ async def main():
             watchdog_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await watchdog_task
+        if not gateway_watchdog_task.done():
+            gateway_watchdog_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await gateway_watchdog_task
         with contextlib.suppress(Exception):
             await bot.channel_queues.close()
         # Flush read positions before the process goes away — a restart is the
