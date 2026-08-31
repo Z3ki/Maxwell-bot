@@ -4756,22 +4756,19 @@ class CreateSiteTool(Tool):
     def get_description(self):
         return (
             f"Publish a site at {self.base_url}/<name>/. "
-            "Full visual freedom: invent a new design each time (layout, type, color, "
-            "density, motion). Do not reuse a house style or clone a previous site "
-            "unless the user asked for a specific look. "
-            "Ship it finished — real content, working controls, no placeholders, "
-            "lorem ipsum, TODOs, or dead href='#' links. A page that only says "
-            "'Loading…' shipped nothing. "
-            "Params: name (slug), title (listing metadata, not a required heading), "
-            "body (complete HTML document for index.html; served byte-for-byte), "
-            'files (extra files as {"path": "content"}: style.css, app.js, '
-            "about/index.html, data.json), "
-            "backend (true for a live same-origin store at /api/site/<name>/ — "
-            "guestbooks, counters, saved state), encoding (text|base64), "
-            "permanent (skip auto-expiry). "
-            "Generate images in a prior turn and paste the CDN URLs in. "
-            "Then site_test it and fix what it reports before saying it works; "
-            "iterate with edit_site / site_server. Never paste HTML into chat."
+            "Full visual freedom: invent a new design each time. "
+            "Ship it finished — real content, working controls, no placeholders. "
+            "Params: name, title, body (complete HTML for index.html), "
+            'files (extra files {"path":"content"}), '
+            "backend (true for same-origin persistence), encoding, permanent. "
+            "CRITICAL: if user asks for neural network / AI / learning / evolution / "
+            "training / realtime / synced / multiplayer / 'computed on backend' / "
+            "'across devices' — you MUST use backend + site_server: create a Python "
+            "backend in site_servers/<slug>/app.py (FastAPI+uvicorn on $PORT, "
+            "WebSocket at /ws), run ALL physics/neural compute server-side, broadcast "
+            "state via ws, and make frontend ONLY render ws messages (never duplicate "
+            "physics client-side). Client-only simulation that pretends to be synced "
+            "is a failure. Always site_test + fix before claiming it works."
         )
 
     async def execute(
