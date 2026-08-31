@@ -586,6 +586,10 @@ CTX_BUDGET_CHANNELS_MAP = 1600  # bumped from 800 — enriched with topic/recenc
 CTX_BUDGET_INBOX = 500
 CTX_BUDGET_TYPING = 800
 
+# Per-DM history read budget. gather_context as a whole is bounded at
+# AUTONOMY_OBSERVE_TIMEOUT; this keeps one unresponsive DM from eating it.
+_DM_HISTORY_TIMEOUT = 20
+
 # Research tools are never available to the unattended tick. Curiosity-as-a-
 # drive turned every quiet interval into web_search + update_memory on random
 # engine trivia. Extra denials: AUTONOMY_DISABLED_TOOLS=shell,delete_channel
@@ -1064,11 +1068,21 @@ class AutonomyEngine:
                         tags.append("auto")
                     topic = getattr(ch, "topic", None) or ""
                     topic_snippet = topic[:80].replace("\n", " ") if topic else ""
+                    # Recency from the channel's cached last_message_id, which
+                    # the gateway already delivered in GUILD_CREATE. This used
+                    # to be `history(limit=1)` — one REST round-trip per text
+                    # channel, awaited SERIALLY inside a nested guild/channel
+                    # loop. Across 21 guilds that is hundreds of sequential
+                    # requests before the tick has read a single message, and
+                    # it was the main reason gather_context blew the 180s
+                    # budget. A snowflake encodes its own creation time, so
+                    # the same string costs zero requests.
                     last_msg_ago = ""
                     try:
-                        last_msg = [m async for m in ch.history(limit=1)]
-                        if last_msg:
-                            age_s = int(now_ts - last_msg[0].created_at.timestamp())
+                        last_id = getattr(ch, "last_message_id", None)
+                        if last_id:
+                            created = discord.utils.snowflake_time(int(last_id))
+                            age_s = int(now_ts - created.timestamp())
                             if age_s < 60:
                                 last_msg_ago = "just now"
                             elif age_s < 3600:
@@ -1118,6 +1132,21 @@ class AutonomyEngine:
             return max(8, min(int(raw), 1500))
         except (TypeError, ValueError):
             return 1500
+
+    def _dm_history_limit(self) -> int:
+        """Messages to read per DM. Each 100 costs one REST round-trip.
+
+        Default 300 rather than the old hardcoded 1500: the rendered DM section
+        is capped at CTX_BUDGET_DM_HISTORY chars anyway, so the extra 12 pages
+        per DM were fetched and then thrown away by truncation.
+        """
+        raw = (getattr(self.bot, "_control", None) or {}).get(
+            "autonomy_dm_messages", 300
+        )
+        try:
+            return max(8, min(int(raw), 1500))
+        except (TypeError, ValueError):
+            return 300
 
     async def _collect_activity_channel_ids(self, events) -> list[str]:
         """Rooms the planner should actually read this tick.
@@ -1477,7 +1506,12 @@ class AutonomyEngine:
             return None
 
         try:
-            resolved = await channel.fetch_message(int(msg_id))
+            # Bounded: this runs inside the serial formatting loop, up to 25
+            # times per tick, so an unresponsive fetch here delays every
+            # remaining room.
+            resolved = await asyncio.wait_for(
+                channel.fetch_message(int(msg_id)), timeout=5
+            )
         except (
             discord.NotFound,
             discord.Forbidden,
@@ -1485,6 +1519,9 @@ class AutonomyEngine:
             ValueError,
             TypeError,
         ):
+            return None
+        except TimeoutError:
+            logger.debug("Reply lookup timed out for message %s", msg_id)
             return None
         except Exception:
             return None
@@ -1655,7 +1692,21 @@ class AutonomyEngine:
         sections = []
         ctx_index = AutonomyContextIndex()
         self._context_index = ctx_index
+        # Phase timings. gather_context is a long chain of Discord reads and
+        # when it blew its budget the log said only "timed out" — no way to
+        # tell which read was responsible. Recorded per phase and logged once
+        # at the end so a future regression names itself.
+        phase_ms: dict[str, float] = {}
+        _phase_start = time.time()
+
+        def _mark(name: str) -> None:
+            nonlocal _phase_start
+            now = time.time()
+            phase_ms[name] = (now - _phase_start) * 1000
+            _phase_start = now
+
         available_channel_lines = await self._collect_available_channels(ctx_index)
+        _mark("channel_map")
         # Use system local time so the LLM doesn't see UTC and think it's
         # night when it's 5pm. No hardcoding offsets — let the OS decide.
         now = datetime.now().astimezone()
@@ -1823,6 +1874,7 @@ class AutonomyEngine:
         # Events, watch, recent replies, then auto-channels / memory — not
         # just the first 10 auto rooms. Fetch in parallel, keep each room
         # as its own block so a busy #general does not erase the others.
+        _mark("goals_events")
         channel_ids_to_check = await self._collect_activity_channel_ids(events)
 
         # Use Semaphore(2) and load history sequentially to avoid bursting Discord API rate limits
@@ -2085,10 +2137,64 @@ class AutonomyEngine:
                 logger.warning("Reflection nudge skipped: %s", e)
 
         # 7. DM + group DM history
+        #
+        # The history reads run concurrently and each is bounded, mirroring the
+        # channel-activity pass above. Previously this awaited
+        # history(limit=1500) — 15 paginated REST requests — once per private
+        # channel, serially, with no timeout: ~20 DMs could burn the entire
+        # gather_context budget on its own, and a single hung fetch stalled the
+        # whole tick. Formatting still happens serially below so ctx_index
+        # numbering stays deterministic.
+        dm_channels = list(getattr(self.bot, "private_channels", []) or [])[:20]
+        dm_sem = asyncio.Semaphore(2)
+
+        async def _load_dm_history(channel) -> tuple[Any, list] | None:
+            try:
+                if not hasattr(channel, "history"):
+                    return None
+                async with dm_sem:
+                    msgs: list = []
+
+                    async def _pull():
+                        msgs.extend(
+                            [m async for m in channel.history(limit=dm_history_limit)]
+                        )
+
+                    await asyncio.wait_for(_pull(), timeout=_DM_HISTORY_TIMEOUT)
+                    await asyncio.sleep(0.5)
+                    return channel, msgs
+            except TimeoutError:
+                logger.warning(
+                    "DM history timed out for %s after %ss",
+                    getattr(channel, "id", "?"),
+                    _DM_HISTORY_TIMEOUT,
+                )
+                return None
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                return None
+            except Exception as e:
+                logger.debug("DM history read failed: %s", e)
+                return None
+
+        dm_history_limit = self._dm_history_limit()
+        dm_loaded = await asyncio.gather(
+            *[_load_dm_history(c) for c in dm_channels],
+            return_exceptions=True,
+        )
+        dm_history_by_id: dict[str, list] = {}
+        for item in dm_loaded:
+            if isinstance(item, BaseException) or not item:
+                continue
+            _dm_ch, _dm_msgs = item
+            dm_history_by_id[str(getattr(_dm_ch, "id", "") or "")] = _dm_msgs
+        _mark("dm_history")
+
         dm_blocks = []
-        for channel in list(getattr(self.bot, "private_channels", []) or [])[:20]:
+        for channel in dm_channels:
             try:
                 cid_private = str(getattr(channel, "id", "") or "")
+                if cid_private not in dm_history_by_id:
+                    continue
                 handle, room_label = await self._register_conversation(
                     ctx_index, cid_private, channel
                 )
@@ -2114,8 +2220,7 @@ class AutonomyEngine:
                 # only through send_dm + user id; a group DM only through
                 # post_channel + its G-handle. Leaving that implicit is how
                 # replies ended up in the wrong room.
-                # Fetch up to 1500 messages from DM history
-                messages = [m async for m in channel.history(limit=1500)]
+                messages = dm_history_by_id[cid_private]
                 last_msg_age = ""
                 if messages:
                     last_created = getattr(messages[0], "created_at", None)
@@ -2332,6 +2437,21 @@ class AutonomyEngine:
                     sections.append(_truncate(inbox_text, CTX_BUDGET_INBOX))
         except Exception as e:
             logger.debug("Autonomy inbox context failed: %s", e)
+
+        _mark("floor_inbox")
+        # One line naming the slowest phases. When this tick eventually times
+        # out again, this is the breadcrumb that says where it went.
+        logger.info(
+            "Autonomy gather_context phases: %s",
+            " ".join(
+                f"{name}={ms / 1000:.1f}s"
+                for name, ms in sorted(
+                    phase_ms.items(), key=lambda kv: kv[1], reverse=True
+                )
+                if ms >= 100
+            )
+            or "all under 0.1s",
+        )
 
         full = "\n\n".join(sections)
         return full
@@ -2652,19 +2772,40 @@ class AutonomyEngine:
         """
         started_at = started_at or _utcnow_iso()
         begin = time.time()
+        budget = self._observe_timeout()
         try:
-            context = await asyncio.wait_for(self.gather_context(), timeout=180)
+            context = await asyncio.wait_for(self.gather_context(), timeout=budget)
         except asyncio.TimeoutError:
             logger.error(
-                "Autonomy gather_context timed out (>180s); "
-                "skipping tick to recover the loop"
+                "Autonomy gather_context timed out (>%ss); skipping tick to "
+                "recover the loop. Slowest phases are logged at INFO by "
+                "gather_context — check those to see which read is stalling.",
+                budget,
             )
             raise RuntimeError("gather_context timed out") from None
+        elapsed = time.time() - begin
+        # Warn while there is still headroom, so a tick that is trending toward
+        # the wall shows up before it starts failing outright.
+        if elapsed > budget * 0.6:
+            logger.warning(
+                "Autonomy gather_context took %.1fs of its %ss budget",
+                elapsed,
+                budget,
+            )
         return Observation(
             context=context,
             started_at=started_at,
-            duration=time.time() - begin,
+            duration=elapsed,
         )
+
+    def _observe_timeout(self) -> int:
+        raw = (getattr(self.bot, "_control", None) or {}).get(
+            "autonomy_observe_timeout_seconds", 180
+        )
+        try:
+            return max(30, min(int(raw), 600))
+        except (TypeError, ValueError):
+            return 180
 
     # ─── stages 2-4, looped ───────────────────────────────────────────
 

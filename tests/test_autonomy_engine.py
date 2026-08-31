@@ -1334,3 +1334,157 @@ def test_should_call_planner_skips_quiet_rooms(tmp_path):
         "G1": SimpleNamespace(state=FLOOR_ADDRESSED, silence_seconds=2),
     }
     assert asyncio.run(engine._should_call_planner()) is True
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-30: gather_context timed out (>180s) 44 times over two days and
+# skipped the tick every time. Two unbounded serial phases were responsible:
+# the AVAILABLE CHANNELS map awaited history(limit=1) once per text channel
+# (hundreds of sequential REST calls across 21 guilds), and the DM pass awaited
+# history(limit=1500) — 15 paginated requests — per private channel with no
+# timeout. These lock in the cheap paths.
+# ---------------------------------------------------------------------------
+
+
+def test_channel_map_uses_cached_snowflake_not_a_history_call(tmp_path):
+    """Recency must come from last_message_id, which the gateway already sent."""
+
+    class ExplodingHistoryChannel:
+        id = 4242
+        name = "general"
+        topic = "chatter"
+        # A real snowflake; snowflake_time() decodes its creation instant.
+        last_message_id = 1416565530504200254
+
+        def permissions_for(self, _me):
+            return SimpleNamespace(send_messages=True)
+
+        async def history(self, limit=1):
+            raise AssertionError(
+                "channel map must not hit the REST API; that is the 180s timeout"
+            )
+            yield  # pragma: no cover - unreachable, keeps this an async gen
+
+    channel = ExplodingHistoryChannel()
+    bot = SimpleNamespace(
+        guilds=[SimpleNamespace(id=1, text_channels=[channel], me=SimpleNamespace())],
+        _auto_channels=set(),
+        _control={},
+    )
+    engine = AutonomyEngine.__new__(AutonomyEngine)
+    engine.bot = bot
+    engine._guild_allowed = lambda _g: True
+    engine._channel_allowed = lambda _c: True
+
+    index = AutonomyContextIndex()
+    lines = asyncio.run(engine._collect_available_channels(index))
+
+    assert len(lines) == 1
+    assert "#general" in lines[0]
+    assert "last msg:" in lines[0]
+
+
+def test_channel_map_survives_a_missing_last_message_id(tmp_path):
+    """A never-used channel has last_message_id None; render it without recency."""
+
+    class FreshChannel:
+        id = 77
+        name = "brand-new"
+        topic = ""
+        last_message_id = None
+
+        def permissions_for(self, _me):
+            return SimpleNamespace(send_messages=True)
+
+    bot = SimpleNamespace(
+        guilds=[
+            SimpleNamespace(id=1, text_channels=[FreshChannel()], me=SimpleNamespace())
+        ],
+        _auto_channels=set(),
+        _control={},
+    )
+    engine = AutonomyEngine.__new__(AutonomyEngine)
+    engine.bot = bot
+    engine._guild_allowed = lambda _g: True
+    engine._channel_allowed = lambda _c: True
+
+    lines = asyncio.run(engine._collect_available_channels(AutonomyContextIndex()))
+
+    assert len(lines) == 1
+    assert "#brand-new" in lines[0]
+    assert "last msg:" not in lines[0]
+
+
+def test_dm_history_limit_is_bounded_and_configurable():
+    engine = AutonomyEngine.__new__(AutonomyEngine)
+
+    engine.bot = SimpleNamespace(_control={})
+    assert engine._dm_history_limit() == 300
+
+    engine.bot = SimpleNamespace(_control={"autonomy_dm_messages": 50})
+    assert engine._dm_history_limit() == 50
+
+    # Clamped at both ends, and junk falls back to the default.
+    engine.bot = SimpleNamespace(_control={"autonomy_dm_messages": 99999})
+    assert engine._dm_history_limit() == 1500
+    engine.bot = SimpleNamespace(_control={"autonomy_dm_messages": 1})
+    assert engine._dm_history_limit() == 8
+    engine.bot = SimpleNamespace(_control={"autonomy_dm_messages": "nonsense"})
+    assert engine._dm_history_limit() == 300
+
+
+def test_observe_timeout_is_configurable_and_clamped():
+    engine = AutonomyEngine.__new__(AutonomyEngine)
+
+    engine.bot = SimpleNamespace(_control={})
+    assert engine._observe_timeout() == 180
+
+    engine.bot = SimpleNamespace(_control={"autonomy_observe_timeout_seconds": 90})
+    assert engine._observe_timeout() == 90
+
+    engine.bot = SimpleNamespace(_control={"autonomy_observe_timeout_seconds": 5})
+    assert engine._observe_timeout() == 30
+    engine.bot = SimpleNamespace(_control={"autonomy_observe_timeout_seconds": 9999})
+    assert engine._observe_timeout() == 600
+    engine.bot = SimpleNamespace(_control={"autonomy_observe_timeout_seconds": None})
+    assert engine._observe_timeout() == 180
+
+
+def test_observe_raises_instead_of_wedging_when_context_hangs():
+    """A hung read must fail the tick, not stall the loop forever.
+
+    The budget floor is 30s, so drive the timeout by patching the engine's
+    own budget accessor rather than waiting on a real clock.
+    """
+    engine = AutonomyEngine.__new__(AutonomyEngine)
+    engine.bot = SimpleNamespace(_control={})
+    engine._observe_timeout = lambda: 0.05
+
+    async def _never_finishes():
+        await asyncio.sleep(30)
+
+    engine.gather_context = _never_finishes
+
+    async def scenario():
+        try:
+            await engine.observe()
+        except RuntimeError as exc:
+            assert "gather_context timed out" in str(exc)
+            return
+        raise AssertionError("observe() must raise when gather_context hangs")
+
+    asyncio.run(scenario())
+
+
+def test_observe_returns_context_and_duration_on_the_happy_path():
+    engine = AutonomyEngine.__new__(AutonomyEngine)
+    engine.bot = SimpleNamespace(_control={})
+
+    async def _fast():
+        return "CONTEXT BODY"
+
+    engine.gather_context = _fast
+    obs = asyncio.run(engine.observe())
+    assert obs.context == "CONTEXT BODY"
+    assert obs.duration >= 0
+    assert obs.started_at

@@ -292,6 +292,14 @@ DEFAULT_CONTROL = {
     # self-reviews goals/memory and sets new objectives on its own cadence.
     "autonomy_reflect_enabled": True,
     "autonomy_reflect_interval_seconds": 3600,
+    # Messages read per DM/group-DM when building the planner context. Each 100
+    # is one REST round-trip, and the rendered section is char-capped anyway,
+    # so reading more than this is paid for and then truncated away.
+    "autonomy_dm_messages": 300,
+    # Hard ceiling on the whole observe stage (all the Discord reads that build
+    # planner context). Exceeding it fails the tick rather than wedging the
+    # loop; gather_context logs per-phase timings so you can see what is slow.
+    "autonomy_observe_timeout_seconds": 180,
 }
 
 DEAD_CONTROL_KEYS = frozenset(
