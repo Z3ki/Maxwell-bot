@@ -111,7 +111,7 @@ def test_rem_event_log_flush_waits_for_in_flight_save(tmp_path):
                 "content": "keep",
             }
         )
-        asyncio.create_task(log._do_save())
+        save_task = asyncio.create_task(log._do_save())
         await log.started.wait()
 
         flush_task = asyncio.create_task(log.flush())
@@ -120,6 +120,7 @@ def test_rem_event_log_flush_waits_for_in_flight_save(tmp_path):
 
         log.release.set()
         await flush_task
+        await save_task
         assert log.snapshots and log.snapshots[-1][0]["content"] == "keep"
 
     asyncio.run(run())

@@ -920,8 +920,9 @@ class RAGMemoryManager:
                     "VALUES (?, ?, ?, ?, 0, 0)",
                     (key, EMBED_DIM, r["embedding"], time.time()),
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                # Backfill is best-effort; a failed seed just means a cache miss.
+                logger.debug("embed_cache backfill row failed: %s", e)
 
         # FTS5/BM25 hybrid search was prototyped but caused DB corruption
         # under concurrent writes (triggers + per-message embedding tasks
@@ -968,8 +969,10 @@ class RAGMemoryManager:
             ).fetchone()
             if row and row["c"] > 0:
                 return  # already migrated
-        except Exception:
-            pass
+        except Exception as e:
+            # Can't tell if we already migrated — fall through and re-run the
+            # migration, which is INSERT OR IGNORE and therefore idempotent.
+            logger.warning("LTM migration check failed, retrying migration: %s", e)
 
         try:
             lines = ltm_file.read_text(encoding="utf-8").strip().splitlines()
@@ -1018,8 +1021,11 @@ class RAGMemoryManager:
             ).fetchone()
             if row and row["c"] > 0:
                 return  # already migrated
-        except Exception:
-            pass
+        except Exception as e:
+            # See the LTM path above: re-running the migration is idempotent.
+            logger.warning(
+                "shared_context migration check failed, retrying migration: %s", e
+            )
 
         try:
             data = json.loads(sc_file.read_text(encoding="utf-8"))
@@ -1104,8 +1110,9 @@ class RAGMemoryManager:
                             (time.time(), cache_key, EMBED_DIM),
                         )
                     return vec
-        except Exception:
-            pass
+        except Exception as e:
+            # Cache read failure is not fatal — fall through and re-embed.
+            logger.debug("embed_cache lookup failed, re-embedding: %s", e)
 
         # ─── endpoint breaker ───────────────────────────────────────
         # Checked AFTER the cache lookup on purpose: a cached vector is still
@@ -1198,8 +1205,9 @@ class RAGMemoryManager:
                     ),
                 )
                 self._maybe_prune_embed_cache()
-            except Exception:
-                pass  # cache write failure is non-fatal
+            except Exception as e:
+                # Non-fatal: the embedding is already computed and returned.
+                logger.debug("embed_cache write failed: %s", e)
 
             self._embed_endpoint_recovered()
             return vec
@@ -1303,8 +1311,9 @@ class RAGMemoryManager:
                 "LIMIT ?)",
                 (excess,),
             )
-        except Exception:
-            pass
+        except Exception as e:
+            # Prune failure only means the cache stays oversized for now.
+            logger.debug("embed_cache prune failed: %s", e)
 
     async def _embed_and_store(self, row_id: str, text: str) -> bool:
         """Generate embedding and update the row in DB."""
@@ -1488,8 +1497,9 @@ class RAGMemoryManager:
             try:
                 meta = json.loads(row["metadata"] or "{}")
                 entry.update(meta)
-            except Exception:
-                pass
+            except Exception as e:
+                # Corrupt metadata JSON: the row is still usable without it.
+                logger.debug("Bad metadata JSON on row %s: %s", row["id"], e)
             result.append(entry)
         return result
 
@@ -2418,8 +2428,9 @@ class RAGMemoryManager:
             try:
                 meta = json.loads(row["metadata"] or "{}")
                 entry.update(meta)
-            except Exception:
-                pass
+            except Exception as e:
+                # Corrupt metadata JSON: the row is still usable without it.
+                logger.debug("Bad metadata JSON on row %s: %s", row["id"], e)
             result.append(entry)
         return result
 
@@ -2469,8 +2480,9 @@ class RAGMemoryManager:
             try:
                 meta = json.loads(row["metadata"] or "{}")
                 entry.update(meta)
-            except Exception:
-                pass
+            except Exception as e:
+                # Corrupt metadata JSON: the row is still usable without it.
+                logger.debug("Bad metadata JSON on row %s: %s", row["id"], e)
             result.append(entry)
 
         # Filter DM-to-admin-only
@@ -3108,10 +3120,12 @@ class RAGMemoryManager:
                 try:
                     meta = json.loads(row["metadata"] or "{}")
                     entry.update(meta)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Bad metadata JSON on row %s: %s", row["id"], e)
                 results.append(entry)
-            except Exception:
+            except Exception as e:
+                # One unusable row must not kill the whole search result set.
+                logger.debug("Skipping unreadable search row: %s", e)
                 continue
 
         # Sort by decayed score (not raw cosine) so recent-but-slightly-less-

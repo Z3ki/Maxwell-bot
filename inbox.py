@@ -207,8 +207,7 @@ class InboxStore:
         if not pending:
             return ""
         lines = ["=== INBOX (unread / actionable — you may ignore) ==="]
-        for item in pending[:14]:
-            lines.append(self.render_item(item))
+        lines.extend(self.render_item(item) for item in pending[:14])
         if len(pending) > 14:
             lines.append(f"… and {len(pending) - 14} more (inbox_list to see them)")
         text = "\n".join(lines)

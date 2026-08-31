@@ -9,14 +9,12 @@ sent directly to their target.
 import contextlib
 import html
 import ipaddress
-import inspect
 import json
 import logging
 import os
 import random
 import re
 import shlex
-import signal
 import shutil
 import socket
 import ssl
@@ -27,26 +25,19 @@ import wave
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 import aiofiles
 import aiohttp
 import asyncio
 import base64
-import types
 import uuid
 import discord
 from discord import Activity, File, Message, Status
 from tools import Tool
 from captcha_solver import CaptchaSolveError
-from config import Config
 from control_defaults import parse_bool
-from tool_schemas import (
-    elide_tool_calls_for_history,
-    normalize_native_tool_calls,
-    trim_tool_tail,
-)
 import site_backend
 import site_server
 import site_test
@@ -54,7 +45,6 @@ from utils import (  # single source of truth, fd-safe
     FileLock,
     _atomic_json_write_sync,
     _safe_int,
-    _spawn_background,
     is_direct_image_url,
     is_gif_page_url,
 )
@@ -108,7 +98,10 @@ try:
         ),
         override=False,
     )
-except Exception:
+except Exception:  # noqa: S110 - logging is not configured this early
+    # Import-time .env preload before logging is configured, so there is
+    # nowhere to report to. config.py loads .env again with override=True and
+    # doctor.py reports a genuinely missing/unreadable .env.
     pass
 
 OWNER_IDS = {
@@ -232,8 +225,9 @@ async def _synthesize_fish_tts(
         # Fish returns MP3 bytes (or whatever fmt requested); write directly.
         # The downstream `make_voice_ogg` re-encodes via ffmpeg so extension
         # does not matter — ffmpeg sniffs the format.
-        with open(output_path, "wb") as f:
-            f.write(data)
+        # Written off-thread: this runs on the bot's event loop, and a blocking
+        # write of a few hundred KB stalls every other chat.
+        await asyncio.to_thread(Path(output_path).write_bytes, data)
         logger.info(
             "Fish TTS synthesized %d bytes (model=%s, ref=%s)",
             len(data),
@@ -1286,10 +1280,7 @@ class ImageGeneratorTool(Tool):
         looks_like_image = bool(
             raw
             and (
-                raw.startswith(b"\x89PNG")
-                or raw.startswith(b"\xff\xd8\xff")
-                or raw.startswith(b"GIF8")
-                or raw.startswith(b"RIFF")
+                raw.startswith((b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"RIFF"))
                 or ctype.startswith("image/")
             )
         )
@@ -1458,8 +1449,9 @@ class HDImageGeneratorTool(Tool):
                 return None, f"no such file: {ref[:80]}"
             if os.path.getsize(path) > self.MAX_INPUT_BYTES:
                 return None, f"file too large: {ref[:80]}"
-            with open(path, "rb") as f:
-                return f.read(), ""
+            # Off-thread: images run up to MAX_INPUT_BYTES and this is on the
+            # event loop, so a blocking read stalls unrelated chats.
+            return await asyncio.to_thread(Path(path).read_bytes), ""
         except Exception as e:
             return None, f"could not read {ref[:80]}: {e}"
 
@@ -2839,8 +2831,12 @@ class SearchMessagesTool(Tool):
                             results.append(f"[#{getattr(chan, 'name', 'chat')} - {msg.id}] {msg.author.display_name}: {snippet}")
                             if len(results) >= search_limit:
                                 break
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Without this log a permissions/rate-limit failure was
+                    # indistinguishable from "no messages matched".
+                    logger.warning(
+                        "search_messages: current-channel scan failed: %s", e
+                    )
 
             # 2. If not enough results and in a guild, search across other accessible text channels
             if len(results) < search_limit and getattr(message, "guild", None):
@@ -2859,7 +2855,13 @@ class SearchMessagesTool(Tool):
                                 results.append(f"[#{c.name} - {msg.id}] {msg.author.display_name}: {snippet}")
                                 if len(results) >= search_limit:
                                     break
-                    except Exception:
+                    except Exception as e:
+                        # Expected for channels we cannot read; keep scanning.
+                        logger.debug(
+                            "search_messages: skipping #%s: %s",
+                            getattr(c, "name", "?"),
+                            e,
+                        )
                         continue
 
             if not results:
@@ -2978,8 +2980,9 @@ class ListServersTool(Tool):
         lines = []
         if self.bot.guilds:
             lines.append(f"Servers ({len(self.bot.guilds)}):")
-            for guild in self.bot.guilds[:20]:
-                lines.append(f"  • {guild.name} (ID: {guild.id})")
+            lines.extend(
+                f"  • {guild.name} (ID: {guild.id})" for guild in self.bot.guilds[:20]
+            )
             if len(self.bot.guilds) > 20:
                 lines.append(f"  ... and {len(self.bot.guilds) - 20} more")
 
@@ -2990,8 +2993,9 @@ class ListServersTool(Tool):
         ]
         if group_channels:
             lines.append(f"\nGroup chats ({len(group_channels)}):")
-            for gc in group_channels[:10]:
-                lines.append(f"  • {gc.name or 'Unnamed'} (ID: {gc.id})")
+            lines.extend(
+                f"  • {gc.name or 'Unnamed'} (ID: {gc.id})" for gc in group_channels[:10]
+            )
 
         if not lines:
             return "You're not in any servers or group chats."
@@ -3598,13 +3602,11 @@ class ManageRoleTool(Tool):
         why = _mod_reason(message)
         if act == "list":
             roles = sorted(
-                list(getattr(guild, "roles", []) or []),
+                getattr(guild, "roles", []) or [],
                 key=lambda r: int(getattr(r, "position", 0) or 0),
                 reverse=True,
             )
-            lines = []
-            for role in roles[:40]:
-                lines.append(_role_label(role))
+            lines = [_role_label(role) for role in roles[:40]]
             return f"Roles in {guild.name} ({len(roles)}):\n" + "\n".join(lines or ["none"])
         if act == "create":
             clean = _clean_discord_name(name)
@@ -4588,8 +4590,8 @@ class CreateSiteTool(Tool):
         ) != os.path.abspath(img_dir):
             return None, "filename escapes images dir"
         try:
-            with open(dest, "wb") as f:
-                f.write(blob)
+            # Off-thread write; see _load_one above.
+            await asyncio.to_thread(Path(dest).write_bytes, blob)
         except Exception as e:
             return None, f"write failed: {e}"
         return dest, None
@@ -5975,8 +5977,16 @@ async def _iter_recent_channel_messages(message, bot=None, limit: int = 40):
 
     try:
         await asyncio.wait_for(_collect(), timeout=_CHANNEL_HISTORY_TIMEOUT)
-    except Exception:
-        pass
+    except TimeoutError:
+        # Partial history is still useful, but a silent timeout looked exactly
+        # like an empty channel to every caller.
+        logger.warning(
+            "channel history timed out after %ss with %d message(s)",
+            _CHANNEL_HISTORY_TIMEOUT,
+            len(collected),
+        )
+    except Exception as e:
+        logger.warning("channel history read failed after %d msg(s): %s", len(collected), e)
     for msg in collected:
         yield msg
 
@@ -6047,9 +6057,9 @@ async def resolve_send_reply_target(message, reply=True, reply_to=None, bot=None
     if not hint_n or hint_n in _REPLY_HINT_THIS:
         return message
 
-    recent: list[Any] = []
-    async for msg in _iter_recent_channel_messages(message, bot=bot):
-        recent.append(msg)
+    recent: list[Any] = [
+        msg async for msg in _iter_recent_channel_messages(message, bot=bot)
+    ]
     if not recent:
         recent = [message]
 
@@ -6509,8 +6519,10 @@ class SendFileTool(Tool):
             )
             or "data"
         )
-        for sub in ("exports", "public_files", "attachments"):
-            bases.append(os.path.join(data_dir, sub))
+        bases.extend(
+            os.path.join(data_dir, sub)
+            for sub in ("exports", "public_files", "attachments")
+        )
         site_dir = getattr(getattr(self, "bot", None), "config", None)
         if site_dir:
             site_path = getattr(site_dir, "MAXWELL_SITE_DIR", "")
@@ -7284,8 +7296,9 @@ class ShellTool(Tool):
                         await self._kill_container_exec(pid_file)
                         proc.kill()
                         await proc.wait()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        # Usually means the process already exited.
+                        logger.debug("shell zombie cleanup: %s", e)
             if output_truncated:
                 stderr_buf.extend(
                     b"\n[output truncated at MAXWELL_SHELL_MAX_OUTPUT]"
@@ -7770,7 +7783,7 @@ class FetchUrlTool(Tool):
             msg = str(e)
             if msg.startswith("Cannot fetch"):
                 return f"Error: {msg}"
-            if msg.startswith("HTTP") or msg.startswith("timed out"):
+            if msg.startswith(("HTTP", "timed out")):
                 return f"Error: {msg}"
             return f"Error fetching URL: {msg}"
         except asyncio.TimeoutError:
@@ -8105,8 +8118,10 @@ class SeeVideoTool(Tool):
 
             if YouTubeTool._is_youtube_url(url):
                 return "Error: use youtube for YouTube links"
-        except Exception:
-            pass
+        except Exception as e:
+            # If the YouTube guard itself breaks, fall through to the generic
+            # fetch rather than refusing the URL outright.
+            logger.debug("YouTube URL guard failed: %s", e)
         control = getattr(self.bot, "_control", None) or {}
         if not parse_bool(control.get("process_images"), True) and not self._audio_enabled():
             return "Error: image and audio processing are disabled"
@@ -8162,7 +8177,7 @@ class YouTubeTool(Tool):
         re.I,
     )
     CACHE_TTL = 10 * 60
-    _result_cache: dict[str, tuple[float, str]] = {}
+    _result_cache: ClassVar[dict[str, tuple[float, str]]] = {}
 
     def get_description(self):
         return (
@@ -8281,8 +8296,7 @@ class YouTubeTool(Tool):
         if (
             "/@" in f"/{path.lstrip('/')}"
             or "/channel/" in path
-            or path.startswith("/c/")
-            or path.startswith("/user/")
+            or path.startswith(("/c/", "/user/"))
         ):
             return "channel"
         return "video"
@@ -8470,7 +8484,9 @@ class YouTubeTool(Tool):
                         if resp.status != 200:
                             continue
                         raw = await _read_response_limited(resp, 2 * 1024 * 1024)
-                except Exception:
+                except Exception as e:
+                    # Each params combo is a guess; failure just means try next.
+                    logger.debug("timedtext fetch failed (%s): %s", params, e)
                     continue
                 text = raw.decode("utf-8", "replace").strip()
                 if not text:
@@ -8504,8 +8520,9 @@ class YouTubeTool(Tool):
                                     lines.append(line)
                         if lines:
                             return "\n".join(lines)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        # Fall through to the regex/plain-text parse below.
+                        logger.debug("json3 transcript parse failed: %s", e)
                 else:
                     text = re.sub(r"<[^>]+>", " ", text)
                     text = re.sub(r"\s+", " ", text).strip()
@@ -8630,7 +8647,9 @@ class YouTubeTool(Tool):
                         "thumbnail attached for visual inspection\n"
                         f"__IMAGE_B64__{encoded}__END_IMAGE_B64__"
                     )
-            except Exception:
+            except Exception as e:
+                # Try the next thumbnail resolution.
+                logger.debug("thumbnail fetch failed: %s", e)
                 continue
         return ""
 
@@ -9024,7 +9043,7 @@ class TtsTool(Tool):
     # quota drain and channel spam. The bot is single-process so a class-level
     # dict is sufficient.
     _COOLDOWN_SECONDS = 15.0
-    _last_tts: dict[str, float] = {}
+    _last_tts: ClassVar[dict[str, float]] = {}
 
     def get_description(self):
         return (
@@ -9361,8 +9380,10 @@ def _is_voice_channel(ch) -> bool:
         stage = getattr(discord, "StageChannel", None)
         if stage is not None and isinstance(ch, stage):
             return True
-    except Exception:
-        pass
+    except Exception as e:
+        # isinstance can fail against stubbed/mocked discord classes; the
+        # type-name check below is the intended fallback.
+        logger.debug("voice channel isinstance check failed: %s", e)
     return type(ch).__name__ in {"VoiceChannel", "StageChannel"}
 
 
@@ -9447,8 +9468,7 @@ class InboxListTool(Tool):
         # item — he asked for the list, so give him the whole thing.
         ordered = store.planner_items(items)
         lines = [f"Inbox ({len(items)} actionable):"]
-        for item in ordered[:20]:
-            lines.append(store.render_item(item, summary_chars=300))
+        lines.extend(store.render_item(item, summary_chars=300) for item in ordered[:20])
         if len(items) > len(ordered):
             lines.append(f"… {len(items) - len(ordered)} more not shown")
         return "\n".join(lines)
@@ -11128,8 +11148,9 @@ async def _chess_record(bot, message, text: str) -> None:
                     "is_tool": True,
                 },
             )
-    except Exception:  # pragma: no cover
-        pass
+    except Exception as e:  # pragma: no cover
+        # Memory write is best-effort; never fail the tool over it.
+        logger.debug("Failed to record tool output in channel memory: %s", e)
 
 
 def _chess_game_result(

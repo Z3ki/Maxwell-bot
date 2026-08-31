@@ -22,7 +22,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 from urllib.parse import urljoin, urlparse
 
 import aiohttp
@@ -537,8 +537,11 @@ async def _await_task_done(task: asyncio.Task) -> None:
     """
     try:
         await task
-    except (asyncio.CancelledError, Exception):
-        pass
+    except (asyncio.CancelledError, Exception) as e:
+        # By design: we only care that the task FINISHED (so it released the
+        # channel lock), never why. The prior task's own handler already
+        # reported any real failure.
+        logger.debug("Awaited prior task finished with %s", type(e).__name__)
 
 
 def _format_context_timestamp(
@@ -1695,8 +1698,9 @@ def strip_tool_payload_leaks(text: str) -> str:
                     env_hits == len(parsed) and len(parsed) <= 6
                 ):
                     cleaned = ""
-        except Exception:
-            pass
+        except Exception as e:
+            # Not JSON after all — leave the text as-is.
+            logger.debug("Envelope strip skipped (unparseable): %s", e)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     # 2026-07-21: the LLM (minimax-m3) sometimes echoes a Discord
     # user-message header into its visible reply, then continues
@@ -2013,9 +2017,13 @@ class TelegramMessageAdapter:
             if file_obj is None:
                 path = getattr(file, "filename", None)
                 if path and Path(str(path)).exists():
-                    with open(path, "rb") as fh:
-                        await self._send_file_bytes(fh.read(), Path(str(path)).name)
-                    return None
+                    # Off-thread read: attachments can be multi-MB, and a
+                    # blocking read here stalls every other coroutine on
+                    # the loop (other chats, heartbeats) until it finishes.
+                    src = Path(str(path))
+                    blob = await asyncio.to_thread(src.read_bytes)
+                    await self._send_file_bytes(blob, src.name)
+                    return
                 raise RuntimeError(
                     "Telegram adapter cannot send file: missing file payload"
                 )
@@ -2029,7 +2037,7 @@ class TelegramMessageAdapter:
             if not filename and hasattr(file_obj, "name"):
                 filename = Path(str(file_obj.name)).name
             await self._send_file_bytes(bytes(blob), filename)
-            return None
+            return
         if content:
             for chunk in _telegram_html_chunks(str(content)):
                 payload = {"chat_id": self.chat_id, "text": chunk, "parse_mode": "HTML"}
@@ -2047,15 +2055,17 @@ class TelegramMessageAdapter:
                         raise RuntimeError(
                             f"Telegram sendMessage failed: {resp.status} - {text[:300]}"
                         )
-        return None
+        return
 
     async def send(self, content: str | None = None, file=None, **kwargs):
         return await self.reply(content=content, file=file, **kwargs)
 
     async def send_voice_file(self, path: str):
-        with open(path, "rb") as fh:
-            await self._send_file_bytes(fh.read(), Path(path).name)
-        return None
+        # Read off-thread; see reply() above.
+        src = Path(path)
+        blob = await asyncio.to_thread(src.read_bytes)
+        await self._send_file_bytes(blob, src.name)
+        return
 
 
 def _looks_like_text(blob: bytes) -> bool:
@@ -2370,7 +2380,12 @@ TOOL_PROTOCOL = (
     "Default: helper tools first (they finish before terminals), then ONE "
     "send_message. Multiple sends + wait are for rare spacing, not ordinary chat. "
     "wait is <=10s; longer pauses use sleep (sleep ends dispatch).\n"
-    "Parallel multi-tool calling: you can call helper tools (like shell) alongside send_message in the same batch turn. When invoking a terminal command or slow operation, you can emit a quick contextual acknowledgement (e.g. `send_message(content='on it...', ...)` or `send_message(content='checking that now...')`) in the same batch so the user gets an instant natural reply while the tool executes.\n"
+    "Parallel multi-tool calling: put the helper tool (shell, create_site, "
+    "web_search…) in the SAME batch as the acknowledgement. A quick "
+    "`send_message(content='on it...')` is fine ONLY when the tool that does "
+    "the work is in that same batch — the ack is not the work. Never send "
+    "'on it' / 'working on it' as the only tool call and plan to act next "
+    "turn: announcing an action is not performing it.\n"
     "Files the user should receive must be attached via send_file or shell `files=`. "
     "A filesystem path is not delivery.\n"
     "create_site: full HTML document in `body`, never pasted into chat. Real "
@@ -2444,6 +2459,45 @@ LEAN_TOOL_PROTOCOL = (
     "The user sees it as the live thinking line."
 )
 
+# An ack-only send_message whose text promises work that has not run yet.
+# Deliberately narrow: it must be SHORT (a real answer is not an ack) and it
+# must read as a promise. A long reply that happens to contain "working on"
+# is a real answer and must stay terminal, or every turn would double-generate.
+_PROMISE_VERB = (
+    r"build|make|create|check|look|get|do|write|set|start|spin|generate|"
+    r"run|fix|add|update|deploy|test|grab|pull|draft|put"
+)
+_PROMISE_RE = re.compile(
+    # Bare acknowledgements.
+    r"\b(?:on it|working on it|checking(?: that)?(?: now)?|let me check|"
+    r"give me a sec|one sec|hold on|two secs|"
+    # "I'll set that up", "gonna spin it up", "let me go build this" — the
+    # intent phrase, then up to two filler words, then a doing-verb.
+    rf"(?:i'?ll|i will|gonna|going to|let me|lemme)\s+(?:\w+\s+){{0,2}}?(?:{_PROMISE_VERB})|"
+    # Present progressive with no result yet.
+    r"(?:building|making|creating|generating|starting|setting|spinning|"
+    r"drafting|putting)\b[^.!?]{0,40}\b(?:it|that|this|now|up)|"
+    r"looking into (?:it|that|this))\b",
+    re.I,
+)
+_PROMISE_MAX_CHARS = 200
+
+
+def _promises_followup_work(result: str) -> bool:
+    """True when a send_message result is a bare "on it…" promise.
+
+    The turn must loop back so the announced work actually happens. Anything
+    long enough to be a substantive reply is treated as a real answer.
+    """
+    idx = result.find("__MESSAGE_SENT__")
+    if idx < 0:
+        return False
+    sent = result[idx + len("__MESSAGE_SENT__") :].strip()
+    if not sent or len(sent) > _PROMISE_MAX_CHARS:
+        return False
+    return bool(_PROMISE_RE.search(sent))
+
+
 def _tool_results_need_followup(tool_results: list[str]) -> bool:
     # First pass: does the batch contain anything that needs a model turn
     # (a follow-up tool result, or an error)? If yes, we ALWAYS loop back,
@@ -2468,11 +2522,39 @@ def _tool_results_need_followup(tool_results: list[str]) -> bool:
     # explicit no_response anyway.
     for result in tool_results:
         if "__MESSAGE_SENT__" in result:
+            # A send_message that only promises future work is NOT terminal.
+            # LEAN/FULL_TOOL_PROTOCOL invites a "on it…" acknowledgement
+            # alongside a slow tool, but the model often emits the ack ALONE
+            # and plans to do the work "next turn". There is no next turn:
+            # send_message is not in RESULT_TOOL_NAMES, so with no other tool
+            # in the batch this returns False, the dispatch loop breaks, and
+            # the promise is all the user ever gets. Loop back once so the
+            # model actually runs the thing it just announced.
+            if _promises_followup_work(result):
+                return True
             return False
         if result.startswith("Tool no_response:") and "__NO_RESPONSE__" in result:
             return False
 
     return False
+
+
+def _only_promise_results(tool_results: list[str]) -> bool:
+    """True when the batch is nothing but ack-only send_message promises.
+
+    Used to bound the extra loop: a batch that also ran a real tool already
+    loops via FOLLOWUP_TOOL_NAMES and must not consume the promise budget.
+    """
+    saw_promise = False
+    for result in tool_results:
+        if "__MESSAGE_SENT__" in result:
+            if not _promises_followup_work(result):
+                return False
+            saw_promise = True
+            continue
+        if result.strip():
+            return False
+    return saw_promise
 
 
 def _should_skip_plaintext_after_send(
@@ -2721,8 +2803,9 @@ class MaxwellBot(commands.Bot):
             # Ensure dir exists
             try:
                 Path(gf_data).mkdir(parents=True, exist_ok=True)
-            except Exception:
-                pass
+            except Exception as e:
+                # validate() below fails loudly if the dir is truly unusable.
+                logger.warning("Could not pre-create %s: %s", gf_data, e)
         self.config.validate()
         # Display name is source of truth - GF account is Uni per Discord, so initial matches that
         self.bot_name = "Uni" if is_gf else "Maxwell"
@@ -2912,6 +2995,10 @@ class MaxwellBot(commands.Bot):
             set()
         )  # "message_id" dedup for REM events
         self._context_tasks: set[asyncio.Task] = set()
+        # Fire-and-forget presence/housekeeping tasks. The loop keeps only a
+        # weak reference to a running task, so anything not held here can be
+        # garbage-collected mid-await and silently never finish.
+        self._detached_tasks: set[asyncio.Task] = set()
         # channel_id -> latest message deferred for context extraction. When the
         # bot is mid-turn (replying / running a tool) in a room we DON'T fire the
         # context watcher immediately — it would contend for AI slots and flood
@@ -3520,8 +3607,8 @@ class MaxwellBot(commands.Bot):
                     data = _json.loads(text)
                     if isinstance(data, dict):
                         return list(data.get("facts", []))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Fact JSON parse failed, trying line split: %s", e)
                 # Sometimes the model returns raw lines, not JSON.
                 lines = [
                     ln.strip().lstrip("-•* ").strip()
@@ -5016,19 +5103,18 @@ class MaxwellBot(commands.Bot):
     async def _save_discord_state(self):
         guilds = []
         for guild in self.guilds:
-            channels = []
-            for channel in getattr(guild, "text_channels", [])[:200]:
-                channels.append(
-                    {
-                        "id": str(channel.id),
-                        "name": channel.name,
-                        "category": getattr(
-                            getattr(channel, "category", None), "name", ""
-                        )
-                        or "",
-                        "position": getattr(channel, "position", 0),
-                    }
-                )
+            channels = [
+                {
+                    "id": str(channel.id),
+                    "name": channel.name,
+                    "category": getattr(
+                        getattr(channel, "category", None), "name", ""
+                    )
+                    or "",
+                    "position": getattr(channel, "position", 0),
+                }
+                for channel in getattr(guild, "text_channels", [])[:200]
+            ]
             guilds.append(
                 {
                     "id": str(guild.id),
@@ -5479,38 +5565,33 @@ class MaxwellBot(commands.Bot):
     @classmethod
     def _message_update_fingerprint(cls, message) -> str:
         """Stable full-state key for cached/raw MESSAGE_UPDATE deduplication."""
-        embeds = []
-        for embed in cls._payload_attr_list(message, "embeds", 8):
-            embeds.append(
-                {
-                    "text": cls._embed_text(embed),
-                    "url": str(getattr(embed, "url", "") or ""),
-                    "media": cls._embed_media_urls(embed),
-                    "type": str(getattr(embed, "type", "") or ""),
-                }
-            )
-        attachments = []
-        for attachment in cls._payload_attr_list(message, "attachments", 8):
-            attachments.append(
-                {
-                    "id": str(getattr(attachment, "id", "") or ""),
-                    "filename": str(getattr(attachment, "filename", "") or ""),
-                    "url": str(getattr(attachment, "url", "") or ""),
-                    "content_type": str(
-                        getattr(attachment, "content_type", "") or ""
-                    ),
-                    "size": str(getattr(attachment, "size", "") or ""),
-                }
-            )
-        stickers = []
-        for sticker in cls._payload_attr_list(message, "stickers", 6):
-            stickers.append(
-                {
-                    "id": str(getattr(sticker, "id", "") or ""),
-                    "name": str(getattr(sticker, "name", "") or ""),
-                    "url": str(getattr(sticker, "url", "") or ""),
-                }
-            )
+        embeds = [
+            {
+                "text": cls._embed_text(embed),
+                "url": str(getattr(embed, "url", "") or ""),
+                "media": cls._embed_media_urls(embed),
+                "type": str(getattr(embed, "type", "") or ""),
+            }
+            for embed in cls._payload_attr_list(message, "embeds", 8)
+        ]
+        attachments = [
+            {
+                "id": str(getattr(attachment, "id", "") or ""),
+                "filename": str(getattr(attachment, "filename", "") or ""),
+                "url": str(getattr(attachment, "url", "") or ""),
+                "content_type": str(getattr(attachment, "content_type", "") or ""),
+                "size": str(getattr(attachment, "size", "") or ""),
+            }
+            for attachment in cls._payload_attr_list(message, "attachments", 8)
+        ]
+        stickers = [
+            {
+                "id": str(getattr(sticker, "id", "") or ""),
+                "name": str(getattr(sticker, "name", "") or ""),
+                "url": str(getattr(sticker, "url", "") or ""),
+            }
+            for sticker in cls._payload_attr_list(message, "stickers", 6)
+        ]
         payload = {
             "content": message_combined_content(message)
             or str(getattr(message, "content", "") or ""),
@@ -5652,13 +5733,13 @@ class MaxwellBot(commands.Bot):
         return media
 
     def _inflight_for_message(self, message_id: str) -> list[dict]:
-        found = []
-        for state in list(
-            (getattr(self, "_inflight_context", None) or {}).values()
-        ):
-            if message_id in set(state.get("message_ids") or set()):
-                found.append(state)
-        return found
+        return [
+            state
+            for state in list(
+                (getattr(self, "_inflight_context", None) or {}).values()
+            )
+            if message_id in set(state.get("message_ids") or set())
+        ]
 
     def _begin_inflight_context(self, message, content: str) -> dict[str, Any]:
         """Register a turn so a late MESSAGE_UPDATE can refresh its context."""
@@ -6490,9 +6571,9 @@ class MaxwellBot(commands.Bot):
             logger.info(
                 "DM call decision caller=%s resp=%r", caller_id, (resp or "")[:40]
             )
-            if text.startswith("DENY") or text.startswith("NO"):
+            if text.startswith(("DENY", "NO")):
                 return False
-            if text.startswith("ANSWER") or text.startswith("YES"):
+            if text.startswith(("ANSWER", "YES")):
                 return True
             return False
         except Exception:
@@ -7118,13 +7199,12 @@ class MaxwellBot(commands.Bot):
                         if not self._blacklist:
                             await message.channel.send("Blacklisted users: none")
                         else:
-                            labels = []
-                            for uid in sorted(self._blacklist):
-                                labels.append(
-                                    await self._user_label(
-                                        uid, guild=getattr(message, "guild", None)
-                                    )
+                            labels = [
+                                await self._user_label(
+                                    uid, guild=getattr(message, "guild", None)
                                 )
+                                for uid in sorted(self._blacklist)
+                            ]
                             await message.channel.send(
                                 "Blacklisted users: " + ", ".join(labels)
                             )
@@ -7513,8 +7593,10 @@ class MaxwellBot(commands.Bot):
         try:
             if hasattr(vc, "is_listening") and vc.is_listening():
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            # voice_recv is optional/monkeypatched; the sink check is the
+            # intended fallback.
+            logger.debug("vc.is_listening() unavailable: %s", e)
         return bool(getattr(vc, "_maxwell_sink", None))
 
     async def _vc_connect_channel(self, channel):
@@ -8053,8 +8135,8 @@ class MaxwellBot(commands.Bot):
                     try:
                         if vc and vc.is_connected() and vc.is_playing():
                             vc.stop()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("VC stop during cancel failed: %s", e)
                     raise
                 except Exception:
                     logger.exception(
@@ -8076,11 +8158,11 @@ class MaxwellBot(commands.Bot):
                 await message.channel.send("No shared context facts.")
                 return
             lines = [title]
-            for e in entries[:20]:
-                lines.append(
-                    f"{e.get('id')} [{e.get('scope')}/{e.get('visibility')}/i{e.get('importance')}] "
-                    f"{e.get('content')}"
-                )
+            lines.extend(
+                f"{e.get('id')} [{e.get('scope')}/{e.get('visibility')}/i{e.get('importance')}] "
+                f"{e.get('content')}"
+                for e in entries[:20]
+            )
             for chunk in self._split_response("\n".join(lines), limit=1900):
                 await message.channel.send(chunk)
 
@@ -8197,18 +8279,19 @@ class MaxwellBot(commands.Bot):
             ref_label = f"{ref.author.display_name}({ref_author_id})"
         return f"\n[Latest message replies to {ref_label}: {ref_content[:500]}]"
 
-    _spotify_seen: dict[str, str] = {}
+    # Intentionally shared across instances: one bot per process, and this
+    # dedupes Spotify links bot-wide rather than per instance.
+    _spotify_seen: ClassVar[dict[str, str]] = {}
     _SPOTIFY_SEEN_MAX = 5000  # cap to prevent unbounded growth
 
     def _get_music_context(self, message) -> str:
-        parts = []
-        for match in re.finditer(
-            r"https?://open\.spotify\.com/(track|album|playlist|artist)/([a-zA-Z0-9]+)",
-            message_combined_content(message) or "",
-        ):
-            parts.append(
-                f"[Spotify {match.group(1)}: open.spotify.com/{match.group(1)}/{match.group(2)}]"
+        parts = [
+            f"[Spotify {match.group(1)}: open.spotify.com/{match.group(1)}/{match.group(2)}]"
+            for match in re.finditer(
+                r"https?://open\.spotify\.com/(track|album|playlist|artist)/([a-zA-Z0-9]+)",
+                message_combined_content(message) or "",
             )
+        ]
         if hasattr(message.author, "activities") and message.author.activities:
             for activity in message.author.activities:
                 if activity.type == discord.ActivityType.listening and hasattr(
@@ -8789,7 +8872,7 @@ class MaxwellBot(commands.Bot):
                 "Channel created in %s: #%s (id=%s, kind=%s)",
                 guild.name, name, getattr(channel, "id", ""), kind,
             )
-        except Exception:
+        except Exception:  # noqa: S110 - the failing statement IS the logger
             pass
         # A soloed server only allows one channel; don't poke a new one there.
         solo = self._solo_channel_for(guild)
@@ -9793,16 +9876,15 @@ class MaxwellBot(commands.Bot):
                 attachment_note = "\nAttachments/media present: " + ", ".join(names)
             embed_note = ""
             if getattr(message, "embeds", None):
-                titles = []
-                for embed in message.embeds[:3]:
-                    titles.append(
-                        str(
-                            getattr(embed, "title", None)
-                            or getattr(embed, "description", None)
-                            or getattr(embed, "url", None)
-                            or "embed"
-                        )[:160]
-                    )
+                titles = [
+                    str(
+                        getattr(embed, "title", None)
+                        or getattr(embed, "description", None)
+                        or getattr(embed, "url", None)
+                        or "embed"
+                    )[:160]
+                    for embed in message.embeds[:3]
+                ]
                 embed_note = "\nEmbeds present: " + "; ".join(titles)
             _sfa = getattr(message, "author", None)
             is_admin = self._is_admin(_sfa.id) if _sfa is not None else False
@@ -9909,7 +9991,7 @@ class MaxwellBot(commands.Bot):
         if not self._control.get("entity_memory_from_extract", True):
             return
         scope = str((entry or {}).get("scope") or "")
-        if not (scope.startswith("user:") or scope.startswith("dm:")):
+        if not scope.startswith(("user:", "dm:")):
             return
         # Secrets and admin-only material are exactly what should not follow
         # someone into another server.
@@ -10290,8 +10372,10 @@ class MaxwellBot(commands.Bot):
                         if datetime.fromisoformat(ts) < cutoff:
                             await self.memory.clear_channel_memory(cid)
                             cleared += 1
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        # Unparseable timestamp or a failed clear for one
+                        # channel must not stop the cleanup sweep.
+                        logger.debug("Cleanup skipped channel %s: %s", cid, e)
             except Exception as e:
                 logger.warning(f"RAG memory cleanup query failed: {e}")
         # Fallback: old-style memory dict (shouldn't exist with RAG but be safe)
@@ -10306,8 +10390,8 @@ class MaxwellBot(commands.Bot):
                     if datetime.fromisoformat(ts) < cutoff:
                         await self.memory.clear_channel_memory(cid)
                         cleared += 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Cleanup skipped channel %s: %s", cid, e)
         # KeyedLocks self-prunes as it grows; this pass additionally drops
         # locks for rooms whose memory we just cleared, keeping anything still
         # held or still live.
@@ -11505,7 +11589,9 @@ class MaxwellBot(commands.Bot):
                      y0 + (cls._GRID_CELL - im.height) // 2),
                     im,
                 )
-            except Exception:
+            except Exception as e:
+                # One undecodable emoji shouldn't blank the whole sheet.
+                logger.debug("Emoji sheet: skipping %s: %s", name, e)
                 continue
             label = name if len(name) <= 12 else name[:11] + "…"
             try:
@@ -12426,7 +12512,15 @@ class MaxwellBot(commands.Bot):
             except Exception as e:  # noqa: BLE001
                 logger.debug("Sleep presence update failed: %s", e)
 
-        loop.create_task(_run())
+        # Hold a strong reference until the task finishes. asyncio keeps only
+        # a weak reference to running tasks, so dropping this one on the floor
+        # lets the GC collect it mid-await and the presence update never lands.
+        # getattr/isinstance because tests bind this method onto a stub object.
+        tasks = getattr(self, "_detached_tasks", None)
+        task = loop.create_task(_run())
+        if isinstance(tasks, set):
+            tasks.add(task)
+            task.add_done_callback(tasks.discard)
 
     async def _apply_sleep_presence(self, *, asleep: bool) -> None:
         """Idle overlay while sleeping; restore _current_status on wake.
@@ -12775,8 +12869,9 @@ class MaxwellBot(commands.Bot):
                             _IMG_RE = re.compile(
                                 r"__IMAGE_B64__([A-Za-z0-9+/=\s]+)__END_IMAGE_B64__"
                             )
-                            for m in _IMG_RE.finditer(yt_result):
-                                pre_images.append(m.group(1).strip())
+                            pre_images.extend(
+                                m.group(1).strip() for m in _IMG_RE.finditer(yt_result)
+                            )
 
             # Auto web_search for queries about new/recent AI models, releases, current events.
             # This is code logic (not a prompt rule) to ensure the bot looks up the most
@@ -13153,6 +13248,7 @@ class MaxwellBot(commands.Bot):
             # — see PM2 out.log 01:25:17→28 for the canonical reproduction.
             followup_turn_ran = False
             tools_expanded = False
+            promise_followups = 0
             tool_results: list[str] = []
             for _iteration in range(max_iters):
                 if time.monotonic() > tool_deadline:
@@ -13197,6 +13293,16 @@ class MaxwellBot(commands.Bot):
                     break
                 if not _tool_results_need_followup(tool_results):
                     break
+                # An ack-only turn ("on it…") loops back exactly once, so the
+                # promised work runs. Without this guard a model that keeps
+                # acknowledging would ping-pong until max_iters.
+                if _only_promise_results(tool_results):
+                    if promise_followups >= 1:
+                        logger.info(
+                            "ack-only send_message repeated; not looping again"
+                        )
+                        break
+                    promise_followups += 1
                 # Native path: append assistant tool_calls + role=tool messages.
                 # XML path: append freeform assistant text + synthetic user results.
                 if native_followup:
@@ -15285,8 +15391,9 @@ class MaxwellBot(commands.Bot):
                     mn = str(ment.get("name") or "")
                     if mid:
                         conv_users[mid] = mn
-        except Exception:
-            pass
+        except Exception as e:
+            # Name hints are a nicety; the prompt still works without them.
+            logger.debug("Could not collect conversation user names: %s", e)
 
         # Persona-aware base: Maxwell vs Luna (mommy GF)
         base_knowledge = getattr(self, "_base_knowledge", MAXWELL_BASE_KNOWLEDGE)
@@ -16261,9 +16368,10 @@ class MaxwellBot(commands.Bot):
             site = web.TCPSite(runner, "0.0.0.0", port)
             await site.start()
             logger.info("Telegram webhook server listening on port %d", port)
-            # Keep running until cancelled
-            while True:
-                await asyncio.sleep(3600)
+            # Park until cancelled. An Event that is never set sleeps with no
+            # timer churn, instead of waking the loop once an hour to do
+            # nothing (and delaying shutdown to the next tick).
+            await asyncio.Event().wait()
         except asyncio.CancelledError as _exc:
             logger.info("Telegram webhook server shutting down")
         except Exception as e:
@@ -16280,8 +16388,9 @@ class MaxwellBot(commands.Bot):
                     logger.info(
                         "Telegram webhook unregistered (status=%d)", resp.status
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                # Shutdown path: a stale webhook self-corrects on next start.
+                logger.warning("Failed to unregister Telegram webhook: %s", e)
             with contextlib.suppress(Exception):
                 await runner.cleanup()
 
@@ -16951,6 +17060,7 @@ class MaxwellBot(commands.Bot):
         pending_native = tg_native_calls
         conversation_tail: list[dict] = []
         followup_turn_ran = False
+        promise_followups = 0
         tool_results: list[str] = []
         for _iteration in range(max_iters):
             response_text, tool_results = await self._dispatch_tool_calls(
@@ -16967,6 +17077,12 @@ class MaxwellBot(commands.Bot):
                 break
             if not _tool_results_need_followup(tool_results):
                 break
+            # See the Discord loop: an ack-only turn loops back exactly once.
+            if _only_promise_results(tool_results):
+                if promise_followups >= 1:
+                    logger.info("ack-only send_message repeated; not looping again")
+                    break
+                promise_followups += 1
             result_messages = [dict(m) for m in messages]
             for msg_item in result_messages:
                 if msg_item.get("role") == "user" and isinstance(
@@ -17131,8 +17247,8 @@ async def main():
             try:
                 if hasattr(sink, "cleanup"):
                     await sink.cleanup()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("VC sink cleanup failed on shutdown: %s", e)
         getattr(bot, "_vc_sinks", {}).clear()
         try:
             await bot.memory.flush()

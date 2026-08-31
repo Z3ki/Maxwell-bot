@@ -496,8 +496,7 @@ def render_tweets(tweets: list[Tweet], *, header: str = "", max_text: int = TWEE
         ]
         if stats:
             lines.append("    " + " · ".join(stats))
-        for url in tweet.media[:4]:
-            lines.append(f"    media: {url}")
+        lines.extend(f"    media: {url}" for url in tweet.media[:4])
         if tweet.url:
             lines.append(f"    {tweet.url}  (id={tweet.id})")
     return "\n".join(lines)
@@ -1128,7 +1127,7 @@ def parse_rss(body: str, *, source: str = "rss", limit: int = 20) -> list[Tweet]
                 author=handle,
                 created_at=_iso(text_of("pubDate", f"{atom}published", f"{atom}updated")),
                 media=[m for m in media[:4] if not m.endswith(".svg")],
-                is_repost=clean.startswith("RT by") or clean.startswith("RT @"),
+                is_repost=clean.startswith(("RT by", "RT @")),
                 source=source,
             )
         )

@@ -849,7 +849,7 @@ def test_exec_complete_goal_marks_inactive(tmp_path):
     result, goals, gid = asyncio.run(run())
     assert result["result"] == "success"
     assert result["goal_id"] == gid
-    target = [g for g in goals if g["id"] == gid][0]
+    target = next(g for g in goals if g["id"] == gid)
     assert target["active"] is False
     assert target.get("completed_at")
     assert target.get("last_progress_at")  # retiring also stamps progress

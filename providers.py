@@ -840,9 +840,11 @@ async def _read_sse_response(
                                     "tool_name": None,
                                 }
                             )
-                        except Exception:
-                            pass
-                if "tool_calls" in delta and delta["tool_calls"]:
+                        except Exception as e:
+                            # Same as above: never break the stream for a
+                            # progress-callback error.
+                            logger.debug("on_token callback failed: %s", e)
+                if delta.get("tool_calls"):
                     for tc_delta in delta["tool_calls"]:
                         tc_idx = tc_delta.get("index", 0)
                         slot = tool_calls_by_index.get(tc_idx)
@@ -896,8 +898,10 @@ async def _read_sse_response(
                                             "tool_name": slot["function"]["name"],
                                         }
                                     )
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    # A broken UI callback must never kill the
+                                    # token stream mid-generation.
+                                    logger.debug("on_token callback failed: %s", e)
                         if fn.get("arguments"):
                             _append_tool_call_arguments(slot, fn["arguments"])
                             # Surface the model's reasoning mid-stream so the
@@ -1596,11 +1600,11 @@ class OllamaProvider:
         self,
         endpoint: ProviderEndpoint,
         chat_messages: list[dict],
-        tools: list[dict] = None,
-        model: str = None,
-        max_tokens: int = None,
-        temperature: float = None,
-        disable_reasoning: bool = None,
+        tools: list[dict] | None = None,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        disable_reasoning: bool | None = None,
     ) -> dict:
         # Model override is honored ONLY on the primary endpoint. Fallback
         # endpoints keep their configured model because the fallback is
@@ -1715,8 +1719,8 @@ class OllamaProvider:
     async def generate_response(
         self,
         messages: list[dict],
-        images: list[str] = None,
-        media: list[dict] = None,
+        images: list[str] | None = None,
+        media: list[dict] | None = None,
         timeout: int = 3600,
         on_tool_call_name=None,
         on_token=None,
@@ -1811,14 +1815,14 @@ class OllamaProvider:
     async def generate_chat_completion(
         self,
         messages: list[dict],
-        images: list[str] = None,
-        media: list[dict] = None,
-        tools: list[dict] = None,
-        model: str = None,
+        images: list[str] | None = None,
+        media: list[dict] | None = None,
+        tools: list[dict] | None = None,
+        model: str | None = None,
         timeout: int = 3600,
-        max_tokens: int = None,
-        temperature: float = None,
-        disable_reasoning: bool = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        disable_reasoning: bool | None = None,
         fast_fallback: bool = False,
         on_tool_call_name=None,
         on_token=None,
@@ -1843,18 +1847,22 @@ class OllamaProvider:
         if media:
             all_media.extend(media)
         if images:
-            for img_b64 in images:
-                all_media.append({"b64": img_b64, "mime_type": "image/png"})
+            all_media.extend(
+                {"b64": img_b64, "mime_type": "image/png"} for img_b64 in images
+            )
 
-        payload_media = []
-        for m in all_media:
-            mime = str(m.get("mime_type", ""))
-            if not m.get("b64"):
-                continue
-            if mime.startswith(("image/", "video/")) or (
-                mime.startswith("audio/") and getattr(self, "enable_audio_input", False)
-            ):
-                payload_media.append(m)
+        payload_media: list[dict] = [
+            m
+            for m in all_media
+            if m.get("b64")
+            and (
+                str(m.get("mime_type", "")).startswith(("image/", "video/"))
+                or (
+                    str(m.get("mime_type", "")).startswith("audio/")
+                    and getattr(self, "enable_audio_input", False)
+                )
+            )
+        ]
 
         if payload_media:
             target = None
@@ -2658,7 +2666,7 @@ class OllamaProvider:
         endpoint: ProviderEndpoint,
         reason: str,
         *,
-        max_attempts: int = None,
+        max_attempts: int | None = None,
         fast_fallback: bool = False,
         has_media: bool = False,
         prefer_fallback: bool = False,

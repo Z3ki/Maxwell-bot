@@ -206,7 +206,7 @@ def allocate(
     ceilings = {
         name: max(0, _coerce_int((caps or {}).get(name), 0)) for name in TIER_ORDER
     }
-    shares: dict[str, int] = {name: 0 for name in TIER_ORDER}
+    shares: dict[str, int] = dict.fromkeys(TIER_ORDER, 0)
     unsettled = [name for name in TIER_ORDER if w.get(name, 0) > 0]
     pool = total
 

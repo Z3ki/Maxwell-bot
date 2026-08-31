@@ -204,7 +204,7 @@ def test_embed_pending_all_terminates_when_embedding_always_fails(
         calls["n"] += 1
         if calls["n"] > 200:
             raise _Runaway("infinite loop: _embed_pending_all never terminated")
-        return None
+        return
 
     monkeypatch.setattr(RAGMemoryManager, "_embed", _embed_fail)
 

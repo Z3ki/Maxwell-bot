@@ -196,7 +196,7 @@ def _build_test_bot(tools_dict):
     bot._trace_lock = asyncio.Lock()
     bot._record_llm_trace = lambda *a, **k: asyncio.sleep(0)
     bot._native_calls_from = lambda r: []
-    bot._consume_native_tool_calls = lambda: []
+    bot._consume_native_tool_calls = list
     bot._usage_from = lambda r: {}
     bot._signal_streaming = lambda *a, **k: None
     bot._tool_results_need_followup = lambda results: False

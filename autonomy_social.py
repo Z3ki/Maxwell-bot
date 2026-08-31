@@ -495,8 +495,10 @@ def render_floor_section(verdicts: Sequence[FloorVerdict]) -> str:
     ]
     if open_v:
         lines.append("YOUR TURN — you may speak in these:")
-        for v in open_v:
-            lines.append(f"- {v.label or v.channel_id} [{v.state}] {v.hint} ({v.reason})")
+        lines.extend(
+            f"- {v.label or v.channel_id} [{v.state}] {v.hint} ({v.reason})"
+            for v in open_v
+        )
     else:
         lines.append(
             "YOUR TURN — none right now. Say nothing anywhere this tick; "
@@ -504,8 +506,9 @@ def render_floor_section(verdicts: Sequence[FloorVerdict]) -> str:
         )
     if closed_v:
         lines.append("NOT YOUR TURN — no messages here:")
-        for v in closed_v[:12]:
-            lines.append(f"- {v.label or v.channel_id} [{v.state}] {v.hint}")
+        lines.extend(
+            f"- {v.label or v.channel_id} [{v.state}] {v.hint}" for v in closed_v[:12]
+        )
     return "\n".join(lines)
 
 

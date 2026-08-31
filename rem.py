@@ -261,7 +261,9 @@ async def _apply_audit_actions(raw_audit: str, memory_manager) -> tuple[dict, st
         try:
             await memory_manager.add_long_term_memory(fact)
             counts["ltm_added"] += 1
-        except Exception:
+        except Exception as e:
+            # One rejected fact must not abort the rest of the REM batch.
+            logger.warning("REM ltm_add failed for %r: %s", fact[:80], e)
             continue
 
     for shared in actions.get("shared_add") or []:
@@ -288,7 +290,8 @@ async def _apply_audit_actions(raw_audit: str, memory_manager) -> tuple[dict, st
         try:
             await memory_manager.add_shared_context(entry)
             counts["shared_added"] += 1
-        except Exception:
+        except Exception as e:
+            logger.warning("REM shared_add failed for %r: %s", content[:80], e)
             continue
 
     summary = (
@@ -419,5 +422,7 @@ async def run_rem_once(
             await store.patch_state({"running": False, "running_since": ""})
         except asyncio.CancelledError:
             raise
-        except Exception:
-            pass
+        except Exception as e:
+            # A stuck running=true blocks every future REM run, so this is
+            # worth a warning even though we cannot do anything about it here.
+            logger.warning("Failed to clear REM running flag: %s", e)

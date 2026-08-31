@@ -433,7 +433,10 @@ def _sanitize_context_entries(data):
                     _exp_dt = _exp_dt.replace(tzinfo=_tz.utc)
                 if _exp_dt.timestamp() <= now:
                     continue
-            except Exception:
+            except Exception:  # noqa: S110 - deliberate, see comment
+                # Unparseable expires_at: keep the entry rather than dropping
+                # a fact over a bad timestamp. No module logger here by
+                # design — api.state stays import-light.
                 pass
         try:
             importance = int(raw.get("importance", 5))

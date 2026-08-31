@@ -169,9 +169,11 @@ def _parse_fetch_response(response: Any) -> tuple[bytes, bytes]:
     literals: list[bytes] = []
     for part in response or []:
         if isinstance(part, tuple):
-            for entry in part[1:]:
-                if isinstance(entry, bytes) and entry.strip():
-                    literals.append(entry)
+            literals.extend(
+                entry
+                for entry in part[1:]
+                if isinstance(entry, bytes) and entry.strip()
+            )
     header = literals[0] if literals else b""
     body = literals[1] if len(literals) > 1 else b""
     return header, body
@@ -221,7 +223,9 @@ def _fetch_new_sync(
             parser = BytesParser(policy=policy.default)
             try:
                 headers = parser.parsebytes(header_bytes)
-            except Exception:
+            except Exception as e:
+                # Malformed MIME header: skip this one, keep polling the rest.
+                logger.warning("Mail poll: unparseable headers for uid %s: %s", uid, e)
                 continue
             subject = _clean(_decode_header(headers.get("Subject")), SUBJECT_CHARS)
             from_raw = _decode_header(headers.get("From"))

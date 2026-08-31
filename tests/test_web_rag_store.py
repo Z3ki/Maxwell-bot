@@ -89,7 +89,7 @@ def _stub_embed(monkeypatch):
             # L2-normalize basis vectors so token counts don't dominate.
             basis[tok] /= np.linalg.norm(basis[tok]) + 1e-8
         vec = np.zeros(EMBED_DIM, dtype=np.float32)
-        for _tok, b in basis.items():
+        for b in basis.values():
             vec += b
         n = np.linalg.norm(vec)
         if n > 1e-8:

@@ -26,6 +26,7 @@ import shutil
 import sys
 from importlib.util import find_spec
 from pathlib import Path
+from typing import ClassVar
 
 from dotenv.main import load_dotenv
 
@@ -568,7 +569,7 @@ class Config:
     # reload but the initial parse lives here.
     MAXWELL_ADMIN_USER = os.getenv("MAXWELL_ADMIN_USER", "admin").strip()
     MAXWELL_ADMIN_PASSWORD = os.getenv("MAXWELL_ADMIN_PASSWORD", "").strip()
-    MAXWELL_OWNER_IDS = {
+    MAXWELL_OWNER_IDS: ClassVar[set[str]] = {
         item.strip()
         for item in os.getenv("MAXWELL_OWNER_IDS", "").split(",")
         if item.strip()

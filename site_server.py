@@ -557,7 +557,7 @@ def merge_code(data_dir, slug: str, files: dict[str, str]) -> list[str]:
     if "app.py" not in checked and not (target / "app.py").is_file():
         raise SiteServerError("the entry file must be called app.py")
 
-    existing = {rel: size for rel, size in list_code(data_dir, slug)}
+    existing = dict(list_code(data_dir, slug))
     kept = {rel: size for rel, size in existing.items() if rel not in checked}
     if len(kept) + len(checked) > MAX_FILES:
         raise SiteServerError(f"too many server files (max {MAX_FILES})")

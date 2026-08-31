@@ -343,8 +343,9 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
     if poll is not None:
         try:
             parts.append(_poll_text(poll))
-        except Exception:
-            pass
+        except Exception as e:
+            # A malformed poll must not cost us the rest of the annotation.
+            logger.debug("Poll annotation failed: %s", e)
 
     # Stickers carry no content and are not attachments, so without this a
     # sticker-only message renders as an empty string and the model never
@@ -358,15 +359,16 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
                 nm = str(getattr(st, "name", "") or "").strip()
                 if nm:
                     names.append(nm)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Sticker name unreadable: %s", e)
         if names:
             parts.append("[sticker: " + ", ".join(names) + "]")
 
     for att in list(getattr(message, "attachments", None) or [])[:5]:
         try:
             parts.append(_attachment_annotation(att))
-        except Exception:
+        except Exception as e:
+            logger.debug("Attachment annotation failed: %s", e)
             continue
 
     parts.extend(_component_annotations(message))
@@ -382,8 +384,8 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
                 parts.append(f"[app command: /{name}]")
             else:
                 parts.append(f"[app interaction: {itype}]")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Interaction annotation failed: %s", e)
 
     mtype = getattr(message, "type", None)
     if mtype is not None:
@@ -421,7 +423,8 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
                     fn = str(getattr(f, "name", "") or "")
                     fv = str(getattr(f, "value", "") or "")[:160]
                     fields.append(f"{fn}: {fv}")
-                except Exception:
+                except Exception as e:
+                    logger.debug("Embed field unreadable: %s", e)
                     continue
             img = getattr(e, "image", None)
             thumb = getattr(e, "thumbnail", None)
@@ -451,7 +454,8 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
             if img_url or thumb_url:
                 line += f" | image: {img_url or thumb_url}"
             parts.append(line + "]")
-        except Exception:
+        except Exception as e:
+            logger.debug("Embed annotation failed: %s", e)
             continue
 
     # Direct media URLs inside the message text (imgur/discord CDN/mp4 etc.)

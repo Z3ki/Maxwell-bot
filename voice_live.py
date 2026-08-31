@@ -336,8 +336,9 @@ class LiveSpeechSink(voice_recv.AudioSink):
                 for f in temp_dir.glob(f"{prefix}*.wav"):
                     if now - f.stat().st_mtime > 60:
                         f.unlink(missing_ok=True)
-        except Exception:
-            pass
+        except Exception as e:
+            # Leftover temp WAVs are harmless; the next disconnect retries.
+            logger.debug("VC temp WAV cleanup failed: %s", e)
 
     @staticmethod
     def _rms16le(buf: bytes) -> float:

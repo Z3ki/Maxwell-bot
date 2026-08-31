@@ -90,7 +90,8 @@ def _load_font(size: int) -> object:
         if os.path.exists(path):
             try:
                 return ImageFont.truetype(path, size)
-            except Exception:
+            except Exception as e:
+                logger.debug("Font %s unusable: %s", path, e)
                 continue
     return ImageFont.load_default()
 
@@ -150,8 +151,9 @@ def render_board_png(board: chess.Board, perspective: str = "white") -> bytes:
                     [x, y, x + _SQUARE, y + _SQUARE],
                     fill=_LAST_MOVE,
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            # Cosmetic highlight only — still render the board.
+            logger.debug("Could not highlight last move: %s", e)
 
     # King in check.
     if board.is_check():
@@ -479,7 +481,9 @@ def _weighted_choice(pool: list, weights: list[float]):
     total = sum(weights) or 1.0
     r = random.uniform(0.0, total)
     acc = 0.0
-    for (item, weight) in zip(pool, weights):
+    # strict=True: a weights list shorter than the pool would silently drop
+    # candidate moves instead of failing, which is invisible in a game log.
+    for item, weight in zip(pool, weights, strict=True):
         acc += weight
         if r <= acc:
             return item
@@ -560,7 +564,9 @@ def _opening_move(board: chess.Board) -> chess.Move | None:
     for san in candidates:
         try:
             move = board.parse_san(san)
-        except Exception:
+        except Exception as e:
+            # Book entry that doesn't apply to this position.
+            logger.debug("Book move %s unparseable here: %s", san, e)
             continue
         if move in board.legal_moves:
             legal.append(move)
@@ -709,6 +715,7 @@ class ChessGame:
         try:
             uci = chess.Move.from_uci(text)
         except Exception:
+            # Not UCI — the SAN parse below is the normal path.
             uci = None
         if uci is not None:
             if uci in self.board.legal_moves:
@@ -716,8 +723,9 @@ class ChessGame:
             raise ValueError(f"{text} is not a legal move right now")
         try:
             return self.board.parse_san(text)
-        except Exception:
-            pass
+        except Exception as e:
+            # Fall through to the sloppy-SAN retry below.
+            logger.debug("SAN parse failed for %r: %s", text, e)
         # Uppercase the rank/file pairs to help sloppy SAN.
         upper = text.upper()
         try:

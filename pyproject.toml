@@ -1,0 +1,80 @@
+# Tooling config only. Deliberately no [build-system]: this repo is run from a
+# checkout (setup.sh + requirements.txt), not pip-installed, and declaring a
+# build backend here would change how `pip install .` treats the tree.
+
+[tool.ruff]
+# 88 to match how the tree is already formatted. Raising this would reflow
+# every long call site in bot.py/bot_tools.py and bury real changes in
+# cosmetic churn.
+line-length = 88
+target-version = "py311"
+extend-exclude = [
+    "bot.py.bak",
+    ".pi-lens",
+    ".pi-subagents",
+    "shelldocker",
+    "temp",
+    "data",
+    "data_gf",
+]
+
+[tool.ruff.lint]
+# Curated for signal over volume. The full E/W/S/TRY/ARG/PTH set reports >5k
+# findings on this tree, ~4k of which are `assert` in tests and long lines —
+# neither is a defect here. What stays selected is the set where a hit usually
+# means a real bug: undefined names, bugbear traps, async footguns, mutable
+# shared state, and silently-wrong comprehensions.
+select = [
+    "F",        # pyflakes: undefined/unused names, bad f-strings
+    "B",        # bugbear: mutable defaults, shadowed loop vars, etc.
+    "C4",       # comprehension correctness/efficiency
+    "ASYNC110", # busy-wait instead of an Event
+    "ASYNC230", # blocking open() inside async def
+    "PERF102",  # iterating .items() when only values are used
+    "PERF401",  # manual list building instead of a comprehension
+    "PIE807",   # lambda: [] instead of list
+    "PIE810",   # repeated startswith/endswith calls
+    "RET501",   # explicit `return None` when None is the only return
+    "RUF006",   # dangling asyncio task (can be GC'd mid-flight)
+    "RUF012",   # mutable class default shared across instances
+    "RUF013",   # implicit Optional in a signature
+    "RUF015",   # allocating a whole list to grab the first element
+    "RUF019",   # redundant key check before dict access
+    "SIM115",   # open() without a context manager (fd leak)
+    "TRY004",   # wrong exception type for a type check
+    "TRY203",   # except that immediately re-raises
+]
+ignore = [
+    # os.path / pathlib calls inside async def. Stat-level calls on local disk
+    # are microseconds and wrapping every one in a thread would cost more than
+    # it saves. Genuinely blocking work (reads, writes) is covered by ASYNC230.
+    "ASYNC240",
+    # try/except inside a loop. Flagged 15 times, and in each the try is there
+    # to keep one bad item from killing the batch — that is the intended shape.
+    "PERF203",
+    # zip() strict=: correct default is version-dependent behaviour change, so
+    # it is opted into per call site rather than enforced tree-wide.
+    "B905",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert freely and build throwaway fixture classes with mutable
+# attributes; neither is a defect in a test.
+"tests/**" = ["RUF012", "RUF015", "SIM115", "F811"]
+# Deliberate re-exports so callers can import from one place.
+"tools.py" = ["F401"]
+
+[tool.ruff.lint.flake8-bugbear]
+# discord.py and aiohttp decorators legitimately take call-expression defaults.
+extend-immutable-calls = ["discord.app_commands.describe"]
+
+[tool.mypy]
+python_version = "3.11"
+# The tree is large and largely unannotated; a strict gate would produce
+# thousands of errors and get ignored. This checks what is annotated and stays
+# quiet about what is not, so new annotations are actually worth adding.
+ignore_missing_imports = true
+warn_redundant_casts = true
+warn_unused_ignores = false
+check_untyped_defs = false
+exclude = "(bot\\.py\\.bak|shelldocker|\\.pi-lens|\\.pi-subagents|temp)"

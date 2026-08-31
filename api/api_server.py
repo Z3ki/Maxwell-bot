@@ -393,8 +393,9 @@ async def context_get(request):
             meta = json.loads(row["metadata"] or "{}")
             if isinstance(meta, dict):
                 entry.update(meta)
-        except Exception:
-            pass
+        except Exception as e:
+            # Corrupt metadata JSON: serve the row without its extras.
+            logger.debug("Bad metadata JSON on row %s: %s", row["id"], e)
         entries.append(entry)
     return _json_response(entries)
 
@@ -1228,8 +1229,9 @@ async def llm_traces(request):
     try:
         q = int(request.query.get("limit", limit))
         limit = max(1, min(q, 1000))
-    except Exception:
-        pass
+    except Exception as e:
+        # Non-numeric ?limit — fall back to the configured default.
+        logger.debug("Ignoring bad ?limit on /llm_traces: %s", e)
     return _json_response(traces[-limit:])
 
 
@@ -1273,10 +1275,9 @@ async def _queue_command(cmd_type: str, extra: dict | None = None):
     # Use cross-process FileLock in addition to in-process _file_lock for
     # better protection against bot reader/writer races on bot_commands.json.
     def _do_append():
-        try:
-            cmds = _load_commands_for_write()
-        except ValueError:
-            raise
+        # _load_commands_for_write raises ValueError on a corrupt file and the
+        # caller turns that into a 500; no local handling needed.
+        cmds = _load_commands_for_write()
         cmd_id = str(_uuid.uuid4())[:8]
         entry = {
             "id": cmd_id,
@@ -1881,8 +1882,9 @@ async def pm2_logs(request):
                 try:
                     proc.kill()
                     await proc.wait()
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Usually means the process already exited.
+                    logger.debug("pm2 subprocess cleanup: %s", e)
         # Strip ANSI escape sequences for clean HTML display
         text = re.sub(r"\x1b\[[0-9;]*m", "", text)
         # Drop PM2 headers and log file labels
@@ -1937,8 +1939,9 @@ async def pm2_restart(request):
                 try:
                     proc.kill()
                     await proc.wait()
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Usually means the process already exited.
+                    logger.debug("pm2 subprocess cleanup: %s", e)
     except Exception:
         return _json_response({"error": "internal error"}, 500)
 
@@ -1992,8 +1995,9 @@ async def chat_history(request):
             meta = json.loads(row["metadata"] or "{}")
             if isinstance(meta, dict):
                 entry.update(meta)
-        except Exception:
-            pass
+        except Exception as e:
+            # Corrupt metadata JSON: serve the row without its extras.
+            logger.debug("Bad metadata JSON on row %s: %s", row["id"], e)
         msgs.append(entry)
     return _json_response(msgs)
 
@@ -2306,14 +2310,16 @@ async def system_stats(request):
         usage = shutil.disk_usage("/")
         disk_total = usage.total
         disk_used = usage.used
-    except Exception:
+    except Exception as e:
+        logger.debug("Could not read disk usage: %s", e)
         disk_total, disk_used = 0, 0
     uptime_seconds = 0
     try:
         uptime_text = Path("/proc/uptime").read_text(encoding="utf-8").strip()
         uptime_seconds = float(uptime_text.split()[0])
-    except Exception:
-        pass
+    except Exception as e:
+        # Non-Linux or restricted /proc: the dashboard shows 0 uptime.
+        logger.debug("Could not read /proc/uptime: %s", e)
     return _json_response(
         {
             "load": loadavg,

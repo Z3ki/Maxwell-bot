@@ -24,7 +24,9 @@ try:
     from dotenv import load_dotenv as _load_dotenv
 
     _load_dotenv(ENV_FILE, override=True)
-except Exception:
+except Exception:  # noqa: S110 - import-time, before logging exists
+    # python-dotenv is optional and this runs at import time, before any
+    # logging config. A missing .env surfaces as a config error downstream.
     pass
 
 
@@ -112,7 +114,12 @@ def _load_for_write(path, expected_type, default):
     except (json.JSONDecodeError, OSError, ValueError) as exc:
         raise ValueError(f"refusing to overwrite corrupt {path.name}: {exc}") from exc
     if not isinstance(data, expected_type):
-        raise ValueError(f"refusing to overwrite malformed {path.name}")
+        # ValueError, not TypeError: every caller catches ValueError to turn a
+        # bad on-disk file into a 4xx/5xx, and the corrupt-JSON branch above
+        # raises the same type. A TypeError here would escape as a 500.
+        raise ValueError(  # noqa: TRY004 - callers switch on ValueError
+            f"refusing to overwrite malformed {path.name}"
+        )
     return data
 
 

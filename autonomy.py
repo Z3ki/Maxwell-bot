@@ -50,7 +50,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import discord
 
@@ -367,7 +367,11 @@ class AutonomyContextIndex:
     KIND_GROUP = "group"
     KIND_UNKNOWN = "unknown"
 
-    _PREFIX = {KIND_DM: "D", KIND_GROUP: "G", KIND_UNKNOWN: "X"}
+    _PREFIX: ClassVar[dict[str, str]] = {
+        KIND_DM: "D",
+        KIND_GROUP: "G",
+        KIND_UNKNOWN: "X",
+    }
 
     def __init__(self):
         self.channel_by_idx: dict[int, str] = {}
@@ -1073,15 +1077,18 @@ class AutonomyEngine:
                                 last_msg_ago = f"{age_s // 3600}h ago"
                             else:
                                 last_msg_ago = f"{age_s // 86400}d ago"
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        # Recency is a hint; render the channel without it.
+                        logger.debug("Could not read last-message age: %s", e)
                     tag_str = f" [{', '.join(tags)}]" if tags else ""
                     topic_str = f' — "{topic_snippet}"' if topic_snippet else ""
                     recency_str = f" (last msg: {last_msg_ago})" if last_msg_ago else ""
                     ch_map_lines.append(
                         f"  {idx}: #{ch.name}{tag_str}{recency_str}{topic_str}"
                     )
-                except Exception:
+                except Exception as e:
+                    # One bad channel must not blank the whole channel map.
+                    logger.debug("Skipping channel in map: %s", e)
                     continue
         return ch_map_lines
 
@@ -1184,8 +1191,7 @@ class AutonomyEngine:
             messages: list = []
 
             async def _pull():
-                async for m in ch.history(limit=limit):
-                    messages.append(m)
+                messages.extend([m async for m in ch.history(limit=limit)])
 
             await asyncio.wait_for(_pull(), timeout=30)
             return cid, ch, messages
@@ -1234,8 +1240,10 @@ class AutonomyEngine:
                     pinned = str(solo.get(str(g.id)) or "")
                     if pinned and pinned != cid:
                         return False
-        except Exception:
-            pass
+        except Exception as e:
+            # Fail OPEN deliberately: a malformed control file should not
+            # silently mute autonomy everywhere. Log it so it's visible.
+            logger.warning("Channel-allowed check failed, allowing: %s", e)
         return True
 
     def _guild_allowed(self, guild_id: str | None) -> bool:
@@ -1889,7 +1897,8 @@ class AutonomyEngine:
                     room_blocks.append("\n".join(room_lines))
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 continue
-            except Exception:
+            except Exception as e:
+                logger.debug("Skipping room while building context: %s", e)
                 continue
         watch_notes = []
         watch_check = getattr(self.bot, "_conversation_watch_active", None)
@@ -2034,8 +2043,9 @@ class AutonomyEngine:
                     _action_feedback_line(e, now=action_now) for e in recent
                 ]
                 action_feedback.append("\n".join(action_lines))
-        except Exception:
-            pass
+        except Exception as e:
+            # Feedback section is optional; the tick still runs without it.
+            logger.debug("Could not build action feedback: %s", e)
 
         # Include validation failures from last tick so LLM learns
         if self._last_validation_failures:
@@ -2071,8 +2081,8 @@ class AutonomyEngine:
                 if self._should_reflect(reflect_state):
                     self._reflect_pending_persist = True
                     sections.append(self._render_reflection_section())
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Reflection nudge skipped: %s", e)
 
         # 7. DM + group DM history
         dm_blocks = []
@@ -2163,7 +2173,8 @@ class AutonomyEngine:
                     dm_blocks.append("\n".join(lines))
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 continue
-            except Exception:
+            except Exception as e:
+                logger.debug("Skipping DM while building context: %s", e)
                 continue
         if dm_blocks:
             sections.append(
@@ -2240,8 +2251,8 @@ class AutonomyEngine:
                         CTX_BUDGET_SHARED,
                     )
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Shared-context section omitted from tick: %s", e)
 
         # Fill the reserved CONVERSATION FLOOR slot now that every room has
         # been read. Channels that were fetched but produced no snapshot still
@@ -2400,9 +2411,7 @@ class AutonomyEngine:
                 if msg is None:
                     continue
 
-                reactions = []
-                for r in msg.reactions:
-                    reactions.append(f"{r.emoji} ({r.count})")
+                reactions = [f"{r.emoji} ({r.count})" for r in msg.reactions]
 
                 # Check for replies (messages that reference this post)
                 reply_snippets = []
@@ -2454,7 +2463,8 @@ class AutonomyEngine:
                     )
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 continue
-            except Exception:
+            except Exception as e:
+                logger.debug("Skipping engagement row: %s", e)
                 continue
 
         return "\n".join(engagement_lines) if engagement_lines else ""
