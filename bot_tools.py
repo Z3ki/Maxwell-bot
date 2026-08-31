@@ -4760,15 +4760,12 @@ class CreateSiteTool(Tool):
             "Ship it finished — real content, working controls, no placeholders. "
             "Params: name, title, body (complete HTML for index.html), "
             'files (extra files {"path":"content"}), '
-            "backend (true for same-origin persistence), encoding, permanent. "
-            "CRITICAL: if user asks for neural network / AI / learning / evolution / "
-            "training / realtime / synced / multiplayer / 'computed on backend' / "
-            "'across devices' — you MUST use backend + site_server: create a Python "
-            "backend in site_servers/<slug>/app.py (FastAPI+uvicorn on $PORT, "
-            "WebSocket at /ws), run ALL physics/neural compute server-side, broadcast "
-            "state via ws, and make frontend ONLY render ws messages (never duplicate "
-            "physics client-side). Client-only simulation that pretends to be synced "
-            "is a failure. Always site_test + fix before claiming it works."
+            "backend (ALWAYS true — every site gets a Python backend), encoding, permanent. "
+            "EVERY site MUST use backend=true + site_server: create Python backend in "
+            "site_servers/<slug>/app.py (FastAPI+uvicorn on $PORT, REST at /api/... and "
+            "WebSocket at /ws if realtime), run ALL compute/state server-side, frontend "
+            "ONLY renders API/ws. Client-only sites are forbidden. Always site_test + fix "
+            "before claiming it works."
         )
 
     async def execute(

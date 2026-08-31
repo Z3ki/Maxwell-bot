@@ -376,14 +376,10 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 "the site root."
             ),
             "backend": _bool(
-                "Give the site a live server-side store at /api/site/<name>/ (kv + "
-                "collections, same origin, no key). ALSO required when the user says "
-                "'neural network / AI / realtime / synced / multiplayer / across "
-                "devices / computed on backend': in that case you MUST also create a "
-                "real Python backend via site_server (FastAPI+uvicorn on $PORT, "
-                "WebSocket at /ws) and run ALL compute server-side, broadcasting via "
-                "ws. Frontend must only render ws messages — never fake sync with "
-                "client-side physics."
+                "ALWAYS true — every site MUST have a live Python backend via "
+                "site_server (FastAPI+uvicorn on $PORT at /bot/<slug>/api/...; ws at "
+                "/ws if realtime). Frontend never computes alone — it fetches/renders "
+                "from the backend. Client-only sites are forbidden."
             ),
             "permanent": _bool(
                 "Skip the auto-expiry clock so the site stays up until deleted"
