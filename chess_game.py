@@ -425,10 +425,122 @@ def _search(board: chess.Board, depth: int, alpha: float, beta: float) -> float:
     return best
 
 
+def _material_balance(board: chess.Board) -> int:
+    """Centipawn material from the side-to-move's perspective."""
+    total = 0
+    for piece in board.piece_map().values():
+        if piece.piece_type == chess.KING:
+            continue
+        value = _VAL.get(piece.piece_type, 0)
+        total += value if piece.color == board.turn else -value
+    return total
+
+
+def annotate_legal_moves(board: chess.Board) -> list[str]:
+    """Legal moves in SAN, each tagged with what it actually does.
+
+    Maxwell picks his own moves now, and a bare list of forty SAN strings is
+    how a language model misses free material and walks into mate — reading
+    "Nxe5" tells it nothing about what sits on e5. Every tag here is something
+    a human player sees at a glance: what the move captures, whether it checks
+    or mates, and whether the piece lands somewhere it just gets taken.
+    """
+    out: list[str] = []
+    for move in board.legal_moves:
+        san = board.san(move)
+        tags: list[str] = []
+        victim = board.piece_at(move.to_square)
+        mover = board.piece_at(move.from_square)
+        if board.is_en_passant(move):
+            tags.append("takes pawn en passant")
+        elif victim is not None:
+            tags.append(f"takes {chess.piece_name(victim.piece_type)}")
+        if move.promotion:
+            tags.append(f"promotes to {chess.piece_name(move.promotion)}")
+        board.push(move)
+        try:
+            if board.is_checkmate():
+                tags.append("CHECKMATE")
+            elif board.is_check():
+                tags.append("check")
+            if board.is_stalemate():
+                tags.append("stalemate (draw)")
+            # board.turn is now the opponent, so "attacked by board.turn" is
+            # "can they take it", and "attacked by not board.turn" is "do we
+            # still defend the square".
+            attacked = board.is_attacked_by(board.turn, move.to_square)
+            defended = board.is_attacked_by(not board.turn, move.to_square)
+        finally:
+            board.pop()
+        if attacked:
+            worth = _VAL.get(getattr(mover, "piece_type", 0), 0)
+            taken = _VAL.get(getattr(victim, "piece_type", 0), 0) if victim else 0
+            if taken >= worth:
+                tags.append("recaptured but trades even or up")
+            elif defended:
+                tags.append("attacked, but defended")
+            else:
+                tags.append("LOSES THE PIECE — attacked and undefended")
+        out.append(f"{san} ({', '.join(tags)})" if tags else san)
+    return out
+
+
+def position_notes(board: chess.Board) -> list[str]:
+    """Short facts about the position the side to move must not miss."""
+    notes: list[str] = []
+    if board.is_check():
+        notes.append(
+            "YOU ARE IN CHECK. Every move listed answers it, so pick the one "
+            "that does not also lose material."
+        )
+    hanging: list[str] = []
+    for square, piece in board.piece_map().items():
+        if piece.color != board.turn or piece.piece_type == chess.KING:
+            continue
+        if not board.is_attacked_by(not board.turn, square):
+            continue
+        if board.is_attacked_by(board.turn, square):
+            continue
+        hanging.append(
+            f"{chess.piece_name(piece.piece_type)} on {chess.square_name(square)}"
+        )
+    if hanging:
+        notes.append(
+            "Your undefended pieces currently under attack: "
+            + ", ".join(sorted(hanging)[:6])
+        )
+    free: list[str] = []
+    for move in board.legal_moves:
+        victim = board.piece_at(move.to_square)
+        if victim is None or victim.piece_type == chess.KING:
+            continue
+        board.push(move)
+        try:
+            recapture = board.is_attacked_by(board.turn, move.to_square)
+        finally:
+            board.pop()
+        if not recapture:
+            free.append(f"{board.san(move)} wins a free {chess.piece_name(victim.piece_type)}")
+    if free:
+        notes.append("Free material available: " + "; ".join(sorted(set(free))[:4]))
+    balance = _material_balance(board)
+    if balance:
+        notes.append(
+            f"Material balance: {balance:+d} centipawns from your side "
+            "(negative means you are behind)."
+        )
+    return notes
+
+
 def choose_bot_move(
     board: chess.Board, depth: int = 3, *, jitter: float = 0.0
 ) -> tuple[chess.Move, str]:
-    """Pick the bot's move. Returns ``(move, san)``.
+    """Fallback move picker. Returns ``(move, san)``.
+
+    Maxwell plays his own chess: the model reads the annotated position and
+    names the move (see ``ChessMoveTool``). This search stays only as the
+    safety net for when the model has repeatedly failed to name a legal move —
+    a game wedged forever on Maxwell's turn is worse than an average move.
 
     ``jitter`` in [0,1] adds strength-varying randomness among near-equal moves
     so opening play is not sterile. ``depth<=0`` or no legal moves -> random.

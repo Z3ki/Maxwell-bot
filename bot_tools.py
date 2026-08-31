@@ -58,9 +58,11 @@ try:  # noqa: E402
 
     from chess_game import (
         ChessManager as _ChessManager,
+        annotate_legal_moves as _chess_annotate_legal_moves,
         choose_bot_move as _chess_choose_bot_move,
         board_ascii as _chess_board_ascii,
         get_manager as _chess_get_manager,
+        position_notes as _chess_position_notes,
         render_board_png as _chess_render_board_png,
     )
 
@@ -68,9 +70,11 @@ try:  # noqa: E402
 except Exception as _chess_err:  # pragma: no cover - missing optional dep
     __CHESS_IMPORTED__ = False
     _ChessManager = None
+    _chess_annotate_legal_moves = None
     _chess_choose_bot_move = None
     _chess_board_ascii = None
     _chess_get_manager = None
+    _chess_position_notes = None
     _chess_render_board_png = None
     _chess = None
     logger.warning("chess tools disabled: python-chess not importable (%s)", _chess_err)
@@ -908,7 +912,7 @@ def _guild_access_detail(guild) -> str:
     top = getattr(me, "top_role", None)
     lines.append(
         f"  top role: {_role_label(top) if top else 'none'} | "
-        f"hierarchy pos { _member_top_position(me)}"
+        f"hierarchy pos {_member_top_position(me)}"
     )
     roles = _named_roles(me, guild)
     if roles:
@@ -926,7 +930,11 @@ def _guild_access_detail(guild) -> str:
                         if n != "administrator" and getattr(role_perms, n, False)
                     ]
                     granted = list(dict.fromkeys(granted))
-            extra = f" grants {', '.join(granted)}" if granted else " (cosmetic / no extra mod perms)"
+            extra = (
+                f" grants {', '.join(granted)}"
+                if granted
+                else " (cosmetic / no extra mod perms)"
+            )
             bits.append(f"{_role_label(role)}{extra}")
         lines.append("  roles: " + "; ".join(bits))
     else:
@@ -936,9 +944,7 @@ def _guild_access_detail(guild) -> str:
     elif "administrator" in caps:
         lines.append("  perms: administrator (every guild mod tool)")
     else:
-        lines.append(
-            "  perms: " + (", ".join(sorted(caps)) if caps else "none")
-        )
+        lines.append("  perms: " + (", ".join(sorted(caps)) if caps else "none"))
     tools = _tools_for_caps(caps)
     lines.append("  tools: " + (", ".join(tools) if tools else "none"))
     channels = list(getattr(guild, "channels", []) or [])
@@ -956,13 +962,18 @@ def _moderation_block(guild, me, target, *, action: str) -> str:
         return "Error: member is unavailable"
     my_id = getattr(me, "id", None)
     their_id = getattr(target, "id", None)
-    if their_id is not None and their_id == my_id and action in {
-        "kick",
-        "ban",
-        "timeout",
-        "voice",
-        "nick",
-    }:
+    if (
+        their_id is not None
+        and their_id == my_id
+        and action
+        in {
+            "kick",
+            "ban",
+            "timeout",
+            "voice",
+            "nick",
+        }
+    ):
         return f"Error: I cannot {action} myself"
     owner_id = getattr(guild, "owner_id", None) or getattr(
         getattr(guild, "owner", None), "id", None
@@ -996,9 +1007,7 @@ def _find_role(guild, spec):
     wanted = str(spec or "").strip().lstrip("@").lower()
     if not wanted:
         return None, "Error: role_id or role_name is required"
-    matches = [
-        r for r in roles if str(getattr(r, "name", "")).lower() == wanted
-    ]
+    matches = [r for r in roles if str(getattr(r, "name", "")).lower() == wanted]
     if len(matches) == 1:
         return matches[0], ""
     if len(matches) > 1:
@@ -1018,13 +1027,22 @@ async def _resolve_member(guild, spec):
             try:
                 member = await fetch(uid)
             except discord.NotFound:
-                return None, f"Error: user {uid} is not in {getattr(guild, 'name', 'this server')}"
+                return (
+                    None,
+                    f"Error: user {uid} is not in {getattr(guild, 'name', 'this server')}",
+                )
             except discord.Forbidden:
-                return None, f"Error: cannot fetch members in {getattr(guild, 'name', 'this server')}"
+                return (
+                    None,
+                    f"Error: cannot fetch members in {getattr(guild, 'name', 'this server')}",
+                )
             except Exception as exc:
                 return None, f"Error fetching member: {exc}"
         if member is None:
-            return None, f"Error: user {uid} is not in {getattr(guild, 'name', 'this server')}"
+            return (
+                None,
+                f"Error: user {uid} is not in {getattr(guild, 'name', 'this server')}",
+            )
         return member, ""
     wanted = str(spec or "").strip().lstrip("@").lower()
     if not wanted:
@@ -1231,7 +1249,9 @@ class ImageGeneratorTool(Tool):
                 "to bundle it into a site)"
             )
         result += "\nLook at the image you just posted. If it looks good, mention the URL or use it for the site. "
-        result += "If it looks bad, call image_generator again with an improved prompt. "
+        result += (
+            "If it looks bad, call image_generator again with an improved prompt. "
+        )
         result += "If you were generating this for a site, call create_site NOW (in your next response) with the URL embedded in the body — do not call create_site before image_generator returns this URL."
         return result
 
@@ -1262,9 +1282,7 @@ class ImageGeneratorTool(Tool):
                         response.status,
                         body[:300],
                     )
-                    return (
-                        f"Error generating image: Pollinations returned {response.status}."
-                    )
+                    return f"Error generating image: Pollinations returned {response.status}."
                 ctype = (
                     (response.headers.get("Content-Type") or "")
                     .split(";")[0]
@@ -2270,19 +2288,37 @@ def _format_captcha(e) -> str:
 
 
 class JoinServerTool(Tool):
-    """Join a Discord server via invite link or code."""
+    """Join a Discord server via invite link or code. Admins only."""
 
     def get_description(self):
         return (
             "Join a Discord server via invite code or full invite URL "
-            "(https://discord.gg/code). Always pass the exact link or code "
-            "the user gave — do not invent or reuse another invite. "
-            "Reports name, gates, captcha, and errors. Params: invite (required)."
+            "(https://discord.gg/code). Restricted to admins — if anyone else "
+            "asks, say it needs an admin and do not call this. Always pass the "
+            "exact link or code the user gave — do not invent or reuse another "
+            "invite. Reports name, gates, captcha, and errors. "
+            "Params: invite (required)."
         )
 
     async def execute(
         self, message: Message, invite: str | None = None, **kwargs
     ) -> str:
+        # Joining a server is an account-level action with a permanent
+        # footprint: the bot's presence, its member list entry, and whatever
+        # that server's rules and moderators then apply to it. Anyone able to
+        # paste an invite could park the account anywhere, so this is gated on
+        # identity the same way change_avatar is, and enforced here rather
+        # than only in the prompt — a prompt is a request, not a permission.
+        author_id = getattr(getattr(message, "author", None), "id", None)
+        is_admin = bool(
+            author_id is not None
+            and getattr(self.bot, "_is_admin", lambda _uid: False)(author_id)
+        )
+        if not is_admin:
+            return (
+                "Error: joining a server is restricted to admins. Ask an admin "
+                "to run it, or send them the invite."
+            )
         raw = _invite_raw_from_params(invite, kwargs)
         code = _extract_invite_code(raw)
         if not code:
@@ -2619,8 +2655,8 @@ class ServerSetupTool(Tool):
             lines.append(f'  • "{prompt["title"]}" (pick {rule}):')
             for opt in prompt["options"]:
                 mark = "✓" if opt["id"] in chosen else " "
-                desc = f' — {opt["description"]}' if opt["description"] else ""
-                lines.append(f'      [{mark}] {opt["title"]}{desc}'[:240])
+                desc = f" — {opt['description']}" if opt["description"] else ""
+                lines.append(f"      [{mark}] {opt['title']}{desc}"[:240])
 
         roles = [
             r.name
@@ -2766,8 +2802,14 @@ class LookupUserTool(Tool):
                     if getattr(member, "nick", None):
                         info_lines.append(f"Server Nickname: {member.nick}")
                     if getattr(member, "joined_at", None):
-                        info_lines.append(f"Server Joined: {member.joined_at.strftime('%Y-%m-%d')}")
-                    roles = [r.name for r in getattr(member, "roles", []) if getattr(r, "name", "") != "@everyone"]
+                        info_lines.append(
+                            f"Server Joined: {member.joined_at.strftime('%Y-%m-%d')}"
+                        )
+                    roles = [
+                        r.name
+                        for r in getattr(member, "roles", [])
+                        if getattr(r, "name", "") != "@everyone"
+                    ]
                     if roles:
                         info_lines.append(f"Roles: {', '.join(roles)}")
 
@@ -2815,8 +2857,12 @@ class SearchMessagesTool(Tool):
             if not clean_query:
                 if chan and hasattr(chan, "history"):
                     async for msg in chan.history(limit=search_limit):
-                        snippet = msg.content[:150] + ("..." if len(msg.content) > 150 else "")
-                        results.append(f"[{msg.id}] {msg.author.display_name}: {snippet}")
+                        snippet = msg.content[:150] + (
+                            "..." if len(msg.content) > 150 else ""
+                        )
+                        results.append(
+                            f"[{msg.id}] {msg.author.display_name}: {snippet}"
+                        )
                     if not results:
                         return "No recent messages found in this channel"
                     return f"Recent messages ({len(results)}):\n" + "\n".join(results)
@@ -2827,8 +2873,12 @@ class SearchMessagesTool(Tool):
                 try:
                     async for msg in chan.history(limit=100):
                         if clean_query in (msg.content or "").lower():
-                            snippet = msg.content[:150] + ("..." if len(msg.content) > 150 else "")
-                            results.append(f"[#{getattr(chan, 'name', 'chat')} - {msg.id}] {msg.author.display_name}: {snippet}")
+                            snippet = msg.content[:150] + (
+                                "..." if len(msg.content) > 150 else ""
+                            )
+                            results.append(
+                                f"[#{getattr(chan, 'name', 'chat')} - {msg.id}] {msg.author.display_name}: {snippet}"
+                            )
                             if len(results) >= search_limit:
                                 break
                 except Exception as e:
@@ -2842,8 +2892,10 @@ class SearchMessagesTool(Tool):
             if len(results) < search_limit and getattr(message, "guild", None):
                 guild = message.guild
                 channels_to_check = [
-                    c for c in getattr(guild, "text_channels", [])
-                    if c.id != getattr(chan, "id", None) and c.permissions_for(guild.me).read_messages
+                    c
+                    for c in getattr(guild, "text_channels", [])
+                    if c.id != getattr(chan, "id", None)
+                    and c.permissions_for(guild.me).read_messages
                 ][:8]
                 for c in channels_to_check:
                     if len(results) >= search_limit:
@@ -2851,8 +2903,12 @@ class SearchMessagesTool(Tool):
                     try:
                         async for msg in c.history(limit=50):
                             if clean_query in (msg.content or "").lower():
-                                snippet = msg.content[:150] + ("..." if len(msg.content) > 150 else "")
-                                results.append(f"[#{c.name} - {msg.id}] {msg.author.display_name}: {snippet}")
+                                snippet = msg.content[:150] + (
+                                    "..." if len(msg.content) > 150 else ""
+                                )
+                                results.append(
+                                    f"[#{c.name} - {msg.id}] {msg.author.display_name}: {snippet}"
+                                )
                                 if len(results) >= search_limit:
                                     break
                     except Exception as e:
@@ -2994,7 +3050,8 @@ class ListServersTool(Tool):
         if group_channels:
             lines.append(f"\nGroup chats ({len(group_channels)}):")
             lines.extend(
-                f"  • {gc.name or 'Unnamed'} (ID: {gc.id})" for gc in group_channels[:10]
+                f"  • {gc.name or 'Unnamed'} (ID: {gc.id})"
+                for gc in group_channels[:10]
             )
 
         if not lines:
@@ -3375,7 +3432,9 @@ class KickMemberTool(Tool):
         if blocked:
             return blocked
         try:
-            await member.kick(reason=_mod_reason(message) if not reason else str(reason)[:512])
+            await member.kick(
+                reason=_mod_reason(message) if not reason else str(reason)[:512]
+            )
             return f"Kicked {member} ({member.id}) from {guild.name}"
         except discord.Forbidden:
             return f"Error: Discord denied kicking {member}; hierarchy or missing kick_members"
@@ -3413,7 +3472,12 @@ class BanMemberTool(Tool):
         if blocked:
             return blocked
         try:
-            seconds = max(0, min(int(_parse_duration_seconds(delete_message_seconds, 0) or 0), 604800))
+            seconds = max(
+                0,
+                min(
+                    int(_parse_duration_seconds(delete_message_seconds, 0) or 0), 604800
+                ),
+            )
         except (TypeError, ValueError):
             seconds = 0
         try:
@@ -3506,7 +3570,9 @@ class ListBansTool(Tool):
             async for entry in guild.bans(limit=cap):
                 user = getattr(entry, "user", None) or entry
                 why = getattr(entry, "reason", None) or "no reason"
-                rows.append(f"{getattr(user, 'name', user)} ({getattr(user, 'id', '?')}): {why}")
+                rows.append(
+                    f"{getattr(user, 'name', user)} ({getattr(user, 'id', '?')}): {why}"
+                )
         except discord.Forbidden:
             return f"Error: cannot list bans in {guild.name}"
         except Exception as e:
@@ -3607,7 +3673,9 @@ class ManageRoleTool(Tool):
                 reverse=True,
             )
             lines = [_role_label(role) for role in roles[:40]]
-            return f"Roles in {guild.name} ({len(roles)}):\n" + "\n".join(lines or ["none"])
+            return f"Roles in {guild.name} ({len(roles)}):\n" + "\n".join(
+                lines or ["none"]
+            )
         if act == "create":
             clean = _clean_discord_name(name)
             if not clean:
@@ -3733,7 +3801,9 @@ class PurgeMessagesTool(Tool):
             return getattr(getattr(msg, "author", None), "id", None) == uid
 
         try:
-            deleted = await channel.purge(limit=cap, check=_check, reason=_mod_reason(message))
+            deleted = await channel.purge(
+                limit=cap, check=_check, reason=_mod_reason(message)
+            )
             return f"Purged {len(deleted)} messages in {_channel_label(channel)}"
         except discord.Forbidden:
             return f"Error: Discord denied purging {_channel_label(channel)}"
@@ -3932,7 +4002,9 @@ class LockChannelTool(Tool):
         try:
             if isinstance(channel, discord.VoiceChannel):
                 await channel.set_permissions(
-                    target, connect=False if locked else None, reason=_mod_reason(message)
+                    target,
+                    connect=False if locked else None,
+                    reason=_mod_reason(message),
                 )
             else:
                 await channel.set_permissions(
@@ -3993,9 +4065,13 @@ class SetChannelPermissionsTool(Tool):
             if not pairs:
                 return "Error: provide allow like send_messages=false,view_channel=true"
             await channel.set_permissions(subject, reason=why, **pairs)
-            return f"Updated overwrites for {target} on {_channel_label(channel)}: {pairs}"
+            return (
+                f"Updated overwrites for {target} on {_channel_label(channel)}: {pairs}"
+            )
         except discord.Forbidden:
-            return f"Error: Discord denied editing overwrites on {_channel_label(channel)}"
+            return (
+                f"Error: Discord denied editing overwrites on {_channel_label(channel)}"
+            )
         except Exception as e:
             return f"Error setting channel permissions: {e}"
 
@@ -4108,9 +4184,8 @@ class ManageEmojiTool(Tool):
         if act == "list":
             if not emojis:
                 return f"No custom emojis in {guild.name}"
-            return (
-                f"Emojis in {guild.name} ({len(emojis)}):\n"
-                + "\n".join(f":{e.name}: ({e.id})" for e in emojis[:40])
+            return f"Emojis in {guild.name} ({len(emojis)}):\n" + "\n".join(
+                f":{e.name}: ({e.id})" for e in emojis[:40]
             )
         if act == "create":
             clean = re.sub(r"[^A-Za-z0-9_]", "", str(name or ""))[:32]
@@ -4313,7 +4388,16 @@ _ELIDED_SITE_PAYLOAD_RE = re.compile(
 )
 # Extensions a static host will serve as-is. Anything executable server-side
 # (.php, .cgi) is pointless here and only invites confusion about what runs.
-SITE_BLOCKED_SUFFIXES = {".php", ".php5", ".phtml", ".cgi", ".pl", ".jsp", ".asp", ".aspx"}
+SITE_BLOCKED_SUFFIXES = {
+    ".php",
+    ".php5",
+    ".phtml",
+    ".cgi",
+    ".pl",
+    ".jsp",
+    ".asp",
+    ".aspx",
+}
 
 
 def _elided_site_payload_error(text: Any) -> str:
@@ -4428,6 +4512,58 @@ def _parse_site_files(files: Any) -> tuple[list[dict], str]:
     return entries, ""
 
 
+# Text that means the page was never finished. These are matched against the
+# HTML the model just wrote, because a 200 response and a screenshot of an
+# unmounted page both look fine — the shortfall is only visible in the source.
+_PLACEHOLDER_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"lorem\s+ipsum", "lorem ipsum filler text"),
+    (r"\bTODO\b", "a TODO left in the page"),
+    (r"\bFIXME\b", "a FIXME left in the page"),
+    (r"coming\s+soon", "a 'coming soon' placeholder"),
+    (r"\[insert[^\]]*\]", "an '[insert …]' placeholder"),
+    (r"your\s+(?:text|content|title)\s+here", "a 'your text here' placeholder"),
+    (r"\bplaceholder\s+(?:text|content|image)\b", "placeholder content"),
+    (r"//\s*(?:implement|fill\s+in|add)\s+(?:this|later|me)", "an unimplemented stub"),
+    (r"#\s*(?:implement|fill\s+in)\s+(?:this|later|me)", "an unimplemented stub"),
+    (r"\bnot\s+implemented\b", "a 'not implemented' branch"),
+    (r"\bTBD\b", "a TBD left in the page"),
+)
+# A nav or button that goes nowhere. Counted rather than named, because one
+# href="#" is a legitimate JS hook and a dozen is an unwired navigation bar.
+_DEAD_LINK_RE = re.compile(r"""<a\b[^>]*href\s*=\s*["']#["'][^>]*>""", re.IGNORECASE)
+_DEAD_LINK_LIMIT = 4
+
+
+def _site_placeholder_warnings(body: str | None, extra_files: list[dict]) -> list[str]:
+    """Unfinished-content shortfalls in what was just written.
+
+    Reported back through the tool result rather than blocking the write: a
+    refusal would lose the whole page, and a page with one TODO in a comment is
+    still worth publishing and then fixing.
+    """
+    sources: list[tuple[str, str]] = []
+    if body:
+        sources.append(("index.html", str(body)))
+    for entry in extra_files or []:
+        blob = entry.get("bytes") or b""
+        if not blob or len(blob) > 2_000_000:
+            continue
+        with contextlib.suppress(UnicodeDecodeError):
+            sources.append((str(entry.get("path") or "file"), blob.decode("utf-8")))
+
+    found: list[str] = []
+    for label, text in sources:
+        for pattern, description in _PLACEHOLDER_PATTERNS:
+            if re.search(pattern, text, re.IGNORECASE):
+                item = f"{label}: {description}"
+                if item not in found:
+                    found.append(item)
+        dead = len(_DEAD_LINK_RE.findall(text))
+        if dead >= _DEAD_LINK_LIMIT:
+            found.append(f"{label}: {dead} links point at href='#' and go nowhere")
+    return found[:12]
+
+
 async def _write_site_file(site_dir: str, rel: str, blob: bytes) -> str:
     """Atomic write of one file inside a site. Returns '' or an error."""
     target = _site_child_path(site_dir, rel)
@@ -4516,11 +4652,17 @@ SITE_CSP_META = (
 
 def _inject_site_csp(body: str) -> str:
     """Put SITE_CSP_META in the document head, unless the page set its own."""
-    if re.search(r"http-equiv\s*=\s*[\"']?Content-Security-Policy", body, re.IGNORECASE):
+    if re.search(
+        r"http-equiv\s*=\s*[\"']?Content-Security-Policy", body, re.IGNORECASE
+    ):
         return body
     if re.search(r"<head[^>]*>", body, re.IGNORECASE):
         return re.sub(
-            r"(<head[^>]*>)", r"\1\n" + SITE_CSP_META, body, count=1, flags=re.IGNORECASE
+            r"(<head[^>]*>)",
+            r"\1\n" + SITE_CSP_META,
+            body,
+            count=1,
+            flags=re.IGNORECASE,
         )
     if re.search(r"<html[^>]*>", body, re.IGNORECASE):
         return re.sub(
@@ -4617,18 +4759,19 @@ class CreateSiteTool(Tool):
             "Full visual freedom: invent a new design each time (layout, type, color, "
             "density, motion). Do not reuse a house style or clone a previous site "
             "unless the user asked for a specific look. "
-            "Params: name (slug), title (listing/metadata, not a required on-page heading), "
+            "Ship it finished — real content, working controls, no placeholders, "
+            "lorem ipsum, TODOs, or dead href='#' links. A page that only says "
+            "'Loading…' shipped nothing. "
+            "Params: name (slug), title (listing metadata, not a required heading), "
             "body (complete HTML document for index.html; served byte-for-byte), "
-            "files (extra files as {\"path\": \"content\"} — style.css, app.js, "
-            "about/index.html, data.json, anything), "
-            "backend (true for a live server-side store: named values + "
-            "append-only lists at /api/site/<name>/, same origin, no key — "
-            "use it for guestbooks, counters, saved state, submissions), "
-            "encoding (text|base64), permanent (true to skip auto-expiry). "
-            "Generate images in a prior turn and paste CDN URLs "
-            "into the HTML — don't batch image_generator with create_site. "
-            "Keep working via edit_site / site_server; site_test loads it "
-            "(console, screenshot). Never paste HTML into chat."
+            'files (extra files as {"path": "content"}: style.css, app.js, '
+            "about/index.html, data.json), "
+            "backend (true for a live same-origin store at /api/site/<name>/ — "
+            "guestbooks, counters, saved state), encoding (text|base64), "
+            "permanent (skip auto-expiry). "
+            "Generate images in a prior turn and paste the CDN URLs in. "
+            "Then site_test it and fix what it reports before saying it works; "
+            "iterate with edit_site / site_server. Never paste HTML into chat."
         )
 
     async def execute(
@@ -4709,8 +4852,7 @@ class CreateSiteTool(Tool):
         max_sites = int(control.get("create_site_quota_per_user", 10))
         active_user_sites = [s for s in sites.values() if s.get("user_id") == user_id]
         already_ours = (
-            isinstance(existing, dict)
-            and str(existing.get("user_id") or "") == user_id
+            isinstance(existing, dict) and str(existing.get("user_id") or "") == user_id
         )
         if not already_ours and len(active_user_sites) >= max_sites:
             return (
@@ -4831,12 +4973,16 @@ class CreateSiteTool(Tool):
 
             written: list[str] = []
             if body:
-                err = await _write_site_file(site_dir, "index.html", body.encode("utf-8"))
+                err = await _write_site_file(
+                    site_dir, "index.html", body.encode("utf-8")
+                )
                 if err:
                     return f"Error creating site: {err}"
                 written.append("index.html")
             for entry in extra_files:
-                err = await _write_site_file(site_dir, entry["path"], entry["bytes"] or b"")
+                err = await _write_site_file(
+                    site_dir, entry["path"], entry["bytes"] or b""
+                )
                 if err:
                     return f"Error creating site: {err}"
                 written.append(entry["path"])
@@ -4888,10 +5034,21 @@ class CreateSiteTool(Tool):
             if wants_backend:
                 result += "\n" + site_backend.client_guide(f"/api/site/{slug}")
             result += f"\nLifetime: {site_expiry_label(site_entry, control)}."
+            # Placeholders shipped in the HTML are invisible in a 200 response
+            # and in a screenshot of a page that has not mounted, so they are
+            # named here where the model cannot miss them.
+            shortfalls = _site_placeholder_warnings(body, extra_files)
+            if shortfalls:
+                result += (
+                    "\nUNFINISHED CONTENT — fix these with edit_site before you "
+                    "tell anyone the site is done:\n"
+                    + "\n".join(f"  • {item}" for item in shortfalls)
+                )
             result += (
-                f"\nTest it with site_test(name=\"{slug}\") before telling "
-                "the user it works — that loads the page, catches console "
-                "errors, and returns a screenshot."
+                f'\nTest it with site_test(name="{slug}") before telling '
+                "the user it works — that loads the page in a real browser, "
+                "catches console errors, reports whether anything actually "
+                "rendered, and returns a screenshot."
             )
             if image_urls:
                 result += f"\nEmbedded images ({len(image_urls)}):\n" + "\n".join(
@@ -4992,15 +5149,22 @@ class _SiteOwnedTool(Tool):
 
     def _resolve(self, message: Message, name: str | None):
         """(slug, entry, site_dir, None) or (None, None, None, error string)."""
-        slug = re.sub(r"[^a-z0-9-]", "-", str(name or "").lower().strip())[:30].strip("-")
+        slug = re.sub(r"[^a-z0-9-]", "-", str(name or "").lower().strip())[:30].strip(
+            "-"
+        )
         if not slug:
             return None, None, None, "Error: name is required (the site slug)."
         if hasattr(self.bot, "_load_sites"):
             self.bot._load_sites(quiet=True)
         entry = (self.bot._sites or {}).get(slug)
         if not isinstance(entry, dict):
-            return None, None, None, (
-                f"Error: no site named '{slug}'. Call list_sites to see the slugs you own."
+            return (
+                None,
+                None,
+                None,
+                (
+                    f"Error: no site named '{slug}'. Call list_sites to see the slugs you own."
+                ),
             )
         owner = str(entry.get("user_id") or "")
         if (
@@ -5194,7 +5358,9 @@ class EditSiteTool(_SiteOwnedTool):
             if all_hits:
                 extra = f" ({hits} occurrence(s))"
             else:
-                extra = f" ({hits - 1} more occurrence(s) left alone)" if hits > 1 else ""
+                extra = (
+                    f" ({hits - 1} more occurrence(s) left alone)" if hits > 1 else ""
+                )
             return (
                 f"Patched {rel}{extra} → {url}\n"
                 f'Call site_test(name="{slug}") to load it and check the console.'
@@ -5304,9 +5470,7 @@ class SiteServerTool(_SiteOwnedTool):
             return err
         data_dir = self.bot.config.DATA_DIR
         act = str(action or "status").strip().lower()
-        all_hits = parse_bool(
-            replace_all if replace_all is not None else all, False
-        )
+        all_hits = parse_bool(replace_all if replace_all is not None else all, False)
         try:
             if act in {"write", "update", "patch_file", "code"}:
                 payload = files
@@ -5314,7 +5478,7 @@ class SiteServerTool(_SiteOwnedTool):
                     payload = {str(path or "app.py"): content}
                 if not payload:
                     return (
-                        "Error: write needs files={\"app.py\": \"...\"} or "
+                        'Error: write needs files={"app.py": "..."} or '
                         "path+content for one file.\n" + site_server.contract(slug)
                     )
                 parsed = await asyncio.to_thread(site_server.parse_files, payload)
@@ -5328,9 +5492,7 @@ class SiteServerTool(_SiteOwnedTool):
                 if "app.py" not in parsed and not existing_app:
                     return "Error: the entry file must be called app.py."
                 new_env = (
-                    await asyncio.to_thread(site_server.parse_env, env)
-                    if env
-                    else None
+                    await asyncio.to_thread(site_server.parse_env, env) if env else None
                 )
                 extra = await asyncio.to_thread(site_server.parse_packages, packages)
                 written = await asyncio.to_thread(
@@ -5362,9 +5524,7 @@ class SiteServerTool(_SiteOwnedTool):
                 if "app.py" not in parsed:
                     return "Error: the entry file must be called app.py."
                 new_env = (
-                    await asyncio.to_thread(site_server.parse_env, env)
-                    if env
-                    else None
+                    await asyncio.to_thread(site_server.parse_env, env) if env else None
                 )
                 extra = await asyncio.to_thread(site_server.parse_packages, packages)
                 written = await asyncio.to_thread(
@@ -5449,9 +5609,12 @@ class SiteServerTool(_SiteOwnedTool):
 
             if act in {"env", "secrets", "config"}:
                 if not env:
-                    current = (site_server.get_entry(data_dir, slug) or {}).get("env") or {}
+                    current = (site_server.get_entry(data_dir, slug) or {}).get(
+                        "env"
+                    ) or {}
                     return (
-                        f"{slug} env: " + (", ".join(sorted(current)) or "none")
+                        f"{slug} env: "
+                        + (", ".join(sorted(current)) or "none")
                         + "\nValues are never shown. Pass env={...} to replace them."
                     )
                 parsed_env = await asyncio.to_thread(site_server.parse_env, env)
@@ -5537,13 +5700,13 @@ class SiteTestTool(_SiteOwnedTool):
         if err:
             return err
         try:
-            target = site_test.page_url(
-                self.base_url, slug, path or url
-            )
+            target = site_test.page_url(self.base_url, slug, path or url)
         except ValueError as e:
             return f"Error: {e}. path must be a page on this site."
         try:
-            wait_s = float(wait) if wait is not None and str(wait).strip() != "" else 2.0
+            wait_s = (
+                float(wait) if wait is not None and str(wait).strip() != "" else 2.0
+            )
         except (TypeError, ValueError):
             wait_s = 2.0
         wait_s = max(0.2, min(wait_s, 15.0))
@@ -5588,9 +5751,7 @@ class SiteTestTool(_SiteOwnedTool):
             except Exception as e:
                 backend_bits.append(f"logs: {e}")
         if entry.get("backend"):
-            public = getattr(
-                self.bot.config, "MAXWELL_PUBLIC_BASE_URL", ""
-            ).rstrip("/")
+            public = getattr(self.bot.config, "MAXWELL_PUBLIC_BASE_URL", "").rstrip("/")
             kv_url = f"{public}/api/site/{slug}/kv"
             kv_status, _, kv_err = await site_test.http_get(kv_url)
             if kv_err:
@@ -5618,7 +5779,16 @@ class SiteTestTool(_SiteOwnedTool):
             "asset_errors": asset_errors,
             "backend": "\n".join(backend_bits),
             "screenshot_png": browser.get("screenshot_png"),
+            # What actually rendered. format_report uses these to catch a page
+            # that returns 200 with a clean console and is still just a
+            # "Loading…" shell — the failure mode behind "the site is listed
+            # but it doesn't work".
+            "has_canvas_or_media": browser.get("has_canvas_or_media"),
         }
+        if browser.get("visible_text") is not None:
+            probe["visible_text"] = browser["visible_text"]
+        if browser.get("rendered_nodes") is not None:
+            probe["rendered_nodes"] = browser["rendered_nodes"]
         if browser.get("browser"):
             probe["browser"] = browser["browser"]
         if browser.get("browser_error"):
@@ -5629,7 +5799,33 @@ class SiteTestTool(_SiteOwnedTool):
             )
             if title_match:
                 probe["title"] = re.sub(r"\s+", " ", title_match.group(1)).strip()[:120]
-        return site_test.format_report(probe)
+        report = site_test.format_report(probe)
+        # Record whether this site currently renders, so list_sites can say so
+        # without loading a browser for every entry.
+        with contextlib.suppress(Exception):
+            await self._record_health(slug, entry, probe)
+        return report
+
+    async def _record_health(self, slug: str, entry: dict, probe: dict) -> None:
+        """Persist the last site_test verdict on the site entry."""
+        stub = site_test.describe_stub(probe)
+        broken = bool(
+            stub
+            or probe.get("page_errors")
+            or probe.get("asset_errors")
+            or probe.get("http_error")
+        )
+        updated = dict(entry or {})
+        health = {
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "ok": not broken,
+        }
+        if stub:
+            health["stub"] = stub[:200]
+        if updated.get("health") == health:
+            return
+        updated["health"] = health
+        await asyncio.to_thread(self._save_entry, slug, updated)
 
 
 class DeleteSiteTool(_SiteOwnedTool):
@@ -5670,7 +5866,9 @@ class DeleteSiteTool(_SiteOwnedTool):
             await site_server.destroy(self.bot.config.DATA_DIR, slug)
         if save_error is not None:
             return f"Error deleting site '{slug}': {save_error}"
-        return f"Deleted site '{slug}' ({entry.get('title') or 'untitled'}). URL is gone."
+        return (
+            f"Deleted site '{slug}' ({entry.get('title') or 'untitled'}). URL is gone."
+        )
 
 
 class ListSitesTool(Tool):
@@ -5678,9 +5876,12 @@ class ListSitesTool(Tool):
 
     def get_description(self):
         return (
-            "List the sites you published: slug, URL, title, time left, and "
-            "whether each has a KV store or a Python server. The slug is what "
-            "edit_site, site_server, site_test, and delete_site take. No params."
+            "List the sites you published: slug, URL, title, time left, "
+            "whether each has a KV store or a Python server, and whether its "
+            "last site_test actually rendered. A site marked BROKEN or 'never "
+            "tested' is not known to work — do not tell anyone it does until "
+            "site_test says it loaded clean. The slug is what edit_site, "
+            "site_server, site_test, and delete_site take. No params."
         )
 
     async def execute(self, message: Message, all_users: bool = False, **kwargs) -> str:
@@ -5697,7 +5898,9 @@ class ListSitesTool(Tool):
         if is_admin or all_users:
             selected_sites = sites
         else:
-            selected_sites = {k: v for k, v in sites.items() if str(v.get("user_id", "")) == user_id}
+            selected_sites = {
+                k: v for k, v in sites.items() if str(v.get("user_id", "")) == user_id
+            }
 
         if not selected_sites:
             return "No active sites found."
@@ -5711,6 +5914,8 @@ class ListSitesTool(Tool):
             "https://maxwell.z3ki.dev",
         ).rstrip("/")
         lines = []
+        unverified: list[str] = []
+        broken: list[str] = []
         for slug, data in selected_sites.items():
             title = data.get("title", "untitled")
             marks = []
@@ -5722,13 +5927,43 @@ class ListSitesTool(Tool):
             if (is_admin or all_users) and data.get("user_id"):
                 owner_uid = str(data.get("user_id"))
                 owner_label = f" [owner: {owner_uid}]"
+            # "Listed" is not "works". A site whose last site_test found a
+            # loading shell must not read as live here, and one that has never
+            # been tested must not read as verified.
+            health = data.get("health")
+            if isinstance(health, dict):
+                if health.get("ok"):
+                    marks.append("verified working")
+                else:
+                    reason = str(health.get("stub") or "broken")
+                    marks.append("BROKEN: " + reason[:80])
+                    broken.append(slug)
+            else:
+                marks.append("never tested")
+                unverified.append(slug)
             tail = f" [{', '.join(marks)}]" if marks else ""
             lines.append(
                 f"  • {slug} — {base_url}/bot/{slug}/ — '{title}' "
                 f"({site_expiry_label(data, control)}){owner_label}{tail}"
             )
-        header = "All active sites:\n" if (is_admin or all_users) else "Your active sites:\n"
-        return header + "\n".join(lines)
+        header = (
+            "All active sites:\n" if (is_admin or all_users) else "Your active sites:\n"
+        )
+        out = header + "\n".join(lines)
+        if broken:
+            out += (
+                "\n\nThese failed their last site_test and are NOT working: "
+                + ", ".join(broken[:10])
+                + ". Fix them with edit_site and re-run site_test before telling "
+                "anyone they are live."
+            )
+        if unverified:
+            out += (
+                "\n\nNever verified in a browser: "
+                + ", ".join(unverified[:10])
+                + ". Run site_test before claiming any of these work."
+            )
+        return out
 
 
 _WEB_REPLY_CTX_RE = re.compile(r"\[Latest message replies to[^\]]*\]", re.IGNORECASE)
@@ -5986,7 +6221,9 @@ async def _iter_recent_channel_messages(message, bot=None, limit: int = 40):
             len(collected),
         )
     except Exception as e:
-        logger.warning("channel history read failed after %d msg(s): %s", len(collected), e)
+        logger.warning(
+            "channel history read failed after %d msg(s): %s", len(collected), e
+        )
     for msg in collected:
         yield msg
 
@@ -6193,7 +6430,11 @@ class SendMessageTool(Tool):
         sent_chunks: list[str] = []
         try:
             target_channel = getattr(message, "channel", None)
-            raw_dest = channel_id if channel_id is not None else (user_id if user_id is not None else kwargs.get("recipient_id"))
+            raw_dest = (
+                channel_id
+                if channel_id is not None
+                else (user_id if user_id is not None else kwargs.get("recipient_id"))
+            )
             target_dest = str(raw_dest or "").strip()
             if target_dest and self.bot:
                 dest_id = _safe_int(target_dest)
@@ -6238,7 +6479,9 @@ class SendMessageTool(Tool):
                 target = await resolve_send_reply_target(
                     message,
                     reply=reply,
-                    reply_to=reply_to if reply_to is not None else kwargs.get("reply_to"),
+                    reply_to=reply_to
+                    if reply_to is not None
+                    else kwargs.get("reply_to"),
                     bot=self.bot,
                 )
             use_reply = target is not None
@@ -6265,9 +6508,7 @@ class SendMessageTool(Tool):
                                 target_channel,
                                 chunk,
                                 reply_to=(
-                                    reply_to_message
-                                    if (i == 0 and use_reply)
-                                    else None
+                                    reply_to_message if (i == 0 and use_reply) else None
                                 ),
                                 **extra,
                             )
@@ -6278,11 +6519,16 @@ class SendMessageTool(Tool):
                                 await reply_to_message.reply(chunk, **extra)
                             except (discord.NotFound, discord.HTTPException) as exc:
                                 code = getattr(exc, "code", None)
-                                parent_gone = isinstance(exc, discord.NotFound) or code in {
+                                parent_gone = isinstance(
+                                    exc, discord.NotFound
+                                ) or code in {
                                     10008,
                                     50035,
                                 }
-                                if code == 50035 and "message_reference" not in str(exc).lower():
+                                if (
+                                    code == 50035
+                                    and "message_reference" not in str(exc).lower()
+                                ):
                                     raise
                                 if not parent_gone:
                                     raise
@@ -6407,7 +6653,10 @@ class MoreToolsTool(Tool):
             n
             for n in (getattr(bot, "tools", {}) or {})
             if n != "more_tools"
-            and n not in set((getattr(bot, "_control", {}) or {}).get("disabled_tools", []) or [])
+            and n
+            not in set(
+                (getattr(bot, "_control", {}) or {}).get("disabled_tools", []) or []
+            )
         )
         logger.info("more_tools: expanding catalog (need=%r)", str(need or "")[:120])
         return (
@@ -7184,13 +7433,9 @@ class ShellTool(Tool):
             # `docker exec` client does not kill a child command; pipelines,
             # background jobs, and `sleep` would otherwise survive every
             # timeout and accumulate in the persistent sandbox.
-            inner = (
-                f"trap 'rm -f {shlex.quote(pid_file)}' EXIT; "
-                f"{sanitized}"
-            )
+            inner = f"trap 'rm -f {shlex.quote(pid_file)}' EXIT; {sanitized}"
             wrapped = (
-                f"echo $$ > {shlex.quote(pid_file)}; "
-                f"exec bash -lc {shlex.quote(inner)}"
+                f"echo $$ > {shlex.quote(pid_file)}; exec bash -lc {shlex.quote(inner)}"
             )
             proc = await asyncio.create_subprocess_exec(
                 "docker",
@@ -7221,7 +7466,11 @@ class ShellTool(Tool):
                 if on_progress is None:
                     return
                 now = time.monotonic()
-                if not force and last_tick and now - last_tick < self._PROGRESS_TICK_SECONDS:
+                if (
+                    not force
+                    and last_tick
+                    and now - last_tick < self._PROGRESS_TICK_SECONDS
+                ):
                     return
                 last_tick = now
                 with contextlib.suppress(Exception):
@@ -7300,9 +7549,7 @@ class ShellTool(Tool):
                         # Usually means the process already exited.
                         logger.debug("shell zombie cleanup: %s", e)
             if output_truncated:
-                stderr_buf.extend(
-                    b"\n[output truncated at MAXWELL_SHELL_MAX_OUTPUT]"
-                )
+                stderr_buf.extend(b"\n[output truncated at MAXWELL_SHELL_MAX_OUTPUT]")
             return bytes(stdout_buf), bytes(stderr_buf), proc.returncode
 
     async def _kill_container_exec(self, pid_file: str) -> None:
@@ -7496,9 +7743,7 @@ class ShellTool(Tool):
             # tool result; mirroring it into Discord can expose secrets and
             # turns a long command into an edit-rate-limit stream.
             del stdout_b, stderr_b, elapsed
-            await self._finish_shell_progress(
-                message, sess, slot, "working on it…"
-            )
+            await self._finish_shell_progress(message, sess, slot, "working on it…")
 
         try:
             stdout, stderr, exit_code = await self._run_shell_command(
@@ -7949,9 +8194,7 @@ class SeeImageTool(Tool):
             f"__IMAGE_B64__{encoded}__END_IMAGE_B64__"
         )
 
-    async def execute(
-        self, message: Message, url: str | None = None, **kwargs
-    ) -> str:
+    async def execute(self, message: Message, url: str | None = None, **kwargs) -> str:
         if not url:
             return "Error: url is required"
         if not _is_safe_url(url):
@@ -8041,9 +8284,7 @@ class SeeVideoTool(Tool):
     ) -> str:
         if not blob:
             return "Error: empty video"
-        if self.bot is None or not hasattr(
-            self.bot, "_extract_video_derivatives"
-        ):
+        if self.bot is None or not hasattr(self.bot, "_extract_video_derivatives"):
             return "Error: see_video is unavailable"
         control = getattr(self.bot, "_control", None) or {}
         if not parse_bool(
@@ -8070,9 +8311,7 @@ class SeeVideoTool(Tool):
         if not derived:
             return f"Error: could not extract frames/audio from {url}"
         if self.bot is not None and message is not None:
-            channel_id = str(
-                getattr(getattr(message, "channel", None), "id", "") or ""
-            )
+            channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
             if channel_id and hasattr(self.bot, "_cache_media_context"):
                 with contextlib.suppress(Exception):
                     self.bot._cache_media_context(
@@ -8084,29 +8323,21 @@ class SeeVideoTool(Tool):
             f"video frame(s) from {url}."
         ]
         if any(
-            str(item.get("mime_type") or "").startswith("audio/")
-            for item in derived
+            str(item.get("mime_type") or "").startswith("audio/") for item in derived
         ):
             lines.append("An audio track was extracted for audio-capable input.")
         for item in derived:
             if item.get("is_image") and item.get("b64"):
-                lines.append(
-                    f"__IMAGE_B64__{item['b64']}__END_IMAGE_B64__"
-                )
-            elif (
-                str(item.get("mime_type") or "").startswith("audio/")
-                and item.get("b64")
+                lines.append(f"__IMAGE_B64__{item['b64']}__END_IMAGE_B64__")
+            elif str(item.get("mime_type") or "").startswith("audio/") and item.get(
+                "b64"
             ):
                 # Tool follow-up parsing turns this into an input_audio media
                 # part; keep the marker out of the user-facing transcript.
-                lines.append(
-                    f"__AUDIO_B64__{item['b64']}__END_AUDIO_B64__"
-                )
+                lines.append(f"__AUDIO_B64__{item['b64']}__END_AUDIO_B64__")
         return "\n".join(lines)
 
-    async def execute(
-        self, message: Message, url: str | None = None, **kwargs
-    ) -> str:
+    async def execute(self, message: Message, url: str | None = None, **kwargs) -> str:
         if not url:
             return "Error: url is required"
         if not _is_safe_url(url):
@@ -8123,7 +8354,10 @@ class SeeVideoTool(Tool):
             # fetch rather than refusing the URL outright.
             logger.debug("YouTube URL guard failed: %s", e)
         control = getattr(self.bot, "_control", None) or {}
-        if not parse_bool(control.get("process_images"), True) and not self._audio_enabled():
+        if (
+            not parse_bool(control.get("process_images"), True)
+            and not self._audio_enabled()
+        ):
             return "Error: image and audio processing are disabled"
         if self.bot is None or not hasattr(self.bot, "_download_embed_media"):
             return "Error: see_video is unavailable"
@@ -8312,12 +8546,14 @@ class YouTubeTool(Tool):
         path = (parsed.path or "").rstrip("/")
         if cls.TAB_RE.search(path):
             path = cls.TAB_RE.sub(
-                lambda m: "/streams"
-                if m.group(1).lower() == "live"
-                else (
-                    "/videos"
-                    if m.group(1).lower() in {"featured", "about", "community"}
-                    else f"/{m.group(1).lower()}"
+                lambda m: (
+                    "/streams"
+                    if m.group(1).lower() == "live"
+                    else (
+                        "/videos"
+                        if m.group(1).lower() in {"featured", "about", "community"}
+                        else f"/{m.group(1).lower()}"
+                    )
                 ),
                 path,
             )
@@ -8778,7 +9014,9 @@ class YouTubeTool(Tool):
             data = json.loads(blob)
         except json.JSONDecodeError:
             return {"error": "yt-dlp returned invalid JSON"}
-        return data if isinstance(data, dict) else {"error": "unexpected yt-dlp payload"}
+        return (
+            data if isinstance(data, dict) else {"error": "unexpected yt-dlp payload"}
+        )
 
     async def _list_catalog(self, url: str, kind: str, limit: int) -> str:
         cache_key = f"list:{kind}:{url}:{limit}"
@@ -8807,18 +9045,18 @@ class YouTubeTool(Tool):
         **kwargs,
     ) -> str:
         query = str(query or kwargs.get("q") or "").strip()
-        list_limit = self._parse_limit(limit if limit is not None else kwargs.get("max_videos"))
+        list_limit = self._parse_limit(
+            limit if limit is not None else kwargs.get("max_videos")
+        )
         if query and not url:
-            return await self._list_catalog(f"ytsearch{list_limit}:{query}", "search", list_limit)
+            return await self._list_catalog(
+                f"ytsearch{list_limit}:{query}", "search", list_limit
+            )
         if not url:
             return "Error: url or query is required"
         url = self._extract_youtube_url(url)
         if url.startswith("ytsearch") or self._is_youtube_url(url):
-            kind = (
-                "search"
-                if url.startswith("ytsearch")
-                else self._url_kind(url)
-            )
+            kind = "search" if url.startswith("ytsearch") else self._url_kind(url)
             if kind == "search" and not url.startswith("ytsearch"):
                 q = parse_qs(urlparse(url).query).get("search_query", [""])[0].strip()
                 if q:
@@ -9412,7 +9650,9 @@ def _find_member_voice(bot, user_id: int, prefer_guild=None):
     return None, None
 
 
-def _resolve_voice_channel(bot, message, channel_id=None, channel_name=None, user_id=None):
+def _resolve_voice_channel(
+    bot, message, channel_id=None, channel_name=None, user_id=None
+):
     """Find a VoiceChannel from an id, name, or a user who is already in one."""
     if user_id:
         cleaned = re.sub(r"[^0-9]", "", str(user_id))
@@ -9468,7 +9708,9 @@ class InboxListTool(Tool):
         # item — he asked for the list, so give him the whole thing.
         ordered = store.planner_items(items)
         lines = [f"Inbox ({len(items)} actionable):"]
-        lines.extend(store.render_item(item, summary_chars=300) for item in ordered[:20])
+        lines.extend(
+            store.render_item(item, summary_chars=300) for item in ordered[:20]
+        )
         if len(items) > len(ordered):
             lines.append(f"… {len(items) - len(ordered)} more not shown")
         return "\n".join(lines)
@@ -9579,8 +9821,12 @@ class VcStatusTool(Tool):
         guild = getattr(message, "guild", None)
         clients = list(getattr(self.bot, "voice_clients", None) or [])
         if guild is not None:
-            clients = [c for c in clients if getattr(c, "guild", None) == guild] or clients
-        vc = next((c for c in clients if getattr(c, "is_connected", lambda: False)()), None)
+            clients = [
+                c for c in clients if getattr(c, "guild", None) == guild
+            ] or clients
+        vc = next(
+            (c for c in clients if getattr(c, "is_connected", lambda: False)()), None
+        )
         if vc is None or not vc.is_connected():
             extra = ""
             if guild is not None:
@@ -9622,7 +9868,9 @@ class VcWhereTool(Tool):
             "Params: user_id (required, numeric id or mention)."
         )
 
-    async def execute(self, message: Message, user_id: str | None = None, **kwargs) -> str:
+    async def execute(
+        self, message: Message, user_id: str | None = None, **kwargs
+    ) -> str:
         cleaned = re.sub(r"[^0-9]", "", str(user_id or ""))
         if not cleaned:
             return "Error: user_id is required"
@@ -10857,11 +11105,7 @@ _CHESS_MENTION_RE = re.compile(r"<@!?(\d+)>")
 def _chess_bot_name(bot=None) -> str:
     """Live people-facing name for this process (Maxwell, Uni, a nick, …)."""
     user = getattr(bot, "user", None) if bot is not None else None
-    name = (
-        getattr(bot, "bot_name", None)
-        if bot is not None
-        else None
-    )
+    name = getattr(bot, "bot_name", None) if bot is not None else None
     name = str(
         name
         or getattr(user, "display_name", None)
@@ -10872,13 +11116,16 @@ def _chess_bot_name(bot=None) -> str:
 
 
 def _chess_user_label(user) -> str:
-    return str(
-        getattr(user, "display_name", None)
-        or getattr(user, "global_name", None)
-        or getattr(user, "name", None)
-        or getattr(user, "id", "")
+    return (
+        str(
+            getattr(user, "display_name", None)
+            or getattr(user, "global_name", None)
+            or getattr(user, "name", None)
+            or getattr(user, "id", "")
+            or "player"
+        ).strip()
         or "player"
-    ).strip() or "player"
+    )
 
 
 def _chess_user_names(user) -> list[str]:
@@ -11061,7 +11308,14 @@ def _chess_render_safe(game) -> bytes | None:
 
 
 def _chess_state_text(game, bot_name: str | None = None) -> str:
-    """The board + metadata the model needs to play, as plain text."""
+    """The board + metadata the model needs to play, as plain text.
+
+    When it is Maxwell's turn this is his entire view of the position, because
+    he now picks the move himself instead of delegating to the search. A bare
+    SAN list is not enough for that: the annotations say what each move
+    captures, whether it checks or mates, and whether the piece lands on a
+    square where it is simply taken.
+    """
     name = str(bot_name or "").strip() or "Maxwell"
     lines: list[str] = []
     lines.append("CHESS BOARD (text — see attached image for the real board):")
@@ -11077,15 +11331,46 @@ def _chess_state_text(game, bot_name: str | None = None) -> str:
     result = game.result
     if result:
         lines.append(f"GAME OVER: {result}")
+        return "\n".join(lines)
+
+    lines.append(f"To move: {game.turn_label}")
+    who = name if game.bot_turn else game.player_name
+    lines.append(f"It is {who}'s move.")
+
+    if game.bot_turn:
+        # Maxwell's own turn: give him the annotated position, all of it. The
+        # legal list is not truncated here — a move he cannot see is a move he
+        # cannot play, and in a sharp position the cut-off 49th move is
+        # sometimes the only one that does not lose.
+        notes: list[str] = []
+        annotated: list[str] = []
+        if _chess_position_notes is not None:
+            with contextlib.suppress(Exception):
+                notes = list(_chess_position_notes(game.board))
+        if _chess_annotate_legal_moves is not None:
+            with contextlib.suppress(Exception):
+                annotated = list(_chess_annotate_legal_moves(game.board))
+        if notes:
+            lines.append("")
+            lines.append("POSITION:")
+            lines.extend(f"  • {note}" for note in notes)
+        moves = annotated or game.legal_san
+        lines.append("")
+        lines.append(f"YOUR LEGAL MOVES ({len(moves)}) — play exactly one of these:")
+        lines.extend(f"  {item}" for item in moves)
+        lines.append("")
+        lines.append(
+            "Pick the move yourself and pass it as chess_move(move='<SAN>'). "
+            "Read the tags before choosing: take free material, answer threats "
+            "to your own pieces, and do not play a move tagged LOSES THE PIECE "
+            "unless you can show it wins more back. Play to win."
+        )
     else:
         legal = game.legal_san
-        lines.append(f"To move: {game.turn_label}")
         shown = ", ".join(legal[:48])
         if len(legal) > 48:
             shown += f" … (+{len(legal) - 48} more)"
-        lines.append(f"Legal moves ({len(legal)}): {shown}")
-        who = name if game.bot_turn else game.player_name
-        lines.append(f"It is {who}'s move.")
+        lines.append(f"Legal moves for them ({len(legal)}): {shown}")
     return "\n".join(lines)
 
 
@@ -11122,7 +11407,10 @@ async def _chess_post_board(bot, message, game) -> tuple[str, str, bytes | None]
         if sent is not None and getattr(sent, "attachments", None):
             cdn_url = sent.attachments[0].url
     except discord.Forbidden:
-        logger.warning("Cannot post chess board in %s — missing permissions", getattr(message.channel, "id", "?"))
+        logger.warning(
+            "Cannot post chess board in %s — missing permissions",
+            getattr(message.channel, "id", "?"),
+        )
     except discord.HTTPException as exc:
         logger.warning("Failed to post chess board: %s", exc)
     return cdn_url, local_path, png
@@ -11151,6 +11439,35 @@ async def _chess_record(bot, message, text: str) -> None:
     except Exception as e:  # pragma: no cover
         # Memory write is best-effort; never fail the tool over it.
         logger.debug("Failed to record tool output in channel memory: %s", e)
+
+
+# game_id -> consecutive illegal/absent moves on Maxwell's own turn. Maxwell
+# picks his own moves now, so the failure mode to protect against is a game
+# wedged forever because he keeps naming a move that is not legal. After
+# _CHESS_MAX_MISSES tries the local search plays one move so the game advances;
+# the counter resets on every successful move.
+_CHESS_MISSES: dict[str, int] = {}
+_CHESS_MAX_MISSES = 3
+
+
+def _chess_note_miss(game_id: str) -> int:
+    key = str(game_id or "")
+    if not key:
+        return 0
+    count = _CHESS_MISSES.get(key, 0) + 1
+    _CHESS_MISSES[key] = count
+    if len(_CHESS_MISSES) > 256:
+        for stale in list(_CHESS_MISSES)[:128]:
+            _CHESS_MISSES.pop(stale, None)
+    return count
+
+
+def _chess_clear_misses(game_id: str) -> None:
+    _CHESS_MISSES.pop(str(game_id or ""), None)
+
+
+def _chess_miss_count(game_id: str) -> int:
+    return _CHESS_MISSES.get(str(game_id or ""), 0)
 
 
 def _chess_game_result(
@@ -11187,11 +11504,11 @@ class ChessStartTool(Tool):
             f"{name} plays — a mention, Discord user id, or display name. Omit "
             f"it to play the person who asked, or the single @mentioned human "
             f"in the message. One game per channel; only that opponent may "
-            f"move. Posts the starting board image and returns FEN and legal "
-            f"moves. Params: opponent, bot_side (white|black|auto, default "
-            f"white), depth (search depth 1-4, default 3). If {name} is white "
-            f"it plays its first move automatically and then it is the "
-            f"player's turn."
+            f"move. Posts the starting board image and returns FEN plus the "
+            f"annotated legal moves. {name} plays his own moves: if {name} is "
+            f"white, this returns the opening position and you pick the first "
+            f"move with chess_move. Params: opponent, bot_side (white|black|"
+            f"auto, default white)."
         )
 
     async def execute(
@@ -11235,6 +11552,10 @@ class ChessStartTool(Tool):
         else:
             return "Error: bot_side must be 'white', 'black', or 'auto'."
 
+        # depth/jitter only ever reach the local search, which is now just the
+        # wedge-breaker for when Maxwell repeatedly fails to name a legal move.
+        # Kept accepted-but-clamped so an old caller passing depth= is not an
+        # error, and stored on the game so the fallback still has settings.
         max_depth = int(depth or 3)
         if max_depth < 1:
             max_depth = 1
@@ -11250,16 +11571,11 @@ class ChessStartTool(Tool):
             jitter=0.35,
         )
 
-        # If this bot is white it opens; otherwise the player moves first.
-        played: list[str] = []
-        if game.bot_turn and not game.is_over:
-            try:
-                mv, san = _chess_choose_bot_move(game.board, depth=game.max_depth, jitter=game.jitter)
-                game.apply_move(mv)
-                played.append(san)
-            except Exception as exc:  # pragma: no cover
-                logger.warning("chess_start engine move failed: %s", exc)
-            manager.persist()
+        # Maxwell plays his own chess. If he has the white side he does NOT get
+        # an engine move dropped in here — the tool returns the annotated
+        # position and he names his own opening move on the follow-up turn
+        # (chess_start is in RESULT_TOOL_NAMES, so that turn always happens).
+        _chess_clear_misses(game.game_id)
 
         self._signal_streaming(message)
         cdn_url, local_path, png = await _chess_post_board(self.bot, message, game)
@@ -11269,8 +11585,7 @@ class ChessStartTool(Tool):
             message,
             f"started a chess game. {name} is "
             f"{_chess_color_name(game.bot_color)}, "
-            f"{game.player_name} is {_chess_color_name(game.player_color)}."
-            + (f" {name} opened with {played[-1]}." if played else ""),
+            f"{game.player_name} is {_chess_color_name(game.player_color)}.",
         )
 
         result = _chess_game_result(
@@ -11281,24 +11596,12 @@ class ChessStartTool(Tool):
             png=png,
             bot_name=name,
         )
-        if played:
+        if game.bot_turn and not game.is_over:
             result += (
-                "\n\nGame started. "
+                "\n\nGame started and it is "
                 + name
-                + " ("
-                + _chess_color_name(game.bot_color)
-                + ") opened with '"
-                + played[-1]
-                + "'. Tell "
-                + game.player_name
-                + " it is their move and prompt them to play."
-            )
-        elif game.bot_turn and not game.is_over:
-            result += (
-                "\n\nGame started. It is "
-                + name
-                + "'s move — call chess_move"
-                " (or pass move=) to play."
+                + "'s move — YOUR move. Pick from the legal moves above and "
+                "call chess_move(move='<SAN>') now. Say your move in chat too."
             )
         else:
             result += (
@@ -11345,13 +11648,15 @@ class ChessMoveTool(Tool):
     def get_description(self):
         name = _chess_bot_name(self.bot)
         return (
-            "Advance the chess game by one move (or a full round). Pass move= "
-            "in SAN (e4, Nf3, O-O, exd5, Qh5) or UCI (e2e4, e7e8q). If it is "
-            f"the player's turn, this relays their move; if it is {name}'s turn "
-            f"and move is omitted, {name} picks a move itself. respond=true "
-            f"(default) makes {name} reply automatically after a player move. "
-            "Posts the updated board image and returns FEN + legal moves. Only "
-            "the chosen opponent may call it."
+            "Advance the chess game by one move. Pass move= in SAN (e4, Nf3, "
+            "O-O, exd5, Qh5) or UCI (e2e4, e7e8q). When it is the player's "
+            f"turn, relay THEIR move. When it is {name}'s turn, YOU choose "
+            f"{name}'s move — there is no engine playing for you. The result "
+            "lists every legal move annotated with what it captures, whether "
+            "it checks or mates, and whether the piece would just be taken; "
+            "read it and pick the best one. Posts the updated board image and "
+            "returns FEN + the new position. Only the chosen opponent may "
+            "call it with their move."
         )
 
     async def execute(
@@ -11375,17 +11680,40 @@ class ChessMoveTool(Tool):
 
         played: list[str] = []
         error_text: str | None = None
+        engine_fallback = False
         try:
             if game.bot_turn:
-                # This bot to move. Either the model supplies its chosen move,
-                # or the engine picks one.
+                # Maxwell's own turn. He names the move; the local search is
+                # only reached after repeated failures to name a legal one, so
+                # a game can never wedge on his turn.
                 if move:
                     mv = game.parse_move(move)
                     played.append(game.apply_move(mv))
-                else:
-                    mv, san = _chess_choose_bot_move(game.board, depth=game.max_depth, jitter=game.jitter)
+                    _chess_clear_misses(game.game_id)
+                elif _chess_miss_count(game.game_id) >= _CHESS_MAX_MISSES:
+                    mv, san = _chess_choose_bot_move(
+                        game.board, depth=game.max_depth, jitter=game.jitter
+                    )
                     game.apply_move(mv)
                     played.append(san)
+                    engine_fallback = True
+                    _chess_clear_misses(game.game_id)
+                    logger.warning(
+                        "chess: falling back to local search in %s after %d "
+                        "failed attempts to name a legal move",
+                        channel_id,
+                        _CHESS_MAX_MISSES,
+                    )
+                else:
+                    misses = _chess_note_miss(game.game_id)
+                    manager.persist()
+                    state = _chess_state_text(game, bot_name=_chess_bot_name(self.bot))
+                    return (
+                        "Error: it is your move and you did not name one. "
+                        "Choose from the legal moves below and call "
+                        "chess_move(move='<SAN>') again "
+                        f"(attempt {misses} of {_CHESS_MAX_MISSES}).\n\n" + state
+                    )
             else:
                 # Player to move. They must supply a move; it must be legal for
                 # the side to move (parse_move enforces that).
@@ -11403,16 +11731,23 @@ class ChessMoveTool(Tool):
             error_text = f"could not apply move: {exc}"
 
         if error_text:
+            if game.bot_turn:
+                # An illegal move from Maxwell himself: hand back the position
+                # so the next attempt is informed, and count it toward the
+                # fallback so a stubborn loop still ends in a played move.
+                misses = _chess_note_miss(game.game_id)
+                state = _chess_state_text(game, bot_name=_chess_bot_name(self.bot))
+                return (
+                    f"Error: {error_text}\nThat move is not legal here "
+                    f"(attempt {misses} of {_CHESS_MAX_MISSES}). Pick one of "
+                    "these exactly as written.\n\n" + state
+                )
             return f"Error: {error_text}"
 
-        # If the human just moved and it is now this bot's turn, respond.
-        if respond and game.bot_turn and not game.is_over:
-            try:
-                mv2, san2 = _chess_choose_bot_move(game.board, depth=game.max_depth, jitter=game.jitter)
-                game.apply_move(mv2)
-                played.append(san2)
-            except Exception as exc:  # pragma: no cover
-                logger.warning("chess_move engine reply failed: %s", exc)
+        # The human just moved and it is now Maxwell's turn. Do not pick his
+        # move here — chess_move returns its result to the model, so he plays
+        # it himself on the follow-up turn with the annotated position in hand.
+        bot_to_move = respond and game.bot_turn and not game.is_over
 
         manager.persist()
         self._signal_streaming(message)
@@ -11433,14 +11768,28 @@ class ChessMoveTool(Tool):
             png=png,
             bot_name=name,
         )
-        result += (
-            "\n\n" + "Played move(s): " + " ".join(played)
-            + ("\nThe game is over." if game.is_over else
-               ("\nIt is now the player's move — tell them it is their turn."
-                if not game.bot_turn else
-                f"\nIt is {name}'s move — play it or pass the next call."))
-        )
-        return result
+        tail = "\n\nPlayed move(s): " + " ".join(played)
+        if engine_fallback:
+            tail += (
+                f"\n(You did not name a legal move {_CHESS_MAX_MISSES} times, "
+                "so the local search played one for you. Pick your own next time.)"
+            )
+        if game.is_over:
+            tail += "\nThe game is over."
+        elif bot_to_move:
+            tail += (
+                f"\nIt is {name}'s move NOW — your move. Pick from the legal "
+                "moves above and call chess_move(move='<SAN>') in this same "
+                "batch. Do not tell the player it is their turn."
+            )
+        elif not game.bot_turn:
+            tail += "\nIt is now the player's move — tell them it is their turn."
+        else:
+            tail += (
+                f"\nIt is {name}'s move — pick from the legal moves above and "
+                "call chess_move(move='<SAN>')."
+            )
+        return result + tail
 
 
 class ChessResignTool(Tool):
@@ -11505,7 +11854,9 @@ class UsageTool(Tool):
         )
 
     def _url(self) -> str:
-        return (os.environ.get("MAXWELL_USAGE_URL", "") or "").strip() or "https://z3ki.dev/v2/usage"
+        return (
+            os.environ.get("MAXWELL_USAGE_URL", "") or ""
+        ).strip() or "https://z3ki.dev/v2/usage"
 
     def _api_key(self) -> str:
         return (
@@ -11595,19 +11946,30 @@ class UsageTool(Tool):
                 active_limited.append(entry)
         if active_limited:
             from collections import Counter
+
             models = Counter()
             for entry in active_limited:
                 m = str(entry.get("model") or entry.get("reason") or "unknown")
                 models[m] += 1
-            summary = ", ".join(f"{model} x{cnt}" if cnt > 1 else model for model, cnt in models.items())
-            lines.append(f"Rate-limited models (pooled, {len(active_limited)} active): {summary}")
-            lines.append("Note: single-model QuotaExhausted on one pooled account is NOT global exhaustion — other accounts still serve.")
+            summary = ", ".join(
+                f"{model} x{cnt}" if cnt > 1 else model for model, cnt in models.items()
+            )
+            lines.append(
+                f"Rate-limited models (pooled, {len(active_limited)} active): {summary}"
+            )
+            lines.append(
+                "Note: single-model QuotaExhausted on one pooled account is NOT global exhaustion — other accounts still serve."
+            )
             if stale_count:
-                lines.append(f"({stale_count} stale/expired rate-limit entries ignored)")
+                lines.append(
+                    f"({stale_count} stale/expired rate-limit entries ignored)"
+                )
         elif isinstance(rate_limited, list) and rate_limited:
             # All entries were stale/weekly-only — not actually rate limited for current window
             if stale_count:
-                lines.append(f"Rate-limited: none (currently) — {stale_count} stale entry expired, pooled quota still available")
+                lines.append(
+                    f"Rate-limited: none (currently) — {stale_count} stale entry expired, pooled quota still available"
+                )
             else:
                 lines.append("Rate-limited: none")
         else:
@@ -11615,7 +11977,9 @@ class UsageTool(Tool):
         # Per-account remainings are useful but must not expose emails. Anonymize to Account 1..N.
         per_account = data.get("per_account")
         if isinstance(per_account, list) and per_account:
-            lines.append(f"Per-account pools: {len(per_account)} accounts (emails redacted)")
+            lines.append(
+                f"Per-account pools: {len(per_account)} accounts (emails redacted)"
+            )
             # Optionally show anonymized quota spread without emails
             for idx, acct in enumerate(per_account[:5], start=1):
                 if not isinstance(acct, dict):
@@ -11633,7 +11997,8 @@ class UsageTool(Tool):
                 extra = " " + " ".join(parts) if parts else ""
                 lines.append(f"  - Account {idx} ({tier}){lim_str}{extra}")
             if len(per_account) > 5:
-                lines.append(f"  … +{len(per_account)-5} more")
+                lines.append(f"  … +{len(per_account) - 5} more")
+
         # Build a sanitized copy for the raw payload fallback — strip every email field recursively
         def _sanitize(obj):
             if isinstance(obj, dict):
@@ -11647,6 +12012,7 @@ class UsageTool(Tool):
             if isinstance(obj, list):
                 return [_sanitize(x) for x in obj]
             return obj
+
         sanitized = _sanitize(data)
         rendered = json.dumps(sanitized, indent=2, ensure_ascii=False)
         if len(rendered) > 2500:
@@ -11678,7 +12044,9 @@ class ManagePluginTool(Tool):
         if not pm:
             return "Error: Plugin manager is not initialized on this bot."
 
-        author_id = message.author.id if message and hasattr(message, "author") else None
+        author_id = (
+            message.author.id if message and hasattr(message, "author") else None
+        )
         act = (action or "list").strip().lower()
 
         if act == "list" or act == "status":
@@ -11688,7 +12056,11 @@ class ManagePluginTool(Tool):
             lines = ["**Installed Maxwell Plugins:**"]
             for p in plugins:
                 glob = "🌐 GLOBAL" if p["enabled_globally"] else "🔒 PER-USER"
-                status = "✅ ACTIVE FOR YOU" if p["enabled_for_you"] else "❌ INACTIVE FOR YOU"
+                status = (
+                    "✅ ACTIVE FOR YOU"
+                    if p["enabled_for_you"]
+                    else "❌ INACTIVE FOR YOU"
+                )
                 tools_str = ", ".join(p["tools"]) if p["tools"] else "none"
                 lines.append(
                     f"• **{p['name']}** (v{p['version']}) — {glob} | {status}\n"
@@ -11705,8 +12077,7 @@ class ManagePluginTool(Tool):
         is_global = parse_bool(is_global, False)
         author_id = str(author_id or "")
         is_admin = bool(
-            author_id
-            and getattr(self.bot, "_is_admin", lambda _uid: False)(author_id)
+            author_id and getattr(self.bot, "_is_admin", lambda _uid: False)(author_id)
         )
         # Admin gate check for global modifications
         if is_global:
@@ -11732,9 +12103,12 @@ class ManagePluginTool(Tool):
             target_user = author_id
 
         if act == "enable":
-            return pm.enable_plugin(plugin_name, user_id=target_user, is_global=is_global)
+            return pm.enable_plugin(
+                plugin_name, user_id=target_user, is_global=is_global
+            )
         elif act == "disable":
-            return pm.disable_plugin(plugin_name, user_id=target_user, is_global=is_global)
+            return pm.disable_plugin(
+                plugin_name, user_id=target_user, is_global=is_global
+            )
         else:
             return f"Error: Unknown action '{act}'. Use 'list', 'enable', 'disable', or 'status'."
-

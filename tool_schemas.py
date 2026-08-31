@@ -151,7 +151,9 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "action": _str("Action to perform: 'list', 'enable', 'disable', 'status'"),
             "plugin": _str("Plugin name (e.g. 'checkers')"),
             "user_id": _str("Optional target user ID or @mention (defaults to caller)"),
-            "is_global": _bool("Whether to enable/disable plugin globally across all users (admin only)"),
+            "is_global": _bool(
+                "Whether to enable/disable plugin globally across all users (admin only)"
+            ),
         },
         ["action"],
     ),
@@ -359,7 +361,13 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 "Served as-is: no restyle or layout template. Invent a new look each "
                 "time unless the user specified one. Prefer this over stuffing HTML "
                 "into chat. In visible HTML text use real line breaks or <br>, never "
-                "literal \\n; keep \\n only inside intentional JavaScript/CSS strings."
+                "literal \\n; keep \\n only inside intentional JavaScript/CSS strings. "
+                "Ship the finished thing: every section written, every control wired "
+                "to code that runs, every list populated with real content. No "
+                "placeholders, no lorem ipsum, no TODO, no 'coming soon', no empty "
+                "href='#' navigation, no stub function returning a fake value. A page "
+                "whose body is just a 'Loading…' shell is a failure, not a start — if "
+                "it takes 900 lines to actually work, write 900 lines."
             ),
             "files": _str(
                 'Optional extra files as JSON: {"style.css": "...", "app.js": "...", '
@@ -454,7 +462,9 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     ),
     "list_sites": _obj(
         {
-            "all_users": _bool("Optional boolean. If true, list all published sites across all users."),
+            "all_users": _bool(
+                "Optional boolean. If true, list all published sites across all users."
+            ),
         },
     ),
     "site_test": _obj(
@@ -707,8 +717,7 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         },
         ["action"],
     ),
-
-    # ---- Chess (this bot plays real chess against a chosen opponent) ----
+    # ---- Chess (Maxwell plays real chess himself against a chosen opponent) --
     "chess_start": _obj(
         {
             "opponent": _str(
@@ -720,20 +729,17 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 "white | black | auto (default white). The side this bot plays. "
                 "The opponent gets the other colour."
             ),
-            "depth": _int("Search depth for this bot's engine moves (1-4, default 3)"),
         }
     ),
     "chess_move": _obj(
         {
             "move": _str(
                 "The move to play, in SAN (e4, Nf3, O-O, exd5, Qh5) or UCI "
-                "(e2e4, e7e8q). If it is this bot's turn and move is omitted, "
-                "the engine picks a move itself."
-            ),
-            "respond": _bool(
-                "After a player move, automatically play this bot's reply in the "
-                "same call (default true). Set false to play the bot's move "
-                "separately."
+                "(e2e4, e7e8q). On the player's turn this is THEIR move. On "
+                "this bot's turn this is the move YOU chose — pick it from the "
+                "annotated legal-move list in the previous result. There is no "
+                "engine playing for you; omitting move on your own turn just "
+                "returns the position again."
             ),
         }
     ),
@@ -891,6 +897,28 @@ TURN_ENDING_TOOL_NAMES: frozenset[str] = frozenset(
     {"send_message", "no_response", "sleep"}
 )
 
+# Plugin tools that declared ``returns_result = True``. Plugin names cannot live
+# in the static set above — they are discovered at import time — and without
+# this every plugin tool got the "returns nothing" contract, so the dispatch
+# loop ended the turn and the plugin's output was never read by the model.
+# Populated by PluginManager on load.
+_PLUGIN_RESULT_TOOL_NAMES: set[str] = set()
+
+
+def set_plugin_result_tools(names: set[str] | frozenset[str] | None) -> None:
+    """Register which plugin tools hand their output back to the model."""
+    _PLUGIN_RESULT_TOOL_NAMES.clear()
+    for name in names or ():
+        text = str(name or "").strip()
+        if text:
+            _PLUGIN_RESULT_TOOL_NAMES.add(text)
+
+
+def returns_result(name: str) -> bool:
+    """Whether ``name`` hands its output back for a follow-up turn."""
+    return name in RESULT_TOOL_NAMES or name in _PLUGIN_RESULT_TOOL_NAMES
+
+
 # One line per contract class, appended to the tool's description so the model
 # reads it in the same place it reads the parameters. Kept short on purpose —
 # this text is paid for on every single request, for every single tool.
@@ -909,7 +937,7 @@ _CONTRACT_SILENT = (
 
 def result_contract(name: str) -> str:
     """The one-line result contract appended to `name`'s description."""
-    if name in RESULT_TOOL_NAMES:
+    if returns_result(name):
         return _CONTRACT_RESULT
     if name in TURN_ENDING_TOOL_NAMES:
         return _CONTRACT_ENDING
@@ -920,7 +948,7 @@ def contract_groups(names: list[str]) -> dict[str, list[str]]:
     """Split `names` into the three contract buckets, order preserved."""
     groups: dict[str, list[str]] = {"result": [], "ending": [], "silent": []}
     for name in names:
-        if name in RESULT_TOOL_NAMES:
+        if returns_result(name):
             groups["result"].append(name)
         elif name in TURN_ENDING_TOOL_NAMES:
             groups["ending"].append(name)

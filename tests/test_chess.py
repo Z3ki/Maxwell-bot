@@ -101,8 +101,12 @@ def test_choose_move_midgame_legal():
 
 def test_parse_move_san_and_uci():
     g = cg.ChessGame(
-        game_id="x", channel_id="c", player_id="p",
-        player_name="p", bot_color=True, started_at="",
+        game_id="x",
+        channel_id="c",
+        player_id="p",
+        player_name="p",
+        bot_color=True,
+        started_at="",
     )
     assert g.parse_move("e4").uci() == "e2e4"
     assert g.parse_move("e2e4").uci() == "e2e4"
@@ -112,8 +116,12 @@ def test_parse_move_san_and_uci():
 
 def test_apply_move_records_san_history():
     g = cg.ChessGame(
-        game_id="x", channel_id="c", player_id="p",
-        player_name="p", bot_color=True, started_at="",
+        game_id="x",
+        channel_id="c",
+        player_id="p",
+        player_name="p",
+        bot_color=True,
+        started_at="",
     )
     g.apply_move(g.parse_move("e4"))
     assert g.history_san == ["e4"]
@@ -230,7 +238,9 @@ def test_chess_resolve_player_defaults_to_asker():
     alice = _user(1, name="alice", display_name="Alice")
     bot = _user(99, name="uni", display_name="Uni")
     msg = _msg(alice)
-    uid, name = bot_tools._chess_resolve_player(msg, None, SimpleNamespace(user=bot, bot_name="Uni"))
+    uid, name = bot_tools._chess_resolve_player(
+        msg, None, SimpleNamespace(user=bot, bot_name="Uni")
+    )
     assert uid == "1"
     assert name == "Alice"
 
@@ -309,3 +319,181 @@ def test_chess_start_description_uses_bot_name():
     assert "Uni" in desc
     assert "Maxwell" not in desc
     assert "opponent=" in desc
+
+
+# --------------------------------------------------------------------------
+# Maxwell picks his own moves. The search stays only as a wedge-breaker, so
+# what matters is that the position he is handed is actually playable from.
+# --------------------------------------------------------------------------
+
+
+def test_annotated_moves_name_what_a_capture_takes():
+    b = chess.Board()
+    b.push_san("e4")
+    b.push_san("d5")
+    ann = cg.annotate_legal_moves(b)
+    exd5 = next(m for m in ann if m.startswith("exd5"))
+    assert "takes pawn" in exd5
+
+
+def test_annotated_moves_flag_a_piece_that_just_gets_taken():
+    # Bishop to b5 is met by the knight on d4; nothing defends b5.
+    b = chess.Board("r1bqkbnr/pppp1ppp/8/4p3/2BnP3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4")
+    ann = cg.annotate_legal_moves(b)
+    bb5 = next(m for m in ann if m.startswith("Bb5"))
+    assert "LOSES THE PIECE" in bb5
+
+
+def test_annotated_moves_do_not_cry_wolf_on_a_defended_square():
+    b = chess.Board("r1bqkbnr/pppp1ppp/8/4p3/2BnP3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4")
+    ann = cg.annotate_legal_moves(b)
+    bb3 = next(m for m in ann if m.startswith("Bb3"))
+    assert "defended" in bb3
+    assert "LOSES THE PIECE" not in bb3
+
+
+def test_annotated_moves_mark_an_even_trade_as_a_trade():
+    b = chess.Board("r1bqkbnr/pppp1ppp/8/4p3/2BnP3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4")
+    ann = cg.annotate_legal_moves(b)
+    nxd4 = next(m for m in ann if m.startswith("Nxd4"))
+    assert "takes knight" in nxd4
+    assert "LOSES THE PIECE" not in nxd4
+
+
+def test_annotated_moves_shout_about_mate():
+    # Qh5 mates on the back-rank-ish scholar pattern.
+    b = chess.Board(
+        "r1bqkbnr/pppp1ppp/2n5/2b1p3/4P3/5Q2/PPPP1PPP/RNB1KBNR w KQkq - 0 1"
+    )
+    b.push_san("Qxf7+")
+    b.pop()
+    ann = cg.annotate_legal_moves(b)
+    qxf7 = next(m for m in ann if m.startswith("Qxf7"))
+    assert "CHECKMATE" in qxf7 or "check" in qxf7
+
+
+def test_annotated_moves_cover_every_legal_move():
+    b = chess.Board()
+    assert len(cg.annotate_legal_moves(b)) == len(list(b.legal_moves))
+
+
+def test_annotating_does_not_disturb_the_board():
+    b = chess.Board()
+    b.push_san("e4")
+    before = b.fen()
+    cg.annotate_legal_moves(b)
+    cg.position_notes(b)
+    assert b.fen() == before
+
+
+def test_position_notes_call_out_free_material():
+    b = chess.Board("r1bqkbnr/pppp1ppp/8/4p3/2BnP3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4")
+    notes = " ".join(cg.position_notes(b))
+    assert "Free material" in notes
+    assert "Nxe5" in notes
+
+
+def test_position_notes_announce_check():
+    b = chess.Board("rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3")
+    assert b.is_check()
+    notes = " ".join(cg.position_notes(b))
+    assert "IN CHECK" in notes
+
+
+def test_position_notes_report_being_down_material():
+    # White is a whole queen short.
+    b = chess.Board("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNB1KBNR w KQkq - 0 1")
+    notes = " ".join(cg.position_notes(b))
+    assert "-900" in notes
+
+
+def test_state_text_hands_maxwell_the_full_annotated_move_list():
+    """On his own turn he must see every move — a truncated list hides the
+    one move that does not lose."""
+    import bot_tools
+
+    g = cg.ChessGame(
+        game_id="x",
+        channel_id="c",
+        player_id="p",
+        player_name="Alice",
+        bot_color=True,
+        started_at="",
+    )
+    text = bot_tools._chess_state_text(g, bot_name="Uni")
+    assert "YOUR LEGAL MOVES (20)" in text
+    assert "…" not in text  # no truncation on his own turn
+    assert "chess_move(move=" in text
+    assert "Play to win." in text
+
+
+def test_state_text_truncates_only_the_opponents_list():
+    import bot_tools
+
+    g = cg.ChessGame(
+        game_id="x",
+        channel_id="c",
+        player_id="p",
+        player_name="Alice",
+        bot_color=False,  # Maxwell is black, so white/Alice is to move
+        started_at="",
+    )
+    text = bot_tools._chess_state_text(g, bot_name="Uni")
+    assert "Legal moves for them (20)" in text
+    assert "YOUR LEGAL MOVES" not in text
+
+
+def test_state_text_stops_at_the_result_when_the_game_is_over():
+    import bot_tools
+
+    g = cg.ChessGame(
+        game_id="x",
+        channel_id="c",
+        player_id="p",
+        player_name="Alice",
+        bot_color=True,
+        started_at="",
+    )
+    # Fool's mate: black delivers Qh4#.
+    for san in ("f3", "e5", "g4", "Qh4#"):
+        g.apply_move(g.parse_move(san))
+    text = bot_tools._chess_state_text(g, bot_name="Uni")
+    assert "GAME OVER" in text
+    assert "YOUR LEGAL MOVES" not in text
+
+
+def test_move_tool_description_says_maxwell_chooses():
+    import bot_tools
+
+    desc = bot_tools.ChessMoveTool(SimpleNamespace(bot_name="Uni")).get_description()
+    assert "YOU choose" in desc
+    assert "no engine playing for you" in desc
+
+
+def test_miss_counter_escalates_then_resets():
+    import bot_tools
+
+    bot_tools._chess_clear_misses("g1")
+    assert bot_tools._chess_miss_count("g1") == 0
+    assert bot_tools._chess_note_miss("g1") == 1
+    assert bot_tools._chess_note_miss("g1") == 2
+    assert bot_tools._chess_miss_count("g1") == 2
+    bot_tools._chess_clear_misses("g1")
+    assert bot_tools._chess_miss_count("g1") == 0
+
+
+def test_miss_counter_is_per_game():
+    import bot_tools
+
+    bot_tools._chess_clear_misses("a")
+    bot_tools._chess_clear_misses("b")
+    bot_tools._chess_note_miss("a")
+    assert bot_tools._chess_miss_count("b") == 0
+
+
+def test_fallback_search_still_returns_a_legal_move():
+    """The wedge-breaker has to work, or a stuck game stays stuck."""
+    b = chess.Board("r1bqkbnr/pppp1ppp/8/4p3/2BnP3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4")
+    move, san = cg.choose_bot_move(b, depth=2)
+    assert move in b.legal_moves
+    assert san

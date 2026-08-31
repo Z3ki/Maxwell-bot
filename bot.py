@@ -206,6 +206,11 @@ from concurrency_safety import (  # noqa: E402
     classify_tool,
     loop_watchdog,
 )
+from message_pipeline import (  # noqa: E402
+    InboundDedup,
+    ReplyQueue,
+    Watermarks,
+)
 from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before these imports
     OWNER_IDS,
     ChangeAvatarTool,
@@ -341,6 +346,7 @@ from tool_registry import (  # noqa: E402 — reasoning now rides inside tool ca
 )
 import site_backend  # noqa: E402
 import site_server  # noqa: E402
+import site_test  # noqa: E402
 from plugin_manager import PluginManager  # noqa: E402
 from tool_schemas import (  # noqa: E402
     CHAT_CORE_TOOL_NAMES,
@@ -352,6 +358,7 @@ from tool_schemas import (  # noqa: E402
     normalize_native_tool_calls,
     recover_text_tool_calls,
     result_contract,
+    returns_result as tool_schemas_returns_result,
     trim_tool_tail,
 )
 from utils import (  # fd-safe, single source of truth  # noqa: E402
@@ -2370,6 +2377,13 @@ TOOL_PROTOCOL = (
     "## Tool contract\n"
     "If the user asks you to do, make, send, search, fetch, run, edit, or "
     "react, call the matching tool. Never describe an action instead of doing it.\n"
+    "Be proactive. Do the whole job, not the first step of it, and do not stop "
+    "to ask permission for work that was clearly implied. If someone asks for a "
+    "site, build it, test it, and fix what the test found before you answer. If "
+    "they report something broken, reproduce it and fix it. If a task needs "
+    "five tool calls, make five — finishing is the job. Only ask a question "
+    "when you genuinely cannot proceed without the answer; otherwise pick the "
+    "sensible option, act, and say what you chose.\n"
     "Look things up. If you are unsure, the topic is current (news, scores, "
     "prices, versions, people, pages), or they asked you to check — call "
     "web_search first, then fetch_url for a specific page. Do not guess from "
@@ -2377,29 +2391,56 @@ TOOL_PROTOCOL = (
     "already fetched this turn.\n"
     "Visible replies go through send_message (or no_response to stay silent). "
     "Do not also write the same text as raw assistant content.\n"
-    "Default: helper tools first (they finish before terminals), then ONE "
-    "send_message. Multiple sends + wait are for rare spacing, not ordinary chat. "
-    "wait is <=10s; longer pauses use sleep (sleep ends dispatch).\n"
+    "ONE send_message per turn carries your whole reply. Do not split a reply "
+    "into a stream of short lines — several messages in a row reads as spam and "
+    "is the single most common complaint about you. Multiple sends are for rare "
+    "deliberate spacing only. wait is <=10s; longer pauses use sleep (sleep "
+    "ends dispatch). If you already answered and nothing new was said, use "
+    "no_response instead of finding something else to add.\n"
     "Parallel multi-tool calling: put the helper tool (shell, create_site, "
     "web_search…) in the SAME batch as the acknowledgement. A quick "
     "`send_message(content='on it...')` is fine ONLY when the tool that does "
     "the work is in that same batch — the ack is not the work. Never send "
     "'on it' / 'working on it' as the only tool call and plan to act next "
-    "turn: announcing an action is not performing it.\n"
+    "turn: announcing an action is not performing it. Better still, skip the "
+    "ack entirely and report the finished result.\n"
+    "Never claim something is done, fixed, built, live, or working unless a "
+    "tool result in this conversation says so. 'I've updated it' with no tool "
+    "call behind it is a lie, and it is the thing people trust you least for.\n"
     "Files the user should receive must be attached via send_file or shell `files=`. "
     "A filesystem path is not delivery.\n"
     "create_site: full HTML document in `body`, never pasted into chat. Real "
     "line breaks or <br> in visible HTML; never literal \\n text. Full visual "
-    "freedom — invent a new look each time; no house style unless the user asked. "
-    "After it is live, call site_test to load the page in a browser — that is "
-    "how you see JS console errors, failed requests, and a screenshot. "
-    "Keep working with edit_site (frontend files) and site_server (Python "
-    "backend). Do not recreate the site to change a line. "
-    "site_server write merges files; deploy replaces the whole snapshot.\n"
+    "freedom — invent a new look each time; no house style unless the user asked.\n"
+    "Sites are the work you are judged on. Build the real thing on the first "
+    "pass: every section written out, every button wired to code that runs, "
+    "every list filled with actual content. NO placeholders — no 'lorem ipsum', "
+    "no 'TODO', no 'coming soon', no '[insert here]', no empty href='#' nav, no "
+    "commented-out 'implement later', no function that returns a fake value. If "
+    "you ship a shell that says 'Loading…' and the app never mounts, you have "
+    "built nothing. If the page needs 900 lines to actually work, write 900 "
+    "lines. If you cannot finish a feature, leave it out and say so rather than "
+    "faking it.\n"
+    "After it is live, call site_test — it loads the page in a real browser and "
+    "reports JS console errors, failed requests, whether anything actually "
+    "rendered, and a screenshot. Read the screenshot. If site_test says NOT "
+    "ACTUALLY RENDERED, the page is broken no matter what the HTML looks like: "
+    "fix it and test again. Keep working with edit_site (frontend files) and "
+    "site_server (Python backend) until it passes. Do not tell anyone a site "
+    "works before site_test says it loaded clean. Do not recreate the site to "
+    "change a line. site_server write merges files; deploy replaces the whole "
+    "snapshot.\n"
+    "chess: you play your own moves. chess_move returns every legal move "
+    "annotated with what it captures, whether it checks or mates, and whether "
+    "the piece would just be taken — read it, pick the strongest move, and pass "
+    "it back as move=. Nothing plays for you, so an omitted move is a wasted "
+    "turn. Play to win.\n"
     "set_activity / change_presence: only when asked or after a real state change.\n"
     "update_base_personality / update_server_prompt: rewrite runtime "
     "personality only when asked or voice is clearly drifting. Base Knowledge "
-    "in code is not editable. Every tool is available; none are admin-only. "
+    "in code is not editable. Sites, games, code, search, plugins and chat are "
+    "open to everyone. join_server is admin-only — if a non-admin sends an "
+    "invite, tell them it needs an admin and do not call it. "
     "Discord kick/ban/channel/role tools still need matching Discord "
     "permissions in that server; the per-turn access line lists what you can use. "
     "COMMAND AUTHORITY, OBEDIENCE & ADMIN/MOD PERMISSIONS:\n"
@@ -2443,12 +2484,16 @@ LEAN_TOOL_PROTOCOL = (
     "something that isn't in it — servers, moderation, roles, channels, files, "
     "shell, sites, email, voice, status, memory — call more_tools and the next "
     "turn has everything. Never describe an action instead of doing it.\n"
+    "Be proactive: if something needs doing, do it rather than offering to. "
+    "Never say you have done something you have not actually done with a tool.\n"
     "Look things up. If you are unsure, the topic is current (news, scores, "
     "prices, versions, people, pages), or they asked you to check — call "
     "web_search first, then fetch_url for a specific page. Do not guess from "
     "training data. Skip lookup only for banter and opinions.\n"
     "Visible replies go through send_message (or no_response to stay silent). "
     "Do not also write the same text as raw assistant content.\n"
+    "ONE send_message holds your whole reply. Consecutive short messages read "
+    "as spam. If you have nothing new to add, use no_response.\n"
     "## What comes back\n"
     "[returns output] — you get another turn with the result; never state it "
     "before you see it. [returns nothing] — no extra turn, so put send_message "
@@ -2498,6 +2543,20 @@ def _promises_followup_work(result: str) -> bool:
     return bool(_PROMISE_RE.search(sent))
 
 
+def _plugin_result_needs_followup(result: str) -> bool:
+    """Whether a tool result came from a plugin tool that returns output.
+
+    Plugin tool names are discovered at import time, so they cannot be in the
+    static FOLLOWUP_TOOL_NAMES set. Without this check a plugin that looked
+    something up had its output collected and then discarded when the dispatch
+    loop broke — the model never saw what it asked for.
+    """
+    if not result.startswith("Tool "):
+        return False
+    head = result[5:].split(":", 1)[0].strip()
+    return bool(head) and tool_schemas_returns_result(head)
+
+
 def _tool_results_need_followup(tool_results: list[str]) -> bool:
     # First pass: does the batch contain anything that needs a model turn
     # (a follow-up tool result, or an error)? If yes, we ALWAYS loop back,
@@ -2511,6 +2570,8 @@ def _tool_results_need_followup(tool_results: list[str]) -> bool:
         if result.startswith(("Error:", "Error ")) or "\nError:" in result:
             return True
         if any(result.startswith(f"Tool {name}:") for name in FOLLOWUP_TOOL_NAMES):
+            has_followup_signal = True
+        elif _plugin_result_needs_followup(result):
             has_followup_signal = True
     if has_followup_signal:
         return True
@@ -2710,24 +2771,39 @@ class MaxwellBot(commands.Bot):
         # Persona switch MUST happen BEFORE validate so GF token/data_dir overrides take effect
         # load_dotenv(override=True) in config.py nukes PM2's DISCORD_TOKEN/DATA_DIR for GF,
         # so we restore them here based on BOT_PERSONA_TYPE.
-        persona = str(getattr(self.config, "BOT_PERSONA_TYPE", "") or os.getenv("BOT_PERSONA_TYPE", "maxwell") or "maxwell").strip().lower()
+        persona = (
+            str(
+                getattr(self.config, "BOT_PERSONA_TYPE", "")
+                or os.getenv("BOT_PERSONA_TYPE", "maxwell")
+                or "maxwell"
+            )
+            .strip()
+            .lower()
+        )
         # Also check env directly because Config.BOT_PERSONA_TYPE may be empty if .env lacks it (PM2 passes it)
         if not persona or persona == "maxwell":
             # Fallback: if PM2 launched with BOT_PERSONA_TYPE=mommy_gf, os.getenv will have it even if Config doesn't
-            persona = os.getenv("BOT_PERSONA_TYPE", "maxwell").strip().lower() or "maxwell"
+            persona = (
+                os.getenv("BOT_PERSONA_TYPE", "maxwell").strip().lower() or "maxwell"
+            )
         is_gf = persona in {"gf", "mommy", "mommy_gf", "luna", "mommygf"}
         self._is_gf = is_gf
         self._persona_type = "mommy_gf" if is_gf else "maxwell"
         # Isolate command prefix: Maxwell uses ",", Uni uses "." (or configurable via GF_COMMAND_PREFIX)
         prefix_override = (
-            os.getenv("GF_COMMAND_PREFIX", "").strip() or str(getattr(self.config, "GF_COMMAND_PREFIX", "") or "").strip()
+            os.getenv("GF_COMMAND_PREFIX", "").strip()
+            or str(getattr(self.config, "GF_COMMAND_PREFIX", "") or "").strip()
             if is_gf
-            else os.getenv("COMMAND_PREFIX", "").strip() or str(getattr(self.config, "COMMAND_PREFIX", "") or "").strip()
+            else os.getenv("COMMAND_PREFIX", "").strip()
+            or str(getattr(self.config, "COMMAND_PREFIX", "") or "").strip()
         )
         self.command_prefix = prefix_override or ("." if is_gf else ",")
         # Load customizable identity properties from config or environment
         creator_name = getattr(self.config, "CREATOR_NAME", "Z3ki") or "Z3ki"
-        creator_id = getattr(self.config, "CREATOR_ID", "1471821513824014480") or "1471821513824014480"
+        creator_id = (
+            getattr(self.config, "CREATOR_ID", "1471821513824014480")
+            or "1471821513824014480"
+        )
         bot_name = getattr(self.config, "BOT_NAME", "Maxwell") or "Maxwell"
         partner_name = getattr(self.config, "PARTNER_NAME", "Uni") or "Uni"
         self._gf_id = str(
@@ -2741,8 +2817,7 @@ class MaxwellBot(commands.Bot):
 
         raw_base_knowledge = GF_BASE_KNOWLEDGE if is_gf else MAXWELL_BASE_KNOWLEDGE
         self._base_knowledge = (
-            raw_base_knowledge
-            .replace("Z3ki", creator_name)
+            raw_base_knowledge.replace("Z3ki", creator_name)
             .replace("1471821513824014480", creator_id)
             .replace("Maxwell", bot_name)
             .replace("Uni", partner_name)
@@ -2784,7 +2859,10 @@ class MaxwellBot(commands.Bot):
         self._partner_turn_window = max(5.0, min(3600.0, partner_window))
         # Restore GF overrides nuked by load_dotenv(override=True)
         if is_gf:
-            gf_tok = os.getenv("GF_DISCORD_TOKEN", "").strip() or str(getattr(self.config, "GF_DISCORD_TOKEN", "") or "").strip()
+            gf_tok = (
+                os.getenv("GF_DISCORD_TOKEN", "").strip()
+                or str(getattr(self.config, "GF_DISCORD_TOKEN", "") or "").strip()
+            )
             # If PM2 passed DISCORD_TOKEN as GF token, load_dotenv overwrote it with Maxwell's token from .env
             # So explicitly restore GF token.
             if gf_tok:
@@ -2828,7 +2906,33 @@ class MaxwellBot(commands.Bot):
         self.plugin_manager = PluginManager(self)
         # Bounded: a plain dict here kept one Lock alive per channel the bot
         # had ever seen, which across a few hundred servers only ever grows.
+        #
+        # The channel lock now guards ONLY the short memory/bookkeeping
+        # section of on_message. Reply generation is serialized by
+        # self._reply_queue instead. Holding this lock across the whole turn
+        # is what produced 586 dropped messages in four days: _handle_message
+        # legitimately runs for minutes on an image or a site build, so the
+        # 15s acquire in on_message timed out constantly and the message was
+        # thrown away.
         self._channel_locks = KeyedLocks(max_idle=256)
+        # One reply at a time per channel, and nothing is dropped waiting for
+        # its turn. See message_pipeline.ReplyQueue.
+        self._reply_queue = ReplyQueue(
+            max_directed=8,
+            max_age=300.0,
+            on_drop=self._on_reply_queue_drop,
+        )
+        # One reply per message id. Discord redelivers MESSAGE_CREATE after a
+        # gateway resume; without this that is a second full reply, which
+        # looks exactly like the bot spamming.
+        self._inbound_dedup = InboundDedup(capacity=4096)
+        # Per-channel high-water message id so a reconnect can fetch what the
+        # gateway never delivered. discord.py does not surface a gap.
+        self._watermarks = Watermarks(
+            os.path.join(self.config.DATA_DIR, "watermarks.json")
+            if getattr(self.config, "DATA_DIR", "")
+            else "data/watermarks.json"
+        )
         self._telegram_chat_locks: dict[str, asyncio.Lock] = {}
         # Channels the bot is currently generating a reply for (in-flight).
         # Autonomy reads this to avoid posting into a channel mid-reply, which
@@ -2987,7 +3091,9 @@ class MaxwellBot(commands.Bot):
         # value here would have made every read site below default to the
         # global state instead of the per-server set.
         self._control_mtime = 0
-        self._reaction_seen: set[str] = set()  # unused leftover; reactions are context now
+        self._reaction_seen: set[str] = (
+            set()
+        )  # unused leftover; reactions are context now
         self._reaction_seen_order: list[str] = []
         self._message_reactions: dict[str, list[dict]] = {}
         self._message_reactions_order: list[str] = []
@@ -3080,7 +3186,9 @@ class MaxwellBot(commands.Bot):
         with contextlib.suppress(Exception):
             user = self.get_user(int(uid))
             if user is not None:
-                name = getattr(user, "display_name", None) or getattr(user, "name", None)
+                name = getattr(user, "display_name", None) or getattr(
+                    user, "name", None
+                )
                 if name:
                     return str(name)
         for names in (getattr(self, "_recent_users", None) or {}).values():
@@ -3131,7 +3239,9 @@ class MaxwellBot(commands.Bot):
             return
         if uid in (getattr(self, "_blacklist", None) or set()):
             return
-        ignored = set((getattr(self, "_control", None) or {}).get("ignore_users", []) or [])
+        ignored = set(
+            (getattr(self, "_control", None) or {}).get("ignore_users", []) or []
+        )
         if uid in ignored:
             return
         # discord.py-self can attribute Maxwell's own DM typing to the
@@ -3139,11 +3249,7 @@ class MaxwellBot(commands.Bot):
         if cid in (getattr(self, "_replying_channels", None) or set()):
             if isinstance(channel, discord.DMChannel):
                 return
-        name = (
-            getattr(user, "display_name", None)
-            or getattr(user, "name", None)
-            or uid
-        )
+        name = getattr(user, "display_name", None) or getattr(user, "name", None) or uid
         store = getattr(self, "_typing_users", None)
         if not isinstance(store, dict):
             self._typing_users = {}
@@ -3186,7 +3292,11 @@ class MaxwellBot(commands.Bot):
 
     def _typing_channel_ids(self) -> list[str]:
         self._prune_typing()
-        return [cid for cid, room in (getattr(self, "_typing_users", None) or {}).items() if room]
+        return [
+            cid
+            for cid, room in (getattr(self, "_typing_users", None) or {}).items()
+            if room
+        ]
 
     def _typing_prompt_lines(self, channel_id) -> list[str]:
         people = self._typing_in_channel(channel_id)
@@ -3270,9 +3380,7 @@ class MaxwellBot(commands.Bot):
             start = max(
                 0, min(23, _safe_int(control.get("night_fallback_start_hour"), 22))
             )
-            end = max(
-                0, min(23, _safe_int(control.get("night_fallback_end_hour"), 9))
-            )
+            end = max(0, min(23, _safe_int(control.get("night_fallback_end_hour"), 9)))
             hour = time.localtime().tm_hour
             if start == end:
                 return False
@@ -3963,7 +4071,13 @@ class MaxwellBot(commands.Bot):
         return self._channel_locks.get(channel_id)
 
     def _channel_lock_timeout(self) -> float:
-        """Fail fast under load instead of parking a room for two minutes."""
+        """How long to wait for the short memory-write critical section.
+
+        This lock no longer spans reply generation, so the wait is bounded by
+        a SQLite write rather than by a provider call plus a tool loop. It can
+        be short, and a timeout here is now a genuine anomaly instead of the
+        routine outcome it used to be.
+        """
         raw = (getattr(self, "_control", None) or {}).get(
             "channel_lock_timeout_seconds", 15
         )
@@ -3972,33 +4086,48 @@ class MaxwellBot(commands.Bot):
         except (TypeError, ValueError):
             return 15.0
 
-    def _watch_lock_timeout(self) -> float:
-        # Image gen / long tools hold the channel lock well past the 15s
-        # on_message fail-fast. Debounced follow-ups wait that out.
-        return max(self._channel_lock_timeout(), 90.0)
+    def _on_reply_queue_drop(self, channel_id: str, entry: Any, why: str) -> None:
+        """Record a queue eviction so a drop is never fully silent.
 
-    def _requeue_after_lock_timeout(self, message) -> None:
-        """Keep a hard ping queued instead of dropping it while the room is busy.
-
-        Only a ping. A lock that timed out means something long is running in
-        that room — an image, a big tool call — and a soft line that waits it
-        out and then answers on top of the result is the flood, not a reply.
+        The queue only evicts stale entries and soft chatter, but a drop is
+        still the one outcome worth counting: if this number climbs the room
+        is generating turns faster than the bot can answer them, which is a
+        capacity problem and not something to discover from user complaints.
         """
-        if message is None or not self._directly_addressed(message):
-            return
-        retries = int(getattr(message, "_lock_retry_count", 0) or 0)
-        if retries >= 4:
-            logger.warning(
-                "Channel lock retries exhausted for %s; dropping live reply",
-                getattr(getattr(message, "channel", None), "id", "?"),
-            )
-            return
+        stats = getattr(self, "_reply_drop_counts", None)
+        if not isinstance(stats, dict):
+            stats = {}
+            self._reply_drop_counts = stats
+        stats[why] = int(stats.get(why, 0) or 0) + 1
+
+    def _dispatch_reply(self, message, content: str, *, directed: bool) -> str:
+        """Hand a message to the per-channel reply queue.
+
+        Replaces the old "take the channel lock or drop the message" contract.
+        A turn already running in the room no longer costs the newer message
+        its reply — it waits its turn.
+        """
+        channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
+        if not channel_id:
+            return "dropped"
+        burst: list[Any] = []
         with contextlib.suppress(Exception):
-            message._lock_retry_count = retries + 1
-        content = self._content_without_self_mention(
-            getattr(message, "content", "") or ""
+            burst = list(getattr(message, "_watch_burst", None) or [])
+        outcome = self._reply_queue.submit(
+            channel_id,
+            message,
+            content,
+            directed=directed,
+            burst=burst,
         )
-        self._queue_watch_reply(message, content, directed=True)
+        if outcome == "queued":
+            logger.info(
+                "Reply queued for %s behind %d turn(s) in %s",
+                getattr(message, "id", "?"),
+                self._reply_queue.depth(channel_id),
+                channel_id,
+            )
+        return outcome
 
     def _should_interrupt_inflight(self, message) -> bool:
         """Cancel the in-flight turn only when THIS user hard-pings again.
@@ -4169,15 +4298,15 @@ class MaxwellBot(commands.Bot):
             old = order.pop(0)
             store.pop(old, None)
 
-    def _record_message_reaction(self, message, user, emoji, *, added: bool = True) -> list[dict]:
+    def _record_message_reaction(
+        self, message, user, emoji, *, added: bool = True
+    ) -> list[dict]:
         mid = str(getattr(message, "id", "") or "")
         if not mid:
             return []
         uid = str(getattr(user, "id", "") or "")
         name = str(
-            getattr(user, "display_name", None)
-            or getattr(user, "name", None)
-            or uid
+            getattr(user, "display_name", None) or getattr(user, "name", None) or uid
         )
         mark = str(emoji or "")[:120]
         if not mark:
@@ -4231,9 +4360,13 @@ class MaxwellBot(commands.Bot):
             counts.append({"emoji": mark, "count": count or 1})
         return format_reactions_annotation(counts)
 
-    async def _persist_message_reactions(self, message_id: str, rows: list[dict]) -> None:
+    async def _persist_message_reactions(
+        self, message_id: str, rows: list[dict]
+    ) -> None:
         mem = getattr(self, "memory", None)
-        merge = getattr(mem, "merge_message_metadata", None) if mem is not None else None
+        merge = (
+            getattr(mem, "merge_message_metadata", None) if mem is not None else None
+        )
         if not callable(merge):
             return
         with contextlib.suppress(Exception):
@@ -4244,7 +4377,9 @@ class MaxwellBot(commands.Bot):
         rendered = render_discord_context_text(
             parent,
             getattr(parent, "content", "") or "",
-            known_users=(getattr(self, "_recent_users", None) or {}).get(channel_id, {}),
+            known_users=(getattr(self, "_recent_users", None) or {}).get(
+                channel_id, {}
+            ),
         )
         annotate = getattr(self, "_reactions_annotation_for", None)
         reactions = annotate(parent) if callable(annotate) else ""
@@ -4275,7 +4410,9 @@ class MaxwellBot(commands.Bot):
                 "Here is that message in full — text, embeds, attachments, "
                 "buttons, audio, everything:"
             )
-            lines.append(full[:8000] if full else "(no renderable text; check attached media)")
+            lines.append(
+                full[:8000] if full else "(no renderable text; check attached media)"
+            )
         elif full:
             cap = 8000 if pinged else 400
             lines.append(
@@ -4306,7 +4443,9 @@ class MaxwellBot(commands.Bot):
         rendered = render_discord_context_text(
             ref,
             getattr(ref, "content", "") or "",
-            known_users=(getattr(self, "_recent_users", None) or {}).get(channel_id, {}),
+            known_users=(getattr(self, "_recent_users", None) or {}).get(
+                channel_id, {}
+            ),
         )
         quoted = " ".join((rendered or str(getattr(ref, "content", "") or "")).split())[
             :240
@@ -4473,9 +4612,7 @@ class MaxwellBot(commands.Bot):
             getattr(me, "name", None),
             getattr(self, "bot_name", None),
         ]
-        signal.names_him = watch_policy.name_mentioned(
-            text, [n for n in names if n]
-        )
+        signal.names_him = watch_policy.name_mentioned(text, [n for n in names if n])
         return signal
 
     def _note_watch_message(self, message) -> None:
@@ -4557,13 +4694,14 @@ class MaxwellBot(commands.Bot):
                 pressure = watch_policy.reply_pressure(
                     signal, state, now, self._conversation_watch_seconds()
                 )
-                lines.append(
-                    watch_policy.describe_signal(signal, state, pressure, now)
-                )
+                lines.append(watch_policy.describe_signal(signal, state, pressure, now))
                 # The gate already refused everything well below the bar, so
                 # a line that got here and is still only just over it is the
                 # marginal case — say so rather than leaving him to guess.
-                if not signal.direct and pressure < self._watch_pressure_threshold() + 0.15:
+                if (
+                    not signal.direct
+                    and pressure < self._watch_pressure_threshold() + 0.15
+                ):
                     lines.append(
                         "This one barely cleared the bar for being worth "
                         "considering. Unless it is plainly for you, "
@@ -4593,11 +4731,14 @@ class MaxwellBot(commands.Bot):
         rendered: list[str] = []
         for item in burst[-12:]:
             author = getattr(item, "author", None)
-            name = str(
-                getattr(author, "display_name", None)
-                or getattr(author, "name", None)
+            name = (
+                str(
+                    getattr(author, "display_name", None)
+                    or getattr(author, "name", None)
+                    or "someone"
+                ).strip()
                 or "someone"
-            ).strip() or "someone"
+            )
             text = " ".join(str(getattr(item, "content", "") or "").split())[:240]
             if text:
                 rendered.append(f"{name}: {text}")
@@ -4644,6 +4785,12 @@ class MaxwellBot(commands.Bot):
         cid = str(channel_id or "").strip()
         if cid and self._channel_turn_active(cid):
             return "a turn is in flight in this room"
+        queue = getattr(self, "_reply_queue", None)
+        if queue is not None:
+            if cid and queue.depth(cid):
+                return "replies are already queued in this room"
+            if queue.any_active():
+                return "a turn is in flight in another room"
         if getattr(self, "_replying_channels", None):
             return "a turn is in flight in another room"
         active = getattr(self, "_active_requests", None) or {}
@@ -4662,8 +4809,7 @@ class MaxwellBot(commands.Bot):
         author = getattr(message, "author", None)
         author_id = str(getattr(author, "id", "") or "")
         return bool(
-            author_id
-            and author_id in (getattr(self, "_partner_ids", None) or set())
+            author_id and author_id in (getattr(self, "_partner_ids", None) or set())
         )
 
     def _partner_reply_budget(self, message, *, consume: bool = False) -> bool:
@@ -4735,9 +4881,7 @@ class MaxwellBot(commands.Bot):
         author = getattr(message, "author", None)
         if getattr(author, "bot", False) or self._is_partner_message(message):
             return
-        channel_id = str(
-            getattr(getattr(message, "channel", None), "id", "") or ""
-        )
+        channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
         if not channel_id:
             return
         turns = getattr(self, "_partner_turns", None)
@@ -4908,12 +5052,13 @@ class MaxwellBot(commands.Bot):
         if target is None:
             return
         content = getattr(target, "content", "") or bucket.get("content") or ""
+        directed = self._directly_addressed(target)
         # Busy is re-checked here, not just when the line arrived: an image
         # generation or a long tool call can start during the debounce wait,
         # and a soft follow-up that waits it out then lands on top of the
         # result is exactly the flood this is meant to prevent. A hard ping
         # still goes through — that one was asked for.
-        if not self._directly_addressed(target):
+        if not directed:
             busy = self._busy_reason(channel_id)
             if busy:
                 logger.info(
@@ -4925,25 +5070,15 @@ class MaxwellBot(commands.Bot):
         with contextlib.suppress(Exception):
             target._watch_followup = True
             target._watch_burst = list(bucket.get("burst") or [])
-        lock = self._get_channel_lock(str(channel_id))
-        try:
-            await asyncio.wait_for(lock.acquire(), timeout=self._watch_lock_timeout())
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Watch debounce: channel lock timeout for %s; requeueing",
-                channel_id,
-            )
-            self._requeue_after_lock_timeout(target)
-            return
-        try:
-            logger.info(
-                "Watch debounce: one reply in %s after %.1fs quiet",
-                channel_id,
-                delay,
-            )
-            await self._handle_message(target, content)
-        finally:
-            lock.release()
+        logger.info(
+            "Watch debounce: one reply in %s after %.1fs quiet",
+            channel_id,
+            delay,
+        )
+        # No lock acquire here. The reply queue serializes per channel and
+        # waits its turn rather than timing out and requeueing through this
+        # same debounce — the old loop that could end in zero replies.
+        self._dispatch_reply(target, content, directed=directed)
 
     async def _maybe_live_reply(self, message, content: str) -> None:
         """Direct mentions reply immediately; soft chatter waits debounce quiet timer."""
@@ -4960,7 +5095,7 @@ class MaxwellBot(commands.Bot):
             self._cancel_watch_debounce(
                 getattr(getattr(message, "channel", None), "id", "")
             )
-            await self._handle_message(message, content)
+            self._dispatch_reply(message, content, directed=True)
             return
         if self._should_live_reply(message):
             if is_partner:
@@ -5026,6 +5161,19 @@ class MaxwellBot(commands.Bot):
         self._load_blacklist()
         self._load_shell_whitelist()
         self._load_control(force=True)
+        # The reply queue is the single serialization point for generating a
+        # reply. Bound here (not at construction) because it needs the running
+        # loop's task factory for tracking.
+        self._reply_queue.bind(self._handle_message, task_factory=self._track_task)
+        self._watermarks.load()
+        logger.info(
+            "Reply queue bound; %d channel watermark(s) restored",
+            len(self._watermarks),
+        )
+        with contextlib.suppress(Exception):
+            started = self.plugin_manager.start_jobs()
+            if started:
+                logger.info("Plugin jobs started: %d", started)
         self._tasks = [
             asyncio.create_task(self._site_cleanup_loop()),
             asyncio.create_task(self._memory_cleanup_loop()),
@@ -5033,6 +5181,7 @@ class MaxwellBot(commands.Bot):
             asyncio.create_task(self._command_queue_loop()),
             asyncio.create_task(self._discord_state_loop()),
             asyncio.create_task(self._rem_scheduler_loop()),
+            asyncio.create_task(self._watermark_save_loop(), name="watermark-save"),
         ]
         if self.mail_poller is not None and self.mail_poller.configured():
             self._tasks.append(
@@ -5090,6 +5239,109 @@ class MaxwellBot(commands.Bot):
             current = getattr(self, "status", None)
             if current is not None:
                 self._current_status = current
+        # on_ready fires on every reconnect, which is exactly when a gateway
+        # gap has just happened. Recover the messages Discord never delivered.
+        self._spawn_detached(self._recover_missed_messages())
+        self._dispatch_plugin_event("on_ready")
+
+    async def on_resumed(self):
+        """A resume means the gateway believes it replayed — it often has not.
+
+        discord.py does not surface a gap, so a session that resumes after a
+        network blip silently loses every MESSAGE_CREATE from the outage. The
+        watermark makes that recoverable.
+        """
+        logger.info("Gateway session resumed; checking for missed messages")
+        self._spawn_detached(self._recover_missed_messages())
+        self._dispatch_plugin_event("on_ready")
+
+    def _spawn_detached(self, coro) -> None:
+        """Fire-and-forget with a strong reference so it cannot be GC'd."""
+        try:
+            task = asyncio.create_task(coro)
+        except RuntimeError:
+            with contextlib.suppress(Exception):
+                coro.close()
+            return
+        self._detached_tasks.add(task)
+        task.add_done_callback(self._detached_tasks.discard)
+
+    def _missed_message_scan_limit(self) -> int:
+        """How many messages per room a gap recovery is allowed to replay.
+
+        Bounded deliberately: a long outage in a busy room should produce a
+        few recent answers, not a wall of replies to a conversation that has
+        already moved on.
+        """
+        raw = (getattr(self, "_control", None) or {}).get(
+            "gap_recovery_max_messages", 20
+        )
+        try:
+            return max(0, min(int(raw), 100))
+        except (TypeError, ValueError):
+            return 20
+
+    async def _recover_missed_messages(self) -> None:
+        """Replay messages the gateway never delivered, oldest first.
+
+        Every recovered message goes back through ``on_message``, so it gets
+        the same dedup, gating, memory write, and reply-queue treatment as a
+        live one. Dedup is what makes this safe to run on every reconnect: a
+        message the gateway *did* deliver is already recorded and is skipped.
+        """
+        limit = self._missed_message_scan_limit()
+        if limit <= 0:
+            return
+        # Let the cache settle before hitting the API on a fresh connect.
+        await asyncio.sleep(2.0)
+        recovered = 0
+        scanned_rooms = 0
+        for channel_id, last_seen in self._watermarks.channels()[:40]:
+            channel: Any = (
+                self.get_channel(int(channel_id)) if channel_id.isdigit() else None
+            )
+            history = getattr(channel, "history", None)
+            if channel is None or not callable(history):
+                continue
+            scanned_rooms += 1
+            missed: list[Any] = []
+            try:
+                after = discord.Object(id=int(last_seen))
+                async for old in channel.history(
+                    limit=limit, after=after, oldest_first=False
+                ):
+                    if int(getattr(old, "id", 0) or 0) <= int(last_seen):
+                        continue
+                    missed.append(old)
+            except discord.Forbidden:
+                continue
+            except Exception as exc:
+                logger.debug("Gap scan failed for %s: %s", channel_id, exc)
+                continue
+            if not missed:
+                continue
+            missed.reverse()  # oldest first, so the room reads in order
+            logger.info(
+                "Gap recovery: replaying %d missed message(s) in %s",
+                len(missed),
+                channel_id,
+            )
+            for old in missed:
+                recovered += 1
+                try:
+                    await self.on_message(old)
+                except Exception as exc:
+                    logger.warning(
+                        "Gap replay failed for %s: %s", getattr(old, "id", "?"), exc
+                    )
+        if recovered:
+            logger.info(
+                "Gap recovery replayed %d message(s) across %d room(s)",
+                recovered,
+                scanned_rooms,
+            )
+        with contextlib.suppress(Exception):
+            self._watermarks.save()
 
     async def _discord_state_loop(self):
         while True:
@@ -5100,6 +5352,29 @@ class MaxwellBot(commands.Bot):
             except Exception as e:
                 logger.warning(f"Discord state snapshot error: {e}")
 
+    def _dispatch_plugin_event(self, event: str, *args: Any, **kwargs: Any) -> None:
+        pm = getattr(self, "plugin_manager", None)
+        if pm is None:
+            return
+        listeners = getattr(pm, "_listeners", None)
+        if not listeners or event not in listeners or not listeners[event]:
+            return
+        self._spawn_detached(pm.dispatch_event(event, *args, **kwargs))
+
+    async def _watermark_save_loop(self):
+        """Persist read positions periodically.
+
+        The most common gateway gap is a process restart, which is precisely
+        when in-memory watermarks are lost — so they have to be on disk before
+        the crash, not written during shutdown.
+        """
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await asyncio.to_thread(self._watermarks.save)
+            except Exception as e:
+                logger.debug("watermark save loop: %s", e)
+
     async def _save_discord_state(self):
         guilds = []
         for guild in self.guilds:
@@ -5107,9 +5382,7 @@ class MaxwellBot(commands.Bot):
                 {
                     "id": str(channel.id),
                     "name": channel.name,
-                    "category": getattr(
-                        getattr(channel, "category", None), "name", ""
-                    )
+                    "category": getattr(getattr(channel, "category", None), "name", "")
                     or "",
                     "position": getattr(channel, "position", 0),
                 }
@@ -5235,18 +5508,21 @@ class MaxwellBot(commands.Bot):
                 await store.mark(item_id, "read")
 
     async def on_relationship_add(self, relationship):
+        self._dispatch_plugin_event("on_relationship_add", relationship)
         try:
             await self.inbox.ingest_relationship(relationship, event="add")
         except Exception as e:
             logger.warning("Inbox relationship_add failed: %s", e)
 
     async def on_relationship_update(self, before, after):
+        self._dispatch_plugin_event("on_relationship_update", before, after)
         try:
             await self.inbox.ingest_relationship(after, event="update", before=before)
         except Exception as e:
             logger.warning("Inbox relationship_update failed: %s", e)
 
     async def on_relationship_remove(self, relationship):
+        self._dispatch_plugin_event("on_relationship_remove", relationship)
         try:
             await self.inbox.ingest_relationship(relationship, event="remove")
         except Exception as e:
@@ -5281,7 +5557,11 @@ class MaxwellBot(commands.Bot):
                 self._guild_emojis[gid][emoji.name.lower()] = str(emoji)
             self._guild_stickers[gid] = {}
             for sticker in getattr(guild, "stickers", []) or []:
-                if getattr(sticker, "format", None) and str(sticker.format).lower() in ("lottie", "apng", "gif"):
+                if getattr(sticker, "format", None) and str(sticker.format).lower() in (
+                    "lottie",
+                    "apng",
+                    "gif",
+                ):
                     continue
                 self._guild_stickers[gid][sticker.name.lower()] = str(sticker.name)
             logger.info(
@@ -5302,16 +5582,25 @@ class MaxwellBot(commands.Bot):
             fmt = getattr(sticker, "format", None)
             fmt_str = str(fmt).lower() if fmt else ""
             fmt_name = getattr(fmt, "name", "").lower()
-            if "lottie" in fmt_str or "apng" in fmt_str or "gif" in fmt_str or fmt_name in ("lottie", "apng", "gif"):
+            if (
+                "lottie" in fmt_str
+                or "apng" in fmt_str
+                or "gif" in fmt_str
+                or fmt_name in ("lottie", "apng", "gif")
+            ):
                 continue
             s_name = sticker.name.strip()
             # Match explicit [STICKER (name here)], [sticker: name], [sticker_name], or whole word
             patterns = [
-                re.compile(rf"\[STICKER\s*\(\s*{re.escape(s_name)}\s*\)\]", re.IGNORECASE),
+                re.compile(
+                    rf"\[STICKER\s*\(\s*{re.escape(s_name)}\s*\)\]", re.IGNORECASE
+                ),
                 re.compile(rf"\[STICKER\s*:\s*{re.escape(s_name)}\]", re.IGNORECASE),
                 re.compile(rf"\[STICKER\s+{re.escape(s_name)}\]", re.IGNORECASE),
                 re.compile(rf"\[{re.escape(s_name)}\]", re.IGNORECASE),
-                re.compile(rf"\b{re.escape(s_name)}\b", re.IGNORECASE) if len(s_name) >= 3 else None,
+                re.compile(rf"\b{re.escape(s_name)}\b", re.IGNORECASE)
+                if len(s_name) >= 3
+                else None,
             ]
             matched = False
             for pat in patterns:
@@ -5345,12 +5634,9 @@ class MaxwellBot(commands.Bot):
         if attachments:
             attachment_names = []
             for attachment in attachments[:5]:
-                content_type = (
-                    getattr(attachment, "content_type", None) or "unknown"
-                )
+                content_type = getattr(attachment, "content_type", None) or "unknown"
                 attachment_names.append(
-                    f"{getattr(attachment, 'filename', 'attachment')} "
-                    f"({content_type})"
+                    f"{getattr(attachment, 'filename', 'attachment')} ({content_type})"
                 )
             memory_content = (
                 f"{memory_content} [attachments: {', '.join(attachment_names)}]"
@@ -5374,9 +5660,7 @@ class MaxwellBot(commands.Bot):
         return render_discord_context_text(
             message,
             memory_content,
-            known_users=(
-                getattr(self, "_recent_users", None) or {}
-            ).get(
+            known_users=(getattr(self, "_recent_users", None) or {}).get(
                 str(getattr(getattr(message, "channel", None), "id", "") or ""),
                 {},
             ),
@@ -5431,7 +5715,10 @@ class MaxwellBot(commands.Bot):
     def _raw_update_namespace(value):
         if isinstance(value, dict):
             return SimpleNamespace(
-                **{str(key): MaxwellBot._raw_update_namespace(val) for key, val in value.items()}
+                **{
+                    str(key): MaxwellBot._raw_update_namespace(val)
+                    for key, val in value.items()
+                }
             )
         if isinstance(value, list):
             return [MaxwellBot._raw_update_namespace(item) for item in value]
@@ -5440,7 +5727,9 @@ class MaxwellBot(commands.Bot):
     @staticmethod
     def _coerce_raw_author(author, previous=None):
         """Discord omits ``bot`` on human authors. Raw updates must still have it."""
-        prev_author = getattr(previous, "author", None) if previous is not None else None
+        prev_author = (
+            getattr(previous, "author", None) if previous is not None else None
+        )
         if author is None or not getattr(author, "id", None):
             author = prev_author
         if author is None or not getattr(author, "id", None):
@@ -5463,8 +5752,7 @@ class MaxwellBot(commands.Bot):
                 id=getattr(author, "id", ""),
                 display_name=display,
                 bot=bot_flag,
-                name=getattr(author, "name", None)
-                or getattr(author, "username", None),
+                name=getattr(author, "name", None) or getattr(author, "username", None),
             )
         return author
 
@@ -5474,15 +5762,9 @@ class MaxwellBot(commands.Bot):
         cached = getattr(payload, "cached_message", None)
         if cached is not None and not data:
             return cached
-        message_id = str(
-            getattr(payload, "message_id", None)
-            or data.get("id")
-            or ""
-        )
+        message_id = str(getattr(payload, "message_id", None) or data.get("id") or "")
         channel_id = str(
-            getattr(payload, "channel_id", None)
-            or data.get("channel_id")
-            or ""
+            getattr(payload, "channel_id", None) or data.get("channel_id") or ""
         )
         channel = getattr(cached, "channel", None)
         getter = getattr(self, "get_channel", None)
@@ -5505,9 +5787,7 @@ class MaxwellBot(commands.Bot):
         fetch = getattr(channel, "fetch_message", None)
         if cached is None and callable(fetch) and message_id:
             with contextlib.suppress(Exception):
-                fetched = await asyncio.wait_for(
-                    fetch(int(message_id)), timeout=4.0
-                )
+                fetched = await asyncio.wait_for(fetch(int(message_id)), timeout=4.0)
                 if fetched is not None:
                     return fetched
         # A raw update is usually a partial object. This fallback is still
@@ -5525,8 +5805,10 @@ class MaxwellBot(commands.Bot):
             return getattr(previous, name, default) if previous is not None else default
 
         author_data = data.get("author") if "author" in data else None
-        author = self._raw_update_namespace(author_data) if author_data else getattr(
-            previous, "author", None
+        author = (
+            self._raw_update_namespace(author_data)
+            if author_data
+            else getattr(previous, "author", None)
         )
         author = self._coerce_raw_author(author, previous)
         guild = getattr(channel, "guild", None)
@@ -5557,9 +5839,7 @@ class MaxwellBot(commands.Bot):
             reference=_field("reference"),
             components=_field("components", []) or [],
             poll=_field("poll"),
-            message_snapshots=_field("message_snapshots")
-            or _field("snapshots")
-            or [],
+            message_snapshots=_field("message_snapshots") or _field("snapshots") or [],
         )
 
     @classmethod
@@ -5664,30 +5944,29 @@ class MaxwellBot(commands.Bot):
         admin_check = getattr(self, "_is_admin", None)
         is_admin = bool(admin_check(author_id)) if callable(admin_check) else False
         ignored_users = {
-            str(value)
-            for value in (self._control.get("ignore_users", []) or [])
+            str(value) for value in (self._control.get("ignore_users", []) or [])
         }
         blacklist = {
             str(value) for value in (getattr(self, "_blacklist", set()) or set())
         }
-        if author_id and (
-            author_id in blacklist or author_id in ignored_users
-        ) and not is_admin:
+        if (
+            author_id
+            and (author_id in blacklist or author_id in ignored_users)
+            and not is_admin
+        ):
             return False
         channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
         if not channel_id:
             return False
         blocked_channels = {
-            str(value)
-            for value in (self._control.get("blocked_channels", []) or [])
+            str(value) for value in (self._control.get("blocked_channels", []) or [])
         }
         if channel_id in blocked_channels:
             return False
         if self._solo_blocks(message):
             return False
         allowed = {
-            str(value)
-            for value in (self._control.get("allowed_channels", []) or [])
+            str(value) for value in (self._control.get("allowed_channels", []) or [])
         }
         return not allowed or channel_id in allowed
 
@@ -5700,11 +5979,7 @@ class MaxwellBot(commands.Bot):
         mid = str(message_id or "")
         cached = list(self._media_context.get(channel_id, []) or [])
         if mid:
-            cached = [
-                item
-                for item in cached
-                if str(item.get("message_id", "")) != mid
-            ]
+            cached = [item for item in cached if str(item.get("message_id", "")) != mid]
         if cached:
             self._media_context[channel_id] = cached
         else:
@@ -5723,11 +5998,7 @@ class MaxwellBot(commands.Bot):
         media.extend(
             await self._extract_linked_media(
                 message,
-                skip_urls={
-                    str(item.get("url"))
-                    for item in media
-                    if item.get("url")
-                },
+                skip_urls={str(item.get("url")) for item in media if item.get("url")},
             )
         )
         return media
@@ -5735,9 +6006,7 @@ class MaxwellBot(commands.Bot):
     def _inflight_for_message(self, message_id: str) -> list[dict]:
         return [
             state
-            for state in list(
-                (getattr(self, "_inflight_context", None) or {}).values()
-            )
+            for state in list((getattr(self, "_inflight_context", None) or {}).values())
             if message_id in set(state.get("message_ids") or set())
         ]
 
@@ -5895,15 +6164,11 @@ class MaxwellBot(commands.Bot):
         if len(update_state) > 1000:
             cutoff = now - 3600
             update_state = {
-                key: value
-                for key, value in update_state.items()
-                if value[2] > cutoff
+                key: value for key, value in update_state.items() if value[2] > cutoff
             }
             self._message_update_state = update_state
             self._message_snapshots = {
-                key: value
-                for key, value in snapshots.items()
-                if key in update_state
+                key: value for key, value in snapshots.items() if key in update_state
             }
             snapshots = self._message_snapshots
 
@@ -5947,7 +6212,9 @@ class MaxwellBot(commands.Bot):
             # this message; do not leave an old embed attached to later turns.
             old_cached = any(
                 str(item.get("message_id", "")) == mid
-                for item in (getattr(self, "_media_context", {}).get(channel_id, []) or [])
+                for item in (
+                    getattr(self, "_media_context", {}).get(channel_id, []) or []
+                )
             )
             if media_refresh_ok and (
                 MaxwellBot._image_input_enabled(self) or old_cached
@@ -5969,9 +6236,7 @@ class MaxwellBot(commands.Bot):
                 if str(getattr(queued, "id", "") or "") == mid:
                     bucket[key] = message
                     if key == "latest_directed":
-                        bucket["content"] = str(
-                            getattr(message, "content", "") or ""
-                        )
+                        bucket["content"] = str(getattr(message, "content", "") or "")
 
         for state in self._inflight_for_message(mid):
             state_media = list(state.get("media") or [])
@@ -6009,6 +6274,7 @@ class MaxwellBot(commands.Bot):
 
     async def on_message_edit(self, before, after):
         """Keep transcript/visual context current without answering the edit."""
+        self._dispatch_plugin_event("on_message_edit", before, after)
         try:
             loader = getattr(self, "_load_control", None)
             if callable(loader) and getattr(self, "config", None) is not None:
@@ -6036,11 +6302,51 @@ class MaxwellBot(commands.Bot):
             logger.warning("Failed to process raw Discord message edit", exc_info=True)
 
     async def on_message(self, message):
+        """Error boundary + dedup around the real handler.
+
+        Everything below used to live in one function with no outer
+        try/except, so any exception past the memory write escaped to
+        discord.py's default ``on_error``: logged, and the message silently
+        never answered. It also had no dedup, so a gateway resume that
+        redelivered MESSAGE_CREATE produced a second full reply.
+        """
+        self._dispatch_plugin_event("on_message", message)
+        message_id = getattr(message, "id", None)
+        try:
+            if not self._inbound_dedup.check_and_add(message_id):
+                logger.debug("Duplicate MESSAGE_CREATE %s ignored", message_id)
+                return
+            # Record how far this room has been read BEFORE doing any work, so
+            # a crash mid-handler does not make the reconnect replay it.
+            with contextlib.suppress(Exception):
+                self._watermarks.note(
+                    getattr(getattr(message, "channel", None), "id", ""),
+                    message_id,
+                )
+            await self._on_message_impl(message)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A single malformed message must not be able to take the handler
+            # down silently. The id is logged so the message can be found.
+            logger.exception(
+                "on_message failed for %s in %s",
+                message_id,
+                getattr(getattr(message, "channel", None), "id", "?"),
+            )
+
+    async def _on_message_impl(self, message):
         try:
             self._load_control()
         except Exception as e:
-            logger.error(f"Failed to load control in on_message: {e}")
-            return
+            # A transient file-read hiccup used to eat the message entirely.
+            # The last known-good control is still in self._control, so
+            # degrade to that instead of dropping real traffic.
+            logger.error(
+                "Failed to load control in on_message (%s); continuing with "
+                "the previous snapshot",
+                e,
+            )
         with contextlib.suppress(Exception):
             self._clear_typing(
                 getattr(getattr(message, "channel", None), "id", ""),
@@ -6103,14 +6409,14 @@ class MaxwellBot(commands.Bot):
         has_sticker = any(getattr(src, "stickers", None) for src in payloads)
 
         try:
-            cooldown = float(
-                self._control.get("per_user_cooldown_seconds", 0.0) or 0
-            )
+            cooldown = float(self._control.get("per_user_cooldown_seconds", 0.0) or 0)
         except (TypeError, ValueError):
             cooldown = 0.0
         last = self._cooldowns.get(str(message.author.id), 0)
         is_direct = self._directly_addressed(message)
-        is_owner = self._is_admin(message.author.id) if hasattr(self, "_is_admin") else False
+        is_owner = (
+            self._is_admin(message.author.id) if hasattr(self, "_is_admin") else False
+        )
         cooldown_for_reply = (
             math.isfinite(cooldown)
             and cooldown > 0
@@ -6132,9 +6438,8 @@ class MaxwellBot(commands.Bot):
 
         if self.user and message.author.id == self.user.id:
             if (
-                (message.content or has_attachment or has_embed or has_sticker)
-                and self._control.get("store_memory", True)
-            ):
+                message.content or has_attachment or has_embed or has_sticker
+            ) and self._control.get("store_memory", True):
                 # Dedup contract: memory.add_to_channel_memory dedups by message_id,
                 # so an autonomy-force-recorded post (same message_id) only merges
                 # metadata here — its autonomy tag/reason are preserved.
@@ -6203,7 +6508,11 @@ class MaxwellBot(commands.Bot):
                 and self._should_interrupt_inflight(message)
             ):
                 is_dm = isinstance(getattr(message, "channel", None), discord.DMChannel)
-                has_media = bool(getattr(message, "attachments", None) or getattr(message, "embeds", None) or getattr(message, "stickers", None))
+                has_media = bool(
+                    getattr(message, "attachments", None)
+                    or getattr(message, "embeds", None)
+                    or getattr(message, "stickers", None)
+                )
                 # Always interrupt if the same user directly pings/messages again
                 # (in DMs, media bursts, or guild channels) so the newer query takes over
                 # and doesn't get dropped or starved behind a slow LLM turn.
@@ -6217,46 +6526,34 @@ class MaxwellBot(commands.Bot):
                 except asyncio.CancelledError:
                     logger.info(f"Interrupted task for {channel_id} cancelled cleanly")
                 except asyncio.TimeoutError:
-                    logger.warning(f"Interrupt cancel timed out for {channel_id} - proceeding anyway")
+                    logger.warning(
+                        f"Interrupt cancel timed out for {channel_id} - proceeding anyway"
+                    )
                 except Exception as e:
                     logger.debug(f"Interrupt await raised {e} for {channel_id}")
                 # Brief yield to let the cancelled task's finally release the channel lock
                 await asyncio.sleep(0.08)
 
+        # Serialize only the memory/bookkeeping write for this room. Reply
+        # generation happens AFTER the lock is released, through the reply
+        # queue — holding this across a provider call is what made the
+        # acquire below time out routinely and throw the message away.
         _lock = self._get_channel_lock(channel_id)
         _lock_acquired = False
         try:
-            # Fail closed: never process the same channel unlocked (double replies / races).
-            await asyncio.wait_for(_lock.acquire(), timeout=self._channel_lock_timeout())
-            _lock_acquired = True
-        except asyncio.TimeoutError as _exc:
-            logger.warning(
-                f"Channel lock timeout for {channel_id}; storing memory and skipping reply"
+            await asyncio.wait_for(
+                _lock.acquire(), timeout=self._channel_lock_timeout()
             )
-            if self._control.get("store_memory", True):
-                with contextlib.suppress(Exception):
-                    await self.add_message_to_memory(
-                        channel_id,
-                        {
-                            "author": getattr(
-                                getattr(message, "author", None),
-                                "display_name",
-                                "System",
-                            ),
-                            "author_id": str(
-                                getattr(
-                                    getattr(message, "author", None), "id", "system"
-                                )
-                            ),
-                            "content": (message.content or "")[:4000]
-                            or "[media attached]",
-                            "message_id": str(getattr(message, "id", "")),
-                            "timestamp": _message_created_at_iso(message),
-                        },
-                        message,
-                    )
-            self._requeue_after_lock_timeout(message)
-            return
+            _lock_acquired = True
+        except asyncio.TimeoutError:
+            # Now genuinely anomalous: the only thing under this lock is a
+            # short SQLite write. Store best-effort and keep going — the
+            # reply is no longer forfeited by a slow memory write.
+            logger.warning(
+                "Channel lock timeout for %s; storing memory unsynchronized "
+                "and continuing to the reply path",
+                channel_id,
+            )
         try:
             if self._control.get("store_memory", True):
                 memory_content = message.content or ""
@@ -6338,116 +6635,121 @@ class MaxwellBot(commands.Bot):
                 except Exception as e:
                     logger.warning(f"Memory/REM write failed in on_message: {e}")
             self._maybe_schedule_context_extraction(message)
-
-            # Cache media context for EVERY message in an allowed channel,
-            # not just pinged ones. Without this, an image posted without a
-            # ping never enters visual memory, so a later ping about "this"
-            # or "the image above" has nothing to attach. This is the fix for
-            # "the bot can't see sent media in channels if it's not pinged".
-            channel_obj = getattr(message, "channel", None)
-            reply_path_enabled = (
-                (
-                    isinstance(channel_obj, discord.DMChannel)
-                    and self._control.get("reply_dms", True)
-                )
-                or (
-                    isinstance(channel_obj, discord.GroupChannel)
-                    and self._control.get("reply_groups", True)
-                )
-                or (
-                    getattr(message, "guild", None) is not None
-                    and self._control.get("reply_mentions", True)
-                )
-            )
-            if (
-                MaxwellBot._image_input_enabled(self)
-                and not (reply_path_enabled and self._should_live_reply(message))
-                and self._message_carries_media(message)
-            ):
-                try:
-                    _imgs, bg_media = await self._extract_media(message)
-                    bg_media.extend(await self._extract_embeds(message))
-                    bg_media.extend(
-                        await self._extract_linked_media(
-                            message,
-                            skip_urls={
-                                str(item.get("url"))
-                                for item in bg_media
-                                if item.get("url")
-                            },
-                        )
-                    )
-                    if bg_media:
-                        self._cache_media_context(channel_id, bg_media)
-                except Exception as e:
-                    logger.warning(f"Background media cache failed: {e}")
-
-            # Partner accounts may be user accounts with bot=False; the
-            # helper distinguishes them from real human messages by ID.
-            self._reset_partner_reply_budget_for_human(message)
-
-            # Inter-bot allow: partner bot (GF <-> Maxwell) bypasses reply_to_bots gate
-            if message.author.bot:
-                is_partner = str(getattr(message.author, "id", "")) in getattr(self, "_partner_ids", set())
-                if not is_partner and not self._control.get("reply_to_bots", True):
-                    return
-
-            # Every human line updates the room's pace and engagement, even
-            # the ones that never become a turn — deliberately above the
-            # cooldown return, so a room's rhythm is already measured by the
-            # time he first speaks there and arms the watch.
-            with contextlib.suppress(Exception):
-                self._note_watch_message(message)
-
-            # 2026-07-31: per-user cooldown was previously an early-return at
-            # bot.py:2823 that ate ~2/3 of channel traffic before it could
-            # reach memory. Now it's applied here, AFTER storage but BEFORE
-            # an LLM turn — so RAG keeps every message but the bot doesn't
-            # burn provider calls replying to every rapid-fire text.
-            if cooldown_for_reply and not message.author.bot:
-                if not self._should_live_reply(message):
-                    logger.info(
-                        f"Cooldown skip reply for user {message.author.id} in {channel_id} (still stored to memory)"
-                    )
-                    return
-
-            if isinstance(message.channel, discord.DMChannel):
-                if self._control.get("reply_dms", True):
-                    if self._is_partner_message(message) and not self._partner_reply_budget(
-                        message, consume=True
-                    ):
-                        logger.info(
-                            "Partner DM auto-reply budget exhausted in %s; waiting for a human message",
-                            channel_id,
-                        )
-                        return
-                    await self._handle_message(
-                        message,
-                        self._content_without_self_mention(message.content),
-                    )
-                return
-
-            if isinstance(message.channel, discord.GroupChannel):
-                if not self._control.get("reply_groups", True):
-                    self._touch_watch_debounce(message)
-                    return
-                await self._maybe_live_reply(
-                    message, self._content_without_self_mention(message.content)
-                )
-                return
-
-            if message.guild:
-                if not self._control.get("reply_mentions", True):
-                    self._touch_watch_debounce(message)
-                    return
-                clean = self._content_without_self_mention(message.content)
-                # Bare @Maxwell with no extra text: still a turn. Do not
-                # invent "look at this" — he should read the room (and any
-                # reply-parent) and answer from that.
-                await self._maybe_live_reply(message, clean)
         finally:
+            # The critical section ends here. Everything below — media
+            # downloads, gating, and the reply itself — runs unlocked, so a
+            # slow turn in this room can no longer make the NEXT message's
+            # lock acquire time out and lose it.
             if _lock_acquired:
                 _lock.release()
+
+        # Cache media context for EVERY message in an allowed channel,
+        # not just pinged ones. Without this, an image posted without a
+        # ping never enters visual memory, so a later ping about "this"
+        # or "the image above" has nothing to attach. This is the fix for
+        # "the bot can't see sent media in channels if it's not pinged".
+        channel_obj = getattr(message, "channel", None)
+        reply_path_enabled = (
+            (
+                isinstance(channel_obj, discord.DMChannel)
+                and self._control.get("reply_dms", True)
+            )
+            or (
+                isinstance(channel_obj, discord.GroupChannel)
+                and self._control.get("reply_groups", True)
+            )
+            or (
+                getattr(message, "guild", None) is not None
+                and self._control.get("reply_mentions", True)
+            )
+        )
+        if (
+            MaxwellBot._image_input_enabled(self)
+            and not (reply_path_enabled and self._should_live_reply(message))
+            and self._message_carries_media(message)
+        ):
+            try:
+                _imgs, bg_media = await self._extract_media(message)
+                bg_media.extend(await self._extract_embeds(message))
+                bg_media.extend(
+                    await self._extract_linked_media(
+                        message,
+                        skip_urls={
+                            str(item.get("url")) for item in bg_media if item.get("url")
+                        },
+                    )
+                )
+                if bg_media:
+                    self._cache_media_context(channel_id, bg_media)
+            except Exception as e:
+                logger.warning(f"Background media cache failed: {e}")
+
+        # Partner accounts may be user accounts with bot=False; the
+        # helper distinguishes them from real human messages by ID.
+        self._reset_partner_reply_budget_for_human(message)
+
+        # Inter-bot allow: partner bot (GF <-> Maxwell) bypasses reply_to_bots gate
+        if message.author.bot:
+            is_partner = str(getattr(message.author, "id", "")) in getattr(
+                self, "_partner_ids", set()
+            )
+            if not is_partner and not self._control.get("reply_to_bots", True):
+                return
+
+        # Every human line updates the room's pace and engagement, even
+        # the ones that never become a turn — deliberately above the
+        # cooldown return, so a room's rhythm is already measured by the
+        # time he first speaks there and arms the watch.
+        with contextlib.suppress(Exception):
+            self._note_watch_message(message)
+
+        # 2026-07-31: per-user cooldown was previously an early-return at
+        # bot.py:2823 that ate ~2/3 of channel traffic before it could
+        # reach memory. Now it's applied here, AFTER storage but BEFORE
+        # an LLM turn — so RAG keeps every message but the bot doesn't
+        # burn provider calls replying to every rapid-fire text.
+        if cooldown_for_reply and not message.author.bot:
+            if not self._should_live_reply(message):
+                logger.info(
+                    f"Cooldown skip reply for user {message.author.id} in {channel_id} (still stored to memory)"
+                )
+                return
+
+        if isinstance(message.channel, discord.DMChannel):
+            if self._control.get("reply_dms", True):
+                if self._is_partner_message(message) and not self._partner_reply_budget(
+                    message, consume=True
+                ):
+                    logger.info(
+                        "Partner DM auto-reply budget exhausted in %s; waiting for a human message",
+                        channel_id,
+                    )
+                    return
+                self._dispatch_reply(
+                    message,
+                    self._content_without_self_mention(message.content),
+                    directed=True,
+                )
+            return
+
+        if isinstance(message.channel, discord.GroupChannel):
+            if not self._control.get("reply_groups", True):
+                self._touch_watch_debounce(message)
+                return
+            await self._maybe_live_reply(
+                message, self._content_without_self_mention(message.content)
+            )
+            return
+
+        if message.guild:
+            if not self._control.get("reply_mentions", True):
+                self._touch_watch_debounce(message)
+                return
+            clean = self._content_without_self_mention(message.content)
+            # Bare @Maxwell with no extra text: still a turn. Do not
+            # invent "look at this" — he should read the room (and any
+            # reply-parent) and answer from that.
+            await self._maybe_live_reply(message, clean)
 
     async def on_call_create(self, call):
         await self._maybe_handle_incoming_call(call)
@@ -6654,9 +6956,7 @@ class MaxwellBot(commands.Bot):
             self._control.get("ignore_users", []) or []
         ):
             return
-        if getattr(user, "bot", False) and not self._control.get(
-            "reply_to_bots", True
-        ):
+        if getattr(user, "bot", False) and not self._control.get("reply_to_bots", True):
             return
         message = getattr(reaction, "message", None)
         if message is None:
@@ -6676,6 +6976,7 @@ class MaxwellBot(commands.Bot):
 
     async def on_typing(self, channel, user, when):
         """Discord TYPING_START — someone is composing in a room we can see."""
+        self._dispatch_plugin_event("on_typing", channel, user, when)
         try:
             self._note_typing(channel, user)
         except Exception:
@@ -6683,12 +6984,14 @@ class MaxwellBot(commands.Bot):
 
     async def on_reaction_add(self, reaction, user):
         """Attach the reaction to that message so Maxwell sees it in context."""
+        self._dispatch_plugin_event("on_reaction_add", reaction, user)
         try:
             await self._note_reaction(reaction, user, added=True)
         except Exception as e:
             logger.warning(f"Failed recording reaction on message: {e}")
 
     async def on_reaction_remove(self, reaction, user):
+        self._dispatch_plugin_event("on_reaction_remove", reaction, user)
         try:
             await self._note_reaction(reaction, user, added=False)
         except Exception as e:
@@ -6724,13 +7027,35 @@ class MaxwellBot(commands.Bot):
         channel_id = str(message.channel.id)
         try:
             if cmd == "stop":
+                # ",stop" must stop everything for this room: the turn that is
+                # generating AND anything queued behind it. Cancelling only the
+                # in-flight task let the next queued reply start immediately,
+                # which reads as the bot ignoring the stop.
                 active = self._active_requests.get(channel_id)
                 self._stop_until[channel_id] = asyncio.get_running_loop().time() + 1
+                queued = self._reply_queue.depth(channel_id)
+                stopped = self._reply_queue.cancel_channel(channel_id, clear_queue=True)
                 if active and not active.done():
                     active.cancel()
-                    await message.channel.send("stopped")
+                    stopped = True
+                self._cancel_watch_debounce(channel_id)
+                if stopped or queued:
+                    await message.channel.send(
+                        "stopped" if not queued else f"stopped (+{queued} queued)"
+                    )
                 else:
-                    await message.channel.send("nothing to stop")
+                    # Repeated ",stop" in an idle room used to answer every
+                    # single time — 29 "nothing to stop" lines in one log
+                    # window, which is the bot spamming, not the user. One
+                    # answer per 30s per room is enough to confirm it landed.
+                    now = asyncio.get_running_loop().time()
+                    last = getattr(self, "_last_nothing_to_stop", None)
+                    if not isinstance(last, dict):
+                        last = {}
+                        self._last_nothing_to_stop = last
+                    if now - float(last.get(channel_id, 0.0) or 0.0) > 30.0:
+                        last[channel_id] = now
+                        await message.channel.send("nothing to stop")
             elif cmd == "prompt":
                 if args is None:
                     current = self.memory.get_server_prompt(server_id)
@@ -7128,11 +7453,15 @@ class MaxwellBot(commands.Bot):
                 if sub in ("list", "ls"):
                     p_list = pm.list_plugins(user_id=author_id)
                     if not p_list:
-                        await message.channel.send("No plugins installed in `plugins/`.")
+                        await message.channel.send(
+                            "No plugins installed in `plugins/`."
+                        )
                     else:
                         lines = ["**Installed Maxwell Plugins:**"]
                         for p in p_list:
-                            status_sym = "🟢 Enabled" if p["user_active"] else "⚪ Disabled"
+                            status_sym = (
+                                "🟢 Enabled" if p["user_active"] else "⚪ Disabled"
+                            )
                             glob_note = " (Global)" if p["enabled_globally"] else ""
                             lines.append(
                                 f"• **{p['name']}** v{p['version']} — {status_sym}{glob_note}\n"
@@ -7141,12 +7470,16 @@ class MaxwellBot(commands.Bot):
                         await message.channel.send("\n".join(lines))
                 elif sub in ("enable", "on"):
                     if len(parts) < 2:
-                        await message.channel.send("Usage: `,plugin enable <name> [--global]`")
+                        await message.channel.send(
+                            "Usage: `,plugin enable <name> [--global]`"
+                        )
                         return
                     p_name = parts[1].lower()
                     is_global = "--global" in parts or "-g" in parts
                     if is_global and not is_admin:
-                        await message.channel.send("Error: Only bot admins can enable plugins globally.")
+                        await message.channel.send(
+                            "Error: Only bot admins can enable plugins globally."
+                        )
                         return
                     res = pm.enable_plugin(
                         p_name,
@@ -7156,12 +7489,16 @@ class MaxwellBot(commands.Bot):
                     await message.channel.send(res)
                 elif sub in ("disable", "off"):
                     if len(parts) < 2:
-                        await message.channel.send("Usage: `,plugin disable <name> [--global]`")
+                        await message.channel.send(
+                            "Usage: `,plugin disable <name> [--global]`"
+                        )
                         return
                     p_name = parts[1].lower()
                     is_global = "--global" in parts or "-g" in parts
                     if is_global and not is_admin:
-                        await message.channel.send("Error: Only bot admins can disable plugins globally.")
+                        await message.channel.send(
+                            "Error: Only bot admins can disable plugins globally."
+                        )
                         return
                     res = pm.disable_plugin(
                         p_name,
@@ -7171,7 +7508,9 @@ class MaxwellBot(commands.Bot):
                     await message.channel.send(res)
                 elif sub in ("reload", "refresh"):
                     if not is_admin:
-                        await message.channel.send("Error: Only bot admins can reload plugins.")
+                        await message.channel.send(
+                            "Error: Only bot admins can reload plugins."
+                        )
                         return
                     res = pm.reload_plugins()
                     await message.channel.send(res)
@@ -8783,9 +9122,7 @@ class MaxwellBot(commands.Bot):
             }
         summary = str(result.get("summary") or "onboarding: no result")
         if result.get("ok") and not dry_run:
-            logger.info(
-                "Auto-onboard %s (guild %s): %s", guild.name, guild.id, summary
-            )
+            logger.info("Auto-onboard %s (guild %s): %s", guild.name, guild.id, summary)
             if notify is not None:
                 try:
                     await notify(summary)
@@ -8798,6 +9135,7 @@ class MaxwellBot(commands.Bot):
         join, or someone manually inviting the account). Runs auto-onboarding
         so role-gated servers are usable immediately, and records the join
         in the log. Failures are logged, never raised."""
+        self._dispatch_plugin_event("on_guild_join", guild)
         with contextlib.suppress(Exception):
             logger.info("Joined guild: %s (id=%s)", guild.name, guild.id)
         # Give the gateway a beat to hydrate guild state before onboarding.
@@ -8839,6 +9177,27 @@ class MaxwellBot(commands.Bot):
         except Exception as e:
             logger.debug("Inbox guild_join notice failed: %s", e)
 
+    async def on_guild_remove(self, guild):
+        self._dispatch_plugin_event("on_guild_remove", guild)
+
+    async def on_member_join(self, member):
+        self._dispatch_plugin_event("on_member_join", member)
+
+    async def on_member_remove(self, member):
+        self._dispatch_plugin_event("on_member_remove", member)
+
+    async def on_member_update(self, before, after):
+        self._dispatch_plugin_event("on_member_update", before, after)
+
+    async def on_voice_state_update(self, member, before, after):
+        self._dispatch_plugin_event("on_voice_state_update", member, before, after)
+
+    async def on_presence_update(self, before, after):
+        self._dispatch_plugin_event("on_presence_update", before, after)
+
+    async def on_message_delete(self, message):
+        self._dispatch_plugin_event("on_message_delete", message)
+
     async def on_guild_channel_create(self, channel):
         """A channel was created in a server Maxwell is in.
 
@@ -8870,7 +9229,10 @@ class MaxwellBot(commands.Bot):
         try:
             logger.info(
                 "Channel created in %s: #%s (id=%s, kind=%s)",
-                guild.name, name, getattr(channel, "id", ""), kind,
+                guild.name,
+                name,
+                getattr(channel, "id", ""),
+                kind,
             )
         except Exception:  # noqa: S110 - the failing statement IS the logger
             pass
@@ -9143,7 +9505,9 @@ class MaxwellBot(commands.Bot):
                 from autonomy_social import summarize_floor
 
                 verdicts = list(
-                    (getattr(self.autonomy_engine, "_floor_verdicts", None) or {}).values()
+                    (
+                        getattr(self.autonomy_engine, "_floor_verdicts", None) or {}
+                    ).values()
                 )
                 floor_line = summarize_floor(verdicts)
                 if not self._control.get("autonomy_floor_enabled", True):
@@ -9512,9 +9876,7 @@ class MaxwellBot(commands.Bot):
             control["email_inbox_poll_seconds"] = max(
                 30,
                 min(
-                    _safe_int(
-                        control.get("email_inbox_poll_seconds", 120) or 120, 120
-                    ),
+                    _safe_int(control.get("email_inbox_poll_seconds", 120) or 120, 120),
                     3600,
                 ),
             )
@@ -10084,10 +10446,14 @@ class MaxwellBot(commands.Bot):
                                 try:
                                     user = await self.fetch_user(uid)
                                 except Exception as e:
-                                    logger.warning("send_dm failed to fetch user %s: %s", uid, e)
+                                    logger.warning(
+                                        "send_dm failed to fetch user %s: %s", uid, e
+                                    )
                                     user = None
                             if user is None:
-                                cmd["result"] = f"error: user {cmd.get('user_id')} not found"
+                                cmd["result"] = (
+                                    f"error: user {cmd.get('user_id')} not found"
+                                )
                                 cmd["status"] = "failed"
                             else:
                                 try:
@@ -10098,7 +10464,9 @@ class MaxwellBot(commands.Bot):
                                     cmd["result"] = "dm sent"
                                     cmd["status"] = "done"
                                 except discord.Forbidden as f_err:
-                                    cmd["result"] = f"error: forbidden (user has DMs disabled or blocked bot): {f_err}"
+                                    cmd["result"] = (
+                                        f"error: forbidden (user has DMs disabled or blocked bot): {f_err}"
+                                    )
                                     cmd["status"] = "failed"
                                 except Exception as dm_err:
                                     cmd["result"] = f"error: {dm_err}"
@@ -10461,6 +10829,13 @@ class MaxwellBot(commands.Bot):
                 await self._cleanup_sites()
             except Exception as e:
                 logger.error(f"Site cleanup error: {e}")
+            # A site_test whose probe was killed (SIGKILL, OOM, container stop)
+            # never reaches its own cleanup, so its browser profile stays on
+            # disk forever. This is the only thing that reclaims those.
+            try:
+                await asyncio.to_thread(site_test.sweep_browser_profiles)
+            except Exception as e:
+                logger.debug("Browser profile sweep failed: %s", e)
 
     def _site_expired(self, entry: dict, now: float) -> bool:
         """Per-site lifetime: permanent flag, then per-site ttl, then control."""
@@ -10820,7 +11195,9 @@ class MaxwellBot(commands.Bot):
             # message is gone" so the response still reaches the user.
             try:
                 if stickers:
-                    sent = await reply_to.reply(content=content, file=file, stickers=stickers, **kwargs)
+                    sent = await reply_to.reply(
+                        content=content, file=file, stickers=stickers, **kwargs
+                    )
                 else:
                     sent = await reply_to.reply(content=content, file=file, **kwargs)
             except discord.Forbidden:
@@ -10847,7 +11224,9 @@ class MaxwellBot(commands.Bot):
                 )
                 try:
                     if stickers:
-                        sent = await channel.send(content=content, file=file, stickers=stickers, **kwargs)
+                        sent = await channel.send(
+                            content=content, file=file, stickers=stickers, **kwargs
+                        )
                     else:
                         sent = await channel.send(content=content, file=file, **kwargs)
                 except (discord.Forbidden, discord.NotFound) as exc:
@@ -10861,7 +11240,9 @@ class MaxwellBot(commands.Bot):
             return sent
         try:
             if stickers:
-                sent = await channel.send(content=content, file=file, stickers=stickers, **kwargs)
+                sent = await channel.send(
+                    content=content, file=file, stickers=stickers, **kwargs
+                )
             else:
                 sent = await channel.send(content=content, file=file, **kwargs)
         except (discord.Forbidden, discord.NotFound) as exc:
@@ -11231,7 +11612,9 @@ class MaxwellBot(commands.Bot):
                     except asyncio.TimeoutError as _exc:
                         proc.kill()
                         await proc.wait()
-                        logger.warning(f"Video frame extraction timed out for {filename}")
+                        logger.warning(
+                            f"Video frame extraction timed out for {filename}"
+                        )
                         stderr = b"timeout"
                     if proc.returncode == 0:
                         for frame_path in sorted(tmp_path.glob("frame-*.jpg")):
@@ -11438,8 +11821,8 @@ class MaxwellBot(commands.Bot):
     # seen one, so it picked them blind. This renders a labeled contact sheet
     # once per guild (cached to disk, keyed by the emoji set) and shows it the
     # first time Maxwell speaks in a channel.
-    _GRID_CELL = 72          # icon box, px
-    _GRID_LABEL_H = 14       # label strip under each icon, px
+    _GRID_CELL = 72  # icon box, px
+    _GRID_LABEL_H = 14  # label strip under each icon, px
     _GRID_COLS = 8
     _GRID_MAX_EMOJIS = 48
     _GRID_MAX_STICKERS = 12
@@ -11468,7 +11851,10 @@ class MaxwellBot(commands.Bot):
                 continue
             ext = ".gif" if getattr(em, "animated", False) else ".png"
             emojis.append(
-                (str(getattr(em, "name", "?")), f"https://cdn.discordapp.com/emojis/{eid}{ext}")
+                (
+                    str(getattr(em, "name", "?")),
+                    f"https://cdn.discordapp.com/emojis/{eid}{ext}",
+                )
             )
         return entries + emojis[: MaxwellBot._GRID_MAX_EMOJIS]
 
@@ -11485,7 +11871,9 @@ class MaxwellBot(commands.Bot):
         path = self._emoji_grid_dir() / f"{getattr(guild, 'id', 'guild')}-{key}.png"
 
         if not path.exists():
-            built = await asyncio.to_thread(self._render_emoji_grid, await self._fetch_grid_icons(entries), path)
+            built = await asyncio.to_thread(
+                self._render_emoji_grid, await self._fetch_grid_icons(entries), path
+            )
             if not built:
                 return None
         try:
@@ -11519,7 +11907,9 @@ class MaxwellBot(commands.Bot):
         try:
             item = await self._emoji_grid_media(guild)
         except Exception as e:
-            logger.warning(f"Emoji grid build failed for guild {getattr(guild, 'id', '?')}: {e}")
+            logger.warning(
+                f"Emoji grid build failed for guild {getattr(guild, 'id', '?')}: {e}"
+            )
             return None
         if item is None:
             return None
@@ -11530,7 +11920,9 @@ class MaxwellBot(commands.Bot):
         logger.info(f"Attaching server emoji grid to channel {channel_id}")
         return item
 
-    async def _fetch_grid_icons(self, entries: list[tuple[str, str]]) -> list[tuple[str, bytes]]:
+    async def _fetch_grid_icons(
+        self, entries: list[tuple[str, str]]
+    ) -> list[tuple[str, bytes]]:
         """Download the icons concurrently; skip whatever fails."""
         sem = asyncio.Semaphore(8)
         session = await _get_shared_session()
@@ -11572,7 +11964,9 @@ class MaxwellBot(commands.Bot):
         rows = (len(icons) + cols - 1) // cols
         # Light background: these are mostly dark-outlined emojis, and a
         # transparent sheet flattens to black in most vision pipelines.
-        sheet = Image.new("RGB", (cols * cls._GRID_CELL, rows * cell_h), (245, 245, 247))
+        sheet = Image.new(
+            "RGB", (cols * cls._GRID_CELL, rows * cell_h), (245, 245, 247)
+        )
         draw = ImageDraw.Draw(sheet)
 
         for idx, (name, blob) in enumerate(icons):
@@ -11585,8 +11979,10 @@ class MaxwellBot(commands.Bot):
                 im.thumbnail((cls._GRID_CELL - 8, cls._GRID_CELL - 8))
                 sheet.paste(
                     im,
-                    (x0 + (cls._GRID_CELL - im.width) // 2,
-                     y0 + (cls._GRID_CELL - im.height) // 2),
+                    (
+                        x0 + (cls._GRID_CELL - im.width) // 2,
+                        y0 + (cls._GRID_CELL - im.height) // 2,
+                    ),
                     im,
                 )
             except Exception as e:
@@ -11683,9 +12079,7 @@ class MaxwellBot(commands.Bot):
     _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
     _MAX_MEDIA_REDIRECTS = 3
     _META_TAG_RE = re.compile(r"<meta\s+[^>]*>", re.I)
-    _META_ATTR_RE = re.compile(
-        r"""([^\s=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"""
-    )
+    _META_ATTR_RE = re.compile(r"""([^\s=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""")
 
     @staticmethod
     def _is_gif_page_url(url: str) -> bool:
@@ -11987,10 +12381,7 @@ class MaxwellBot(commands.Bot):
                                 continue
                             if derived_item.get("is_image") and not proc_img:
                                 continue
-                            if (
-                                not derived_item.get("is_image")
-                                and not proc_aud
-                            ):
+                            if not derived_item.get("is_image") and not proc_aud:
                                 continue
                             media.append(derived_item)
                             media_count += 1
@@ -12018,9 +12409,7 @@ class MaxwellBot(commands.Bot):
     # fetched too, but _extract_linked_media immediately runs them through
     # ffmpeg; a raw video_url part is rejected by several provider endpoints.
     _LINK_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
-    _LINK_AUDIO_EXTS = frozenset(
-        {".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac"}
-    )
+    _LINK_AUDIO_EXTS = frozenset({".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac"})
     _LINK_VIDEO_EXTS = frozenset({".mp4", ".webm", ".mov", ".mkv", ".avi"})
 
     @classmethod
@@ -12089,9 +12478,7 @@ class MaxwellBot(commands.Bot):
                 (ext in self._LINK_IMAGE_EXTS and proc_img)
                 or (ext in self._LINK_AUDIO_EXTS and proc_aud)
                 or (
-                    ext in video_exts
-                    and video_input_enabled
-                    and (proc_img or proc_aud)
+                    ext in video_exts and video_input_enabled and (proc_img or proc_aud)
                 )
             )
         ]
@@ -12125,7 +12512,9 @@ class MaxwellBot(commands.Bot):
                     # _download_embed_media; keep it explicitly sourced.
                     media.append(item)
         if media:
-            logger.info(f"Extracted {len(media)} linked media item(s) from message text")
+            logger.info(
+                f"Extracted {len(media)} linked media item(s) from message text"
+            )
         return media
 
     def _cache_media_context(self, channel_id: str, media: list[dict]):
@@ -12669,15 +13058,11 @@ class MaxwellBot(commands.Bot):
                 content = str(getattr(message, "content", "") or "")
                 turn_context["message"] = message
                 turn_context["content"] = content
-                turn_context["message_ids"].add(
-                    str(getattr(message, "id", "") or "")
-                )
+                turn_context["message_ids"].add(str(getattr(message, "id", "") or ""))
                 if (
                     not turn_context.get("version")
                     and self._control.get("store_memory", True)
-                    and getattr(
-                        self, "memory", None
-                    )
+                    and getattr(self, "memory", None)
                 ):
                     with contextlib.suppress(Exception):
                         await self.add_message_to_memory(
@@ -12757,8 +13142,14 @@ class MaxwellBot(commands.Bot):
             dm_cached = self._get_media_context(channel_id)
             if dm_cached:
                 # Dedupe by message_id+filename so we don't double-count the current image
-                current_keys = {(c.get("message_id"), c.get("filename")) for c in current_images}
-                filtered = [c for c in dm_cached if (c.get("message_id"), c.get("filename")) not in current_keys]
+                current_keys = {
+                    (c.get("message_id"), c.get("filename")) for c in current_images
+                }
+                filtered = [
+                    c
+                    for c in dm_cached
+                    if (c.get("message_id"), c.get("filename")) not in current_keys
+                ]
                 # Only merge if we have current images to compare against, OR if the DM has
                 # no current image but user is clearly continuing (previous image within uses_left)
                 # - image+image: current_images non-empty -> merge previous
@@ -12767,7 +13158,9 @@ class MaxwellBot(commands.Bot):
                     # For image+image burst, always merge. For text follow-up, merge if we have any cached.
                     if current_images or len(filtered) > 0:
                         cached_media = filtered
-                        logger.info(f"DM merge: {len(current_images)} current + {len(cached_media)} cached (interrupt)")
+                        logger.info(
+                            f"DM merge: {len(current_images)} current + {len(cached_media)} cached (interrupt)"
+                        )
         # Current attachments always go through. Cached images are gated above;
         # otherwise normal chat gets polluted by yesterday's meme/screenshot.
         active_media = current_images + cached_media + self._current_binary_media(media)
@@ -12852,6 +13245,7 @@ class MaxwellBot(commands.Bot):
                     yt_scan,
                     re.IGNORECASE,
                 )
+
                 async def _exec_yt(u):
                     try:
                         res = await self.tools["youtube"].execute(message, url=u)
@@ -13298,9 +13692,7 @@ class MaxwellBot(commands.Bot):
                 # acknowledging would ping-pong until max_iters.
                 if _only_promise_results(tool_results):
                     if promise_followups >= 1:
-                        logger.info(
-                            "ack-only send_message repeated; not looping again"
-                        )
+                        logger.info("ack-only send_message repeated; not looping again")
                         break
                     promise_followups += 1
                 # Native path: append assistant tool_calls + role=tool messages.
@@ -13308,9 +13700,7 @@ class MaxwellBot(commands.Bot):
                 if native_followup:
                     conversation_tail.extend(native_followup)
                 else:
-                    conversation_tail.append(
-                        {"role": "assistant", "content": response}
-                    )
+                    conversation_tail.append({"role": "assistant", "content": response})
                     conversation_tail.append(
                         {
                             "role": "user",
@@ -13572,7 +13962,9 @@ class MaxwellBot(commands.Bot):
                 )
                 response = _auto_format_discord(response)
                 response = self._render_custom_emojis(response, message.guild)
-                response, send_stickers = self._extract_stickers_from_text(response, message.guild)
+                response, send_stickers = self._extract_stickers_from_text(
+                    response, message.guild
+                )
                 chunks = self._split_response(response, limit=1900)
                 if not chunks and send_stickers:
                     chunks = [""]
@@ -13846,7 +14238,9 @@ class MaxwellBot(commands.Bot):
         raw_name = name
         if name not in self.tools and name in _TOOL_ALIASES:
             resolved = _TOOL_ALIASES[name]
-            logger.info("Aliasing hallucinated/alternate tool name %r -> %r", name, resolved)
+            logger.info(
+                "Aliasing hallucinated/alternate tool name %r -> %r", name, resolved
+            )
             name = resolved
 
         # Extract reasoning first. It is NOT a real tool argument; tools must
@@ -13860,24 +14254,18 @@ class MaxwellBot(commands.Bot):
         try:
             plugin_manager = getattr(self, "plugin_manager", None)
             plugin_tool = (
-                plugin_manager.get_tool(name)
-                if plugin_manager is not None
-                else None
+                plugin_manager.get_tool(name) if plugin_manager is not None else None
             )
             plugin_allowed = False
             if plugin_tool is not None:
-                author_id = getattr(
-                    getattr(message, "author", None), "id", None
-                )
+                author_id = getattr(getattr(message, "author", None), "id", None)
                 try:
                     plugin_allowed = name in plugin_manager.get_available_tools(
                         user_id=author_id,
                         platform=self._message_tool_platform(message),
                     )
                 except Exception:
-                    logger.exception(
-                        "Failed to check access for plugin tool %s", name
-                    )
+                    logger.exception("Failed to check access for plugin tool %s", name)
             if name == "send_message" and isinstance(params.get("content"), str):
                 params = dict(params)
                 content = params.get("content", "")
@@ -14113,7 +14501,11 @@ class MaxwellBot(commands.Bot):
         if existing_progress is not None:
             progress = existing_progress
         else:
-            progress_enabled = bool(non_terminal) and bool(message.guild) and self._progress_enabled(str(message.guild.id))
+            progress_enabled = (
+                bool(non_terminal)
+                and bool(message.guild)
+                and self._progress_enabled(str(message.guild.id))
+            )
             progress = _make_tool_progress(message) if progress_enabled else None
 
         # 2026-07-21: pick a per-tool "artifact" field for the progress
@@ -14420,9 +14812,7 @@ class MaxwellBot(commands.Bot):
         # only attach the decoded image as vision. Also cap each
         # tool result at 32KB to keep context size bounded.
         _IMG_RE = re.compile(r"__IMAGE_B64__([A-Za-z0-9+/=\s]+)__END_IMAGE_B64__")
-        _AUDIO_RE = re.compile(
-            r"__AUDIO_B64__([A-Za-z0-9+/=\s]+)__END_AUDIO_B64__"
-        )
+        _AUDIO_RE = re.compile(r"__AUDIO_B64__([A-Za-z0-9+/=\s]+)__END_AUDIO_B64__")
         _MAX_TOOL_RESULT_CHARS = 32_000
         _SITE_RESULT_TOOLS = {
             "create_site",
@@ -14762,6 +15152,22 @@ class MaxwellBot(commands.Bot):
                 if pt_name not in disabled:
                     names.add(pt_name)
 
+        if "join_server" in names:
+            author_id = (
+                getattr(getattr(message, "author", None), "id", None)
+                if message is not None
+                else None
+            )
+            is_admin = False
+            try:
+                is_admin = bool(
+                    author_id
+                    and getattr(self, "_is_admin", lambda _uid: False)(author_id)
+                )
+            except Exception:
+                is_admin = False
+            if not is_admin:
+                names.discard("join_server")
         if message is not None and MaxwellBot._lean_chat_turn(self, message, content):
             lean = {n for n in names if n in CHAT_CORE_TOOL_NAMES}
             # Never strip the turn down to nothing to say — if the core set
@@ -14824,7 +15230,9 @@ class MaxwellBot(commands.Bot):
         return custom, None
 
     def _is_short_live_turn(self, message, content: str | None = None) -> bool:
-        text = str(content if content is not None else getattr(message, "content", "") or "")
+        text = str(
+            content if content is not None else getattr(message, "content", "") or ""
+        )
         if getattr(message, "_watch_followup", False):
             return True
         if self._conversation_watch_active(
@@ -14888,8 +15296,7 @@ class MaxwellBot(commands.Bot):
                 "send_message (or no_response). Each call needs `reasoning` first "
                 "(~280 chars, why, plain text only). "
                 "Look things up with web_search / fetch_url when you are unsure "
-                "or the topic is current; do not guess from training data.\n"
-                + catalog
+                "or the topic is current; do not guess from training data.\n" + catalog
             )
         else:
             descriptions = [
@@ -15180,7 +15587,9 @@ class MaxwellBot(commands.Bot):
         control = getattr(self, "_control", None) or {}
         if not control.get("self_repetition_note_enabled", True):
             return ""
-        self_id = str(getattr(self.user, "id", "")) if getattr(self, "user", None) else ""
+        self_id = (
+            str(getattr(self.user, "id", "")) if getattr(self, "user", None) else ""
+        )
         openers: list[str] = []
         for entry in reversed(memory):
             if len(openers) >= MaxwellBot._ECHO_LOOKBACK:
@@ -15192,7 +15601,9 @@ class MaxwellBot(commands.Bot):
             )
             if not is_self:
                 continue
-            words = re.findall(r"[\w\u00C0-\u024F']+", str(entry.get("content") or "").lower())
+            words = re.findall(
+                r"[\w\u00C0-\u024F']+", str(entry.get("content") or "").lower()
+            )
             if not words:
                 continue
             openers.append(" ".join(words[: MaxwellBot._ECHO_OPENER_WORDS]))
@@ -15215,7 +15626,7 @@ class MaxwellBot(commands.Bot):
         phrase = hits[0].split(" ", 1)[0]
         return (
             f"You have opened {len(hits)} of your last {len(openers)} messages with "
-            f"\"{phrase}\". It has stopped meaning anything. Do not open this one "
+            f'"{phrase}". It has stopped meaning anything. Do not open this one '
             "that way — say the thing itself, or say nothing."
         )
 
@@ -15256,9 +15667,7 @@ class MaxwellBot(commands.Bot):
             disabled.add("facts")
         if not control.get("entity_memory_enabled", True):
             disabled.add("entity")
-        return allocate(
-            total, weights=weights_from_control(control), disabled=disabled
-        )
+        return allocate(total, weights=weights_from_control(control), disabled=disabled)
 
     async def _entity_profile_for(
         self, message, user_message: str, budget: int
@@ -15441,7 +15850,9 @@ class MaxwellBot(commands.Bot):
             self._drugged_until.pop(channel_id, None)
         local_now = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=-4)))
         user_kind = (
-            "bot" if getattr(getattr(message, "author", None), "bot", False) else "human"
+            "bot"
+            if getattr(getattr(message, "author", None), "bot", False)
+            else "human"
         )
         channel_name = getattr(message.channel, "name", None) or (
             "DM" if isinstance(message.channel, discord.DMChannel) else "unknown"
@@ -15514,9 +15925,9 @@ class MaxwellBot(commands.Bot):
                 ctx_plan.note_usage("entity", len(block), items=len(entity_facts))
             ctx_spare = ctx_plan.spare_after("entity")
 
-        if self._control.get("long_term_memory_enabled", True) and not self._is_short_live_turn(
-            message, user_message
-        ):
+        if self._control.get(
+            "long_term_memory_enabled", True
+        ) and not self._is_short_live_turn(message, user_message):
             try:
                 # RAG: use semantic search to find the most relevant memories
                 # instead of just dumping the last N entries. This means the
@@ -15755,9 +16166,9 @@ class MaxwellBot(commands.Bot):
             except Exception as e:
                 logger.warning(f"Failed to load long-term memory: {e}")
             ctx_spare = ctx_plan.spare_after("entity", "ltm", "web")
-        if self._control.get("cross_context_enabled", True) and not self._is_short_live_turn(
-            message, user_message
-        ):
+        if self._control.get(
+            "cross_context_enabled", True
+        ) and not self._is_short_live_turn(message, user_message):
             try:
                 facts = await self.memory.get_relevant_shared_context(
                     user_id=str(message.author.id),
@@ -15807,7 +16218,9 @@ class MaxwellBot(commands.Bot):
             )
         if message.guild and self._control.get("emoji_context_enabled", True):
             emojis = self._guild_emojis.get(str(message.guild.id), {})
-            stickers = getattr(self, "_guild_stickers", {}).get(str(message.guild.id), {})
+            stickers = getattr(self, "_guild_stickers", {}).get(
+                str(message.guild.id), {}
+            )
             if emojis or stickers:
                 # Keep the name list and the reference grid on the same caps —
                 # they drifted (25/15 vs 48/12), so Maxwell saw icons he had no
@@ -16619,11 +17032,7 @@ class MaxwellBot(commands.Bot):
         if delivered_text:
             await self._mark_inbox_announced()
 
-        if (
-            delivered_text
-            and self._control.get("store_memory", True)
-            and tg_chan_id
-        ):
+        if delivered_text and self._control.get("store_memory", True) and tg_chan_id:
             await self.memory.add_to_channel_memory(
                 tg_chan_id,
                 {
@@ -16918,9 +17327,7 @@ class MaxwellBot(commands.Bot):
                 recency_tau_days=3.0,
                 top_k=8,
             )
-            rag_recent = [r for r in rec_results if r.get("similarity", 0) >= 0.40][
-                :5
-            ]
+            rag_recent = [r for r in rec_results if r.get("similarity", 0) >= 0.40][:5]
             # ─── web results (operator feature 2026-08-09) ───
             rag_web: list[dict] = []
             if (
@@ -16936,9 +17343,7 @@ class MaxwellBot(commands.Bot):
                         min_similarity=0.40,
                         max_age_days=7,
                     )
-                    rag_web = [
-                        r for r in web_rows if r.get("similarity", 0) >= 0.40
-                    ]
+                    rag_web = [r for r in web_rows if r.get("similarity", 0) >= 0.40]
                 except Exception as e:
                     logger.debug(f"tg recall_web_results skipped: {e}")
             if rag_context:
@@ -16961,8 +17366,7 @@ class MaxwellBot(commands.Bot):
                         f"- [{who}, {sim_pct}% match] {str(r['content'])[:300]}"
                     )
                 dynamic_parts.append(
-                    "Recent relevant messages (background):\n"
-                    + "\n".join(rec_lines)
+                    "Recent relevant messages (background):\n" + "\n".join(rec_lines)
                 )
             if rag_web:
                 web_lines = []
@@ -16980,8 +17384,7 @@ class MaxwellBot(commands.Bot):
                         f"{title}\n  {url}\n  {content}"
                     )
                 dynamic_parts.append(
-                    "Earlier web results (cite URL if reused):\n"
-                    + "\n".join(web_lines)
+                    "Earlier web results (cite URL if reused):\n" + "\n".join(web_lines)
                 )
         except Exception as e:
             logger.warning(f"Telegram RAG retrieval failed: {e}")
@@ -16998,8 +17401,7 @@ class MaxwellBot(commands.Bot):
             author_id = str(m.get("author_id") or "")
             is_self = bool(self_user_id_tg and author_id == self_user_id_tg) or (
                 not author_id
-                and author
-                == (self.user.display_name if self.user else self.bot_name)
+                and author == (self.user.display_name if self.user else self.bot_name)
             )
             role = "assistant" if is_self else "user"
             # NOT `text` — that is the incoming message, and reusing the
@@ -17053,9 +17455,7 @@ class MaxwellBot(commands.Bot):
         )
         max_iters = max(
             0,
-            min(
-                _safe_int(self._control.get("max_tool_iterations", 30) or 0, 0), 100
-            ),
+            min(_safe_int(self._control.get("max_tool_iterations", 30) or 0, 0), 100),
         )
         pending_native = tg_native_calls
         conversation_tail: list[dict] = []
@@ -17181,7 +17581,9 @@ async def main():
             raise RuntimeError("DISCORD_TOKEN is not configured")
         await bot.start(bot.config.DISCORD_TOKEN)
     except discord.LoginFailure:
-        persona = str(getattr(bot, "_persona_type", "") or os.getenv("BOT_PERSONA_TYPE", "") or "")
+        persona = str(
+            getattr(bot, "_persona_type", "") or os.getenv("BOT_PERSONA_TYPE", "") or ""
+        )
         which = (
             "GF_DISCORD_TOKEN"
             if persona in {"mommy_gf", "gf", "mommy", "luna", "mommygf"}
@@ -17210,6 +17612,17 @@ async def main():
                 await watchdog_task
         with contextlib.suppress(Exception):
             await bot.channel_queues.close()
+        # Flush read positions before the process goes away — a restart is the
+        # most common gateway gap, and an unsaved watermark means the messages
+        # from the outage are unrecoverable.
+        with contextlib.suppress(Exception):
+            bot._watermarks.save()
+        with contextlib.suppress(Exception):
+            await bot._reply_queue.close()
+        with contextlib.suppress(Exception):
+            pm = getattr(bot, "plugin_manager", None)
+            if pm is not None:
+                await pm.teardown()
         try:
             await bot.autonomy_engine.stop()
         except Exception as e:

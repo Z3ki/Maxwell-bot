@@ -7,6 +7,7 @@ from autonomy import _reply_relation_bit
 from bot import MaxwellBot
 from concurrency_safety import KeyedLocks
 from control_defaults import DEFAULT_CONTROL
+from message_pipeline import ReplyQueue
 
 
 def _bot(*, watch_seconds=180, debounce_seconds=0.05):
@@ -45,8 +46,8 @@ def _bot(*, watch_seconds=180, debounce_seconds=0.05):
     bot._directly_addressed = MaxwellBot._directly_addressed.__get__(bot)
     bot._is_partner_message = MaxwellBot._is_partner_message.__get__(bot)
     bot._partner_reply_budget = MaxwellBot._partner_reply_budget.__get__(bot)
-    bot._content_without_self_mention = MaxwellBot._content_without_self_mention.__get__(
-        bot
+    bot._content_without_self_mention = (
+        MaxwellBot._content_without_self_mention.__get__(bot)
     )
     bot._is_bare_ping = MaxwellBot._is_bare_ping.__get__(bot)
     bot._soft_addressed = MaxwellBot._soft_addressed.__get__(bot)
@@ -72,13 +73,14 @@ def _bot(*, watch_seconds=180, debounce_seconds=0.05):
     bot._maybe_live_reply = MaxwellBot._maybe_live_reply.__get__(bot)
     bot._get_channel_lock = MaxwellBot._get_channel_lock.__get__(bot)
     bot._channel_lock_timeout = MaxwellBot._channel_lock_timeout.__get__(bot)
-    bot._watch_lock_timeout = MaxwellBot._watch_lock_timeout.__get__(bot)
-    bot._requeue_after_lock_timeout = MaxwellBot._requeue_after_lock_timeout.__get__(
-        bot
+    # Reply generation is serialized by the queue, not by the channel lock.
+    # Bind through a late lookup so a test can still swap _handle_message.
+    bot._reply_queue = ReplyQueue(max_directed=8, max_age=300.0)
+    bot._reply_queue.bind(
+        lambda message, content: bot._handle_message(message, content)
     )
-    bot._should_interrupt_inflight = MaxwellBot._should_interrupt_inflight.__get__(
-        bot
-    )
+    bot._dispatch_reply = MaxwellBot._dispatch_reply.__get__(bot)
+    bot._should_interrupt_inflight = MaxwellBot._should_interrupt_inflight.__get__(bot)
     bot._track_task = lambda task: task
     bot._update_recent_users = MaxwellBot._update_recent_users.__get__(bot)
     bot._prune_typing = MaxwellBot._prune_typing.__get__(bot)
@@ -108,6 +110,23 @@ def _plain_followup(
         guild=SimpleNamespace(me=None, get_member=lambda _uid: None),
         reference=reference,
     )
+
+
+async def _drain(bot, spins=400):
+    """Let the reply queue run to completion.
+
+    Dispatch is no longer inline: ``_maybe_live_reply`` hands the message to
+    the per-channel queue and returns, so a test has to yield for the pump.
+    """
+    queue = bot._reply_queue
+    for _ in range(spins):
+        await asyncio.sleep(0)
+        pending = queue.any_active() or any(
+            queue.depth(cid)
+            for cid in list(queue._channels)  # noqa: SLF001
+        )
+        if not pending:
+            return
 
 
 def test_watch_default_is_three_minutes():
@@ -144,7 +163,11 @@ def test_watch_only_spends_a_turn_on_lines_that_ask_for_him():
         named = _plain_followup(content="maxwell say hi")
         assert MaxwellBot._should_live_reply(bot, named) is True
         # Nobody pointed these at him and he is not mid-exchange here.
-        for content in ("wow fancy i am doing fine myself", "lol", "wanna talk about something?"):
+        for content in (
+            "wow fancy i am doing fine myself",
+            "lol",
+            "wanna talk about something?",
+        ):
             assert (
                 MaxwellBot._should_live_reply(bot, _plain_followup(content=content))
                 is False
@@ -245,7 +268,9 @@ def test_pressure_bar_is_configurable():
         assert MaxwellBot._should_live_reply(bot, named) is False
         # 0.0 = the old behaviour, every human line on watch.
         bot._control["conversation_watch_pressure"] = 0.0
-        assert MaxwellBot._should_live_reply(bot, _plain_followup(content="lol")) is True
+        assert (
+            MaxwellBot._should_live_reply(bot, _plain_followup(content="lol")) is True
+        )
 
     asyncio.run(run())
 
@@ -516,9 +541,7 @@ def test_watch_debounce_still_shows_an_aside():
     async def run():
         MaxwellBot._arm_conversation_watch(bot, 1506001126426808511)
         ping = _plain_followup(content="hey maxwell")
-        aside = _plain_followup(
-            content="that's why they don't have access to maxwell"
-        )
+        aside = _plain_followup(content="that's why they don't have access to maxwell")
         await MaxwellBot._maybe_live_reply(bot, ping, ping.content)
         await MaxwellBot._maybe_live_reply(bot, aside, aside.content)
         await asyncio.sleep(0.25)
@@ -567,14 +590,14 @@ def test_reply_relation_includes_quote():
     assert self_bit == 'reply_to=you/Maxwell(1) "hey"'
 
 
-def test_channel_lock_fails_fast_under_load():
+def test_memory_lock_timeout_is_bounded():
+    """The lock now guards only the memory write, so the wait stays short."""
     bot = _bot()
     assert MaxwellBot._channel_lock_timeout(bot) == 15.0
     bot._control["channel_lock_timeout_seconds"] = 120
     assert MaxwellBot._channel_lock_timeout(bot) == 60.0
     bot._control["channel_lock_timeout_seconds"] = 1
     assert MaxwellBot._channel_lock_timeout(bot) == 3.0
-    assert MaxwellBot._watch_lock_timeout(bot) == 90.0
 
 
 def test_watch_chatter_does_not_interrupt_inflight():
@@ -597,25 +620,46 @@ def test_watch_chatter_does_not_interrupt_inflight():
     asyncio.run(run())
 
 
-def test_lock_timeout_requeues_a_live_reply():
+def test_a_busy_room_queues_the_ping_instead_of_dropping_it():
+    """The old path stored the message and forfeited the reply."""
     bot = _bot()
-    queued = []
-    bot._queue_watch_reply = lambda msg, content, directed=True: queued.append(
-        (content, directed)
-    )
+    handled = []
+    release = asyncio.Event()
+
+    async def handle(message, content=None):
+        handled.append(content)
+        if len(handled) == 1:
+            await release.wait()
+
+    bot._handle_message = handle
 
     async def run():
-        msg = _plain_followup(content=f"<@{bot.user.id}> make an image of a cat")
-        msg.mentions = [bot.user]
-        MaxwellBot._arm_conversation_watch(bot, msg.channel.id)
-        MaxwellBot._requeue_after_lock_timeout(bot, msg)
-        # A soft line that timed out on the lock is dropped, not requeued:
-        # the lock being held is exactly the "he is busy" case.
-        soft = _plain_followup(content="maxwell say hi")
-        MaxwellBot._requeue_after_lock_timeout(bot, soft)
+        first = _plain_followup(content=f"<@{bot.user.id}> make an image of a cat")
+        first.mentions = [bot.user]
+        first.id = 1
+        MaxwellBot._arm_conversation_watch(bot, first.channel.id)
+        await MaxwellBot._maybe_live_reply(bot, first, "make an image of a cat")
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if handled:
+                break
+        assert handled == ["make an image of a cat"]
+
+        # Second ping arrives while the first turn is still running.
+        second = _plain_followup(content=f"<@{bot.user.id}> actually a dog")
+        second.mentions = [bot.user]
+        second.id = 2
+        await MaxwellBot._maybe_live_reply(bot, second, "actually a dog")
+        assert bot._reply_queue.depth(str(second.channel.id)) == 1
+
+        release.set()
+        for _ in range(200):
+            await asyncio.sleep(0)
+            if len(handled) == 2:
+                break
+        assert handled == ["make an image of a cat", "actually a dog"]
 
     asyncio.run(run())
-    assert queued == [("make an image of a cat", True)]
 
 
 def test_bare_mention_is_a_ping_with_no_text():
@@ -692,6 +736,7 @@ def test_partner_self_accounts_hit_a_finite_reply_budget():
             message.author.bot = False
             message.mentions = [bot.user]
             await MaxwellBot._maybe_live_reply(bot, message, text)
+            await _drain(bot)
 
         assert handled == ["first", "second"]
         assert bot._partner_turns[str(message.channel.id)] == 2
@@ -706,6 +751,7 @@ def test_partner_self_accounts_hit_a_finite_reply_budget():
         fresh.author.bot = False
         fresh.mentions = [bot.user]
         await MaxwellBot._maybe_live_reply(bot, fresh, fresh.content)
+        await _drain(bot)
         assert handled == ["first", "second", "fresh"]
 
     asyncio.run(run())
