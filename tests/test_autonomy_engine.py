@@ -1419,18 +1419,18 @@ def test_dm_history_limit_is_bounded_and_configurable():
     engine = AutonomyEngine.__new__(AutonomyEngine)
 
     engine.bot = SimpleNamespace(_control={})
-    assert engine._dm_history_limit() == 300
+    assert engine._dm_history_limit() == 40
 
     engine.bot = SimpleNamespace(_control={"autonomy_dm_messages": 50})
     assert engine._dm_history_limit() == 50
 
     # Clamped at both ends, and junk falls back to the default.
     engine.bot = SimpleNamespace(_control={"autonomy_dm_messages": 99999})
-    assert engine._dm_history_limit() == 1500
+    assert engine._dm_history_limit() == 200
     engine.bot = SimpleNamespace(_control={"autonomy_dm_messages": 1})
     assert engine._dm_history_limit() == 8
     engine.bot = SimpleNamespace(_control={"autonomy_dm_messages": "nonsense"})
-    assert engine._dm_history_limit() == 300
+    assert engine._dm_history_limit() == 40
 
 
 def test_observe_timeout_is_configurable_and_clamped():

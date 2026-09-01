@@ -41,6 +41,9 @@ def test_picks_up_image_and_audio_links():
         ".mp4",
         ".webm",
         ".mov",
+        ".heic",
+        ".opus",
+        ".m4v",
     ],
 )
 def test_every_supported_extension_is_recognised(ext):

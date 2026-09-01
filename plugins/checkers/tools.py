@@ -48,6 +48,8 @@ def _run_maxwell_turn(game: CheckersGame) -> list[str]:
 
 
 class CheckersStartTool(Tool):
+    returns_result = True
+
     def __init__(self, bot=None):
         self.bot = bot
 
@@ -108,6 +110,8 @@ class CheckersStartTool(Tool):
 
 
 class CheckersMoveTool(Tool):
+    returns_result = True
+
     def __init__(self, bot=None):
         self.bot = bot
 
@@ -172,6 +176,8 @@ class CheckersMoveTool(Tool):
 
 
 class CheckersStateTool(Tool):
+    returns_result = True
+
     def __init__(self, bot=None):
         self.bot = bot
 
@@ -204,6 +210,8 @@ class CheckersStateTool(Tool):
 
 
 class CheckersResignTool(Tool):
+    returns_result = True
+
     def __init__(self, bot=None):
         self.bot = bot
 

@@ -238,6 +238,7 @@ def test_reaction_on_maxwell_message_does_not_invoke_handler():
         _MAX_REACTION_MESSAGES=MaxwellBot._MAX_REACTION_MESSAGES,
         _MAX_REACTORS_PER_MESSAGE=MaxwellBot._MAX_REACTORS_PER_MESSAGE,
         _handle_message=handle_message,
+        _dispatch_plugin_event=lambda *a, **k: None,
     )
     bot._remember_reaction_message = MaxwellBot._remember_reaction_message.__get__(bot)
     bot._record_message_reaction = MaxwellBot._record_message_reaction.__get__(bot)
@@ -555,6 +556,8 @@ def test_build_messages_caps_tool_history_outside_recent_count():
     bot._reply_parent = MaxwellBot._reply_parent.__get__(bot)
     bot._replying_to_own_message = MaxwellBot._replying_to_own_message.__get__(bot)
     bot._render_reply_parent = MaxwellBot._render_reply_parent.__get__(bot)
+    bot._author_is_self = MaxwellBot._author_is_self.__get__(bot)
+    bot._iter_resolved_reply_chain = MaxwellBot._iter_resolved_reply_chain.__get__(bot)
     bot._reply_parent_context_lines = MaxwellBot._reply_parent_context_lines.__get__(
         bot
     )
@@ -743,6 +746,8 @@ def test_build_messages_has_single_formatting_instruction():
     bot._reply_parent = MaxwellBot._reply_parent.__get__(bot)
     bot._replying_to_own_message = MaxwellBot._replying_to_own_message.__get__(bot)
     bot._render_reply_parent = MaxwellBot._render_reply_parent.__get__(bot)
+    bot._author_is_self = MaxwellBot._author_is_self.__get__(bot)
+    bot._iter_resolved_reply_chain = MaxwellBot._iter_resolved_reply_chain.__get__(bot)
     bot._reply_parent_context_lines = MaxwellBot._reply_parent_context_lines.__get__(
         bot
     )
@@ -796,6 +801,8 @@ def test_bare_ping_prompt_uses_room_context_not_look_at_this():
     bot._reply_parent = MaxwellBot._reply_parent.__get__(bot)
     bot._replying_to_own_message = MaxwellBot._replying_to_own_message.__get__(bot)
     bot._render_reply_parent = MaxwellBot._render_reply_parent.__get__(bot)
+    bot._author_is_self = MaxwellBot._author_is_self.__get__(bot)
+    bot._iter_resolved_reply_chain = MaxwellBot._iter_resolved_reply_chain.__get__(bot)
     bot._reply_parent_context_lines = MaxwellBot._reply_parent_context_lines.__get__(
         bot
     )

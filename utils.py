@@ -27,7 +27,11 @@ ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
 # the message carries a media URL and what type it is — otherwise a message
 # like "look at this" + an imgur link reads as pure text.
 MEDIA_URL_RE = re.compile(
-    r"https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%\-]+\.(?:png|jpe?g|gif|webp|mp4|webm|mov|mkv|mp3|ogg|wav|flac|m4a|aac)(?:[?#][A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%\-]*)?",
+    r"https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%\-]+\.(?:"
+    r"png|jpe?g|gif|webp|bmp|tiff?|heic|heif|avif|apng|"
+    r"mp4|webm|mov|mkv|avi|m4v|mpeg|mpg|3gp|"
+    r"mp3|ogg|oga|opus|wav|flac|m4a|aac|wma"
+    r")(?:[?#][A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%\-]*)?",
     re.IGNORECASE,
 )
 
@@ -48,7 +52,9 @@ GIF_PAGE_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
-_DIRECT_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".gifv"})
+_DIRECT_IMAGE_EXTS = frozenset(
+    {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif", ".avif", ".apng", ".gifv"}
+)
 
 
 def is_gif_page_url(url: str) -> bool:
@@ -66,10 +72,21 @@ def is_direct_image_url(url: str) -> bool:
 
 
 # Human-readable labels for Discord system message types (welcome messages,
-# joins, boosts, pins, etc.). Anything unmapped falls back to the enum name.
+# joins, boosts, pins, stage, incidents, etc.). Ordinary chat types are
+# skipped in the annotator. Anything unmapped falls back to the enum name.
+_ORDINARY_MESSAGE_TYPE_NAMES = frozenset(
+    {
+        "default",
+        "reply",
+        "chat_input_command",
+        "context_menu_command",
+    }
+)
+
 SYSTEM_MESSAGE_LABELS = {
     "MessageType.new_member": "new member joined the server",
     "MessageType.member_join": "member joined the server",
+    "MessageType.user_join": "member joined the server",
     "MessageType.guild_stream": "started streaming",
     "MessageType.guild_application_premium_subscription": "booster subscribed",
     "MessageType.premium_guild_subscription": "boosted the server",
@@ -93,13 +110,41 @@ SYSTEM_MESSAGE_LABELS = {
     "MessageType.stage_start": "stage started",
     "MessageType.stage_end": "stage ended",
     "MessageType.stage_speaker": "was invited to speak on stage",
+    "MessageType.stage_raise_hand": "requested to speak on stage",
     "MessageType.stage_topic": "changed the stage topic",
     "MessageType.role_subscription_purchase": "subscribed to a server role",
     "MessageType.interaction_premium_upsell": "premium upsell interaction",
     "MessageType.purchase_notification": "made a purchase",
     "MessageType.poll_result": "poll ended",
     "MessageType.emoji_added": "added a server emoji",
+    "MessageType.thread_created": "started a thread",
+    "MessageType.thread_starter_message": "thread starter message",
+    "MessageType.guild_incident_alert_mode_enabled": "enabled security actions",
+    "MessageType.guild_incident_alert_mode_disabled": "disabled security actions",
+    "MessageType.guild_incident_report_raid": "reported a raid",
+    "MessageType.guild_incident_report_false_alarm": "reported a false alarm",
 }
+
+
+def _message_type_name(mtype) -> str:
+    """Lowercased MessageType name from an enum, string, or None."""
+    if mtype is None:
+        return ""
+    name = str(getattr(mtype, "name", "") or "").strip()
+    if name:
+        return name.lower()
+    text = str(mtype)
+    if text.startswith("MessageType."):
+        return text.split(".", 1)[-1].lower()
+    return text.lower()
+
+
+def message_is_discord_system_event(message: Any) -> bool:
+    """True for Discord-rendered system events (joins, pins, boosts, …)."""
+    return _message_type_name(getattr(message, "type", None)) not in (
+        "",
+        *_ORDINARY_MESSAGE_TYPE_NAMES,
+    )
 
 
 def _poll_text(poll) -> str:
@@ -215,25 +260,88 @@ def _attachment_is_voice(att: Any) -> bool:
     )
 
 
+def _attachment_is_clip(att: Any) -> bool:
+    flags = getattr(att, "flags", None)
+    if flags is not None and bool(getattr(flags, "clip", False)):
+        return True
+    if getattr(att, "clip_created_at", None) is not None:
+        return True
+    if getattr(att, "clip_participants", None):
+        return True
+    return False
+
+
 def _attachment_annotation(att: Any) -> str:
     name = str(getattr(att, "filename", "") or "file")
     ctype = str(getattr(att, "content_type", "") or "").split(";")[0].lower()
     lower = name.lower()
+    extras: list[str] = []
+    spoiler = getattr(att, "is_spoiler", None)
+    if callable(spoiler):
+        with contextlib.suppress(Exception):
+            spoiler = spoiler()
+    if spoiler:
+        extras.append("spoiler")
+    width = getattr(att, "width", None)
+    height = getattr(att, "height", None)
+    if width and height:
+        extras.append(f"{int(width)}x{int(height)}")
+    title = str(getattr(att, "title", "") or "").strip()
+    desc = str(getattr(att, "description", "") or "").strip()
+    if title and title.lower() != name.lower():
+        extras.append(f'title "{title[:80]}"')
+    if desc:
+        extras.append(f'alt "{desc[:80]}"')
+    if _attachment_is_clip(att):
+        extras.append("clip")
+        app = getattr(att, "application", None)
+        app_name = str(getattr(app, "name", "") or "").strip()
+        if app_name:
+            extras.append(f"from {app_name}")
+        parts = []
+        for user in list(getattr(att, "clip_participants", None) or [])[:6]:
+            nm = str(
+                getattr(user, "display_name", None) or getattr(user, "name", "") or ""
+            ).strip()
+            if nm:
+                parts.append(nm)
+        if parts:
+            extras.append("with " + ", ".join(parts))
+    extra = (" " + " ".join(f"({x})" for x in extras)) if extras else ""
     if _attachment_is_voice(att):
         dur = getattr(att, "duration", None)
-        extra = f" {float(dur):.0f}s" if dur else ""
-        return f"[voice message:{extra} {name}]"
+        dur_bit = f" {float(dur):.0f}s" if dur else ""
+        return f"[voice message:{dur_bit} {name}]{extra}"
     if ctype.startswith("image/") or lower.endswith(
-        (".png", ".jpg", ".jpeg", ".gif", ".webp")
+        (
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".webp",
+            ".bmp",
+            ".tif",
+            ".tiff",
+            ".heic",
+            ".heif",
+            ".avif",
+            ".apng",
+        )
     ):
-        return f"[image: {name}]"
+        return f"[image: {name}]{extra}"
     if ctype.startswith("audio/") or lower.endswith(
-        (".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac")
+        (".mp3", ".wav", ".ogg", ".oga", ".opus", ".m4a", ".flac", ".aac", ".wma")
     ):
-        return f"[audio: {name}]"
-    if ctype.startswith("video/") or lower.endswith((".mp4", ".webm", ".mov", ".mkv")):
-        return f"[video: {name}]"
-    return f"[file: {name}]"
+        dur = getattr(att, "duration", None)
+        dur_bit = f" {float(dur):.0f}s" if dur else ""
+        return f"[audio:{dur_bit} {name}]{extra}"
+    if ctype.startswith("video/") or lower.endswith(
+        (".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".mpeg", ".mpg", ".3gp")
+    ):
+        dur = getattr(att, "duration", None)
+        dur_bit = f" {float(dur):.0f}s" if dur else ""
+        return f"[video:{dur_bit} {name}]{extra}"
+    return f"[file: {name}]{extra}"
 
 
 def iter_message_snapshots(message: Any) -> list:
@@ -326,10 +434,156 @@ def message_has_visible_payload(message: Any) -> bool:
         return True
     if message_reference_is_forward(message):
         return True
+    if message_is_discord_system_event(message):
+        return True
+    if getattr(message, "activity", None) is not None:
+        return True
+    if getattr(message, "call", None) is not None:
+        return True
+    if getattr(message, "role_subscription", None) is not None:
+        return True
+    if getattr(message, "purchase_notification", None) is not None:
+        return True
     for snap in iter_message_snapshots(message):
         if message_has_visible_payload(snap):
             return True
     return False
+
+
+def _system_event_annotation(message: Any) -> str | None:
+    """Discord-rendered system/welcome/boost/stage/incident line, or None."""
+    mtype = getattr(message, "type", None)
+    name = _message_type_name(mtype)
+    if not name or name in _ORDINARY_MESSAGE_TYPE_NAMES:
+        return None
+    sys_text = ""
+    with contextlib.suppress(Exception):
+        sys_text = str(getattr(message, "system_content", "") or "").strip()
+    content = str(getattr(message, "content", "") or "").strip()
+    if sys_text and sys_text != content:
+        return f"[system: {sys_text}]"
+    key = f"MessageType.{name}"
+    label = (
+        SYSTEM_MESSAGE_LABELS.get(key)
+        or SYSTEM_MESSAGE_LABELS.get(str(mtype))
+        or name.replace("_", " ")
+    )
+    author = getattr(message, "author", None)
+    aname = getattr(author, "display_name", None) if author is not None else None
+    return f"[system: {label}" + (f" — {aname}" if aname else "") + "]"
+
+
+def _thread_annotation(message: Any) -> str | None:
+    channel = getattr(message, "channel", None)
+    if channel is None:
+        return None
+    parent = getattr(channel, "parent", None)
+    if parent is None:
+        return None
+    tname = str(getattr(channel, "name", "") or "").strip()
+    if not tname:
+        return None
+    pname = str(getattr(parent, "name", "") or "").strip()
+    if pname:
+        return f"[thread: {tname} in #{pname}]"
+    return f"[thread: {tname}]"
+
+
+def _call_annotation(message: Any) -> str | None:
+    call = getattr(message, "call", None)
+    if call is None:
+        return None
+    bits = ["call"]
+    if getattr(call, "ended_timestamp", None):
+        bits.append("ended")
+    names = []
+    for user in list(getattr(call, "participants", None) or [])[:8]:
+        nm = str(
+            getattr(user, "display_name", None) or getattr(user, "name", "") or ""
+        ).strip()
+        if nm:
+            names.append(nm)
+    if names:
+        bits.append("participants: " + ", ".join(names))
+    return "[" + " | ".join(bits) + "]"
+
+
+def _message_invite_activity_annotation(message: Any) -> str | None:
+    """Join / spectate / listen-along invite attached to the message."""
+    activity = getattr(message, "activity", None)
+    if activity is None:
+        return None
+    if isinstance(activity, dict):
+        atype = activity.get("type")
+        party = activity.get("party_id") or ""
+    else:
+        atype = getattr(activity, "type", None)
+        party = getattr(activity, "party_id", "") or ""
+    type_map = {1: "join", 2: "spectate", 3: "listen", 5: "join request"}
+    try:
+        label = type_map.get(int(atype), str(atype or "activity"))
+    except (TypeError, ValueError):
+        label = str(atype or "activity")
+    bit = f"[message activity: {label}"
+    if party:
+        bit += f" party {party}"
+    return bit + "]"
+
+
+def _role_subscription_annotation(message: Any) -> str | None:
+    sub = getattr(message, "role_subscription", None)
+    if sub is None:
+        return None
+    bits = ["role subscription"]
+    tier = str(getattr(sub, "tier_name", "") or "").strip()
+    if tier:
+        bits.append(tier)
+    if getattr(sub, "is_renewal", False):
+        bits.append("renewal")
+    months = getattr(sub, "total_months_subscribed", None)
+    if months:
+        bits.append(f"{months} months")
+    return "[" + " — ".join(bits) + "]"
+
+
+def _purchase_annotation(message: Any) -> str | None:
+    note = getattr(message, "purchase_notification", None)
+    if note is None:
+        return None
+    gp = getattr(note, "guild_product_purchase", None)
+    name = (
+        str(getattr(gp, "product_name", "") or "").strip() if gp is not None else ""
+    )
+    if name:
+        return f"[purchase: {name}]"
+    return "[purchase notification]"
+
+
+def _message_flags_annotation(message: Any) -> str | None:
+    flags = getattr(message, "flags", None)
+    if flags is None:
+        return None
+    bits: list[str] = []
+    seen: set[str] = set()
+    for attr, label in (
+        ("voice", "voice message"),
+        ("is_voice_message", "voice message"),
+        ("silent", "silent"),
+        ("suppress_notifications", "silent"),
+        ("urgent", "urgent"),
+        ("crossposted", "crossposted"),
+        ("is_crossposted", "crossposted"),
+        ("ephemeral", "ephemeral"),
+        ("source_message_deleted", "source deleted"),
+        ("suppress_embeds", "embeds suppressed"),
+        ("has_thread", "has thread"),
+    ):
+        if bool(getattr(flags, attr, False)) and label not in seen:
+            seen.add(label)
+            bits.append(label)
+    if not bits:
+        return None
+    return "[flags: " + ", ".join(bits) + "]"
 
 
 def _render_message_annotations(message: Any, raw_content: str = "") -> str:
@@ -357,8 +611,12 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
         for st in stickers[:3]:
             try:
                 nm = str(getattr(st, "name", "") or "").strip()
-                if nm:
-                    names.append(nm)
+                if not nm:
+                    continue
+                fmt = str(
+                    getattr(getattr(st, "format", None), "name", "") or ""
+                ).strip()
+                names.append(f"{nm} ({fmt})" if fmt else nm)
             except Exception as e:
                 logger.debug("Sticker name unreadable: %s", e)
         if names:
@@ -387,27 +645,17 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
         except Exception as e:
             logger.debug("Interaction annotation failed: %s", e)
 
-    mtype = getattr(message, "type", None)
-    if mtype is not None:
-        key = str(mtype)
-        if key == "MessageType.default":
-            pass
-        elif key.startswith("MessageType."):
-            label = SYSTEM_MESSAGE_LABELS.get(key) or key
-            author = getattr(message, "author", None)
-            aname = (
-                getattr(author, "display_name", None) if author is not None else None
-            )
-            parts.append(f"[system: {label}" + (f" — {aname}" if aname else "") + "]")
-        elif hasattr(mtype, "name"):
-            # enum-like objects where str() isn't the qualified name
-            key2 = f"MessageType.{mtype.name}"
-            label = SYSTEM_MESSAGE_LABELS.get(key2) or str(mtype)
-            author = getattr(message, "author", None)
-            aname = (
-                getattr(author, "display_name", None) if author is not None else None
-            )
-            parts.append(f"[system: {label}" + (f" — {aname}" if aname else "") + "]")
+    for extra in (
+        _system_event_annotation(message),
+        _thread_annotation(message),
+        _call_annotation(message),
+        _message_invite_activity_annotation(message),
+        _role_subscription_annotation(message),
+        _purchase_annotation(message),
+        _message_flags_annotation(message),
+    ):
+        if extra:
+            parts.append(extra)
 
     embeds = list(getattr(message, "embeds", []) or [])
     for e in embeds[:3]:
@@ -428,9 +676,13 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
                     continue
             img = getattr(e, "image", None)
             thumb = getattr(e, "thumbnail", None)
+            video = getattr(e, "video", None)
             img_url = str(getattr(img, "url", "") or "") if img is not None else ""
             thumb_url = (
                 str(getattr(thumb, "url", "") or "") if thumb is not None else ""
+            )
+            video_url = (
+                str(getattr(video, "url", "") or "") if video is not None else ""
             )
             footer = getattr(e, "footer", None)
             footer_text = (
@@ -438,11 +690,19 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
                 if footer is not None
                 else ""
             )
+            provider = getattr(e, "provider", None)
+            provider_name = (
+                str(getattr(provider, "name", "") or "").strip()
+                if provider is not None
+                else ""
+            )
             line = "[embed:"
             if title:
                 line += f" {title[:200]}"
             if aname:
                 line += f" (by {aname})"
+            if provider_name:
+                line += f" via {provider_name}"
             if desc:
                 line += f" — {desc[:400]}"
             if url:
@@ -453,6 +713,8 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
                 line += f" | footer: {footer_text[:120]}"
             if img_url or thumb_url:
                 line += f" | image: {img_url or thumb_url}"
+            if video_url:
+                line += f" | video: {video_url}"
             parts.append(line + "]")
         except Exception as e:
             logger.debug("Embed annotation failed: %s", e)
@@ -473,16 +735,31 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
             "jpeg": "image",
             "gif": "image",
             "webp": "image",
+            "bmp": "image",
+            "tif": "image",
+            "tiff": "image",
+            "heic": "image",
+            "heif": "image",
+            "avif": "image",
+            "apng": "image",
             "mp4": "video",
             "webm": "video",
             "mov": "video",
             "mkv": "video",
+            "avi": "video",
+            "m4v": "video",
+            "mpeg": "video",
+            "mpg": "video",
+            "3gp": "video",
             "mp3": "audio",
             "ogg": "audio",
+            "oga": "audio",
+            "opus": "audio",
             "wav": "audio",
             "flac": "audio",
             "m4a": "audio",
             "aac": "audio",
+            "wma": "audio",
         }.get(ext, "file")
         found.append((kind, u))
     for m in GIF_PAGE_URL_RE.finditer(raw_content):

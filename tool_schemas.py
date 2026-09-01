@@ -804,6 +804,7 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "site_server",
         "site_test",
         "list_sites",
+        "guide",
         "web_search",
         "fetch_url",
         "see_image",
@@ -867,14 +868,8 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
     }
 )
 
-# ── the conversational subset ─────────────────────────────────────────────
-# Most turns are chat: "lol", "wdym", "what do you think of X". Shipping ~60
-# tool schemas to answer those costs thousands of tokens per message and gives
-# the model a shelf of moderation and server-admin machinery it has no use for.
-# CHAT_CORE_TOOL_NAMES is what stays on an ordinary turn — talking, reacting,
-# looking things up, seeing what was posted. Anything else arrives the moment
-# the turn asks for it (see MaxwellBot._lean_chat_turn) or the moment the model
-# calls more_tools, which hands back the full catalog and another turn.
+# ── unused leftover (full catalog ships every turn; do not gate on this) ──
+# Kept so older tests and comments that name this set still import cleanly.
 CHAT_CORE_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "send_message",
@@ -889,6 +884,7 @@ CHAT_CORE_TOOL_NAMES: frozenset[str] = frozenset(
         "send_media",
         "send_meme",
         "image_generator",
+        "hd_image",
         "more_tools",
         "chess_start",
         "chess_move",
@@ -929,17 +925,9 @@ def returns_result(name: str) -> bool:
 # One line per contract class, appended to the tool's description so the model
 # reads it in the same place it reads the parameters. Kept short on purpose —
 # this text is paid for on every single request, for every single tool.
-_CONTRACT_RESULT = (
-    " [returns output: you get another turn with the result — "
-    "do not describe or invent the result before you see it]"
-)
-_CONTRACT_ENDING = (
-    " [ends the turn: nothing after it runs and you are not called again]"
-)
-_CONTRACT_SILENT = (
-    " [returns nothing: no result, no extra turn — pair it with send_message "
-    "in the SAME batch if the user should see a reply]"
-)
+_CONTRACT_RESULT = " [returns output]"
+_CONTRACT_ENDING = " [ends the turn]"
+_CONTRACT_SILENT = " [returns nothing]"
 
 
 def result_contract(name: str) -> str:
@@ -970,9 +958,7 @@ def contract_groups(names: list[str]) -> dict[str, list[str]]:
 REASONING_PARAM: dict[str, Any] = {
     "type": "string",
     "description": (
-        "One plain-English sentence (max ~280 chars) of WHY you are calling "
-        "this tool — not the artifact, body, or output. Plain text only; no "
-        "XML, JSON, or tags. First argument on every call, including send_message."
+        "Why this call, one sentence, first argument. Plain text only."
     ),
 }
 
@@ -1790,7 +1776,7 @@ def recover_text_tool_calls(
 # is not enough on its own: 24 rounds of a 32k-capped result is still ~768k
 # chars riding on top of an already-full prompt.
 TOOL_TAIL_MAX_MESSAGES = 12
-TOOL_TAIL_MAX_CHARS = 48_000
+TOOL_TAIL_MAX_CHARS = 24_000
 
 
 def message_chars(message: dict) -> int:

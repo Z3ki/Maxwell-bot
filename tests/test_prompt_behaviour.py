@@ -75,6 +75,17 @@ def test_full_protocol_forbids_claiming_unverified_work():
 def test_full_protocol_still_rejects_ack_only_turns():
     text = TOOL_PROTOCOL.lower()
     assert "announcing an action is not performing it" in text
+    assert "on it" in text
+    assert "do not pair send_message" in text
+    assert "acknowledgement" not in text
+    assert "put the helper tool" not in text
+
+
+def test_protocols_do_not_ask_for_a_placeholder_send():
+    for text in (TOOL_PROTOCOL.lower(), LEAN_TOOL_PROTOCOL.lower()):
+        assert "same batch as the acknowledgement" not in text
+        assert "content='on it" not in text
+        assert "more_tools" not in text
 
 
 def test_lean_protocol_forbids_claiming_unverified_work():

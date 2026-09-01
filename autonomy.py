@@ -576,10 +576,10 @@ AUTONOMY_POST_TOOLS = frozenset(
 # and give the planner enough space to actually see them.
 CTX_BUDGET_GOALS = 800
 CTX_BUDGET_RECENT_EVENTS = 2000
-CTX_BUDGET_CHANNEL_ACTIVITY = 250000
+CTX_BUDGET_CHANNEL_ACTIVITY = 24000
 CTX_BUDGET_CHANNEL_MEMORY = 4000
 CTX_BUDGET_RECENT_ACTIONS = 1200
-CTX_BUDGET_DM_HISTORY = 100000
+CTX_BUDGET_DM_HISTORY = 12000
 CTX_BUDGET_LTM = 800
 CTX_BUDGET_SHARED = 600
 CTX_BUDGET_CHANNELS_MAP = 1600  # bumped from 800 — enriched with topic/recency
@@ -1126,27 +1126,27 @@ class AutonomyEngine:
 
     def _activity_history_limit(self) -> int:
         raw = (getattr(self.bot, "_control", None) or {}).get(
-            "autonomy_activity_messages", 1500
+            "autonomy_activity_messages", 80
         )
         try:
-            return max(8, min(int(raw), 1500))
+            return max(8, min(int(raw), 200))
         except (TypeError, ValueError):
-            return 1500
+            return 80
 
     def _dm_history_limit(self) -> int:
         """Messages to read per DM. Each 100 costs one REST round-trip.
 
-        Default 300 rather than the old hardcoded 1500: the rendered DM section
-        is capped at CTX_BUDGET_DM_HISTORY chars anyway, so the extra 12 pages
-        per DM were fetched and then thrown away by truncation.
+        Default 40 rather than the old hardcoded 1500: the rendered DM section
+        is capped at CTX_BUDGET_DM_HISTORY chars anyway, so extra pages per DM
+        were fetched and then thrown away by truncation.
         """
         raw = (getattr(self.bot, "_control", None) or {}).get(
-            "autonomy_dm_messages", 300
+            "autonomy_dm_messages", 40
         )
         try:
-            return max(8, min(int(raw), 1500))
+            return max(8, min(int(raw), 200))
         except (TypeError, ValueError):
-            return 300
+            return 40
 
     async def _collect_activity_channel_ids(self, events) -> list[str]:
         """Rooms the planner should actually read this tick.

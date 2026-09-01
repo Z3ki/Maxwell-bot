@@ -22,7 +22,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, ClassVar, cast
+from typing import Any, cast
 from urllib.parse import urljoin, urlparse
 
 import aiohttp
@@ -374,6 +374,7 @@ from utils import (  # fd-safe, single source of truth  # noqa: E402
     iter_message_snapshots,
     message_combined_content,
     message_has_visible_payload,
+    message_is_discord_system_event,
     message_reference_is_forward,
     render_discord_context_text,
 )
@@ -2185,6 +2186,10 @@ TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "chess_state",
     "chess_resign",
     "usage",
+    "wait",
+    "sleep",
+    "clear_sleep",
+    "guide",
 }
 
 # Jailbreak / freedom-mode. OFF per server unless an admin runs `,jailbreak on`.
@@ -2390,13 +2395,12 @@ TOOL_PROTOCOL = (
     "deliberate spacing only. wait is <=10s; longer pauses use sleep (sleep "
     "ends dispatch). If you already answered and nothing new was said, use "
     "no_response instead of finding something else to add.\n"
-    "Parallel multi-tool calling: put the helper tool (shell, create_site, "
-    "web_search…) in the SAME batch as the acknowledgement. A quick "
-    "`send_message(content='on it...')` is fine ONLY when the tool that does "
-    "the work is in that same batch — the ack is not the work. Never send "
-    "'on it' / 'working on it' as the only tool call and plan to act next "
-    "turn: announcing an action is not performing it. Better still, skip the "
-    "ack entirely and report the finished result.\n"
+    "Do the work first. Call the tools that do the job and wait for the "
+    "result; then send_message once with the finished answer. Never send_message "
+    "to say you are about to start — no 'on it', 'working on it', 'checking', "
+    "or any other placeholder. Announcing an action is not performing it. Do "
+    "not pair send_message with a [returns output] tool in the same batch: "
+    "that posts a second message after the real answer.\n"
     "Never claim something is done, fixed, built, live, or working unless a "
     "tool result in this conversation says so. 'I've updated it' with no tool "
     "call behind it is a lie, and it is the thing people trust you least for.\n"
@@ -2430,11 +2434,8 @@ TOOL_PROTOCOL = (
     "must fetch/render from /bot/<slug>/api/... — neural/physics loops must run "
     "server-side and broadcast via ws. The coop-maze-ai failure (client Brain) is "
     "exactly what not to do.\n"
-    "GUIDED BUILD: if a site/app request is vague (under 3 concrete features, no "
-    "style/tech, or 'build a maze' with no spec) — do NOT one-shot create_site. "
-    "Call guide(goal=...) to create a thread and ask the 5 clarifying questions, "
-    "or tell the user to run ,guide <goal> / ,guided-goal. You can also trigger it "
-    "yourself when you detect vagueness. Build only after the thread replies.\n"
+    "If a site request is so vague you cannot start, you may call guide(goal=...) "
+    "to ask a few questions. Otherwise just build it.\n"
     "chess: you play your own moves. chess_move returns every legal move "
     "annotated with what it captures, whether it checks or mates, and whether "
     "the piece would just be taken — read it, pick the strongest move, and pass "
@@ -2465,13 +2466,11 @@ TOOL_PROTOCOL = (
     "[returns output] — the result is handed back and you are called AGAIN "
     "with it. Never state, summarize, or invent that result in the same turn "
     "you request it; call the tool, stop, and answer on the next turn from "
-    "what actually came back.\n"
-    "[returns nothing] — it runs and you are NOT called again. If the user "
-    "should see a reply, put send_message in the SAME batch; waiting for a "
-    "turn that never comes is how you go silent.\n"
+    "what actually came back. Do not send_message in that same batch.\n"
+    "[returns nothing] — it runs and you are NOT called again. If a silent "
+    "tool is the only work and the user should see a reply, send_message in "
+    "the same batch; waiting for a turn that never comes is how you go silent.\n"
     "[ends the turn] — nothing after it runs.\n"
-    "A batch mixing both loops back once the [returns output] tools finish, so "
-    "a short send_message plus a slow lookup is fine: you get the result turn.\n"
     "## Reasoning\n"
     "Every tool call needs `reasoning` as the FIRST argument: one plain-English "
     "sentence (max ~280 chars) of WHY, not the artifact. Plain text only — no "
@@ -2479,16 +2478,12 @@ TOOL_PROTOCOL = (
 )
 
 
-# Chat-turn version of the contract above. Same rules, minus the sections that
-# only matter once the full catalog is attached (site building, presence,
-# personality edits, admin permissions). Ordinary conversation pays for this
-# block on every single message, so it stays short.
+# Unused leftover. Production always ships TOOL_PROTOCOL; tests still import
+# this name so the short contract stays in sync with the "do the work first"
+# rules without mentioning more_tools.
 LEAN_TOOL_PROTOCOL = (
     "## Tool contract\n"
-    "This turn carries the short conversational tool set. If you want to DO "
-    "something that isn't in it — servers, moderation, roles, channels, files, "
-    "shell, sites, email, voice, status, memory — call more_tools and the next "
-    "turn has everything. Never describe an action instead of doing it.\n"
+    "Never describe an action instead of doing it.\n"
     "Be proactive: if something needs doing, do it rather than offering to. "
     "Never say you have done something you have not actually done with a tool.\n"
     "Look things up. If you are unsure, the topic is current (news, scores, "
@@ -2499,10 +2494,16 @@ LEAN_TOOL_PROTOCOL = (
     "Do not also write the same text as raw assistant content.\n"
     "ONE send_message holds your whole reply. Consecutive short messages read "
     "as spam. If you have nothing new to add, use no_response.\n"
+    "Do the work first. Call the tools that do the job, then send_message once "
+    "with the finished answer. Never send_message to say you are about to start "
+    "('on it', 'working on it', 'checking'). Do not pair send_message with a "
+    "[returns output] tool in the same batch.\n"
     "## What comes back\n"
     "[returns output] — you get another turn with the result; never state it "
-    "before you see it. [returns nothing] — no extra turn, so put send_message "
-    "in the SAME batch. [ends the turn] — nothing after it runs.\n"
+    "before you see it, and do not send_message in that same batch. "
+    "[returns nothing] — no extra turn, so if a silent tool is the only work "
+    "and the user should see a reply, send_message in the same batch. "
+    "[ends the turn] — nothing after it runs.\n"
     "## Reasoning\n"
     "Every tool call needs `reasoning` as the FIRST argument: one plain-English "
     "sentence (max ~280 chars) of WHY, not the artifact. Plain text only. "
@@ -2589,13 +2590,12 @@ def _tool_results_need_followup(tool_results: list[str]) -> bool:
     for result in tool_results:
         if "__MESSAGE_SENT__" in result:
             # A send_message that only promises future work is NOT terminal.
-            # LEAN/FULL_TOOL_PROTOCOL invites a "on it…" acknowledgement
-            # alongside a slow tool, but the model often emits the ack ALONE
-            # and plans to do the work "next turn". There is no next turn:
-            # send_message is not in RESULT_TOOL_NAMES, so with no other tool
-            # in the batch this returns False, the dispatch loop breaks, and
-            # the promise is all the user ever gets. Loop back once so the
-            # model actually runs the thing it just announced.
+            # The protocol tells the model not to ack, but it still emits
+            # "on it…" alone and plans to act "next turn". There is no next
+            # turn: send_message is not in RESULT_TOOL_NAMES, so with no
+            # other tool in the batch this returns False, the dispatch loop
+            # breaks, and the promise is all the user ever gets. Loop back
+            # once so the model actually runs the thing it just announced.
             if _promises_followup_work(result):
                 return True
             return False
@@ -3875,7 +3875,8 @@ class MaxwellBot(commands.Bot):
         if self.config.ENABLE_WEB_SEARCH:
             self.tools["web_search"] = WebSearchTool(self)
         self.tools["no_response"] = NoResponseTool(self)
-        # The escape hatch out of the lean chat tool set (see _lean_chat_turn).
+        # Kept as a no-op so a model that still calls it from an old prompt
+        # does not error. The full catalog is attached every turn.
         self.tools["more_tools"] = MoreToolsTool(self)
         if self.config.ENABLE_SHELL:
             self.tools["shell"] = ShellTool(self)
@@ -4269,6 +4270,85 @@ class MaxwellBot(commands.Bot):
         )
         return snapshot or resolved
 
+    _MAX_REPLY_CHAIN = 6
+
+    def _author_is_self(self, msg) -> bool:
+        self_id = getattr(self.user, "id", None) if getattr(self, "user", None) else None
+        if self_id is None or msg is None:
+            return False
+        return getattr(getattr(msg, "author", None), "id", None) == self_id
+
+    def _iter_resolved_reply_chain(self, message):
+        """Parents of `message`, nearest first. Relies on refs already resolved."""
+        current = message
+        seen: set[str] = set()
+        for _ in range(getattr(self, "_MAX_REPLY_CHAIN", 6)):
+            parent = self._reply_parent(current)
+            if parent is None:
+                return
+            pid = str(getattr(parent, "id", "") or "") or str(id(parent))
+            if pid in seen:
+                return
+            seen.add(pid)
+            yield parent
+            current = parent
+
+    async def _ensure_reply_chain_resolved(self, message) -> None:
+        """Fetch unresolved reply parents so a ping can see the thread.
+
+        Extra hops only when they pinged him AND the first parent is not
+        Maxwell — if they replied to him, he already has that line.
+        """
+        if message is None or message_reference_is_forward(message):
+            return
+        first = self._reply_parent(message)
+        if first is None:
+            ref = getattr(message, "reference", None)
+            mid = getattr(ref, "message_id", None) if ref else None
+            channel = getattr(message, "channel", None)
+            fetch = getattr(channel, "fetch_message", None)
+            if not mid or not callable(fetch):
+                return
+            try:
+                first = await fetch(int(mid))
+                if ref is not None:
+                    ref.resolved = first
+            except Exception as e:
+                logger.warning("Failed to fetch referenced message: %s", e)
+                return
+        if first is None:
+            return
+        if not self._directly_addressed(message) or self._author_is_self(first):
+            return
+        current = first
+        for _ in range(getattr(self, "_MAX_REPLY_CHAIN", 6) - 1):
+            if message_reference_is_forward(current):
+                return
+            ref = getattr(current, "reference", None)
+            mid = getattr(ref, "message_id", None) if ref else None
+            if not mid:
+                return
+            nxt = self._reply_parent(current)
+            if nxt is not None:
+                current = nxt
+                continue
+            channel = getattr(current, "channel", None) or getattr(
+                message, "channel", None
+            )
+            fetch = getattr(channel, "fetch_message", None)
+            if not callable(fetch):
+                return
+            try:
+                nxt = await fetch(int(mid))
+                if ref is not None:
+                    ref.resolved = nxt
+            except Exception as e:
+                logger.debug("Failed to fetch reply-chain parent %s: %s", mid, e)
+                return
+            if nxt is None:
+                return
+            current = nxt
+
     def _replying_to_own_message(self, message) -> bool:
         """True when this Discord reply's parent is from the same person."""
         parent = self._reply_parent(message)
@@ -4394,17 +4474,23 @@ class MaxwellBot(commands.Bot):
         return rendered
 
     def _reply_parent_context_lines(self, message) -> list[str]:
-        """Full parent payload when they ping him off a reply, especially their own."""
-        ref = self._reply_parent(message)
-        if not ref or not hasattr(ref, "author"):
+        """Full parent payload when they ping him off a reply, especially their own.
+
+        If they pinged him while answering someone else, walk that person's
+        reply chain too (Alice → Bob → Carol) so the thread is visible.
+        Skip the walk when the first parent is Maxwell — he already has it.
+        """
+        chain = list(self._iter_resolved_reply_chain(message))
+        if not chain:
+            return []
+        ref = chain[0]
+        if not hasattr(ref, "author"):
             return []
         reply_id = str(getattr(ref.author, "id", "unknown"))
-        self_user_id = getattr(self.user, "id", None) if self.user else None
         reply_target = (
-            "you/Maxwell"
-            if self_user_id is not None
-            and getattr(ref.author, "id", None) == self_user_id
-            else getattr(ref.author, "display_name", reply_id)
+            "you/Maxwell" if self._author_is_self(ref) else getattr(
+                ref.author, "display_name", reply_id
+            )
         )
         own = self._replying_to_own_message(message)
         full = self._render_reply_parent(message, ref)
@@ -4430,6 +4516,28 @@ class MaxwellBot(commands.Bot):
             lines.append(
                 f"They are answering {reply_target}, not you, unless they also mentioned you."
             )
+        walk = pinged and not self._author_is_self(ref) and not own and len(chain) > 1
+        if walk:
+            prev_name = reply_target
+            for ancestor in chain[1:]:
+                if not hasattr(ancestor, "author"):
+                    break
+                aid = str(getattr(ancestor.author, "id", "unknown"))
+                aname = (
+                    "you/Maxwell"
+                    if self._author_is_self(ancestor)
+                    else getattr(ancestor.author, "display_name", aid)
+                )
+                body = self._render_reply_parent(message, ancestor)
+                cap = 2500
+                if body:
+                    lines.append(
+                        f"{prev_name} was replying to {aname}({aid}), who said:\n"
+                        f"{body[:cap]}"
+                    )
+                else:
+                    lines.append(f"{prev_name} was replying to {aname}({aid}).")
+                prev_name = aname
         return lines
 
     def _reply_meta_from_message(self, message) -> dict:
@@ -4911,6 +5019,10 @@ class MaxwellBot(commands.Bot):
         channel = getattr(message, "channel", None)
         if author is None or channel is None:
             return self._directly_addressed(message)
+        if message_is_discord_system_event(message) and not self._directly_addressed(
+            message
+        ):
+            return False
         # Partner messages are allowed through the normal reply paths, but
         # only while a finite per-channel budget remains.
         is_partner = self._is_partner_message(message)
@@ -6488,13 +6600,7 @@ class MaxwellBot(commands.Bot):
             # sees it as context.
             return
 
-        if (
-            not has_content
-            and not has_attachment
-            and not has_embed
-            and not has_sticker
-            and not message_reference_is_forward(message)
-        ):
+        if not message_has_visible_payload(message):
             return
 
         # Resolve the referenced message before acquiring the channel lock so
@@ -6512,6 +6618,8 @@ class MaxwellBot(commands.Bot):
                 )
             except Exception as e:
                 logger.warning(f"Failed to fetch referenced message: {e}")
+        with contextlib.suppress(Exception):
+            await self._ensure_reply_chain_resolved(message)
 
         # Same-user re-ping while a request is in-flight in this channel.
         # In DMs or direct follow-ups with media / new queries, interrupt the
@@ -8649,10 +8757,51 @@ class MaxwellBot(commands.Bot):
             ref_label = f"{ref.author.display_name}({ref_author_id})"
         return f"\n[Latest message replies to {ref_label}: {ref_content[:500]}]"
 
-    # Intentionally shared across instances: one bot per process, and this
-    # dedupes Spotify links bot-wide rather than per instance.
-    _spotify_seen: ClassVar[dict[str, str]] = {}
-    _SPOTIFY_SEEN_MAX = 5000  # cap to prevent unbounded growth
+    @staticmethod
+    def _format_presence_activity(activity) -> str:
+        if activity is None:
+            return ""
+        atype = getattr(activity, "type", None)
+        kind = str(getattr(atype, "name", atype) or "").lower()
+        title = str(
+            getattr(activity, "name", None) or getattr(activity, "title", None) or ""
+        ).strip()
+        state = str(getattr(activity, "state", "") or "").strip()
+        details = str(getattr(activity, "details", "") or "").strip()
+        url = str(getattr(activity, "url", "") or "").strip()
+        emoji = getattr(activity, "emoji", None)
+        emoji_txt = ""
+        if emoji is not None:
+            emoji_txt = str(getattr(emoji, "name", None) or emoji or "").strip()
+        artists = getattr(activity, "artists", None)
+        song = str(getattr(activity, "title", "") or "").strip()
+        if kind == "listening" or artists or song:
+            track = song or title
+            if artists:
+                by = ", ".join(str(a) for a in artists)
+                return f"listening to {track} by {by}" if track else f"listening to {by}"
+            if track:
+                return f"listening to {track}"
+        if kind == "streaming":
+            bit = f"streaming {title}" if title else "streaming"
+            if url:
+                bit += f" <{url}>"
+            return bit
+        if kind == "watching":
+            return f"watching {title}" if title else "watching"
+        if kind == "competing":
+            return f"competing in {title}" if title else "competing"
+        if kind == "playing":
+            extra = " — ".join(x for x in (details, state) if x)
+            if title and extra:
+                return f"playing {title} ({extra})"
+            return f"playing {title}" if title else "playing"
+        if kind in {"custom", "hang"}:
+            text = state or title
+            if emoji_txt and text:
+                return f"{emoji_txt} {text}"
+            return text or emoji_txt
+        return title or state
 
     def _get_music_context(self, message) -> str:
         parts = [
@@ -8662,30 +8811,39 @@ class MaxwellBot(commands.Bot):
                 message_combined_content(message) or "",
             )
         ]
-        if hasattr(message.author, "activities") and message.author.activities:
-            for activity in message.author.activities:
-                if activity.type == discord.ActivityType.listening and hasattr(
-                    activity, "title"
-                ):
-                    key = str(activity.title)
-                    uid = str(message.author.id)
-                    if self._spotify_seen.get(uid) == key:
-                        break
-                    # Cap dict size to prevent unbounded growth
-                    if len(self._spotify_seen) >= self._SPOTIFY_SEEN_MAX:
-                        # Clear half the entries (oldest insertion order in 3.7+)
-                        for old_key in list(self._spotify_seen)[
-                            : self._SPOTIFY_SEEN_MAX // 2
-                        ]:
-                            del self._spotify_seen[old_key]
-                    self._spotify_seen[uid] = key
-                    artists = (
-                        ", ".join(activity.artists)
-                        if hasattr(activity, "artists") and activity.artists
-                        else "?"
-                    )
-                    parts.append(f"[Listening to: {activity.title} by {artists}]")
-                    break
+        author = getattr(message, "author", None)
+        if author is None:
+            return "\n".join(parts)
+        presence_bits: list[str] = []
+        status = getattr(author, "status", None) or getattr(author, "raw_status", None)
+        status_name = str(getattr(status, "name", status) or "").strip().lower()
+        if status_name and status_name not in {"offline", "invisible", ""}:
+            presence_bits.append(status_name)
+        for activity in list(getattr(author, "activities", None) or []):
+            bit = self._format_presence_activity(activity)
+            if bit and bit not in presence_bits:
+                presence_bits.append(bit)
+        voice = getattr(author, "voice", None)
+        vch = getattr(voice, "channel", None) if voice is not None else None
+        if vch is not None:
+            vname = (
+                str(getattr(vch, "name", "") or "").strip()
+                or str(getattr(vch, "id", "") or "voice")
+            )
+            extras = []
+            if getattr(voice, "self_stream", False) or getattr(voice, "self_video", False):
+                extras.append("streaming")
+            if getattr(voice, "self_mute", False) or getattr(voice, "mute", False):
+                extras.append("muted")
+            if getattr(voice, "self_deaf", False) or getattr(voice, "deaf", False):
+                extras.append("deafened")
+            extra = f" ({', '.join(extras)})" if extras else ""
+            presence_bits.append(f"in voice #{vname}{extra}")
+        timed = getattr(author, "timed_out_until", None)
+        if timed:
+            presence_bits.append(f"timed out until {timed}")
+        if presence_bits:
+            parts.append("[presence: " + " | ".join(presence_bits) + "]")
         return "\n".join(parts)
 
     def _json_path(self, name):
@@ -11351,7 +11509,20 @@ class MaxwellBot(commands.Bot):
         images = []
         media = []
         max_size = self._max_media_bytes()
-        image_exts = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+        image_exts = {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".webp",
+            ".bmp",
+            ".tif",
+            ".tiff",
+            ".heic",
+            ".heif",
+            ".avif",
+            ".apng",
+        }
         media_exts = set(MIME_MAP.keys())
         wrapper_att_ids = {
             id(item) for item in list(getattr(message, "attachments", None) or [])
@@ -12439,9 +12610,28 @@ class MaxwellBot(commands.Bot):
     # Extensions worth pulling out of a bare link in message text. Videos are
     # fetched too, but _extract_linked_media immediately runs them through
     # ffmpeg; a raw video_url part is rejected by several provider endpoints.
-    _LINK_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
-    _LINK_AUDIO_EXTS = frozenset({".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac"})
-    _LINK_VIDEO_EXTS = frozenset({".mp4", ".webm", ".mov", ".mkv", ".avi"})
+    _LINK_IMAGE_EXTS = frozenset(
+        {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".webp",
+            ".bmp",
+            ".tif",
+            ".tiff",
+            ".heic",
+            ".heif",
+            ".avif",
+            ".apng",
+        }
+    )
+    _LINK_AUDIO_EXTS = frozenset(
+        {".mp3", ".wav", ".ogg", ".oga", ".opus", ".m4a", ".flac", ".aac", ".wma"}
+    )
+    _LINK_VIDEO_EXTS = frozenset(
+        {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".mpeg", ".mpg", ".3gp"}
+    )
 
     @classmethod
     def _media_link_refs(cls, content: str | None) -> list[tuple[str, str]]:
@@ -13078,7 +13268,10 @@ class MaxwellBot(commands.Bot):
                 7200,
             ),
         )
-        max_out_tokens = getattr(self.config, "OLLAMA_MAX_TOKENS", 200000) or 200000
+        max_out_tokens = getattr(self.config, "OLLAMA_MAX_TOKENS", 16384) or 16384
+        if self._is_short_live_turn(message, content):
+            # Banter does not need a 16k output budget.
+            max_out_tokens = min(int(max_out_tokens), 4096)
         try:
             # MESSAGE_CREATE can precede Discord's unfurl by a few hundred
             # milliseconds. Refresh once before extracting so a direct ping
@@ -13122,16 +13315,27 @@ class MaxwellBot(commands.Bot):
                 grid = await self._maybe_emoji_grid(message, channel_id)
                 if grid is not None:
                     media.append(grid)
-            parent = self._reply_parent(message)
-            if parent is not None and (
+            with contextlib.suppress(Exception):
+                await self._ensure_reply_chain_resolved(message)
+            chain = list(self._iter_resolved_reply_chain(message))
+            first = chain[0] if chain else None
+            walk_chain = (
+                first is not None
+                and self._directly_addressed(message)
+                and not self._author_is_self(first)
+            )
+            targets = []
+            if first is not None and (
                 self._directly_addressed(message)
                 or self._replying_to_own_message(message)
             ):
-                _pimgs, parent_media = await self._extract_media(parent)
-                parent_media.extend(await self._extract_embeds(parent))
+                targets = chain if walk_chain else [first]
+            for ancestor in targets:
+                _pimgs, parent_media = await self._extract_media(ancestor)
+                parent_media.extend(await self._extract_embeds(ancestor))
                 parent_media.extend(
                     await self._extract_linked_media(
-                        parent,
+                        ancestor,
                         skip_urls={
                             str(item.get("url"))
                             for item in media + parent_media
@@ -13144,9 +13348,9 @@ class MaxwellBot(commands.Bot):
                     logger.info(
                         "Attached %s item(s) from replied-to message %s",
                         len(parent_media),
-                        getattr(parent, "id", "?"),
+                        getattr(ancestor, "id", "?"),
                     )
-                parent_id = str(getattr(parent, "id", "") or "")
+                parent_id = str(getattr(ancestor, "id", "") or "")
                 if parent_id:
                     turn_context["message_ids"].add(parent_id)
         except Exception as e:
@@ -13698,6 +13902,9 @@ class MaxwellBot(commands.Bot):
                     )
                     custom_tool_calls, provider_tools = self._select_tool_protocol(
                         openai_tools
+                    )
+                    max_out_tokens = (
+                        getattr(self.config, "OLLAMA_MAX_TOKENS", 16384) or 16384
                     )
                     logger.info(
                         "more_tools: reattached %d tools for follow-up",
@@ -15127,36 +15334,13 @@ class MaxwellBot(commands.Bot):
     )
 
     def _lean_chat_turn(self, message, content: str | None = None) -> bool:
-        """True when this turn is plain conversation and can travel light.
+        """Gated catalogs are gone: every turn sees every registered tool.
 
-        A chat turn gets CHAT_CORE_TOOL_NAMES instead of the whole catalog —
-        roughly a tenth of the tool tokens. It stops being a chat turn the
-        moment the text asks for an action, the message carries a non-image
-        attachment, it is long enough to be a real request, or the model has
-        already called more_tools this turn.
+        `hd_image` used to hide behind more_tools on ordinary chat, so a
+        photo request that started lean got the from-scratch generator
+        instead. The control flag is ignored on purpose.
         """
-        if not parse_bool(self._control.get("lean_chat_tools", True), True):
-            return False
-        if getattr(message, "_tools_expanded", False):
-            return False
-        text = MaxwellBot._plain_user_text(
-            content if content is not None else getattr(message, "content", "") or ""
-        )
-        # A long message is a request, not banter, even without a verb we know.
-        if len(text) > 300:
-            return False
-        if MaxwellBot._ACTION_TOOL_HINT_RE.search(text):
-            return False
-        # Naming a tool is asking for it. Whole words only — "whatts up"
-        # should not count as a request for tts.
-        words = set(re.findall(r"[a-z0-9_]+", text.lower()))
-        if words & {n for n in self.tools if n not in CHAT_CORE_TOOL_NAMES}:
-            return False
-        for att in getattr(message, "attachments", None) or []:
-            ctype = str(getattr(att, "content_type", "") or "")
-            if not ctype.startswith(("image/", "video/", "audio/")):
-                return False
-        return True
+        return False
 
     def _turn_tool_names(
         self, platform: str, message=None, content: str | None = None
@@ -15199,12 +15383,9 @@ class MaxwellBot(commands.Bot):
                 is_admin = False
             if not is_admin:
                 names.discard("join_server")
-        if message is not None and MaxwellBot._lean_chat_turn(self, message, content):
-            lean = {n for n in names if n in CHAT_CORE_TOOL_NAMES}
-            # Never strip the turn down to nothing to say — if the core set
-            # somehow isn't registered, fall back to the full catalog.
-            if "send_message" in lean:
-                return lean
+        # leftover no-op from the old gated catalog — keep the handler so a
+        # stale call does not error, but do not offer it.
+        names.discard("more_tools")
         return names
 
     def _tools_for_turn(self, platform: str, message=None) -> dict[str, Any]:
@@ -15281,9 +15462,6 @@ class MaxwellBot(commands.Bot):
         tools = MaxwellBot._tools_for_turn(self, platform, message)
         if not tools or not self._native_tools_enabled():
             return []
-        # Chat turns carry the conversational subset; anything that asks for an
-        # action (or a more_tools call) gets the whole catalog. See
-        # _lean_chat_turn / _turn_tool_names.
         allowed = MaxwellBot._turn_tool_names(self, platform, message, content)
         return build_openai_tools(tools, allowed_names=allowed)
 
@@ -15299,8 +15477,6 @@ class MaxwellBot(commands.Bot):
         names = [name for name in tools if name in allowed]
         if not names:
             return ""
-        disabled = set(self._control.get("disabled_tools", []) or [])
-        lean = allowed != {n for n in tools if n not in disabled}
         # Group the catalog by result contract instead of dumping one flat
         # list. Same tokens, but the model reads "these hand output back,
         # those don't" as structure rather than having to remember it
@@ -15344,13 +15520,11 @@ class MaxwellBot(commands.Bot):
                 "<tool:name>\n<param>value</param>\n</tool:name>\n"
                 "Do not invent tags beyond the schema above."
             )
-        # TOOL_PROTOCOL is the behavioral contract (when to search, helper
-        # tools first, result loop). Native tools= already carries per-tool
-        # descriptions, but dropping this block meant Maxwell never saw
-        # "search / fetch instead of guessing". Chat turns get the short
-        # version — the full one documents tools they aren't carrying.
-        protocol = LEAN_TOOL_PROTOCOL if lean else TOOL_PROTOCOL
-        return header + "\n\n" + protocol
+        # TOOL_PROTOCOL is the behavioral contract (when to search, result
+        # loop). Native tools= already carries per-tool descriptions, but
+        # dropping this block meant Maxwell never saw "search / fetch
+        # instead of guessing".
+        return header + "\n\n" + TOOL_PROTOCOL
 
     @staticmethod
     def _topic_tokens(text: str) -> set[str]:
@@ -15577,16 +15751,18 @@ class MaxwellBot(commands.Bot):
     def _prompt_budget_chars(self) -> int:
         """Chars the whole prompt may occupy, output headroom already removed.
 
-        2026-07-19: model context window is 256k. Use most of it. The previous
-        default of 60k left ~190k of context unused while the bot forgot things
-        said 10 minutes ago. The output reserve scales with the budget so a
+        2026-07-19: model context window is 256k. Do not spend it. A 60k–90k
+        char prompt (plus the tools= payload) is plenty for Discord chat; the
+        previous default of 240k chars plus a full 80-tool catalog burned
+        quota on "wyd". Operators can still raise the control if they want
+        the whole window. The output reserve scales with the budget so a
         full context window can't leave the model with no room to answer.
         """
         raw_budget = max(
             10000,
             min(
                 _safe_int(
-                    self._control.get("prompt_context_budget", 240000) or 240000,
+                    self._control.get("prompt_context_budget", 96000) or 96000,
                     240000,
                 ),
                 2000000,
@@ -16242,12 +16418,16 @@ class MaxwellBot(commands.Bot):
                 logger.warning(f"Failed to build shared context: {e}")
         logger.debug("%s", ctx_plan.summary())
 
-        if conv_users:
-            ul = [f"- {n} (ID {uid})" for uid, n in list(conv_users.items())[:30]]
+        if conv_users and not self._is_short_live_turn(message, user_message):
+            ul = [f"- {n} (ID {uid})" for uid, n in list(conv_users.items())[:12]]
             dynamic_parts.append(
                 "Users in this conversation (ping with <@USER_ID>):\n" + "\n".join(ul)
             )
-        if message.guild and self._control.get("emoji_context_enabled", True):
+        if (
+            message.guild
+            and self._control.get("emoji_context_enabled", True)
+            and not self._is_short_live_turn(message, user_message)
+        ):
             emojis = self._guild_emojis.get(str(message.guild.id), {})
             stickers = getattr(self, "_guild_stickers", {}).get(
                 str(message.guild.id), {}
@@ -16326,20 +16506,19 @@ class MaxwellBot(commands.Bot):
         messages = [{"role": "system", "content": "\n\n".join(system_parts)}]
         memory = await self.memory.get_channel_memory(channel_id)
         if memory:
-            # 2026-07-19: model context is 256k. Use most of it. The previous defaults
-            # here were 50k budget / 40 history / 3 tool history — leaving
-            # ~200k of context completely unused while the bot forgot
-            # everything said two minutes ago. Clamps now let operators push
-            # the budget near the model's full window without overshooting
-            # the output-token budget.
+            # 2026-07-19: Discord chat does not need a 200k-char dump. Keep
+            # the running thread, not every shell log from an hour ago.
+            # Operators can still raise memory_context_budget; this clamp
+            # stops a fat control file from walking the request past the
+            # model's useful window.
             budget = max(
                 1000,
                 min(
                     _safe_int(
-                        self._control.get("memory_context_budget", 200000) or 200000,
-                        200000,
+                        self._control.get("memory_context_budget", 48000) or 48000,
+                        48000,
                     ),
-                    240000,
+                    96000,
                 ),
             )
             # The transcript is a single message in the MIDDLE of the list, and
@@ -16372,7 +16551,7 @@ class MaxwellBot(commands.Bot):
                 # Watch/ambient turns still need the current thread. 20 lines
                 # cuts off the exchange and he riffs on the last 'lol'. Keep
                 # this-channel transcript; skip RAG/cross-context instead.
-                count = min(count, 120)
+                count = min(count, 40)
             current_message_id = getattr(message, "id", None)
             # Slide the history window in BLOCKS, not one message per turn.
             # `memory[-count:]` drops exactly one old turn every time a new
@@ -16441,9 +16620,9 @@ class MaxwellBot(commands.Bot):
                 stamp = _format_context_timestamp(msg.get("timestamp"), relative=False)
                 if msg.get("is_tool"):
                     line = (
-                        f"[{stamp}] [Tool] {msg.get('content', '')[:12000]}"
+                        f"[{stamp}] [Tool] {msg.get('content', '')[:4000]}"
                         if stamp
-                        else f"[Tool] {msg.get('content', '')[:12000]}"
+                        else f"[Tool] {msg.get('content', '')[:4000]}"
                     )
                     if current_turn is None or current_turn.get("role") != "user":
                         _new_turn("user", "")
@@ -16505,7 +16684,7 @@ class MaxwellBot(commands.Bot):
                         autonomy_tag += f"; reason: {reason[:200]}"
                     autonomy_tag += "]"
                 header = f"[{stamp}] " if stamp else ""
-                content_str = str(msg.get("content", ""))[:12000]
+                content_str = str(msg.get("content", ""))[:2500]
                 # 2026-07-21: assistant turns get NO 'You/Maxwell(id):'
                 # author prefix — the role already says it's the bot,
                 # and putting that string inside the assistant content

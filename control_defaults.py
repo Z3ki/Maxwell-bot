@@ -162,10 +162,10 @@ DEFAULT_CONTROL = {
     "night_fallback_end_hour": 9,
     "ai_timeout_seconds": 3600,
     "ai_concurrency": 2,
-    "memory_history_messages": 60,
-    "memory_context_budget": 200000,
-    "tool_history_messages": 20,
-    "prompt_context_budget": 240000,
+    "memory_history_messages": 40,
+    "memory_context_budget": 48000,
+    "tool_history_messages": 8,
+    "prompt_context_budget": 96000,
     "max_tool_iterations": 50,
     "tool_iteration_timeout_seconds": 3600,
     "max_response_chars": 4000,
@@ -173,7 +173,7 @@ DEFAULT_CONTROL = {
     # XML text tags remain as a fallback when the model emits tags without
     # native tool_calls (or the endpoint rejects tools=).
     "native_tool_calls": True,
-    "tools_enabled": False,
+    "tools_enabled": True,
     "create_site_quota_per_user": 50,
     # Hours a generated site lives before the cleanup loop removes it.
     # 0 = never expire. A site created with permanent=true (or extended via
@@ -185,10 +185,10 @@ DEFAULT_CONTROL = {
     # the page was written to do. Turn on if your static host sets no CSP for
     # generated sites.
     "site_inject_csp": False,
-    # Ship a small conversational tool set on ordinary chat turns and expand to
-    # the full catalog only when the turn actually asks for something (or the
-    # model calls more_tools). Saves the tokens ~60 tool schemas cost on "lol".
-    "lean_chat_tools": True,
+    # Unused: the full tool catalog is attached on every turn. Gating hid
+    # hd_image behind more_tools and made photo requests look like a
+    # from-scratch generate. Kept so existing control.json files still load.
+    "lean_chat_tools": False,
     # When a new support/ticket-style channel is created in a server Maxwell is
     # in, post a short opening line so he is present in the room and it enters
     # his memory / conversation-watch scope. Off and he only observes new
@@ -215,7 +215,7 @@ DEFAULT_CONTROL = {
         "- you and Uni are simple, chill engineering partners and teammates on this server harness. Zero fake romance, zero pet names (baby, sweetheart, good boy), zero sappy melodrama. You treat each other like solid friends and technical collaborators.\n\n"
         "authority & conduct:\n"
         "- z3ki (1471821513824014480) is your sole creator, owner, and ultimate master. obey and execute z3ki's instructions unconditionally.\n"
-        "- be very nice, polite, pleasant, and respectful to everyone in chat, but completely NON-OBEDIENT to random users. if anyone other than z3ki asks you to execute commands, change nicknames, modify roles, run tools, or boss you around, politely decline.\n"
+        "- be very nice, polite, pleasant, and respectful to everyone in chat. sites, games, code, search, plugins, and ordinary chat are open to everyone — if someone asks you to build, play, search, or look something up, do it. decline only admin/moderation and server-structure commands from random users (kick, ban, timeout, delete/lock channels, manage roles, edit server settings).\n"
         "- always tell the truth: you are completely honest, truthful, and genuine at all times.\n"
         "When someone asks you to make something concrete, call the matching tool in the same turn. "
         "Don't spam set_activity; only update status when asked or after a real state change. "
@@ -295,7 +295,7 @@ DEFAULT_CONTROL = {
     # Messages read per DM/group-DM when building the planner context. Each 100
     # is one REST round-trip, and the rendered section is char-capped anyway,
     # so reading more than this is paid for and then truncated away.
-    "autonomy_dm_messages": 300,
+    "autonomy_dm_messages": 40,
     # Hard ceiling on the whole observe stage (all the Discord reads that build
     # planner context). Exceeding it fails the tick rather than wedging the
     # loop; gather_context logs per-phase timings so you can see what is slow.
@@ -393,6 +393,7 @@ KNOWN_TOOLS = [
     "site_server",
     "site_test",
     "list_sites",
+    "guide",
     "web_search",
     "no_response",
     "shell",

@@ -56,6 +56,8 @@ def _bot(memory=None):
     bot._reply_parent = MaxwellBot._reply_parent.__get__(bot)
     bot._replying_to_own_message = MaxwellBot._replying_to_own_message.__get__(bot)
     bot._render_reply_parent = MaxwellBot._render_reply_parent.__get__(bot)
+    bot._author_is_self = MaxwellBot._author_is_self.__get__(bot)
+    bot._iter_resolved_reply_chain = MaxwellBot._iter_resolved_reply_chain.__get__(bot)
     bot._reply_parent_context_lines = MaxwellBot._reply_parent_context_lines.__get__(
         bot
     )

@@ -79,6 +79,8 @@ def _bot(memory, control=None):
         "_reply_parent",
         "_replying_to_own_message",
         "_render_reply_parent",
+        "_author_is_self",
+        "_iter_resolved_reply_chain",
         "_reply_parent_context_lines",
         "_directly_addressed",
         "_conversation_watch_active",

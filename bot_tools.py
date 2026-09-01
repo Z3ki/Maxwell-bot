@@ -4756,8 +4756,9 @@ class CreateSiteTool(Tool):
     def get_description(self):
         return (
             f"Publish a site at {self.base_url}/<name>/. "
-            "Full visual freedom: invent a new design each time. "
+            "Full visual freedom: invent a new design each time; no house style unless asked. "
             "Ship it finished — real content, working controls, no placeholders. "
+            "No lorem ipsum; a Loading shell has shipped nothing. "
             "Params: name, title, body (complete HTML for index.html), "
             'files (extra files {"path":"content"}), '
             "backend (ALWAYS true — every site gets a Python backend), encoding, permanent. "
@@ -5962,14 +5963,9 @@ class GuideTool(Tool):
     def get_description(self):
         return (
             "Start a guided build: create a thread named 'guide: <goal>' and ask "
-            "clarifying questions before you build. Use this when the user's site/app "
-            "request is vague (under 3 concrete features, no style/tech, or just "
-            "'build a maze'). It creates a Discord thread from the triggering message, "
-            "posts a 5-question checklist (purpose/audience, must-have features, style, "
-            "backend/realtime needs, data/persistence), and tells the user to reply in "
-            "the thread. You will then build from their answers. Params: goal (short "
-            "description of what they want). Always use this instead of one-shot "
-            "create_site when intent is vague."
+            "clarifying questions before you build. Optional — only when you "
+            "genuinely cannot start without answers. Params: goal (short "
+            "description of what they want)."
         )
 
     async def execute(self, message: Message, goal: str | None = None, **kwargs) -> str:
@@ -5982,11 +5978,11 @@ class GuideTool(Tool):
             f"**Guided build — {short}**\n"
             f"<@{message.author.id}> let's nail the spec before I build it:\n"
             "1) **Purpose / audience** — who is it for, what problem does it solve?\n"
-            "2) **Must-have features** — list 3-5 things it must do (e.g. 10 raycasts, coop gates, neural evolution)\n"
-            "3) **Look & feel** — style, vibe, colors, reference site?\n"
-            "4) **Realtime / backend** — neural compute on backend? synced across devices? multiplayer? WebSocket?\n"
-            "5) **Data / persistence** — save state, accounts, guestbook? TTL vs permanent?\n"
-            "Reply in this thread with your answers (numbers are fine). I'll then build the full site + backend and `site_test` it."
+            "2) **Must-have features** — list 3-5 things it must do\n"
+            "3) **Look & feel** — style, vibe, colors, any reference?\n"
+            "4) **Realtime / backend** — live updates, multiplayer, accounts, or a static page?\n"
+            "5) **Data / persistence** — save state? how long should it live?\n"
+            "Reply in this thread with your answers (numbers are fine). I'll then build it and `site_test` it."
         )
         thread = None
         err = None
@@ -6681,46 +6677,25 @@ class NoResponseTool(Tool):
 
 
 class MoreToolsTool(Tool):
-    """Unlock the full tool catalog on a turn that started out conversational.
+    """No-op leftover. The full catalog is attached on every turn.
 
-    Ordinary chat turns ship a small tool set (see CHAT_CORE_TOOL_NAMES) so a
-    "lol" doesn't drag sixty schemas through the context window. When a turn
-    turns out to need something else, this is the door: it marks the turn as
-    expanded, returns the whole catalog, and the next turn has every tool
-    attached for real. One extra hop, only on the turns that need it.
+    Older prompts told the model to call this to unlock tools mid-turn.
+    That hid tools like hd_image behind a hop, so a photo request that
+    started without the verb "generate" got the from-scratch generator
+    instead. Kept registered so a stale call does not error.
     """
 
     def get_description(self):
         return (
-            "Unlock your full tool set for this turn. This turn is carrying the "
-            "short conversational list; everything else — servers, moderation, "
-            "roles/channels, shell, sites, files, email, voice, "
-            "avatar/status, memory edits — is one call away. Call this the "
-            "moment you want to DO something you can't see a tool for, say what "
-            "you need in `need`, and the next turn has all of them."
+            "No-op. You already have every tool this turn. Call the one you "
+            "need directly — this does not unlock anything."
         )
 
     async def execute(self, message: Message, need: str | None = None, **kwargs) -> str:
-        with contextlib.suppress(Exception):
-            message._tools_expanded = True
-        bot = self.bot
-        names = sorted(
-            n
-            for n in (getattr(bot, "tools", {}) or {})
-            if n != "more_tools"
-            and n
-            not in set(
-                (getattr(bot, "_control", {}) or {}).get("disabled_tools", []) or []
-            )
-        )
-        logger.info("more_tools: expanding catalog (need=%r)", str(need or "")[:120])
+        logger.info("more_tools: no-op (catalog is already full, need=%r)", str(need or "")[:120])
         return (
-            "Full tool set attached for the rest of this turn"
-            + (f" (you asked for: {str(need)[:160]})" if need else "")
-            + ".\nAvailable now: "
-            + ", ".join(names)
-            + "\nCall the one you need — the schemas are on your next turn. "
-            "Don't call more_tools again."
+            "You already have the full tool catalog this turn. "
+            "Call the tool you need directly — more_tools does not unlock anything."
         )
 
 

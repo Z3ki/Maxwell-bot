@@ -13,6 +13,9 @@ def _bot():
     bot._reply_parent = MaxwellBot._reply_parent.__get__(bot)
     bot._replying_to_own_message = MaxwellBot._replying_to_own_message.__get__(bot)
     bot._render_reply_parent = MaxwellBot._render_reply_parent.__get__(bot)
+    bot._author_is_self = MaxwellBot._author_is_self.__get__(bot)
+    bot._iter_resolved_reply_chain = MaxwellBot._iter_resolved_reply_chain.__get__(bot)
+    bot._MAX_REPLY_CHAIN = MaxwellBot._MAX_REPLY_CHAIN
     bot._reply_parent_context_lines = MaxwellBot._reply_parent_context_lines.__get__(
         bot
     )
@@ -27,9 +30,10 @@ def _parent(
     embeds=None,
     attachments=None,
     components=None,
+    id=1,
 ):
     return SimpleNamespace(
-        id=1,
+        id=id,
         author=author,
         content=content,
         embeds=embeds or [],
@@ -189,3 +193,39 @@ def test_reply_media_message_id_sees_embeds_and_stickers():
     assert MaxwellBot._reply_media_message_id(embed_msg) == 11
     assert MaxwellBot._reply_media_message_id(sticker_msg) == 12
     assert MaxwellBot._reply_media_message_id(empty_msg) is None
+
+
+def test_ping_on_someone_elses_reply_walks_the_thread():
+    bot = _bot()
+    carol = SimpleNamespace(id=77, display_name="Carol")
+    bob = SimpleNamespace(id=88, display_name="Bob")
+    alice = SimpleNamespace(id=99, display_name="Alice")
+    grand = _parent(author=carol, content="carol said this ending", id=31)
+    mid = _parent(author=bob, content="bob said this ending", id=32)
+    mid.reference = SimpleNamespace(resolved=grand, message_id=grand.id)
+    parent = _parent(author=alice, content="alice said this ending", id=33)
+    parent.reference = SimpleNamespace(resolved=mid, message_id=mid.id)
+    msg, _p = _self_reply(bot, parent=parent)
+    blob = "\n".join(MaxwellBot._reply_parent_context_lines(bot, msg))
+    assert "alice said this ending" in blob
+    assert "Alice was replying to Bob(88)" in blob
+    assert "bob said this ending" in blob
+    assert "Bob was replying to Carol(77)" in blob
+    assert "carol said this ending" in blob
+
+
+def test_ping_replying_to_maxwell_does_not_walk_the_chain():
+    bot = _bot()
+    alice = SimpleNamespace(id=99, display_name="Alice")
+    grand = _parent(author=alice, content="alice buried ending", id=41)
+    parent = _parent(
+        author=SimpleNamespace(id=bot.user.id, display_name="Maxwell"),
+        content="maxwell's own line",
+        id=42,
+    )
+    parent.reference = SimpleNamespace(resolved=grand, message_id=grand.id)
+    msg, _p = _self_reply(bot, parent=parent)
+    blob = "\n".join(MaxwellBot._reply_parent_context_lines(bot, msg))
+    assert "you/Maxwell" in blob
+    assert "alice buried ending" not in blob
+    assert "was replying to" not in blob

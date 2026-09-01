@@ -8,6 +8,7 @@ import asyncio
 from types import SimpleNamespace
 
 from bot import TOOL_PROTOCOL
+from control_defaults import DEFAULT_CONTROL
 from bot_tools import (
     BanMemberTool,
     CreateInviteTool,
@@ -36,6 +37,10 @@ def test_tool_protocol_keeps_creative_tools_open():
         "Sites, games, code, search, plugins and chat are open to everyone"
         in TOOL_PROTOCOL
     )
+    personality = DEFAULT_CONTROL["base_personality"].lower()
+    assert "run tools" not in personality
+    assert "politely decline" not in personality
+    assert "open to everyone" in personality
 
 
 def test_tool_protocol_states_the_join_server_restriction():
