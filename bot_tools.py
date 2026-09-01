@@ -4434,6 +4434,29 @@ SITE_MUTATING_ACTIONS = frozenset(
     }
 )
 
+# discord.py Message uses __slots__, so setattr(_site_idle_reads) raises
+# AttributeError and every site tool blows up. Keep counters here, keyed by
+# id(message) for the life of one tool loop.
+_SITE_TURN_STATE: dict[int, dict[str, Any]] = {}
+_SITE_TURN_STATE_MAX = 128
+
+
+def _site_turn_state(message: Any) -> dict[str, Any] | None:
+    """Idle-read / site_test counters for one tool-loop turn."""
+    if message is None:
+        return None
+    key = id(message)
+    state = _SITE_TURN_STATE.get(key)
+    if state is None:
+        while len(_SITE_TURN_STATE) >= _SITE_TURN_STATE_MAX:
+            oldest = next(iter(_SITE_TURN_STATE), None)
+            if oldest is None:
+                break
+            _SITE_TURN_STATE.pop(oldest, None)
+        state = {"idle": 0, "test_counts": {}, "read_cache": set()}
+        _SITE_TURN_STATE[key] = state
+    return state
+
 
 def _site_start_line(raw: Any) -> int:
     try:
@@ -4511,20 +4534,18 @@ def site_read_loop_guard(
 ) -> str | None:
     """Refuse duplicate/idle site reads that hang the turn. None = proceed."""
     act = str(action or "").strip().lower()
+    state = _site_turn_state(message)
     if act in SITE_MUTATING_ACTIONS:
-        if message is not None:
-            message._site_idle_reads = 0
-            message._site_test_counts = {}
-            message._site_read_cache = set()
+        if state is not None:
+            state["idle"] = 0
+            state["test_counts"] = {}
+            state["read_cache"] = set()
         return None
-    if act not in SITE_FILE_READ_ACTIONS or message is None:
+    if act not in SITE_FILE_READ_ACTIONS or state is None:
         return None
-    idle = int(getattr(message, "_site_idle_reads", 0) or 0) + 1
-    message._site_idle_reads = idle
-    cache = getattr(message, "_site_read_cache", None)
-    if cache is None:
-        cache = set()
-        message._site_read_cache = cache
+    idle = int(state.get("idle", 0) or 0) + 1
+    state["idle"] = idle
+    cache = state.setdefault("read_cache", set())
     if idle >= SITE_IDLE_READ_LIMIT:
         cache.add(key)
         return (
@@ -4546,13 +4567,11 @@ def site_read_loop_guard(
 
 def site_test_repeat_guard(message: Any, fingerprint: str) -> str | None:
     """Refuse a third site_test of the same URL with no edit in between."""
-    if message is None:
+    state = _site_turn_state(message)
+    if state is None:
         return None
-    message._site_idle_reads = 0
-    counts = getattr(message, "_site_test_counts", None)
-    if counts is None:
-        counts = {}
-        message._site_test_counts = counts
+    state["idle"] = 0
+    counts = state.setdefault("test_counts", {})
     n = int(counts.get(fingerprint, 0) or 0) + 1
     counts[fingerprint] = n
     if n > SITE_TEST_REPEAT_LIMIT:

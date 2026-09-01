@@ -371,3 +371,32 @@ def test_edit_write_resets_the_read_loop(bot):
     out = run(edit.execute(msg, name="reset", action="read"))
     assert "<h1>hi</h1>" in out
     assert SITE_READ_LOOP_MARKER not in out
+
+
+def test_site_guards_work_on_slotted_discord_messages(bot):
+    """discord.py Message has __slots__; stashing _site_idle_reads on it raises."""
+    from bot_tools import (
+        SITE_READ_LOOP_MARKER,
+        site_read_loop_guard,
+        site_test_repeat_guard,
+    )
+
+    class SlottedMessage:
+        __slots__ = ("author",)
+
+        def __init__(self):
+            self.author = SimpleNamespace(id=42, display_name="tester")
+
+    run(CreateSiteTool(bot).execute(_msg(), name="slot", title="Slot", body=PAGE))
+    msg = SlottedMessage()
+    assert site_read_loop_guard(msg, key="a", label="a", action="read") is None
+    assert site_read_loop_guard(msg, key="a", label="a", action="read") is not None
+    assert site_read_loop_guard(msg, key="a", label="a", action="write") is None
+    assert site_test_repeat_guard(msg, "https://example/test") is None
+    assert site_test_repeat_guard(msg, "https://example/test") is None
+    third = site_test_repeat_guard(msg, "https://example/test")
+    assert third is not None
+    assert SITE_READ_LOOP_MARKER in third
+    out = run(EditSiteTool(bot).execute(msg, name="slot", action="read"))
+    assert "_site_idle_reads" not in out
+    assert "<h1>hi</h1>" in out
