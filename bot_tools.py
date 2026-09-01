@@ -4400,6 +4400,170 @@ SITE_BLOCKED_SUFFIXES = {
 }
 
 
+# Site `action=read` used to dump the whole file into the tool result. A 30–40k
+# index.html is larger than the tool-loop tail budget, so the previous round
+# (the other file) is dropped, the model re-reads that one, and we ping-pong
+# until max_tool_iterations. Window large files and refuse duplicate reads.
+SITE_READ_FULL_CHARS = 8_000
+SITE_READ_WINDOW_CHARS = 6_000
+SITE_IDLE_READ_LIMIT = 6
+SITE_TEST_REPEAT_LIMIT = 2
+SITE_READ_LOOP_MARKER = "__SITE_READ_LOOP__"
+SITE_FILE_READ_ACTIONS = frozenset({"read", "cat", "get"})
+SITE_MUTATING_ACTIONS = frozenset(
+    {
+        "write",
+        "put",
+        "set",
+        "update",
+        "patch_file",
+        "code",
+        "replace",
+        "patch",
+        "sub",
+        "delete",
+        "rm",
+        "remove",
+        "unlink",
+        "deploy",
+        "create",
+        "snapshot",
+        "start",
+        "restart",
+        "reload",
+    }
+)
+
+
+def _site_start_line(raw: Any) -> int:
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(n, 1_000_000))
+
+
+def format_site_file_read(rel: str, text: str, *, start_line: int = 1) -> str:
+    """Return a file without blowing the tool-loop tail budget.
+
+    Small files come back whole. Larger ones get a numbered window; pass
+    ``start_line`` to page. A minified one-liner is paged by character so it
+    cannot dump 40k into the tool loop (that is what hung Maxwell).
+    """
+    start_line = _site_start_line(start_line)
+    raw = text or ""
+    n = len(raw)
+    if n <= SITE_READ_FULL_CHARS and start_line <= 1:
+        return f"{rel} ({n} chars):\n{raw}"
+    lines = raw.splitlines(keepends=True)
+    total = len(lines)
+    if total == 0:
+        return f"{rel} (0 chars):\n"
+    # One giant line (minified HTML/JS): page by start_line as a char window.
+    if total == 1 and n > SITE_READ_FULL_CHARS:
+        offset = (start_line - 1) * SITE_READ_WINDOW_CHARS
+        if offset >= n:
+            offset = max(0, n - SITE_READ_WINDOW_CHARS)
+        chunk = raw[offset : offset + SITE_READ_WINDOW_CHARS]
+        more = ""
+        if offset + len(chunk) < n:
+            more = (
+                f" Chars {offset + len(chunk) + 1}–{n} omitted — "
+                f"pass start_line={start_line + 1} to continue."
+            )
+        return (
+            f"{rel} ({n} chars, 1 line) showing chars "
+            f"{offset + 1}–{offset + len(chunk)}.{more}\n"
+            "Do not re-read this file unless you need another slice. "
+            "Patch with action=replace (exact text from this window) or "
+            "action=write.\n" + chunk
+        )
+    start = min(start_line, total)
+    out: list[str] = []
+    used = 0
+    last = start - 1
+    for i in range(start - 1, total):
+        raw_line = lines[i]
+        numbered = f"{i + 1}|{raw_line if raw_line.endswith(chr(10)) else raw_line + chr(10)}"
+        if not out and len(numbered) > SITE_READ_WINDOW_CHARS:
+            numbered = numbered[:SITE_READ_WINDOW_CHARS] + "\n"
+            out.append(numbered)
+            last = i + 1
+            break
+        if out and used + len(numbered) > SITE_READ_WINDOW_CHARS:
+            break
+        out.append(numbered)
+        used += len(numbered)
+        last = i + 1
+    more = ""
+    if last < total:
+        more = f" Lines {last + 1}–{total} omitted — pass start_line={last + 1} to continue."
+    return (
+        f"{rel} ({n} chars, {total} lines) showing {start}–{last}.{more}\n"
+        "Do not re-read this file unless you need another slice. "
+        "Patch with action=replace (exact text from this window) or action=write.\n"
+        + "".join(out)
+    )
+
+
+def site_read_loop_guard(
+    message: Any, *, key: str, label: str, action: str
+) -> str | None:
+    """Refuse duplicate/idle site reads that hang the turn. None = proceed."""
+    act = str(action or "").strip().lower()
+    if act in SITE_MUTATING_ACTIONS:
+        if message is not None:
+            message._site_idle_reads = 0
+            message._site_test_counts = {}
+            message._site_read_cache = set()
+        return None
+    if act not in SITE_FILE_READ_ACTIONS or message is None:
+        return None
+    idle = int(getattr(message, "_site_idle_reads", 0) or 0) + 1
+    message._site_idle_reads = idle
+    cache = getattr(message, "_site_read_cache", None)
+    if cache is None:
+        cache = set()
+        message._site_read_cache = cache
+    if idle >= SITE_IDLE_READ_LIMIT:
+        cache.add(key)
+        return (
+            "STOP. You have re-read site files repeatedly this turn without "
+            "changing anything. The source is already in this turn. Call "
+            "action=write or action=replace with a real change, or site_test "
+            f"once, then send_message with the URL. {SITE_READ_LOOP_MARKER}"
+        )
+    if key in cache:
+        return (
+            f"Already returned {label} this turn — it is in an earlier tool "
+            "result. Use action=replace or action=write to change it, or "
+            "start_line= to window a different slice. Re-reading the same "
+            "file will not print it again."
+        )
+    cache.add(key)
+    return None
+
+
+def site_test_repeat_guard(message: Any, fingerprint: str) -> str | None:
+    """Refuse a third site_test of the same URL with no edit in between."""
+    if message is None:
+        return None
+    message._site_idle_reads = 0
+    counts = getattr(message, "_site_test_counts", None)
+    if counts is None:
+        counts = {}
+        message._site_test_counts = counts
+    n = int(counts.get(fingerprint, 0) or 0) + 1
+    counts[fingerprint] = n
+    if n > SITE_TEST_REPEAT_LIMIT:
+        return (
+            f"Already ran site_test on this URL this turn ({n - 1} times). "
+            "Fix with edit_site or site_server (write/replace), then test "
+            f"once, or send_message with the URL. {SITE_READ_LOOP_MARKER}"
+        )
+    return None
+
+
 def _elided_site_payload_error(text: Any) -> str:
     """Error if ``text`` is a context-elision marker, not real site source."""
     if not isinstance(text, str):
@@ -5193,16 +5357,17 @@ class EditSiteTool(_SiteOwnedTool):
             "to keep working on the frontend (HTML/CSS/JS) — do not recreate "
             "the site. "
             "action=list (files + sizes; notes a Python backend if one is running), "
-            "read (one file back), write (replace or add a file — path defaults "
-            "to index.html; or pass files={...} to write several at once), "
+            "read (one file; large files return a numbered window — pass "
+            "start_line= to page; do not re-read a file you already have), "
+            "write (replace or add a file — path defaults to index.html; or pass "
+            "files={...} to write several at once), "
             "replace (swap `find` with `replace` in one file; all=true for every "
             "occurrence), delete (remove a file), rename, backend (on/off/status/"
             "clear the KV store — not the Python server), extend. "
             "Python backend code is site_server (write/replace/read), not this. "
-            "After an edit, site_test loads the live page (JS console, failed "
-            "requests, screenshot). "
+            "After an edit, site_test loads the live page once. "
             "Params: name, action, path, content, files, find, replace, all, "
-            "title, encoding, backend, permanent. "
+            "title, encoding, backend, permanent, start_line. "
             "Prefer this over re-running create_site for a tweak."
         )
 
@@ -5222,12 +5387,15 @@ class EditSiteTool(_SiteOwnedTool):
         encoding: str = "text",
         backend: Any = None,
         permanent: Any = None,
+        start_line: Any = None,
         **kwargs,
     ) -> str:
         slug, entry, site_dir, err = self._resolve(message, name)
         if err:
             return err
         act = str(action or "list").strip().lower()
+        if act in SITE_MUTATING_ACTIONS:
+            site_read_loop_guard(message, key="", label="", action=act)
         url = f"{self.base_url}/{slug}/"
 
         if act in {"list", "ls", "files", "status"}:
@@ -5261,7 +5429,16 @@ class EditSiteTool(_SiteOwnedTool):
                 text = target.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as e:
                 return f"Error reading {rel}: {e}"
-            return f"{rel} ({len(text)} chars):\n{text}"
+            start = _site_start_line(start_line)
+            blocked = site_read_loop_guard(
+                message,
+                key=f"edit_site:{slug}:{rel}:{start}",
+                label=f"{rel} (start_line={start})",
+                action=act,
+            )
+            if blocked:
+                return blocked
+            return format_site_file_read(rel, text, start_line=start)
 
         if act in {"write", "put", "set", "update"}:
             extra_files, files_err = _parse_site_files(files)
@@ -5425,7 +5602,9 @@ class SiteServerTool(_SiteOwnedTool):
             "Use this when the site needs server-side logic: accounts, WebSockets, "
             "a hidden API key, anything a static page cannot enforce. "
             "Keep working on a live backend with these actions instead of recreating it: "
-            "list (source files), read (one file), write (merge files — helpers stay; "
+            "list (source files), read (one file; large files return a numbered "
+            "window — pass start_line= to page; do not re-read a file you already "
+            "have), write (merge files — helpers stay; "
             "pass path+content for one file or files={...} for several), replace "
             "(exact-text patch in one file, like edit_site), deploy (full snapshot, "
             "missing files disappear), start, stop, restart, status, logs, env, "
@@ -5451,6 +5630,7 @@ class SiteServerTool(_SiteOwnedTool):
         all: Any = None,
         replace_all: Any = None,
         lines: int = 40,
+        start_line: Any = None,
         **kwargs,
     ) -> str:
         slug, entry, _site_dir, err = self._resolve(message, name)
@@ -5458,6 +5638,8 @@ class SiteServerTool(_SiteOwnedTool):
             return err
         data_dir = self.bot.config.DATA_DIR
         act = str(action or "status").strip().lower()
+        if act in SITE_MUTATING_ACTIONS:
+            site_read_loop_guard(message, key="", label="", action=act)
         all_hits = parse_bool(replace_all if replace_all is not None else all, False)
         try:
             if act in {"write", "update", "patch_file", "code"}:
@@ -5593,7 +5775,16 @@ class SiteServerTool(_SiteOwnedTool):
                 text = await asyncio.to_thread(
                     site_server.read_code, data_dir, slug, rel
                 )
-                return f"{rel} ({len(text)} chars):\n{text}"
+                start = _site_start_line(start_line)
+                blocked = site_read_loop_guard(
+                    message,
+                    key=f"site_server:{slug}:{rel}:{start}",
+                    label=f"{rel} (start_line={start})",
+                    action=act,
+                )
+                if blocked:
+                    return blocked
+                return format_site_file_read(rel, text, start_line=start)
 
             if act in {"env", "secrets", "config"}:
                 if not env:
@@ -5667,11 +5858,12 @@ class SiteTestTool(_SiteOwnedTool):
             "Load one of your published sites the way a visitor's browser would: "
             "JS console errors, uncaught exceptions, failed network requests, "
             "broken CSS/JS/images, HTTP status, and a screenshot (vision). "
-            "Always call this after create_site / edit_site / site_server before "
+            "Call this once after create_site / edit_site / site_server before "
             "telling the user it works. fetch_url only sees HTML — this sees "
             "runtime. Params: name (slug), path (optional subpage or this site's "
             "full URL), wait (seconds for JS, default 2), screenshot (default true). "
-            "Fix what it finds with edit_site or site_server, then test again."
+            "Fix what it finds with write/replace, then test once more. Do not "
+            "re-test the same URL without changing a file."
         )
 
     async def execute(
@@ -5691,6 +5883,9 @@ class SiteTestTool(_SiteOwnedTool):
             target = site_test.page_url(self.base_url, slug, path or url)
         except ValueError as e:
             return f"Error: {e}. path must be a page on this site."
+        blocked = site_test_repeat_guard(message, f"{slug}:{target}")
+        if blocked:
+            return blocked
         try:
             wait_s = (
                 float(wait) if wait is not None and str(wait).strip() != "" else 2.0

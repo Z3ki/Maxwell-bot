@@ -376,12 +376,18 @@ the title, or `extend` its lifetime. `delete_site` removes the whole thing.
 Sites expire after `site_ttl_hours` (24 by default, `0` disables expiry);
 `permanent=true` opts one site out.
 
+`action=read` returns small files whole. Larger ones come back as a numbered
+window — pass `start_line` to page. Re-reading the same file in one turn is
+refused, so a frontend/backend ping-pong cannot hang the bot. Patch with
+`replace` or `write` instead of dumping the whole page back into context.
+
 `site_test` loads the published URL in headless Chromium and returns JS
 console errors, uncaught exceptions, failed network requests, broken linked
 assets, HTTP status, and a screenshot (so the model can see the page). If
 Chromium is missing it still checks the HTML and linked files over HTTP.
-Call it after every publish or edit — `fetch_url` only sees source, not
-runtime. Fix with `edit_site` / `site_server`, then test again.
+Call it once after a publish or edit — `fetch_url` only sees source, not
+runtime. Fix with `edit_site` / `site_server`, then test once more. Repeating
+`site_test` on the same URL without changing a file is refused.
 
 Maxwell can now edit **any** site (ownership check removed for `edit_site`/`site_server`/`site_test` so he can fix a site even if you didn't create it), and `create_site`/`site_server` is enforced for neural/synced builds. For vague requests (`"build a maze"` with no spec) use `,guide <goal>` or `,guided-goal` — Maxwell creates a thread `guide: <goal>` and asks 5 clarifying questions (purpose, must-have features, style, realtime/backend, data). He also auto-calls the `guide` tool himself when he detects vagueness instead of one-shot building.
 

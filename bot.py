@@ -304,6 +304,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     _is_safe_url,
     _read_response_limited,
     close_shared_session,
+    SITE_READ_LOOP_MARKER,
 )
 from captcha_solver import (  # noqa: E402
     CaptchaSolveError,
@@ -2418,15 +2419,13 @@ TOOL_PROTOCOL = (
     "built nothing. If the page needs 900 lines to actually work, write 900 "
     "lines. If you cannot finish a feature, leave it out and say so rather than "
     "faking it.\n"
-    "After it is live, call site_test — it loads the page in a real browser and "
-    "reports JS console errors, failed requests, whether anything actually "
-    "rendered, and a screenshot. Read the screenshot. If site_test says NOT "
-    "ACTUALLY RENDERED, the page is broken no matter what the HTML looks like: "
-    "fix it and test again. Keep working with edit_site (frontend files) and "
-    "site_server (Python backend) until it passes. Do not tell anyone a site "
-    "works before site_test says it loaded clean. Do not recreate the site to "
-    "change a line. site_server write merges files; deploy replaces the whole "
-    "snapshot.\n"
+    "After it is live, call site_test once. If it fails, patch with "
+    "edit_site/site_server action=replace or write — do not re-read a file "
+    "you already have this turn. Then test once more. Do not ping-pong "
+    "action=read on index.html and app.py: those dumps blow the context and "
+    "hang you. Do not tell anyone a site works before site_test says it "
+    "loaded clean. Do not recreate the site to change a line. site_server "
+    "write merges files; deploy replaces the whole snapshot.\n"
     "BACKEND IS MANDATORY FOR EVERY SITE — NOT JUST NEURAL/SYNCED: every "
     "create_site MUST use backend=true AND a real Python backend via site_server "
     "(FastAPI+uvicorn on $PORT, WebSocket at /ws when realtime, otherwise REST "
@@ -5342,6 +5341,23 @@ class MaxwellBot(commands.Bot):
 
     async def on_error(self, event, *args, **kwargs):
         logger.exception("discord event %s failed", event)
+
+    def is_connected(self) -> bool:
+        """True while the Discord gateway websocket is open.
+
+        discord.py-self's Client has is_ready/is_closed but no is_connected.
+        The gateway watchdog used to crash on AttributeError and never force
+        a PM2 restart of a dead socket.
+        """
+        if self.is_closed():
+            return False
+        ws = getattr(self, "ws", None)
+        if ws is None:
+            return False
+        try:
+            return bool(ws.open)
+        except Exception:
+            return False
 
     async def on_disconnect(self):
         logger.warning("discord gateway disconnected")
@@ -13878,6 +13894,7 @@ class MaxwellBot(commands.Bot):
             followup_turn_ran = False
             tools_expanded = False
             promise_followups = 0
+            site_loop_strikes = 0
             tool_results: list[str] = []
             for _iteration in range(max_iters):
                 if time.monotonic() > tool_deadline:
@@ -13925,6 +13942,13 @@ class MaxwellBot(commands.Bot):
                     break
                 if not _tool_results_need_followup(tool_results):
                     break
+                if any(SITE_READ_LOOP_MARKER in (r or "") for r in tool_results):
+                    site_loop_strikes += 1
+                    if site_loop_strikes >= 2:
+                        logger.info(
+                            "site read-loop breaker; stopping tool iterations"
+                        )
+                        break
                 # An ack-only turn ("on it…") loops back exactly once, so the
                 # promised work runs. Without this guard a model that keeps
                 # acknowledging would ping-pong until max_iters.
@@ -17671,6 +17695,7 @@ class MaxwellBot(commands.Bot):
         conversation_tail: list[dict] = []
         followup_turn_ran = False
         promise_followups = 0
+        site_loop_strikes = 0
         tool_results: list[str] = []
         for _iteration in range(max_iters):
             response_text, tool_results = await self._dispatch_tool_calls(
@@ -17687,6 +17712,11 @@ class MaxwellBot(commands.Bot):
                 break
             if not _tool_results_need_followup(tool_results):
                 break
+            if any(SITE_READ_LOOP_MARKER in (r or "") for r in tool_results):
+                site_loop_strikes += 1
+                if site_loop_strikes >= 2:
+                    logger.info("site read-loop breaker; stopping tool iterations")
+                    break
             # See the Discord loop: an ack-only turn loops back exactly once.
             if _only_promise_results(tool_results):
                 if promise_followups >= 1:

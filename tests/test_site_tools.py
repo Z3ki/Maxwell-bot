@@ -195,10 +195,11 @@ def test_replace_that_does_not_match_says_so(bot):
     assert "byte-for-byte" in out
 
 
-def test_edit_refuses_a_site_you_do_not_own(bot):
+def test_edit_can_fix_a_site_you_did_not_create(bot, tmp_path):
     run(CreateSiteTool(bot).execute(_msg(uid=1), name="mine", title="Mine", body=PAGE))
     out = run(EditSiteTool(bot).execute(_msg(uid=2), name="mine", action="read"))
-    assert "belongs to someone else" in out
+    assert "<h1>hi</h1>" in out
+    assert "belongs to someone else" not in out
 
 
 def test_edit_cannot_read_outside_the_site(bot, tmp_path):
@@ -323,10 +324,50 @@ def test_refuses_to_publish_a_history_placeholder_as_the_page(bot, tmp_path):
     assert marker not in page
 
 
-def test_edit_site_read_returns_a_page_over_60k(bot, tmp_path):
+def test_edit_site_read_windows_a_page_over_60k(bot, tmp_path):
     huge = "<!DOCTYPE html><html><body>" + ("x" * 63_199) + "</body></html>"
-    run(CreateSiteTool(bot).execute(_msg(), name="big", title="Big", body=huge))
-    out = run(EditSiteTool(bot).execute(_msg(), name="big", action="read"))
+    msg = _msg()
+    run(CreateSiteTool(bot).execute(msg, name="big", title="Big", body=huge))
+    out = run(EditSiteTool(bot).execute(msg, name="big", action="read"))
     assert "too big to return" not in out
-    assert "63199" in out or str(len(huge)) in out
-    assert huge in out
+    assert str(len(huge)) in out
+    assert huge not in out
+    assert "start_line" in out
+    assert out.count("x") <= 8_000
+
+
+def test_edit_site_refuses_a_second_identical_read(bot):
+    msg = _msg()
+    run(CreateSiteTool(bot).execute(msg, name="once", title="Once", body=PAGE))
+    edit = EditSiteTool(bot)
+    first = run(edit.execute(msg, name="once", action="read"))
+    assert "<h1>hi</h1>" in first
+    second = run(edit.execute(msg, name="once", action="read"))
+    assert "Already returned" in second
+    assert "<h1>hi</h1>" not in second
+
+
+def test_edit_site_stops_a_read_only_loop(bot):
+    from bot_tools import SITE_IDLE_READ_LIMIT, SITE_READ_LOOP_MARKER
+
+    msg = _msg()
+    run(CreateSiteTool(bot).execute(msg, name="loop", title="Loop", body=PAGE))
+    edit = EditSiteTool(bot)
+    for i in range(SITE_IDLE_READ_LIMIT):
+        run(edit.execute(msg, name="loop", action="read", start_line=i + 1))
+    last = run(edit.execute(msg, name="loop", action="read", start_line=99))
+    assert SITE_READ_LOOP_MARKER in last
+
+
+def test_edit_write_resets_the_read_loop(bot):
+    from bot_tools import SITE_IDLE_READ_LIMIT, SITE_READ_LOOP_MARKER
+
+    msg = _msg()
+    run(CreateSiteTool(bot).execute(msg, name="reset", title="Reset", body=PAGE))
+    edit = EditSiteTool(bot)
+    for i in range(SITE_IDLE_READ_LIMIT):
+        run(edit.execute(msg, name="reset", action="read", start_line=i + 1))
+    run(edit.execute(msg, name="reset", action="write", content=PAGE))
+    out = run(edit.execute(msg, name="reset", action="read"))
+    assert "<h1>hi</h1>" in out
+    assert SITE_READ_LOOP_MARKER not in out

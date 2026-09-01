@@ -133,10 +133,43 @@ def test_format_report_clean_page():
     assert "no console errors" in text
 
 
-def test_refuses_a_site_you_do_not_own(bot):
+def test_can_test_a_site_you_did_not_create(bot, monkeypatch):
     run(CreateSiteTool(bot).execute(_msg(uid=1), name="mine", title="Mine", body=PAGE))
+
+    async def fake_http(url, **kwargs):
+        return 200, PAGE.encode(), ""
+
+    async def fake_browser(url, **kwargs):
+        return {"browser": "none", "http_status": 200, "console_errors": []}
+
+    monkeypatch.setattr(site_test, "http_get", fake_http)
+    monkeypatch.setattr(site_test, "probe_browser", fake_browser)
     out = run(SiteTestTool(bot).execute(_msg(uid=2), name="mine"))
-    assert "belongs to someone else" in out
+    assert "belongs to someone else" not in out
+    assert "mine" in out.lower()
+
+
+def test_site_test_refuses_a_third_identical_probe(bot, monkeypatch):
+    from bot_tools import SITE_READ_LOOP_MARKER
+
+    msg = _msg()
+    run(CreateSiteTool(bot).execute(msg, name="demo", title="Demo", body=PAGE))
+
+    async def fake_http(url, **kwargs):
+        return 200, PAGE.encode(), ""
+
+    async def fake_browser(url, **kwargs):
+        return {"browser": "none", "http_status": 200, "console_errors": []}
+
+    monkeypatch.setattr(site_test, "http_get", fake_http)
+    monkeypatch.setattr(site_test, "probe_browser", fake_browser)
+    tool = SiteTestTool(bot)
+    first = run(tool.execute(msg, name="demo"))
+    second = run(tool.execute(msg, name="demo"))
+    third = run(tool.execute(msg, name="demo"))
+    assert SITE_READ_LOOP_MARKER not in first
+    assert SITE_READ_LOOP_MARKER not in second
+    assert SITE_READ_LOOP_MARKER in third
 
 
 def test_unknown_site(bot):

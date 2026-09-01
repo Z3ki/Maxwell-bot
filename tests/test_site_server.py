@@ -270,11 +270,29 @@ def test_secret_values_are_never_echoed_back(tool):
     assert "sk-do-not-leak" not in status
 
 
-def test_another_user_cannot_touch_the_backend(tool):
-    for action in ("write", "logs", "status", "env", "delete", "start"):
-        out = run(tool.execute(_msg(uid=999), name="demo", action=action, files={"app.py": "x"}))
-        assert "belongs to someone else" in out
-    assert tool._started == []
+def test_another_user_can_edit_the_backend(tool):
+    out = run(
+        tool.execute(
+            _msg(uid=999),
+            name="demo",
+            action="write",
+            files={"app.py": "print('ok')"},
+        )
+    )
+    assert "belongs to someone else" not in out
+    assert "Backend server live" in out
+    assert tool._started
+
+
+def test_server_read_windows_a_huge_file_and_refuses_a_repeat(tool):
+    huge = "print(1)\n" + ("#x\n" * 12_000)
+    msg = _msg()
+    run(tool.execute(msg, name="demo", action="write", files={"app.py": huge}))
+    out = run(tool.execute(msg, name="demo", action="read"))
+    assert huge not in out
+    assert "start_line" in out
+    second = run(tool.execute(msg, name="demo", action="read"))
+    assert "Already returned" in second
 
 
 def test_unknown_action_lists_the_real_ones(tool):

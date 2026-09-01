@@ -194,6 +194,44 @@ def test_trim_conversation_tail_enforces_char_budget():
     assert trimmed[-1]["tool_call_id"] == "call_9"
 
 
+def test_trim_tool_tail_compacts_older_tool_results():
+    from tool_schemas import TOOL_RESULT_COMPACT_CHARS
+
+    tail = []
+    for i in range(3):
+        tail += [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": f"c{i}",
+                        "function": {"name": "edit_site", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": f"c{i}", "content": "y" * 8_000},
+        ]
+    trimmed = trim_tool_tail(tail)
+    old = next(m for m in trimmed if m.get("tool_call_id") == "c0")
+    newest = next(m for m in trimmed if m.get("tool_call_id") == "c2")
+    assert len(newest["content"]) == 8_000
+    assert "truncated from earlier tool result" in old["content"]
+    assert len(old["content"]) <= TOOL_RESULT_COMPACT_CHARS + 80
+
+
+def test_is_connected_uses_the_gateway_websocket():
+    bot = SimpleNamespace(is_closed=lambda: False, ws=SimpleNamespace(open=True))
+    assert MaxwellBot.is_connected(bot) is True
+    bot.ws.open = False
+    assert MaxwellBot.is_connected(bot) is False
+    bot.ws = None
+    assert MaxwellBot.is_connected(bot) is False
+    bot.is_closed = lambda: True
+    bot.ws = SimpleNamespace(open=True)
+    assert MaxwellBot.is_connected(bot) is False
+
+
 def test_message_content_chars_counts_tool_call_arguments():
     msg = {
         "role": "assistant",

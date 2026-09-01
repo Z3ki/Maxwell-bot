@@ -409,6 +409,10 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "encoding": _str("text (default) or base64 for write"),
             "backend": _str("For backend: true | false | status | clear"),
             "permanent": _bool("For extend: stop this site expiring"),
+            "start_line": _int(
+                "For read of a large file: 1-based line to start the window. "
+                "Omit to see the top (or the whole file if it is small)."
+            ),
         },
         ["name", "action"],
     ),
@@ -453,6 +457,10 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 "image, so the first deploy takes longer."
             ),
             "lines": _int("For logs: how many lines (default 40, max 200)"),
+            "start_line": _int(
+                "For read of a large file: 1-based line to start the window. "
+                "Omit to see the top (or the whole file if it is small)."
+            ),
         },
         ["name", "action"],
     ),
@@ -1776,7 +1784,8 @@ def recover_text_tool_calls(
 # is not enough on its own: 24 rounds of a 32k-capped result is still ~768k
 # chars riding on top of an already-full prompt.
 TOOL_TAIL_MAX_MESSAGES = 12
-TOOL_TAIL_MAX_CHARS = 24_000
+TOOL_TAIL_MAX_CHARS = 36_000
+TOOL_RESULT_COMPACT_CHARS = 4_000
 
 
 def message_chars(message: dict) -> int:
@@ -1848,7 +1857,32 @@ def trim_tool_tail(
         dropped = groups.pop(0)
         count -= len(dropped)
         used -= sum(message_chars(m) for m in dropped)
+    _compact_old_tool_results(groups)
     return [msg for group in groups for msg in group]
+
+
+def _compact_old_tool_results(groups: list[list[dict]]) -> None:
+    """Shrink older tool results so a huge dump cannot evict the other file.
+
+    The newest round stays intact (the model just produced it). Earlier
+    rounds already got a follow-up turn; keeping a 40k HTML dump of them
+    only inflates the tail until trim_tool_tail drops the sibling read.
+    """
+    if len(groups) < 2:
+        return
+    marker_prefix = "\n… ["
+    for group in groups[:-1]:
+        for msg in group:
+            if msg.get("role") != "tool":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, str) or len(content) <= TOOL_RESULT_COMPACT_CHARS:
+                continue
+            omitted = len(content) - TOOL_RESULT_COMPACT_CHARS
+            msg["content"] = (
+                content[:TOOL_RESULT_COMPACT_CHARS]
+                + f"{marker_prefix}{omitted} chars truncated from earlier tool result]"
+            )
 
 
 # Site tools carry the page itself in arguments. Replacing that with
