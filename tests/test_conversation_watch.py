@@ -10,9 +10,10 @@ from control_defaults import DEFAULT_CONTROL
 from message_pipeline import ReplyQueue
 
 
-def _bot(*, watch_seconds=180, debounce_seconds=0.05):
+def _bot(*, watch_seconds=180, debounce_seconds=0.05, watch_enabled=True):
     bot = SimpleNamespace(
         _control={
+            "conversation_watch_enabled": watch_enabled,
             "conversation_watch_seconds": watch_seconds,
             "conversation_watch_debounce_seconds": debounce_seconds,
         },
@@ -32,6 +33,9 @@ def _bot(*, watch_seconds=180, debounce_seconds=0.05):
         ),
     )
     bot._conversation_watch_seconds = MaxwellBot._conversation_watch_seconds.__get__(
+        bot
+    )
+    bot._conversation_watch_enabled = MaxwellBot._conversation_watch_enabled.__get__(
         bot
     )
     bot._watch_state = MaxwellBot._watch_state.__get__(bot)
@@ -130,11 +134,30 @@ async def _drain(bot, spins=400):
 
 
 def test_watch_default_is_three_minutes():
+    assert DEFAULT_CONTROL["conversation_watch_enabled"] is True
     assert DEFAULT_CONTROL["conversation_watch_seconds"] == 180
     missing = SimpleNamespace(_control={})
+    assert MaxwellBot._conversation_watch_enabled(missing) is True
     assert MaxwellBot._conversation_watch_seconds(missing) == 180.0
     garbage = SimpleNamespace(_control={"conversation_watch_seconds": "nope"})
     assert MaxwellBot._conversation_watch_seconds(garbage) == 180.0
+
+
+def test_watch_disabled_when_toggle_off():
+    bot = _bot(watch_enabled=False)
+
+    async def run():
+        MaxwellBot._arm_conversation_watch(bot, "ch")
+        assert bot._conversation_watch == {}
+        assert MaxwellBot._conversation_watch_active(bot, "ch") is False
+        chatter = _plain_followup(content="anyway what are you up to later")
+        bot._conversation_watch[str(chatter.channel.id)] = (
+            asyncio.get_running_loop().time() + 999
+        )
+        assert MaxwellBot._conversation_watch_active(bot, chatter.channel.id) is False
+        assert MaxwellBot._should_live_reply(bot, chatter) is False
+
+    asyncio.run(run())
 
 
 def test_ambient_outside_watch_is_ignored():

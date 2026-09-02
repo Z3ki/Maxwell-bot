@@ -17,6 +17,7 @@ class FakeDM(discord.DMChannel):
 def _bot(control=None, admins=()):
     bot = SimpleNamespace(
         _control={
+            "conversation_watch_enabled": True,
             "conversation_watch_seconds": 180,
             "conversation_watch_debounce_seconds": 1.0,
             "cross_context_enabled": True,
@@ -47,6 +48,7 @@ def _bot(control=None, admins=()):
         "_note_watch_silence",
         "_arm_conversation_watch",
         "_conversation_watch_seconds",
+        "_conversation_watch_enabled",
         "_conversation_watch_active",
         "_watch_debounce_seconds",
         "_should_extract_context",

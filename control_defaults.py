@@ -95,7 +95,10 @@ DEFAULT_CONTROL = {
     "reply_mentions": True,
     # After a mention/reply (or after Maxwell posts in a room), keep
     # watching that whole channel so a directed follow-up does not need
-    # another @ or Discord reply. Default 3 minutes. 0 disables the watch.
+    # another @ or Discord reply. Each later line can spend a full LLM
+    # turn deciding whether to speak — that is token-expensive, so the
+    # bool is the master switch. Seconds=0 also disables (legacy).
+    "conversation_watch_enabled": True,
     "conversation_watch_seconds": 180,
     # Watch follow-ups wait this long for more lines, then one reply.
     # Hard @ / reply-to-Maxwell still go out immediately.

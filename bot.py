@@ -4642,6 +4642,27 @@ class MaxwellBot(commands.Bot):
         except (TypeError, ValueError):
             return 180.0
 
+    def _conversation_watch_enabled(self) -> bool:
+        """Master switch for the post-reply 'should I talk?' poll.
+
+        Off means he only answers hard pings (@ / reply / DM). Seconds=0
+        is the older disable and still works.
+        """
+        control = getattr(self, "_control", None) or {}
+        if not parse_bool(control.get("conversation_watch_enabled", True), True):
+            return False
+        getter = getattr(self, "_conversation_watch_seconds", None)
+        if callable(getter):
+            try:
+                return float(getter()) > 0
+            except (TypeError, ValueError):
+                return True
+        raw = control.get("conversation_watch_seconds", 180)
+        try:
+            return max(0.0, min(float(raw), 3600.0)) > 0
+        except (TypeError, ValueError):
+            return True
+
     def _watch_state(self, channel_id):
         """Per-room watch memory, created on demand and bounded.
 
@@ -4665,6 +4686,8 @@ class MaxwellBot(commands.Bot):
         return state
 
     def _arm_conversation_watch(self, channel_id) -> None:
+        if not MaxwellBot._conversation_watch_enabled(self):
+            return
         base = self._conversation_watch_seconds()
         if base <= 0:
             return
@@ -4766,6 +4789,8 @@ class MaxwellBot(commands.Bot):
         state.observe_silence()
 
     def _conversation_watch_active(self, channel_id) -> bool:
+        if not MaxwellBot._conversation_watch_enabled(self):
+            return False
         watch = getattr(self, "_conversation_watch", None) or {}
         key = str(channel_id or "").strip()
         exp = watch.get(key)
@@ -5170,6 +5195,8 @@ class MaxwellBot(commands.Bot):
             return
         content = getattr(target, "content", "") or bucket.get("content") or ""
         directed = self._directly_addressed(target)
+        if not directed and not MaxwellBot._conversation_watch_enabled(self):
+            return
         # Busy is re-checked here, not just when the line arrived: an image
         # generation or a long tool call can start during the debounce wait,
         # and a soft follow-up that waits it out then lands on top of the
@@ -10114,6 +10141,8 @@ class MaxwellBot(commands.Bot):
             # read sites now (they call _progress_enabled(server_id)).
             self._control_mtime = mtime
             logger.info("Loaded dashboard control settings")
+            if not self._conversation_watch_enabled():
+                self._drop_watches_for_sleep()
         except Exception as e:
             logger.error(f"Failed to load control settings: {e}")
 
