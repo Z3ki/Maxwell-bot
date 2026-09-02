@@ -5319,6 +5319,7 @@ class MaxwellBot(commands.Bot):
             if started:
                 logger.info("Plugin jobs started: %d", started)
         self._tasks = [
+            asyncio.create_task(self._backfill_site_graph(), name="site-graph-backfill"),
             asyncio.create_task(self._site_cleanup_loop()),
             asyncio.create_task(self._memory_cleanup_loop()),
             asyncio.create_task(self._control_reload_loop()),
@@ -10495,12 +10496,16 @@ class MaxwellBot(commands.Bot):
                 "OUTPUT JSON only, no fence:\n"
                 '{ "should_store": bool, "importance": 1-10, "scope": "...", '
                 '"visibility": "...", "summary": "<one-line fact>", "tags": ["..."], '
-                '"expires_in_hours": <int or null> }\n'
+                '"expires_in_hours": <int or null>, '
+                '"triples": [{"s":"Name","rel":"OWNS","o":"Thing"}] }\n'
                 "scope ∈ {global, user:<id>, guild:<id>, channel:<id>, dm:<id>}. "
                 "visibility ∈ {shared, private, admin_only, public_hint}. "
                 "Non-admin DMs → scope=user:<id>, visibility=private. "
                 "importance 8-10 identity/ops, 5-7 useful, 1-4 trivia. "
-                "expires_in_hours null = persistent. If unsure, should_store false."
+                "expires_in_hours null = persistent. If unsure, should_store false. "
+                "triples optional; rel ∈ OWNS,USES,DISLIKES,DEPENDS_ON,"
+                "CONFIGURED_WITH,PREFERS,BUILT,WORKS_ON. Only durable project/"
+                "ownership/preference links — omit triples rather than guess."
             )
             user = (
                 f"Author: {message.author.display_name} ({message.author.id})\n"
@@ -10564,6 +10569,7 @@ class MaxwellBot(commands.Bot):
                     f"Context watcher stored fact {context_id}: {entry['content'][:120]}"
                 )
             await self._mirror_fact_to_entity(message, entry)
+            self._ingest_graph_triples(message, data)
         except Exception as e:
             logger.warning(f"Context extraction error: {e}")
 
@@ -10619,6 +10625,74 @@ class MaxwellBot(commands.Bot):
                 logger.info("Entity memory: new fact for user %s", uid)
         except Exception as e:
             logger.debug(f"entity mirror skipped: {e}")
+
+    def _ingest_graph_triples(self, message, data: dict) -> None:
+        """Fold extractor triples into the SQLite graph. No extra LLM call."""
+        if not parse_bool(
+            (getattr(self, "_control", None) or {}).get(
+                "knowledge_graph_enabled", True
+            ),
+            True,
+        ):
+            return
+        graph = getattr(getattr(self, "memory", None), "graph", None)
+        if graph is None or not isinstance(data, dict):
+            return
+        triples = data.get("triples")
+        if not triples:
+            return
+        try:
+            author = getattr(message, "author", None)
+            n = graph.ingest_triples(
+                triples,
+                speaker_id=str(getattr(author, "id", "") or ""),
+                speaker_name=str(getattr(author, "display_name", "") or ""),
+            )
+            if n:
+                logger.info("Knowledge graph: stored %s triple(s)", n)
+        except Exception as e:
+            logger.debug("graph triple ingest skipped: %s", e)
+
+    def _graph_prompt_block(self, query: str, user_id: str, budget: int) -> str:
+        if not parse_bool(
+            (getattr(self, "_control", None) or {}).get(
+                "knowledge_graph_enabled", True
+            ),
+            True,
+        ):
+            return ""
+        graph = getattr(getattr(self, "memory", None), "graph", None)
+        if graph is None:
+            return ""
+        try:
+            return graph.prompt_block(query=query, user_id=user_id, budget=budget)
+        except Exception as e:
+            logger.debug("graph prompt skipped: %s", e)
+            return ""
+
+    async def _backfill_site_graph(self) -> None:
+        """Index published sites into the graph once at boot (ast scan, no LLM)."""
+        if not parse_bool(
+            (getattr(self, "_control", None) or {}).get(
+                "knowledge_graph_enabled", True
+            ),
+            True,
+        ):
+            return
+        try:
+            from knowledge_graph import refresh_site
+
+            slugs = list((getattr(self, "_sites", None) or {}) or [])
+            n = 0
+            for slug in slugs:
+                with contextlib.suppress(Exception):
+                    note = await asyncio.to_thread(refresh_site, self, slug)
+                    if note:
+                        n += 1
+            if n:
+                logger.info("Knowledge graph: indexed %s/%s sites", n, len(slugs))
+        except Exception as e:
+            logger.debug("site graph backfill skipped: %s", e)
 
     async def _command_queue_loop(self):
         path = Path(self.config.DATA_DIR) / "bot_commands.json"
@@ -16185,6 +16259,16 @@ class MaxwellBot(commands.Bot):
                 ctx_plan.note_usage("entity", len(block), items=len(entity_facts))
             ctx_spare = ctx_plan.spare_after("entity")
 
+        graph_block = MaxwellBot._graph_prompt_block(
+            self,
+            user_message,
+            str(getattr(message.author, "id", "") or ""),
+            budget=min(900, max(ctx_spare, 240)),
+        )
+        if graph_block:
+            dynamic_parts.append(graph_block)
+            ctx_spare = max(0, ctx_spare - len(graph_block))
+
         if self._control.get(
             "long_term_memory_enabled", True
         ) and not self._is_short_live_turn(message, user_message):
@@ -17168,6 +17252,7 @@ class MaxwellBot(commands.Bot):
         dynamic_parts: list[str] = []
 
         await self._telegram_append_cross_context(dynamic_parts, text, user_id)
+        await self._telegram_append_graph(dynamic_parts, text, user_id)
         await self._telegram_append_rag(dynamic_parts, text, tg_chan_id, chat_id)
         append_inbox = getattr(self, "_append_inbox_dynamic", None)
         if callable(append_inbox):
@@ -17562,6 +17647,11 @@ class MaxwellBot(commands.Bot):
                     )
         except Exception as e:
             logger.warning("Telegram context fetching error: %s", e)
+
+    async def _telegram_append_graph(self, dynamic_parts, text, user_id):
+        block = self._graph_prompt_block(text or "", str(user_id or ""), budget=600)
+        if block:
+            dynamic_parts.append(block)
 
     async def _telegram_append_rag(self, dynamic_parts, text, tg_chan_id, chat_id):
         # RAG: semantic memory retrieval for Telegram

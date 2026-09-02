@@ -4816,6 +4816,22 @@ def site_expiry_label(entry: dict, control: dict) -> str:
     return f"{int(remaining // 3600)}h {int((remaining % 3600) // 60)}m left"
 
 
+def _site_graph_note(bot, slug: str, *, refresh: bool = True) -> str:
+    """One-line route graph for tool results. Never raises into the tool."""
+    try:
+        from knowledge_graph import graph_from_bot, refresh_site
+
+        if refresh:
+            note = refresh_site(bot, slug)
+        else:
+            graph = graph_from_bot(bot)
+            note = graph.summarize_site(slug) if graph is not None else ""
+        return f"\nGraph: {note}" if note else ""
+    except Exception as e:
+        logger.debug("site graph skipped: %s", e)
+        return ""
+
+
 # Optional hardening for operators whose static host does NOT set a CSP for
 # generated pages. Off by default: a meta tag injected into the model's own
 # document can only ever subtract from what the page was written to do, and
@@ -5237,6 +5253,7 @@ class CreateSiteTool(Tool):
                     f"\nWARNING: {len(missing_images)} image(s) NOT found on disk and skipped: "
                     + ", ".join(missing_images)
                 )
+            result += _site_graph_note(self.bot, slug)
             return result
         except Exception as e:
             logger.error(f"Failed to create site {slug}: {e}")
@@ -5435,6 +5452,7 @@ class EditSiteTool(_SiteOwnedTool):
                     f"\nPython backend: on at {url}api/ ({names}). "
                     "Edit it with site_server (list/read/write/replace), not this tool."
                 )
+            out += _site_graph_note(self.bot, slug, refresh=False)
             return out
 
         if act in {"read", "cat", "get"}:
@@ -5508,6 +5526,7 @@ class EditSiteTool(_SiteOwnedTool):
             return (
                 f"Wrote {', '.join(written)} → {url}\n"
                 f'Call site_test(name="{slug}") to load it and check the console.'
+                + _site_graph_note(self.bot, slug)
             )
 
         if act in {"replace", "patch", "sub"}:
@@ -5548,6 +5567,7 @@ class EditSiteTool(_SiteOwnedTool):
             return (
                 f"Patched {rel}{extra} → {url}\n"
                 f'Call site_test(name="{slug}") to load it and check the console.'
+                + _site_graph_note(self.bot, slug)
             )
 
         if act in {"delete", "rm", "remove"}:
@@ -5563,7 +5583,7 @@ class EditSiteTool(_SiteOwnedTool):
                 target.unlink()
             except OSError as e:
                 return f"Error deleting {rel}: {e}"
-            return f"Deleted {rel} from {slug}."
+            return f"Deleted {rel} from {slug}." + _site_graph_note(self.bot, slug)
 
         if act in {"rename", "title", "retitle"}:
             if not title:
@@ -5695,6 +5715,7 @@ class SiteServerTool(_SiteOwnedTool):
                     f"Backend server live: {self.base_url}/{slug}/api/ "
                     f"(updated {', '.join(written)}; other source files kept)\n"
                     + site_server.contract(slug)
+                    + _site_graph_note(self.bot, slug)
                 )
 
             if act in {"deploy", "create", "snapshot"}:
@@ -5727,6 +5748,7 @@ class SiteServerTool(_SiteOwnedTool):
                     f"Backend server live: {self.base_url}/{slug}/api/ "
                     f"(full snapshot: {', '.join(written)})\n"
                     + site_server.contract(slug)
+                    + _site_graph_note(self.bot, slug)
                 )
 
             if act in {"replace", "patch", "sub"}:
@@ -5742,7 +5764,10 @@ class SiteServerTool(_SiteOwnedTool):
                 )
                 await site_server.start(data_dir, slug)
                 await self._mark_server(slug, entry, True)
-                return f"{note} and restarted → {self.base_url}/{slug}/api/"
+                return (
+                    f"{note} and restarted → {self.base_url}/{slug}/api/"
+                    + _site_graph_note(self.bot, slug)
+                )
 
             if act in {"rm", "unlink"}:
                 note = await asyncio.to_thread(
@@ -5750,7 +5775,10 @@ class SiteServerTool(_SiteOwnedTool):
                 )
                 await site_server.start(data_dir, slug)
                 await self._mark_server(slug, entry, True)
-                return f"{note} and restarted → {self.base_url}/{slug}/api/"
+                return (
+                    f"{note} and restarted → {self.base_url}/{slug}/api/"
+                    + _site_graph_note(self.bot, slug)
+                )
 
             if act in {"start", "restart", "reload"}:
                 await site_server.start(data_dir, slug)
@@ -5779,6 +5807,7 @@ class SiteServerTool(_SiteOwnedTool):
                     + "\n".join(lines_out)
                     + "\nUse action=read / write / replace to edit. "
                     "write merges; deploy replaces the whole snapshot."
+                    + _site_graph_note(self.bot, slug, refresh=False)
                 )
 
             if act in {"status", "info"}:
@@ -5826,7 +5855,10 @@ class SiteServerTool(_SiteOwnedTool):
             if act in {"delete", "remove", "destroy"}:
                 await site_server.destroy(data_dir, slug)
                 await self._mark_server(slug, entry, False)
-                return f"Deleted the backend server for {slug} — code, database, and secrets."
+                return (
+                    f"Deleted the backend server for {slug} — code, database, and secrets."
+                    + _site_graph_note(self.bot, slug)
+                )
 
             return (
                 f"Error: unknown action '{act}'. Use list, read, write, replace, "
@@ -6066,6 +6098,10 @@ class DeleteSiteTool(_SiteOwnedTool):
         # Container, server code, database, and secrets go too.
         with contextlib.suppress(Exception):
             await site_server.destroy(self.bot.config.DATA_DIR, slug)
+        with contextlib.suppress(Exception):
+            from knowledge_graph import drop_site as _drop_site_graph
+
+            _drop_site_graph(self.bot, slug)
         if save_error is not None:
             return f"Error deleting site '{slug}': {save_error}"
         return (

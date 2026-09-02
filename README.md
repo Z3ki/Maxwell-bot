@@ -627,6 +627,8 @@ Changing the model or dimension invalidates existing vectors: delete
 
 The SQLite database lives at `data/maxwell_rag.db` (gitignored). Channel memory, LTM, shared context, and per-user entity facts are all in one `vectors` table distinguished by `kind` (`message`, `ltm`, `shared_context`, `entity`), alongside a `user_entities` table holding identity.
 
+A second layer in the same database is a small **knowledge graph** (`graph_nodes` / `graph_edges`): site routes parsed from Python AST, frontend `/api/` calls, and optional ownership triples from the existing context extractor. Vector search still handles conversational recall; the graph answers "what routes does this site expose" without another embed or a full file re-read. Toggle: `knowledge_graph_enabled`.
+
 ### Global user memory
 
 A Discord user id is already global — the same person in two servers and a DM

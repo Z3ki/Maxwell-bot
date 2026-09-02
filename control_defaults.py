@@ -66,6 +66,10 @@ DEFAULT_CONTROL = {
     # facts are already global-by-user; this makes them retrievable by the
     # entity tier too, with per-person semantic ranking.
     "entity_memory_from_extract": True,
+    # Hybrid graph next to vector RAG: site routes + ownership triples.
+    # Deterministic (ast scan) plus optional triples from the existing
+    # context-extractor call — no extra LLM. Off leaves vector RAG as-is.
+    "knowledge_graph_enabled": True,
     # ─── per-tier context budget (see context_budget.py) ────────────────
     # Relative weights for how the memory character budget is divided. They
     # are normalized, so what matters is their ratio, not the total. A

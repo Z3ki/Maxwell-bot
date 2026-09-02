@@ -887,6 +887,10 @@ class RAGMemoryManager:
             "ON vectors(kind, author_id)"
         )
 
+        from knowledge_graph import KnowledgeGraph
+
+        self.graph = KnowledgeGraph(self._db)
+
         # Seed embed_cache from existing rows so the first recall after
         # upgrade doesn't pay hundreds of cold ollama calls. Cheap (we
         # already have the blobs in `vectors.embedding`).
