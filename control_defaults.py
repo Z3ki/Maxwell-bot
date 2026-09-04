@@ -176,6 +176,14 @@ DEFAULT_CONTROL = {
     "max_tool_iterations": 50,
     "tool_iteration_timeout_seconds": 3600,
     "max_response_chars": 4000,
+    # ─── background sub-agent jobs (jobs.py) ────────────────────────────
+    # Extended budgets for detached background work. Live turns stay tight;
+    # jobs get the big headroom (more thinking, more output, more timeout).
+    # 0/blank = fall back to env (BG_MAX_TOKENS / BG_TIMEOUT_SECONDS /
+    # BG_MAX_ITERS) and then to the built-in generous defaults.
+    "bg_max_tokens": 0,
+    "bg_timeout_seconds": 0,
+    "bg_max_iters": 0,
     # Prefer OpenAI-style native tool_calls when the provider supports them.
     # XML text tags remain as a fallback when the model emits tags without
     # native tool_calls (or the endpoint rejects tools=).
@@ -401,6 +409,7 @@ KNOWN_TOOLS = [
     "site_test",
     "list_sites",
     "guide",
+    "spawn_background",
     "web_search",
     "no_response",
     "shell",

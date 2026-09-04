@@ -249,7 +249,10 @@ All commands use the `,` prefix. Admin commands require the user to be in the ad
 
 | Command | Admin | Description |
 |---|---|---|
-| `,stop` | No | Cancel the active AI request in this channel |
+| `,stop` | No | Cancel the active AI request in this channel (` ,stop job <id>` cancels a background job) |
+| `,bg <goal>` | No | Start a background sub-agent job: instant ack, channel stays free, pings you when done |
+| `,jobs` | No | List background jobs |
+| `,job cancel <id>` | No | Cancel your background job (or anyone's, if admin) |
 | `,prompt [text]` | Yes | View or set a custom server prompt |
 | `,clearprompt` | Yes | Clear the custom server prompt |
 | `,clearmem` | Yes | Clear channel memory and all cached state |
