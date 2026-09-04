@@ -7322,7 +7322,8 @@ class MaxwellBot(commands.Bot):
                                 f"on it — job `{_job.id}`, I'll ping you when it's done"
                             )
             elif cmd == "jobs":
-                await message.channel.send(self.bg_jobs.list_text(limit=10))
+                _gid = str(message.guild.id) if message.guild else ""
+                await message.channel.send(self.bg_jobs.list_text(limit=10, guild_id=_gid))
             elif cmd == "job":
                 _job_args = (args or "").strip().split(maxsplit=1)
                 if len(_job_args) == 2 and _job_args[0].lower() == "cancel":
@@ -7334,8 +7335,13 @@ class MaxwellBot(commands.Bot):
                     await message.channel.send(_msg)
                 else:
                     _job = self.bg_jobs.get(_job_args[0] if _job_args else "")
+                    _gid = str(message.guild.id) if message.guild else ""
+                    _uid = str(message.author.id)
+                    _is_adm = self._is_admin(message.author.id)
                     if _job is None:
                         await message.channel.send("usage: `,job cancel <id>`")
+                    elif not _is_adm and ((_gid and _job.guild_id != _gid) or (not _gid and _job.user_id != _uid)):
+                        await message.channel.send("job not found.")
                     else:
                         await message.channel.send(
                             f"`{_job.id}` [{_job.status}] {_job.goal[:200]}"

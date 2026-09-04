@@ -121,6 +121,8 @@ def test_manager_cancel_owner_vs_stranger(tmp_path):
     job = manager.create(guild_id="g", channel_id="c", user_id="owner", goal="x")
     ok, _ = manager.cancel(job.id, requester_id="stranger", is_admin=False)
     assert ok is False
+    ok, _ = manager.cancel(job.id, requester_id="", is_admin=False)
+    assert ok is False
     ok, msg = manager.cancel(job.id, requester_id="owner", is_admin=False)
     assert ok is True and job.id in msg
     assert manager.get(job.id).status == "cancelled"
@@ -281,3 +283,38 @@ def test_runner_marks_error_and_notifies(tmp_path):
     job, channel = asyncio.run(scenario())
     assert job.status == "error"
     assert any("failed" in text for text in channel.sent)
+
+
+def test_manager_list_text_guild_filtering(tmp_path):
+    manager = BackgroundJobManager(data_path=str(tmp_path / "jobs.json"))
+    j1 = manager.create(guild_id="g1", channel_id="c1", user_id="u1", goal="goal 1")
+    j2 = manager.create(guild_id="g2", channel_id="c2", user_id="u2", goal="goal 2")
+
+    lines_g1 = manager.list_text(guild_id="g1")
+    assert j1.id in lines_g1
+    assert j2.id not in lines_g1
+
+    lines_all = manager.list_text()
+    assert j1.id in lines_all
+    assert j2.id in lines_all
+
+
+def test_runner_splits_long_delivery_messages(tmp_path):
+    class LongOutputBot(RunnerStubBot):
+        async def _generate_response(self, messages, **kwargs):
+            return "A" * 3500
+
+    async def scenario():
+        manager = BackgroundJobManager(data_path=str(tmp_path / "jobs.json"))
+        bot = LongOutputBot(manager)
+        message = FakeMessage()
+        job = manager.create(guild_id="g", channel_id="222", user_id="111", goal="long")
+        manager.attach_runtime(job.id, message=message, channel=message.channel)
+        await run_background_job(bot, job.id)
+        return message.channel
+
+    channel = asyncio.run(scenario())
+    assert len(channel.sent) >= 2
+    for msg in channel.sent:
+        assert len(msg) <= 1900
+

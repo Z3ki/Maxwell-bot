@@ -201,6 +201,7 @@ class BackgroundJobManager:
             ordered = sorted(self._jobs.values(), key=lambda j: j.created_at)
             for stale in ordered[:-50]:
                 self._jobs.pop(stale.id, None)
+                self.cleanup_runtime(stale.id)
 
     # ---- lifecycle ------------------------------------------------------
     def active_count(self) -> int:
@@ -248,15 +249,24 @@ class BackgroundJobManager:
     def get(self, job_id: str) -> BackgroundJob | None:
         return self._jobs.get(str(job_id or "").strip().lower())
 
-    def list_text(self, limit: int = 10) -> str:
+    def list_text(self, limit: int = 10, *, guild_id: Any = None) -> str:
         if not self._jobs:
             return "no background jobs yet."
-        ordered = sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)[: max(1, limit)]
+        gid = str(guild_id or "").strip()
+        jobs = [j for j in self._jobs.values() if not gid or j.guild_id == gid]
+        if not jobs:
+            return "no background jobs in this server yet."
+        ordered = sorted(jobs, key=lambda j: j.created_at, reverse=True)[: max(1, limit)]
         lines = []
         for job in ordered:
             age = time.strftime("%H:%M", time.localtime(job.created_at)) if job.created_at else "??:??"
             lines.append(f"`{job.id}` [{job.status}] <@{job.user_id}> {_short(job.goal, 60)} ({age})")
         return "\n".join(lines)
+
+    def cleanup_runtime(self, job_id: str) -> None:
+        jid = str(job_id)
+        self._runtime.pop(jid, None)
+        self._tasks.pop(jid, None)
 
     def attach_runtime(self, job_id: str, **objects: Any) -> None:
         self._runtime[str(job_id)] = dict(objects)
@@ -286,7 +296,7 @@ class BackgroundJobManager:
         if job.status not in ("queued", "running"):
             return False, f"job `{job.id}` already {job.status}."
         uid = str(requester_id or "")
-        if uid and uid != job.user_id and not is_admin:
+        if not is_admin and (not uid or uid != job.user_id):
             return False, "only the job owner (or an admin) can cancel it."
         task = self._tasks.get(job.id)
         if task is not None and not task.done():
@@ -531,12 +541,6 @@ async def run_background_job(bot: Any, job_id: str) -> None:
 
     final_text = ""
     succeeded = False
-    try:
-        await bot._acquire_ai_slot(timeout=float(min(timeout, 600)), priority="background", key=job.channel_id)
-    except Exception as exc:
-        await _fail(f"still waiting on an LLM slot after 10m ({exc}).")
-        return
-
     deadline = time.monotonic() + float(timeout)
     try:
         for step in range(max(1, max_iters)):
@@ -544,10 +548,23 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                 manager.mark(job.id, progress=f"time budget ({timeout}s) hit at step {step}")
                 final_text = final_text or "I ran out of time budget — partial work is in the thread."
                 break
+
+            remaining = max(10.0, deadline - time.monotonic())
+            try:
+                await bot._acquire_ai_slot(
+                    timeout=float(min(remaining, 600)), priority="background", key=job.channel_id
+                )
+            except Exception as exc:
+                if step == 0:
+                    await _fail(f"still waiting on an LLM slot after 10m ({exc}).")
+                    return
+                logger.warning("background job %s slot wait failed at step %s: %s", job.id, step, exc)
+                break
+
             try:
                 response = await bot._generate_response(
                     messages,
-                    timeout=timeout,
+                    timeout=min(timeout, remaining),
                     max_tokens=max_tokens,
                     tools=provider_tools,
                     disable_reasoning=False,
@@ -557,6 +574,9 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                 logger.warning("background job %s generation failed at step %s: %s", job.id, step, exc)
                 final_text = final_text or f"generation failed ({type(exc).__name__}); partial work is in the thread."
                 break
+            finally:
+                with contextlib.suppress(Exception):
+                    await bot._release_ai_slot()
             try:
                 calls = list(bot._native_calls_from(response) or [])
             except Exception:
@@ -624,8 +644,7 @@ async def run_background_job(bot: Any, job_id: str) -> None:
         await _post_thread(thread, f"Job `{job.id}` cancelled.")
         raise
     finally:
-        with contextlib.suppress(Exception):
-            await bot._release_ai_slot()
+        manager.cleanup_runtime(job.id)
 
     if not succeeded:
         # Nothing ever came back — honest error, not a fake done.
@@ -650,10 +669,17 @@ async def run_background_job(bot: Any, job_id: str) -> None:
     except Exception:
         pass
     delivery = f"<@{job.user_id}> job `{job.id}` done — {body}"
-    if thread_ref and len(delivery) < 1800:
+    if thread_ref:
         delivery += f"\n{thread_ref}"
     try:
-        await channel.send(delivery)
+        splitter = getattr(bot, "_split_response", None)
+        if callable(splitter):
+            chunks = splitter(delivery, limit=1900)
+        else:
+            chunks = [delivery[i : i + 1900] for i in range(0, len(delivery), 1900)]
+        for chunk in chunks:
+            if chunk.strip():
+                await channel.send(chunk)
     except Exception as exc:
         logger.warning("background job %s delivery failed: %s", job.id, exc)
         await _post_thread(thread, f"Done, but I could not post to the channel ({exc}):\n{body[:1500]}")
