@@ -19,6 +19,9 @@ yt-dlp-ejs>=0.8.0
 PyNaCl>=1.5.0,<1.6
 davey>=0.1.6
 discord-ext-voice-recv==0.5.2a179
+# VC speech-to-text goes through NVIDIA Riva (bot.py: _transcribe_riva_wav_sync),
+# and TTS_ENGINE=riva uses the same client. Needs NVIDIA_API_KEY.
+nvidia-riva-client>=2.17.0
 
 # --- text to speech (ENABLE_TTS) ---------------------------------------------
 # Only needed for the gTTS engine; espeak-ng (system package) and the

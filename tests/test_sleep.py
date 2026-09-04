@@ -451,3 +451,36 @@ def test_sleep_expiry_restores_presence():
             bot._cancel_sleep_wake()
 
     asyncio.run(scenario())
+
+
+def test_sleep_gate_notifies_right_after_boot():
+    """``loop.time()`` is monotonic and starts near zero at boot.
+
+    The dedup map used ``0.0`` as its "never notified" default, so on a host
+    that had been up for less than five minutes ``now - 0.0 < 300`` held for
+    every first ping and the notice was silently swallowed. A bot started by
+    systemd/Docker at boot hit this on every restart.
+    """
+
+    async def scenario():
+        bot = _gate_bot()
+        loop = asyncio.get_running_loop()
+        real_time = loop.time
+        base = real_time()
+        # Pretend the process is 12 seconds past boot.
+        loop.time = lambda: real_time() - base + 12.0
+        try:
+            await bot.set_sleep(10)
+            msg = FakeMessage()
+            proceed = await bot._check_sleep_gate(msg)
+            assert proceed is False
+            assert len(msg.channel.sent) == 1
+            assert "sleeping" in msg.channel.sent[0]
+            # Second ping inside the window stays deduped.
+            proceed2 = await bot._check_sleep_gate(msg)
+            assert proceed2 is False
+            assert len(msg.channel.sent) == 1
+        finally:
+            loop.time = real_time
+
+    asyncio.run(scenario())

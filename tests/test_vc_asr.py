@@ -1,10 +1,15 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 import bot as botmod
 
 
 def test_transcribe_riva_wav_sync_parses_results(monkeypatch, tmp_path):
+    # nvidia-riva-client is an optional extra; skip rather than error when
+    # it is not installed.
+    pytest.importorskip("riva.client")
     wav_path = tmp_path / "utt.wav"
     wav_path.write_bytes(b"RIFF")
 

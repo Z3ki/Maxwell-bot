@@ -6615,7 +6615,7 @@ class MaxwellBot(commands.Bot):
             cooldown = float(self._control.get("per_user_cooldown_seconds", 0.0) or 0)
         except (TypeError, ValueError):
             cooldown = 0.0
-        last = self._cooldowns.get(str(message.author.id), 0)
+        last = self._cooldowns.get(str(message.author.id))
         is_direct = self._directly_addressed(message)
         is_owner = (
             self._is_admin(message.author.id) if hasattr(self, "_is_admin") else False
@@ -6623,6 +6623,7 @@ class MaxwellBot(commands.Bot):
         cooldown_for_reply = (
             math.isfinite(cooldown)
             and cooldown > 0
+            and last is not None
             and now - last < cooldown
             and not is_direct
             and not is_owner
@@ -7256,7 +7257,8 @@ class MaxwellBot(commands.Bot):
                     if not isinstance(last, dict):
                         last = {}
                         self._last_nothing_to_stop = last
-                    if now - float(last.get(channel_id, 0.0) or 0.0) > 30.0:
+                    prev = last.get(channel_id)
+                    if prev is None or now - float(prev) > 30.0:
                         last[channel_id] = now
                         await message.channel.send("nothing to stop")
             elif cmd == "prompt":
@@ -11419,7 +11421,12 @@ class MaxwellBot(commands.Bot):
         if not channel_id:
             return
         now = time.monotonic()
-        last = self._last_bot_send.get(channel_id, 0.0)
+        last = self._last_bot_send.get(channel_id)
+        if last is None:
+            # Never sent here before: nothing to pace against. (Do not use a
+            # 0.0 sentinel -- ``time.monotonic()`` is seconds since boot, so
+            # right after startup it would look like we just sent.)
+            return
         elapsed = now - last
         if elapsed >= effective_cap:
             return
@@ -13359,8 +13366,13 @@ class MaxwellBot(commands.Bot):
         # already got a 'sleeping' note recently, stay silent.
         if uid:
             now = asyncio.get_running_loop().time()
-            last = self._sleep_notified_at.get(uid, 0.0)
-            if now - last < 300:  # 5 minutes
+            # ``loop.time()`` is a monotonic clock that starts near zero at
+            # boot, so a ``0.0`` "never notified" sentinel would read as
+            # "notified moments ago" for the first five minutes after the
+            # host comes up and the notice would be silently swallowed.
+            # Use ``None`` for "never" instead.
+            last = self._sleep_notified_at.get(uid)
+            if last is not None and now - last < 300:  # 5 minutes
                 return False
             self._sleep_notified_at[uid] = now
         remaining = self._format_sleep_remaining(secs)
