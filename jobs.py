@@ -476,7 +476,7 @@ def _delivery_line(final_text: Any, job_id: str) -> str:
 
 
 async def _reply_short(target_message: Any, channel: Any, text: str) -> None:
-    """Reply to the original message (no ping). Fall back to plain channel send."""
+    """Reply to the ORIGINAL message with mention ping. Fall back to plain channel send."""
     text = str(text or "")[:1900]
     if not text.strip():
         return
@@ -484,7 +484,7 @@ async def _reply_short(target_message: Any, channel: Any, text: str) -> None:
     if callable(reply):
         try:
             try:
-                await reply(text, mention_author=False)
+                await reply(text, mention_author=True)
             except TypeError:
                 await reply(text)
             return
@@ -492,6 +492,66 @@ async def _reply_short(target_message: Any, channel: Any, text: str) -> None:
             pass
     if channel is not None:
         await channel.send(text)
+
+
+async def _llm_delivery_line(bot: Any, final_text: Any, job_id: str, job_goal: str = "") -> str:
+    """LLM-rewritten delivery line for the ORIGINAL-message reply (ping on).
+
+    Takes the worker's raw final text and asks the model for one short,
+    natural chat line carrying the result + single URL. Falls back to the
+    templated `_delivery_line` when the LLM is unavailable or returns junk,
+    so delivery never fails silently.
+    """
+    fallback = _delivery_line(final_text, job_id)
+    try:
+        generate = getattr(bot, "_generate_response", None)
+        if not callable(generate):
+            return fallback
+        raw = str(final_text or "").strip()[:2000] or fallback
+        goal = re.sub(r"\s+", " ", str(job_goal or "")).strip()[:200]
+        prompt = (
+            "Rewrite this background-job result as ONE short Discord reply line. "
+            "Keep the real title and the real URL exactly, no placeholders, no extra links. "
+            "No 'job `id` done' prefix, no thread talk — just the result in your own voice, under 200 chars. "
+            f"Result: {raw}"
+            + (f" Goal was: {goal}." if goal else "")
+        )
+        try:
+            await bot._acquire_ai_slot(timeout=30.0, priority="background", key=f"delivery-{job_id}")
+            slot_held = True
+        except Exception:
+            slot_held = False
+        try:
+            resp = await generate(
+                [
+                    {"role": "system", "content": "You are Maxwell. One short reply line, no wall of text."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=256,
+                timeout=120,
+                disable_reasoning=False,
+            )
+        finally:
+            if slot_held:
+                with contextlib.suppress(Exception):
+                    await bot._release_ai_slot()
+        text = str(resp or "").strip()
+        # Single line, single URL — never a wall.
+        first = ""
+        for line in text.splitlines():
+            line = line.strip()
+            if line:
+                first = line
+                break
+        first = re.sub(r"\s+", " ", first)[:400]
+        if not first or len(first) < 10:
+            return fallback
+        url = _first_url(text)
+        if url and url not in first:
+            return f"{first}\n{url}"
+        return first
+    except Exception:
+        return fallback
 
 
 async def _post_thread(thread: Any, text: str) -> None:
@@ -798,9 +858,12 @@ async def run_background_job(bot: Any, job_id: str) -> None:
     final_text = str(final_text or "").strip() or "Done — details are in the thread."
     manager.mark(job.id, status="done", result=final_text[:8000], progress="done")
 
-    # Deliver: ONE short reply to the ORIGINAL message (no ping, no wall).
+    # Deliver: LLM-written reply to the ORIGINAL message (ping on).
     # Full result already lives in the build thread; the channel gets one line.
-    body = _delivery_line(final_text, job.id)
+    try:
+        body = await _llm_delivery_line(bot, final_text, job.id, job.goal)
+    except Exception:
+        body = _delivery_line(final_text, job.id)
     try:
         await _reply_short(orig_message, channel, body)
     except Exception as exc:

@@ -218,6 +218,7 @@ class RunnerStubBot(StubBot):
         super().__init__(manager)
         self.slot_priority = None
         self.generated_with = {}
+        self.generated_calls = []
 
     def _message_tool_platform(self, message):
         return "discord"
@@ -239,6 +240,7 @@ class RunnerStubBot(StubBot):
 
     async def _generate_response(self, messages, **kwargs):
         self.generated_with = dict(kwargs)
+        self.generated_calls.append(dict(kwargs))
         return "built it: http://example.local/site"
 
     def _native_calls_from(self, response):
@@ -268,14 +270,13 @@ def test_runner_delivers_short_reply_no_ping(tmp_path):
     assert job is not None
     assert job.status == "done"
     assert bot.slot_priority == "background"  # user turns outrank it
-    assert bot.generated_with.get("disable_reasoning") is False  # full thinking
-    assert bot.generated_with.get("max_tokens", 0) >= 32768  # extended output
-    # ONE reply to the original message: no ping, job id + single URL.
+    worker_call = bot.generated_calls[0] if bot.generated_calls else {}
+    assert worker_call.get("disable_reasoning") is False  # full thinking
+    assert worker_call.get("max_tokens", 0) >= 32768  # extended output
+    # ONE LLM-written reply to the ORIGINAL message: ping on, single URL.
     assert len(message.replies) == 1
     text, kwargs = message.replies[0]
-    assert kwargs.get("mention_author") is False
-    assert "<@111>" not in text
-    assert job.id in text
+    assert kwargs.get("mention_author") is True
     assert "http://example.local/site" in text
     assert text.count("http") == 1  # single link, never a list
     assert len(channel.sent) == 1
