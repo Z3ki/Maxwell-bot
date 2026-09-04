@@ -334,3 +334,15 @@ def test_runner_delivery_is_single_short_reply(tmp_path):
     assert len(message.channel.sent) == 1  # never a multi-message wall
     assert len(message.channel.sent[0]) <= 1900
 
+
+
+def test_looks_like_progress_markers():
+    from jobs import _looks_like_progress
+
+    assert _looks_like_progress(["Wrote index.html → https://x/"])
+    assert _looks_like_progress(["Patched app.py and restarted → https://x/"])
+    assert _looks_like_progress(["Site created: https://x/"])
+    assert _looks_like_progress(["Backend server live: https://x/"])
+    assert not _looks_like_progress(["Total lines: 491 Part 1 len: 12380"])
+    assert not _looks_like_progress(["Length of index.html: 23706"])
+    assert not _looks_like_progress([])

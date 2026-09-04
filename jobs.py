@@ -385,6 +385,22 @@ def _call_name(call: Any) -> str:
     return ""
 
 
+_PROGRESS_MARKERS = (
+    "site created",
+    "wrote ",
+    "patched ",
+    "backend server live",
+    "deployed",
+    "restarted",
+)
+
+
+def _looks_like_progress(tool_results: Any) -> bool:
+    """Did this step change a site file? Shell greps and reads don't count."""
+    blob = " ".join(str(r or "") for r in list(tool_results or [])[:4]).lower()
+    return any(marker in blob for marker in _PROGRESS_MARKERS)
+
+
 def _summarize_tool_results(results: Any, limit: int = 300) -> str:
     parts = []
     for item in list(results or [])[:4]:
@@ -585,6 +601,7 @@ async def run_background_job(bot: Any, job_id: str) -> None:
 
     final_text = ""
     succeeded = False
+    last_progress_step = 0
     deadline = time.monotonic() + float(timeout)
     try:
         for step in range(max(1, max_iters)):
@@ -658,6 +675,27 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                 messages.append({"role": "user", "content": f"=== TOOL RESULTS ===\ntool error: {exc}"})
                 continue
             manager.mark(job.id, progress=f"step {step + 1}: {', '.join([n for n in names if n][:4]) or 'thinking'}")
+            if _looks_like_progress(tool_results):
+                last_progress_step = step
+            elif step - last_progress_step >= 15:
+                # Stuck loop: shell greps and re-reads, no file changing.
+                # Nudge hard toward converge instead of burning 100 steps.
+                last_progress_step = step
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "You're going in circles: no site file has changed in 15 steps. "
+                            "Stop shell-verifying trivia and stop re-reading files. Your next "
+                            "step must be ONE of: edit_site/site_server write or replace with "
+                            "a real fix, or site_test. Then finish with the single-line summary."
+                        ),
+                    }
+                )
+                await _post_thread(
+                    thread,
+                    f"step {step + 1}: nudge — no file change in 15 steps, forcing converge.",
+                )
             await _post_thread(
                 thread,
                 f"step {step + 1} `{', '.join([n for n in names if n][:4]) or '…'}` — {_summarize_tool_results(tool_results)}",
