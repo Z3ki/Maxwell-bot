@@ -2,9 +2,9 @@
 set -euo pipefail
 
 if [ -t 1 ]; then
-  BOLD='\033[1m'; DIM='\033[2m'; GREEN='\033[32m'; YELLOW='\033[33m'; RED='\033[31m'; RESET='\033[0m'
+  BOLD='\033[1m'; GREEN='\033[32m'; YELLOW='\033[33m'; RED='\033[31m'; RESET='\033[0m'
 else
-  BOLD=''; DIM=''; GREEN=''; YELLOW=''; RED=''; RESET=''
+  BOLD=''; GREEN=''; YELLOW=''; RED=''; RESET=''
 fi
 
 step() { printf '\n%s==>%s %s\n' "$BOLD" "$RESET" "$*"; }
@@ -14,7 +14,13 @@ fail() { printf '  %s✗%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
 
 SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
 case "$SCRIPT_PATH" in
-  */*) SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" 2>/dev/null && pwd -P || pwd -P)" ;;
+  */*)
+    if SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" 2>/dev/null && pwd -P)"; then
+      :
+    else
+      SCRIPT_DIR="$(pwd -P)"
+    fi
+    ;;
   *) SCRIPT_DIR="$(pwd -P)" ;;
 esac
 
@@ -338,8 +344,10 @@ configure_env() {
       if [ "$ollama_choice" = "yes" ]; then
         if [ "$(uname -s 2>/dev/null || printf unknown)" = "Linux" ]; then
           curl -fsSL https://ollama.com/install.sh | sh
-          command -v ollama >/dev/null 2>&1 && ollama pull "$model_default" || true
-          command -v ollama >/dev/null 2>&1 && ollama pull qwen3-embedding:0.6b || true
+          if command -v ollama >/dev/null 2>&1; then
+            ollama pull "$model_default" || true
+            ollama pull qwen3-embedding:0.6b || true
+          fi
         else
           warn "Install Ollama from https://ollama.com/download, then run: ollama pull $model_default"
         fi
@@ -356,7 +364,11 @@ configure_env() {
   printf '\n%sStep 3/5: Owner Discord user ID(s)%s\n' "$BOLD" "$RESET"
   printf '  Enable Discord Developer Mode, right-click yourself, and choose Copy User ID. Use commas for multiple owners.\n'
   owner=$(prompt "Owner ID(s), optional" "${MAXWELL_OWNER_IDS:-}")
-  [ -n "$owner" ] && set_env_value MAXWELL_OWNER_IDS "$owner" || warn "MAXWELL_OWNER_IDS left blank; admin commands will be denied."
+  if [ -n "$owner" ]; then
+    set_env_value MAXWELL_OWNER_IDS "$owner"
+  else
+    warn "MAXWELL_OWNER_IDS left blank; admin commands will be denied."
+  fi
 
   printf '\n%sStep 4/5: Dashboard password%s\n' "$BOLD" "$RESET"
   printf '  Empty MAXWELL_ADMIN_PASSWORD makes the dashboard/admin API answer 503. Press Enter interactively to generate one.\n'
@@ -366,14 +378,26 @@ configure_env() {
     if command -v openssl >/dev/null 2>&1; then admin_pw=$(openssl rand -hex 16); else admin_pw=$(python3 -c 'import secrets; print(secrets.token_hex(16))'); fi
     printf '  Generated dashboard password: %s\n' "$admin_pw"
   fi
-  [ -n "$admin_pw" ] && set_env_value MAXWELL_ADMIN_PASSWORD "$admin_pw" || warn "MAXWELL_ADMIN_PASSWORD left blank; dashboard/admin API will answer 503."
+  if [ -n "$admin_pw" ]; then
+    set_env_value MAXWELL_ADMIN_PASSWORD "$admin_pw"
+  else
+    warn "MAXWELL_ADMIN_PASSWORD left blank; dashboard/admin API will answer 503."
+  fi
 
   printf '\n%sStep 5/5: Optional background loops%s\n' "$BOLD" "$RESET"
   printf '  Autonomy and REM spend LLM tokens on timers, so the safe default is off.\n'
   autonomy=$(yes_no "Enable autonomy background actions?" "no" "${ENABLE_AUTONOMY:-}")
   rem=$(yes_no "Enable REM memory consolidation?" "no" "${ENABLE_REM:-}")
-  [ "$autonomy" = "yes" ] && set_env_value ENABLE_AUTONOMY true || set_env_value ENABLE_AUTONOMY false
-  [ "$rem" = "yes" ] && set_env_value ENABLE_REM true || set_env_value ENABLE_REM false
+  if [ "$autonomy" = "yes" ]; then
+    set_env_value ENABLE_AUTONOMY true
+  else
+    set_env_value ENABLE_AUTONOMY false
+  fi
+  if [ "$rem" = "yes" ]; then
+    set_env_value ENABLE_REM true
+  else
+    set_env_value ENABLE_REM false
+  fi
 
   install_docker_if_requested
 }

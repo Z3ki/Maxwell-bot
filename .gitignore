@@ -15,6 +15,7 @@ avatar.b64
 public/bot/
 *.log
 dump.pm2
+run.sh
 .DS_Store
 .kilo/
 .pi-lens/
