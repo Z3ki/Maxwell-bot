@@ -102,7 +102,7 @@ prompt_secret() {
   prompt_text=$1
   default_value=${2:-}
   answer=""
-  if [ "$NONINTERACTIVE" = "1" ]; then
+  if [ "$NONINTERACTIVE" = "1" ] || [ -z "${TTY:-}" ]; then
     printf '%s' "$default_value"
     return 0
   fi
@@ -181,7 +181,10 @@ install_extra_system_deps() {
   step "Installing optional system packages"
   case "$OS_FAMILY" in
     apt) run_as_root apt-get update; run_as_root apt-get install -y ffmpeg libopus0 libsodium-dev espeak-ng nodejs ;;
-    dnf) run_as_root dnf install -y ffmpeg opus libsodium-devel espeak-ng nodejs ;;
+    dnf)
+      run_as_root dnf install -y opus libsodium-devel espeak-ng nodejs
+      run_as_root dnf install -y ffmpeg || warn "ffmpeg not in default dnf repos (enable RPM Fusion for voice support)."
+      ;;
     pacman) run_as_root pacman -Sy --needed --noconfirm ffmpeg opus libsodium espeak-ng nodejs ;;
     brew) brew install ffmpeg opus libsodium espeak-ng node ;;
   esac
@@ -225,7 +228,7 @@ clone_or_update() {
 }
 
 set_env_value() {
-  "$PYTHON_BIN" scripts/set_env.py .env "$1" "$2"
+  SET_ENV_VALUE="$2" "$PYTHON_BIN" scripts/set_env.py .env "$1"
 }
 
 copy_env_if_needed() {
@@ -282,7 +285,9 @@ install_docker_if_requested() {
   step "Installing Docker"
   case "$OS_FAMILY" in
     apt|dnf)
-      curl -fsSL https://get.docker.com | run_as_root sh
+      curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+      run_as_root sh /tmp/get-docker.sh
+      rm -f /tmp/get-docker.sh
       ;;
     pacman)
       run_as_root pacman -Sy --needed --noconfirm docker
@@ -293,13 +298,14 @@ install_docker_if_requested() {
       brew install --cask docker
       ;;
   esac
-  if command -v docker >/dev/null 2>&1 && [ "$(id -u)" -ne 0 ] && getent group docker >/dev/null 2>&1; then
-    run_as_root usermod -aG docker "$USER" || true
-    warn "Added $USER to the docker group. Log out and back in before using Docker without sudo."
+  target_user="${USER:-$(id -un 2>/dev/null || printf '')}"
+  if command -v docker >/dev/null 2>&1 && [ "$(id -u)" -ne 0 ] && [ -n "$target_user" ] && getent group docker >/dev/null 2>&1; then
+    run_as_root usermod -aG docker "$target_user" || true
+    warn "Added $target_user to the docker group. Log out and back in before using Docker without sudo."
   fi
-  if docker_reachable; then
+  if docker_reachable || run_as_root docker info >/dev/null 2>&1; then
     set_env_value ENABLE_SHELL true
-    ok "Docker is reachable; shell tool remains enabled"
+    ok "Docker daemon is running; shell tool enabled"
   else
     set_env_value ENABLE_SHELL false
     warn "Docker is still not reachable; set ENABLE_SHELL=false. Re-run --reconfigure after fixing Docker."
@@ -343,7 +349,9 @@ configure_env() {
       ollama_choice=$(yes_no "Install Ollama and pull the selected model?" "no" "")
       if [ "$ollama_choice" = "yes" ]; then
         if [ "$(uname -s 2>/dev/null || printf unknown)" = "Linux" ]; then
-          curl -fsSL https://ollama.com/install.sh | sh
+          curl -fsSL https://ollama.com/install.sh -o /tmp/ollama-install.sh
+          sh /tmp/ollama-install.sh
+          rm -f /tmp/ollama-install.sh
           if command -v ollama >/dev/null 2>&1; then
             ollama pull "$model_default" || true
             ollama pull qwen3-embedding:0.6b || true
@@ -370,8 +378,13 @@ configure_env() {
     warn "MAXWELL_OWNER_IDS left blank; admin commands will be denied."
   fi
 
-  printf '\n%sStep 4/5: Dashboard password%s\n' "$BOLD" "$RESET"
+  printf '\n%sStep 4/5: Dashboard credentials%s\n' "$BOLD" "$RESET"
   printf '  Empty MAXWELL_ADMIN_PASSWORD makes the dashboard/admin API answer 503. Press Enter interactively to generate one.\n'
+  admin_user_default="${MAXWELL_ADMIN_USER:-admin}"
+  admin_user=$(prompt "Dashboard admin username" "$admin_user_default")
+  [ -n "$admin_user" ] || admin_user="admin"
+  set_env_value MAXWELL_ADMIN_USER "$admin_user"
+
   admin_pw_default="${MAXWELL_ADMIN_PASSWORD:-}"
   admin_pw=$(prompt_secret "Dashboard admin password" "$admin_pw_default")
   if [ -z "$admin_pw" ] && [ "$NONINTERACTIVE" != "1" ]; then

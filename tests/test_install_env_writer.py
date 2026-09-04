@@ -34,3 +34,15 @@ def test_set_env_replaces_exported_key_and_rejects_multiline(tmp_path: Path) -> 
     assert env_file.read_text(encoding="utf-8") == "MAXWELL_OWNER_IDS=123, 456\n"
     with pytest.raises(ValueError):
         set_env(env_file, "BAD", "line1\nline2")
+
+
+def test_set_env_handles_backreferences_and_quotes(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("DISCORD_TOKEN=initial\n", encoding="utf-8")
+
+    special_secret = r"token\1\g<test>with\"quote and #comment"
+    set_env(env_file, "DISCORD_TOKEN", special_secret)
+
+    import dotenv
+    values = dotenv.dotenv_values(env_file)
+    assert values["DISCORD_TOKEN"] == special_secret
