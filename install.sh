@@ -25,7 +25,7 @@ case "$SCRIPT_PATH" in
 esac
 
 INSTALL_DIR="${MAXWELL_INSTALL_DIR:-$HOME/maxwell}"
-REPO_URL="${MAXWELL_REPO_URL:-https://github.com/guthabbr0/Maxwell-bot.git}"
+REPO_URL="${MAXWELL_REPO_URL:-https://github.com/Z3ki/Maxwell-bot.git}"
 BRANCH="${MAXWELL_BRANCH:-main}"
 RECONFIGURE=0
 LOCAL_MODE=0

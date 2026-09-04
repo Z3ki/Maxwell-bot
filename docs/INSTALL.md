@@ -3,10 +3,10 @@
 ## Fastest path
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/guthabbr0/Maxwell-bot/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/install.sh | bash
 ```
 
-The installer explains that Maxwell is a Discord self-bot, warns that self-bots may violate Discord's Terms of Service, installs system packages, clones/updates `https://github.com/guthabbr0/Maxwell-bot.git`, creates `.venv`, installs Python dependencies, asks for configuration, runs `doctor.py`, writes `run.sh`, and prints start/update instructions.
+The installer explains that Maxwell is a Discord self-bot, warns that self-bots may violate Discord's Terms of Service, installs system packages, clones/updates `https://github.com/Z3ki/Maxwell-bot.git`, creates `.venv`, installs Python dependencies, asks for configuration, runs `doctor.py`, writes `run.sh`, and prints start/update instructions.
 
 It will ask for:
 
@@ -32,7 +32,7 @@ MAXWELL_OWNER_IDS="123456789012345678" \
 MAXWELL_ADMIN_PASSWORD="change-me" \
 MAXWELL_INSTALL_EXTRAS=no \
 MAXWELL_INSTALL_DOCKER=no \
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/guthabbr0/Maxwell-bot/main/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/install.sh)"
 ```
 
 For sandboxes or CI where system packages must not be installed, add `MAXWELL_SKIP_SYSTEM_DEPS=1`. Use it only after preinstalling `git`, `curl`, and Python 3.11+ with venv/pip.
@@ -56,7 +56,7 @@ sudo apt install -y git python3 python3-venv python3-pip
 ```
 
 ```bash
-git clone https://github.com/guthabbr0/Maxwell-bot.git maxwell
+git clone https://github.com/Z3ki/Maxwell-bot.git maxwell
 cd maxwell
 python3 -m venv .venv
 . .venv/bin/activate

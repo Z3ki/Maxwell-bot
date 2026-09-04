@@ -9,7 +9,7 @@ Maxwell is a Discord self-bot backed by any OpenAI-compatible API. It reads text
 The newcomer path is one command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/guthabbr0/Maxwell-bot/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/install.sh | bash
 ```
 
 Maxwell is a Discord self-bot backed by any OpenAI-compatible LLM. The installer fetches this repository, installs system and Python dependencies, creates `.venv`, walks through Discord token/provider/owner/dashboard configuration, verifies the result with `doctor.py`, and writes `run.sh`.
@@ -25,7 +25,7 @@ Read these first if you are new to the project:
 ### Manual path in brief
 
 ```bash
-git clone https://github.com/guthabbr0/Maxwell-bot.git maxwell
+git clone https://github.com/Z3ki/Maxwell-bot.git maxwell
 cd maxwell
 python3 -m venv .venv
 . .venv/bin/activate
