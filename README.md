@@ -6,119 +6,49 @@ Maxwell is a Discord self-bot backed by any OpenAI-compatible API. It reads text
 
 ## Quick start
 
-You need exactly two things: **a Discord token** and **a model** (any
-OpenAI-compatible endpoint). Everything else is optional and turns itself on
-only if what it needs is already installed.
+The newcomer path is one command:
 
-### Prerequisites (Debian/Ubuntu)
 ```bash
-sudo apt update && sudo apt install -y git python3 python3-venv python3-pip
+curl -fsSL https://raw.githubusercontent.com/guthabbr0/Maxwell-bot/main/install.sh | bash
 ```
 
+Maxwell is a Discord self-bot backed by any OpenAI-compatible LLM. The installer fetches this repository, installs system and Python dependencies, creates `.venv`, walks through Discord token/provider/owner/dashboard configuration, verifies the result with `doctor.py`, and writes `run.sh`.
+
+**Self-bot warning:** Maxwell uses `discord.py-self` with a Discord user token. Self-bots may violate Discord's Terms of Service and can put the account at risk. The installer asks you to confirm this before continuing.
+
+Read these first if you are new to the project:
+
+- [High-level overview](docs/OVERVIEW.md)
+- [Complete installation guide](docs/INSTALL.md)
+- [Configuration quick reference](docs/CONFIGURATION.md)
+
+### Manual path in brief
+
 ```bash
-git clone https://github.com/Z3ki/Maxwell-bot.git maxwell && cd maxwell
-./setup.sh          # venv + core deps + asks for the two required values
+git clone https://github.com/guthabbr0/Maxwell-bot.git maxwell
+cd maxwell
+python3 -m venv .venv
 . .venv/bin/activate
-python3 bot.py
-```
-
-Prefer to do it by hand?
-
-```bash
-python3 -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 cp .env.example .env      # fill in DISCORD_TOKEN, OLLAMA_BASE_URL, OLLAMA_MODEL
-python3 doctor.py         # what's on, what's off, and why
+python3 doctor.py
 python3 bot.py
 ```
 
-`python3 doctor.py --probe` also calls your model and embedding endpoints, so
-you find out the URL or key is wrong before the bot does.
+`python3 doctor.py --probe` also calls your model and embedding endpoints, so you find out the URL, key, or model is wrong before the bot does.
 
-One thing is worth knowing up front: the `shell` tool runs inside a Docker
-container, so it needs a working Docker daemon your user can reach.
-Everything else works without it. `doctor.py` reports the daemon alongside
-the rest, and `ENABLE_SHELL=false` turns the tool off if you would rather
-not install Docker at all.
-
-### The minimum .env
-
-```ini
-DISCORD_TOKEN=your-discord-user-token
-OLLAMA_BASE_URL=http://localhost:11434   # or https://openrouter.ai/api/v1, etc.
-OLLAMA_MODEL=qwen3:8b                    # whatever your endpoint serves
-```
-
-A bare host URL gets `/v1` appended automatically; a URL that already has a
-path is used as-is. Add `OLLAMA_API_KEY` if your endpoint needs a bearer token,
-and `MAXWELL_OWNER_IDS` (your Discord user ID) if you want admin commands to
-work.
-
-### Optional extras
-
-Nothing below is needed to run the bot. Install a line only if you want that
-feature — each one is detected at startup, and a missing dependency turns that
-one feature off instead of breaking anything.
+### Running after install
 
 ```bash
-pip install -r requirements-optional.txt   # all of it
-pip install ddgs                           # or just web search
+cd ~/maxwell
+./run.sh                         # bot
+. .venv/bin/activate
+python3 api/api_server.py        # dashboard/API (optional)
+pm2 start ecosystem.config.js    # optional process manager
 ```
 
-| You want | Install | Feature |
-|---|---|---|
-| Web search | `pip install ddgs` | `web_search` tool |
-| YouTube | `pip install yt-dlp yt-dlp-ejs` + `node` | `youtube` tool |
-| Video attachments | `ffmpeg` | frame extraction for `video/*` |
-| Voice channels | `pip install PyNaCl davey discord-ext-voice-recv` + `libopus0 libsodium-dev` | live VC listening, `,vc` commands |
-| Text to speech | `espeak-ng` (free), or `pip install gTTS`, or a Fish/NVIDIA key | `tts` tool, VC speech |
-| Semantic memory | `ollama pull qwen3-embedding:0.6b`, or any embeddings endpoint | RAG vector recall |
-| Email tools | Postfix + Dovecot, then set `MAXWELL_EMAIL_PASSWORD` | `email_*` tools |
-| Posting to X | two cookies from a logged-in x.com tab (`X_AUTH_TOKEN`, `X_CT0`) | `x_post`; reading X needs nothing |
-
-Debian/Ubuntu, everything except mail:
-
-```bash
-sudo apt install ffmpeg libopus0 libsodium-dev espeak-ng nodejs
-```
-
-### Optional features are tri-state
-
-Every `ENABLE_*` switch takes `true`, `false`, or `auto` — and `auto` is the
-default, including when you leave it out of `.env` entirely:
-
-- `auto` — on only if the dependency is actually present on this machine.
-- `true` — force on. You promise the dependency is there.
-- `false` — force off. The tool is never registered and the dependency never imported.
-
-So you never have to fill in a wall of flags to install Maxwell; you set one
-only to overrule a detection result. `python3 doctor.py` prints the resolved
-state of every switch with the reason, and the bot logs the same summary at
-startup.
-
-Two features are opt-in rather than auto-detected, because they spend tokens
-on a timer with nobody watching: `ENABLE_REM` and `ENABLE_AUTONOMY`.
-
-### Run it
-
-```bash
-python3 bot.py                 # the bot
-python3 api/api_server.py      # dashboard + admin API (optional)
-```
-
-Or under PM2 (what the author runs in production):
-
-```bash
-pm2 start ecosystem.config.js
-pm2 logs maxwell-bot maxwell-api
-```
-
-The PM2 config uses `.venv/bin/python3` when that exists, and only manages an
-`ollama` process if the `ollama` binary is on your PATH (`MAXWELL_PM2_OLLAMA=true|false`
-to overrule).
-
-For the YouTube tool, set `YOUTUBE_COOKIES_FILE=/path/to/cookies.txt` in `.env`
-for videos that trigger YouTube bot checks. Never commit that file.
+One thing is worth knowing up front: the `shell` tool runs inside a Docker container, so it needs a working Docker daemon your user can reach. The installer offers to install Docker or writes `ENABLE_SHELL=false` so the default is never left enabled silently when Docker is unavailable.
 
 ## Features
 
@@ -150,7 +80,8 @@ site_backend.py     Per-site datastore behind /api/site/<slug>/ (generated sites
 site_server.py      Per-site backend containers behind /bot/<slug>/api/
 site_test.py        Headless Chromium probe: console, network, screenshot
 doctor.py           Install check: what works, what doesn't, why
-setup.sh            One-command installer
+install.sh          One-line bootstrap installer
+setup.sh            Local setup wrapper around install.sh --local
 api/api_server.py   Dashboard and admin API server
 web/                Static dashboard files (index.html, admin/)
 examples/           Caddyfile and PM2 config examples
