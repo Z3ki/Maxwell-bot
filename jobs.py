@@ -71,6 +71,22 @@ def _worker_tools(openai_tools: Any) -> list[dict[str, Any]]:
     ]
 
 
+BG_MODEL_DEFAULT = "gemini-3.8-flash-high"
+
+
+def resolve_job_model(control: Any) -> str:
+    """LLM model for background workers. Precedence: control bg_model > env BG_MODEL > default.
+
+    Live turns stay on the cheap low model; workers get the high model so big
+    builds reason properly. Blank/whitespace falls back down the chain.
+    """
+    control = control or {}
+    raw = str(control.get("bg_model", "") or "").strip()
+    if not raw:
+        raw = str(os.getenv("BG_MODEL", "") or "").strip()
+    return raw or BG_MODEL_DEFAULT
+
+
 def resolve_job_budgets(control: Any, config: Any) -> dict[str, int]:
     """Extended thinking/output/timeout budgets for background jobs.
 
@@ -519,6 +535,7 @@ async def run_background_job(bot: Any, job_id: str) -> None:
         return
 
     budgets = resolve_job_budgets(getattr(bot, "_control", {}) or {}, getattr(bot, "config", None))
+    job_model = resolve_job_model(getattr(bot, "_control", {}) or {})
     max_tokens = int(budgets["max_tokens"])
     timeout = int(budgets["timeout_seconds"])
     max_iters = int(budgets["max_iters"])
@@ -667,6 +684,7 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                     max_tokens=max_tokens,
                     tools=provider_tools,
                     disable_reasoning=False,
+                    model=job_model,
                 )
                 succeeded = True
             except Exception as exc:

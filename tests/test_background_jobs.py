@@ -368,3 +368,14 @@ def test_delivery_line_vague_final_falls_back_to_thread():
     good = _delivery_line("Built BODYCAM // ZERO HOUR: https://maxwell.z3ki.dev/bot/bodycam-zero-hour/ — hyper-realistic bodycam", "abc123")
     assert "https://maxwell.z3ki.dev/bot/bodycam-zero-hour/" in good
     assert good.count("http") == 1
+
+
+def test_resolve_job_model_precedence(monkeypatch):
+    from jobs import BG_MODEL_DEFAULT, resolve_job_model
+
+    monkeypatch.delenv("BG_MODEL", raising=False)
+    assert resolve_job_model({}) == BG_MODEL_DEFAULT
+    assert resolve_job_model({"bg_model": "  "}) == BG_MODEL_DEFAULT
+    monkeypatch.setenv("BG_MODEL", "gemini-3.8-flash-medium")
+    assert resolve_job_model({}) == "gemini-3.8-flash-medium"
+    assert resolve_job_model({"bg_model": "custom-model"}) == "custom-model"
