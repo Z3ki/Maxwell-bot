@@ -509,7 +509,7 @@ async def run_background_job(bot: Any, job_id: str) -> None:
         manager.mark(job.id, thread_id=str(getattr(thread, "id", "") or ""))
         await _post_thread(
             thread,
-            f"Job `{job.id}` running for <@{job.user_id}> — `{_short(job.goal, 120)}`\n"
+            f"Job `{job.id}` running — `{_short(job.goal, 120)}`\n"
             f"Budgets: {max_tokens} tokens/call, {timeout}s timeout, {max_iters} steps. Progress lands here.",
         )
     else:

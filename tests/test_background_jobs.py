@@ -279,6 +279,8 @@ def test_runner_delivers_short_reply_no_ping(tmp_path):
     assert "http://example.local/site" in text
     assert text.count("http") == 1  # single link, never a list
     assert len(channel.sent) == 1
+    # thread posts never ping either
+    assert all("<@" not in t for t in message.channel.thread.sent)
 
 
 def test_runner_marks_error_and_notifies(tmp_path):
