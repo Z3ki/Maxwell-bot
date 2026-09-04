@@ -340,6 +340,7 @@ from providers import (  # noqa: E402
     ProviderUsageExhaustedError,
 )
 from rag_memory import RAGMemoryManager, RemEventLog, _parse_iso  # noqa: E402
+from jobs import BackgroundJobManager, SpawnBackgroundTool  # noqa: E402
 from rem import RemStore, load_rem_defaults, run_rem_once  # noqa: E402
 from tool_progress import make_progress as _make_tool_progress  # noqa: E402
 from tool_registry import (  # noqa: E402 — reasoning now rides inside tool calls
@@ -2441,6 +2442,13 @@ TOOL_PROTOCOL = (
     "exactly what not to do.\n"
     "If a site request is so vague you cannot start, you may call guide(goal=...) "
     "to ask a few questions. Otherwise just build it.\n"
+    "LONG TASKS GO TO THE BACKGROUND: if the job will take many tool calls "
+    "(a full site + backend + test cycle, big research), call "
+    "spawn_background(goal=...) FIRST, then send_message ONE short ack line "
+    "naming the job id and end the turn. That ack is the single exception to "
+    "the no-placeholder rule — the detached job does the work and delivers "
+    "the finished answer later. Never start a long build inline when you "
+    "could spawn it.\n"
     "chess: you play your own moves. chess_move returns every legal move "
     "annotated with what it captures, whether it checks or mates, and whether "
     "the piece would just be taken — read it, pick the strongest move, and pass "
@@ -2931,6 +2939,13 @@ class MaxwellBot(commands.Bot):
             max_directed=8,
             max_age=300.0,
             on_drop=self._on_reply_queue_drop,
+        )
+        # Detached background sub-agent jobs for long tasks (sites, builds,
+        # research). A job frees the channel turn immediately and delivers
+        # later via channel.send. See jobs.py.
+        _jobs_data_dir = getattr(self.config, "DATA_DIR", "") or "data"
+        self.bg_jobs = BackgroundJobManager(
+            data_path=os.path.join(_jobs_data_dir, "background_jobs.json")
         )
         # One reply per message id. Discord redelivers MESSAGE_CREATE after a
         # gateway resume; without this that is a second full reply, which
@@ -3877,6 +3892,9 @@ class MaxwellBot(commands.Bot):
             self.tools["site_test"] = SiteTestTool(self)
             self.tools["list_sites"] = ListSitesTool(self)
             self.tools["guide"] = GuideTool(self)
+        # Background sub-agent jobs: always registered (the tool itself is
+        # the escape hatch for long turns, independent of the site feature).
+        self.tools["spawn_background"] = SpawnBackgroundTool(self)
         if self.config.ENABLE_WEB_SEARCH:
             self.tools["web_search"] = WebSearchTool(self)
         self.tools["no_response"] = NoResponseTool(self)
@@ -7231,6 +7249,16 @@ class MaxwellBot(commands.Bot):
         channel_id = str(message.channel.id)
         try:
             if cmd == "stop":
+                # ",stop job <id>" cancels a background job instead of the live turn.
+                _stop_args = (args or "").strip().split()
+                if len(_stop_args) >= 2 and _stop_args[0].lower() == "job":
+                    _ok, _msg = self.bg_jobs.cancel(
+                        _stop_args[1],
+                        requester_id=getattr(message.author, "id", ""),
+                        is_admin=self._is_admin(message.author.id),
+                    )
+                    await message.channel.send(_msg)
+                    return
                 # ",stop" must stop everything for this room: the turn that is
                 # generating AND anything queued behind it. Cancelling only the
                 # in-flight task let the next queued reply start immediately,
@@ -7261,6 +7289,64 @@ class MaxwellBot(commands.Bot):
                     if prev is None or now - float(prev) > 30.0:
                         last[channel_id] = now
                         await message.channel.send("nothing to stop")
+            elif cmd == "bg":
+                # Manual background job: `,bg <goal>`. Everyone may use it;
+                # the live turn ends at once and the job pings back when done.
+                _goal = (args or "").strip()
+                if not _goal:
+                    await message.channel.send("usage: `,bg <what to build/do>`")
+                else:
+                    try:
+                        _job = self.bg_jobs.create(
+                            guild_id=message.guild.id if message.guild else "DM",
+                            channel_id=channel_id,
+                            user_id=message.author.id,
+                            goal=_goal,
+                        )
+                    except (ValueError, RuntimeError) as _exc:
+                        await message.channel.send(str(_exc))
+                    else:
+                        from jobs import run_background_job as _run_bg
+
+                        self.bg_jobs.attach_runtime(
+                            _job.id, message=message, channel=message.channel
+                        )
+                        try:
+                            _task = _spawn_background(_run_bg(self, _job.id))
+                            self.bg_jobs.track_task(_job.id, _task)
+                        except RuntimeError as _exc:
+                            self.bg_jobs.mark(_job.id, status="error", progress=str(_exc)[:200])
+                            await message.channel.send(f"could not launch job: {_exc}")
+                        else:
+                            await message.channel.send(
+                                f"on it — job `{_job.id}`, I'll ping you when it's done"
+                            )
+            elif cmd == "jobs":
+                _gid = str(message.guild.id) if message.guild else ""
+                await message.channel.send(self.bg_jobs.list_text(limit=10, guild_id=_gid))
+            elif cmd == "job":
+                _job_args = (args or "").strip().split(maxsplit=1)
+                if len(_job_args) == 2 and _job_args[0].lower() == "cancel":
+                    _ok, _msg = self.bg_jobs.cancel(
+                        _job_args[1],
+                        requester_id=getattr(message.author, "id", ""),
+                        is_admin=self._is_admin(message.author.id),
+                    )
+                    await message.channel.send(_msg)
+                else:
+                    _job = self.bg_jobs.get(_job_args[0] if _job_args else "")
+                    _gid = str(message.guild.id) if message.guild else ""
+                    _uid = str(message.author.id)
+                    _is_adm = self._is_admin(message.author.id)
+                    if _job is None:
+                        await message.channel.send("usage: `,job cancel <id>`")
+                    elif not _is_adm and ((_gid and _job.guild_id != _gid) or (not _gid and _job.user_id != _uid)):
+                        await message.channel.send("job not found.")
+                    else:
+                        await message.channel.send(
+                            f"`{_job.id}` [{_job.status}] {_job.goal[:200]}"
+                            + (f"\n{_job.progress[:500]}" if _job.progress else "")
+                        )
             elif cmd == "prompt":
                 if args is None:
                     current = self.memory.get_server_prompt(server_id)
