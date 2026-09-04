@@ -4747,6 +4747,57 @@ def _site_placeholder_warnings(body: str | None, extra_files: list[dict]) -> lis
     return found[:12]
 
 
+_FETCH_ABS_API_RE = re.compile(
+    r"""(?:fetch|axios\.\w+|EventSource)\s*\(\s*['"`]\s*/api/"""
+)
+_WS_HARDCODED_RE = re.compile(
+    r"""new\s+WebSocket\s*\(\s*['"`](?:wss?://|/api/)"""
+)
+_BOT_API_SLUG_RE = re.compile(r"""['"`]/bot/([A-Za-z0-9._ \-]{1,80})/api/""")
+
+
+def _site_api_path_warnings(slug: str, body: str | None, extra_files: list[dict]) -> list[str]:
+    """Frontend calls that can never reach this site's backend.
+
+    The page is served under /bot/<slug>/, so fetch('/api/...') resolves
+    to the domain root and 404s — the frontend must call its backend with
+    RELATIVE paths ('api/...'). A hardcoded /bot/<other>/api/... is the
+    same bug with a different slug. Reported, not blocking: same rationale
+    as _site_placeholder_warnings.
+    """
+    sources: list[tuple[str, str]] = []
+    if body:
+        sources.append(("index.html", str(body)))
+    for entry in extra_files or []:
+        blob = entry.get("bytes") or b""
+        if not blob or len(blob) > 2_000_000:
+            continue
+        with contextlib.suppress(UnicodeDecodeError):
+            sources.append((str(entry.get("path") or "file"), blob.decode("utf-8")))
+
+    found: list[str] = []
+    for label, text in sources:
+        if not label.lower().endswith((".html", ".htm", ".js")):
+            continue
+        if _FETCH_ABS_API_RE.search(text):
+            found.append(
+                f"{label}: absolute fetch('/api/...') 404s under /bot/{slug}/ — "
+                "call the backend with relative paths ('api/...')"
+            )
+        if _WS_HARDCODED_RE.search(text):
+            found.append(
+                f"{label}: hardcoded WebSocket URL — build it from "
+                f"location.origin.replace('http', 'ws') + '/bot/{slug}/api/ws'"
+            )
+        for match in _BOT_API_SLUG_RE.finditer(text):
+            if match.group(1) != slug:
+                found.append(
+                    f"{label}: calls /bot/{match.group(1)}/api/... but this site "
+                    f"is {slug} — use relative 'api/...' instead"
+                )
+    return found[:12]
+
+
 async def _write_site_file(site_dir: str, rel: str, blob: bytes) -> str:
     """Atomic write of one file inside a site. Returns '' or an error."""
     target = _site_child_path(site_dir, rel)
@@ -4965,7 +5016,8 @@ class CreateSiteTool(Tool):
             "site_servers/<slug>/app.py (FastAPI+uvicorn on $PORT, REST at /api/... and "
             "WebSocket at /ws if realtime), run ALL compute/state server-side, frontend "
             "ONLY renders API/ws. Client-only sites are forbidden. Always site_test + fix "
-            "before claiming it works."
+            "before claiming it works. Frontend API calls are RELATIVE ('api/notes', "
+            "never '/api/...' — absolute paths 404 under /bot/<name>/)."
         )
 
     async def execute(
@@ -5227,6 +5279,13 @@ class CreateSiteTool(Tool):
                 result += f"\nFiles: {', '.join(written)}"
             if wants_backend:
                 result += "\n" + site_backend.client_guide(f"/api/site/{slug}")
+                result += (
+                    "\nNOTE: /api/site/<slug>/... above is the simple KV store. If this "
+                    "site also gets a site_server container backend (/bot/<slug>/api/...), "
+                    "the frontend uses the container with RELATIVE paths ('api/...') — "
+                    "pick the backend that fits, use its exact routes, never invent "
+                    "routes or mix the two."
+                )
             result += f"\nLifetime: {site_expiry_label(site_entry, control)}."
             # Placeholders shipped in the HTML are invisible in a 200 response
             # and in a screenshot of a page that has not mounted, so they are
@@ -5237,6 +5296,14 @@ class CreateSiteTool(Tool):
                     "\nUNFINISHED CONTENT — fix these with edit_site before you "
                     "tell anyone the site is done:\n"
                     + "\n".join(f"  • {item}" for item in shortfalls)
+                )
+            api_paths = _site_api_path_warnings(slug, body, extra_files)
+            if api_paths:
+                result += (
+                    "\nWRONG API PATH — the frontend can never reach the backend "
+                    "like this. Fix with edit_site before you tell anyone the "
+                    "site is done:\n"
+                    + "\n".join(f"  • {item}" for item in api_paths)
                 )
             result += (
                 f'\nTest it with site_test(name="{slug}") before telling '
@@ -5523,12 +5590,23 @@ class EditSiteTool(_SiteOwnedTool):
                     return f"Error: {werr}"
                 if rel not in written:
                     written.append(rel)
+            edit_pages: list[dict] = list(extra_files or [])
+            if content is not None and isinstance(content, str):
+                edit_pages = edit_pages + [{"path": rel, "bytes": content.encode("utf-8")}]
+            api_paths = _site_api_path_warnings(slug, None, edit_pages)
+            api_note = (
+                "\nWRONG API PATH — the frontend can never reach the backend "
+                "like this. Fix before you tell anyone the site is done:\n"
+                + "\n".join(f"  • {item}" for item in api_paths)
+                if api_paths
+                else ""
+            )
             return (
                 f"Wrote {', '.join(written)} → {url}\n"
                 f'Call site_test(name="{slug}") to load it and check the console.'
+                + api_note
                 + _site_graph_note(self.bot, slug)
             )
-
         if act in {"replace", "patch", "sub"}:
             rel = _safe_site_relpath(path or "index.html")
             if not rel:

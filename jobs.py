@@ -676,8 +676,13 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                 messages.extend(followups)
             else:
                 messages.append({"role": "assistant", "content": str(response or "")})
+                # Cap what flows back into the worker loop: full tool outputs
+                # accumulate across steps (100+ messages, 40k+ tokens/call) and
+                # the worker starts re-verifying trivia instead of converging.
+                # Full detail already lives in the thread posts.
+                clipped = "\n".join(str(r or "")[:2000] for r in tool_results)[:8000]
                 messages.append(
-                    {"role": "user", "content": "=== TOOL RESULTS ===\n" + "\n".join(tool_results)}
+                    {"role": "user", "content": "=== TOOL RESULTS ===\n" + clipped}
                 )
             if not tool_results:
                 final_text = resp_text.strip()

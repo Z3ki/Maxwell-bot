@@ -400,3 +400,29 @@ def test_site_guards_work_on_slotted_discord_messages(bot):
     out = run(EditSiteTool(bot).execute(msg, name="slot", action="read"))
     assert "_site_idle_reads" not in out
     assert "<h1>hi</h1>" in out
+
+
+def test_api_path_warnings_flag_absolute_fetch():
+    from bot_tools import _site_api_path_warnings
+
+    body = '<script>fetch("/api/notes").then(r=>r.json())</script>'
+    warns = _site_api_path_warnings("quantum-forge", body, [])
+    assert any("index.html" in w and "RELATIVE" in w.upper() or "relative" in w for w in warns), warns
+
+
+def test_api_path_warnings_flag_wrong_slug_and_hardcoded_ws():
+    from bot_tools import _site_api_path_warnings
+
+    files = [
+        {"path": "app.js", "bytes": b'fetch("/bot/other-site/api/notes"); new WebSocket("ws://x/bot/q/api/ws")'},
+    ]
+    warns = _site_api_path_warnings("quantum-forge", None, files)
+    assert any("other-site" in w for w in warns), warns
+    assert any("WebSocket" in w for w in warns), warns
+
+
+def test_api_path_warnings_quiet_on_relative_paths():
+    from bot_tools import _site_api_path_warnings
+
+    body = '<script>fetch("api/notes")</script>'
+    assert _site_api_path_warnings("quantum-forge", body, []) == []
