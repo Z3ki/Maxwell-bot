@@ -884,7 +884,15 @@ def _spawn_background(coro) -> asyncio.Task:
         coro.close()
         raise
     _BACKGROUND_TASKS.add(task)
-    task.add_done_callback(_BACKGROUND_TASKS.discard)
+
+    def _on_done(t: asyncio.Task) -> None:
+        _BACKGROUND_TASKS.discard(t)
+        if not t.cancelled():
+            exc = t.exception()
+            if exc:
+                logger.error("Background task failed: %s", exc, exc_info=exc)
+
+    task.add_done_callback(_on_done)
     return task
 
 

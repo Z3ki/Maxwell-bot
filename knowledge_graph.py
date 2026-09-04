@@ -362,8 +362,8 @@ class KnowledgeGraph:
                 if py.name.startswith("_"):
                     continue
                 try:
-                    source = py.read_text(encoding="utf-8")
-                except (OSError, UnicodeDecodeError):
+                    source = py.read_text(encoding="utf-8", errors="replace")
+                except OSError:
                     continue
                 files.append(py.name)
                 routes.extend(extract_python_routes(source))
@@ -541,9 +541,10 @@ class KnowledgeGraph:
         # Longer unique names (display names, titles) via substring, bounded.
         tokens = [t for t in re.findall(r"[A-Za-z0-9][A-Za-z0-9_\-]{2,}", text) if t.lower() not in STOP_NAMES]
         for token in tokens[:8]:
+            safe_token = token.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             rows = self._db.execute(
-                "SELECT id FROM graph_nodes WHERE name LIKE ? LIMIT 3",
-                (f"%{token}%",),
+                "SELECT id FROM graph_nodes WHERE name LIKE ? ESCAPE '\\' LIMIT 3",
+                (f"%{safe_token}%",),
             ).fetchall()
             for row in rows:
                 add(str(row["id"]))

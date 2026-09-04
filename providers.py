@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import copy
 import json
 import logging
 import os
@@ -1885,7 +1886,7 @@ class OllamaProvider:
             if not self.available:
                 raise RuntimeError("Provider not available")
 
-        chat_messages = [dict(m) for m in messages]
+        chat_messages = copy.deepcopy(messages)
 
         all_media = []
         if media:

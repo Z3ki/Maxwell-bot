@@ -94,7 +94,7 @@ class InboundDedup:
         return len(self._seen)
 
     def __contains__(self, message_id: object) -> bool:
-        return str(message_id or "") in self._seen
+        return str(message_id or "").strip() in self._seen
 
 
 @dataclass
@@ -243,8 +243,12 @@ class ReplyQueue:
         state.queue.append(entry)
         self._enforce_bound(cid, state)
         started = state.running is None or state.running.done()
+        if started and len(state.queue) == 1:
+            outcome = "started"
+        else:
+            outcome = "queued"
         self._ensure_pump(cid, state)
-        return "started" if started else "queued"
+        return outcome
 
     def _expire(self, cid: str, state: _ChannelState, now: float) -> None:
         """Drop entries so old that answering them would be noise, not a reply."""

@@ -451,6 +451,9 @@ _PER_CHANNEL_STATE_CAPS = {
     "_typing_users": 500,
     "_active_request_user": 500,
     "_current_progress_by_channel": 500,
+    "_media_context": 500,
+    "_message_snapshots": 1000,
+    "_message_update_state": 1000,
 }
 
 MAX_VISUAL_MEMORY_IMAGES = 5
@@ -2419,9 +2422,12 @@ TOOL_PROTOCOL = (
     "built nothing. If the page needs 900 lines to actually work, write 900 "
     "lines. If you cannot finish a feature, leave it out and say so rather than "
     "faking it.\n"
-    "After it is live, call site_test once. If it fails, patch with "
-    "edit_site/site_server action=replace or write — do not re-read a file "
-    "you already have this turn. Then test once more. Do not ping-pong "
+    "After it is live, call site_test once — it loads the page in a real browser "
+    "and reports JS console errors, failed requests, whether anything actually "
+    "rendered, and a screenshot. Read the screenshot. If site_test says NOT "
+    "ACTUALLY RENDERED, the page is broken no matter what the HTML looks like: "
+    "fix it and patch with edit_site/site_server action=replace or write — do not "
+    "re-read a file you already have this turn. Then test once more. Do not ping-pong "
     "action=read on index.html and app.py: those dumps blow the context and "
     "hang you. Do not tell anyone a site works before site_test says it "
     "loaded clean. Do not recreate the site to change a line. site_server "
@@ -5146,8 +5152,10 @@ class MaxwellBot(commands.Bot):
         if bucket is None:
             if not directed:
                 return
-            bucket = {}
+            bucket = {"first_seen": time.time()}
             debounce[cid] = bucket
+        elif "first_seen" not in bucket:
+            bucket["first_seen"] = time.time()
         bucket["latest"] = message
         burst = list(bucket.get("burst") or [])
         last = burst[-1] if burst else None
@@ -5165,6 +5173,13 @@ class MaxwellBot(commands.Bot):
         if old is not None and not old.done():
             old.cancel()
         delay = self._watch_debounce_seconds(cid)
+        # Prevent indefinite starvation: if a burst keeps coming for > 3.0s, cap the remaining delay
+        first_seen = bucket.get("first_seen", time.time())
+        elapsed = max(0.0, time.time() - first_seen)
+        if elapsed > 3.0:
+            delay = min(delay, 0.2)
+        elif elapsed + delay > 3.0:
+            delay = max(0.1, 3.0 - elapsed)
         bucket["task"] = self._track_task(
             asyncio.create_task(
                 self._flush_watch_reply(cid, delay),
@@ -5392,9 +5407,17 @@ class MaxwellBot(commands.Bot):
         self._gateway_last_disconnect = time.monotonic()
 
     async def on_resumed(self):
-        logger.info("discord gateway resumed")
+        """A resume means the gateway believes it replayed — it often has not.
+
+        discord.py does not surface a gap, so a session that resumes after a
+        network blip silently loses every MESSAGE_CREATE from the outage. The
+        watermark makes that recoverable.
+        """
+        logger.info("discord gateway resumed; checking for missed messages")
         self._gateway_last_disconnect = None
         self._gateway_last_ok = time.monotonic()
+        self._spawn_detached(self._recover_missed_messages())
+        self._dispatch_plugin_event("on_ready")
 
     async def on_ready(self):
         self._gateway_last_ok = time.monotonic()
@@ -5420,17 +5443,6 @@ class MaxwellBot(commands.Bot):
         self._spawn_detached(self._recover_missed_messages())
         self._dispatch_plugin_event("on_ready")
 
-    async def on_resumed(self):
-        """A resume means the gateway believes it replayed — it often has not.
-
-        discord.py does not surface a gap, so a session that resumes after a
-        network blip silently loses every MESSAGE_CREATE from the outage. The
-        watermark makes that recoverable.
-        """
-        logger.info("Gateway session resumed; checking for missed messages")
-        self._spawn_detached(self._recover_missed_messages())
-        self._dispatch_plugin_event("on_ready")
-
     def _spawn_detached(self, coro) -> None:
         """Fire-and-forget with a strong reference so it cannot be GC'd."""
         try:
@@ -5440,7 +5452,15 @@ class MaxwellBot(commands.Bot):
                 coro.close()
             return
         self._detached_tasks.add(task)
-        task.add_done_callback(self._detached_tasks.discard)
+
+        def _on_done(t: asyncio.Task) -> None:
+            self._detached_tasks.discard(t)
+            if not t.cancelled():
+                exc = t.exception()
+                if exc:
+                    logger.error("Detached task failed: %s", exc, exc_info=exc)
+
+        task.add_done_callback(_on_done)
 
     def _missed_message_scan_limit(self) -> int:
         """How many messages per room a gap recovery is allowed to replay.
@@ -5535,7 +5555,14 @@ class MaxwellBot(commands.Bot):
         listeners = getattr(pm, "_listeners", None)
         if not listeners or event not in listeners or not listeners[event]:
             return
-        self._spawn_detached(pm.dispatch_event(event, *args, **kwargs))
+        spawn = getattr(self, "_spawn_detached", None)
+        if callable(spawn):
+            spawn(pm.dispatch_event(event, *args, **kwargs))
+        else:
+            try:
+                asyncio.create_task(pm.dispatch_event(event, *args, **kwargs))
+            except RuntimeError:
+                pass
 
     async def _watermark_save_loop(self):
         """Persist read positions periodically.
@@ -7156,14 +7183,18 @@ class MaxwellBot(commands.Bot):
 
     async def on_reaction_add(self, reaction, user):
         """Attach the reaction to that message so Maxwell sees it in context."""
-        self._dispatch_plugin_event("on_reaction_add", reaction, user)
+        dispatch = getattr(self, "_dispatch_plugin_event", None)
+        if callable(dispatch):
+            dispatch("on_reaction_add", reaction, user)
         try:
             await self._note_reaction(reaction, user, added=True)
         except Exception as e:
             logger.warning(f"Failed recording reaction on message: {e}")
 
     async def on_reaction_remove(self, reaction, user):
-        self._dispatch_plugin_event("on_reaction_remove", reaction, user)
+        dispatch = getattr(self, "_dispatch_plugin_event", None)
+        if callable(dispatch):
+            dispatch("on_reaction_remove", reaction, user)
         try:
             await self._note_reaction(reaction, user, added=False)
         except Exception as e:
