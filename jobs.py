@@ -56,6 +56,19 @@ BG_MAX_PER_USER_DEFAULT = 1
 # Job tools never include this: a background turn that spawns another
 # background turn is recursion, not progress.
 _NO_RECURSE_TOOL = "spawn_background"
+# Worker catalog hides: the spawner (no recursion) and send_message (the worker
+# must NEVER post to a channel — its final answer is delivered automatically as
+# one reply line; a worker send_message is how double-deliveries happened).
+_WORKER_HIDDEN_TOOLS = frozenset({_NO_RECURSE_TOOL, "send_message"})
+
+
+def _worker_tools(openai_tools: Any) -> list[dict[str, Any]]:
+    """Background-worker tool catalog: full tools minus spawner and channel post."""
+    return [
+        t
+        for t in (openai_tools or [])
+        if (t.get("function") or {}).get("name") not in _WORKER_HIDDEN_TOOLS
+    ]
 
 
 def resolve_job_budgets(control: Any, config: Any) -> dict[str, int]:
@@ -420,6 +433,12 @@ def _first_url(text: Any) -> str:
     return match.group(0).rstrip(".,;:") if match else ""
 
 
+_VAGUE_FINAL_RE = re.compile(
+    r"^(i['’]m\s+(all\s+)?done|done|finished|all\s+done|complete)[.!…]*$",
+    re.IGNORECASE,
+)
+
+
 def _delivery_line(final_text: Any, job_id: str) -> str:
     """ONE short line + single URL. No ping, no wall — details live in the thread."""
     first = ""
@@ -429,8 +448,12 @@ def _delivery_line(final_text: Any, job_id: str) -> str:
             first = line
             break
     summary = re.sub(r"\s+", " ", first)[:200] or "done — details in the thread"
-    head = f"job `{job_id}` done — {summary}"
     url = _first_url(final_text)
+    if not url and (_VAGUE_FINAL_RE.match(summary) or len(summary) < 15):
+        # Worker ended vague ("I'm all done!") — say nothing useful over
+        # parroting it; the thread holds the real result.
+        return f"job `{job_id}` done — details in the thread."
+    head = f"job `{job_id}` done — {summary}"
     if url and url not in head:
         return f"{head}\n{url}"
     return head
@@ -566,14 +589,28 @@ async def run_background_job(bot: Any, job_id: str) -> None:
             "content": (
                 f"{base_personality}\n\n"
                 f"You are Maxwell's BACKGROUND build agent (job `{job.id}`). The user was already "
-                "told the work is running; do not narrate, just build.\n"
+                "told the work is running; do not narrate, just build. You have NO channel "
+                "tools — you cannot post to any channel, so never try send_message. The ONLY "
+                "thing the requester ever sees is your FINAL answer, delivered automatically "
+                "as one reply line. Make it count.\n"
                 f"Goal: {job.goal}\n"
                 + (f"Extra context: {job.context}\n" if job.context else "")
-                + "Do the whole job with tools (build, test with site_test, fix failures). "
-                "Keep intermediate chatter out of the main channel — progress goes to this thread. "
-                "End with ONE short line: what was built + its single main URL. "
-                "Delivery replies to the requester's original message with just that line — "
-                "no pings, no extra links, no recap paragraph. Full details live in this thread.\n\n"
+                + "How to work:\n"
+                "1. Build with tools (create_site / site_server / edit_site for sites; shell "
+                "only when no tool can do it).\n"
+                "2. For sites: create → wire the frontend with RELATIVE api paths "
+                "('api/notes', never '/api/...') → site_test → fix what it reports → "
+                "site_test again. Never claim done while console errors remain.\n"
+                "3. Read and patch files in their live location via the tools. Never keep "
+                "shadow copies under /home/maxwell — they diverge and patches fail.\n"
+                "4. One backend route = one definition. Never mount the same route under "
+                "several prefixes.\n"
+                "Ending contract (mandatory): your LAST message must be exactly this shape: "
+                "`Built <title>: <url> — <one line on what it is>`, with the real title and "
+                "the real URL from the tool results, never a placeholder. NEVER end with "
+                "'done', 'I'm all done', 'finished', or any vague line — that wastes the "
+                "delivery and the user sees nothing useful. If the work failed, end with "
+                "`FAILED: <one-line reason>` instead.\n\n"
                 f"{tool_prompt}"
             ).strip(),
         },
@@ -592,8 +629,9 @@ async def run_background_job(bot: Any, job_id: str) -> None:
         openai_tools = list(bot._build_openai_tools(platform, message=orig_message, content=job.goal) or [])
     except Exception as exc:
         logger.warning("background job %s tool catalog failed: %s", job.id, exc)
-    # No recursion: the job IS the background worker.
-    openai_tools = [t for t in openai_tools if (t.get("function") or {}).get("name") != _NO_RECURSE_TOOL]
+    # No recursion (the job IS the worker) and no channel posts (delivery is
+    # automatic — a worker send_message double-delivers to the channel).
+    openai_tools = _worker_tools(openai_tools)
     try:
         _custom, provider_tools = bot._select_tool_protocol(openai_tools)
     except Exception:

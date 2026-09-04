@@ -346,3 +346,25 @@ def test_looks_like_progress_markers():
     assert not _looks_like_progress(["Total lines: 491 Part 1 len: 12380"])
     assert not _looks_like_progress(["Length of index.html: 23706"])
     assert not _looks_like_progress([])
+
+
+def _tool(name):
+    return {"function": {"name": name}}
+
+
+def test_worker_catalog_hides_spawner_and_channel_post():
+    from jobs import _worker_tools
+
+    tools = [_tool("spawn_background"), _tool("send_message"), _tool("shell"), _tool("site_test")]
+    kept = {(t["function"]["name"]) for t in _worker_tools(tools)}
+    assert kept == {"shell", "site_test"}
+
+
+def test_delivery_line_vague_final_falls_back_to_thread():
+    from jobs import _delivery_line
+
+    assert _delivery_line("I'm all done!", "abc123") == "job `abc123` done — details in the thread."
+    assert _delivery_line("done", "abc123") == "job `abc123` done — details in the thread."
+    good = _delivery_line("Built BODYCAM // ZERO HOUR: https://maxwell.z3ki.dev/bot/bodycam-zero-hour/ — hyper-realistic bodycam", "abc123")
+    assert "https://maxwell.z3ki.dev/bot/bodycam-zero-hour/" in good
+    assert good.count("http") == 1
