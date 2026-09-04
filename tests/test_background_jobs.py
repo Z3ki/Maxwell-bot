@@ -59,6 +59,12 @@ class FakeMessage:
         self.content = content
         self.author = FakeAuthor()
         self.guild = FakeGuild()
+        self.replies = []
+
+    async def reply(self, text, **kwargs):
+        self.replies.append((text, kwargs))
+        self.channel.sent.append(text)
+        return None
 
     async def create_thread(self, name=None, auto_archive_duration=None):
         return self.channel.thread
@@ -245,7 +251,7 @@ class RunnerStubBot(StubBot):
         return str(response), []
 
 
-def test_runner_delivers_final_reply_with_mention(tmp_path):
+def test_runner_delivers_short_reply_no_ping(tmp_path):
     async def scenario():
         manager = BackgroundJobManager(data_path=str(tmp_path / "jobs.json"))
         bot = RunnerStubBot(manager)
@@ -255,15 +261,24 @@ def test_runner_delivers_final_reply_with_mention(tmp_path):
         )
         manager.attach_runtime(job.id, message=message, channel=message.channel)
         await run_background_job(bot, job.id)
-        return manager.get(job.id), message.channel, bot
+        return manager.get(job.id), message, bot
 
-    job, channel, bot = asyncio.run(scenario())
+    job, message, bot = asyncio.run(scenario())
+    channel = message.channel
+    assert job is not None
     assert job.status == "done"
     assert bot.slot_priority == "background"  # user turns outrank it
     assert bot.generated_with.get("disable_reasoning") is False  # full thinking
     assert bot.generated_with.get("max_tokens", 0) >= 32768  # extended output
-    assert any("<@111>" in text and job.id in text for text in channel.sent)
-    assert any("http://example.local/site" in text for text in channel.sent)
+    # ONE reply to the original message: no ping, job id + single URL.
+    assert len(message.replies) == 1
+    text, kwargs = message.replies[0]
+    assert kwargs.get("mention_author") is False
+    assert "<@111>" not in text
+    assert job.id in text
+    assert "http://example.local/site" in text
+    assert text.count("http") == 1  # single link, never a list
+    assert len(channel.sent) == 1
 
 
 def test_runner_marks_error_and_notifies(tmp_path):
@@ -299,10 +314,10 @@ def test_manager_list_text_guild_filtering(tmp_path):
     assert j2.id in lines_all
 
 
-def test_runner_splits_long_delivery_messages(tmp_path):
+def test_runner_delivery_is_single_short_reply(tmp_path):
     class LongOutputBot(RunnerStubBot):
         async def _generate_response(self, messages, **kwargs):
-            return "A" * 3500
+            return "A" * 3500 + "\nhttp://example.local/big"
 
     async def scenario():
         manager = BackgroundJobManager(data_path=str(tmp_path / "jobs.json"))
@@ -311,10 +326,9 @@ def test_runner_splits_long_delivery_messages(tmp_path):
         job = manager.create(guild_id="g", channel_id="222", user_id="111", goal="long")
         manager.attach_runtime(job.id, message=message, channel=message.channel)
         await run_background_job(bot, job.id)
-        return message.channel
+        return message
 
-    channel = asyncio.run(scenario())
-    assert len(channel.sent) >= 2
-    for msg in channel.sent:
-        assert len(msg) <= 1900
+    message = asyncio.run(scenario())
+    assert len(message.channel.sent) == 1  # never a multi-message wall
+    assert len(message.channel.sent[0]) <= 1900
 

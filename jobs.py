@@ -320,7 +320,7 @@ class SpawnBackgroundTool(Tool):
         return (
             "Start a BACKGROUND job for a long task (site build, big research, "
             "multi-step work) and END this turn. The job runs detached with "
-            "bigger budgets and pings the user when done, so the channel stays "
+            "bigger budgets and replies to the original message when done, so the channel stays "
             "free. Params: goal (what to build/do, required), context (extra "
             "spec, optional). After calling, reply with send_message: ONE short "
             "ack line naming the job id — nothing else, no other tools."
@@ -369,7 +369,7 @@ class SpawnBackgroundTool(Tool):
         return (
             f"Background job `{job.id}` started for '{_short(raw_goal, 80)}'. "
             f"Reply NOW with send_message: ONE short ack line (e.g. `on it — job `{job.id}`, "
-            "I'll ping you when it's done`) and NOTHING else. Do not start the work "
+            "I'll reply here when it's done`) and NOTHING else. Do not start the work "
             "in this turn — the detached job does it."
         )
 
@@ -393,6 +393,50 @@ def _summarize_tool_results(results: Any, limit: int = 300) -> str:
             parts.append(text[:limit])
     blob = " | ".join(parts)
     return blob[:1200] if blob else "(no output)"
+
+
+_URL_RE = re.compile(r"https?://[^\s)>\]]+")
+
+
+def _first_url(text: Any) -> str:
+    """First URL in the text, or '' — delivery carries ONE link, never a list."""
+    match = _URL_RE.search(str(text or ""))
+    return match.group(0).rstrip(".,;:") if match else ""
+
+
+def _delivery_line(final_text: Any, job_id: str) -> str:
+    """ONE short line + single URL. No ping, no wall — details live in the thread."""
+    first = ""
+    for line in str(final_text or "").splitlines():
+        line = line.strip()
+        if line:
+            first = line
+            break
+    summary = re.sub(r"\s+", " ", first)[:200] or "done — details in the thread"
+    head = f"job `{job_id}` done — {summary}"
+    url = _first_url(final_text)
+    if url and url not in head:
+        return f"{head}\n{url}"
+    return head
+
+
+async def _reply_short(target_message: Any, channel: Any, text: str) -> None:
+    """Reply to the original message (no ping). Fall back to plain channel send."""
+    text = str(text or "")[:1900]
+    if not text.strip():
+        return
+    reply: Any = getattr(target_message, "reply", None)
+    if callable(reply):
+        try:
+            try:
+                await reply(text, mention_author=False)
+            except TypeError:
+                await reply(text)
+            return
+        except Exception:
+            pass
+    if channel is not None:
+        await channel.send(text)
 
 
 async def _post_thread(thread: Any, text: str) -> None:
@@ -429,9 +473,7 @@ async def run_background_job(bot: Any, job_id: str) -> None:
 
     async def _fail(text: str) -> None:
         manager.mark(job.id, status="error", progress=text[:500])
-        if channel is not None:
-            with contextlib.suppress(Exception):
-                await channel.send(f"<@{job.user_id}> job `{job.id}` failed — {text[:1500]}")
+        await _reply_short(orig_message, channel, f"job `{job.id}` failed — {text[:300]}")
 
     if orig_message is None or channel is None:
         await _fail("lost the origin channel (restart or deleted channel).")
@@ -513,7 +555,9 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                 + (f"Extra context: {job.context}\n" if job.context else "")
                 + "Do the whole job with tools (build, test with site_test, fix failures). "
                 "Keep intermediate chatter out of the main channel — progress goes to this thread. "
-                "End with a concise summary: what was built + URLs.\n\n"
+                "End with ONE short line: what was built + its single main URL. "
+                "Delivery replies to the requester's original message with just that line — "
+                "no pings, no extra links, no recap paragraph. Full details live in this thread.\n\n"
                 f"{tool_prompt}"
             ).strip(),
         },
@@ -655,32 +699,12 @@ async def run_background_job(bot: Any, job_id: str) -> None:
     final_text = str(final_text or "").strip() or "Done — details are in the thread."
     manager.mark(job.id, status="done", result=final_text[:8000], progress="done")
 
-    # Deliver: mention the requester in the ORIGIN channel with the data.
-    # Direct send — never through ReplyQueue, so nothing else ever waits.
-    max_chars = 4000
+    # Deliver: ONE short reply to the ORIGINAL message (no ping, no wall).
+    # Full result already lives in the build thread; the channel gets one line.
+    body = _delivery_line(final_text, job.id)
     try:
-        max_chars = max(500, min(int((getattr(bot, "_control", {}) or {}).get("max_response_chars", 4000) or 4000), 1900 * 4))
-    except Exception:
-        pass
-    body = final_text[:max_chars]
-    thread_ref = ""
-    try:
-        thread_ref = getattr(thread, "jump_url", None) or getattr(thread, "mention", "") or ""
-    except Exception:
-        pass
-    delivery = f"<@{job.user_id}> job `{job.id}` done — {body}"
-    if thread_ref:
-        delivery += f"\n{thread_ref}"
-    try:
-        splitter = getattr(bot, "_split_response", None)
-        if callable(splitter):
-            chunks = splitter(delivery, limit=1900)
-        else:
-            chunks = [delivery[i : i + 1900] for i in range(0, len(delivery), 1900)]
-        for chunk in chunks:
-            if chunk.strip():
-                await channel.send(chunk)
+        await _reply_short(orig_message, channel, body)
     except Exception as exc:
         logger.warning("background job %s delivery failed: %s", job.id, exc)
         await _post_thread(thread, f"Done, but I could not post to the channel ({exc}):\n{body[:1500]}")
-    await _post_thread(thread, f"Finished.\n{body[:1500]}")
+    await _post_thread(thread, f"Finished.\n{str(final_text or '')[:1500]}")
