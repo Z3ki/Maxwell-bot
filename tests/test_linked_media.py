@@ -68,6 +68,10 @@ def test_tenor_and_giphy_pages_count_as_gifs():
     assert refs("https://i.imgur.com/abc123.gifv") == [
         ("https://i.imgur.com/abc123.gifv", ".gif")
     ]
+    gph = "https://gph.is/abc123"
+    klipy = "https://klipy.com/gif/funny-cat"
+    assert refs(gph) == [(gph, ".gif")]
+    assert refs(klipy) == [(klipy, ".gif")]
 
 
 def test_plain_website_still_ignored():

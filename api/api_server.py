@@ -1056,69 +1056,76 @@ async def _proxy_websocket(request, slug: str, target: str):
     session = aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=None, sock_connect=10)
     )
+    upstream = None
+    client = None
     try:
-        upstream = await session.ws_connect(
-            target.replace("http://", "ws://", 1),
-            headers=headers,
-            protocols=requested,
-            max_msg_size=SITE_WS_MAX_MSG,
-            heartbeat=30,
-            autoclose=False,
-        )
-    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        await session.close()
-        logger.warning("site %s websocket upstream failed: %s", slug, e)
-        return _site_json({"error": "the site backend refused the websocket"}, 502)
-
-    # Mirror whatever subprotocol the backend actually chose.
-    chosen = upstream.protocol
-    client = web.WebSocketResponse(
-        heartbeat=30,
-        max_msg_size=SITE_WS_MAX_MSG,
-        protocols=[chosen] if chosen else (),
-    )
-    if not client.can_prepare(request).ok:
-        await upstream.close()
-        await session.close()
-        return _site_json({"error": "not a websocket request"}, 400)
-    await client.prepare(request)
-
-    async def pump(src, dst, direction):
         try:
-            async for msg in src:
-                if msg.type == aiohttp.WSMsgType.TEXT:
-                    await dst.send_str(msg.data)
-                elif msg.type == aiohttp.WSMsgType.BINARY:
-                    await dst.send_bytes(msg.data)
-                elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING):
-                    break
-                elif msg.type == aiohttp.WSMsgType.ERROR:
-                    logger.warning(
-                        "site %s ws %s error: %s", slug, direction, src.exception()
-                    )
-                    break
-        except Exception as e:
-            # Never silent: a bug in here used to look exactly like a browser
-            # closing the tab.
-            logger.warning("site %s ws %s pump failed: %r", slug, direction, e)
-        finally:
-            # One side hanging up ends the other; nothing is left half-open.
-            with contextlib.suppress(Exception):
-                await dst.close()
+            upstream = await session.ws_connect(
+                target.replace("http://", "ws://", 1),
+                headers=headers,
+                protocols=requested,
+                max_msg_size=SITE_WS_MAX_MSG,
+                heartbeat=30,
+                autoclose=False,
+            )
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+            logger.warning("site %s websocket upstream failed: %s", slug, e)
+            return _site_json({"error": "the site backend refused the websocket"}, 502)
 
-    try:
+        # Mirror whatever subprotocol the backend actually chose.
+        chosen = upstream.protocol
+        client = web.WebSocketResponse(
+            heartbeat=30,
+            max_msg_size=SITE_WS_MAX_MSG,
+            protocols=[chosen] if chosen else (),
+        )
+        if not client.can_prepare(request).ok:
+            return _site_json({"error": "not a websocket request"}, 400)
+        try:
+            await client.prepare(request)
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as e:
+            logger.info(
+                "site %s websocket client hung up during handshake: %s", slug, e
+            )
+            return client
+
+        async def pump(src, dst, direction):
+            try:
+                async for msg in src:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        await dst.send_str(msg.data)
+                    elif msg.type == aiohttp.WSMsgType.BINARY:
+                        await dst.send_bytes(msg.data)
+                    elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING):
+                        break
+                    elif msg.type == aiohttp.WSMsgType.ERROR:
+                        logger.warning(
+                            "site %s ws %s error: %s", slug, direction, src.exception()
+                        )
+                        break
+            except Exception as e:
+                # Never silent: a bug in here used to look exactly like a browser
+                # closing the tab.
+                logger.warning("site %s ws %s pump failed: %r", slug, direction, e)
+            finally:
+                # One side hanging up ends the other; nothing is left half-open.
+                with contextlib.suppress(Exception):
+                    await dst.close()
+
         await asyncio.gather(
             pump(client, upstream, "client->backend"),
             pump(upstream, client, "backend->client"),
         )
+        return client
     finally:
-        with contextlib.suppress(Exception):
-            await upstream.close()
+        if upstream is not None:
+            with contextlib.suppress(Exception):
+                await upstream.close()
         with contextlib.suppress(Exception):
             await session.close()
-        with contextlib.suppress(Exception):
-            await client.close()
-    return client
+        if client is not None:
+            with contextlib.suppress(Exception):
+                await client.close()
 
 
 async def site_proxy(request):
@@ -1183,7 +1190,7 @@ async def site_proxy(request):
     except asyncio.TimeoutError:
         await session.close()
         return _site_json({"error": "the site backend timed out"}, 504)
-    except aiohttp.ClientError as e:
+    except (aiohttp.ClientError, OSError) as e:
         await session.close()
         logger.warning("site backend %s unreachable: %s", slug, e)
         return _site_json({"error": "the site backend is not responding"}, 502)
@@ -1203,7 +1210,7 @@ async def site_proxy(request):
             await out.write(chunk)
         await out.write_eof()
         return out
-    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
         logger.warning("site backend %s died mid-response: %s", slug, e)
         with contextlib.suppress(Exception):
             await out.write_eof()
@@ -2486,6 +2493,12 @@ async def _reliability_middleware(request, handler):
             )
     try:
         async with _API_CONCURRENCY_SEM:
+            # Site backends (WebSockets, SSE, slow downloads) have their own
+            # connect/read timeouts. The 30s admin-API cap would kill a live
+            # multiplayer socket — production logs showed GET /bot/*/api/ws
+            # timing out and leaking ClientSessions.
+            if request.path.startswith("/bot/"):
+                return await handler(request)
             return await asyncio.wait_for(
                 handler(request), timeout=_API_REQUEST_TIMEOUT
             )
@@ -2493,6 +2506,9 @@ async def _reliability_middleware(request, handler):
         logger.warning("request timeout %s %s", request.method, request.path)
         return web.json_response({"error": "request timed out"}, status=504)
     except asyncio.CancelledError:
+        raise
+    except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+        logger.info("client hung up %s %s", request.method, request.path)
         raise
     except Exception as e:
         logger.exception(

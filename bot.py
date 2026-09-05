@@ -2444,9 +2444,8 @@ LEAN_TOOL_PROTOCOL = (
     "and the user should see a reply, send_message in the same batch. "
     "[ends the turn] — nothing after it runs.\n"
     "## Reasoning\n"
-    "Every tool call needs `reasoning` as the FIRST argument: one plain-English "
-    "sentence (max ~280 chars) of WHY, not the artifact. Plain text only. "
-    "The user sees it as the live thinking line."
+    "Every tool call may include `reasoning`: one plain-English sentence "
+    "(max ~280 chars) of WHY. Plain text only.\n"
 )
 
 # An ack-only send_message whose text promises work that has not run yet.
@@ -6677,6 +6676,12 @@ class MaxwellBot(commands.Bot):
                     logger.debug(f"Interrupt await raised {e} for {channel_id}")
                 # Brief yield to let the cancelled task's finally release the channel lock
                 await asyncio.sleep(0.08)
+                # Same lesson as ",stop": cancelling the in-flight task lets
+                # the pump immediately start a queued soft watch line, which
+                # starves this interrupting ping. Drop only soft chatter;
+                # directed pings already in queue still get their turn.
+                with contextlib.suppress(Exception):
+                    self._reply_queue.drop_soft(channel_id)
 
         # Serialize only the memory/bookkeeping write for this room. Reply
         # generation happens AFTER the lock is released, through the reply

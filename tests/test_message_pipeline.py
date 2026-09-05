@@ -231,6 +231,38 @@ def test_queue_survives_a_cancelled_turn():
     asyncio.run(scenario())
 
 
+def test_drop_soft_keeps_directed_pings():
+    """Same-user interrupt must not let a queued watch line steal the next slot."""
+
+    async def scenario():
+        seen = []
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def handler(message, content):
+            if message.id == 1:
+                started.set()
+                await release.wait()
+            seen.append(message.id)
+
+        q = ReplyQueue()
+        q.bind(handler)
+        q.submit("c1", _msg(1), "running", directed=True)
+        await started.wait()
+        q.submit("c1", _msg(2), "watch chatter", directed=False)
+        q.submit("c1", _msg(3), "hard ping", directed=True)
+        assert q.drop_soft("c1") == 1
+        release.set()
+        for _ in range(200):
+            await asyncio.sleep(0)
+            if 3 in seen:
+                break
+        assert 2 not in seen
+        assert 3 in seen
+
+    asyncio.run(scenario())
+
+
 def test_queue_channels_are_independent():
     """One slow room must not hold up another."""
 

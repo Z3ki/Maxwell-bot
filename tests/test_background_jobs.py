@@ -155,6 +155,30 @@ def test_manager_restart_cancels_inflight(tmp_path):
     assert again.get(job.id).status == "cancelled"
 
 
+def test_manager_get_normalizes_persisted_case(tmp_path):
+    path = str(tmp_path / "jobs.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "jobs": {
+                    "ABCD1234": {
+                        "guild_id": "g",
+                        "channel_id": "c",
+                        "user_id": "u",
+                        "goal": "x",
+                        "status": "done",
+                        "created_at": 1.0,
+                    }
+                }
+            },
+            handle,
+        )
+    manager = BackgroundJobManager(data_path=path)
+    assert manager.get("ABCD1234") is not None
+    assert manager.get("abcd1234") is not None
+    assert manager.get("abcd1234").status == "done"
+
+
 # spawn tool
 
 
@@ -301,6 +325,36 @@ def test_runner_marks_error_and_notifies(tmp_path):
     job, channel = asyncio.run(scenario())
     assert job.status == "error"
     assert any("failed" in text for text in channel.sent)
+
+
+def test_runner_midloop_generation_failure_is_error(tmp_path):
+    class FlakyBot(RunnerStubBot):
+        async def _generate_response(self, messages, **kwargs):
+            self.generated_calls.append(dict(kwargs))
+            if len(self.generated_calls) == 1:
+                self._pending_calls = [{"function": {"name": "shell"}}]
+                return "working"
+            raise RuntimeError("provider down")
+
+        def _native_calls_from(self, response):
+            calls = getattr(self, "_pending_calls", [])
+            self._pending_calls = []
+            return calls
+
+        async def _dispatch_tool_calls(self, message, response, **kwargs):
+            return str(response), ["Wrote index.html"]
+
+    async def scenario():
+        manager = BackgroundJobManager(data_path=str(tmp_path / "jobs.json"))
+        bot = FlakyBot(manager)
+        message = FakeMessage()
+        job = manager.create(guild_id="g", channel_id="222", user_id="111", goal="x")
+        manager.attach_runtime(job.id, message=message, channel=message.channel)
+        await run_background_job(bot, job.id)
+        return manager.get(job.id)
+
+    job = asyncio.run(scenario())
+    assert job.status == "error"
 
 
 def test_manager_list_text_guild_filtering(tmp_path):

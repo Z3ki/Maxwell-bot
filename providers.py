@@ -1461,6 +1461,7 @@ class OllamaProvider:
                 )
             )
         self._session = None
+        self._session_lock = asyncio.Lock()
         self.available = False
         self._last_usage: dict = {}
         self._last_tool_calls: list = []
@@ -1712,24 +1713,25 @@ class OllamaProvider:
         return data
 
     async def _get_session(self):
-        if self._session is None or self._session.closed:
-            # BUG FIX: do NOT use SSRF-safe resolver for the provider session.
-            # The default provider URL is localhost:11434 (local Ollama), and
-            # the safe resolver blocks all private/loopback addresses.
-            # The provider is operator-configured via env vars, not user input.
-            # SSRF protection belongs on the shared session used by tools like
-            # fetch_url, which DO accept untrusted URLs.
-            connector = aiohttp.TCPConnector(
-                limit=16,
-                limit_per_host=6,
-                ttl_dns_cache=300,
-                enable_cleanup_closed=True,
-                keepalive_timeout=30,
-            )
-            self._session = aiohttp.ClientSession(
-                connector=connector, timeout=aiohttp.ClientTimeout(total=None)
-            )
-        return self._session
+        async with self._session_lock:
+            if self._session is None or self._session.closed:
+                # BUG FIX: do NOT use SSRF-safe resolver for the provider session.
+                # The default provider URL is localhost:11434 (local Ollama), and
+                # the safe resolver blocks all private/loopback addresses.
+                # The provider is operator-configured via env vars, not user input.
+                # SSRF protection belongs on the shared session used by tools like
+                # fetch_url, which DO accept untrusted URLs.
+                connector = aiohttp.TCPConnector(
+                    limit=16,
+                    limit_per_host=6,
+                    ttl_dns_cache=300,
+                    enable_cleanup_closed=True,
+                    keepalive_timeout=30,
+                )
+                self._session = aiohttp.ClientSession(
+                    connector=connector, timeout=aiohttp.ClientTimeout(total=None)
+                )
+            return self._session
 
     async def close(self):
         if self._session and not self._session.closed:

@@ -45,7 +45,7 @@ GIF_PAGE_URL_RE = re.compile(
     r"|i\.giphy\.com/[^\s<>\"']+"
     r"|media\d*\.giphy\.com/[^\s<>\"']+"
     r"|gph\.is/[^\s<>\"']+"
-    r"(?:(?:media|cdn)\.)?klipy\.com/[^\s<>\"']+"
+    r"|(?:(?:media|cdn)\.)?klipy\.com/[^\s<>\"']+"
     r"|i\.imgur\.com/[A-Za-z0-9]+\.gifv"
     r"|imgur\.com/[A-Za-z0-9]+\.gifv"
     r")",

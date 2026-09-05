@@ -355,6 +355,27 @@ class ReplyQueue:
             return True
         return False
 
+    def drop_soft(self, channel_id: Any) -> int:
+        """Drop pending soft (watch/chatter) entries. Directed pings stay.
+
+        Used by same-user interrupt so a coalesced watch line cannot steal the
+        next slot from the ping that just cancelled the in-flight turn.
+        """
+        cid = str(channel_id or "")
+        state = self._channels.get(cid)
+        if state is None:
+            return 0
+        kept: list[_Pending] = []
+        dropped = 0
+        for entry in state.queue:
+            if entry.directed:
+                kept.append(entry)
+                continue
+            self._note_drop(cid, entry, "interrupted")
+            dropped += 1
+        state.queue = kept
+        return dropped
+
     async def close(self) -> None:
         self._closing = True
         for cid, state in list(self._channels.items()):

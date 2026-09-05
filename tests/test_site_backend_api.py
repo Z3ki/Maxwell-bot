@@ -166,6 +166,22 @@ def test_collections_append_and_page(data_dir):
     assert _payload(removed)["removed"] == 1
 
 
+def test_items_list_unknown_cursor_is_empty(data_dir):
+    for n in range(3):
+        site_backend.items_add(data_dir, "guest", "log", n)
+    assert site_backend.items_list(data_dir, "guest", "log", after="no-such-id") == []
+
+
+def test_items_list_after_returns_next_page_not_newest(data_dir):
+    ids = []
+    for n in range(5):
+        ids.append(site_backend.items_add(data_dir, "guest", "paged", n)["id"])
+    page = site_backend.items_list(data_dir, "guest", "paged", limit=2, after=ids[0])
+    assert [i["data"] for i in page] == [1, 2]
+    newest = site_backend.items_list(data_dir, "guest", "paged", limit=2)
+    assert [i["data"] for i in newest] == [3, 4]
+
+
 def test_a_site_without_backend_gets_nothing(data_dir):
     resp = run(api.site_kv_get(FakeRequest(match={"slug": "plain"})))
     assert resp.status == 404
@@ -413,3 +429,18 @@ def test_oversize_upload_is_refused_before_streaming(data_dir, monkeypatch):
     resp = run(api.site_proxy(req))
     assert resp.status == 413
     assert "too large" in _payload(resp)["error"]
+
+
+def test_site_proxy_paths_are_not_killed_by_api_timeout(monkeypatch):
+    """A live /bot/... websocket must outlive the 30s admin-API request cap."""
+
+    async def scenario():
+        async def handler(request):
+            await asyncio.sleep(0.05)
+            return "ok"
+
+        monkeypatch.setattr(api, "_API_REQUEST_TIMEOUT", 0.001)
+        req = FakeRequest(path="/bot/demo/api/ws", method="GET")
+        return await api._reliability_middleware(req, handler)
+
+    assert run(scenario()) == "ok"

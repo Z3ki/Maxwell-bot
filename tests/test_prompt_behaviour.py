@@ -94,6 +94,12 @@ def test_lean_protocol_forbids_claiming_unverified_work():
     )
 
 
+def test_protocols_do_not_force_reasoning_on_every_call():
+    for text in (TOOL_PROTOCOL, LEAN_TOOL_PROTOCOL):
+        assert "needs `reasoning`" not in text
+        assert "may include `reasoning`" in text
+
+
 # --------------------------------------------------------------------------
 # sites: work hard, no placeholders
 # --------------------------------------------------------------------------

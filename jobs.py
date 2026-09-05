@@ -135,6 +135,10 @@ def _short(text: Any, limit: int = 50) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()[:limit] or "project"
 
 
+def _norm_jid(job_id: Any) -> str:
+    return str(job_id or "").strip().lower()
+
+
 @dataclass
 class BackgroundJob:
     id: str
@@ -202,9 +206,12 @@ class BackgroundJobManager:
         for jid, data in items.items():
             if not isinstance(data, dict):
                 continue
+            jid = _norm_jid(jid)
+            if not jid:
+                continue
             try:
                 job = BackgroundJob(
-                    id=str(jid),
+                    id=jid,
                     guild_id=str(data.get("guild_id") or ""),
                     channel_id=str(data.get("channel_id") or ""),
                     user_id=str(data.get("user_id") or ""),
@@ -260,9 +267,9 @@ class BackgroundJobManager:
             raise RuntimeError("ALREADY_RUNNING: you already have a background job running")
         if self.active_count() >= self.max_jobs:
             raise RuntimeError("ALL_BUSY: all background slots are busy — try again in a bit")
-        jid = secrets.token_hex(JOB_ID_BYTES)
-        while jid in self._jobs:
-            jid = secrets.token_hex(JOB_ID_BYTES)
+        jid = _norm_jid(secrets.token_hex(JOB_ID_BYTES))
+        while not jid or jid in self._jobs:
+            jid = _norm_jid(secrets.token_hex(JOB_ID_BYTES))
         job = BackgroundJob(
             id=jid,
             guild_id=str(guild_id or ""),
@@ -276,7 +283,7 @@ class BackgroundJobManager:
         return job
 
     def get(self, job_id: str) -> BackgroundJob | None:
-        return self._jobs.get(str(job_id or "").strip().lower())
+        return self._jobs.get(_norm_jid(job_id))
 
     def list_text(self, limit: int = 10, *, guild_id: Any = None) -> str:
         if not self._jobs:
@@ -293,18 +300,18 @@ class BackgroundJobManager:
         return "\n".join(lines)
 
     def cleanup_runtime(self, job_id: str) -> None:
-        jid = str(job_id)
+        jid = _norm_jid(job_id)
         self._runtime.pop(jid, None)
         self._tasks.pop(jid, None)
 
     def attach_runtime(self, job_id: str, **objects: Any) -> None:
-        self._runtime[str(job_id)] = dict(objects)
+        self._runtime[_norm_jid(job_id)] = dict(objects)
 
     def runtime(self, job_id: str) -> dict[str, Any]:
-        return self._runtime.get(str(job_id), {})
+        return self._runtime.get(_norm_jid(job_id), {})
 
     def track_task(self, job_id: str, task: asyncio.Task) -> None:
-        self._tasks[str(job_id)] = task
+        self._tasks[_norm_jid(job_id)] = task
 
     def mark(self, job_id: str, **fields: Any) -> BackgroundJob | None:
         job = self.get(job_id)
@@ -730,6 +737,10 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                 succeeded = True
             except Exception as exc:
                 logger.warning("background job %s generation failed at step %s: %s", job.id, step, exc)
+                # A later-step failure is not a successful finish. The first
+                # successful LLM call used to leave succeeded=True, so a
+                # mid-run provider drop was marked done with partial text.
+                succeeded = False
                 final_text = final_text or f"generation failed ({type(exc).__name__}); partial work is in the thread."
                 break
             finally:
@@ -821,31 +832,31 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                 final_text = resp_text.strip()
                 break
             final_text = resp_text.strip()
+
+        if not succeeded:
+            # Nothing ever came back — honest error, not a fake done.
+            await _fail(final_text or "the model never returned anything.")
+            await _post_thread(thread, "Failed before producing output.")
+            return
+
+        final_text = str(final_text or "").strip() or "Done — details are in the thread."
+        manager.mark(job.id, status="done", result=final_text[:8000], progress="done")
+
+        # Deliver: LLM-written reply to the ORIGINAL message (ping on).
+        # Full result already lives in the build thread; the channel gets one line.
+        try:
+            body = await _llm_delivery_line(bot, final_text, job.id, job.goal)
+        except Exception:
+            body = _delivery_line(final_text, job.id)
+        try:
+            await _reply_short(orig_message, channel, body)
+        except Exception as exc:
+            logger.warning("background job %s delivery failed: %s", job.id, exc)
+            await _post_thread(thread, f"Done, but I could not post to the channel ({exc}):\n{body[:1500]}")
+        await _post_thread(thread, f"Finished.\n{str(final_text or '')[:1500]}")
     except asyncio.CancelledError:
         manager.mark(job.id, status="cancelled", progress="cancelled on request")
         await _post_thread(thread, f"Job `{job.id}` cancelled.")
         raise
     finally:
         manager.cleanup_runtime(job.id)
-
-    if not succeeded:
-        # Nothing ever came back — honest error, not a fake done.
-        await _fail(final_text or "the model never returned anything.")
-        await _post_thread(thread, "Failed before producing output.")
-        return
-
-    final_text = str(final_text or "").strip() or "Done — details are in the thread."
-    manager.mark(job.id, status="done", result=final_text[:8000], progress="done")
-
-    # Deliver: LLM-written reply to the ORIGINAL message (ping on).
-    # Full result already lives in the build thread; the channel gets one line.
-    try:
-        body = await _llm_delivery_line(bot, final_text, job.id, job.goal)
-    except Exception:
-        body = _delivery_line(final_text, job.id)
-    try:
-        await _reply_short(orig_message, channel, body)
-    except Exception as exc:
-        logger.warning("background job %s delivery failed: %s", job.id, exc)
-        await _post_thread(thread, f"Done, but I could not post to the channel ({exc}):\n{body[:1500]}")
-    await _post_thread(thread, f"Finished.\n{str(final_text or '')[:1500]}")

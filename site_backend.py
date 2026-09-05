@@ -209,15 +209,23 @@ def items_list(
 ) -> list[dict]:
     name = _check_name(name, "collection")
     items = _read(store_path(data_dir, slug))["collections"].get(name) or []
-    if after:
-        for idx, item in enumerate(items):
-            if str(item.get("id")) == str(after):
-                items = items[idx + 1 :]
-                break
     try:
         limit = max(1, min(int(limit), MAX_ITEMS_PER_COLLECTION))
     except (TypeError, ValueError):
         limit = 100
+    if after:
+        cursor = str(after)
+        found = False
+        for idx, item in enumerate(items):
+            if str(item.get("id")) == cursor:
+                items = items[idx + 1 :]
+                found = True
+                break
+        # A stale/unknown cursor must not jump to the newest page — that
+        # silently skips (or duplicates) entries for guestbook clients.
+        if not found:
+            return []
+        return items[:limit]
     return items[-limit:]
 
 
