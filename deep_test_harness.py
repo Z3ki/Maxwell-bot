@@ -264,8 +264,8 @@ class DeepTestHarness:
                 params = fn["parameters"]
                 assert params["type"] == "object"
                 assert "properties" in params
-                assert "reasoning" in params["properties"]  # reasoning injected into all schemas
-            return f"{len(tools)} OpenAI tool schemas built with injected reasoning"
+                assert "reasoning" not in params["properties"]  # reasoning no longer injected into schemas
+            return f"{len(tools)} OpenAI tool schemas built cleanly without forced reasoning"
 
         def test_native_tool_call_normalization():
             raw_calls = [

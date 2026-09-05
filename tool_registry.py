@@ -1,10 +1,9 @@
 """Reasoning plumbing for Maxwell tool calls.
 
-There is no standalone `reasoning_log` tool and no second schema builder. Every
-tool carries an OPTIONAL-in-shape, required-in-practice `reasoning` string that
-tool_schemas.build_openai_tools() injects into its JSON schema, so the model
-does its thinking inside the call it actually wants to make. This module owns
-the other half of that contract:
+There is no standalone `reasoning_log` tool and no second schema builder.
+`reasoning` is optional: build_openai_tools() does not inject or require it,
+but extract_reasoning() still pops it when a model includes it. This module
+owns that half of the contract:
 
 - `extract_reasoning()` pops `reasoning` back out before the params reach
   Tool.execute(), so no tool ever sees the kwarg.

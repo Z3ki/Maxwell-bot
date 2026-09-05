@@ -347,12 +347,9 @@ class SpawnBackgroundTool(Tool):
 
     def get_description(self):
         return (
-            "Start a BACKGROUND job for a long task (site build, big research, "
-            "multi-step work) and END this turn. The job runs detached with "
-            "bigger budgets and replies to the original message when done, so the channel stays "
-            "free. Params: goal (what to build/do, required), context (extra "
-            "spec, optional). After calling, reply with send_message: ONE short "
-            "ack line naming the job id — nothing else, no other tools."
+            "BACKGROUND job for a long task (site, research, multi-step). END this turn. "
+            "Detached, bigger budgets, replies when done. Params: goal (required), "
+            "context (optional spec). Then send_message: ONE short ack with the job id — nothing else."
         )
 
     async def execute(self, message: Any, goal: str | None = None, context: str | None = None, **kwargs: Any) -> str:
@@ -382,24 +379,23 @@ class SpawnBackgroundTool(Tool):
             text = str(exc)
             if text.startswith("ALREADY_RUNNING:"):
                 return (
-                    "A background job is ALREADY RUNNING for this user — do not start another. "
-                    "Reply NOW with send_message: ONE short ack line and NOTHING else."
+                    "A background job is ALREADY RUNNING for this user. "
+                    "Reply NOW with send_message: ONE short ack, nothing else."
                 )
             if text.startswith("ALL_BUSY:"):
-                return f"COULD NOT START background job ({text[len('ALL_BUSY:'):].strip()}). Do the work inline instead."
-            return f"COULD NOT START background job: {text} Do the work inline instead."
+                return f"COULD NOT START ({text[len('ALL_BUSY:'):].strip()}). Do the work inline."
+            return f"COULD NOT START: {text} Do the work inline."
         manager.attach_runtime(job.id, message=message, channel=channel)
         try:
             task = _spawn_background(run_background_job(bot, job.id))
             manager.track_task(job.id, task)
         except RuntimeError as exc:
             manager.mark(job.id, status="error", progress=f"could not launch: {exc}")
-            return f"ERROR launching background job `{job.id}`: {exc} Do the work inline."
+            return f"ERROR launching `{job.id}`: {exc} Do the work inline."
         return (
             f"Background job `{job.id}` started for '{_short(raw_goal, 80)}'. "
-            f"Reply NOW with send_message: ONE short ack line (e.g. `on it — job `{job.id}`, "
-            "I'll reply here when it's done`) and NOTHING else. Do not start the work "
-            "in this turn — the detached job does it."
+            f"Reply NOW with send_message: ONE short ack naming `{job.id}` "
+            "and NOTHING else. Do not start the work this turn."
         )
 
 
@@ -510,11 +506,10 @@ async def _llm_delivery_line(bot: Any, final_text: Any, job_id: str, job_goal: s
         raw = str(final_text or "").strip()[:2000] or fallback
         goal = re.sub(r"\s+", " ", str(job_goal or "")).strip()[:200]
         prompt = (
-            "Rewrite this background-job result as ONE short Discord reply line. "
-            "Keep the real title and the real URL exactly, no placeholders, no extra links. "
-            "No 'job `id` done' prefix, no thread talk — just the result in your own voice, under 200 chars. "
+            "One Discord line, <200 chars. Keep the real title and URL; "
+            "no placeholders, extra links, job-id prefix, or thread talk.\n"
             f"Result: {raw}"
-            + (f" Goal was: {goal}." if goal else "")
+            + (f"\nGoal: {goal}" if goal else "")
         )
         try:
             await bot._acquire_ai_slot(timeout=30.0, priority="background", key=f"delivery-{job_id}")
@@ -524,7 +519,7 @@ async def _llm_delivery_line(bot: Any, final_text: Any, job_id: str, job_goal: s
         try:
             resp = await generate(
                 [
-                    {"role": "system", "content": "You are Maxwell. One short reply line, no wall of text."},
+                    {"role": "system", "content": "Maxwell. One short reply line."},
                     {"role": "user", "content": prompt},
                 ],
                 max_tokens=256,
@@ -665,39 +660,25 @@ async def run_background_job(bot: Any, job_id: str) -> None:
             "role": "system",
             "content": (
                 f"{base_personality}\n\n"
-                f"You are Maxwell's BACKGROUND build agent (job `{job.id}`). The user was already "
-                "told the work is running; do not narrate, just build. You have NO channel "
-                "tools — you cannot post to any channel, so never try send_message. The ONLY "
-                "thing the requester ever sees is your FINAL answer, delivered automatically "
-                "as one reply line. Make it count.\n"
+                f"BACKGROUND job `{job.id}`. Channel already acked — don't narrate. "
+                "No channel posts (no send_message). Only your FINAL line is delivered.\n"
                 f"Goal: {job.goal}\n"
-                + (f"Extra context: {job.context}\n" if job.context else "")
-                + "How to work:\n"
-                "1. Build with tools (create_site / site_server / edit_site for sites; shell "
-                "only when no tool can do it).\n"
-                "2. For sites: create → wire the frontend with RELATIVE api paths "
-                "('api/notes', never '/api/...') → site_test → fix what it reports → "
-                "site_test again. Never claim done while console errors remain.\n"
-                "3. Read and patch files in their live location via the tools. Never keep "
-                "shadow copies under /home/maxwell — they diverge and patches fail.\n"
-                "4. One backend route = one definition. Never mount the same route under "
-                "several prefixes.\n"
-                "Ending contract (mandatory): your LAST message must be exactly this shape: "
-                "`Built <title>: <url> — <one line on what it is>`, with the real title and "
-                "the real URL from the tool results, never a placeholder. NEVER end with "
-                "'done', 'I'm all done', 'finished', or any vague line — that wastes the "
-                "delivery and the user sees nothing useful. If the work failed, end with "
-                "`FAILED: <one-line reason>` instead.\n\n"
+                + (f"Context: {job.context}\n" if job.context else "")
+                + "Work:\n"
+                "1. Tools first (create_site / site_server / edit_site; shell only if no tool fits).\n"
+                "2. Sites: create → relative API paths (`api/notes`, never `/api/...`) → "
+                "site_test → fix → retest. Don't claim done with console errors.\n"
+                "3. Patch live files via tools. No shadow copies under /home/maxwell.\n"
+                "4. One route = one definition; don't remount the same path.\n"
+                "Last message MUST be `Built <title>: <url> — <one line>` with the real "
+                "title+URL from tools — never a placeholder, 'done', or 'finished'. "
+                "On failure: `FAILED: <reason>`.\n\n"
                 f"{tool_prompt}"
             ).strip(),
         },
         {
             "role": "user",
-            "content": (
-                f"Background job `{job.id}` from <@{job.user_id}>: {job.goal}"
-                + (f"\nContext: {job.context}" if job.context else "")
-                + "\nDo it now."
-            ),
+            "content": f"<@{job.user_id}>: {job.goal}\nDo it now.",
         },
     ]
 
@@ -801,10 +782,8 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                     {
                         "role": "user",
                         "content": (
-                            "You're going in circles: no site file has changed in 15 steps. "
-                            "Stop shell-verifying trivia and stop re-reading files. Your next "
-                            "step must be ONE of: edit_site/site_server write or replace with "
-                            "a real fix, or site_test. Then finish with the single-line summary."
+                            "No site file changed in 15 steps. Stop grepping/re-reading. "
+                            "Next: edit_site/site_server write, or site_test. Then the single-line summary."
                         ),
                     }
                 )

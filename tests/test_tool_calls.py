@@ -4,9 +4,9 @@ The XML ``collect_tool_calls`` dispatcher is gone (Maxwell is native
 function-calling only now). What stays is ``strip_tool_payload_leaks`` — the
 defensive sanitizer that scrubs any leaked ``<tool:...>`` tags a misbehaving
 model drops into visible text even in native mode. These tests cover that
-sanitizer plus the new reasoning contract:
-- every tool schema gets an auto-injected ``reasoning`` param,
-- ``extract_reasoning`` pulls it out of params before the tool runs,
+sanitizer plus the reasoning contract:
+- tool schemas do **not** inject or require ``reasoning``,
+- ``extract_reasoning`` still pops it if the model sent it,
 - ``_sanitize_reasoning`` strips tag-wrapped thoughts the model sneakily emits.
 """
 
@@ -180,27 +180,23 @@ def test_strip_tool_payload_leaks_drops_empty_json_fence():
     assert strip_tool_payload_leaks("look:\n```json\n\n```\noops") == "look:\n\noops"
 
 
-# ---- reasoning param injection on every tool schema ----
+# ---- reasoning param is NO LONGER injected on every tool schema ----
 
 
-def test_every_tool_gets_reasoning_param():
+def test_tools_do_not_force_reasoning_param():
     tools = {"send_message": _FakeTool(), "react": _FakeTool(), "no_response": _FakeTool()}
     out = {o["function"]["name"]: o for o in build_openai_tools(tools)}
     for name, fn in out.items():
         props = fn["function"]["parameters"]["properties"]
-        assert "reasoning" in props, f"{name} is missing the reasoning param, damn it"
+        assert "reasoning" not in props, f"{name} unexpectedly had reasoning injected"
 
 
-def test_reasoning_is_always_required():
+def test_reasoning_is_not_forced_in_required():
     tools = {"send_message": _FakeTool()}
     out = build_openai_tools(tools)[0]
     required = out["function"]["parameters"].get("required", [])
-    # reasoning is always in required so the provider rejects empty calls
-    # instead of silently dropping the trace. The tool's own required field
-    # (content) is preserved alongside.
-    assert "reasoning" in required
-    assert "content" in required
-    assert set(required) == {"reasoning", "content"}
+    assert "reasoning" not in required
+    assert set(required) == {"content"}
 
 
 def test_reasoning_param_schema_is_stable():

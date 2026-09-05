@@ -13,14 +13,13 @@ from utils import _atomic_json_write_sync
 logger = logging.getLogger(__name__)
 
 DEFAULT_REM_PROMPT_BODY = (
-    "Assimilate the short-term slice. Search existing memories before adding. "
-    "Keep durable facts, preferences, decisions, identities, unresolved work. "
-    "Drop obsolete bloat. End with one JSON object on its own line:\n"
-    '{"actions": {"ltm_add": ["fact"], "ltm_remove": [<line ids>], '
-    '"shared_add": [{"scope": "global|user:<id>|guild:<id>|channel:<id>", '
-    '"content": "fact", "importance": 1-10}]}, '
-    '"audit": "one-paragraph summary"}\n'
-    'If nothing to persist: {"actions": {}, "audit": "no changes"}. audit is required.'
+    "Assimilate the short-term slice. Search existing LTM before adding. "
+    "Keep durable facts, prefs, decisions, identities, open work. Drop stale bloat. "
+    "One JSON line:\n"
+    '{"actions":{"ltm_add":["fact"],"ltm_remove":[<ids>],'
+    '"shared_add":[{"scope":"global|user:<id>|guild:<id>|channel:<id>",'
+    '"content":"fact","importance":1-10}]},"audit":"short summary"}\n'
+    'Empty: {"actions":{},"audit":"no changes"}. audit required.'
 )
 
 
@@ -32,14 +31,12 @@ def rem_system_prompt(turns_remaining: int, prompt_body: str | None = None) -> s
     body = (prompt_body or DEFAULT_REM_PROMPT_BODY).strip()
     # NOTE: REM is a single-pass audit, not a multi-turn tool loop. The old
     # prompt advertised "N turns left" but the runner never looped, which
-    # misled the model. Don't mention turns; just ask for one DONE audit.
+    # misled the model. Don't mention turns or DONE; ask for one JSON audit.
     return (
-        "You are Maxwell REM — periodic memory assimilation, not live chat.\n"
-        "Keep the last slice useful, specific, deduplicated. Don't drop decisions, "
-        "preferences, unresolved tasks, or identity facts.\n\n"
+        "You are Maxwell REM — memory assimilation, not live chat.\n"
+        "Dedup. Don't drop decisions, prefs, open tasks, or identity.\n\n"
         f"## Task\n{body}\n\n"
-        "## Output\nSingle pass. Brief reason, then exactly one JSON object "
-        "(one line). `audit` is what the dashboard shows — keep it short."
+        "## Output\nOne pass. One JSON line. Short `audit` (dashboard)."
     )
 
 
@@ -52,6 +49,40 @@ def rem_system_prompt(turns_remaining: int, prompt_body: str | None = None) -> s
 # contributes its decision/preference/task.
 REM_SLICE_MAX_CHARS = 120_000
 REM_SLICE_MIN_EVENT_CHARS = 300
+
+
+_REM_EVENT_FALSE_KEYS = frozenset({"auto_mode", "reply_to_self"})
+
+
+def compact_rem_event(event: dict) -> dict:
+    """Drop empty/false fields and alias keys (ts/role already carry them)."""
+    if not isinstance(event, dict):
+        return {}
+    out = {}
+    for key, value in event.items():
+        if key == "timestamp" and event.get("ts"):
+            continue
+        if key == "kind" and event.get("role"):
+            continue
+        if value in ("", None, [], {}):
+            continue
+        if key in _REM_EVENT_FALSE_KEYS and not value:
+            continue
+        out[key] = value
+    return out
+
+
+def format_ltm_prompt(entries, limit: int = 200) -> str:
+    """id: content lines — no timestamps, no JSON wrapper."""
+    lines = []
+    for entry in list(entries or [])[:limit]:
+        if not isinstance(entry, dict):
+            continue
+        content = str(entry.get("content") or "").strip()
+        if not content:
+            continue
+        lines.append(f"{entry.get('id', '')}: {content}")
+    return "\n".join(lines)
 
 
 def short_term_slice_prompt(events: list[dict]) -> str:
@@ -70,9 +101,10 @@ def short_term_slice_prompt(events: list[dict]) -> str:
             )
             budgeted.append(trimmed)
         events = budgeted
+    compacted = [compact_rem_event(event) for event in events]
     return (
-        "Short-term visible slice (inputs/outputs, reasoning excluded). "
-        "Keep what matters:\n" + json.dumps(events, ensure_ascii=False, sort_keys=True)
+        "STM slice (I/O only, reasoning excluded):\n"
+        + json.dumps(compacted, ensure_ascii=False, sort_keys=True)
     )
 
 
@@ -365,10 +397,9 @@ async def run_rem_once(
         {"role": "system", "content": short_term_slice_prompt(events)},
         {
             "role": "system",
-            "content": "Current long-term memory snapshot:\n"
-            + json.dumps(
-                (await asyncio.to_thread(memory_manager.get_long_term_memory))[:200],
-                ensure_ascii=False,
+            "content": "LTM:\n"
+            + format_ltm_prompt(
+                await asyncio.to_thread(memory_manager.get_long_term_memory)
             ),
         },
     ]

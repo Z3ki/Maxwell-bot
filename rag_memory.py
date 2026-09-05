@@ -2647,9 +2647,7 @@ class RAGMemoryManager:
         for r in rows:
             ts_short = str(r["timestamp"])[:16].replace("T", " ")
             content_short = str(r["content"])[:280].replace("\n", " ")
-            transcript_lines.append(
-                f"[{ts_short}] #{r['channel_id']} {r['author']}: {content_short}"
-            )
+            transcript_lines.append(f"{ts_short} {r['author']}: {content_short}")
         transcript = "\n".join(transcript_lines)
         if len(transcript) > 12000:
             transcript = transcript[:12000] + "\n…[truncated]"

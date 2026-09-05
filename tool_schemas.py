@@ -536,10 +536,10 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         },
         ["content"],
     ),
-    # NOTE: no more `reasoning_log` tool. Reasoning now rides inside every
-    # tool call via the auto-injected `reasoning` param (see build_openai_tools
-    # above and tool_registry.record_reasoning). Plain chat goes through
-    # send_message, which itself carries a reasoning field.
+    # NOTE: no more `reasoning_log` tool. Reasoning may ride inside a tool
+    # call as an optional `reasoning` field (see tool_registry.extract_reasoning
+    # / record_reasoning). It is not forced onto OpenAI schemas. Plain chat
+    # goes through send_message.
     "no_response": _obj({}),
     "more_tools": _obj(
         {
@@ -974,15 +974,28 @@ def contract_groups(names: list[str]) -> dict[str, list[str]]:
     return groups
 
 
-# The reasoning parameter is stamped onto EVERY tool so the model does its
-# real reasoning *inside the tool call it wants to use* instead of a separate,
-# pointless `reasoning_log` tool. Same shape everywhere — see tool_registry.py.
+# Optional reasoning key. Not injected into OpenAI tool schemas (providers
+# reject extra required fields, and forcing it made every call fail closed).
+# Recovery parsers still accept it when a model emits it in leaked text —
+# see _recovery_properties and tool_registry.extract_reasoning.
 REASONING_PARAM: dict[str, Any] = {
     "type": "string",
     "description": (
         "Why this call, one sentence, first argument. Plain text only."
     ),
 }
+
+
+def _recovery_properties(name: str) -> dict[str, Any]:
+    """Declared tool params plus optional ``reasoning``.
+
+    ``build_openai_tools`` no longer stamps ``reasoning`` onto schemas, but
+    leaked text dialects still emit it. Recovery must accept that key without
+    treating it as a required schema field.
+    """
+    props = dict((TOOL_PARAMETERS.get(name) or {}).get("properties") or {})
+    props.setdefault("reasoning", REASONING_PARAM)
+    return props
 
 
 def build_openai_tools(
@@ -994,12 +1007,7 @@ def build_openai_tools(
 ) -> list[dict[str, Any]]:
     """Build OpenAI ``tools`` payload from live tool instances.
 
-    Every tool gets an auto-injected `reasoning` parameter on top of whatever
-    it declared in TOOL_PARAMETERS. Reasoning lives INSIDE the tool call now —
-    there is no standalone reasoning_log tool anymore. If you add a new tool,
-    you do nothing special: it gets reasoning for free. Stop forgetting.
-
-    Every description also gets its result contract appended (see
+    Every description gets its result contract appended (see
     result_contract) so the model knows, per tool, whether the output comes
     back to it. The contract is added AFTER the description is truncated, so
     a long description can never eat the part that changes the model's plan.
@@ -1040,23 +1048,15 @@ def build_openai_tools(
                 "additionalProperties": True,
             }
         params = dict(declared)
-        # Inject reasoning onto a COPY so we never mutate TOOL_PARAMETERS.
         raw_props = params.get("properties")
         props = dict(raw_props) if isinstance(raw_props, dict) else {}
-        props.setdefault("reasoning", REASONING_PARAM)
         params["properties"] = props
-        # reasoning is ALWAYS required — no exceptions, no "terse on a trivial
-        # call" carve-out. If the model thinks before it acts, we want the
-        # trace. If it skips reasoning, the provider rejects the call instead
-        # of silently dropping it (which is what bit us before).
         raw_required = params.get("required")
         required = (
-            [r for r in raw_required if isinstance(r, str) and r != "reasoning"]
+            [r for r in raw_required if isinstance(r, str)]
             if isinstance(raw_required, (list, tuple))
             else []
         )
-        if "reasoning" not in required:
-            required.append("reasoning")
         params["required"] = required
         out.append(
             {
@@ -1440,9 +1440,9 @@ def _pairs_from_body(body: str, name: str) -> dict[str, Any]:
                 return dict(parsed[0])
     # Last dialect: the tool's own parameter names used as XML tags,
     # e.g. "<content>hola</content>". Only names the schema declares are
-    # accepted, so prose in angle brackets cannot invent an argument.
-    props = dict((TOOL_PARAMETERS.get(name) or {}).get("properties") or {})
-    props.setdefault("reasoning", REASONING_PARAM)
+    # accepted (plus optional reasoning), so prose in angle brackets cannot
+    # invent an argument.
+    props = _recovery_properties(name)
     args: dict[str, Any] = {}
     for key in props:
         tag = re.search(
@@ -1522,8 +1522,7 @@ def _strip_wrapping_quotes(value: str) -> str:
 
 def _pairs_from_paren_body(interior: str, name: str) -> dict[str, Any]:
     """Split ``key=value, key=value`` where values may contain commas."""
-    props = dict((TOOL_PARAMETERS.get(name) or {}).get("properties") or {})
-    props.setdefault("reasoning", REASONING_PARAM)
+    props = _recovery_properties(name)
     marks: list[tuple[int, int, str]] = []
     for match in _PAREN_ARG_KEY_RE.finditer(interior):
         key = match.group(1)
