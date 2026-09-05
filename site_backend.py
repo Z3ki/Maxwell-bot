@@ -36,8 +36,8 @@ from utils import FileLock, _atomic_json_write_sync
 
 # ── limits ────────────────────────────────────────────────────────────────
 # Chosen so a busy toy site is comfortable and a hostile one is boring.
-MAX_STORE_BYTES = 1_000_000  # whole store, serialized
-MAX_VALUE_BYTES = 64_000  # one kv value or one collection item
+MAX_STORE_BYTES = 10_000_000  # whole store, serialized
+MAX_VALUE_BYTES = 1_000_000  # one kv value or one collection item
 MAX_KEYS = 200
 MAX_COLLECTIONS = 20
 MAX_ITEMS_PER_COLLECTION = 1000  # oldest drop out (ring)
