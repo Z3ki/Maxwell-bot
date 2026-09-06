@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any, ClassVar, cast
-from urllib.parse import parse_qs, quote, urljoin, urlparse
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
 
 import aiofiles
 import aiohttp
@@ -287,14 +287,7 @@ def _is_safe_ip(value: str) -> bool:
     # Unwrap IPv4-mapped IPv6 (::ffff:127.0.0.1) so loopback/private checks apply.
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
-    return not (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_reserved
-        or ip.is_multicast
-        or ip.is_unspecified
-    )
+    return bool(getattr(ip, "is_global", False))
 
 
 class _SafeResolver:
@@ -385,8 +378,10 @@ def _is_safe_url(url: str) -> bool:
         hostname = parsed.hostname
         if not hostname:
             return False
-        # Block localhost names
-        if hostname.lower() in ("localhost", "127.0.0.1", "0.0.0.0", "::1"):
+        host = hostname.lower().rstrip(".")
+        if host in {"localhost", "localhost.localdomain"} or host.endswith(
+            (".localhost", ".local", ".internal", ".lan")
+        ):
             return False
         try:
             ipaddress.ip_address(hostname)
@@ -605,6 +600,15 @@ def _unterminated_heredoc_error(command: str) -> str | None:
             "file body, then a line containing only EOF"
         )
     return None
+
+
+def _caller_is_admin(bot, message) -> bool:
+    author_id = getattr(getattr(message, "author", None), "id", None)
+    check = getattr(bot, "_is_admin", None)
+    try:
+        return bool(author_id is not None and callable(check) and check(author_id))
+    except Exception:
+        return False
 
 
 def _is_path_allowed(path: str, allowed_base: str) -> bool:
@@ -1189,6 +1193,90 @@ def _persist_public_image(
         return None, None
 
 
+def _public_files_target(bot) -> tuple[str, str]:
+    """Return (local_dir, public_base_url) for hosted files.
+
+    Files land in <MAXWELL_SITE_DIR>/_files/<slug>/ and are served at
+    <MAXWELL_PUBLIC_BASE_URL>/bot/_files/<slug>/... — same origin as
+    create_site pages, so Discord can embed/unfurl the URL.
+    """
+    cfg = getattr(bot, "config", None)
+    site_dir = str(getattr(cfg, "MAXWELL_SITE_DIR", "public/bot") or "public/bot")
+    pub = str(
+        getattr(cfg, "MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com")
+        or "https://maxwell.example.com"
+    ).rstrip("/")
+    return os.path.join(site_dir, "_files"), f"{pub}/bot/_files"
+
+
+_HOST_MIME_EXT = {
+    "text/html": ".html",
+    "text/css": ".css",
+    "text/javascript": ".js",
+    "application/javascript": ".js",
+    "application/json": ".json",
+    "text/plain": ".txt",
+    "text/markdown": ".md",
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/svg+xml": ".svg",
+    "audio/mpeg": ".mp3",
+    "audio/wav": ".wav",
+    "audio/ogg": ".ogg",
+    "video/mp4": ".mp4",
+    "video/webm": ".webm",
+    "application/pdf": ".pdf",
+    "application/zip": ".zip",
+    "font/woff2": ".woff2",
+    "font/woff": ".woff",
+}
+
+
+def _blob_looks_like_html(blob: bytes, content_type: str = "", url: str = "") -> bool:
+    mime = (content_type or "").split(";", 1)[0].strip().lower()
+    if mime.startswith("text/html") or mime == "application/xhtml+xml":
+        return True
+    path = unquote(urlparse(url or "").path or "").lower()
+    if path.endswith((".html", ".htm", ".xhtml")):
+        return True
+    head = (blob or b"")[:256].lstrip().lower()
+    return head.startswith(b"<!doctype html") or head.startswith(b"<html")
+
+
+def _title_from_html(body: str) -> str:
+    match = re.search(r"<title[^>]*>(.*?)</title>", body or "", re.I | re.S)
+    if not match:
+        return ""
+    return re.sub(r"\s+", " ", html.unescape(match.group(1))).strip()[:80]
+
+
+def _filename_from_url(url: str, content_type: str = "", default: str = "file") -> str:
+    path = unquote(urlparse(url or "").path or "")
+    name = Path(path).name if path else ""
+    name = _safe_attachment_filename(name, default=default)
+    if name and "." in name and name not in {default, "file"}:
+        return name
+    mime = (content_type or "").split(";", 1)[0].strip().lower()
+    ext = _HOST_MIME_EXT.get(mime, "")
+    if ext and not name.endswith(ext):
+        stem = name if name not in {"", ".", "..", default, "file"} else default
+        if "." in stem:
+            stem = Path(stem).stem
+        return _safe_attachment_filename(stem + ext, default=default + ext)
+    return name or default
+
+
+def _host_file_slug(raw: Any, fallback: str) -> str:
+    slug = re.sub(r"[^a-z0-9-]", "-", str(raw or "").lower().strip())[:30].strip("-")
+    if not slug or len(slug) < 2:
+        slug = fallback
+    if slug in {"images", "files"} or slug.startswith("-"):
+        slug = (f"f-{slug.lstrip('-')}" if slug else fallback)[:30]
+    return slug or fallback
+
+
 class ImageGeneratorTool(Tool):
     """Fast image generation using Pollinations (SDXL-Lightning)."""
 
@@ -1459,19 +1547,15 @@ class HDImageGeneratorTool(Tool):
         # Local path — only from the dirs Maxwell itself writes images to.
         try:
             img_dir, _ = _public_image_target(self.bot)
-            allowed = [os.path.abspath(img_dir), os.path.abspath("temp")]
-            path = os.path.abspath(ref)
-            if not any(
-                path == root or path.startswith(root + os.sep) for root in allowed
-            ):
+            allowed = [img_dir, "temp"]
+            if not any(_is_path_allowed(ref, root) for root in allowed):
                 return None, f"local path outside the allowed image dirs: {ref[:80]}"
-            if not os.path.isfile(path):
-                return None, f"no such file: {ref[:80]}"
-            if os.path.getsize(path) > self.MAX_INPUT_BYTES:
+            path = Path(ref).resolve()
+            if path.stat().st_size > self.MAX_INPUT_BYTES:
                 return None, f"file too large: {ref[:80]}"
             # Off-thread: images run up to MAX_INPUT_BYTES and this is on the
             # event loop, so a blocking read stalls unrelated chats.
-            return await asyncio.to_thread(Path(path).read_bytes), ""
+            return await asyncio.to_thread(path.read_bytes), ""
         except Exception as e:
             return None, f"could not read {ref[:80]}: {e}"
 
@@ -2705,6 +2789,11 @@ class LeaveServerTool(Tool):
     async def execute(
         self, message: Message, server: str | None = None, **kwargs
     ) -> str:
+        if not _caller_is_admin(self.bot, message):
+            return (
+                "Error: leaving a server is restricted to admins. Ask an admin "
+                "to run it."
+            )
         target = (server or "").strip()
         if not target:
             return "Error: leave_server requires a server name or ID"
@@ -5011,7 +5100,8 @@ class CreateSiteTool(Tool):
             "Full visual freedom: invent a new design each time; no house style unless asked. "
             "Ship it finished — real content, working controls, no placeholders. "
             "No lorem ipsum; a Loading shell has shipped nothing. "
-            "Params: name, title, body (complete HTML for index.html), "
+            "Params: name, title, body (complete HTML for index.html) OR url "
+            "(fetch existing HTML and host it), "
             'files (extra files {"path":"content"}), '
             "backend (optional, default false), encoding, permanent. "
             "Static HTML/CSS/JS is first-class. Use backend=true + site_server only when "
@@ -5021,6 +5111,30 @@ class CreateSiteTool(Tool):
             "frontend API calls are RELATIVE ('api/notes', never '/api/...' — absolute "
             "paths 404 under /bot/<name>/)."
         )
+
+    async def _fetch_site_html(self, url: str) -> str:
+        """Download a public HTML file to use as index.html."""
+        if not _is_safe_url(url):
+            return "Error: Cannot fetch from private/internal URLs"
+        try:
+            _final, content_type, raw = await _fetch_public_url(
+                url, max_bytes=self.MAX_CONTENT_SIZE
+            )
+        except ValueError as e:
+            return f"Error: {e}"
+        except Exception as e:
+            return f"Error fetching URL: {e}"
+        if not raw:
+            return "Error: fetched page was empty"
+        if not _blob_looks_like_html(raw, content_type, url):
+            return (
+                "Error: that URL is not an HTML page. "
+                "Use host_file(url=...) to publish it as a file."
+            )
+        text = raw.decode("utf-8", errors="replace")
+        if not text.strip():
+            return "Error: fetched page was empty"
+        return text
 
     async def execute(
         self,
@@ -5033,12 +5147,23 @@ class CreateSiteTool(Tool):
         files: Any = None,
         backend: Any = None,
         permanent: Any = None,
+        url: str | None = None,
         **kwargs,
     ) -> str:
         # Available to everyone (non-admins too). Quota + ownership checks apply.
         extra_files, files_err = _parse_site_files(files)
         if files_err:
             return f"Error: {files_err}"
+        source_url = str(url or kwargs.get("src") or "").strip()
+        fetched_from_url = False
+        if source_url and (body is None or not str(body).strip()):
+            fetched = await self._fetch_site_html(source_url)
+            if fetched.startswith("Error:"):
+                return fetched
+            body = fetched
+            fetched_from_url = True
+            if not title:
+                title = _title_from_html(body) or "hosted page"
         has_index = any(f["path"] == "index.html" for f in extra_files)
         if not name or not title or (body is None and not has_index):
             missing = []
@@ -5047,15 +5172,18 @@ class CreateSiteTool(Tool):
             if not title:
                 missing.append("title")
             if body is None and not has_index:
-                missing.append("body (or files with an index.html)")
+                missing.append("body (or url= of an HTML file, or files with an index.html)")
             return (
                 f"Error: missing required params — {', '.join(missing)}. "
-                "name + title + body are the minimum for a site."
+                "name + title + (body or url) are the minimum for a site."
             )
 
         mode = str(encoding or "text").strip().lower()
         if body is None:
             body = ""
+        elif fetched_from_url:
+            # Already decoded HTML from the URL; do not re-interpret as base64.
+            pass
         elif mode in {"base64", "b64"}:
             try:
                 body = base64.b64decode(str(body), validate=True).decode("utf-8")
@@ -6156,6 +6284,15 @@ class DeleteSiteTool(_SiteOwnedTool):
         slug, entry, site_dir, err = self._resolve(message, name)
         if err:
             return err
+        owner = str(entry.get("user_id") or "")
+        author = str(getattr(getattr(message, "author", None), "id", "") or "")
+        if (
+            owner
+            and author
+            and owner != author
+            and not _caller_is_admin(self.bot, message)
+        ):
+            return f"Error: site '{slug}' belongs to someone else"
         base = Path(self.base_dir).resolve()
         try:
             target = Path(site_dir).resolve()
@@ -6203,17 +6340,15 @@ class ListSitesTool(Tool):
         )
 
     async def execute(self, message: Message, all_users: bool = False, **kwargs) -> str:
+        all_users = parse_bool(all_users, False)
         user_id = str(message.author.id)
         if hasattr(self.bot, "_load_sites"):
             self.bot._load_sites(quiet=True)
         sites = getattr(self.bot, "_sites", {}) or {}
 
-        # If user is admin/owner or explicitly requests all_users, show all sites
-        is_admin = False
-        if hasattr(self.bot, "_is_admin") and self.bot._is_admin(user_id):
-            is_admin = True
+        is_admin = _caller_is_admin(self.bot, message)
 
-        if is_admin or all_users:
+        if is_admin and all_users:
             selected_sites = sites
         else:
             selected_sites = {
@@ -7302,6 +7437,158 @@ class SendFileTool(Tool):
         if file_url:
             result += f"\nFile URL: {file_url}"
         return result
+
+
+class HostFileTool(Tool):
+    """Publish a file (HTML, image, pdf, …) at a stable public URL."""
+
+    concurrency_class = "site"
+    MAX_SIZE = SITE_MAX_TOTAL_BYTES
+
+    def get_description(self):
+        base = _public_files_target(self.bot)[1]
+        return (
+            f"Host a file at a permanent public URL under {base}/<name>/. "
+            "Pass url (curl a public file — Discord attachment, raw GitHub, "
+            "any http(s) link), or path (local/shell file), or filename+content. "
+            "HTML is served as a page (index.html) so Discord can embed the link. "
+            "Then send_message the URL without angle brackets. "
+            "For a named site you will edit, create_site url= instead."
+        )
+
+    def _send_file_helper(self) -> SendFileTool:
+        tools = getattr(self.bot, "tools", None) or {}
+        existing = tools.get("send_file") if isinstance(tools, dict) else None
+        if isinstance(existing, SendFileTool):
+            return existing
+        return SendFileTool(self.bot)
+
+    async def execute(
+        self,
+        message: Message,
+        url: str | None = None,
+        path: str | None = None,
+        content: str | None = None,
+        filename: str | None = None,
+        name: str | None = None,
+        encoding: str = "text",
+        **kwargs,
+    ) -> str:
+        source_url = str(url or "").strip()
+        source_path = str(path or "").strip()
+        has_content = content is not None
+        sources = sum(bool(x) for x in (source_url, source_path, has_content))
+        if sources == 0:
+            return (
+                "Error: pass url= (fetch and host), path= (host a local file), "
+                "or filename= + content=."
+            )
+        if sources > 1:
+            return "Error: pass only one of url, path, or content"
+
+        blob: bytes | None = None
+        hint_name = str(filename or "").strip()
+        content_type = ""
+
+        if source_url:
+            if not _is_safe_url(source_url):
+                return "Error: Cannot fetch from private/internal URLs"
+            try:
+                _final, content_type, blob = await _fetch_public_url(
+                    source_url, max_bytes=self.MAX_SIZE
+                )
+            except ValueError as e:
+                return f"Error: {e}"
+            except Exception as e:
+                return f"Error fetching URL: {e}"
+            if not hint_name:
+                hint_name = _filename_from_url(source_url, content_type)
+        elif source_path:
+            helper = self._send_file_helper()
+            resolved = helper._resolve_send_file_path(source_path)
+            host_path, host_error = await helper._try_read_host_file(resolved)
+            tmp_to_clean = None
+            if host_path is None:
+                target, cp_error = await helper._docker_cp_from_shell(source_path)
+                if target is None:
+                    return (
+                        f"Error: could not read file at '{source_path}'. "
+                        f"Host: {host_error or 'not found'}. "
+                        f"Container: {cp_error or 'not found or not readable'}."
+                    )
+                tmp_to_clean = target
+                host_path = target
+            try:
+                blob = await asyncio.to_thread(host_path.read_bytes)
+            except Exception as e:
+                return f"Error reading file from disk: {e}"
+            finally:
+                if tmp_to_clean is not None:
+                    with contextlib.suppress(Exception):
+                        shutil.rmtree(tmp_to_clean.parent, ignore_errors=True)
+            if not hint_name:
+                hint_name = host_path.name
+        else:
+            if not hint_name:
+                return "Error: filename is required when hosting inline content"
+            mode = str(encoding or "text").strip().lower()
+            try:
+                if mode in {"base64", "b64"}:
+                    blob = base64.b64decode(str(content), validate=True)
+                elif mode in {"text", "utf8", "utf-8", ""}:
+                    blob = str(content).encode("utf-8")
+                else:
+                    return "Error: encoding must be text or base64"
+            except Exception as e:
+                return f"Error: could not decode file content: {e}"
+
+        if not blob:
+            return "Error: file was empty"
+        if len(blob) > self.MAX_SIZE:
+            return f"Error: file is too large (max {self.MAX_SIZE // 1000}KB)"
+
+        is_html = _blob_looks_like_html(blob, content_type, hint_name)
+        if is_html:
+            rel = "index.html"
+        else:
+            rel = _safe_site_relpath(hint_name)
+            if not rel:
+                guessed = _filename_from_url(hint_name, content_type, default="file.bin")
+                rel = _safe_site_relpath(guessed)
+            if not rel:
+                return f"Error: unsafe or unsupported file name: {hint_name!r}"
+
+        fallback = (
+            f"f{int(datetime.now(timezone.utc).timestamp())}"
+            f"{random.randint(100, 999)}"
+        )
+        slug_source = name or Path(rel).stem or fallback
+        slug = _host_file_slug(slug_source, fallback)
+        files_dir, pub_base = _public_files_target(self.bot)
+        dest_dir = os.path.join(files_dir, slug)
+        if os.path.isdir(dest_dir) and os.listdir(dest_dir):
+            slug = _host_file_slug(f"{slug}-{random.randint(10, 99)}", fallback)
+            dest_dir = os.path.join(files_dir, slug)
+
+        err = await _write_site_file(dest_dir, rel, blob)
+        if err:
+            return f"Error hosting file: {err}"
+
+        if is_html:
+            public_url = f"{pub_base}/{slug}/"
+            kind = "page"
+        else:
+            public_url = f"{pub_base}/{slug}/{rel}"
+            kind = "file"
+        local_path = os.path.join(dest_dir, rel.replace("/", os.sep))
+        return (
+            f"Hosted {kind}: {public_url}\n"
+            f"{rel} ({len(blob)} bytes)\n"
+            f"Local path: {local_path}\n"
+            "send_message this URL without <angle brackets> so Discord unfurls "
+            "it — you can see the embed/link. To turn HTML into an editable "
+            f'site use create_site(name="{slug}", title="...", url="{public_url}").'
+        )
 
 
 # Patterns blocked in shell commands (defense-in-depth even in full-access mode).
@@ -8573,6 +8860,18 @@ class SeeImageTool(Tool):
         )
         if not item or not item.get("b64"):
             return f"Error: could not load an image from {url}"
+        mime = str(item.get("mime_type") or "")
+        if mime.startswith("video/"):
+            blob = base64.b64decode(item["b64"], validate=True)
+            return await SeeVideoTool(self.bot).result_from_blob(
+                blob,
+                mime,
+                url,
+                message,
+                filename=str(item.get("filename") or ""),
+            )
+        if not item.get("is_image") or not mime.startswith("image/"):
+            return f"Error: URL was {mime or 'unknown type'}, not an image I can look at"
         channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
         if channel_id and hasattr(self.bot, "_cache_media_context"):
             with contextlib.suppress(Exception):
@@ -9703,7 +10002,10 @@ class TtsTool(Tool):
         # `tts_source` on success; failures fall through silently.
         if not tts_source and fish_api_key:
             fish_model = os.environ.get("TTS_FISH_MODEL", "s2.1-pro-free")
-            fish_ref = _fish_reference_id(voice)
+            fish_voice = voice or (
+                "spanish" if language_key == "spanish" else None
+            )
+            fish_ref = _fish_reference_id(fish_voice)
             fish_fmt = os.environ.get("TTS_FISH_FORMAT", "mp3")
             fish_out = await _synthesize_fish_tts(
                 text,
@@ -11360,6 +11662,8 @@ class UpdateBasePersonalityTool(Tool):
         text: str | None = None,
         **kwargs,
     ) -> str:
+        if not _caller_is_admin(self.bot, message):
+            return "Error: restricted to admins."
         if not text or not str(text).strip():
             return "Error: 'text' is required and cannot be empty."
         text = str(text).strip()
@@ -11424,6 +11728,8 @@ class UpdateServerPromptTool(Tool):
         text: str | None = None,
         **kwargs,
     ) -> str:
+        if not _caller_is_admin(self.bot, message):
+            return "Error: restricted to admins."
         if not server_id or not str(server_id).strip():
             return "Error: 'server_id' is required (numeric snowflake or 'DM')."
         server_id = str(server_id).strip()
@@ -12394,6 +12700,47 @@ class UsageTool(Tool):
             rendered = rendered[:2500] + "\n… [truncated, emails redacted]"
         lines.append("\nSanitized payload (emails redacted):" + rendered)
         return "\n".join(lines)
+
+
+def collect_debug_stats(bot, channel_id: str | None = None) -> str:
+    """TTFT / TPS / token dump from the live provider + daily counter."""
+    from providers import format_timing_debug
+
+    provider = getattr(bot, "ai_provider", None)
+    history = list(getattr(provider, "_timing_history", None) or [])
+    if not history:
+        last = getattr(provider, "_last_timing", None)
+        if isinstance(last, dict) and last:
+            history = [last]
+    daily = None
+    tracker = getattr(bot, "_token_tracker", None)
+    if tracker is not None and hasattr(tracker, "summary"):
+        with contextlib.suppress(Exception):
+            daily = tracker.summary()
+    extra: list[str] = []
+    queue = getattr(bot, "_reply_queue", None)
+    if queue is not None and channel_id and hasattr(queue, "depth"):
+        with contextlib.suppress(Exception):
+            extra.append(f"queue depth {queue.depth(str(channel_id))}")
+    active = getattr(bot, "_active_requests", None)
+    if isinstance(active, dict):
+        extra.append(f"in-flight turns {sum(1 for t in active.values() if t and not t.done())}")
+    return format_timing_debug(history, daily=daily, extra=extra or None)
+
+
+class DebugTool(Tool):
+    """Report last-call TTFT, TPS, and token counts."""
+
+    def get_description(self):
+        return (
+            "Latency debug: last LLM call TTFT (time to first token), TPS "
+            "(tokens/sec), tokens in/out, endpoint, and recent averages. "
+            "No params. Use when asked how fast/slow generation is."
+        )
+
+    async def execute(self, message: Message, **kwargs) -> str:
+        channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
+        return collect_debug_stats(self.bot, channel_id or None)
 
 
 class ManagePluginTool(Tool):

@@ -13,6 +13,7 @@ from bot_tools import (
     BanMemberTool,
     CreateInviteTool,
     JoinServerTool,
+    LeaveServerTool,
     ListAdminServersTool,
     ListServersTool,
     UpdateBasePersonalityTool,
@@ -119,6 +120,29 @@ def test_join_server_lets_an_admin_through_to_the_invite_lookup():
     )
     assert seen == ["abcdef"]
     assert "restricted to admins" not in result
+
+
+def test_leave_server_refuses_a_non_admin():
+    bot = SimpleNamespace(_is_admin=lambda _uid: False, guilds=[])
+    msg = SimpleNamespace(author=SimpleNamespace(id=999))
+    result = asyncio.run(LeaveServerTool(bot).execute(msg, server="Villa"))
+    assert result.startswith("Error:")
+    assert "admin" in result.lower()
+
+
+def test_personality_tools_refuse_a_non_admin():
+    bot = SimpleNamespace(_is_admin=lambda _uid: False)
+    msg = SimpleNamespace(author=SimpleNamespace(id=999))
+    personality = asyncio.run(
+        UpdateBasePersonalityTool(bot).execute(msg, text="keep replies short and honest.")
+    )
+    prompt = asyncio.run(
+        UpdateServerPromptTool(bot).execute(msg, server_id="1", text="be chill")
+    )
+    assert personality.startswith("Error:")
+    assert prompt.startswith("Error:")
+    assert "admin" in personality.lower()
+    assert "admin" in prompt.lower()
 
 
 def test_join_server_survives_a_bot_without_the_admin_helper():

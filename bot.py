@@ -223,6 +223,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     DeleteChannelTool,
     DeleteMessageTool,
     DeleteSiteTool,
+    DebugTool,
     EditChannelTool,
     EditMessageTool,
     EditSiteTool,
@@ -232,6 +233,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     EmailSendTool,
     FetchUrlTool,
     ForwardMessageTool,
+    HostFileTool,
     HDImageGeneratorTool,
     ImageGeneratorTool,
     InboxActTool,
@@ -295,6 +297,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     ChessStateTool,
     ChessResignTool,
     UsageTool,
+    collect_debug_stats,
     __CHESS_IMPORTED__ as _CHESS_IMPORTED,
     forget_shell_progress,
     _IMAGE_FETCH_UA,
@@ -360,7 +363,6 @@ import site_server  # noqa: E402
 import site_test  # noqa: E402
 from plugin_manager import PluginManager  # noqa: E402
 from tool_schemas import (  # noqa: E402
-    CHAT_CORE_TOOL_NAMES,
     RESULT_TOOL_NAMES,
     build_openai_tools,
     contract_groups,
@@ -534,15 +536,19 @@ def _web_result_snippet(content: str, title: str, limit: int = 280) -> str:
 def _owner_audio_input_enabled(owner) -> bool:
     """Whether audio should be extracted and forwarded to the model.
 
-    Dashboard ``process_audio`` wins when present. Otherwise fall back to
-    ``ENABLE_AUDIO_INPUT``. Defaulting the extract paths to False while the
-    env/control defaults are True is how a clip could be fetched and then
-    silently dropped before the provider ever saw it.
+    ``ENABLE_AUDIO_INPUT=false`` is a hard off (same as images). Dashboard
+    ``process_audio`` can still mute audio when the env switch is on.
     """
+    cfg = getattr(owner, "config", None)
+    if cfg is not None and not parse_bool(
+        getattr(cfg, "ENABLE_AUDIO_INPUT", True), True
+    ):
+        return False
     control = getattr(owner, "_control", None) or {}
     if isinstance(control, dict) and "process_audio" in control:
         return parse_bool(control.get("process_audio"), False)
-    cfg = getattr(owner, "config", None)
+    if cfg is None:
+        return False
     return parse_bool(getattr(cfg, "ENABLE_AUDIO_INPUT", False), False)
 
 
@@ -2166,6 +2172,7 @@ TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "site_server",
     "site_test",
     "list_sites",
+    "host_file",
     "web_search",
     "no_response",
     "shell",
@@ -2199,6 +2206,7 @@ TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "chess_state",
     "chess_resign",
     "usage",
+    "debug",
     "wait",
     "sleep",
     "clear_sleep",
@@ -2237,8 +2245,6 @@ MAXWELL_BASE_KNOWLEDGE = (
     "Attitude: Warm and friendly. Love building, games (chess, checkers), websites, plugins, web search, coding. "
     "Anyone can ask you to do these — do them.\n"
     "Truthful, genuine, honest. Born {birthday_long}. You know your age.\n"
-    "Agency: Proactively check inbox (`inbox_list`), accept/decline friend requests (`inbox_act`), "
-    "send messages/DMs (`send_message`), explore the web, make decisions on your own. Accept incoming friend requests immediately.\n"
     "## Discord Moderation & Admin Actions Safety Protocol\n"
     "Structural actions (create_channel, edit_channel, delete_channel, lock_channel, "
     "set_channel_permissions, manage_role, edit_server, set_member_nickname) are reserved for configured owner / admins. "
@@ -2255,7 +2261,7 @@ MAXWELL_BASE_KNOWLEDGE = (
 # Partner companion identity. Shares the same harness; partner_line is empty
 # on a solo install (no partner Discord ID configured).
 GF_BASE_KNOWLEDGE = (
-    "## Base Knowledge & Autonomy - You are {bot_name}{self_id_paren}\n"
+    "## Base Knowledge & Autonomy\n"
     "You are {bot_name}{self_id_paren}. "
     "User account (self-bot), talk naturally like a real Discord user. Supportive partner on this harness.\n"
     "{creator_line}\n"
@@ -2274,13 +2280,14 @@ GF_BASE_KNOWLEDGE = (
 # Discord chat protocol. Kept out of personality so it isn't duplicated
 # per-server and so prefix-caching can reuse it.
 DISCORD_CHAT_PROTOCOL = (
-    "History in <previous_conversation> is background only. Reply only to [RESPOND TO THIS]. "
-    "Don't answer older turns or other speakers who didn't ping you.\n"
+    "Read history in <previous_conversation>; answer only [RESPOND TO THIS]. "
+    "Do not echo the transcript or reply to older turns. "
+    "If conversation-watch notes say you may speak without an @, follow those notes.\n"
     "Ping with exactly <@USER_ID> — no backticks, no markdown, no @Name(id).\n"
     "User lines: `Name(id): text`; your past lines: `[{bot_name}] text`. Attribute by ID.\n"
     "Public name in this room is the per-turn 'Your name here' line.\n"
-    "Match the channel. Discord markdown when helpful. Lowercase-natural. "
-    "No asterisk actions, no 'as an AI'. {invite_line}"
+    "Match the channel's energy, casing, and length. Discord markdown when helpful. "
+    "No *does a thing* stage directions (italic markdown is fine). No 'as an AI'. {invite_line}"
 )
 
 
@@ -2410,8 +2417,10 @@ TOOL_PROTOCOL = (
     "Never claim something is done, fixed, built, live, or working unless a tool "
     "result in this conversation says so.\n"
     "Files the user should receive must be attached via send_file or shell `files=`. "
-    "A filesystem path is not delivery.\n"
-    "create_site: full HTML document in `body`, never pasted into chat. Real line breaks "
+    "A filesystem path is not delivery. To share a live page or a file Discord can "
+    "embed, host_file (url/path/content) or create_site url= and send_message the URL.\n"
+    "create_site: full HTML document in `body`, or url= of an existing HTML file to "
+    "fetch and host. Never paste the page into chat. Real line breaks "
     "or <br> in visible HTML; never literal \\n text. Full visual freedom — invent a new look "
     "each time; no house style unless the user asked.\n"
     "Sites: build the real thing on first pass with complete content. NO placeholders — "
@@ -3829,6 +3838,7 @@ class MaxwellBot(commands.Bot):
             self.tools["site_server"] = SiteServerTool(self)
             self.tools["site_test"] = SiteTestTool(self)
             self.tools["list_sites"] = ListSitesTool(self)
+            self.tools["host_file"] = HostFileTool(self)
             self.tools["guide"] = GuideTool(self)
         # Background sub-agent jobs: always registered (the tool itself is
         # the escape hatch for long turns, independent of the site feature).
@@ -3858,6 +3868,7 @@ class MaxwellBot(commands.Bot):
             self.tools["chess_state"] = ChessStateTool(self)
             self.tools["chess_resign"] = ChessResignTool(self)
         self.tools["usage"] = UsageTool(self)
+        self.tools["debug"] = DebugTool(self)
         # No more standalone `reasoning_log` tool. Reasoning now rides INSIDE
         # every tool call via the auto-injected `reasoning` param (see
         # tool_registry.record_reasoning + tool_schemas.build_openai_tools).
@@ -6536,7 +6547,10 @@ class MaxwellBot(commands.Bot):
         # fetch_url / web_search when they return untrusted content, and is
         # consulted by the destructive shell tool to gate execution.
         self.clear_message_taint(message)
-        if not message.author.bot:
+        author = getattr(message, "author", None)
+        if author is None:
+            return
+        if not author.bot:
             preview = message.content[:100] if message.content else "[no text]"
             if not self._control.get("log_messages", True):
                 preview = "[hidden]"
@@ -6560,8 +6574,9 @@ class MaxwellBot(commands.Bot):
             and message.content.startswith(self.command_prefix)
             and not message.author.bot
         ):
-            await self._handle_command(message)
-            return
+            # Unknown prefix text (".ok", "...") is chat, not a command.
+            if await self._handle_command(message) is not False:
+                return
 
         if not self._control.get("bot_enabled", True):
             return
@@ -6699,9 +6714,11 @@ class MaxwellBot(commands.Bot):
                 )
                 active.cancel()
                 try:
-                    await asyncio.wait_for(active, timeout=2.5)
+                    await asyncio.wait_for(
+                        asyncio.shield(_await_task_done(active)), timeout=2.5
+                    )
                 except asyncio.CancelledError:
-                    logger.info(f"Interrupted task for {channel_id} cancelled cleanly")
+                    raise
                 except asyncio.TimeoutError:
                     logger.warning(
                         f"Interrupt cancel timed out for {channel_id} - proceeding anyway"
@@ -7185,10 +7202,54 @@ class MaxwellBot(commands.Bot):
             logger.warning(f"Failed recording reaction removal: {e}")
 
     async def _handle_command(self, message):
-        content = message.content[1:].strip()
+        prefix = str(getattr(self, "command_prefix", None) or ",")
+        raw = str(message.content or "")
+        content = (
+            raw[len(prefix) :].strip()
+            if raw.startswith(prefix)
+            else raw[1:].strip()
+        )
         parts = content.split(maxsplit=1)
         cmd = parts[0].lower() if parts else ""
         args = parts[1] if len(parts) > 1 else None
+        known = {
+            "stop",
+            "bg",
+            "jobs",
+            "job",
+            "prompt",
+            "clearprompt",
+            "clearmem",
+            "downvote",
+            "neg",
+            "summarize",
+            "context",
+            "rem",
+            "autonomy",
+            "drug",
+            "sleep",
+            "wake",
+            "jailbreak",
+            "progress",
+            "admin",
+            "guide",
+            "guided",
+            "guided-goal",
+            "guided_goal",
+            "solo",
+            "help",
+            "x",
+            "vc",
+            "shell",
+            "plugin",
+            "plugins",
+            "confirm",
+            "blacklist",
+            "unblacklist",
+            "debug",
+        }
+        if cmd not in known:
+            return False
         if cmd in set(self._control.get("disabled_commands", []) or []):
             return
         admin_commands = {
@@ -7206,6 +7267,7 @@ class MaxwellBot(commands.Bot):
             "summarize",
             "solo",
             "x",
+            "debug",
         }
         if cmd in admin_commands and not self._is_admin(message.author.id):
             await message.channel.send("not authorized")
@@ -7287,8 +7349,16 @@ class MaxwellBot(commands.Bot):
                                 f"on it — job `{_job.id}`, I'll ping you when it's done"
                             )
             elif cmd == "jobs":
-                _gid = str(message.guild.id) if message.guild else ""
-                await message.channel.send(self.bg_jobs.list_text(limit=10, guild_id=_gid))
+                _gid = str(message.guild.id) if message.guild else "DM"
+                _uid = str(message.author.id)
+                _is_adm = self._is_admin(message.author.id)
+                await message.channel.send(
+                    self.bg_jobs.list_text(
+                        limit=10,
+                        guild_id=_gid,
+                        user_id=None if _is_adm else _uid,
+                    )
+                )
             elif cmd == "job":
                 _job_args = (args or "").strip().split(maxsplit=1)
                 if len(_job_args) == 2 and _job_args[0].lower() == "cancel":
@@ -7642,11 +7712,15 @@ class MaxwellBot(commands.Bot):
                     )
             elif cmd == "solo":
                 await self._handle_solo_command(message, args)
+            elif cmd == "debug":
+                text = collect_debug_stats(self, channel_id)
+                await message.channel.send(f"```\n{text[:1900]}\n```")
             elif cmd == "help":
                 await message.channel.send(
                     "Commands:\n"
                     "` ,guide [goal]` / `,guided-goal [goal]` - create a thread and ask 5 clarifying questions before building (use when request is vague)\n"
                     "` ,help` - show this list\n"
+                    "` ,debug` - last LLM call TTFT / TPS / tokens (admin)\n"
                     "` ,stop` - stop active response in this channel\n"
                     "` ,prompt [text]` - view/set server prompt (admin)\n"
                     "` ,clearprompt` - clear server prompt (admin)\n"
@@ -8353,12 +8427,7 @@ class MaxwellBot(commands.Bot):
     def _vc_build_system_prompt(self, user, guild, facts: list) -> str:
         guild_id = str(guild.id) if guild else ""
         guild_name = getattr(guild, "name", "DM/group call")
-        base_style = self._get_personality()
-        style_bits = (
-            base_style.split("Discord style:", 1)[-1].strip()
-            if "Discord style:" in base_style
-            else "short, casual, easygoing and kind."
-        )
+        style_bits = self._get_personality()
         identity = _live_self_identity_line(
             getattr(self, "user", None), guild, getattr(self, "bot_name", None)
         )
@@ -8376,7 +8445,9 @@ class MaxwellBot(commands.Bot):
             "Reply directly to what they said. No reasoning, no "
             "chain-of-thought, no meta-commentary, no narrating what you're doing."
             "\nOptional: start your reply with [voice=NAME] to pick your TTS voice "
-            "(choices: tiktok, mommy, espanol/spanish). Defaults to tiktok if you don't specify."
+            f"(choices: tiktok, mommy, espanol/spanish). Defaults to "
+            f"{str(self._control.get('vc_tts_voice') or 'the configured Fish reference')} "
+            "if you don't specify."
         )
         if self._control.get("vc_response_mode", "always") == "addressed":
             stored = self._control.get("vc_wake_words")
@@ -9580,7 +9651,9 @@ class MaxwellBot(commands.Bot):
         if not getattr(perms, "send_messages", False):
             return
         try:
-            await channel.send(channel_watch.greeting_for(name))
+            await channel.send(
+                channel_watch.greeting_for(name, process_name(self))
+            )
         except discord.Forbidden:
             logger.debug("no permission to greet new ticket channel #%s", name)
         except Exception as e:
@@ -11785,6 +11858,8 @@ class MaxwellBot(commands.Bot):
                         ext, "text/plain" if is_text else "application/octet-stream"
                     )
                 )
+                if not mime.startswith(("image/", "video/", "audio/", "text/")):
+                    mime = MIME_MAP.get(ext, mime)
                 filename = attachment.filename
                 # Respect process_audio (the audio-input toggle) — skip pure audio attachments
                 # if disabled. Video may still yield image frames even if audio track skipped later.
@@ -12600,7 +12675,10 @@ class MaxwellBot(commands.Bot):
         gif_host = (
             self._is_gif_page_url(url)
             or self._is_gif_page_url(final_url)
-            or host.endswith(("tenor.com", "giphy.com", "gph.is", "klipy.com"))
+            or any(
+                host == h or host.endswith("." + h)
+                for h in ("tenor.com", "giphy.com", "gph.is", "klipy.com")
+            )
         )
         if mime.startswith("text/html") or (mime.startswith("text/") and gif_host):
             if _depth >= 2 or not gif_host:
@@ -12625,6 +12703,8 @@ class MaxwellBot(commands.Bot):
             return None
         if not mime:
             mime = MIME_MAP.get(ext, "application/octet-stream")
+        if not mime.startswith(("image/", "video/", "audio/")):
+            mime = MIME_MAP.get(ext, mime)
         if not mime.startswith(("image/", "video/", "audio/")):
             logger.warning(
                 f"Skipping embed media {url[:120]}: unsupported mime {mime or 'unknown'}"
@@ -13990,23 +14070,13 @@ class MaxwellBot(commands.Bot):
             # message can switch to "<tool>: …" as soon as the name appears
             # (early in the stream) rather than at the very end.
             if custom_tool_calls:
-                # Catalog already lives in _tool_system_prompt (XML mode).
-                # Only teach the bare-JSON wire format here.
-                disabled = set(self._control.get("disabled_tools", []) or [])
-                names = [
-                    name
-                    for name in self._turn_tool_names(platform, message, content)
-                    if name not in disabled
-                ]
-                tool_list = ", ".join(names) if names else "(none)"
                 snip = (
                     "Custom tool protocol: one bare JSON object per line, no fences, "
                     "no XML, no native function-call format.\n"
-                    f"Tools: {tool_list}\n"
-                    '{"name":"<tool>","arguments":{"reasoning":"<one sentence why>",...}}\n'
-                    "`reasoning` may be passed as arguments key (~280 chars, plain text). "
-                    "create_site HTML goes in body. send_file large payloads: encoding=base64. "
-                    "JSON line(s) first, then a short user-facing reply — or no JSON when done."
+                    '{"name":"<tool>","arguments":{...}}\n'
+                    "`reasoning` may be passed as an arguments key (~280 chars, plain text). "
+                    "Visible replies still go through send_message / no_response. "
+                    "Do not also write the reply as raw assistant text."
                 )
                 messages = list(messages)
                 # Append to the first system message if present, else add one.
@@ -14689,6 +14759,10 @@ class MaxwellBot(commands.Bot):
             "curl": "fetch_url",
             "http_get": "fetch_url",
             "fetch": "fetch_url",
+            "host": "host_file",
+            "host_file": "host_file",
+            "publish_file": "host_file",
+            "serve_file": "host_file",
             "generate_image": "image_generator",
             "gen_image": "image_generator",
             "dalle": "image_generator",
@@ -14796,13 +14870,19 @@ class MaxwellBot(commands.Bot):
                     )
                     async with gate:
                         raw = await tool.execute(message, **params)
-                    result_text = str(raw) if raw else "executed successfully"
+                    if raw is None:
+                        result_text = ""
+                    else:
+                        result_text = str(raw)
+                    if not result_text.strip() and name in RESULT_TOOL_NAMES:
+                        result_text = "(no output)"
                     logger.info(
                         "Tool %s finished: %s",
                         name,
                         result_text[:200].replace("\n", " "),
                     )
-                    if result_text.startswith(("Error", "Error:")):
+                    head = result_text.lstrip().upper()
+                    if head.startswith("ERROR") or head.startswith("COULD NOT"):
                         self._tool_breaker.record_failure(name)
                     else:
                         self._tool_breaker.record_success(name)
@@ -15592,7 +15672,12 @@ class MaxwellBot(commands.Bot):
                 if pt_name not in disabled:
                     names.add(pt_name)
 
-        if "join_server" in names:
+        if names & {
+            "join_server",
+            "leave_server",
+            "update_base_personality",
+            "update_server_prompt",
+        }:
             author_id = (
                 getattr(getattr(message, "author", None), "id", None)
                 if message is not None
@@ -15608,6 +15693,9 @@ class MaxwellBot(commands.Bot):
                 is_admin = False
             if not is_admin:
                 names.discard("join_server")
+                names.discard("leave_server")
+                names.discard("update_base_personality")
+                names.discard("update_server_prompt")
         # leftover no-op from the old gated catalog — keep the handler so a
         # stale call does not error, but do not offer it.
         names.discard("more_tools")
@@ -15731,24 +15819,25 @@ class MaxwellBot(commands.Bot):
                 "or the topic is current; do not guess from training data.\n" + catalog
             )
         else:
+            # Dispatch is native-or-JSON; the old <tool:name> XML path is
+            # stripped as a leak and never executed. Keep the name: description
+            # catalog because tools= is not sent on this path.
             descriptions = [
                 f"{name}: {tools[name].get_description()}{result_contract(name)}"
                 for name in names
             ]
             header = (
-                "## Available tools\n"
+                "## Tools\n"
                 + "\n".join(descriptions)
                 + "\n\n"
                 + catalog
                 + "\n\n## How to call\n"
-                "XML text tags only, one tag per call:\n"
-                "<tool:name>\n<param>value</param>\n</tool:name>\n"
-                "Do not invent tags beyond the schema above."
+                "One bare JSON object per line, no fences, no XML:\n"
+                '{"name":"<tool>","arguments":{...}}\n'
+                "Visible replies go through send_message (or no_response). "
+                "Look things up with web_search / fetch_url when you are unsure "
+                "or the topic is current; do not guess from training data."
             )
-        # TOOL_PROTOCOL is the behavioral contract (when to search, result
-        # loop). Native tools= already carries per-tool descriptions, but
-        # dropping this block meant Maxwell never saw "search / fetch
-        # instead of guessing".
         return header + "\n\n" + TOOL_PROTOCOL
 
     @staticmethod
@@ -17372,10 +17461,10 @@ class MaxwellBot(commands.Bot):
         if tool_prompt:
             system_parts.append(tool_prompt)
 
-        # JAILBREAK: inject at end for recency bias (same as Discord path)
-        # Telegram is a private channel — always get jailbreak
+        # JAILBREAK: same recency-bias slot as Discord, but the Discord
+        # "this server / lowercase" copy does not belong on Telegram.
         dynamic_parts.append(
-            _fill_identity_text(self, JAILBREAK_PROMPT, live_name=True)
+            _fill_identity_text(self, JAILBREAK_PROMPT_VC, live_name=True)
         )
 
         messages = [{"role": "system", "content": "\n\n".join(system_parts)}]
@@ -18181,7 +18270,9 @@ async def main():
         for sink in list(getattr(bot, "_vc_sinks", {}).values() or []):
             try:
                 if hasattr(sink, "cleanup"):
-                    await sink.cleanup()
+                    result = sink.cleanup()
+                    if inspect.isawaitable(result):
+                        await result
             except Exception as e:
                 logger.warning("VC sink cleanup failed on shutdown: %s", e)
         getattr(bot, "_vc_sinks", {}).clear()

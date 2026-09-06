@@ -50,6 +50,8 @@ def test_is_safe_url_blocks_private_and_allows_public():
     assert _is_safe_url("http://localhost/admin") is False
     assert _is_safe_url("http://10.0.0.5/x") is False
     assert _is_safe_url("http://169.254.169.254/latest") is False
+    assert _is_safe_url("http://100.64.0.1/") is False
+    assert _is_safe_url("http://localhost./") is False
     assert _is_safe_url("file:///etc/passwd") is False
 
 

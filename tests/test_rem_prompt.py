@@ -41,6 +41,22 @@ def test_extract_rem_json_allows_braces_inside_strings():
     assert payload["actions"] == {}
 
 
+def test_extract_rem_json_ignores_trailing_unrelated_objects():
+    raw = '{"actions":{"ltm_add":["cats"]},"audit":"kept"} then {"ok":true}'
+    payload = _extract_rem_json(raw)
+    assert payload["audit"] == "kept"
+    assert payload["actions"]["ltm_add"] == ["cats"]
+
+
+def test_rem_prompt_example_is_valid_json():
+    prompt = rem_system_prompt(0, bot_name="Nova")
+    payload = _extract_rem_json(prompt)
+    assert payload is not None
+    assert "actions" in payload
+    assert "audit" in payload
+    json.dumps(payload)
+
+
 def test_short_term_slice_prompt_bounds_a_huge_slice():
     """500 events x 4000 chars would serialize past any context window."""
     events = [

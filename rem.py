@@ -14,12 +14,15 @@ from utils import _atomic_json_write_sync
 logger = logging.getLogger(__name__)
 
 DEFAULT_REM_PROMPT_BODY = (
-    "Assimilate the short-term slice. Search existing LTM before adding. "
+    "Assimilate the short-term slice using the LTM block already in context. "
     "Keep durable facts, prefs, decisions, identities, open work. Drop stale bloat. "
-    "One JSON line:\n"
-    '{"actions":{"ltm_add":["fact"],"ltm_remove":[<ids>],'
-    '"shared_add":[{"scope":"global|user:<id>|guild:<id>|channel:<id>",'
-    '"content":"fact","importance":1-10}]},"audit":"short summary"}\n'
+    "Do not duplicate existing LTM ids. "
+    "One JSON object: "
+    '{"actions":{"ltm_add":["durable fact"],"ltm_remove":["42"],'
+    '"shared_add":[{"scope":"user:123","content":"durable fact","importance":7}]},'
+    '"audit":"one-line summary"}. '
+    "scope is exactly one of global, user:<id>, guild:<id>, channel:<id>. "
+    "importance is an integer 1-10. ltm_remove is an array of ids from the LTM block. "
     'Empty: {"actions":{},"audit":"no changes"}. audit required.'
 )
 
@@ -243,7 +246,9 @@ def _extract_rem_json(raw: str) -> dict | None:
     """Pull the trailing JSON object from a REM response.
 
     Uses JSONDecoder.raw_decode so braces inside quoted strings do not
-    split a valid payload. Prefers the last well-formed object.
+    split a valid payload. Prefers the last object that looks like a REM
+    audit (has ``actions`` or ``audit``), so a trailing ``{"ok":true}``
+    cannot steal the payload.
     """
     text = str(raw or "").strip()
     if not text or "{" not in text:
@@ -260,10 +265,16 @@ def _extract_rem_json(raw: str) -> dict | None:
         except json.JSONDecodeError:
             i = start + 1
             continue
-        if isinstance(obj, dict):
+        if isinstance(obj, dict) and ("actions" in obj or "audit" in obj):
             last = obj
         i = max(end, start + 1)
     return last
+
+
+def _as_list(value):
+    if value is None or value == "":
+        return []
+    return value if isinstance(value, list) else [value]
 
 
 async def _apply_audit_actions(raw_audit: str, memory_manager) -> tuple[dict, str]:
@@ -282,7 +293,7 @@ async def _apply_audit_actions(raw_audit: str, memory_manager) -> tuple[dict, st
     counts = {"ltm_added": 0, "ltm_removed": 0, "shared_added": 0}
 
     # LTM removes first so any renumber from adds is applied to the surviving ids.
-    for raw_id in actions.get("ltm_remove") or []:
+    for raw_id in _as_list(actions.get("ltm_remove")):
         try:
             ok = await memory_manager.remove_long_term_memory(str(raw_id))
         except Exception:
@@ -290,7 +301,7 @@ async def _apply_audit_actions(raw_audit: str, memory_manager) -> tuple[dict, st
         if ok:
             counts["ltm_removed"] += 1
 
-    for fact in actions.get("ltm_add") or []:
+    for fact in _as_list(actions.get("ltm_add")):
         if not isinstance(fact, str):
             continue
         fact = fact.strip()
@@ -304,7 +315,7 @@ async def _apply_audit_actions(raw_audit: str, memory_manager) -> tuple[dict, st
             logger.warning("REM ltm_add failed for %r: %s", fact[:80], e)
             continue
 
-    for shared in actions.get("shared_add") or []:
+    for shared in _as_list(actions.get("shared_add")):
         if not isinstance(shared, dict):
             continue
         content = str(shared.get("content") or "").strip()
@@ -318,10 +329,16 @@ async def _apply_audit_actions(raw_audit: str, memory_manager) -> tuple[dict, st
         # a model-supplied fact to globally shared visibility by default.
         if scope == "global" and vis not in {"private", "admin_only"}:
             vis = "private"
+        importance = 5
+        try:
+            importance = int(shared.get("importance") or 5)
+        except (TypeError, ValueError):
+            importance = 5
+        importance = max(1, min(importance, 10))
         entry = {
             "content": content,
             "scope": scope,
-            "importance": shared.get("importance", 5),
+            "importance": importance,
             "visibility": vis,
             "source_kind": "rem",
         }
@@ -383,13 +400,13 @@ async def run_rem_once(
                 "last_rem_run_ts": started,
                 "running": False,
                 "running_since": "",
-                "last_audit": "DONE - empty slice",
+                "last_audit": "empty slice",
             }
         )
         run = {
             "ts": started,
             "turns_used": 0,
-            "audit": "DONE - empty slice",
+            "audit": "empty slice",
             "tool_counts": {},
             "events": 0,
         }
@@ -420,7 +437,26 @@ async def run_rem_once(
         response = await _provider_message(
             provider, messages, [], model, timeout, max_tokens
         )
-        raw_audit = _message_content(response).strip() or "DONE"
+        raw_audit = _message_content(response).strip()
+        parsed = _extract_rem_json(raw_audit)
+        if not raw_audit or parsed is None:
+            # Invalid/empty output must not consume the slice — retry next tick.
+            await store.patch_state(
+                {
+                    "running": False,
+                    "running_since": "",
+                    "last_audit": "no JSON",
+                }
+            )
+            run = {
+                "ts": utcnow_iso(),
+                "turns_used": 0,
+                "audit": "no JSON",
+                "tool_counts": {},
+                "events": len(events),
+            }
+            await store.append_run(run)
+            return run
         audit = raw_audit[:4000]
         actions_applied = {"ltm_added": 0, "ltm_removed": 0, "shared_added": 0}
         actions_audit = ""

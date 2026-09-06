@@ -187,8 +187,7 @@ DEFAULT_CONTROL = {
     "bg_timeout_seconds": 0,
     "bg_max_iters": 0,
     # Prefer OpenAI-style native tool_calls when the provider supports them.
-    # XML text tags remain as a fallback when the model emits tags without
-    # native tool_calls (or the endpoint rejects tools=).
+    # When this is off, the prompt teaches bare JSON lines — not XML tags.
     "native_tool_calls": True,
     "tools_enabled": True,
     "create_site_quota_per_user": 50,
@@ -409,6 +408,7 @@ KNOWN_TOOLS = [
     "site_server",
     "site_test",
     "list_sites",
+    "host_file",
     "guide",
     "spawn_background",
     "web_search",
@@ -446,4 +446,5 @@ KNOWN_TOOLS = [
     "chess_resign",
     "manage_plugin",
     "usage",
+    "debug",
 ]

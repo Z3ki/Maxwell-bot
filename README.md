@@ -63,7 +63,7 @@ One thing is worth knowing up front: the `shell` tool runs inside a Docker conta
 - RAG vector memory: messages, long-term facts, and shared context entries are embedded through any OpenAI-compatible or Ollama embeddings endpoint and stored in a SQLite vector database. Semantic search retrieves the most relevant memories for each conversation — global across all channels and servers. With no embedder reachable the bot logs one line and falls back to recent-history context.
 - Opt-in REM "dreaming" pass that periodically consolidates recent visible traffic into long-term memory.
 - Web dashboard/admin API protected by HTTP Basic auth.
-- Site building: `create_site` publishes a whole directory (index plus any CSS/JS/subpages/data files) byte-for-byte under a configurable public URL; `edit_site` patches a published site in place; `delete_site` takes it down. Static HTML/CSS/JS is the default. `backend=true` is optional (same-origin key/list datastore). A containerized app via `site_server` is a separate opt-in — not every site gets FastAPI or a backend.
+- Site building: `create_site` publishes a whole directory (index plus any CSS/JS/subpages/data files) byte-for-byte under a configurable public URL; `host_file` fetches a URL or takes a local file and hosts it at a stable `/bot/_files/<slug>/` link Discord can embed; `edit_site` patches a published site in place; `delete_site` takes it down. Static HTML/CSS/JS is the default. `backend=true` is optional (same-origin key/list datastore). A containerized app via `site_server` is a separate opt-in — not every site gets FastAPI or a backend.
 - Lean chat turns: ordinary conversation ships a small conversational tool set instead of the whole catalog (~83% fewer tool tokens per message). Anything that asks for an action gets everything, and `more_tools` reopens the catalog mid-turn. Turn it off with `lean_chat_tools` in the dashboard.
 
 ## Project Structure
@@ -157,7 +157,7 @@ present). Restart to re-detect. `python3 doctor.py` shows the resolved state.
 | `ENABLE_WEB_SEARCH` | `web_search` tool | the `ddgs` package |
 | `ENABLE_YOUTUBE` | `youtube` tool | the `yt-dlp` binary |
 | `ENABLE_FETCH_URL` | `fetch_url` tool | — |
-| `ENABLE_CREATE_SITE` | `create_site` / `edit_site` / `delete_site` / `list_sites` / `site_server` / `site_test` tools | — |
+| `ENABLE_CREATE_SITE` | `create_site` / `edit_site` / `delete_site` / `list_sites` / `host_file` / `site_server` / `site_test` tools | — |
 | `ENABLE_AVATAR` | `change_avatar` tool | — |
 | `ENABLE_EMAIL_TOOLS` | The four `email_*` tools | `MAXWELL_EMAIL_PASSWORD` set |
 | `ENABLE_X` | `x_read` / `x_post` | — (public reads need no credentials) |
@@ -262,6 +262,7 @@ All commands use the `,` prefix. Admin commands require the user to be in the ad
 | Command | Admin | Description |
 |---|---|---|
 | `,stop` | No | Cancel the active AI request in this channel (` ,stop job <id>` cancels a background job) |
+| `,debug` | Yes | Last LLM call TTFT, TPS, tokens in/out, and recent averages |
 | `,bg <goal>` | No | Start a background sub-agent job: instant ack, channel stays free, pings you when done |
 | `,jobs` | No | List background jobs |
 | `,job cancel <id>` | No | Cancel your background job (or anyone's, if admin) |
@@ -315,10 +316,18 @@ same-origin datastore. Use `site_server` only when it needs to run code.
 Neither FastAPI nor a container is created unless you ask.
 
 `create_site` writes a directory, not a single file. `body` is index.html;
+`url` fetches an existing HTML file (Discord attachment, raw GitHub, any
+public link) and publishes it instead of pasting the page into the tool call;
 `files` is anything else — `{"style.css": "...", "app.js": "...",
 "about/index.html": "..."}` — and it is all served exactly as written, with no
 injected wrapper, house style, or meta tags. (Set `site_inject_csp` if your
 host serves generated pages without a CSP of its own.)
+
+`host_file` is the one-shot version: curl a URL, point at a local path, or
+pass inline content, and it lands at
+`<MAXWELL_PUBLIC_BASE_URL>/bot/_files/<slug>/`. HTML is served as `index.html`
+so Discord can unfurl the link. Use `create_site` when you want an editable
+named site; use `host_file` when you just need a stable public URL.
 
 `edit_site` changes a live site at the same URL: `list` its files, `read` one
 back, `write` a new one (or several via `files={...}`), `replace` an exact

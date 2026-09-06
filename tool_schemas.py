@@ -369,6 +369,12 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 "whose body is just a 'Loading…' shell is a failure, not a start — if "
                 "it takes 900 lines to actually work, write 900 lines."
             ),
+            "url": _str(
+                "Optional public http(s) URL of an existing HTML file to fetch "
+                "and publish as index.html (Discord attachment, raw GitHub, any "
+                "curlable page). Use instead of pasting body. body is not needed "
+                "when url is set."
+            ),
             "files": _str(
                 'Optional extra files as JSON: {"style.css": "...", "app.js": "...", '
                 '"about/index.html": "..."}. Anything a static host serves — split a '
@@ -386,7 +392,7 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "encoding": _str("text (default) or base64 for exact bytes"),
             "images": _str("Optional JSON list of local image paths to include"),
         },
-        ["name", "title", "body"],
+        ["name", "title"],
     ),
     "edit_site": _obj(
         {
@@ -472,6 +478,19 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "all_users": _bool(
                 "Optional boolean. If true, list all published sites across all users."
             ),
+        },
+    ),
+    "host_file": _obj(
+        {
+            "url": _str(
+                "Public http(s) URL to fetch and host (Discord attachment, raw file, "
+                "any curlable link). Prefer this over pasting the file into chat."
+            ),
+            "path": _str("Local or shell path of a file already on disk"),
+            "filename": _str("Name to serve as (required with content=)"),
+            "content": _str("Inline file bytes as text or base64"),
+            "encoding": _str("text (default) or base64 when using content="),
+            "name": _str("Optional short slug for the public URL path"),
         },
     ),
     "site_test": _obj(
@@ -777,6 +796,7 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         }
     ),
     "usage": _obj({}),
+    "debug": _obj({}),
 }
 
 
@@ -822,6 +842,7 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "site_server",
         "site_test",
         "list_sites",
+        "host_file",
         "guide",
         "web_search",
         "fetch_url",
@@ -883,6 +904,7 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "chess_state",
         "chess_resign",
         "usage",
+        "debug",
         # spawn_background hands the job id back so the live turn can ack it
         # by name, then ends (the detached job delivers the real answer later).
         "spawn_background",
@@ -912,6 +934,7 @@ CHAT_CORE_TOOL_NAMES: frozenset[str] = frozenset(
         "chess_state",
         "chess_resign",
         "usage",
+        "debug",
     }
 )
 

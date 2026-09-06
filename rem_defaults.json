@@ -2,7 +2,7 @@
   "version": "2026-05-22.1",
   "name": "rem_dream",
   "description": "Periodic REM memory assimilation over recent visible inputs and outputs.",
-  "prompt": "Assimilate the short-term slice. Search existing LTM before adding. Keep durable facts, prefs, decisions, identities, open work. Drop stale bloat. One JSON line: {\"actions\":{\"ltm_add\":[\"fact\"],\"ltm_remove\":[<ids>],\"shared_add\":[{\"scope\":\"global|user:<id>|guild:<id>|channel:<id>\",\"content\":\"fact\",\"importance\":1-10}]},\"audit\":\"short summary\"}. Empty: {\"actions\":{},\"audit\":\"no changes\"}. audit required.",
+  "prompt": "Assimilate the short-term slice using the LTM block already in context. Keep durable facts, prefs, decisions, identities, open work. Drop stale bloat. Do not duplicate existing LTM ids. One JSON object: {\"actions\":{\"ltm_add\":[\"durable fact\"],\"ltm_remove\":[\"42\"],\"shared_add\":[{\"scope\":\"user:123\",\"content\":\"durable fact\",\"importance\":7}]},\"audit\":\"one-line summary\"}. scope is exactly one of global, user:<id>, guild:<id>, channel:<id>. importance is an integer 1-10. ltm_remove is an array of ids from the LTM block. Empty: {\"actions\":{},\"audit\":\"no changes\"}. audit required.",
   "interval_seconds": 600,
   "max_turns": 3
 }

@@ -43,17 +43,10 @@ def test_rem_loop_bypasses_tool_calls_and_records_run(tmp_path):
             {"role": "assistant", "content": "DONE\n- reviewed visible slice\n- no memory edits"},
         ])
         rem_run = await run_rem_once(memory_manager=mem, rem_log=log, provider=provider, data_dir=str(tmp_path), model="rem", max_turns=3)
-        # 2026-07-21: REM no longer bypasses — it parses a trailing JSON
-        # actions block and applies ltm/shared writes itself. A response
-        # with no JSON block is a no-op (no edits), but tool_counts is now
-        # a real action summary, not an empty dict.
+        # Prose with no JSON must not look like success or consume the slice.
         assert mem.items == []
-        assert rem_run["tool_counts"] == {
-            "ltm_added": 0,
-            "ltm_removed": 0,
-            "shared_added": 0,
-        }
-        assert rem_run["audit"].startswith("DONE")
+        assert rem_run["tool_counts"] == {}
+        assert rem_run["audit"] == "no JSON"
         assert provider.calls == 1
         assert len(await RemStore(str(tmp_path)).load_runs()) == 1
     asyncio.run(run())
@@ -96,6 +89,6 @@ def test_rem_loop_empty_slice_and_single_pass_advances(tmp_path):
         ])
         rem_run = await run_rem_once(memory_manager=mem, rem_log=log, provider=provider, data_dir=str(tmp_path), model="rem", max_turns=1)
         assert rem_run["turns_used"] == 0
-        assert rem_run["audit"].startswith("DONE")
+        assert rem_run["audit"] == "no JSON"
         assert provider.calls == 1
     asyncio.run(run())

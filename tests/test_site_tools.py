@@ -231,6 +231,15 @@ def test_delete_site_removes_files_metadata_and_store(bot, tmp_path):
     }
 
 
+def test_delete_site_refuses_another_users_site(bot, tmp_path):
+    run(CreateSiteTool(bot).execute(_msg(uid=1), name="mine", title="Mine", body=PAGE))
+    out = run(DeleteSiteTool(bot).execute(_msg(uid=2), name="mine"))
+    assert out.startswith("Error:")
+    assert "belongs to someone else" in out
+    assert "mine" in bot._sites
+    assert (tmp_path / "public" / "bot" / "mine").exists()
+
+
 def test_backend_flag_records_and_documents_itself(bot):
     out = run(
         CreateSiteTool(bot).execute(

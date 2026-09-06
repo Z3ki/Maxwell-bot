@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import time
+from collections import deque
 from dataclasses import dataclass
 
 import random as _random
@@ -1011,6 +1012,143 @@ DEFAULT_ENDPOINT_COOLDOWN_SECONDS = 60.0
 # assistant content or tool call. Keep ordinary retries small, but give this
 # specific transient response a separate, bounded recovery round.
 DEFAULT_EMPTY_RESPONSE_RETRIES = 2
+TIMING_HISTORY_MAX = 24
+
+
+def compute_llm_timing(
+    *,
+    request_start: float,
+    first_token_s: float | None,
+    ended_at: float | None = None,
+    headers_ms: float = 0.0,
+    usage: dict | None = None,
+    endpoint: str = "",
+    model: str = "",
+    stream: bool = False,
+    content_chars: int = 0,
+    tool_calls: int = 0,
+) -> dict:
+    """TTFT, generation window, and tokens/sec for one provider call.
+
+    Streaming TTFT is time-to-first-SSE-frame. TPS is completion tokens over
+    the post-TTFT window when that window is long enough; otherwise over the
+    whole request (typical for non-streaming, where the first token is the
+    whole body).
+    """
+    ended = float(ended_at) if ended_at is not None else time.perf_counter()
+    total_ms = max(0.0, (ended - float(request_start)) * 1000.0)
+    if first_token_s is not None:
+        ttft_ms = max(0.0, (float(first_token_s) - float(request_start)) * 1000.0)
+    else:
+        ttft_ms = total_ms
+    gen_ms = max(0.0, total_ms - ttft_ms)
+    raw = usage if isinstance(usage, dict) else {}
+
+    def _tok(key: str) -> int:
+        try:
+            return max(0, int(raw.get(key) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    prompt = _tok("prompt_tokens")
+    completion = _tok("completion_tokens")
+    total_tok = _tok("total_tokens") or (prompt + completion)
+    window_ms = gen_ms if stream and gen_ms >= 20.0 else total_ms
+    tps = None
+    if completion > 0 and window_ms >= 20.0:
+        tps = round(completion / (window_ms / 1000.0), 1)
+    try:
+        headers_val = float(headers_ms or 0.0)
+    except (TypeError, ValueError):
+        headers_val = 0.0
+    return {
+        "ts": time.time(),
+        "endpoint": str(endpoint or ""),
+        "model": str(model or ""),
+        "stream": bool(stream),
+        "ttft_ms": round(ttft_ms, 1),
+        "total_ms": round(total_ms, 1),
+        "headers_ms": round(headers_val, 1),
+        "gen_ms": round(gen_ms, 1),
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total_tok,
+        "tps": tps,
+        "content_chars": int(content_chars or 0),
+        "tool_calls": int(tool_calls or 0),
+    }
+
+
+def format_timing_debug(
+    records,
+    *,
+    daily: dict | None = None,
+    extra: list[str] | None = None,
+) -> str:
+    """Human-readable TTFT / TPS dump for `,debug` and the debug tool."""
+    rows = [r for r in (records or []) if isinstance(r, dict)]
+    lines = ["llm debug"]
+    if not rows:
+        lines.append("no calls recorded yet this process")
+    else:
+        last = rows[-1]
+        lines.append("last call")
+        lines.extend(_format_timing_row(last, indent="  "))
+        window = rows[-8:]
+        if len(window) > 1:
+            ttfts = [float(r.get("ttft_ms") or 0) for r in window]
+            tpss = [
+                float(r["tps"])
+                for r in window
+                if r.get("tps") is not None
+            ]
+            lines.append(f"recent {len(window)}")
+            if ttfts:
+                lines.append(
+                    f"  avg ttft {sum(ttfts) / len(ttfts):.0f}ms  "
+                    f"(min {min(ttfts):.0f} / max {max(ttfts):.0f})"
+                )
+            if tpss:
+                lines.append(
+                    f"  avg tps {sum(tpss) / len(tpss):.1f}  "
+                    f"(min {min(tpss):.1f} / max {max(tpss):.1f})"
+                )
+            for rec in reversed(window[:-1][:5]):
+                tps = rec.get("tps")
+                tps_s = f"{tps} tps" if tps is not None else "tps n/a"
+                lines.append(
+                    f"  {float(rec.get('ttft_ms') or 0):.0f}ms ttft  "
+                    f"{float(rec.get('total_ms') or 0):.0f}ms  {tps_s}  "
+                    f"{rec.get('endpoint') or '?'}"
+                )
+    if isinstance(daily, dict) and daily:
+        lines.append(
+            f"today {daily.get('prompt_tokens', 0)} in / "
+            f"{daily.get('completion_tokens', 0)} out  "
+            f"({daily.get('total_tokens', 0)} total)"
+        )
+    if extra:
+        lines.extend(str(item) for item in extra if item)
+    return "\n".join(lines)
+
+
+def _format_timing_row(rec: dict, indent: str = "") -> list[str]:
+    tps = rec.get("tps")
+    tps_s = f"{tps}" if tps is not None else "n/a"
+    ep = rec.get("endpoint") or "?"
+    model = rec.get("model") or "?"
+    return [
+        f"{indent}{ep}  {model}",
+        (
+            f"{indent}ttft {float(rec.get('ttft_ms') or 0):.0f}ms  "
+            f"total {float(rec.get('total_ms') or 0):.0f}ms  "
+            f"gen {float(rec.get('gen_ms') or 0):.0f}ms"
+        ),
+        (
+            f"{indent}tokens {rec.get('prompt_tokens', 0)} in / "
+            f"{rec.get('completion_tokens', 0)} out  tps {tps_s}"
+        ),
+    ]
 
 USAGE_EXHAUSTED_MESSAGE = (
     "The api is down cuz yall drained the usage and im not rich so wait like 2 hours"
@@ -1466,6 +1604,8 @@ class OllamaProvider:
         self._last_usage: dict = {}
         self._last_tool_calls: list = []
         self._last_assistant_message: dict | None = None
+        self._last_timing: dict = {}
+        self._timing_history: deque = deque(maxlen=TIMING_HISTORY_MAX)
         # Per-endpoint learned max *output* token cap (name -> cap). Set when a
         # 400 "maximum output tokens" is observed, and applied proactively on
         # the next call to that endpoint so we don't waste a round-trip on the
@@ -2413,6 +2553,7 @@ class OllamaProvider:
                         )
 
                     json_ms = 0.0
+                    first_token_s = None
                     if data.get("stream"):
                         merged = await _read_sse_response(
                             resp,
@@ -2631,14 +2772,29 @@ class OllamaProvider:
                         "completion_tokens": usage.get("completion_tokens", 0),
                         "total_tokens": usage.get("total_tokens", 0),
                     }
+                    timing = compute_llm_timing(
+                        request_start=request_start,
+                        first_token_s=first_token_s,
+                        headers_ms=headers_ms,
+                        usage=self._last_usage,
+                        endpoint=endpoint.name,
+                        model=str(data.get("model") or ""),
+                        stream=bool(data.get("stream")),
+                        content_chars=len(content or ""),
+                        tool_calls=len(message.get("tool_calls") or []),
+                    )
+                    self._last_timing = timing
+                    self._timing_history.append(timing)
                     # Healthy response: this endpoint is no longer rate-limited.
                     self._endpoint_cooldown.pop(endpoint.name, None)
                     logger.info(
-                        "Provider timing done endpoint=%s status=%s headers_ms=%.1f total_ms=%.1f content_chars=%s tool_calls=%s tokens=%s",
+                        "Provider timing done endpoint=%s status=%s headers_ms=%.1f ttft_ms=%.1f total_ms=%.1f tps=%s content_chars=%s tool_calls=%s tokens=%s",
                         endpoint.name,
                         resp.status,
                         headers_ms,
-                        json_ms,
+                        timing.get("ttft_ms", json_ms),
+                        timing.get("total_ms", json_ms),
+                        timing.get("tps"),
                         len(content or ""),
                         len(message.get("tool_calls") or []),
                         self._last_usage.get("total_tokens", 0),
