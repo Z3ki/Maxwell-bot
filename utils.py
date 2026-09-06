@@ -28,7 +28,7 @@ ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
 # like "look at this" + an imgur link reads as pure text.
 MEDIA_URL_RE = re.compile(
     r"https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%\-]+\.(?:"
-    r"png|jpe?g|gif|webp|bmp|tiff?|heic|heif|avif|apng|"
+    r"png|jpe?g|gifv|gif|webp|bmp|tiff?|heic|heif|avif|apng|"
     r"mp4|webm|mov|mkv|avi|m4v|mpeg|mpg|3gp|"
     r"mp3|ogg|oga|opus|wav|flac|m4a|aac|wma"
     r")(?:[?#][A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%\-]*)?",
@@ -41,7 +41,7 @@ MEDIA_URL_RE = re.compile(
 GIF_PAGE_URL_RE = re.compile(
     r"https?://(?:www\.)?(?:"
     r"(?:(?:media\d*|c)\.)?tenor\.com/[^\s<>\"']+"
-    r"|giphy\.com/(?:gifs|media|embed|clips)/[^\s<>\"']+"
+    r"|giphy\.com/(?:gifs|gif|media|embed|clips)/[^\s<>\"']+"
     r"|i\.giphy\.com/[^\s<>\"']+"
     r"|media\d*\.giphy\.com/[^\s<>\"']+"
     r"|gph\.is/[^\s<>\"']+"

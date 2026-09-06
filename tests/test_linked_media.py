@@ -212,6 +212,16 @@ def test_audio_flag_prefers_dashboard_then_env():
         is True
     )
     assert _owner_audio_input_enabled(SimpleNamespace(_control={}, config=None)) is False
+    # Env hard-off wins even if the dashboard still has process_audio on.
+    assert (
+        _owner_audio_input_enabled(
+            SimpleNamespace(
+                _control={"process_audio": True},
+                config=SimpleNamespace(ENABLE_AUDIO_INPUT=False),
+            )
+        )
+        is False
+    )
 
 
 def test_items_are_tagged_with_source_and_url():

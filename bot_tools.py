@@ -287,14 +287,7 @@ def _is_safe_ip(value: str) -> bool:
     # Unwrap IPv4-mapped IPv6 (::ffff:127.0.0.1) so loopback/private checks apply.
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
-    return not (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_reserved
-        or ip.is_multicast
-        or ip.is_unspecified
-    )
+    return bool(getattr(ip, "is_global", False))
 
 
 class _SafeResolver:
@@ -385,8 +378,10 @@ def _is_safe_url(url: str) -> bool:
         hostname = parsed.hostname
         if not hostname:
             return False
-        # Block localhost names
-        if hostname.lower() in ("localhost", "127.0.0.1", "0.0.0.0", "::1"):
+        host = hostname.lower().rstrip(".")
+        if host in {"localhost", "localhost.localdomain"} or host.endswith(
+            (".localhost", ".local", ".internal", ".lan")
+        ):
             return False
         try:
             ipaddress.ip_address(hostname)
@@ -605,6 +600,15 @@ def _unterminated_heredoc_error(command: str) -> str | None:
             "file body, then a line containing only EOF"
         )
     return None
+
+
+def _caller_is_admin(bot, message) -> bool:
+    author_id = getattr(getattr(message, "author", None), "id", None)
+    check = getattr(bot, "_is_admin", None)
+    try:
+        return bool(author_id is not None and callable(check) and check(author_id))
+    except Exception:
+        return False
 
 
 def _is_path_allowed(path: str, allowed_base: str) -> bool:
@@ -1459,19 +1463,15 @@ class HDImageGeneratorTool(Tool):
         # Local path — only from the dirs Maxwell itself writes images to.
         try:
             img_dir, _ = _public_image_target(self.bot)
-            allowed = [os.path.abspath(img_dir), os.path.abspath("temp")]
-            path = os.path.abspath(ref)
-            if not any(
-                path == root or path.startswith(root + os.sep) for root in allowed
-            ):
+            allowed = [img_dir, "temp"]
+            if not any(_is_path_allowed(ref, root) for root in allowed):
                 return None, f"local path outside the allowed image dirs: {ref[:80]}"
-            if not os.path.isfile(path):
-                return None, f"no such file: {ref[:80]}"
-            if os.path.getsize(path) > self.MAX_INPUT_BYTES:
+            path = Path(ref).resolve()
+            if path.stat().st_size > self.MAX_INPUT_BYTES:
                 return None, f"file too large: {ref[:80]}"
             # Off-thread: images run up to MAX_INPUT_BYTES and this is on the
             # event loop, so a blocking read stalls unrelated chats.
-            return await asyncio.to_thread(Path(path).read_bytes), ""
+            return await asyncio.to_thread(path.read_bytes), ""
         except Exception as e:
             return None, f"could not read {ref[:80]}: {e}"
 
@@ -2705,6 +2705,11 @@ class LeaveServerTool(Tool):
     async def execute(
         self, message: Message, server: str | None = None, **kwargs
     ) -> str:
+        if not _caller_is_admin(self.bot, message):
+            return (
+                "Error: leaving a server is restricted to admins. Ask an admin "
+                "to run it."
+            )
         target = (server or "").strip()
         if not target:
             return "Error: leave_server requires a server name or ID"
@@ -6156,6 +6161,15 @@ class DeleteSiteTool(_SiteOwnedTool):
         slug, entry, site_dir, err = self._resolve(message, name)
         if err:
             return err
+        owner = str(entry.get("user_id") or "")
+        author = str(getattr(getattr(message, "author", None), "id", "") or "")
+        if (
+            owner
+            and author
+            and owner != author
+            and not _caller_is_admin(self.bot, message)
+        ):
+            return f"Error: site '{slug}' belongs to someone else"
         base = Path(self.base_dir).resolve()
         try:
             target = Path(site_dir).resolve()
@@ -6203,17 +6217,15 @@ class ListSitesTool(Tool):
         )
 
     async def execute(self, message: Message, all_users: bool = False, **kwargs) -> str:
+        all_users = parse_bool(all_users, False)
         user_id = str(message.author.id)
         if hasattr(self.bot, "_load_sites"):
             self.bot._load_sites(quiet=True)
         sites = getattr(self.bot, "_sites", {}) or {}
 
-        # If user is admin/owner or explicitly requests all_users, show all sites
-        is_admin = False
-        if hasattr(self.bot, "_is_admin") and self.bot._is_admin(user_id):
-            is_admin = True
+        is_admin = _caller_is_admin(self.bot, message)
 
-        if is_admin or all_users:
+        if is_admin and all_users:
             selected_sites = sites
         else:
             selected_sites = {
@@ -8573,6 +8585,18 @@ class SeeImageTool(Tool):
         )
         if not item or not item.get("b64"):
             return f"Error: could not load an image from {url}"
+        mime = str(item.get("mime_type") or "")
+        if mime.startswith("video/"):
+            blob = base64.b64decode(item["b64"], validate=True)
+            return await SeeVideoTool(self.bot).result_from_blob(
+                blob,
+                mime,
+                url,
+                message,
+                filename=str(item.get("filename") or ""),
+            )
+        if not item.get("is_image") or not mime.startswith("image/"):
+            return f"Error: URL was {mime or 'unknown type'}, not an image I can look at"
         channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
         if channel_id and hasattr(self.bot, "_cache_media_context"):
             with contextlib.suppress(Exception):
@@ -9703,7 +9727,10 @@ class TtsTool(Tool):
         # `tts_source` on success; failures fall through silently.
         if not tts_source and fish_api_key:
             fish_model = os.environ.get("TTS_FISH_MODEL", "s2.1-pro-free")
-            fish_ref = _fish_reference_id(voice)
+            fish_voice = voice or (
+                "spanish" if language_key == "spanish" else None
+            )
+            fish_ref = _fish_reference_id(fish_voice)
             fish_fmt = os.environ.get("TTS_FISH_FORMAT", "mp3")
             fish_out = await _synthesize_fish_tts(
                 text,
@@ -11360,6 +11387,8 @@ class UpdateBasePersonalityTool(Tool):
         text: str | None = None,
         **kwargs,
     ) -> str:
+        if not _caller_is_admin(self.bot, message):
+            return "Error: restricted to admins."
         if not text or not str(text).strip():
             return "Error: 'text' is required and cannot be empty."
         text = str(text).strip()
@@ -11424,6 +11453,8 @@ class UpdateServerPromptTool(Tool):
         text: str | None = None,
         **kwargs,
     ) -> str:
+        if not _caller_is_admin(self.bot, message):
+            return "Error: restricted to admins."
         if not server_id or not str(server_id).strip():
             return "Error: 'server_id' is required (numeric snowflake or 'DM')."
         server_id = str(server_id).strip()

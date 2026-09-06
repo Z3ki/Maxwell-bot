@@ -286,11 +286,16 @@ class BackgroundJobManager:
     def get(self, job_id: str) -> BackgroundJob | None:
         return self._jobs.get(_norm_jid(job_id))
 
-    def list_text(self, limit: int = 10, *, guild_id: Any = None) -> str:
+    def list_text(self, limit: int = 10, *, guild_id: Any = None, user_id: Any = None) -> str:
         if not self._jobs:
             return "no background jobs yet."
         gid = str(guild_id or "").strip()
-        jobs = [j for j in self._jobs.values() if not gid or j.guild_id == gid]
+        uid = str(user_id or "").strip()
+        jobs = [
+            j
+            for j in self._jobs.values()
+            if (not gid or j.guild_id == gid) and (not uid or j.user_id == uid)
+        ]
         if not jobs:
             return "no background jobs in this server yet."
         ordered = sorted(jobs, key=lambda j: j.created_at, reverse=True)[: max(1, limit)]
@@ -355,7 +360,8 @@ class SpawnBackgroundTool(Tool):
 
     def get_description(self):
         return (
-            "BACKGROUND job for a long task (site, research, multi-step). END this turn. "
+            "BACKGROUND job for a long task (site, research, multi-step). "
+            "Returns a job id; then send_message one short ack with that id. "
             "Detached, bigger budgets, replies when done. Params: goal (required), "
             "context (optional spec). Then send_message: ONE short ack with the job id — nothing else."
         )
@@ -559,7 +565,7 @@ async def _llm_delivery_line(bot: Any, final_text: Any, job_id: str, job_goal: s
         first = re.sub(r"\s+", " ", first)[:400]
         if not first or len(first) < 10:
             return fallback
-        url = _first_url(text)
+        url = _first_url(text) or _first_url(raw)
         if url and url not in first:
             return f"{first}\n{url}"
         return first
@@ -664,7 +670,14 @@ async def run_background_job(bot: Any, job_id: str) -> None:
 
     base_personality = ""
     try:
-        base_personality = str((getattr(bot, "_control", {}) or {}).get("base_personality") or "")
+        get_p = getattr(bot, "_get_personality", None)
+        if callable(get_p):
+            base_personality = str(get_p() or "")
+        else:
+            from identity import fill_identity
+
+            raw = str((getattr(bot, "_control", {}) or {}).get("base_personality") or "")
+            base_personality = fill_identity(raw) if raw else ""
     except Exception:
         pass
     tool_prompt = ""
@@ -687,7 +700,7 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                 "2. Sites may be static HTML/CSS/JS. Use site_server and relative API paths "
                 "(`api/notes`, never `/api/...`) only when the goal needs a backend. "
                 "Then site_test → fix → retest. Don't claim done with console errors.\n"
-                "3. Patch live files via tools. No shadow copies under /home/maxwell.\n"
+                "3. Patch live files via tools. No shadow copies under the workspace root.\n"
                 "4. One route = one definition; don't remount the same path.\n"
                 "Last message MUST be `Built <title>: <url> — <one line>` with the real "
                 "title+URL from tools — never a placeholder, 'done', or 'finished'. "
@@ -716,16 +729,18 @@ async def run_background_job(bot: Any, job_id: str) -> None:
 
     final_text = ""
     succeeded = False
+    finished_cleanly = False
     last_progress_step = 0
     deadline = time.monotonic() + float(timeout)
     try:
         for step in range(max(1, max_iters)):
-            if time.monotonic() > deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 manager.mark(job.id, progress=f"time budget ({timeout}s) hit at step {step}")
                 final_text = final_text or "I ran out of time budget — partial work is in the thread."
+                succeeded = False
                 break
 
-            remaining = max(10.0, deadline - time.monotonic())
             try:
                 await bot._acquire_ai_slot(
                     timeout=float(min(remaining, 600)), priority="background", key=job.channel_id
@@ -735,6 +750,7 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                     await _fail(f"still waiting on an LLM slot after 10m ({exc}).")
                     return
                 logger.warning("background job %s slot wait failed at step %s: %s", job.id, step, exc)
+                succeeded = False
                 break
 
             try:
@@ -768,6 +784,7 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                     calls = list(recovered or [])
                 except Exception:
                     calls = []
+            calls = [c for c in calls if _call_name(c) not in _WORKER_HIDDEN_TOOLS]
             if not calls:
                 try:
                     cleaned = await bot._dispatch_tool_calls(orig_message, response or "")
@@ -775,6 +792,7 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                 except Exception:
                     final_text = str(response or "")
                 final_text = str(final_text or "").strip()
+                finished_cleanly = True
                 break
             names = [_call_name(c) for c in calls]
             try:
@@ -806,7 +824,8 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                         "role": "user",
                         "content": (
                             "No site file changed in 15 steps. Stop grepping/re-reading. "
-                            "Next: edit_site/site_server write, or site_test. Then the single-line summary."
+                            "Next: edit_site write (site_server only if this goal needs a backend), "
+                            "or site_test. Then the single-line summary."
                         ),
                     }
                 )
@@ -823,6 +842,7 @@ async def run_background_job(bot: Any, job_id: str) -> None:
             named = {n for n in names if n}
             if named and named <= set(TURN_ENDING_TOOL_NAMES) and resp_text.strip():
                 final_text = resp_text.strip()
+                finished_cleanly = True
                 break
             try:
                 followups = list(getattr(bot, "_last_native_followup_messages", None) or [])
@@ -845,14 +865,19 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                 break
             final_text = resp_text.strip()
 
-        if not succeeded:
-            # Nothing ever came back — honest error, not a fake done.
-            await _fail(final_text or "the model never returned anything.")
-            await _post_thread(thread, "Failed before producing output.")
+        if not succeeded or not finished_cleanly:
+            # Timeout, slot-wait abort, or max-iters without a final answer.
+            await _fail(final_text or "the model never returned a finished answer.")
+            await _post_thread(thread, "Failed before producing a final answer.")
             return
 
-        final_text = str(final_text or "").strip() or "Done — details are in the thread."
-        manager.mark(job.id, status="done", result=final_text[:8000], progress="done")
+        final_text = str(final_text or "").strip()
+        if not final_text or final_text.upper().startswith("FAILED"):
+            await _fail(final_text or "empty final answer.")
+            await _post_thread(thread, "Failed before producing a final answer.")
+            return
+
+        manager.mark(job.id, progress="delivering")
 
         # Deliver: LLM-written reply to the ORIGINAL message (ping on).
         # Full result already lives in the build thread; the channel gets one line.
@@ -865,6 +890,7 @@ async def run_background_job(bot: Any, job_id: str) -> None:
         except Exception as exc:
             logger.warning("background job %s delivery failed: %s", job.id, exc)
             await _post_thread(thread, f"Done, but I could not post to the channel ({exc}):\n{body[:1500]}")
+        manager.mark(job.id, status="done", result=final_text[:8000], progress="done")
         await _post_thread(thread, f"Finished.\n{str(final_text or '')[:1500]}")
     except asyncio.CancelledError:
         manager.mark(job.id, status="cancelled", progress="cancelled on request")

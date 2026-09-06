@@ -1,9 +1,9 @@
 """Tests for UpdateBasePersonalityTool and UpdateServerPromptTool.
 
 These tools let Maxwell rewrite its own base personality paragraph and
-per-server prompts at runtime. Anyone can call them. Tests cover:
+per-server prompts at runtime. Admin-only. Tests cover:
 
-- non-admin call: writes
+- non-admin call: refused
 - valid text: writes to bot_control.json atomically
 - empty/too-short/too-long text: rejected with clear error
 - server prompt set + clear + DM target
@@ -92,13 +92,14 @@ def non_admin_msg():
 # ---------------------------------------------------------------------------
 
 
-def test_update_base_personality_allows_non_admin(bot, non_admin_msg):
+def test_update_base_personality_refuses_non_admin(bot, non_admin_msg):
     async def run():
         tool = UpdateBasePersonalityTool(bot)
         return await tool.execute(non_admin_msg, text="anything goes here really ok")
     result = asyncio.run(run())
-    assert "updated" in result.lower()
-    assert bot._control["base_personality"] == "anything goes here really ok"
+    assert result.startswith("Error:")
+    assert "admin" in result.lower()
+    assert bot._control["base_personality"] == "original personality text"
 
 
 def test_update_base_personality_requires_text(bot, admin_msg):
@@ -160,13 +161,14 @@ def test_update_base_personality_keeps_other_keys(bot, admin_msg, tmp_data_dir):
 # ---------------------------------------------------------------------------
 
 
-def test_update_server_prompt_allows_non_admin(bot, non_admin_msg):
+def test_update_server_prompt_refuses_non_admin(bot, non_admin_msg):
     async def run():
         tool = UpdateServerPromptTool(bot)
         return await tool.execute(non_admin_msg, server_id="12345", text="anything goes here ok")
     result = asyncio.run(run())
-    assert "updated" in result.lower()
-    assert bot.memory.get_server_prompt("12345") == "anything goes here ok"
+    assert result.startswith("Error:")
+    assert "admin" in result.lower()
+    assert bot.memory.get_server_prompt("12345") is None
 
 
 def test_update_server_prompt_requires_server_id(bot, admin_msg):
