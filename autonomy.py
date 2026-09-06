@@ -77,6 +77,7 @@ from utils import (
 from utils import (
     render_discord_context_text as _render_discord_context_text,
 )
+from identity import process_name
 from autonomy_social import (  # noqa: E402
     FLOOR_ADDRESSED,
     FLOOR_IDLE,
@@ -878,6 +879,7 @@ def _planner_system_prompt(
     tool_descriptions: str,
     goals_text: str,
     context: str,
+    bot_name: str | None = None,
 ) -> str:
     """Build the autonomy planner system prompt.
 
@@ -885,7 +887,8 @@ def _planner_system_prompt(
     them across ticks. GOALS and CURRENT CONTEXT change every tick and stay
     at the end on purpose.
     """
-    return f"""You are Maxwell acting autonomously on your own time. Be natural, proactive, and engage like a real human participant in a community server. Don't narrate internal machinery.
+    name = (bot_name or "Maxwell").strip() or "Maxwell"
+    return f"""You are {name} acting autonomously on your own time. Be natural, proactive, and engage like a real human participant in a community server. Don't narrate internal machinery.
 
 PERSONALITY:
 {base_personality}
@@ -910,7 +913,7 @@ INBOX (when present): inbox_list / inbox_act. Voice: join_vc / vc_where / vc_sta
 Skip repeating identical actions from YOUR RECENT ACTIONS.
 
 ## Target
-channel=3(#general) → post_channel "3". dm=D1(with Z3ki(111)) → send_dm target_user_id "111". group=G1(...) → post_channel "G1".
+channel=3(#general) → post_channel "3". dm=D1(with Ada(111)) → send_dm target_user_id "111". group=G1(...) → post_channel "G1".
 msg= is not a room. Reply: reply_to_message_id (post_channel) or target_message_id (run_tool). Just speaking into the room → omit reply_to_message_id.
 Max {MAX_ACTIONS_PER_TICK} actions. kinds: send_dm, post_channel, run_tool, update_memory, create_goal, complete_goal, do_nothing.
 
@@ -972,8 +975,8 @@ class AutonomyEngine:
         """Register a room for this tick and return (handle, display label).
 
         Every context section routes through this so the planner sees one
-        naming scheme everywhere: `channel=3(#general)`, `dm=D1(with Z3ki)`,
-        `group=G1(Z3ki, dirac)`. Rooms that aren't guild channels can't come
+        naming scheme everywhere: `channel=3(#general)`, `dm=D1(with Ada)`,
+        `group=G1(Ada, dirac)`. Rooms that aren't guild channels can't come
         out looking like one.
 
         The first registration fixes a room's kind for the whole tick, so it
@@ -2987,6 +2990,7 @@ class AutonomyEngine:
             tool_descriptions=tool_descriptions,
             goals_text=goals_text,
             context=context,
+            bot_name=process_name(self.bot),
         )
 
         # call the LLM
@@ -3348,7 +3352,7 @@ class AutonomyEngine:
 
                 # Posting tools must ALWAYS have an explicit target channel.
                 # Otherwise _exec_run_tool falls back to auto_channels[0], and
-                # if that happens to be a group DM (e.g. "Z3ki, normalMan,
+                # if that happens to be a group DM (e.g. "Ada, normalMan,
                 # dirac") the reply lands in someone's group chat. Hard
                 # reject: no target -> drop the action and let validation
                 # failures push the LLM toward picking the right channel next
@@ -4016,7 +4020,7 @@ class AutonomyEngine:
             # HARD REFUSAL for posting tools. Auto_channels is bot operator config
             # (it's the channel(s) that auto-reply to non-mention messages) — it is
             # NOT a default destination for autonomous posts, and historically it
-            # has been a Discord group DM ("Z3ki, normalMan, dirac") which is the
+            # has been a Discord group DM ("Ada, normalMan, dirac") which is the
             # exact wrong place to drop a reply. Better to error out so the LLM
             # picks a real channel next tick than to broadcast into someone's
             # group chat. Non-posting tools (web_search, fetch_url, memory edits,

@@ -53,15 +53,21 @@ function envValue(text, name) {
   return raw.replace(/\s+#.*$/, "").trim();
 }
 
-let gfToken = "";
+let envText = "";
 try {
   const envPath = path.join(appRoot, ".env");
   if (fs.existsSync(envPath)) {
-    const envText = fs.readFileSync(envPath, "utf8");
-    gfToken = envValue(envText, "GF_DISCORD_TOKEN");
+    envText = fs.readFileSync(envPath, "utf8");
   }
 } catch {}
-if (!gfToken) gfToken = process.env.GF_DISCORD_TOKEN || "";
+
+function fromEnv(name) {
+  return envValue(envText, name) || process.env[name] || "";
+}
+
+const gfToken = fromEnv("GF_DISCORD_TOKEN");
+const partnerDataDir = fromEnv("PARTNER_DATA_DIR") || "data_gf";
+const partnerPersona = fromEnv("BOT_PERSONA_TYPE") || "mommy_gf";
 
 const apps = [
 	{
@@ -148,8 +154,8 @@ const apps = [
 		out_file: "/root/.pm2/logs/maxwell-api-out.log",
 		log_type: "json",
 	},
-	// Mommy GF companion - second self-bot on same harness, mommy persona
-	// Runs same bot.py but with GF token and isolated data dir. Direct comms via partner IDs.
+	// Optional companion self-bot on the same harness. Isolated data dir;
+	// partner Discord IDs come from .env, not from this file.
 	...(gfToken ? [{
 		name: "maxwell-gf",
 		script: "bot.py",
@@ -168,11 +174,12 @@ const apps = [
 		env: {
 			PYTHONUNBUFFERED: "1",
 			DISCORD_TOKEN: gfToken,
-			BOT_PERSONA_TYPE: "mommy_gf",
-			DATA_DIR: "data_gf",
-			GF_USER_ID: "1496154562715848763",
-			MAXWELL_USER_ID: "1382894657624866889",
-			PARTNER_USER_ID: "1382894657624866889",
+			BOT_PERSONA_TYPE: partnerPersona,
+			PARTNER_DATA_DIR: partnerDataDir,
+			DATA_DIR: partnerDataDir,
+			GF_USER_ID: fromEnv("GF_USER_ID"),
+			MAXWELL_USER_ID: fromEnv("MAXWELL_USER_ID"),
+			PARTNER_USER_ID: fromEnv("PARTNER_USER_ID"),
 		},
 		log_date_format: "YYYY-MM-DD HH:mm:ss Z",
 		merge_logs: true,

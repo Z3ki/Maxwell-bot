@@ -60,7 +60,7 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "image": _str(
                 "Optional image to edit or use as reference: an http(s) URL "
                 "(Discord CDN, a permanent URL from a previous image, any public "
-                "link) or a local path Maxwell wrote. For several, pass a JSON "
+                "link) or a local path this bot wrote. For several, pass a JSON "
                 "list or a comma-separated string (max 4). Omit to generate from "
                 "scratch; images attached to the user's message are used "
                 "automatically."
@@ -376,10 +376,9 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 "the site root."
             ),
             "backend": _bool(
-                "ALWAYS true — every site MUST have a live Python backend via "
-                "site_server (FastAPI+uvicorn on $PORT at /bot/<slug>/api/...; ws at "
-                "/ws if realtime). Frontend never computes alone — it fetches/renders "
-                "from the backend. Client-only sites are forbidden."
+                "Optional, default false. Enable only if the site needs a server "
+                "(state, REST, websockets, auth, or persistence). Static HTML/CSS/JS "
+                "sites omit it."
             ),
             "permanent": _bool(
                 "Skip the auto-expiry clock so the site stays up until deleted"

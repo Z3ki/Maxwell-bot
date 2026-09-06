@@ -16,6 +16,7 @@ from bot import (
     _live_self_identity_line,
     _live_self_name,
 )
+from identity import fill_identity
 
 
 class FakeMemory:
@@ -50,6 +51,7 @@ def _bot(memory=None):
         _conversation_watch={},
         _tool_system_prompt=lambda *args, **kwargs: "",
         bot_name="Maxwell",
+        _base_knowledge=fill_identity("You are {bot_name}", {"bot_name": "Maxwell"}),
         memory=memory or FakeMemory(),
         user=SimpleNamespace(display_name="Maxwell", name="maxwell", id=1),
     )
@@ -156,6 +158,21 @@ def test_build_messages_injects_guild_nick_into_dynamic_context():
     assert "Your name here: Sparky" not in static
     # Core identity is still Maxwell; the nick is the server-facing name.
     assert "You are Maxwell" in static
+
+
+def test_build_messages_static_prompt_uses_custom_bot_name():
+    bot = _bot()
+    bot.bot_name = "Sparky"
+    bot._base_knowledge = fill_identity("You are {bot_name}", {"bot_name": "Sparky"})
+    message = _message()
+
+    async def run():
+        return await MaxwellBot._build_messages(bot, message, "hey")
+
+    messages = asyncio.run(run())
+    static = messages[0]["content"]
+    assert "You are Sparky" in static
+    assert "You are Maxwell" not in static
 
 
 def test_build_messages_guild_without_nick_still_says_maxwell():

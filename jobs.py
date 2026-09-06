@@ -30,6 +30,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from identity import process_name
 from tools import Tool
 from utils import _safe_int, _spawn_background
 
@@ -523,10 +524,20 @@ async def _llm_delivery_line(bot: Any, final_text: Any, job_id: str, job_goal: s
             slot_held = True
         except Exception:
             slot_held = False
+        name = "Bot"
+        with contextlib.suppress(Exception):
+            name = (
+                str(
+                    process_name(bot)
+                    or getattr(bot, "bot_name", None)
+                    or "Bot"
+                ).strip()
+                or "Bot"
+            )
         try:
             resp = await generate(
                 [
-                    {"role": "system", "content": "Maxwell. One short reply line."},
+                    {"role": "system", "content": f"{name}. One short reply line."},
                     {"role": "user", "content": prompt},
                 ],
                 max_tokens=256,
@@ -672,9 +683,10 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                 f"Goal: {job.goal}\n"
                 + (f"Context: {job.context}\n" if job.context else "")
                 + "Work:\n"
-                "1. Tools first (create_site / site_server / edit_site; shell only if no tool fits).\n"
-                "2. Sites: create → relative API paths (`api/notes`, never `/api/...`) → "
-                "site_test → fix → retest. Don't claim done with console errors.\n"
+                "1. Tools first (create_site / edit_site; site_server only if the goal needs a backend; shell only if no tool fits).\n"
+                "2. Sites may be static HTML/CSS/JS. Use site_server and relative API paths "
+                "(`api/notes`, never `/api/...`) only when the goal needs a backend. "
+                "Then site_test → fix → retest. Don't claim done with console errors.\n"
                 "3. Patch live files via tools. No shadow copies under /home/maxwell.\n"
                 "4. One route = one definition; don't remount the same path.\n"
                 "Last message MUST be `Built <title>: <url> — <one line>` with the real "

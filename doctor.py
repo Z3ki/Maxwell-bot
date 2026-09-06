@@ -88,10 +88,22 @@ def check_required_settings(cfg) -> None:
     else:
         line("bad", "model endpoint incomplete", "set OLLAMA_BASE_URL and OLLAMA_MODEL")
         problems.append("set OLLAMA_BASE_URL and OLLAMA_MODEL in .env")
+    from identity import identity_values
+
+    ident = identity_values(cfg)
+    line("ok", "BOT_NAME", ident["bot_name"])
     if cfg.MAXWELL_OWNER_IDS:
         line("ok", "MAXWELL_OWNER_IDS set", f"{len(cfg.MAXWELL_OWNER_IDS)} owner(s)")
     else:
         line("warn", "MAXWELL_OWNER_IDS empty", "admin commands will be denied to everyone")
+    creator_name = (getattr(cfg, "CREATOR_NAME", None) or "").strip()
+    creator_id = (getattr(cfg, "CREATOR_ID", None) or "").strip()
+    if not creator_name and not creator_id and not cfg.MAXWELL_OWNER_IDS:
+        line(
+            "warn",
+            "no owner configured",
+            "CREATOR_NAME, CREATOR_ID, and MAXWELL_OWNER_IDS are empty — prompts will have no owner",
+        )
     if cfg.MAXWELL_ADMIN_PASSWORD:
         line("ok", "dashboard password set")
     else:

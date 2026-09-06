@@ -41,10 +41,7 @@ ADMIN_PASSWORD = os.getenv("MAXWELL_ADMIN_PASSWORD", "").strip()
 
 DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "").strip()
 DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "").strip()
-DISCORD_REDIRECT_URI = os.getenv(
-    "DISCORD_REDIRECT_URI",
-    "https://maxwell.z3ki.dev/api/auth/discord/callback",
-).strip()
+DISCORD_REDIRECT_URI = os.getenv("DISCORD_REDIRECT_URI", "").strip()
 DISCORD_ALLOWED_USER_IDS = {
     uid.strip()
     for uid in os.getenv("DISCORD_ALLOWED_USER_IDS", "").split(",")

@@ -146,6 +146,31 @@ def test_create_site_description_stays_within_the_openai_limit():
     assert len(_create_site_desc()) < 1024
 
 
+def test_create_site_description_does_not_force_a_backend():
+    desc = _create_site_desc()
+    low = desc.lower()
+    assert "always true" not in low
+    assert "must use backend=true" not in low
+    assert "client-only sites are forbidden" not in low
+    assert "optional" in low or "not required" in low
+
+
+def test_create_site_backend_schema_does_not_forbid_static_sites():
+    desc = TOOL_PARAMETERS["create_site"]["properties"]["backend"]["description"].lower()
+    assert "always true" not in desc
+    assert "forbidden" not in desc
+
+
+def test_protocol_does_not_force_a_site_backend():
+    text = TOOL_PROTOCOL
+    low = text.lower()
+    assert "BACKEND IS MANDATORY" not in text
+    assert "Client-only sites are forbidden" not in text
+    assert "MUST use backend=true" not in text
+    assert "optional" in low
+    assert "z3ki authorization" not in low
+
+
 # --------------------------------------------------------------------------
 # placeholder detection in what was actually written
 # --------------------------------------------------------------------------

@@ -6,7 +6,7 @@
 curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/install.sh | bash
 ```
 
-The installer explains that Maxwell is a Discord self-bot, warns that self-bots may violate Discord's Terms of Service, installs system packages, clones/updates `https://github.com/Z3ki/Maxwell-bot.git`, creates `.venv`, installs Python dependencies, asks for configuration, runs `doctor.py`, writes `run.sh`, and prints start/update instructions.
+The installer explains that Maxwell is a Discord self-bot, warns that self-bots may violate Discord's Terms of Service, installs system packages, clones/updates the repo (`MAXWELL_REPO_URL`, defaulting to the upstream GitHub URL), creates `.venv`, installs Python dependencies, asks for configuration, runs `doctor.py`, writes `run.sh`, and prints start/update instructions.
 
 It will ask for:
 
@@ -35,6 +35,8 @@ MAXWELL_INSTALL_DOCKER=no \
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/install.sh)"
 ```
 
+To install from a fork or mirror, set `MAXWELL_REPO_URL` (and optionally `MAXWELL_BRANCH`). Identity (`BOT_NAME`, `CREATOR_NAME`, `CREATOR_ID`, `MAXWELL_OWNER_IDS`, `BOT_INVITE_URL`, and related IDs) is configured in `.env` after install — blank IDs mean no baked-in owner. See [CONFIGURATION.md](CONFIGURATION.md).
+
 For sandboxes or CI where system packages must not be installed, add `MAXWELL_SKIP_SYSTEM_DEPS=1`. Use it only after preinstalling `git`, `curl`, and Python 3.11+ with venv/pip.
 
 ## Requirements
@@ -58,6 +60,11 @@ sudo apt install -y git python3 python3-venv python3-pip
 ```bash
 git clone https://github.com/Z3ki/Maxwell-bot.git maxwell
 cd maxwell
+```
+
+That URL is the upstream repo. A fork or mirror is fine; the installer equivalent is `MAXWELL_REPO_URL`. Then:
+
+```bash
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
@@ -73,6 +80,8 @@ DISCORD_TOKEN=your-discord-user-token
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=qwen3:8b
 ```
+
+Optional identity (`BOT_NAME`, `CREATOR_NAME`, `CREATOR_ID`, `BOT_INVITE_URL`, …) is documented in [CONFIGURATION.md](CONFIGURATION.md). Empty IDs mean no baked-in owner.
 
 Then verify and run:
 

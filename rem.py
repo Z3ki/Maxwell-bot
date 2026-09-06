@@ -8,6 +8,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+from identity import process_name
 from utils import _atomic_json_write_sync
 
 logger = logging.getLogger(__name__)
@@ -27,13 +28,18 @@ def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def rem_system_prompt(turns_remaining: int, prompt_body: str | None = None) -> str:
+def rem_system_prompt(
+    turns_remaining: int,
+    prompt_body: str | None = None,
+    bot_name: str | None = None,
+) -> str:
+    name = (bot_name or process_name()).strip() or process_name()
     body = (prompt_body or DEFAULT_REM_PROMPT_BODY).strip()
     # NOTE: REM is a single-pass audit, not a multi-turn tool loop. The old
     # prompt advertised "N turns left" but the runner never looped, which
     # misled the model. Don't mention turns or DONE; ask for one JSON audit.
     return (
-        "You are Maxwell REM — memory assimilation, not live chat.\n"
+        f"You are {name} REM — memory assimilation, not live chat.\n"
         "Dedup. Don't drop decisions, prefs, open tasks, or identity.\n\n"
         f"## Task\n{body}\n\n"
         "## Output\nOne pass. One JSON line. Short `audit` (dashboard)."
@@ -364,6 +370,7 @@ async def run_rem_once(
     timeout: int = 60,
     max_tokens: int | None = None,
     apply_actions: bool = True,
+    bot=None,
 ) -> dict:
     store = RemStore(data_dir, run_history=run_history)
     state = await store.load_state()
@@ -392,7 +399,11 @@ async def run_rem_once(
     messages = [
         {
             "role": "system",
-            "content": rem_system_prompt(max_turns, prompt_body=prompt_body),
+            "content": rem_system_prompt(
+                max_turns,
+                prompt_body=prompt_body,
+                bot_name=process_name(bot),
+            ),
         },
         {"role": "system", "content": short_term_slice_prompt(events)},
         {

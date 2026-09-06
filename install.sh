@@ -56,6 +56,7 @@ Useful environment variables:
   MAXWELL_NONINTERACTIVE=1, MAXWELL_SKIP_SYSTEM_DEPS=1,
   DISCORD_TOKEN, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_API_KEY,
   MAXWELL_OWNER_IDS, MAXWELL_ADMIN_PASSWORD,
+  BOT_NAME, CREATOR_NAME, CREATOR_ID, COMMAND_PREFIX,
   MAXWELL_INSTALL_EXTRAS=yes|no, MAXWELL_INSTALL_DOCKER=yes|no
 EOF
 }
@@ -369,14 +370,41 @@ configure_env() {
   if [ -n "$model" ]; then set_env_value OLLAMA_MODEL "$model"; else warn "OLLAMA_MODEL left blank; set it before starting Maxwell."; fi
   set_env_value OLLAMA_API_KEY "$key"
 
-  printf '\n%sStep 3/5: Owner Discord user ID(s)%s\n' "$BOLD" "$RESET"
+  printf '\n%sStep 3/5: Identity (name, owner, prefix)%s\n' "$BOLD" "$RESET"
+  printf '  A fresh clone is not owned by anyone until you set these. Display names are labels, not a baked-in identity.\n'
+  bot_name=$(prompt "Bot display name" "${BOT_NAME:-Maxwell}")
+  [ -n "$bot_name" ] || bot_name="Maxwell"
+  set_env_value BOT_NAME "$bot_name"
+
+  creator_name=$(prompt "Owner/creator name (optional)" "${CREATOR_NAME:-}")
+  if [ -n "$creator_name" ]; then
+    set_env_value CREATOR_NAME "$creator_name"
+  fi
+
   printf '  Enable Discord Developer Mode, right-click yourself, and choose Copy User ID. Use commas for multiple owners.\n'
-  owner=$(prompt "Owner ID(s), optional" "${MAXWELL_OWNER_IDS:-}")
+  owner=$(prompt "Owner Discord ID(s), optional" "${MAXWELL_OWNER_IDS:-}")
   if [ -n "$owner" ]; then
     set_env_value MAXWELL_OWNER_IDS "$owner"
   else
     warn "MAXWELL_OWNER_IDS left blank; admin commands will be denied."
   fi
+
+  creator_id="${CREATOR_ID:-}"
+  if [ -z "$creator_id" ] && [ -n "$owner" ]; then
+    creator_id="${owner%%,*}"
+    creator_id="${creator_id#"${creator_id%%[![:space:]]*}"}"
+    creator_id="${creator_id%"${creator_id##*[![:space:]]}"}"
+  fi
+  if [ -n "$creator_id" ]; then
+    set_env_value CREATOR_ID "$creator_id"
+    if [ -z "${CREATOR_ID:-}" ]; then
+      ok "CREATOR_ID set from the first owner ID"
+    fi
+  fi
+
+  cmd_prefix=$(prompt "Command prefix (optional)" "${COMMAND_PREFIX:-,}")
+  [ -n "$cmd_prefix" ] || cmd_prefix=","
+  set_env_value COMMAND_PREFIX "$cmd_prefix"
 
   printf '\n%sStep 4/5: Dashboard credentials%s\n' "$BOLD" "$RESET"
   printf '  Empty MAXWELL_ADMIN_PASSWORD makes the dashboard/admin API answer 503. Press Enter interactively to generate one.\n'

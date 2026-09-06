@@ -4,7 +4,7 @@ from rem import rem_system_prompt, short_term_slice_prompt, _extract_rem_json
 
 
 def test_rem_system_prompt_shape():
-    prompt = rem_system_prompt(2)
+    prompt = rem_system_prompt(2, bot_name="Maxwell")
     assert "You are Maxwell REM" in prompt
     assert "not live chat" in prompt
     # REM is a single pass (no multi-turn loop), so the prompt must not
@@ -18,6 +18,12 @@ def test_rem_system_prompt_shape():
     assert "JSON" in prompt
     assert "actions" in prompt
     assert "DONE" not in prompt
+
+
+def test_rem_system_prompt_uses_custom_bot_name():
+    prompt = rem_system_prompt(0, bot_name="Nova")
+    assert "You are Nova REM" in prompt
+    assert "You are Maxwell REM" not in prompt
 
 
 def test_short_term_slice_prompt_serializes_stably():

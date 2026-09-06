@@ -28,6 +28,8 @@ import re
 import time
 from typing import Any, Awaitable, Callable
 
+from identity import identity_values
+
 logger = logging.getLogger(__name__)
 
 # async (method, path_template, payload|None, **route_params) -> dict
@@ -294,8 +296,9 @@ def build_picker_messages(
     answered: set[str] | None = None,
     personality: str = "",
     preferences: str = "",
+    bot_name: str | None = None,
 ) -> list[dict]:
-    """Chat messages asking Maxwell which roles/channels he wants."""
+    """Chat messages asking the bot which roles/channels it wants."""
     persona = (personality or "").strip()
     if persona:
         persona = f"Your personality:\n{persona[:1200]}\n\n"
@@ -304,8 +307,9 @@ def build_picker_messages(
         if (preferences or "").strip()
         else ""
     )
+    name = (bot_name or identity_values()["bot_name"] or "Maxwell").strip() or "Maxwell"
     system = (
-        "You are Maxwell, choosing your own roles and channels in a Discord "
+        f"You are {name}, choosing your own roles and channels in a Discord "
         "server you just joined. Pick what genuinely fits you — the topics "
         "you'd actually read, the pings you'd actually want. Skip options "
         "that don't interest you; you do not have to pick from every prompt. "
@@ -349,6 +353,7 @@ async def run_onboarding(
     preferences: str = "",
     include_post_join: bool = INCLUDE_POST_JOIN_PROMPTS,
     dry_run: bool = False,
+    bot_name: str | None = None,
 ) -> dict:
     """Fetch prompts, let Maxwell choose, submit, and report what happened.
 
@@ -389,7 +394,12 @@ async def run_onboarding(
         try:
             reply = await ask_llm(
                 build_picker_messages(
-                    guild_name, prompts, answered, personality, preferences
+                    guild_name,
+                    prompts,
+                    answered,
+                    personality,
+                    preferences,
+                    bot_name=bot_name,
                 )
             )
             choice = parse_choice_json(reply, prompts)

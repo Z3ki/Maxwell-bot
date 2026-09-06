@@ -63,7 +63,7 @@ One thing is worth knowing up front: the `shell` tool runs inside a Docker conta
 - RAG vector memory: messages, long-term facts, and shared context entries are embedded through any OpenAI-compatible or Ollama embeddings endpoint and stored in a SQLite vector database. Semantic search retrieves the most relevant memories for each conversation — global across all channels and servers. With no embedder reachable the bot logs one line and falls back to recent-history context.
 - Opt-in REM "dreaming" pass that periodically consolidates recent visible traffic into long-term memory.
 - Web dashboard/admin API protected by HTTP Basic auth.
-- Site building: `create_site` publishes a whole directory (index plus any CSS/JS/subpages/data files) byte-for-byte under a configurable public URL, `edit_site` patches a published site in place, `delete_site` takes it down. Pass `backend=true` and the page gets a real server side — named values and append-only lists at `/api/site/<slug>/`, same origin, no key — so a guestbook, counter, poll, or saved state is one `fetch()` away.
+- Site building: `create_site` publishes a whole directory (index plus any CSS/JS/subpages/data files) byte-for-byte under a configurable public URL; `edit_site` patches a published site in place; `delete_site` takes it down. Static HTML/CSS/JS is the default. `backend=true` is optional (same-origin key/list datastore). A containerized app via `site_server` is a separate opt-in — not every site gets FastAPI or a backend.
 - Lean chat turns: ordinary conversation ships a small conversational tool set instead of the whole catalog (~83% fewer tool tokens per message). Anything that asks for an action gets everything, and `more_tools` reopens the catalog mid-turn. Turn it off with `lean_chat_tools` in the dashboard.
 
 ## Project Structure
@@ -111,8 +111,20 @@ required values are the first thing in the file. The ones that matter:
 | Variable | Description |
 |---|---|
 | `OLLAMA_API_KEY` | Bearer token, if your endpoint needs one (falls back to `OPENAI_COMPAT_API_KEY`) |
-| `MAXWELL_OWNER_IDS` | Comma-separated Discord user IDs allowed to run admin commands. Empty = every admin command is denied. |
+| `MAXWELL_OWNER_IDS` | Comma-separated Discord user IDs allowed to run admin commands. Empty = every admin command is denied; there is no baked-in owner. |
 | `MAXWELL_ADMIN_USER` / `MAXWELL_ADMIN_PASSWORD` | Dashboard / API Basic auth. Empty password = 503 on every request. |
+
+### Identity
+
+Display name, owner, invite, and command prefix are env-driven. Leave IDs blank on a fresh install — nothing assumes a specific person.
+
+| Variable | Description |
+|---|---|
+| `BOT_NAME` | Spoken / prompt name (default `Maxwell`). Live Discord nick still wins in chat. |
+| `CREATOR_NAME` / `CREATOR_ID` | Optional human owner label and Discord user ID. Blank = no named creator. |
+| `MAXWELL_OWNER_IDS` | Operators who may run admin commands (same as above). Empty = nobody. |
+| `BOT_INVITE_URL` | Official invite the bot may share when asked where to find it. |
+| `MAXWELL_USAGE_URL` | Optional provider quota endpoint for the `usage` tool. Blank = tool has nowhere to query. |
 
 ### LLM provider
 
@@ -297,6 +309,11 @@ Live VC replies require `discord-ext-voice-recv`, `PyNaCl`, `ffmpeg`, and an aud
 
 ## Sites
 
+`create_site` is static by default: a directory of files under a public URL.
+Backends are optional. Pass `backend=true` only when the page needs a
+same-origin datastore. Use `site_server` only when it needs to run code.
+Neither FastAPI nor a container is created unless you ask.
+
 `create_site` writes a directory, not a single file. `body` is index.html;
 `files` is anything else — `{"style.css": "...", "app.js": "...",
 "about/index.html": "..."}` — and it is all served exactly as written, with no
@@ -327,7 +344,7 @@ Maxwell can now edit **any** site (ownership check removed for `edit_site`/`site
 
 ### Site backends
 
-A site created with `backend=true` gets a datastore on the same origin, so
+Optional. A site created with `backend=true` gets a datastore on the same origin, so
 page JavaScript can talk to it with a plain `fetch` — no key, no CORS:
 
 | Route | What it does |
@@ -349,8 +366,10 @@ Data lives in `data/site_data/<slug>.json` and dies with the site.
 
 ### Real backend servers
 
-`backend=true` is a datastore: it remembers things, but it cannot run code,
-keep a secret, or enforce a rule. When a site needs an actual server —
+Also optional — `create_site` does not start a Python/FastAPI process for
+every page. `backend=true` is only a datastore: it remembers things, but it
+cannot run code, keep a secret, or enforce a rule. When a site needs an actual
+server —
 a hidden API key, real auth, computation, a database it queries — `site_server`
 gives it one:
 
@@ -524,10 +543,10 @@ restart. Deps: `python-chess` + `pillow` (already in `requirements.txt`).
 
 ## Usage
 
-The `usage` tool queries the provider quota endpoint (`z3ki.dev/v2/usage`)
-with the API key already in the environment (`OLLAMA_API_KEY`, falling back to
-`OPENAI_COMPAT_API_KEY`), returning remaining percentage and reset times.
-Override the URL with `MAXWELL_USAGE_URL`.
+The `usage` tool queries `MAXWELL_USAGE_URL` when that is set — whatever
+quota/usage HTTP endpoint your provider documents — using `OLLAMA_API_KEY`
+(falling back to `OPENAI_COMPAT_API_KEY`). It returns remaining percentage and
+reset times. Leave the URL blank if your provider has no such endpoint.
 
 ## Memory and RAG
 

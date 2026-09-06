@@ -38,6 +38,7 @@ from discord import Activity, File, Message, Status
 from tools import Tool
 from captcha_solver import CaptchaSolveError
 from control_defaults import parse_bool
+from identity import identity_values, process_name
 import site_backend
 import site_server
 import site_test
@@ -796,7 +797,8 @@ def _missing_cap(guild, cap: str) -> str:
 
 
 def _mod_reason(message) -> str:
-    return f"Maxwell admin tool requested by {getattr(message, 'author', '?')}"
+    name = process_name() or "Bot"
+    return f"{name} admin tool requested by {getattr(message, 'author', '?')}"
 
 
 def _parse_snowflake(value) -> int | None:
@@ -2013,7 +2015,7 @@ class SleepTool(Tool):
     def get_description(self):
         return (
             "Sleep 1-60 minutes (default 30). While asleep, LLM turns are skipped "
-            "and the triggering channel gets one 'max is sleeping' notice. Use only "
+            "and the triggering channel gets one sleeping notice. Use only "
             "at a real end-of-conversation, not as a goodbye. Calling again resets "
             "the window. Params: duration_minutes."
         )
@@ -3142,13 +3144,13 @@ class CreateCategoryTool(Tool):
             return f"Error: I do not have manage_channels/admin in {guild.name}. Run list_admin_servers first."
         try:
             category = await guild.create_category(
-                clean, reason=f"Maxwell admin tool requested by {message.author}"
+                clean, reason=_mod_reason(message)
             )
             if position is not None:
                 try:
                     await category.edit(
                         position=max(0, int(position)),
-                        reason="Maxwell admin tool position update",
+                        reason=f"{process_name() or 'Bot'} admin tool position update",
                     )
                 except (TypeError, ValueError):
                     return f"Created category {category.name} ({category.id}), but position was invalid"
@@ -3237,7 +3239,7 @@ class CreateChannelTool(Tool):
                 channel = await guild.create_voice_channel(
                     clean,
                     category=category,
-                    reason=f"Maxwell admin tool requested by {message.author}",
+                    reason=_mod_reason(message),
                 )
             elif channel_kind in {"text", "chat"}:
                 try:
@@ -3250,7 +3252,7 @@ class CreateChannelTool(Tool):
                     topic=str(topic or "")[:1024],
                     nsfw=str(nsfw).lower() in {"1", "true", "yes", "on"},
                     slowmode_delay=slowmode,
-                    reason=f"Maxwell admin tool requested by {message.author}",
+                    reason=_mod_reason(message),
                 )
             else:
                 return "Error: kind/type must be text or voice"
@@ -3340,7 +3342,7 @@ class EditChannelTool(Tool):
             return "Error: provide at least one edit field"
         try:
             await channel.edit(
-                **updates, reason=f"Maxwell admin tool requested by {message.author}"
+                **updates, reason=_mod_reason(message)
             )
             return f"Edited {_channel_label(channel)} in {guild.name}: {', '.join(sorted(updates))}"
         except discord.Forbidden:
@@ -3386,7 +3388,7 @@ class DeleteChannelTool(Tool):
         try:
             label = _channel_label(channel)
             await channel.delete(
-                reason=f"Maxwell admin tool requested by {message.author}"
+                reason=_mod_reason(message)
             )
             return f"Deleted {label} from {guild.name}"
         except discord.Forbidden:
@@ -5011,13 +5013,13 @@ class CreateSiteTool(Tool):
             "No lorem ipsum; a Loading shell has shipped nothing. "
             "Params: name, title, body (complete HTML for index.html), "
             'files (extra files {"path":"content"}), '
-            "backend (ALWAYS true — every site gets a Python backend), encoding, permanent. "
-            "EVERY site MUST use backend=true + site_server: create Python backend in "
-            "site_servers/<slug>/app.py (FastAPI+uvicorn on $PORT, REST at /api/... and "
-            "WebSocket at /ws if realtime), run ALL compute/state server-side, frontend "
-            "ONLY renders API/ws. Client-only sites are forbidden. Always site_test + fix "
-            "before claiming it works. Frontend API calls are RELATIVE ('api/notes', "
-            "never '/api/...' — absolute paths 404 under /bot/<name>/)."
+            "backend (optional, default false), encoding, permanent. "
+            "Static HTML/CSS/JS is first-class. Use backend=true + site_server only when "
+            "the page needs server-side state, REST, websockets, auth, or persistence "
+            "(Python in site_servers/<slug>/app.py, FastAPI+uvicorn on $PORT). "
+            "Always site_test + fix before claiming it works. When a backend exists, "
+            "frontend API calls are RELATIVE ('api/notes', never '/api/...' — absolute "
+            "paths 404 under /bot/<name>/)."
         )
 
     async def execute(
@@ -6227,7 +6229,7 @@ class ListSitesTool(Tool):
         base_url = getattr(
             self.bot.config,
             "MAXWELL_PUBLIC_BASE_URL",
-            "https://maxwell.z3ki.dev",
+            "https://maxwell.example.com",
         ).rstrip("/")
         lines = []
         unverified: list[str] = []
@@ -8411,7 +8413,7 @@ class FetchUrlTool(Tool):
         if mime.startswith("audio/") or url_ext in SeeVideoTool.AUDIO_EXTS:
             return (
                 "Error: URL contains audio media, not readable text. "
-                "Attach or post the audio URL so Maxwell can hear it."
+                f"Attach or post the audio URL so {process_name(self.bot) or 'the bot'} can hear it."
             )
 
         try:
@@ -10325,15 +10327,22 @@ def _email_cfg(bot) -> dict:
     testing against Mailgun's sandbox), they only edit env vars, not code.
     """
     cfg = getattr(bot, "config", None)
+    from_name = (
+        str(getattr(cfg, "MAXWELL_EMAIL_FROM_NAME", "") or "").strip()
+        or process_name(bot)
+        or str(getattr(cfg, "BOT_NAME", "") or "").strip()
+        or identity_values(cfg).get("bot_name", "")
+        or ""
+    )
     return {
         "host": getattr(cfg, "MAXWELL_SMTP_HOST", "127.0.0.1"),
         "smtp_port": int(getattr(cfg, "MAXWELL_SMTP_PORT", "25")),
         "imap_host": getattr(cfg, "MAXWELL_IMAP_HOST", "127.0.0.1"),
         "imap_port": int(getattr(cfg, "MAXWELL_IMAP_PORT", "993")),
-        "user": getattr(cfg, "MAXWELL_EMAIL_USER", "maxwell@z3ki.dev"),
+        "user": getattr(cfg, "MAXWELL_EMAIL_USER", "") or "",
         "password": getattr(cfg, "MAXWELL_EMAIL_PASSWORD", ""),
-        "from_addr": getattr(cfg, "MAXWELL_EMAIL_FROM", "maxwell@z3ki.dev"),
-        "from_name": getattr(cfg, "MAXWELL_EMAIL_FROM_NAME", "Maxwell"),
+        "from_addr": getattr(cfg, "MAXWELL_EMAIL_FROM", "") or "",
+        "from_name": from_name,
     }
 
 
@@ -11468,9 +11477,11 @@ def _chess_bot_name(bot=None) -> str:
         name
         or getattr(user, "display_name", None)
         or getattr(user, "name", None)
-        or "Maxwell"
+        or process_name(bot)
+        or identity_values().get("bot_name", "")
+        or ""
     ).strip()
-    return name or "Maxwell"
+    return name or process_name(bot) or "Bot"
 
 
 def _chess_user_label(user) -> str:
@@ -11674,7 +11685,7 @@ def _chess_state_text(game, bot_name: str | None = None) -> str:
     captures, whether it checks or mates, and whether the piece lands on a
     square where it is simply taken.
     """
-    name = str(bot_name or "").strip() or "Maxwell"
+    name = str(bot_name or "").strip() or process_name() or "Bot"
     lines: list[str] = []
     lines.append("CHESS BOARD (text — see attached image for the real board):")
     lines.append(_chess_board_ascii(game.board))
@@ -12201,20 +12212,24 @@ class ChessResignTool(Tool):
 
 
 class UsageTool(Tool):
-    """Query the usage/quota endpoint (z3ki.dev/v2/usage) with the API key in env."""
+    """Query the configured usage/quota endpoint with the API key in env."""
 
     def get_description(self):
+        url = self._url()
+        where = f" ({url})" if url else " (MAXWELL_USAGE_URL)"
         return (
-            "Fetch current API usage and remaining quota from the provider "
-            "(z3ki.dev/v2/usage) using the API key already configured in env. "
+            "Fetch current API usage and remaining quota from the configured "
+            f"usage endpoint{where} using the API key already configured in env. "
             "Returns usage percentages, reset times, and account counts so you "
             "can report how much budget is left."
         )
 
     def _url(self) -> str:
+        cfg = getattr(self.bot, "config", None)
         return (
-            os.environ.get("MAXWELL_USAGE_URL", "") or ""
-        ).strip() or "https://z3ki.dev/v2/usage"
+            str(getattr(cfg, "MAXWELL_USAGE_URL", "") or "").strip()
+            or (os.environ.get("MAXWELL_USAGE_URL", "") or "").strip()
+        )
 
     def _api_key(self) -> str:
         return (
@@ -12225,6 +12240,8 @@ class UsageTool(Tool):
 
     async def execute(self, message: Message, **kwargs) -> str:
         url = self._url()
+        if not url:
+            return "Error: MAXWELL_USAGE_URL is not configured"
         key = self._api_key()
         if not key:
             return "Error: no API key configured (OLLAMA_API_KEY or OPENAI_COMPAT_API_KEY)."
@@ -12384,7 +12401,7 @@ class ManagePluginTool(Tool):
 
     def get_description(self):
         return (
-            "Manage Maxwell modular plugins. Params: action (required: 'list', 'enable', 'disable', 'status'), "
+            "Manage modular plugins. Params: action (required: 'list', 'enable', 'disable', 'status'), "
             "plugin (optional, plugin name), user_id (optional, user ID or @mention), "
             "is_global (optional boolean, enable/disable plugin globally - requires admin)."
         )
@@ -12411,7 +12428,7 @@ class ManagePluginTool(Tool):
             plugins = pm.list_plugins(user_id=author_id)
             if not plugins:
                 return "No plugins currently installed in plugins/."
-            lines = ["**Installed Maxwell Plugins:**"]
+            lines = ["**Installed plugins:**"]
             for p in plugins:
                 glob = "🌐 GLOBAL" if p["enabled_globally"] else "🔒 PER-USER"
                 status = (
@@ -12440,7 +12457,7 @@ class ManagePluginTool(Tool):
         # Admin gate check for global modifications
         if is_global:
             if not is_admin:
-                return "Error: Modifying global plugin status requires Maxwell admin permissions."
+                return "Error: Modifying global plugin status requires admin permissions."
 
         target_user = user_id
         if target_user:

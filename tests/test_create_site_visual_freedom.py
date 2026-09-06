@@ -57,6 +57,9 @@ def test_create_site_description_grants_visual_freedom():
         assert phrase not in blob, f"prompt still mandates {phrase!r}"
     assert "headline" not in title_desc.lower()
     assert "inline css/js" not in desc.lower()
+    assert "always true" not in desc.lower()
+    assert "must use backend=true" not in desc.lower()
+    assert "client-only sites are forbidden" not in desc.lower()
 
 
 def test_create_site_openai_description_keeps_freedom_under_limit():

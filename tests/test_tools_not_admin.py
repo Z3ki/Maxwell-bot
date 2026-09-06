@@ -40,6 +40,8 @@ def test_tool_protocol_keeps_creative_tools_open():
     personality = DEFAULT_CONTROL["base_personality"].lower()
     assert "run tools" not in personality
     assert "politely decline" not in personality
+    # Personality may use {placeholders} instead of a literal name; the
+    # access rule still has to stay in the default text.
     assert "open to everyone" in personality
 
 

@@ -293,11 +293,14 @@ class Config:
         lambda _tts=ENABLE_TTS: _tts and _has_binary("ffmpeg"),
         needs="ffmpeg + a TTS engine",
     )
-    # Maxwell Companion / Partner
+    # Companion / partner process (optional second self-bot on the same harness).
+    # IDs default empty on purpose — a fresh clone must not inherit someone
+    # else's Discord snowflakes. Set them in .env for your accounts.
     GF_DISCORD_TOKEN = os.getenv("GF_DISCORD_TOKEN", "").strip()
-    GF_USER_ID = os.getenv("GF_USER_ID", "1496154562715848763").strip()
-    MAXWELL_USER_ID = os.getenv("MAXWELL_USER_ID", "1382894657624866889").strip()
+    GF_USER_ID = os.getenv("GF_USER_ID", "").strip()
+    MAXWELL_USER_ID = os.getenv("MAXWELL_USER_ID", "").strip()
     PARTNER_USER_ID = os.getenv("PARTNER_USER_ID", "").strip()
+    PARTNER_DATA_DIR = os.getenv("PARTNER_DATA_DIR", "data_gf").strip() or "data_gf"
     # Partner-to-partner replies are intentionally finite.  A human message
     # resets the budget; silence resets it after the configured window.
     PARTNER_MAX_AUTO_TURNS = _int_env(
@@ -307,10 +310,19 @@ class Config:
         "PARTNER_TURN_WINDOW_SECONDS", 60.0, min_value=5.0, max_value=3600.0
     )
     BOT_PERSONA_TYPE = os.getenv("BOT_PERSONA_TYPE", "maxwell").strip().lower()
-    CREATOR_NAME = os.getenv("CREATOR_NAME", "Z3ki").strip() or "Z3ki"
-    CREATOR_ID = os.getenv("CREATOR_ID", "1471821513824014480").strip() or "1471821513824014480"
+    # Owner / display identity. Names default to the project labels; IDs and
+    # the human creator name stay blank until the operator sets them.
+    CREATOR_NAME = os.getenv("CREATOR_NAME", "").strip()
+    CREATOR_ID = os.getenv("CREATOR_ID", "").strip()
     BOT_NAME = os.getenv("BOT_NAME", "Maxwell").strip() or "Maxwell"
     PARTNER_NAME = os.getenv("PARTNER_NAME", "Uni").strip() or "Uni"
+    COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", ",").strip() or ","
+    GF_COMMAND_PREFIX = os.getenv("GF_COMMAND_PREFIX", ".").strip() or "."
+    BOT_BIRTHDAY = os.getenv("BOT_BIRTHDAY", "2026-05-21").strip() or "2026-05-21"
+    BOT_INVITE_URL = os.getenv(
+        "BOT_INVITE_URL", os.getenv("OFFICIAL_INVITE", "")
+    ).strip()
+    MAXWELL_USAGE_URL = os.getenv("MAXWELL_USAGE_URL", "").strip()
 
     # Email needs a real mailbox. Without a password the four tools could
     # only ever answer "not configured", so auto keeps them unregistered.
@@ -530,7 +542,9 @@ class Config:
     MAXWELL_EMAIL_FROM = (
         os.getenv("MAXWELL_EMAIL_FROM", "").strip() or MAXWELL_EMAIL_USER
     )
-    MAXWELL_EMAIL_FROM_NAME = os.getenv("MAXWELL_EMAIL_FROM_NAME", "Maxwell").strip()
+    MAXWELL_EMAIL_FROM_NAME = os.getenv(
+        "MAXWELL_EMAIL_FROM_NAME", BOT_NAME
+    ).strip() or BOT_NAME
     # Senders whose mail is never filed as an inbox notice. Comma-separated;
     # a full address, or a leading-dot domain (".google.com") for it and its
     # subdomains. Empty by default: which machine mail matters is the

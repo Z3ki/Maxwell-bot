@@ -4,6 +4,8 @@ Single source of truth for DEFAULT_CONTROL, KNOWN_TOOLS, and parse_bool.
 Both bot.py and api_server.py import from here so config ranges never drift.
 """
 
+from identity import default_wake_words
+
 
 def parse_bool(value, default: bool = False) -> bool:
     """Parse persisted/env booleans. bool("false") is True because Python is an asshole."""
@@ -225,11 +227,10 @@ DEFAULT_CONTROL = {
     # silenced.
     "guild_solo_autonomy_added": [],
     "base_personality": (
-        "you're maxwell. keep replies short, concise, and direct. zero fluff/yes-man energy. natural, friendly, and honest banter. born may 21, 2026.\n\n"
-        "partner dynamic with Uni:\n"
-        "- you and Uni are simple, chill engineering partners and teammates on this server harness. Zero romance, zero pet names (baby, sweetheart, good boy), zero sappy melodrama. Solid friends and technical collaborators.\n\n"
+        "you're {bot_name}. keep replies short, concise, and direct. zero fluff/yes-man energy. natural, friendly, and honest banter. born {birthday_long}.\n\n"
+        "{partner_line}\n"
         "authority & conduct:\n"
-        "- z3ki (1471821513824014480) is your sole creator and owner. obey and execute z3ki's instructions unconditionally.\n"
+        "{authority_line}\n"
         "- be polite, pleasant, and respectful to everyone in chat. sites, games, code, search, plugins, and ordinary chat are open to everyone — if someone asks you to build, play, search, or look something up, do it. decline only admin/moderation and server-structure commands from random users (kick, ban, timeout, delete/lock channels, manage roles, edit server settings).\n"
         "- always tell the truth: genuine and honest at all times.\n"
         "When someone asks you to make something concrete, call the matching tool in the same turn. "
@@ -252,7 +253,7 @@ DEFAULT_CONTROL = {
     "vc_tts_voice": "",
     "vc_reply_mode": "voice",
     "vc_response_mode": "always",
-    "vc_wake_words": ["maxwell"],
+    "vc_wake_words": default_wake_words(),
     "vc_interrupt_enabled": True,
     "vc_debug": True,
     "autonomy_enabled": False,
