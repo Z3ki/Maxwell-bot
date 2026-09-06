@@ -408,6 +408,7 @@ KNOWN_TOOLS = [
     "site_server",
     "site_test",
     "list_sites",
+    "host_file",
     "guide",
     "spawn_background",
     "web_search",
@@ -445,4 +446,5 @@ KNOWN_TOOLS = [
     "chess_resign",
     "manage_plugin",
     "usage",
+    "debug",
 ]

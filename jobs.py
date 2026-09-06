@@ -696,7 +696,7 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                 f"Goal: {job.goal}\n"
                 + (f"Context: {job.context}\n" if job.context else "")
                 + "Work:\n"
-                "1. Tools first (create_site / edit_site; site_server only if the goal needs a backend; shell only if no tool fits).\n"
+                "1. Tools first (create_site / edit_site / host_file; site_server only if the goal needs a backend; shell only if no tool fits).\n"
                 "2. Sites may be static HTML/CSS/JS. Use site_server and relative API paths "
                 "(`api/notes`, never `/api/...`) only when the goal needs a backend. "
                 "Then site_test → fix → retest. Don't claim done with console errors.\n"

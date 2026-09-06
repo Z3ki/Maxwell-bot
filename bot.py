@@ -223,6 +223,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     DeleteChannelTool,
     DeleteMessageTool,
     DeleteSiteTool,
+    DebugTool,
     EditChannelTool,
     EditMessageTool,
     EditSiteTool,
@@ -232,6 +233,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     EmailSendTool,
     FetchUrlTool,
     ForwardMessageTool,
+    HostFileTool,
     HDImageGeneratorTool,
     ImageGeneratorTool,
     InboxActTool,
@@ -295,6 +297,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     ChessStateTool,
     ChessResignTool,
     UsageTool,
+    collect_debug_stats,
     __CHESS_IMPORTED__ as _CHESS_IMPORTED,
     forget_shell_progress,
     _IMAGE_FETCH_UA,
@@ -2169,6 +2172,7 @@ TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "site_server",
     "site_test",
     "list_sites",
+    "host_file",
     "web_search",
     "no_response",
     "shell",
@@ -2202,6 +2206,7 @@ TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "chess_state",
     "chess_resign",
     "usage",
+    "debug",
     "wait",
     "sleep",
     "clear_sleep",
@@ -2412,8 +2417,10 @@ TOOL_PROTOCOL = (
     "Never claim something is done, fixed, built, live, or working unless a tool "
     "result in this conversation says so.\n"
     "Files the user should receive must be attached via send_file or shell `files=`. "
-    "A filesystem path is not delivery.\n"
-    "create_site: full HTML document in `body`, never pasted into chat. Real line breaks "
+    "A filesystem path is not delivery. To share a live page or a file Discord can "
+    "embed, host_file (url/path/content) or create_site url= and send_message the URL.\n"
+    "create_site: full HTML document in `body`, or url= of an existing HTML file to "
+    "fetch and host. Never paste the page into chat. Real line breaks "
     "or <br> in visible HTML; never literal \\n text. Full visual freedom — invent a new look "
     "each time; no house style unless the user asked.\n"
     "Sites: build the real thing on first pass with complete content. NO placeholders — "
@@ -3831,6 +3838,7 @@ class MaxwellBot(commands.Bot):
             self.tools["site_server"] = SiteServerTool(self)
             self.tools["site_test"] = SiteTestTool(self)
             self.tools["list_sites"] = ListSitesTool(self)
+            self.tools["host_file"] = HostFileTool(self)
             self.tools["guide"] = GuideTool(self)
         # Background sub-agent jobs: always registered (the tool itself is
         # the escape hatch for long turns, independent of the site feature).
@@ -3860,6 +3868,7 @@ class MaxwellBot(commands.Bot):
             self.tools["chess_state"] = ChessStateTool(self)
             self.tools["chess_resign"] = ChessResignTool(self)
         self.tools["usage"] = UsageTool(self)
+        self.tools["debug"] = DebugTool(self)
         # No more standalone `reasoning_log` tool. Reasoning now rides INSIDE
         # every tool call via the auto-injected `reasoning` param (see
         # tool_registry.record_reasoning + tool_schemas.build_openai_tools).
@@ -7237,6 +7246,7 @@ class MaxwellBot(commands.Bot):
             "confirm",
             "blacklist",
             "unblacklist",
+            "debug",
         }
         if cmd not in known:
             return False
@@ -7257,6 +7267,7 @@ class MaxwellBot(commands.Bot):
             "summarize",
             "solo",
             "x",
+            "debug",
         }
         if cmd in admin_commands and not self._is_admin(message.author.id):
             await message.channel.send("not authorized")
@@ -7701,11 +7712,15 @@ class MaxwellBot(commands.Bot):
                     )
             elif cmd == "solo":
                 await self._handle_solo_command(message, args)
+            elif cmd == "debug":
+                text = collect_debug_stats(self, channel_id)
+                await message.channel.send(f"```\n{text[:1900]}\n```")
             elif cmd == "help":
                 await message.channel.send(
                     "Commands:\n"
                     "` ,guide [goal]` / `,guided-goal [goal]` - create a thread and ask 5 clarifying questions before building (use when request is vague)\n"
                     "` ,help` - show this list\n"
+                    "` ,debug` - last LLM call TTFT / TPS / tokens (admin)\n"
                     "` ,stop` - stop active response in this channel\n"
                     "` ,prompt [text]` - view/set server prompt (admin)\n"
                     "` ,clearprompt` - clear server prompt (admin)\n"
@@ -14744,6 +14759,10 @@ class MaxwellBot(commands.Bot):
             "curl": "fetch_url",
             "http_get": "fetch_url",
             "fetch": "fetch_url",
+            "host": "host_file",
+            "host_file": "host_file",
+            "publish_file": "host_file",
+            "serve_file": "host_file",
             "generate_image": "image_generator",
             "gen_image": "image_generator",
             "dalle": "image_generator",
