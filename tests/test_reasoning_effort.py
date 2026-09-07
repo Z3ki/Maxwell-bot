@@ -1,4 +1,4 @@
-"""GF model routing + provider reasoning_effort passthrough."""
+"""Provider reasoning_effort passthrough."""
 
 import providers
 from providers import OllamaProvider, ProviderEndpoint

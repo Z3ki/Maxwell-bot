@@ -3,15 +3,29 @@
 2026-08-02: a "checking…" placeholder via send_message dropped the later
 follow-up answer. 2026-08-14: leftover assistant content on the SAME
 generation as send_message posted a second Discord reply ping.
+
+2026-09-06: after send_message, a short filler follow-up with no tool
+(the model writing "ok" instead of no_response) posted a second Discord
+reply. Dispatcher now drops that leftover and ends the turn.
 """
 
 import json
 
 from bot import (
+    _apply_send_followup_guard,
     _only_promise_results,
     _should_skip_plaintext_after_send,
     _tool_results_need_followup,
 )
+
+_LONG_FOLLOWUP = (
+    "yeah, Mat Dickie (MDickie) is the indie wrestling game dev behind "
+    "Wrestling Revolution and a pile of other locker-room sims. the Yotta "
+    "writeup is a bit stale — the 2024 numbers are the ones to use, and the "
+    "dispatch loop lives in bot.py so a follow-up turn is what feeds results "
+    "back to the model instead of dropping the answer on the floor."
+)
+assert len(_LONG_FOLLOWUP) > 200
 
 
 def _native_call(name, args, call_id="call_1"):
@@ -50,9 +64,40 @@ def test_message_sent_followup_response_is_not_silently_dropped():
             last,
             all_results,
             followup_turn_ran=True,
-            response="yeah, Mat Dickie (MDickie) is the indie wrestling game dev...",
+            response=_LONG_FOLLOWUP,
         )
         is False
+    )
+
+
+def test_short_filler_after_send_is_dropped():
+    last = []
+    all_results = ["Tool send_message: __MESSAGE_SENT__\nchecking…"]
+    for text in (
+        "ok",
+        "done",
+        "hope that helps!",
+        "let me know if you need anything",
+        "got it",
+    ):
+        assert (
+            _should_skip_plaintext_after_send(
+                last,
+                all_results,
+                followup_turn_ran=True,
+                response=text,
+            )
+            is True
+        ), text
+
+
+def test_same_generation_long_leftover_is_still_skipped():
+    last = ["Tool send_message: __MESSAGE_SENT__\nhello"]
+    assert (
+        _should_skip_plaintext_after_send(
+            last, last, followup_turn_ran=False, response=_LONG_FOLLOWUP
+        )
+        is True
     )
 
 
@@ -175,3 +220,68 @@ def test_no_response_stays_terminal():
 
 def test_error_still_forces_followup():
     assert _tool_results_need_followup(["Tool shell: Error - boom"]) is True
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-06: after send_message, do not generate again just to close, and
+# do not post short leftover prose. Another send_message / real tool in the
+# next step still runs. Multi-send in one native batch is covered by
+# tests/test_wait_tool.py.
+# ---------------------------------------------------------------------------
+
+
+def test_send_message_alone_does_not_ask_for_another_generation():
+    assert not _tool_results_need_followup(
+        ["Tool send_message: __MESSAGE_SENT__\nhere's the answer"]
+    )
+
+
+def test_multi_send_in_one_batch_does_not_loop():
+    results = [
+        "Tool send_message: __MESSAGE_SENT__\nfirst",
+        "Tool send_message: __MESSAGE_SENT__\nsecond",
+    ]
+    assert _tool_results_need_followup(results) is False
+
+
+def test_guard_drops_short_bare_text_after_send():
+    text, stop = _apply_send_followup_guard(True, [], "ok")
+    assert stop is True
+    assert text == ""
+
+
+def test_guard_drops_empty_followup_after_send():
+    text, stop = _apply_send_followup_guard(True, None, "   ")
+    assert stop is True
+    assert text == ""
+
+
+def test_guard_keeps_long_answer_but_stops_the_loop():
+    text, stop = _apply_send_followup_guard(True, [], _LONG_FOLLOWUP)
+    assert stop is True
+    assert text == _LONG_FOLLOWUP
+
+
+def test_guard_runs_another_send_message():
+    pending = [_native_call("send_message", {"content": "part 2"})]
+    text, stop = _apply_send_followup_guard(True, pending, "")
+    assert stop is False
+    assert text == ""
+
+
+def test_guard_runs_a_real_followup_tool():
+    pending = [_native_call("web_search", {"query": "Mat Dickie"})]
+    _, stop = _apply_send_followup_guard(True, pending, "searching")
+    assert stop is False
+
+
+def test_guard_lets_no_response_dispatch():
+    pending = [_native_call("no_response", {})]
+    _, stop = _apply_send_followup_guard(True, pending, "")
+    assert stop is False
+
+
+def test_guard_is_noop_when_nothing_was_sent():
+    text, stop = _apply_send_followup_guard(False, [], "ok")
+    assert stop is False
+    assert text == "ok"

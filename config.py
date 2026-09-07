@@ -197,12 +197,6 @@ class Config:
     # at startup with a sentence that says what to do.
     OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "").strip()
     OLLAMA_REM_MODEL = os.getenv("OLLAMA_REM_MODEL") or OLLAMA_MODEL
-    # Partner bot (Uni/GF) can run its own model/endpoint. Blank fields
-    # inherit the main OLLAMA_* values, so unset = current behavior.
-    GF_MODEL = os.getenv("GF_MODEL", "").strip()
-    GF_BASE_URL = os.getenv("GF_BASE_URL", "").strip()
-    GF_API_KEY = os.getenv("GF_API_KEY", "").strip()
-    GF_REASONING_EFFORT = os.getenv("GF_REASONING_EFFORT", "").strip()
     # max_tokens = max *output* tokens per completion (not context window).
     # minimax-m3 allows huge context but caps output ~131072; 8192 is a sane default.
     OLLAMA_MAX_TOKENS = _int_env(
@@ -299,31 +293,15 @@ class Config:
         lambda _tts=ENABLE_TTS: _tts and _has_binary("ffmpeg"),
         needs="ffmpeg + a TTS engine",
     )
-    # Companion / partner process (optional second self-bot on the same harness).
-    # IDs default empty on purpose — a fresh clone must not inherit someone
-    # else's Discord snowflakes. Set them in .env for your accounts.
-    GF_DISCORD_TOKEN = os.getenv("GF_DISCORD_TOKEN", "").strip()
-    GF_USER_ID = os.getenv("GF_USER_ID", "").strip()
+    # Optional Discord ID of this bot's user account. Empty on a fresh clone
+    # so no one else's snowflake is inherited.
     MAXWELL_USER_ID = os.getenv("MAXWELL_USER_ID", "").strip()
-    PARTNER_USER_ID = os.getenv("PARTNER_USER_ID", "").strip()
-    PARTNER_DATA_DIR = os.getenv("PARTNER_DATA_DIR", "data_gf").strip() or "data_gf"
-    # Partner-to-partner replies are intentionally finite.  A human message
-    # resets the budget; silence resets it after the configured window.
-    PARTNER_MAX_AUTO_TURNS = _int_env(
-        "PARTNER_MAX_AUTO_TURNS", 2, min_value=1, max_value=20
-    )
-    PARTNER_TURN_WINDOW_SECONDS = _float_env(
-        "PARTNER_TURN_WINDOW_SECONDS", 60.0, min_value=5.0, max_value=3600.0
-    )
-    BOT_PERSONA_TYPE = os.getenv("BOT_PERSONA_TYPE", "maxwell").strip().lower()
     # Owner / display identity. Names default to the project labels; IDs and
     # the human creator name stay blank until the operator sets them.
     CREATOR_NAME = os.getenv("CREATOR_NAME", "").strip()
     CREATOR_ID = os.getenv("CREATOR_ID", "").strip()
     BOT_NAME = os.getenv("BOT_NAME", "Maxwell").strip() or "Maxwell"
-    PARTNER_NAME = os.getenv("PARTNER_NAME", "Uni").strip() or "Uni"
     COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", ",").strip() or ","
-    GF_COMMAND_PREFIX = os.getenv("GF_COMMAND_PREFIX", ".").strip() or "."
     BOT_BIRTHDAY = os.getenv("BOT_BIRTHDAY", "2026-05-21").strip() or "2026-05-21"
     BOT_INVITE_URL = os.getenv(
         "BOT_INVITE_URL", os.getenv("OFFICIAL_INVITE", "")

@@ -33,42 +33,6 @@ function hasOllama() {
 const venvPython = path.join(appRoot, ".venv", "bin", "python3");
 const python = fs.existsSync(venvPython) ? venvPython : "python3";
 
-// Load .env for GF token if present (so PM2 gf app can inherit it without
-// --update-env quirks). Parse the value like dotenv does: quoted values and
-// inline comments must not become part of the Discord token.
-function envValue(text, name) {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = text.match(
-    new RegExp(`^\\s*(?:export\\s+)?${escaped}\\s*=\\s*(.*?)\\s*$`, "m"),
-  );
-  if (!match) return "";
-  const raw = match[1].trim();
-  if (
-    raw.length >= 2 &&
-    ((raw.startsWith('"') && raw.endsWith('"')) ||
-      (raw.startsWith("'") && raw.endsWith("'")))
-  ) {
-    return raw.slice(1, -1);
-  }
-  return raw.replace(/\s+#.*$/, "").trim();
-}
-
-let envText = "";
-try {
-  const envPath = path.join(appRoot, ".env");
-  if (fs.existsSync(envPath)) {
-    envText = fs.readFileSync(envPath, "utf8");
-  }
-} catch {}
-
-function fromEnv(name) {
-  return envValue(envText, name) || process.env[name] || "";
-}
-
-const gfToken = fromEnv("GF_DISCORD_TOKEN");
-const partnerDataDir = fromEnv("PARTNER_DATA_DIR") || "data_gf";
-const partnerPersona = fromEnv("BOT_PERSONA_TYPE") || "mommy_gf";
-
 const apps = [
 	{
 		name: "maxwell-bot",
@@ -154,36 +118,6 @@ const apps = [
 		out_file: "/root/.pm2/logs/maxwell-api-out.log",
 		log_type: "json",
 	},
-	// Optional companion self-bot on the same harness. Isolated data dir;
-	// partner Discord IDs come from .env, not from this file.
-	...(gfToken ? [{
-		name: "maxwell-gf",
-		script: "bot.py",
-		interpreter: python,
-		cwd: appRoot,
-		instances: 1,
-		autorestart: true,
-		watch: false,
-		max_memory_restart: "1G",
-		kill_timeout: 15000,
-		kill_signal: "SIGTERM",
-		stop_exit_codes: [2],
-		exp_backoff_restart_delay: 2000,
-		max_restarts: 10,
-		min_uptime: 10000,
-		env: {
-			PYTHONUNBUFFERED: "1",
-			DISCORD_TOKEN: gfToken,
-			BOT_PERSONA_TYPE: partnerPersona,
-			PARTNER_DATA_DIR: partnerDataDir,
-			DATA_DIR: partnerDataDir,
-			GF_USER_ID: fromEnv("GF_USER_ID"),
-			MAXWELL_USER_ID: fromEnv("MAXWELL_USER_ID"),
-			PARTNER_USER_ID: fromEnv("PARTNER_USER_ID"),
-		},
-		log_date_format: "YYYY-MM-DD HH:mm:ss Z",
-		merge_logs: true,
-	}] : []),
 ];
 
 module.exports = {

@@ -26,12 +26,10 @@ Names and IDs are env-driven. Empty Discord IDs mean no baked-in owner — admin
 | Variable | Default | Purpose |
 |---|---|---|
 | `BOT_NAME` | `Maxwell` | Spoken name in prompts; live Discord nick still wins in chat. |
-| `PARTNER_NAME` | `Uni` | Partner-persona display name when that persona is enabled. |
 | `CREATOR_NAME` | empty | Optional human owner label in prompts. |
 | `CREATOR_ID` | empty | Optional creator Discord user ID. Blank = not assumed. |
 | `MAXWELL_USER_ID` | empty | Optional Discord ID of this bot account. |
-| `GF_USER_ID` | empty | Optional Discord ID of the partner account. |
-| `COMMAND_PREFIX` | `,` | Prefix for this bot's text commands (`GF_COMMAND_PREFIX` for partner). |
+| `COMMAND_PREFIX` | `,` | Prefix for this bot's text commands. |
 | `BOT_BIRTHDAY` | `2026-05-21` | ISO date used when the bot talks about its birthday. |
 | `BOT_INVITE_URL` | empty | Official invite the bot may share. |
 | `MAXWELL_USAGE_URL` | empty | Provider quota endpoint for the `usage` tool. |

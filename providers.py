@@ -1860,7 +1860,7 @@ class OllamaProvider:
             and self.reasoning_effort
             and endpoint.name == "primary"
         ):
-            # Explicit per-provider effort (e.g. GF on grok-4.6 "low").
+            # Explicit per-provider effort (e.g. grok-4.6 "low").
             # Top-level shape only: the nested `reasoning.effort` variant
             # tested slower through CLIProxyAPI, and "none" stays reserved
             # for the disable_reasoning path above.

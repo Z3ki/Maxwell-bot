@@ -19,7 +19,6 @@ from identity import (
     default_wake_words,
     fill_identity,
     identity_values,
-    is_partner_persona,
     parse_birthday,
     process_name,
 )
@@ -42,25 +41,37 @@ _STRIP_KEYS = frozenset(
         "COMMAND_PREFIX",
         "OFFICIAL_INVITE",
         "GF_COMMAND_PREFIX",
+        "BOT_PERSONA_TYPE",
     }
+)
+
+_GONE_CONFIG_ATTRS = (
+    "GF_DISCORD_TOKEN",
+    "GF_USER_ID",
+    "GF_MODEL",
+    "GF_BASE_URL",
+    "GF_API_KEY",
+    "GF_REASONING_EFFORT",
+    "GF_COMMAND_PREFIX",
+    "PARTNER_USER_ID",
+    "PARTNER_DATA_DIR",
+    "PARTNER_MAX_AUTO_TURNS",
+    "PARTNER_TURN_WINDOW_SECONDS",
+    "PARTNER_NAME",
+    "BOT_PERSONA_TYPE",
 )
 
 
 def _blank_config(**overrides):
     cfg = SimpleNamespace(
         BOT_NAME="Maxwell",
-        PARTNER_NAME="Uni",
         CREATOR_NAME="",
         CREATOR_ID="",
         MAXWELL_USER_ID="",
-        GF_USER_ID="",
-        PARTNER_USER_ID="",
-        BOT_PERSONA_TYPE="maxwell",
         BOT_BIRTHDAY="2026-05-21",
         BOT_INVITE_URL="",
         OFFICIAL_INVITE="",
         COMMAND_PREFIX=",",
-        GF_COMMAND_PREFIX=".",
         MAXWELL_OWNER_IDS=(),
     )
     for key, value in overrides.items():
@@ -99,7 +110,6 @@ def test_config_identity_defaults_are_empty_without_env():
         "checks = [\n"
         "    ('CREATOR_NAME', Config.CREATOR_NAME, ''),\n"
         "    ('CREATOR_ID', Config.CREATOR_ID, ''),\n"
-        "    ('GF_USER_ID', Config.GF_USER_ID, ''),\n"
         "    ('MAXWELL_USER_ID', Config.MAXWELL_USER_ID, ''),\n"
         "    ('BOT_NAME', Config.BOT_NAME, 'Maxwell'),\n"
         "    ('COMMAND_PREFIX', Config.COMMAND_PREFIX, ','),\n"
@@ -113,10 +123,9 @@ def test_config_identity_defaults_are_empty_without_env():
         "id_checks = [\n"
         "    ('creator_name', v['creator_name'], ''),\n"
         "    ('creator_id', v['creator_id'], ''),\n"
-        "    ('partner_id', v['partner_id'], ''),\n"
         "    ('self_id', v['self_id'], ''),\n"
         "    ('bot_name', v['bot_name'], 'Maxwell'),\n"
-        "    ('partner_name', v['partner_name'], 'Uni'),\n"
+        "    ('partner_line', v['partner_line'], ''),\n"
         "]\n"
         "for name, got, expected in id_checks:\n"
         "    if got != expected:\n"
@@ -132,12 +141,13 @@ def test_identity_values_empty_owner_fields_on_blank_config(monkeypatch):
     assert values["creator_name"] == ""
     assert values["creator_id"] == ""
     assert values["self_id"] == ""
-    assert values["partner_id"] == ""
     assert values["bot_name"] == "Maxwell"
-    assert values["partner_name"] == "Uni"
     assert values["command_prefix"] == ","
     assert values["official_invite"] == ""
     assert values["invite_line"] == ""
+    assert values["partner_line"] == ""
+    assert values["partner_id"] == ""
+    assert values["partner_name"] == ""
     assert "MAXWELL_OWNER_IDS" in values["creator_line"]
     assert _HARDCODED_SNOWFLAKE not in values["creator_id"]
     assert _HARDCODED_SNOWFLAKE not in values["creator_line"]
@@ -152,7 +162,6 @@ def test_identity_values_custom_bot_and_creator(monkeypatch):
             CREATOR_NAME="Ada",
             CREATOR_ID="99",
             MAXWELL_USER_ID="1",
-            GF_USER_ID="2",
             BOT_INVITE_URL="https://example.com/invite",
         )
     )
@@ -160,11 +169,11 @@ def test_identity_values_custom_bot_and_creator(monkeypatch):
     assert values["creator_name"] == "Ada"
     assert values["creator_id"] == "99"
     assert values["self_id"] == "1"
-    assert values["partner_id"] == "2"
+    assert values["partner_id"] == ""
+    assert values["partner_line"] == ""
     assert "Ada" in values["creator_line"]
     assert "99" in values["creator_line"]
     assert "Ada" in values["authority_line"]
-    assert "Uni (ID 2)" in values["partner_line"]
     assert "https://example.com/invite" in values["invite_line"]
 
 
@@ -183,12 +192,17 @@ def test_fill_identity_replaces_bot_name_and_creator_line(monkeypatch):
     assert "99" in filled
     assert "{bot_name}" not in filled
     assert "{creator_line}" not in filled
+    assert "{partner_line}" not in filled
+    assert "trusted partner" not in filled.lower()
     assert fill_identity("keep {unknown}", values) == "keep {unknown}"
 
     knowledge = fill_identity(MAXWELL_BASE_KNOWLEDGE, values)
     assert "You are Nova" in knowledge
     assert "You are Maxwell" not in knowledge
     assert "{bot_name}" not in knowledge
+    assert "{partner_line}" not in knowledge
+    assert "trusted partner" not in knowledge.lower()
+    assert "supportive partner" not in knowledge.lower()
     chat = fill_identity(DISCORD_CHAT_PROTOCOL, values)
     assert "[Nova]" in chat
     assert "[Maxwell]" not in chat
@@ -218,12 +232,39 @@ def test_default_wake_words_from_bot_name():
     assert default_wake_words("Foo Bar") == ["foo bar", "foo"]
 
 
-def test_is_partner_persona():
-    assert is_partner_persona(_blank_config()) is False
-    assert is_partner_persona(_blank_config(BOT_PERSONA_TYPE="gf")) is True
-    assert is_partner_persona(persona="mommy") is True
-    assert is_partner_persona(persona="luna") is True
-    assert is_partner_persona(persona="maxwell") is False
+def test_partner_companion_code_is_gone():
+    """The second-bot GF/partner persona must not still be wired in."""
+    import identity as identity_mod
+    from config import Config
+
+    assert not hasattr(identity_mod, "is_partner_persona")
+    assert not hasattr(identity_mod, "PARTNER_PERSONA_TYPES")
+    for name in _GONE_CONFIG_ATTRS:
+        assert not hasattr(Config, name), name
+    assert not hasattr(MaxwellBot, "_is_partner_message")
+    assert not hasattr(MaxwellBot, "_partner_reply_budget")
+    assert not hasattr(MaxwellBot, "_reset_partner_reply_budget_for_human")
+    import bot as bot_mod
+
+    assert not hasattr(bot_mod, "GF_BASE_KNOWLEDGE")
+
+
+def test_old_partner_env_does_not_invent_a_companion(monkeypatch):
+    """Leftover GF_* / PARTNER_* env from an old install must be ignored."""
+    monkeypatch.delenv("MAXWELL_OWNER_IDS", raising=False)
+    values = identity_values(
+        _blank_config(
+            PARTNER_NAME="Uni",
+            GF_USER_ID="2",
+            PARTNER_USER_ID="3",
+            BOT_PERSONA_TYPE="gf",
+        )
+    )
+    assert values["bot_name"] == "Maxwell"
+    assert values["partner_line"] == ""
+    assert values["partner_id"] == ""
+    assert values["partner_name"] == ""
+    assert "Uni" not in fill_identity(MAXWELL_BASE_KNOWLEDGE, values)
 
 
 def test_process_name_prefers_bot_then_config():
