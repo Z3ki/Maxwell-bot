@@ -128,6 +128,71 @@ def check_system_tools() -> None:
             line("warn", f"{binary} not found", f"needed for: {purpose}")
 
 
+def site_dir_is_host_visible(
+    site_dir: Path,
+    *,
+    in_docker: bool,
+    app_root: Path,
+    mountinfo: str | None = None,
+) -> bool:
+    """True when create_site writes land where the host (Caddy) can serve them.
+
+    Inside Docker, a SITE_DIR that is not under the checkout bind-mount (/app)
+    and is not itself bind-mounted lives on the overlay filesystem. Caddy on
+    the host then 404s every new site.
+    """
+    if not in_docker:
+        return True
+    try:
+        site_dir = site_dir.resolve()
+        app_root = app_root.resolve()
+    except OSError:
+        return False
+    try:
+        site_dir.relative_to(app_root)
+        return True
+    except ValueError:
+        pass
+    text = mountinfo
+    if text is None:
+        try:
+            text = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+    for raw in text.splitlines():
+        left, _, right = raw.partition(" - ")
+        parts = left.split()
+        if len(parts) < 5:
+            continue
+        mp = Path(parts[4])
+        fstype = (right.split()[0] if right else "")
+        if fstype == "overlay":
+            continue
+        try:
+            if site_dir == mp or site_dir.is_relative_to(mp):
+                if mp != Path("/"):
+                    return True
+        except (ValueError, OSError):
+            continue
+    return os.path.ismount(str(site_dir))
+
+
+def _check_site_dir_mount(cfg) -> None:
+    raw = getattr(cfg, "MAXWELL_SITE_DIR", None) or "public/bot"
+    site_dir = Path(str(raw))
+    if not site_dir.is_absolute():
+        site_dir = APP_ROOT / site_dir
+    app_root = Path(os.environ.get("MAXWELL_APP_ROOT") or APP_ROOT)
+    if site_dir_is_host_visible(site_dir, in_docker=True, app_root=app_root):
+        line("ok", "MAXWELL_SITE_DIR visible to host", str(site_dir))
+        return
+    line(
+        "warn",
+        "MAXWELL_SITE_DIR is not bind-mounted",
+        f"{site_dir} is the container overlay; Caddy on the host will 404 new sites",
+    )
+
+
 def check_docker(cfg) -> None:
     """Maxwell and the shell sandbox both talk to a Docker daemon.
 
@@ -152,6 +217,8 @@ def check_docker(cfg) -> None:
                 "MAXWELL_HOST_BIND unset",
                 "sibling containers cannot bind-mount this checkout",
             )
+        if cfg is not None:
+            _check_site_dir_mount(cfg)
     if not shutil.which("docker"):
         line(
             "warn",

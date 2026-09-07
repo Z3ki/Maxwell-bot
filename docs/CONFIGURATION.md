@@ -17,8 +17,9 @@ The installer writes `.env` from `.env.example` and updates only the keys it ask
 | `ENABLE_REM` | Optional | Timed memory consolidation (also accepted as `REM_ENABLED`); off by default to avoid surprise token spend. |
 | `ENABLE_SHELL` | Optional | Shell tool. The supported Docker install leaves this on; the sandbox is a sibling container. |
 | `MAXWELL_HOST_BIND` | Set by installer | Host path of this checkout, used when sibling containers bind-mount files. |
+| `MAXWELL_SITE_DIR` | `public/bot` | Where `create_site` writes HTML. If this is an absolute path outside the checkout (typical Caddy root `/var/www/maxwell/bot`), docker compose bind-mounts it. Leave it unset to write under the checkout. |
 
-See [`.env.example`](../.env.example) for the full set of advanced knobs, including embeddings, dashboard host/port, TTS, X/Twitter, email, captcha solving, and tool-specific limits.
+See [`.env.example`](../.env.example) for the full set of advanced knobs, including embeddings, dashboard host/port, TTS, X/Twitter, email, captcha solving, generated-site paths, and tool-specific limits.
 
 ## Autofix (self-heal PRs)
 

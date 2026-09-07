@@ -25,4 +25,9 @@ services:
     volumes:
       - .:/app
       - /var/run/docker.sock:/var/run/docker.sock
+      # Caddy serves generated sites from MAXWELL_SITE_DIR on the *host*.
+      # Without this mount, create_site writes into the container overlay and
+      # the public URL 404s. Empty SITE_DIR falls back to public/bot under /app
+      # (already covered by .:/app; the extra bind is then a no-op duplicate).
+      - ${MAXWELL_SITE_DIR:-./public/bot}:${MAXWELL_SITE_DIR:-/app/public/bot}
     stop_grace_period: 20s

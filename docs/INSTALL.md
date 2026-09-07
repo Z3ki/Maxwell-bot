@@ -62,6 +62,11 @@ DISCORD_TOKEN=your-discord-user-token
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=qwen3:8b
 MAXWELL_HOST_BIND=/absolute/path/to/this/checkout
+# Optional. Default is public/bot in the checkout (already bind-mounted).
+# If Caddy serves sites from somewhere else, set the same absolute path here
+# so docker compose mounts it — otherwise create_site 404s on the public URL.
+# MAXWELL_SITE_DIR=/var/www/maxwell/bot
+# MAXWELL_PUBLIC_BASE_URL=https://maxwell.example.com
 ```
 
 Optional identity (`BOT_NAME`, `CREATOR_NAME`, `CREATOR_ID`, `BOT_INVITE_URL`, …) is documented in [CONFIGURATION.md](CONFIGURATION.md). Empty IDs mean no baked-in owner.
