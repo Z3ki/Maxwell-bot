@@ -3705,6 +3705,10 @@ class AutonomyEngine:
         content = action["content"][:MAX_CONTENT_CHARS]
         result["target"] = f"user:{user_id}"
         result["content_summary"] = content[:200]
+        if not (getattr(self.bot, "_control", None) or {}).get("reply_dms", False):
+            result["result"] = "error"
+            result["error"] = "DMs are disabled"
+            return
 
         if str(user_id) in self._unreachable_dm_users:
             if time.time() - self._unreachable_dm_users[str(user_id)] < 86400:

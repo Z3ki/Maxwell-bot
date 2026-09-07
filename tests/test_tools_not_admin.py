@@ -51,6 +51,13 @@ def test_tool_protocol_states_the_join_server_restriction():
     assert "join_server is admin-only" in TOOL_PROTOCOL
 
 
+def test_tool_protocol_states_dm_and_cross_chat_restrictions():
+    text = TOOL_PROTOCOL.lower()
+    assert "dms are admin-only" in text
+    assert "send_message stays in the current chat" in text
+    assert "sending to another" in text
+
+
 def test_tool_descriptions_do_not_say_admin_only():
     bot = SimpleNamespace()
     for cls in (
@@ -78,6 +85,14 @@ def test_join_server_description_announces_the_restriction():
     """The model should decline up front rather than call and get refused."""
     desc = JoinServerTool(SimpleNamespace()).get_description().lower()
     assert "admins" in desc
+
+
+def test_send_message_description_announces_cross_chat_restriction():
+    from bot_tools import SendMessageTool
+
+    desc = SendMessageTool(SimpleNamespace()).get_description().lower()
+    assert "admin-only" in desc
+    assert "channel_id" in desc
 
 
 def test_join_server_refuses_a_non_admin():

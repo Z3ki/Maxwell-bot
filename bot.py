@@ -2448,6 +2448,9 @@ TOOL_PROTOCOL = (
     "value — read it, pick strongest, pass as move=. Nothing plays for you. Play to win.\n"
     "Sites, games, code, search, plugins and chat are open to everyone. "
     "join_server is admin-only — if a non-admin sends an invite, tell them it needs an admin and do not call it. "
+    "DMs are admin-only. send_message stays in the current chat; sending to another "
+    "channel or DM is admin-only — if a non-admin asks you to speak somewhere else, "
+    "tell them it needs an admin and reply here instead. "
     "join_server and server_setup need the Discord user account. If only the official "
     "bot account is connected, do not call them; share BOT_INVITE_URL so a human can add the bot. "
     "Structural tools (create_channel, edit_channel, delete_channel, lock_channel, manage_role, "
@@ -2474,6 +2477,7 @@ LEAN_TOOL_PROTOCOL = (
     "training data. Skip lookup only for banter and opinions.\n"
     "Visible replies go through send_message (or no_response to stay silent). "
     "Do not also write the same text as raw assistant content.\n"
+    "DMs are admin-only. send_message stays in this chat unless the caller is an admin.\n"
     "ONE send_message holds your whole reply. Consecutive short messages read "
     "as spam. If you have nothing new to add, use no_response.\n"
     "Do the work first. Call the tools that do the job, then send_message once "
@@ -4493,7 +4497,7 @@ class MaxwellBot(commands.Bot):
         if self._solo_blocks(message):
             return "solo_restriction"
         if isinstance(message.channel, discord.DMChannel):
-            if not control.get("reply_dms", True):
+            if not self._dm_replies_allowed(message):
                 return "dm_replies_disabled"
         elif isinstance(message.channel, discord.GroupChannel):
             if not control.get("reply_groups", True):
@@ -7248,6 +7252,13 @@ class MaxwellBot(commands.Bot):
         ) and not self._is_admin(message.author.id):
             return "ignored_author"
 
+        # Non-admin DMs never run commands or start a turn. reply_dms is the
+        # master off switch even for admins.
+        if isinstance(message.channel, discord.DMChannel) and not self._dm_replies_allowed(
+            message
+        ):
+            return "dm_replies_disabled"
+
         if (
             message.content
             and message.content.startswith(self.command_prefix)
@@ -7439,7 +7450,7 @@ class MaxwellBot(commands.Bot):
         reply_path_enabled = (
             (
                 isinstance(channel_obj, discord.DMChannel)
-                and self._control.get("reply_dms", True)
+                and self._dm_replies_allowed(message)
             )
             or (
                 isinstance(channel_obj, discord.GroupChannel)
@@ -7495,13 +7506,14 @@ class MaxwellBot(commands.Bot):
                 return "cooldown"
 
         if isinstance(message.channel, discord.DMChannel):
-            if self._control.get("reply_dms", True):
-                self._dispatch_reply(
-                    message,
-                    self._content_without_self_mention(message.content),
-                    directed=True,
-                )
-            return "dm_replies_disabled"
+            if not self._dm_replies_allowed(message):
+                return "dm_replies_disabled"
+            self._dispatch_reply(
+                message,
+                self._content_without_self_mention(message.content),
+                directed=True,
+            )
+            return
 
         if isinstance(message.channel, discord.GroupChannel):
             if not self._control.get("reply_groups", True):
@@ -9815,6 +9827,18 @@ class MaxwellBot(commands.Bot):
     def _is_admin(self, user_id) -> bool:
         """True if user_id is in the configured admin set (owners + admins.json)."""
         return str(user_id) in self._admins
+
+    def _dm_replies_allowed(self, message) -> bool:
+        """Inbound DMs are admin-only. reply_dms=false turns them off entirely."""
+        if not isinstance(getattr(message, "channel", None), discord.DMChannel):
+            return True
+        if not (getattr(self, "_control", None) or {}).get("reply_dms", False):
+            return False
+        author_id = getattr(getattr(message, "author", None), "id", None)
+        try:
+            return bool(author_id is not None and self._is_admin(author_id))
+        except Exception:
+            return False
 
     def _save_admins(self):
         self._save_str_set(

@@ -1367,7 +1367,7 @@
         {
           title: "Replies & Triggers",
           fields: [
-            { k: "reply_dms", t: "bool" },
+            { k: "reply_dms", t: "bool", hint: "admin DMs only; non-admins never get DM replies" },
             { k: "reply_groups", t: "bool" },
             { k: "reply_mentions", t: "bool" },
             { k: "require_direct_response", t: "bool", hint: "answer direct pings instead of choosing silence; restrictions still apply" },

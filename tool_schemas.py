@@ -541,7 +541,8 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     "send_message": _obj(
         {
             "channel_id": _str(
-                "Optional channel ID or DM recipient user ID to send to. If omitted, sends to current channel."
+                "Optional channel ID or DM recipient user ID. Other chats are "
+                "admin-only; omit to reply here."
             ),
             "content": _str("Message text (Discord markdown OK)"),
             "reply": _bool(

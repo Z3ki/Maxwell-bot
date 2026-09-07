@@ -9,7 +9,8 @@ from bot_tools import (
 
 
 class FakeChannel:
-    def __init__(self):
+    def __init__(self, cid=99):
+        self.id = cid
         self.sent = []
 
     async def send(self, text):
@@ -17,8 +18,9 @@ class FakeChannel:
 
 
 class FakeMessage:
-    def __init__(self):
-        self.channel = FakeChannel()
+    def __init__(self, author_id=11, channel_id=99):
+        self.channel = FakeChannel(channel_id)
+        self.author = SimpleNamespace(id=author_id)
         self.replies = []
 
     async def reply(self, text):
@@ -220,6 +222,9 @@ def test_send_message_explicit_channel_id():
                 return self.channels[cid]
             raise RuntimeError("Channel not found")
 
+        def _is_admin(self, _uid):
+            return True
+
     async def run():
         bot = FakeBot()
         tool = SendMessageTool(bot)
@@ -252,6 +257,78 @@ def test_send_message_explicit_channel_id():
         )
         res4 = await tool.execute(sn_msg, content="nice link")
         assert "__MESSAGE_SENT__" in res4
+
+    asyncio.run(run())
+
+
+def test_send_message_cross_channel_refuses_non_admin():
+    class Target:
+        def __init__(self):
+            self.id = 123456789
+            self.sent = []
+
+        async def send(self, text):
+            self.sent.append(text)
+
+    class Bot:
+        def __init__(self):
+            self.target = Target()
+
+        def get_channel(self, cid):
+            return self.target if cid == 123456789 else None
+
+        def _is_admin(self, _uid):
+            return False
+
+    async def run():
+        bot = Bot()
+        msg = FakeMessage(author_id=1003210843984498748, channel_id=99)
+        result = await SendMessageTool(bot).execute(
+            msg, content="its just me no one else", channel_id="123456789"
+        )
+        assert result.startswith("Error:")
+        assert "admin" in result.lower()
+        assert bot.target.sent == []
+        assert msg.replies == []
+        assert msg.channel.sent == []
+
+    asyncio.run(run())
+
+
+def test_send_message_same_channel_id_allowed_for_non_admin():
+    async def run():
+        msg = FakeMessage(author_id=11, channel_id=99)
+        bot = SimpleNamespace(_is_admin=lambda _uid: False)
+        result = await SendMessageTool(bot).execute(
+            msg, content="hello here", channel_id="99"
+        )
+        assert "__MESSAGE_SENT__" in result
+        assert msg.replies == ["hello here"]
+
+    asyncio.run(run())
+
+
+def test_send_message_same_dm_recipient_allowed_for_non_admin():
+    async def run():
+        msg = FakeMessage(author_id=11, channel_id=1546631263928979457)
+        msg.channel.recipient = SimpleNamespace(id=1003210843984498748)
+        bot = SimpleNamespace(
+            _is_admin=lambda _uid: False,
+            get_user=lambda _cid: None,
+            get_channel=lambda _cid: None,
+        )
+
+        async def fetch_user(uid):
+            raise RuntimeError("should not fetch")
+
+        bot.fetch_user = fetch_user
+        bot.fetch_channel = fetch_user
+        result = await SendMessageTool(bot).execute(
+            msg, content="ok", user_id="1003210843984498748"
+        )
+        # Same DM recipient is current chat, so it still sends here.
+        assert "__MESSAGE_SENT__" in result
+        assert msg.replies == ["ok"]
 
     asyncio.run(run())
 

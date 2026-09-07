@@ -548,6 +548,7 @@ def test_send_dm_is_gated_through_the_recipients_dm_channel(tmp_path):
     # Normally populated by gather_context's DM pass.
     engine._dm_channel_by_user = {"7": "500"}
 
+    bot._control = {"reply_dms": True}
     results = asyncio.run(
         engine.execute(
             [{"kind": "send_dm", "target_user_id": "7", "content": "you there?"}]
@@ -565,6 +566,7 @@ def test_send_dm_to_someone_new_is_not_gated(tmp_path):
     engine = AutonomyEngine(_gate_bot(tmp_path, channel))
     engine._dm_channel_by_user = {}
 
+    engine.bot._control = {"reply_dms": True}
     results = asyncio.run(
         engine.execute(
             [{"kind": "send_dm", "target_user_id": "7", "content": "hey"}]

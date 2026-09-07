@@ -613,6 +613,24 @@ def _caller_is_admin(bot, message) -> bool:
         return False
 
 
+def _destination_is_current_chat(message, dest_id: int) -> bool:
+    """True when dest_id is this channel, or the other person in this DM."""
+    channel = getattr(message, "channel", None)
+    origin = _parse_snowflake(getattr(channel, "id", None))
+    if origin is not None and origin == dest_id:
+        return True
+    people = []
+    recipient = getattr(channel, "recipient", None)
+    if recipient is not None:
+        people.append(recipient)
+    people.extend(getattr(channel, "recipients", None) or [])
+    for person in people:
+        pid = _parse_snowflake(getattr(person, "id", None))
+        if pid is not None and pid == dest_id:
+            return True
+    return False
+
+
 def _is_path_allowed(path: str, allowed_base: str) -> bool:
     """Return True if `path` resolves to a regular file under `allowed_base`.
 
@@ -6799,7 +6817,9 @@ class SendMessageTool(Tool):
             "Content supports Discord markdown: **bold**, *italic*, `code`, ```code blocks```, > quotes, bullet lists. "
             "Params: content (required), reply (optional bool, default true — Discord "
             "quote-reply is on; pass false only for a standalone line with no quote), "
-            "reply_to (optional short quote or who said it, like nah or alice — not an id)."
+            "reply_to (optional short quote or who said it, like nah or alice — not an id). "
+            "channel_id/user_id to another channel or DM is admin-only — everyone else "
+            "must reply in this chat."
         )
 
     @staticmethod
@@ -6842,7 +6862,16 @@ class SendMessageTool(Tool):
                 else (user_id if user_id is not None else kwargs.get("recipient_id"))
             )
             target_dest = str(raw_dest or "").strip()
-            if target_dest and self.bot:
+            dest_id = _parse_snowflake(target_dest) if target_dest else None
+            cross_chat = bool(
+                dest_id and not _destination_is_current_chat(message, dest_id)
+            )
+            if cross_chat and not _caller_is_admin(self.bot, message):
+                return (
+                    "Error: sending to another channel or DM is restricted "
+                    "to admins. Reply in this chat instead."
+                )
+            if cross_chat and self.bot:
                 dest_id = _safe_int(target_dest)
                 if dest_id:
                     # Check if it's a channel first
