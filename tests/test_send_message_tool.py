@@ -307,3 +307,90 @@ def test_send_message_does_not_forward_stray_kwargs_to_discord():
 
     asyncio.run(run())
 
+
+def test_send_receipt_is_recorded_only_after_success():
+    async def run():
+        events = []
+        message = FakeMessage()
+        receipt = SimpleNamespace(id=90)
+
+        async def send(_channel, content, **_kwargs):
+            events.append(("send", content))
+            return receipt
+
+        bot = SimpleNamespace(
+            _send_with_slowmode=send,
+            _mark_request_effect=lambda msg: events.append(("effect", msg)),
+            _record_delivery=lambda msg, sent: events.append(("delivered", sent.id)),
+        )
+        result = await SendMessageTool(bot).execute(message, content="answer")
+        assert "__MESSAGE_SENT__" in result
+        assert events == [
+            ("effect", message),
+            ("send", "answer"),
+            ("delivered", 90),
+        ]
+
+    asyncio.run(run())
+
+
+def test_send_none_does_not_claim_delivery():
+    async def run():
+        receipts = []
+
+        async def send(*_args, **_kwargs):
+            return None
+
+        bot = SimpleNamespace(
+            _send_with_slowmode=send,
+            _record_delivery=lambda *_args: receipts.append("delivered"),
+        )
+        result = await SendMessageTool(bot).execute(FakeMessage(), content="answer")
+        assert result.startswith("Error:")
+        assert "__MESSAGE_SENT__" not in result
+        assert receipts == []
+
+    asyncio.run(run())
+
+
+def test_partial_send_does_not_claim_unsent_chunks():
+    async def run():
+        calls = 0
+        outcomes = []
+
+        async def send(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return SimpleNamespace(id=90) if calls == 1 else None
+
+        bot = SimpleNamespace(
+            _send_with_slowmode=send,
+            _record_request_outcome=lambda _msg, status, **kw: outcomes.append(
+                (status, kw.get("reason"))
+            ),
+        )
+        result = await SendMessageTool(bot).execute(
+            FakeMessage(), content="a" * 1900 + "b" * 100
+        )
+        assert result == "__MESSAGE_SENT__\n" + "a" * 1900
+        assert outcomes == [("delivered", "partial_delivery")]
+        assert calls == 2
+
+    asyncio.run(run())
+
+
+def test_failed_effect_checkpoint_prevents_send():
+    async def run():
+        message = FakeMessage()
+
+        def mark(_message):
+            raise OSError("journal unavailable")
+
+        result = await SendMessageTool(
+            SimpleNamespace(_mark_request_effect=mark)
+        ).execute(message, content="answer")
+        assert result.startswith("Error")
+        assert message.replies == []
+        assert message.channel.sent == []
+
+    asyncio.run(run())

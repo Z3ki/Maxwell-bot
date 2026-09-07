@@ -6,10 +6,13 @@ replies in one channel.
 """
 
 import asyncio
+import json
+import sqlite3
 
 import pytest
 
-from message_pipeline import InboundDedup, ReplyQueue, Watermarks
+import message_pipeline
+from message_pipeline import InboundDedup, ReplyQueue, RequestJournal, Watermarks
 
 
 # --------------------------------------------------------------------------
@@ -175,6 +178,40 @@ def test_queue_resubmitting_same_message_does_not_double_reply():
             if len(seen) == 2:
                 break
         assert seen == [0, 7]
+
+    asyncio.run(scenario())
+
+
+def test_queue_deduplicates_running_messages_and_tracks_owned_ids():
+    async def scenario():
+        seen = []
+        started = asyncio.Event()
+        gate = asyncio.Event()
+
+        async def handler(message, content):
+            seen.append(message.id)
+            started.set()
+            await gate.wait()
+
+        q = ReplyQueue()
+        q.bind(handler)
+        q.submit("c1", _msg(1), "first", directed=True)
+        assert q.contains("c1", 1)
+        assert not q.contains("other", 1)
+        assert not q.contains("c1", None)
+        await started.wait()
+        assert q.contains("c1", "1")
+        assert q.submit("c1", _msg(1), "replayed", directed=True) == "duplicate"
+        assert q.depth("c1") == 0
+        q.submit("c1", _msg(2), "second", directed=True)
+        assert q.contains("c1", 2)
+        gate.set()
+        pump = q._channels["c1"].pump
+        await pump
+        assert seen == [1, 2]
+        assert not q.contains("c1", 1)
+        assert not q.contains("c1", 2)
+        await q.close()
 
     asyncio.run(scenario())
 
@@ -346,13 +383,101 @@ def test_queue_bound_evicts_soft_before_directed():
     asyncio.run(scenario())
 
 
-def test_queue_drops_stale_entries():
+def test_queue_directed_overflow_defers_only_new_requests():
     async def scenario():
+        seen = []
+        drops = []
+        gate = asyncio.Event()
+        started = asyncio.Event()
+
+        async def handler(message, content):
+            seen.append(message.id)
+            started.set()
+            await gate.wait()
+
+        q = ReplyQueue(
+            max_directed=2,
+            on_drop=lambda cid, entry, why: drops.append((cid, entry.message_id, why)),
+        )
+        q.bind(handler)
+        q.submit("c1", _msg(1), "running", directed=True)
+        await started.wait()
+        assert q.submit("c1", _msg(2), "waiting", directed=True) == "queued"
+        assert q.submit("c1", _msg(3), "waiting", directed=True) == "queued"
+        q._channels["c1"].queue[0].enqueued_at -= 999
+        for mid in range(4, 14):
+            assert q.submit("c1", _msg(mid), "overflow", directed=True) == "deferred"
+            assert not q.contains("c1", mid)
+            assert q.depth("c1") == 2
+        assert drops == [("c1", str(mid), "deferred") for mid in range(4, 14)]
+        assert q.contains("c1", 2)
+        assert q.contains("c1", 3)
+        assert q.submit("c1", _msg(2), "redelivery", directed=True) == "duplicate"
+        gate.set()
+        await q._channels["c1"].pump
+        assert seen == [1, 2, 3]
+        assert q.submit("c1", _msg(4), "retry", directed=True) == "started"
+        await q._channels["c1"].pump
+        assert seen == [1, 2, 3, 4]
+        await q.close()
+
+    asyncio.run(scenario())
+
+
+def test_queue_soft_overflow_cannot_evict_directed_requests():
+    async def scenario():
+        drops = []
+
+        async def handler(message, content):
+            return None
+
+        q = ReplyQueue(
+            max_directed=1,
+            on_drop=lambda cid, entry, why: drops.append((entry.message_id, why)),
+        )
+        q.bind(handler)
+        q.submit("c1", _msg(1), "directed", directed=True)
+        assert q.submit("c1", _msg(2), "soft", directed=False) == "dropped"
+        assert drops == [("2", "queue full")]
+        assert q.contains("c1", 1)
+        assert not q.contains("c1", 2)
+        await q.close()
+
+    asyncio.run(scenario())
+
+
+def test_queue_coalescing_reports_superseded_id_and_keeps_burst():
+    async def scenario():
+        drops = []
+
+        async def handler(message, content):
+            return None
+
+        q = ReplyQueue(
+            on_drop=lambda cid, entry, why: drops.append((entry.message_id, why))
+        )
+        q.bind(handler)
+        first, second = _msg(1), _msg(2)
+        q.submit("c1", first, "first", directed=False)
+        assert q.submit("c1", second, "second", directed=False) == "coalesced"
+        assert drops == [("1", "superseded")]
+        assert not q.contains("c1", 1)
+        assert q.contains("c1", 2)
+        assert q._channels["c1"].queue[0].burst == [first, second]
+        await q.close()
+
+    asyncio.run(scenario())
+
+
+def test_queue_retains_stale_directed_entries():
+    async def scenario():
+        seen = []
         drops = []
         gate = asyncio.Event()
 
         async def handler(message, content):
             await gate.wait()
+            seen.append(message.id)
 
         q = ReplyQueue(
             max_age=10.0, on_drop=lambda cid, e, why: drops.append((e.message_id, why))
@@ -365,10 +490,388 @@ def test_queue_drops_stale_entries():
         state = q._channels["c1"]  # noqa: SLF001 - white-box on purpose
         state.queue[0].enqueued_at -= 999
         q.submit("c1", _msg(2), "new", directed=True)
-        assert ("1", "stale") in drops
+        assert not drops
+        assert q.contains("c1", 1)
         gate.set()
+        await state.pump
+        assert seen == [0, 1, 2]
+        await q.close()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("submit_new", [False, True])
+def test_queue_expires_stale_soft_entries_at_submission_and_dispatch(submit_new):
+    async def scenario():
+        seen = []
+        drops = []
+        started = asyncio.Event()
+        gate = asyncio.Event()
+
+        async def handler(message, content):
+            started.set()
+            await gate.wait()
+            seen.append(message.id)
+
+        q = ReplyQueue(
+            max_age=10,
+            on_drop=lambda cid, entry, why: drops.append((entry.message_id, why)),
+        )
+        q.bind(handler)
+        q.submit("c1", _msg(1), "running", directed=True)
+        await started.wait()
+        q.submit("c1", _msg(2), "old soft", directed=False)
+        state = q._channels["c1"]
+        state.queue[0].enqueued_at -= 999
+        if submit_new:
+            q.submit("c1", _msg(3), "new directed", directed=True)
+            assert not q.contains("c1", 2)
+        gate.set()
+        await state.pump
+        assert drops == [("2", "stale")]
+        assert seen == ([1, 3] if submit_new else [1])
+        await q.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("start_handlers", [False, True])
+def test_queue_close_cancels_all_channels_without_respawning(start_handlers):
+    async def scenario():
+        seen = []
+        finished = []
+        pumps = []
+        started = [asyncio.Event(), asyncio.Event()]
+
+        async def handler(message, content):
+            seen.append(message.id)
+            started[message.id - 1].set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                finished.append(message.id)
+
+        def track(task):
+            pumps.append(task)
+            return task
+
+        q = ReplyQueue()
+        q.bind(handler, task_factory=track)
+        for mid in (1, 2):
+            cid = f"c{mid}"
+            q.submit(cid, _msg(mid, cid), "running", directed=True)
+            q.submit(cid, _msg(mid + 10, cid), "waiting", directed=True)
+        if start_handlers:
+            await asyncio.gather(*(event.wait() for event in started))
+        await q.close()
+        await asyncio.sleep(0)
+        assert len(pumps) == 2
+        assert all(task.done() for task in pumps)
+        assert sorted(seen) == ([1, 2] if start_handlers else [])
+        assert sorted(finished) == sorted(seen)
+        assert not q.any_active()
+        assert q.stats()["channels_tracked"] == 0
+        assert not q.contains("c1", 1)
+        assert q.submit("c1", _msg(99), "after close", directed=True) == "dropped"
+        await q.close()
+
+    asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------
+# durable request journal
+# --------------------------------------------------------------------------
+
+
+def test_journal_accept_stores_only_metadata_and_preserves_duplicates(tmp_path):
+    journal = RequestJournal(tmp_path / "nested" / "requests.sqlite3")
+    assert journal.accept(101, 202, 303, directed=True)
+    initial = journal.get(101)
+    assert initial == {
+        "id": "101",
+        "message_id": "101",
+        "channel_id": "202",
+        "author_id": "303",
+        "status": "received",
+        "directed": True,
+        "attempts": 0,
+        "effects_started": False,
+        "response_id": None,
+        "reason": "",
+        "created_at": initial["created_at"],
+        "updated_at": initial["created_at"],
+    }
+    assert not journal.accept("101", "other", "other", directed=False)
+    assert journal.get("101") == initial
+    journal.update(101, "delivered", effects_started=True, response_id=404)
+    delivered = journal.get(101)
+    assert delivered["response_id"] == "404"
+    assert not journal.accept(101, 202)
+    assert journal.get(101) == delivered
+    assert journal.get("unknown") is None
+    assert journal.pending() == []
+
+
+def test_journal_pending_order_limit_and_effects_exclusion(tmp_path, monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(message_pipeline.time, "time", lambda: now[0])
+    journal = RequestJournal(tmp_path / "requests.sqlite3")
+    statuses = (
+        "received",
+        "delivered",
+        "queued",
+        "suppressed",
+        "deferred",
+        "failed",
+        "running",
+        "superseded",
+    )
+    for index, status in enumerate(statuses, start=1):
+        now[0] += 1
+        journal.accept(index, "channel")
+        journal.update(index, status)
+    journal.accept(9, "channel")
+    journal.update(9, "running", effects_started=True)
+    expected = ["1", "3", "5", "7"]
+    assert [record["message_id"] for record in journal.pending()] == expected
+    assert [record["message_id"] for record in journal.pending(2)] == expected[:2]
+    assert journal.pending(0) == []
+    assert journal.pending(-1) == []
+
+
+def test_journal_pending_cursor_reaches_rooms_beyond_a_busy_prefix(tmp_path):
+    journal = RequestJournal(tmp_path / "requests.sqlite3")
+    with journal._transaction(write=True) as connection:
+        connection.executemany(
+            """
+            INSERT INTO requests (
+                message_id, channel_id, status, created_at, updated_at
+            ) VALUES (?, 'busy', 'queued', ?, ?)
+            """,
+            [(str(index), index, index) for index in range(1001)],
+        )
+    journal.accept("later", "available")
+    first = journal.pending(1000)
+    assert len(first) == 1000
+    assert all(row["channel_id"] == "busy" for row in first)
+    cursor = first[-1]["created_at"], first[-1]["message_id"]
+    next_page = journal.pending(1000, after=cursor)
+    assert [row["message_id"] for row in next_page] == ["1000", "later"]
+    cursor = next_page[-1]["created_at"], next_page[-1]["message_id"]
+    assert journal.pending(1000, after=cursor) == []
+    assert journal.pending(1)[0]["message_id"] == "0"
+
+
+def test_journal_pending_cursor_handles_ties_and_status_changes(tmp_path, monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(message_pipeline.time, "time", lambda: now[0])
+    journal = RequestJournal(tmp_path / "requests.sqlite3")
+    for mid in ("20", "2", "10", "1"):
+        journal.accept(mid, "channel")
+    page = journal.pending(2)
+    assert [row["message_id"] for row in page] == ["1", "10"]
+    cursor = page[-1]["created_at"], page[-1]["message_id"]
+    now[0] += 10
+    journal.update("10", "delivered")
+    journal.update("2", "deferred")
+    assert [row["message_id"] for row in journal.pending(2, after=cursor)] == ["2", "20"]
+    assert journal.get("2")["updated_at"] > cursor[0]
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "received", "queued", "deferred", "running",
+        "delivered", "suppressed", "failed", "superseded",
+    ],
+)
+@pytest.mark.parametrize("effects_started", [False, True])
+def test_journal_restart_recovers_only_safe_unfinished_work(
+    tmp_path, status, effects_started
+):
+    path = tmp_path / "requests.sqlite3"
+    journal = RequestJournal(path)
+    journal.accept(101, 202, 303, directed=True)
+    if status == "running":
+        journal.begin(101)
+    journal.update(
+        101,
+        status,
+        reason="original",
+        effects_started=effects_started,
+        response_id=404 if status == "delivered" else None,
+    )
+    original = journal.get(101)
+
+    restarted = RequestJournal(path)
+    assert restarted.get(101) == original
+    restarted.recover()
+    record = restarted.get(101)
+    assert record["attempts"] == original["attempts"]
+    assert record["directed"] is True
+    assert record["effects_started"] is effects_started
+    if status in ("delivered", "suppressed", "failed", "superseded"):
+        assert record == original
+        assert restarted.pending() == []
+    elif effects_started:
+        assert record["status"] == "failed"
+        assert record["reason"] == "interrupted_after_effect"
+        assert restarted.pending() == []
+    else:
+        assert record["status"] == "deferred"
+        assert [row["message_id"] for row in restarted.pending()] == ["101"]
+    restarted.recover()
+    assert restarted.get(101) == record
+
+
+def test_journal_begin_counts_attempts_and_requires_explicit_terminal_reset(tmp_path):
+    journal = RequestJournal(tmp_path / "requests.sqlite3")
+    journal.accept(1, 2)
+    journal.begin(1)
+    assert journal.get(1)["status"] == "running"
+    assert journal.get(1)["attempts"] == 1
+    journal.update(1, "deferred", reason="retry")
+    journal.begin(1)
+    assert journal.get(1)["attempts"] == 2
+    journal.update(1, "running", directed=True, effects_started=True)
+    with pytest.raises(ValueError, match="effects-started"):
+        journal.begin(1)
+    journal.update(1, "delivered", response_id=3)
+    terminal = journal.get(1)
+    with pytest.raises(ValueError, match="terminal"):
+        journal.begin(1)
+    assert journal.get(1) == terminal
+    assert terminal["directed"] is True
+    assert terminal["effects_started"] is True
+    journal.update(1, "received", reason="edited_mention", effects_started=False)
+    journal.begin(1)
+    assert journal.get(1)["attempts"] == 3
+    assert journal.get(1)["effects_started"] is False
+
+
+def test_journal_transition_log_is_structured_and_contains_duration(
+    tmp_path, caplog, monkeypatch
+):
+    now = [100.0]
+    monkeypatch.setattr(message_pipeline.time, "time", lambda: now[0])
+    caplog.set_level("INFO", logger="message_pipeline")
+    journal = RequestJournal(tmp_path / "requests.sqlite3")
+    journal.accept(101, 202)
+    now[0] = 102.5
+    journal.update(101, "deferred", reason="capacity", directed=True)
+    event = json.loads(caplog.records[-1].getMessage().split(" ", 1)[1])
+    assert event["message_id"] == "101"
+    assert event["channel_id"] == "202"
+    assert event["previous_status"] == "received"
+    assert event["status"] == "deferred"
+    assert event["duration_ms"] == 2500
+    assert event["reason"] == "capacity"
+
+
+def test_journal_retention_is_bounded_without_pruning_pending(tmp_path):
+    journal = RequestJournal(tmp_path / "requests.sqlite3")
+    terminal_statuses = ("delivered", "suppressed", "failed", "superseded")
+    for status in ("received", "queued", "deferred", "running"):
+        journal.accept(status, "channel")
+        journal.update(status, status)
+    with journal._transaction(write=True) as connection:
+        connection.execute("UPDATE requests SET created_at = 0, updated_at = 0")
+        connection.executemany(
+            """
+            INSERT INTO requests (
+                message_id, channel_id, status, created_at, updated_at
+            ) VALUES (?, 'channel', ?, ?, ?)
+            """,
+            [
+                (
+                    f"terminal-{index}",
+                    terminal_statuses[index % 4],
+                    index + 1,
+                    index + 1,
+                )
+                for index in range(10_002)
+            ],
+        )
+    journal.accept("new", "channel")
+    journal.update("new", "delivered")
+    with journal._transaction() as connection:
+        count = connection.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
+    assert count == 10_004
+    assert {row["message_id"] for row in journal.pending()} == {
+        "received", "queued", "deferred", "running"
+    }
+    assert journal.get("terminal-0") is None
+    assert journal.get("terminal-2") is None
+    assert journal.get("terminal-3") is not None
+    assert journal.get("new")["status"] == "delivered"
+
+
+def test_journal_database_errors_are_visible_and_never_reset_data(tmp_path):
+    corrupt = tmp_path / "corrupt.sqlite3"
+    original = b"not a SQLite database"
+    corrupt.write_bytes(original)
+    with pytest.raises(sqlite3.DatabaseError):
+        RequestJournal(corrupt)
+    assert corrupt.read_bytes() == original
+    with pytest.raises(sqlite3.OperationalError):
+        RequestJournal(tmp_path)
+
+
+def test_journal_operations_close_connections_even_after_errors(tmp_path, monkeypatch):
+    opened = []
+    closed = []
+    connect = sqlite3.connect
+
+    class TrackingConnection(sqlite3.Connection):
+        def close(self):
+            closed.append(self)
+            super().close()
+
+    def tracked_connect(*args, **kwargs):
+        connection = connect(*args, factory=TrackingConnection, **kwargs)
+        opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(message_pipeline.sqlite3, "connect", tracked_connect)
+    journal = RequestJournal(tmp_path / "requests.sqlite3")
+    journal.accept(1, 2)
+    assert not journal.accept(1, 2)
+    journal.get(1)
+    journal.begin(1)
+    journal.pending()
+    journal.recover()
+    journal.update(1, "delivered")
+    with pytest.raises(ValueError):
+        journal.begin(1)
+    with pytest.raises(KeyError):
+        journal.update("missing", "queued")
+    assert opened == closed
+    for connection in opened:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
+    journal.close()
+    journal.close()
+    assert journal.get(1)["status"] == "delivered"
+    assert opened == closed
+
+
+def test_journal_failed_write_rolls_back_and_invalid_status_is_rejected(
+    tmp_path, monkeypatch
+):
+    journal = RequestJournal(tmp_path / "requests.sqlite3")
+    journal.accept(1, 2)
+    original = journal.get(1)
+
+    def fail_prune(connection):
+        raise sqlite3.OperationalError("write failed")
+
+    monkeypatch.setattr(journal, "_prune", fail_prune)
+    with pytest.raises(sqlite3.OperationalError, match="write failed"):
+        journal.update(1, "delivered", response_id=3)
+    assert journal.get(1) == original
+    with pytest.raises(ValueError, match="Unknown request status"):
+        journal.update(1, "invalid")
+    assert journal.get(1) == original
 
 
 # --------------------------------------------------------------------------

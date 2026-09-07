@@ -7012,6 +7012,9 @@ class SendMessageTool(Tool):
                 for i, chunk in enumerate(chunks):
                     chunk_stickers = stickers if i == 0 else None
                     try:
+                        mark_effect = getattr(self.bot, "_mark_request_effect", None)
+                        if callable(mark_effect):
+                            mark_effect(message)
                         # Only pass stickers to Discord; drop all other tool kwargs (reasoning, channel_id, etc.)
                         # to avoid "multiple values for keyword argument 'content'" and "unexpected keyword"
                         extra = {}
@@ -7028,11 +7031,16 @@ class SendMessageTool(Tool):
                                 ),
                                 **extra,
                             )
-                            if sent is None and not sent_any:
-                                return "Error: missing permissions to send message"
+                            if sent is None:
+                                if not sent_any:
+                                    return "Error: missing permissions to send message"
+                                record = getattr(self.bot, "_record_request_outcome", None)
+                                if callable(record):
+                                    record(message, "delivered", reason="partial_delivery")
+                                return "__MESSAGE_SENT__\n" + "\n".join(sent_chunks)
                         elif i == 0 and use_reply:
                             try:
-                                await reply_to_message.reply(chunk, **extra)
+                                sent = await reply_to_message.reply(chunk, **extra)
                             except (discord.NotFound, discord.HTTPException) as exc:
                                 code = getattr(exc, "code", None)
                                 parent_gone = isinstance(
@@ -7048,13 +7056,25 @@ class SendMessageTool(Tool):
                                     raise
                                 if not parent_gone:
                                     raise
-                                await target_channel.send(chunk, **extra)
+                                sent = await target_channel.send(chunk, **extra)
                         else:
-                            await target_channel.send(chunk, **extra)
+                            sent = await target_channel.send(chunk, **extra)
                         sent_any = True
                         sent_chunks.append(chunk)
-                    except Exception:
+                        record_delivery = getattr(self.bot, "_record_delivery", None)
+                        if callable(record_delivery):
+                            record_delivery(message, sent)
+                    except Exception as exc:
                         if sent_any:
+                            logger.warning(
+                                "Partial send for message %s (%s)",
+                                getattr(message, "id", "?"),
+                                type(exc).__name__,
+                            )
+                            record = getattr(self.bot, "_record_request_outcome", None)
+                            if callable(record):
+                                with contextlib.suppress(Exception):
+                                    record(message, "delivered", reason="partial_delivery")
                             return "__MESSAGE_SENT__\n" + "\n".join(sent_chunks)
                         raise
                     if len(chunks) > 1:
@@ -7071,7 +7091,7 @@ class SendMessageTool(Tool):
             return "Error: missing permissions to send message"
         except Exception as e:
             if sent_any:
-                return f"__MESSAGE_SENT__\n{text}"
+                return "__MESSAGE_SENT__\n" + "\n".join(sent_chunks)
             return f"Error sending message: {e}"
 
 
@@ -7133,11 +7153,36 @@ class NoResponseTool(Tool):
 
     def get_description(self):
         return (
-            "Skip replying to this message entirely. Use this when the user message is not useful to engage with "
-            "(e.g., spam, baiting, pure annoyance, or low-effort fillers like 'idc') or when you truly have nothing to add."
+            "Stay silent for unrelated chatter, spam, or an already answered message. "
+            "Give a reason: unrelated, spam, already_answered, user_requested_silence, or other. "
+            "An unanswered direct ping or DM normally requires send_message, not no_response."
         )
 
-    async def execute(self, message: Message, **kwargs) -> str:
+    async def execute(self, message: Message, reason: str = "other", **kwargs) -> str:
+        journal = getattr(self.bot, "_request_journal", None)
+        row = journal.get(getattr(message, "id", "")) if journal is not None else None
+        if row and row.get("status") == "delivered":
+            return "__NO_RESPONSE__"
+        directed = getattr(self.bot, "_directly_addressed", None)
+        control = getattr(self.bot, "_control", None) or {}
+        if (
+            parse_bool(control.get("require_direct_response"), True)
+            and (
+                bool(row and row.get("directed"))
+                or (callable(directed) and directed(message))
+            )
+        ):
+            return (
+                "Error: this direct request has not received an answer. "
+                "Use send_message to answer or acknowledge it."
+            )
+        allowed = {"unrelated", "spam", "already_answered", "user_requested_silence", "other"}
+        reason = str(reason or "other")
+        if reason not in allowed:
+            reason = "other"
+        record = getattr(self.bot, "_record_request_outcome", None)
+        if callable(record):
+            record(message, "suppressed", reason=f"model_no_response:{reason}")
         return "__NO_RESPONSE__"
 
 
@@ -7421,6 +7466,9 @@ class SendFileTool(Tool):
                 if not parent_gone:
                     raise
                 sent = await message.channel.send(file=file)
+            record_delivery = getattr(self.bot, "_record_delivery", None)
+            if callable(record_delivery) and sent is not None:
+                record_delivery(message, sent)
         except discord.Forbidden:
             return "Error: no permission to send files here"
         except discord.HTTPException as e:
@@ -9846,7 +9894,10 @@ class SendMemeTool(Tool):
 
         file = File(BytesIO(img_bytes), filename=filename)
         try:
-            await message.reply(file=file)
+            sent = await message.reply(file=file)
+            record_delivery = getattr(self.bot, "_record_delivery", None)
+            if callable(record_delivery) and sent is not None:
+                record_delivery(message, sent)
         except discord.Forbidden:
             return "Error: no permission to send files here"
         except discord.HTTPException as e:
@@ -9912,6 +9963,9 @@ class SendMediaTool(Tool):
         sent = None
         try:
             sent = await message.reply(file=file)
+            record_delivery = getattr(self.bot, "_record_delivery", None)
+            if callable(record_delivery) and sent is not None:
+                record_delivery(message, sent)
         except discord.Forbidden:
             return "Error: no permission to send files here"
         except discord.HTTPException as e:

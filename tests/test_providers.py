@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import json
+import logging
 
 import pytest
 
@@ -140,6 +141,53 @@ class FakeSequenceSession(FakeSession):
         self.urls.append(url)
         self.payloads.append(copy.deepcopy(json))
         return self.responses.pop(0)
+
+
+def test_request_id_correlates_actual_fallback_without_changing_payload(caplog):
+    provider = OllamaProvider(
+        "http://example.test",
+        "primary-model",
+        10,
+        0.5,
+        fallback_base_url="http://fallback.test",
+        fallback_model="fallback-model",
+    )
+    provider.available = True
+    session = FakeSession()
+    provider._session = session
+    with caplog.at_level(logging.INFO, logger="providers"):
+        result = asyncio.run(
+            provider.generate_response(
+                [{"role": "user", "content": "hello"}],
+                prefer_fallback=True,
+                request_id="42",
+            )
+        )
+    assert result == "ok"
+    assert "request_id=42 endpoint=fallback model=fallback-model" in caplog.text
+    assert all("request_id" not in payload for payload in session.payloads)
+
+
+def test_request_id_survives_tool_protocol_fallback(monkeypatch):
+    provider = OllamaProvider("http://example.test", "model", 10, 0.5)
+    calls = []
+
+    async def complete(_messages, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise RuntimeError("tools is not supported")
+        return {"content": "ok"}
+
+    monkeypatch.setattr(provider, "generate_chat_completion", complete)
+    result = asyncio.run(
+        provider.generate_response(
+            [{"role": "user", "content": "hello"}],
+            tools=[{"type": "function"}],
+            request_id="42",
+        )
+    )
+    assert result == "ok"
+    assert [call["request_id"] for call in calls] == ["42", "42"]
 
 
 def test_generate_chat_completion_model_override():

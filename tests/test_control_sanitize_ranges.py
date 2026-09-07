@@ -76,6 +76,28 @@ def test_out_of_range_is_clamped_not_defaulted():
 
 
 @pytest.mark.parametrize(
+    "key,low,high",
+    [
+        ("live_turn_timeout_seconds", 1, 7200),
+        ("inbound_retry_attempts", 1, 5),
+        ("inbound_retry_delay_seconds", 1, 300),
+        ("gap_recovery_max_messages", 0, 100),
+    ],
+)
+def test_inbound_reliability_limits(key, low, high):
+    assert _sanitize_control({key: -1})[key] == low
+    assert _sanitize_control({key: 99999})[key] == high
+    assert _sanitize_control({key: "inf"})[key] == DEFAULT_CONTROL[key]
+    assert _sanitize_control({key: "nan"})[key] == DEFAULT_CONTROL[key]
+
+
+@pytest.mark.parametrize("key", ["require_direct_response", "respond_to_edited_mentions"])
+def test_inbound_policy_booleans(key):
+    assert _sanitize_control({key: "false"})[key] is False
+    assert _sanitize_control({key: "true"})[key] is True
+
+
+@pytest.mark.parametrize(
     "key,good,bad,fallback",
     [
         ("vc_tts_engine", "espeak", "bogus", "fish"),

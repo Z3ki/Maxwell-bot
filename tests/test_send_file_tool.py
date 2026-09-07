@@ -2,7 +2,13 @@ import asyncio
 import base64
 from types import SimpleNamespace
 
+import discord
+import pytest
+
+import bot_tools
 from bot_tools import SendFileTool
+from bot_tools import SendMediaTool
+from bot_tools import SendMemeTool
 from bot_tools import ShellTool
 from bot_tools import SendMessageTool
 from bot_tools import ReasoningLogTool
@@ -86,6 +92,59 @@ def test_send_file_tool_sends_base64_and_strips_path():
         assert sent.fp.read() == b"\x00\x01binary"
 
     asyncio.run(run())
+
+
+def test_file_delivery_records_the_confirmed_message():
+    message = FakeMessage()
+    receipts = []
+    tool = SendFileTool(SimpleNamespace(
+        _record_delivery=lambda origin, sent: receipts.append((origin, sent)),
+    ))
+    result = asyncio.run(tool.execute(message, filename="answer.txt", content="answer"))
+    assert result.startswith("__FILE_SENT__")
+    assert receipts == [(message, message.channel.sent[0])]
+
+
+@pytest.mark.parametrize("tool_class", [SendMediaTool, SendMemeTool])
+@pytest.mark.parametrize("forbidden", [False, True])
+def test_media_delivery_only_records_confirmed_sends(monkeypatch, tool_class, forbidden):
+    class Response:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def json(self):
+            return {"url": "https://example.com/image.png"}
+
+    async def session():
+        return SimpleNamespace(get=lambda *_args, **_kwargs: Response())
+
+    async def read(*_args):
+        return b"image"
+
+    monkeypatch.setattr(bot_tools, "_get_shared_session", session)
+    monkeypatch.setattr(bot_tools, "_read_response_limited", read)
+    message = FakeMessage()
+    if forbidden:
+        async def denied(**_kwargs):
+            raise discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "")
+
+        message.reply = denied
+    receipts = []
+    tool = tool_class(SimpleNamespace(
+        _record_delivery=lambda origin, sent: receipts.append((origin, sent)),
+    ))
+    result = asyncio.run(tool.execute(message, url="https://example.com/image.png"))
+    if forbidden:
+        assert result.startswith("Error:")
+        assert receipts == []
+    else:
+        assert "_SENT__" in result
+        assert receipts == [(message, message.channel.sent[0])]
 
 
 def test_shell_tool_runs_without_author_gate():

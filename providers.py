@@ -1913,6 +1913,7 @@ class OllamaProvider:
         on_token=None,
         custom_tool_calls: bool = False,
         prefer_fallback: bool = False,
+        request_id: str = "",
         **kwargs,
     ) -> str:
         """Generate response. images is legacy b64 list, media is list of {b64, mime_type}.
@@ -1940,6 +1941,7 @@ class OllamaProvider:
                 on_token=on_token,
                 custom_tool_calls=custom_tool_calls,
                 prefer_fallback=prefer_fallback,
+                request_id=request_id,
                 **kwargs,
             )
         except RuntimeError as e:
@@ -1963,6 +1965,7 @@ class OllamaProvider:
                     media=media,
                     timeout=timeout,
                     prefer_fallback=prefer_fallback,
+                    request_id=request_id,
                     **kwargs,
                 )
             else:
@@ -2015,6 +2018,7 @@ class OllamaProvider:
         on_token=None,
         custom_tool_calls: bool = False,
         prefer_fallback: bool = False,
+        request_id: str = "",
     ) -> dict:
         """Generate an OpenAI-compatible assistant message, optionally with tools.
 
@@ -2196,7 +2200,8 @@ class OllamaProvider:
                 if isinstance(part, dict) and part.get("type") != "text"
             )
             logger.info(
-                "Provider timing start endpoint=%s model=%s attempt=%s/%s messages=%s media_parts=%s timeout=%s max_tokens=%s reasoning_disabled=%s tools=%s",
+                "Provider timing start request_id=%s endpoint=%s model=%s attempt=%s/%s messages=%s media_parts=%s timeout=%s max_tokens=%s reasoning_disabled=%s tools=%s",
+                request_id,
                 endpoint.name,
                 data.get("model"),
                 attempt,
@@ -2788,8 +2793,10 @@ class OllamaProvider:
                     # Healthy response: this endpoint is no longer rate-limited.
                     self._endpoint_cooldown.pop(endpoint.name, None)
                     logger.info(
-                        "Provider timing done endpoint=%s status=%s headers_ms=%.1f ttft_ms=%.1f total_ms=%.1f tps=%s content_chars=%s tool_calls=%s tokens=%s",
+                        "Provider timing done request_id=%s endpoint=%s model=%s status=%s headers_ms=%.1f ttft_ms=%.1f total_ms=%.1f tps=%s content_chars=%s tool_calls=%s tokens=%s",
+                        request_id,
                         endpoint.name,
+                        data.get("model"),
                         resp.status,
                         headers_ms,
                         timing.get("ttft_ms", json_ms),
@@ -2802,7 +2809,8 @@ class OllamaProvider:
                     return message
             except asyncio.TimeoutError:
                 logger.warning(
-                    "Provider timing timeout endpoint=%s elapsed_ms=%.1f timeout=%s",
+                    "Provider timing timeout request_id=%s endpoint=%s elapsed_ms=%.1f timeout=%s",
+                    request_id,
                     endpoint.name,
                     (time.perf_counter() - request_start) * 1000,
                     timeout,

@@ -148,7 +148,7 @@ def _sanitize_control(control):
             # silently all the way back to the default.
             try:
                 out[key] = int(float(value))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 out[key] = default
         elif isinstance(default, float):
             try:
@@ -202,6 +202,10 @@ def _sanitize_control(control):
     out["site_ttl_hours"] = max(0, min(_safe_int(out.get("site_ttl_hours"), 24), 8760))
     out["max_image_size_mb"] = max(1, min(out["max_image_size_mb"], 25))
     out["ai_timeout_seconds"] = max(10, min(out["ai_timeout_seconds"], 7200))
+    out["live_turn_timeout_seconds"] = max(1, min(out["live_turn_timeout_seconds"], 7200))
+    out["inbound_retry_attempts"] = max(1, min(out["inbound_retry_attempts"], 5))
+    out["inbound_retry_delay_seconds"] = max(1, min(out["inbound_retry_delay_seconds"], 300))
+    out["gap_recovery_max_messages"] = max(0, min(out["gap_recovery_max_messages"], 100))
     out["tool_iteration_timeout_seconds"] = max(
         60,
         min(_safe_int(out.get("tool_iteration_timeout_seconds"), 3600), 14400),

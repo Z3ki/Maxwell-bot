@@ -623,7 +623,7 @@ def test_memory_lock_timeout_is_bounded():
     assert MaxwellBot._channel_lock_timeout(bot) == 3.0
 
 
-def test_watch_chatter_does_not_interrupt_inflight():
+def test_neither_watch_chatter_nor_new_ping_interrupts_inflight():
     bot = _bot()
     fake = SimpleNamespace(done=lambda: False)
 
@@ -638,7 +638,7 @@ def test_watch_chatter_does_not_interrupt_inflight():
         # It does not even earn a turn now, let alone cancel the running one.
         assert MaxwellBot._should_live_reply(bot, chatter) is False
         assert MaxwellBot._should_interrupt_inflight(bot, chatter) is False
-        assert MaxwellBot._should_interrupt_inflight(bot, ping) is True
+        assert MaxwellBot._should_interrupt_inflight(bot, ping) is False
 
     asyncio.run(run())
 

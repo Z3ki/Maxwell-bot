@@ -22,13 +22,14 @@ The pieces here fix the structure rather than the symptom:
 
 ``InboundDedup``     one reply per message id, bounded.
 ``ReplyQueue``       one reply at a time per channel, the rest *wait* instead
-                     of being dropped. Directed messages never lose their
-                     turn; soft chatter coalesces to the newest line.
+                     of being dropped. Accepted directed messages never lose
+                     their turn; overflow is deferred to the durable journal.
+``RequestJournal``   durable request IDs and lifecycle metadata, so restarts
+                     can retry work that has not begun irreversible effects.
 ``Watermarks``       per-channel high-water message id so a reconnect can
                      replay what the gateway missed.
 
-None of these hold a lock across a provider call, and none of them can drop a
-directed message.
+None of these hold a lock across a provider call.
 """
 
 from __future__ import annotations
@@ -38,8 +39,9 @@ import contextlib
 import json
 import logging
 import os
+import sqlite3
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -107,12 +109,14 @@ class _Pending:
 
     @property
     def message_id(self) -> str:
-        return str(getattr(self.message, "id", "") or "")
+        mid = getattr(self.message, "id", None)
+        return "" if mid is None else str(mid).strip()
 
 
 @dataclass
 class _ChannelState:
     running: asyncio.Task | None = None
+    running_entry: _Pending | None = None
     queue: list[_Pending] = field(default_factory=list)
     pump: asyncio.Task | None = None
 
@@ -124,10 +128,10 @@ class ReplyQueue:
     message is gone". The contract here is "your turn comes after the one in
     front of you", which is what a person in the room expects.
 
-    Bounding still exists, because an unbounded queue behind a slow turn is
-    its own failure — the room would get a wall of stale replies. But the
-    bound evicts *soft chatter* first and only ever drops the oldest soft
-    entry, so a directed message cannot be squeezed out by background noise.
+    At most ``max_directed`` entries wait behind one running turn per channel.
+    Soft chatter is evicted first. If only directed entries remain, a NEW
+    directed request is returned as ``deferred`` for durable requeueing by the
+    caller; accepted directed requests never expire or lose their place.
 
     Soft (non-directed) lines coalesce: at most one soft entry is pending per
     channel and a newer one replaces it, carrying the burst of lines it
@@ -176,6 +180,17 @@ class ReplyQueue:
         state = self._channels.get(str(channel_id or ""))
         return len(state.queue) if state else 0
 
+    def contains(self, channel_id: Any, message_id: Any) -> bool:
+        """Whether a message is waiting or still owned by the running turn."""
+        state = self._channels.get(str(channel_id or ""))
+        mid = "" if message_id is None else str(message_id).strip()
+        if state is None or not mid:
+            return False
+        return bool(
+            (state.running_entry and state.running_entry.message_id == mid)
+            or any(entry.message_id == mid for entry in state.queue)
+        )
+
     def stats(self) -> dict[str, Any]:
         running = [cid for cid, s in self._channels.items() if self.active(cid)]
         return {
@@ -199,7 +214,8 @@ class ReplyQueue:
         """Queue a reply turn. Returns what happened, for logging.
 
         One of: ``"started"``, ``"queued"``, ``"coalesced"``, ``"duplicate"``,
-        ``"dropped"``.
+        ``"deferred"``, ``"dropped"``. Deferred directed requests were NOT
+        accepted into memory and must be persisted/retried by the caller.
         """
         cid = str(channel_id or "")
         if not cid or self._handler is None or self._closing:
@@ -216,6 +232,13 @@ class ReplyQueue:
             burst=list(burst or []),
         )
 
+        if (
+            entry.message_id
+            and state.running_entry is not None
+            and state.running_entry.message_id == entry.message_id
+        ):
+            return "duplicate"
+
         # Same message already waiting: refresh it in place rather than
         # queueing the same turn twice (an edit or a re-dispatch).
         for index, queued in enumerate(state.queue):
@@ -231,17 +254,21 @@ class ReplyQueue:
             # inherits the burst of the lines it replaced.
             for index, queued in enumerate(state.queue):
                 if not queued.directed:
-                    merged = list(queued.burst)
+                    merged = list(queued.burst or [queued.message])
                     for msg in entry.burst or [entry.message]:
                         if msg not in merged:
                             merged.append(msg)
                     entry.burst = merged[-24:]
                     state.queue[index] = entry
+                    self._note_drop(cid, queued, "superseded")
                     self._ensure_pump(cid, state)
                     return "coalesced"
 
+        if not self._make_room(cid, state):
+            reason = "deferred" if entry.directed else "queue full"
+            self._note_drop(cid, entry, reason)
+            return "deferred" if entry.directed else "dropped"
         state.queue.append(entry)
-        self._enforce_bound(cid, state)
         started = state.running is None or state.running.done()
         if started and len(state.queue) == 1:
             outcome = "started"
@@ -251,29 +278,24 @@ class ReplyQueue:
         return outcome
 
     def _expire(self, cid: str, state: _ChannelState, now: float) -> None:
-        """Drop entries so old that answering them would be noise, not a reply."""
+        """Expire only soft chatter, never an accepted directed request."""
         kept: list[_Pending] = []
         for entry in state.queue:
-            if now - entry.enqueued_at > self.max_age:
+            if not entry.directed and now - entry.enqueued_at > self.max_age:
                 self._note_drop(cid, entry, "stale")
                 continue
             kept.append(entry)
         state.queue = kept
 
-    def _enforce_bound(self, cid: str, state: _ChannelState) -> None:
-        # Soft entries are already capped at one by coalescing, so the bound
-        # only has to protect against a flood of directed pings. Evict the
-        # OLDEST, because the newest ping is the one the user is waiting on.
-        while len(state.queue) > self.max_directed:
-            victim = None
-            for index, entry in enumerate(state.queue):
-                if not entry.directed:
-                    victim = index
-                    break
-            if victim is None:
-                victim = 0
-            self._note_drop(cid, state.queue[victim], "queue full")
-            del state.queue[victim]
+    def _make_room(self, cid: str, state: _ChannelState) -> bool:
+        if len(state.queue) < self.max_directed:
+            return True
+        for index, entry in enumerate(state.queue):
+            if not entry.directed:
+                del state.queue[index]
+                self._note_drop(cid, entry, "queue full")
+                return True
+        return False
 
     def _note_drop(self, cid: str, entry: _Pending, why: str) -> None:
         logger.warning(
@@ -284,11 +306,17 @@ class ReplyQueue:
             why,
         )
         if self._on_drop is not None:
-            with contextlib.suppress(Exception):
+            try:
                 self._on_drop(cid, entry, why)
+            except Exception:
+                logger.exception(
+                    "ReplyQueue drop callback failed for message %s in %s",
+                    entry.message_id,
+                    cid,
+                )
 
     def _ensure_pump(self, cid: str, state: _ChannelState) -> None:
-        if state.pump is not None and not state.pump.done():
+        if self._closing or (state.pump is not None and not state.pump.done()):
             return
         state.pump = self._task_factory(
             asyncio.create_task(self._pump(cid), name=f"reply-queue-{cid}")
@@ -299,14 +327,19 @@ class ReplyQueue:
         state = self._channels.get(cid)
         if state is None:
             return
+        cancelled = False
         try:
-            while state.queue:
+            while state.queue and not self._closing:
+                self._expire(cid, state, time.monotonic())
+                if not state.queue:
+                    break
                 entry = state.queue.pop(0)
                 handler = self._handler
                 if handler is None:
                     return
                 task = asyncio.ensure_future(handler(entry.message, entry.content))
                 state.running = task
+                state.running_entry = entry
                 try:
                     await asyncio.shield(task)
                 except asyncio.CancelledError:
@@ -319,8 +352,10 @@ class ReplyQueue:
                     #    awaiting it does not cancel us.
                     #  - the PUMP itself was cancelled (shutdown). Then the
                     #    reply task is still running and we must re-raise.
-                    if not task.done():
-                        task.cancel()
+                    pump = asyncio.current_task()
+                    if self._closing or (pump is not None and pump.cancelling()):
+                        if not task.done():
+                            task.cancel()
                         with contextlib.suppress(Exception, asyncio.CancelledError):
                             await task
                         raise
@@ -331,11 +366,15 @@ class ReplyQueue:
                     logger.exception("Reply turn failed in %s", cid)
                 finally:
                     state.running = None
+                    state.running_entry = None
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         finally:
             state.pump = None
             if not state.queue and state.running is None:
                 self._channels.pop(cid, None)
-            elif state.queue:
+            elif state.queue and not self._closing and not cancelled:
                 # A submission landed while we were tearing down.
                 self._ensure_pump(cid, state)
 
@@ -377,23 +416,317 @@ class ReplyQueue:
         return dropped
 
     async def close(self) -> None:
+        """Stop all channels before awaiting cancellation; never restart pumps."""
         self._closing = True
-        for cid, state in list(self._channels.items()):
+        tasks = set()
+        for state in self._channels.values():
             state.queue.clear()
             for task in (state.running, state.pump):
-                if task is not None and not task.done():
-                    task.cancel()
-                    with contextlib.suppress(Exception, asyncio.CancelledError):
-                        await task
-            self._channels.pop(cid, None)
+                if task is not None:
+                    tasks.add(task)
+                    if not task.done():
+                        task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._channels.clear()
+
+
+class RequestJournal:
+    """Durable request IDs and metadata, never message content or credentials.
+
+    Call ``recover()`` once at startup, then fetch Discord messages using
+    ``pending()``. Mark ``effects_started`` BEFORE a tool call or message send:
+    those requests are never automatically retried, even if the process died
+    before it could record delivery. Reasons must be non-sensitive reason codes.
+
+    Connections are opened, committed/rolled back, and closed per operation.
+    Database errors propagate; a corrupt/unwritable journal is never replaced.
+    ``update()`` explicitly permits terminal transitions for edited messages;
+    ``accept()`` and ``begin()`` never silently reopen terminal requests.
+    """
+
+    _PENDING = ("received", "queued", "deferred", "running")
+    _TERMINAL = ("delivered", "suppressed", "failed", "superseded")
+    _TERMINAL_RETENTION = 10_000
+
+    def __init__(self, path: str | os.PathLike[str]) -> None:
+        self.path = os.fspath(path)
+        if not self.path or self.path == ":memory:":
+            raise ValueError("RequestJournal requires an on-disk database path")
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        with self._transaction(write=True) as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS requests (
+                    message_id TEXT PRIMARY KEY,
+                    channel_id TEXT NOT NULL,
+                    author_id TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL CHECK (status IN (
+                        'received', 'queued', 'deferred', 'running',
+                        'delivered', 'suppressed', 'failed', 'superseded'
+                    )),
+                    directed INTEGER NOT NULL DEFAULT 0,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    effects_started INTEGER NOT NULL DEFAULT 0,
+                    response_id TEXT,
+                    reason TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS requests_pending "
+                "ON requests(created_at, message_id) "
+                "WHERE status IN ('received', 'queued', 'deferred', 'running') "
+                "AND effects_started = 0"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS requests_terminal_age "
+                "ON requests(updated_at DESC, message_id DESC) "
+                "WHERE status IN ('delivered', 'suppressed', 'failed', 'superseded')"
+            )
+            self._prune(connection)
+
+    @contextlib.contextmanager
+    def _transaction(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
+        connection = sqlite3.connect(self.path, timeout=5.0)
+        try:
+            connection.row_factory = sqlite3.Row
+            with connection:
+                if write:
+                    connection.execute("BEGIN IMMEDIATE")
+                yield connection
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _record(row: sqlite3.Row) -> dict[str, Any]:
+        record = dict(row)
+        record["id"] = record["message_id"]
+        record["directed"] = bool(record["directed"])
+        record["effects_started"] = bool(record["effects_started"])
+        return record
+
+    @staticmethod
+    def _require(connection: sqlite3.Connection, message_id: Any) -> sqlite3.Row:
+        row = connection.execute(
+            "SELECT * FROM requests WHERE message_id = ?", (str(message_id).strip(),)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown request ID: {message_id}")
+        return row
+
+    @staticmethod
+    def _log_transition(previous: str | None, record: dict[str, Any]) -> None:
+        logger.info(
+            "request_transition %s",
+            json.dumps(
+                {
+                    "message_id": record["message_id"],
+                    "channel_id": record["channel_id"],
+                    "previous_status": previous,
+                    "status": record["status"],
+                    "duration_ms": round(
+                        max(0.0, record["updated_at"] - record["created_at"]) * 1000, 3
+                    ),
+                    "reason": record["reason"],
+                    "attempts": record["attempts"],
+                    "directed": record["directed"],
+                    "effects_started": record["effects_started"],
+                    "response_id": record["response_id"],
+                },
+                sort_keys=True,
+            ),
+        )
+
+    def _prune(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            DELETE FROM requests WHERE message_id IN (
+                SELECT message_id FROM requests
+                WHERE status IN ('delivered', 'suppressed', 'failed', 'superseded')
+                ORDER BY updated_at DESC, message_id DESC
+                LIMIT -1 OFFSET ?
+            )
+            """,
+            (self._TERMINAL_RETENTION,),
+        )
+
+    def accept(
+        self,
+        message_id: Any,
+        channel_id: Any,
+        author_id: Any = "",
+        *,
+        directed: bool = False,
+    ) -> bool:
+        """Insert a received request once; existing metadata is never reset."""
+        mid = "" if message_id is None else str(message_id).strip()
+        cid = "" if channel_id is None else str(channel_id).strip()
+        if not mid or not cid:
+            raise ValueError("Request message_id and channel_id must be nonempty")
+        now = time.time()
+        with self._transaction(write=True) as connection:
+            inserted = connection.execute(
+                """
+                INSERT INTO requests (
+                    message_id, channel_id, author_id, status, directed,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, 'received', ?, ?, ?)
+                ON CONFLICT(message_id) DO NOTHING
+                """,
+                (mid, cid, str(author_id or ""), bool(directed), now, now),
+            ).rowcount
+            if not inserted:
+                return False
+            record = self._record(self._require(connection, mid))
+        self._log_transition(None, record)
+        return True
+
+    def get(self, message_id: Any) -> dict[str, Any] | None:
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM requests WHERE message_id = ?", (str(message_id).strip(),)
+            ).fetchone()
+            return self._record(row) if row is not None else None
+
+    def _change(
+        self,
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        status: str,
+        *,
+        reason: str = "",
+        directed: bool | None = None,
+        effects_started: bool | None = None,
+        response_id: Any = None,
+        attempts: int | None = None,
+    ) -> dict[str, Any]:
+        record = self._record(row)
+        record.update(status=status, reason=reason, updated_at=time.time())
+        if directed is not None:
+            record["directed"] = bool(directed)
+        if effects_started is not None:
+            record["effects_started"] = bool(effects_started)
+        if response_id is not None:
+            record["response_id"] = str(response_id)
+        if attempts is not None:
+            record["attempts"] = attempts
+        connection.execute(
+            """
+            UPDATE requests SET status = :status, reason = :reason,
+                updated_at = :updated_at, directed = :directed,
+                effects_started = :effects_started, response_id = :response_id,
+                attempts = :attempts
+            WHERE message_id = :message_id
+            """,
+            record,
+        )
+        return record
+
+    def update(
+        self,
+        message_id: Any,
+        status: str,
+        *,
+        reason: str = "",
+        directed: bool | None = None,
+        effects_started: bool | None = None,
+        response_id: Any = None,
+    ) -> None:
+        """Persist an explicit transition; omitted optional fields are preserved."""
+        if status not in self._PENDING + self._TERMINAL:
+            raise ValueError(f"Unknown request status: {status}")
+        with self._transaction(write=True) as connection:
+            row = self._require(connection, message_id)
+            record = self._change(
+                connection,
+                row,
+                status,
+                reason=reason,
+                directed=directed,
+                effects_started=effects_started,
+                response_id=response_id,
+            )
+            if status in self._TERMINAL:
+                self._prune(connection)
+        self._log_transition(row["status"], record)
+
+    def pending(
+        self,
+        limit: int = 100,
+        *,
+        after: tuple[float, str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Oldest unfinished, effect-free requests, with stable keyset paging.
+
+        Pass ``(last_row["created_at"], last_row["message_id"])`` as ``after``
+        to inspect the next page even when earlier requests remain busy. Start
+        a fresh sweep without a cursor after reaching the end. Status updates
+        and terminal pruning do not invalidate the cursor.
+        """
+        query = """
+            SELECT * FROM requests
+            WHERE status IN ('received', 'queued', 'deferred', 'running')
+                AND effects_started = 0
+        """
+        parameters: list[Any] = []
+        if after is not None:
+            query += " AND (created_at, message_id) > (?, ?)"
+            parameters.extend((float(after[0]), str(after[1])))
+        query += " ORDER BY created_at, message_id LIMIT ?"
+        parameters.append(max(0, int(limit)))
+        with self._transaction() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+            return [self._record(row) for row in rows]
+
+    def begin(self, message_id: Any) -> None:
+        """Atomically count an attempt and start an unfinished, effect-free turn."""
+        with self._transaction(write=True) as connection:
+            row = self._require(connection, message_id)
+            if row["status"] not in self._PENDING or row["effects_started"]:
+                raise ValueError("Cannot begin a terminal or effects-started request")
+            record = self._change(
+                connection, row, "running", attempts=row["attempts"] + 1
+            )
+        self._log_transition(row["status"], record)
+
+    def recover(self) -> None:
+        """Recover interrupted work once at startup, never replaying effects."""
+        transitions = []
+        with self._transaction(write=True) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM requests
+                WHERE status IN ('received', 'queued', 'running')
+                    OR (status = 'deferred' AND effects_started = 1)
+                """
+            ).fetchall()
+            for row in rows:
+                interrupted = bool(row["effects_started"])
+                record = self._change(
+                    connection,
+                    row,
+                    "failed" if interrupted else "deferred",
+                    reason="interrupted_after_effect" if interrupted else "recovered",
+                )
+                transitions.append((row["status"], record))
+            self._prune(connection)
+        for previous, record in transitions:
+            self._log_transition(previous, record)
+
+    def close(self) -> None:
+        """Lifecycle hook; every operation already closes its own connection."""
 
 
 class Watermarks:
     """Per-channel highest processed message id, for gateway-gap recovery.
 
-    discord.py silently swallows a gateway gap: after a resume the events that
-    happened during the outage are simply never delivered. Recording how far
-    each channel was read lets the bot ask Discord for the rest.
+    A successful gateway resume can replay buffered events, but non-resumable
+    reconnects and process restarts can leave gaps. Recording how far each
+    channel was read lets the bot reconcile those gaps against Discord history,
+    subject to message retention and channel permissions.
 
     Persisted because the most common gap is a process restart, which is
     exactly when in-memory state is gone.

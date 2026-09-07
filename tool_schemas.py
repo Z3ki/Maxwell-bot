@@ -558,7 +558,21 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     # call as an optional `reasoning` field (see tool_registry.extract_reasoning
     # / record_reasoning). It is not forced onto OpenAI schemas. Plain chat
     # goes through send_message.
-    "no_response": _obj({}),
+    "no_response": _obj(
+        {
+            "reason": {
+                "type": "string",
+                "description": "Why this message does not need a reply.",
+                "enum": [
+                    "unrelated",
+                    "spam",
+                    "already_answered",
+                    "user_requested_silence",
+                    "other",
+                ],
+            }
+        }
+    ),
     "more_tools": _obj(
         {
             "need": _str(

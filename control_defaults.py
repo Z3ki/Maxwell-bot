@@ -99,6 +99,14 @@ DEFAULT_CONTROL = {
     "reply_dms": True,
     "reply_groups": True,
     "reply_mentions": True,
+    # Direct requests must end in a visible answer, not discretionary silence.
+    "require_direct_response": True,
+    "respond_to_edited_mentions": True,
+    "live_turn_timeout_seconds": 180,
+    "inbound_retry_attempts": 2,
+    "inbound_retry_delay_seconds": 5,
+    # Page size, not a cap on the total recoverable backlog.
+    "gap_recovery_max_messages": 20,
     # After a mention/reply (or after Maxwell posts in a room), keep
     # watching that whole channel so a directed follow-up does not need
     # another @ or Discord reply. Each later line can spend a full LLM
