@@ -44,7 +44,7 @@ These controls live in the dashboard's **Replies & Triggers** and
 | `live_turn_timeout_seconds` | `180` | Whole live-turn deadline, including preparation and waiting for an AI slot. Range 1–7200 seconds. Long work should use background jobs rather than occupy a live turn indefinitely. |
 | `inbound_retry_attempts` | `2` | Maximum safe processing attempts, including the initial attempt; range 1–5. Never automatically repeat a request after a tool/send may have taken effect. |
 | `inbound_retry_delay_seconds` | `5` | Base retry delay, range 1–300 seconds. The periodic recovery worker applies backoff. |
-| `gap_recovery_max_messages` | `20` | History **page size**, range 0–100, not the total backlog limit. Zero disables history gap scans; durable pending-request recovery remains separate. |
+| `gap_recovery_max_messages` | `0` | Unused for replies. Startup skips the offline backlog (no answers to messages from while Maxwell was down). |
 
 Personal follow-ups now wait their turn instead of cancelling the same user's
 earlier question. `,stop` remains an explicit cancellation. Directed requests that
@@ -62,8 +62,8 @@ and confirmed response IDs—not message content or credentials. Keep the data
 directory private and persistent across deployments.
 
 - **No receipt:** compare Discord history with gateway disconnect/resume logs.
-  Check channel access and whether that channel had a recovery cursor. A missing
-  receipt alone does not prove a Discord library bug.
+  Check channel access. Offline backlog is intentionally not answered after a
+  restart; a missing receipt for a message sent while Maxwell was down is expected.
 - **Suppressed:** inspect the reason (reply switch, channel/user restriction,
   sleep, soft-watch policy, or allowed model silence).
 - **Queued/deferred/running:** inspect queue pressure, retries, and stage timing.

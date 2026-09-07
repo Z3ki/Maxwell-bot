@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -83,6 +84,7 @@ def _message(bot, mid=101, cid=22, *, directed=True, content="question"):
 
         channel.send = send
         channel.fetch_message = AsyncMock(side_effect=lambda mid: channel.messages[mid])
+        channel.last_message_id = mid
         bot._channels_for_test[cid] = channel
     message = SimpleNamespace(
         id=mid,
@@ -103,6 +105,7 @@ def _message(bot, mid=101, cid=22, *, directed=True, content="question"):
     )
     message.reply = channel.send
     channel.messages[mid] = message
+    channel.last_message_id = max(int(getattr(channel, "last_message_id", 0) or 0), int(mid))
     return message
 
 
@@ -326,7 +329,8 @@ def test_forbidden_send_is_not_delivery_or_replayed(tmp_path):
     asyncio.run(run())
     assert bot._request_state(message)["status"] == "failed"
     assert bot._request_state(message)["response_id"] is None
-    assert message.channel.send.await_count == 1
+    # reply() forbidden, then a one-shot channel.send fallback. Not retried.
+    assert message.channel.send.await_count == 2
 
 
 def test_deadline_covers_preparation_and_cleans_typing_context(tmp_path):
@@ -447,18 +451,17 @@ def test_sleep_is_explicit_suppression_not_promised_deferral(tmp_path):
     assert "ping me again" in message.channel.sent[0].content
 
 
-def test_recovery_pages_oldest_first_all_rooms_with_fetch_fallback(tmp_path):
+def test_recovery_skips_offline_backlog_without_replying(tmp_path):
     bot = _bot(tmp_path)
-    bot._control["gap_recovery_max_messages"] = 2
     history_calls = []
-    for cid in range(22, 64):
+    for cid in range(22, 26):
         messages = [_message(bot, cid * 100 + i, cid) for i in range(1, 6)]
         channel = messages[0].channel
         bot._watermarks.note(cid, cid * 100)
 
-        async def history(*, limit, after, oldest_first, rows=messages):
-            history_calls.append((rows[0].channel.id, after.id, oldest_first))
-            for old in [m for m in rows if m.id > after.id][:limit]:
+        async def history(*, limit=1, **_kwargs):
+            history_calls.append(True)
+            for old in []:
                 yield old
 
         channel.history = history
@@ -467,63 +470,47 @@ def test_recovery_pages_oldest_first_all_rooms_with_fetch_fallback(tmp_path):
     bot.get_channel = lambda _cid: None
     bot._capture_recovery_snapshot()
 
-    async def run():
-        for _ in range(16):
-            await bot._recover_missed_messages(settle=False)
-            await _drain(bot)
-
-    asyncio.run(run())
-    assert len(history_calls) == 126
-    assert all(call[2] for call in history_calls)
+    asyncio.run(bot._recover_missed_messages(settle=False))
     assert bot._recovery_cursors == {}
+    assert history_calls == []
     assert all(bot._watermarks.get(cid) == cid * 100 + 5 for cid in channels)
-    assert bot.fetch_channel.await_count == 126
+    assert all(ch.sent == [] for ch in channels.values())
 
 
-def test_disconnect_snapshot_survives_new_live_high_watermark(tmp_path):
+def test_disconnect_snapshot_does_not_answer_missed_messages(tmp_path):
     bot = _bot(tmp_path)
     old, missed, live = [_message(bot, mid) for mid in (100, 101, 200)]
     bot._watermarks.note(22, old.id)
 
-    async def history(*, limit, after, oldest_first):
-        assert after.id == 100
-        assert oldest_first
-        yield missed
-        yield live
-
-    live.channel.history = history
-
     async def run():
         await bot.on_disconnect()
         await bot.on_message(live)
-        assert bot._watermarks.get(22) == 100
+        await _drain(bot)
         await bot._recover_missed_messages(settle=False)
         await _drain(bot)
 
     asyncio.run(run())
-    assert bot._request_state(missed)["status"] == "delivered"
+    assert bot._request_state(missed) == {}
+    assert bot._request_state(live)["status"] == "delivered"
     assert bot._watermarks.get(22) == 200
-    assert len(live.channel.sent) == 2
+    assert len(live.channel.sent) == 1
+    assert bot._recovery_cursors == {}
 
 
-def test_recovery_does_not_advance_past_failed_durable_accept(tmp_path, monkeypatch):
+def test_recovery_jump_does_not_need_journal_accept(tmp_path, monkeypatch):
     bot = _bot(tmp_path)
     message = _message(bot)
     bot._watermarks.note(22, 100)
     bot._capture_recovery_snapshot()
-
-    async def history(**_kwargs):
-        yield message
-
-    message.channel.history = history
     monkeypatch.setattr(
         bot._request_journal,
         "accept",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk unavailable")),
     )
     asyncio.run(bot._recover_missed_messages(settle=False))
-    assert bot._watermarks.get(22) == 100
-    assert bot._recovery_cursors["22"] == 100
+    assert bot._watermarks.get(22) == message.id
+    assert bot._recovery_cursors == {}
+    assert message.channel.sent == []
 
 
 def test_restart_drains_accepted_request_but_not_uncertain_tool(tmp_path):
@@ -602,14 +589,15 @@ def test_overlapping_recovery_scans_are_serialized(tmp_path):
 
     async def run():
         entered, release = asyncio.Event(), asyncio.Event()
+        original = bot._fetch_inbound_channel
 
-        async def history(**kwargs):
-            calls.append(kwargs["after"].id)
+        async def fetch(channel_id):
+            calls.append(channel_id)
             entered.set()
             await release.wait()
-            yield message
+            return await original(channel_id)
 
-        message.channel.history = history
+        bot._fetch_inbound_channel = fetch
         scan = asyncio.create_task(bot._recover_missed_messages(settle=False))
         await entered.wait()
         await bot._recover_missed_messages(settle=False)
@@ -618,8 +606,9 @@ def test_overlapping_recovery_scans_are_serialized(tmp_path):
         await _drain(bot)
 
     asyncio.run(run())
-    assert calls == [100]
-    assert bot._request_state(message)["status"] == "delivered"
+    assert calls == ["22"]
+    assert message.channel.sent == []
+    assert bot._recovery_cursors == {}
 
 
 def test_llm_trace_has_inbound_message_id(tmp_path):
@@ -702,22 +691,12 @@ def test_explicit_command_is_checkpointed_before_execution(tmp_path):
     assert row["effects_started"] is True
 
 
-def test_restart_mid_gap_keeps_conservative_persisted_cursor(tmp_path):
+def test_restart_skips_offline_gap_instead_of_answering_it(tmp_path):
     first = _bot(tmp_path)
-    first._control["gap_recovery_max_messages"] = 2
     first._watermarks.note(22, 100)
     first._watermarks.save()
     first._capture_recovery_snapshot()
     backlog = [_message(first, mid) for mid in (101, 102, 103, 200)]
-    history_starts = []
-
-    async def history(*, limit, after, oldest_first):
-        assert oldest_first
-        history_starts.append(after.id)
-        for message in [m for m in backlog if m.id > after.id][:limit]:
-            yield message
-
-    backlog[0].channel.history = history
 
     async def before_restart():
         await first.on_message(backlog[-1])
@@ -726,10 +705,10 @@ def test_restart_mid_gap_keeps_conservative_persisted_cursor(tmp_path):
         await _drain(first)
 
     asyncio.run(before_restart())
-    assert first._watermarks.get(22) == 102
+    assert first._watermarks.get(22) == 200
+    assert len(backlog[0].channel.sent) == 1
 
     restarted = _bot(tmp_path)
-    restarted._control["gap_recovery_max_messages"] = 2
     restarted._channels_for_test[22] = backlog[0].channel
     restarted._watermarks.load()
     restarted._capture_recovery_snapshot()
@@ -740,10 +719,32 @@ def test_restart_mid_gap_keeps_conservative_persisted_cursor(tmp_path):
         await _drain(restarted)
 
     asyncio.run(after_restart())
-    assert history_starts == [100, 102]
-    assert restarted._request_state(backlog[2])["status"] == "delivered"
-    # The newer live message was already delivered before the crash.
-    assert len(backlog[0].channel.sent) == 4
+    assert restarted._watermarks.get(22) == 200
+    assert restarted._request_state(backlog[2]) == {}
+    assert len(backlog[0].channel.sent) == 1
+
+
+def test_offline_journal_rows_are_abandoned_not_answered(tmp_path):
+    bot = _bot(tmp_path)
+    bot._process_started_at = time.time()
+    message = _message(bot)
+    bot._request_journal.accept(message.id, 22, 11, directed=True)
+    # Pretend the receipt is from the previous process.
+    import sqlite3
+
+    path = bot._request_journal.path
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "UPDATE requests SET created_at = ? WHERE message_id = ?",
+            (bot._process_started_at - 60, str(message.id)),
+        )
+        db.commit()
+    bot._request_journal.recover()
+    dropped = bot._abandon_offline_inbound()
+    assert dropped == 1
+    asyncio.run(bot._retry_pending_inbound())
+    assert bot._request_state(message)["reason"] == "stale_offline"
+    assert message.channel.sent == []
 
 
 def test_pending_sweep_reaches_new_rooms_beyond_busy_first_page(tmp_path):
@@ -918,20 +919,13 @@ def test_failed_receipt_floor_survives_new_live_message_and_restart(
     restarted._capture_recovery_snapshot()
     restarted._request_journal.recover()
 
-    async def history(*, after, **_kwargs):
-        assert after.id == 100
-        yield missing
-        yield newer
-
-    missing.channel.history = history
-
     async def after_restart():
         await restarted._recover_missed_messages(settle=False)
         await _drain(restarted)
 
     asyncio.run(after_restart())
-    assert restarted._request_state(missing)["status"] == "delivered"
-    assert len(missing.channel.sent) == 2
+    assert restarted._request_state(missing) == {}
+    assert len(missing.channel.sent) == 1
     assert json.loads((tmp_path / "inbound_recovery_floors.json").read_text()) == {}
 
 
@@ -953,8 +947,10 @@ def test_receipt_failure_during_empty_gap_page_cannot_clear_new_floor(tmp_path, 
 
     message.channel.history = history
     asyncio.run(bot._recover_missed_messages(settle=False))
-    assert bot._recovery_cursors["22"] == 100
-    assert json.loads((tmp_path / "inbound_recovery_floors.json").read_text()) == {"22": 100}
+    assert bot._recovery_cursors == {}
+    floors_path = tmp_path / "inbound_recovery_floors.json"
+    assert (not floors_path.exists()) or json.loads(floors_path.read_text()) == {}
+    assert message.channel.sent == []
 
 
 @pytest.mark.parametrize("forbidden", [False, True])

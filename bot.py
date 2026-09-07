@@ -2905,6 +2905,9 @@ class MaxwellBot(commands.Bot):
         self._inbound_processing: set[str] = set()
         self._recovery_cursors: dict[str, int] = {}
         self._recovery_lock = asyncio.Lock()
+        # Rows journaled before this process started are leftover from an
+        # outage. They are not live conversation and must not get a reply.
+        self._process_started_at = time.time()
         self._telegram_chat_locks: dict[str, asyncio.Lock] = {}
         # Channels the bot is currently generating a reply for (in-flight).
         # Autonomy reads this to avoid posting into a channel mid-reply, which
@@ -5661,11 +5664,13 @@ class MaxwellBot(commands.Bot):
         # loop's task factory for tracking.
         self._reply_queue.bind(self._run_reliable_turn, task_factory=self._track_task)
         self._request_journal.recover()
+        abandoned = self._abandon_offline_inbound()
         self._watermarks.load()
         self._capture_recovery_snapshot()
         logger.info(
-            "Reply queue bound; %d channel watermark(s) restored",
+            "Reply queue bound; %d channel watermark(s) restored%s",
             len(self._watermarks),
+            f"; abandoned {abandoned} offline inbound request(s)" if abandoned else "",
         )
         with contextlib.suppress(Exception):
             started = self.plugin_manager.start_jobs()
@@ -5951,77 +5956,89 @@ class MaxwellBot(commands.Bot):
             channel = await self.fetch_channel(int(channel_id))
         return channel
 
+    def _abandon_offline_inbound(self) -> int:
+        """Drop journaled work from before this process started. No replies."""
+        journal = getattr(self, "_request_journal", None)
+        boot = float(getattr(self, "_process_started_at", 0) or 0)
+        if journal is None or boot <= 0:
+            return 0
+        dropped = 0
+        for row in journal.pending(limit=10000):
+            created = float(row.get("created_at") or 0)
+            if created >= boot:
+                continue
+            with contextlib.suppress(Exception):
+                journal.update(
+                    row["message_id"], "suppressed", reason="stale_offline"
+                )
+                dropped += 1
+        return dropped
+
+    async def _latest_channel_message_id(self, channel) -> int | None:
+        latest = getattr(channel, "last_message_id", None)
+        if latest:
+            with contextlib.suppress(TypeError, ValueError):
+                return int(latest)
+        history = getattr(channel, "history", None)
+        if not callable(history):
+            return None
+        try:
+            async for msg in history(limit=1):
+                mid = getattr(msg, "id", None)
+                if mid is not None:
+                    return int(mid)
+        except TypeError:
+            async for msg in history():
+                mid = getattr(msg, "id", None)
+                if mid is not None:
+                    return int(mid)
+                break
+        except Exception:
+            return None
+        return None
+
     async def _recover_missed_messages(self, *, settle=True) -> None:
-        """Serialize oldest-first pages, freezing each cursor until durable receipt."""
+        """Skip the offline backlog. Do not answer messages from while we were down."""
         if not hasattr(self, "_recovery_lock"):
             self._recovery_lock = asyncio.Lock()
         if self._recovery_lock.locked():
             return
-        failure_versions = getattr(self, "_receipt_failure_versions", None)
-        if failure_versions is None:
-            failure_versions = self._receipt_failure_versions = {}
         if not hasattr(self, "_recovery_cursors"):
             self._capture_recovery_snapshot()
-        limit = self._missed_message_scan_limit()
-        if limit <= 0:
-            return
         async with self._recovery_lock:
             if settle:
-                await asyncio.sleep(2.0)
-            # Eight pages per tick, rotating unfinished rooms to the back.
-            # A long backlog or inaccessible room cannot starve other rooms.
-            for channel_id, last_seen in list(self._recovery_cursors.items())[:8]:
-                if not channel_id.isdigit():
+                await asyncio.sleep(0)
+            skipped = 0
+            for channel_id in list(self._recovery_cursors):
+                if not str(channel_id).isdigit():
                     self._recovery_cursors.pop(channel_id, None)
                     continue
-                count = 0
-                failure_version = failure_versions.get(channel_id, 0)
                 try:
-                    async with asyncio.timeout(30):
-                        channel = await self._fetch_inbound_channel(channel_id)
-                        async for old in channel.history(
-                            limit=limit,
-                            after=discord.Object(id=int(last_seen)),
-                            oldest_first=True,
-                        ):
-                            if int(getattr(old, "id", 0) or 0) <= int(last_seen):
-                                continue
-                            await self.on_message(old)
-                            journal = getattr(self, "_request_journal", None)
-                            if journal is not None and not journal.get(old.id):
-                                # The durable insert failed. Do not advance past it.
-                                break
-                            if failure_versions.get(channel_id, 0) != failure_version:
-                                break
-                            self._recovery_cursors[channel_id] = int(old.id)
-                            self._watermarks.note(channel_id, old.id)
-                            count += 1
-                        else:
-                            if (
-                                count < limit
-                                and failure_versions.get(channel_id, 0) == failure_version
-                            ):
-                                self._recovery_cursors.pop(channel_id, None)
-                                floors = (
-                                    getattr(self, "_failed_receipt_floors", None) or {}
-                                )
-                                if channel_id in floors:
-                                    floors.pop(channel_id)
-                                    self._save_failed_receipt_floors()
+                    channel = await self._fetch_inbound_channel(channel_id)
+                    latest = await self._latest_channel_message_id(channel)
+                    if latest:
+                        self._watermarks.note(channel_id, latest)
+                        skipped += 1
                 except (discord.Forbidden, discord.NotFound):
-                    # Retain the frozen cursor in case access is restored.
-                    continue
+                    pass
                 except Exception as exc:
                     logger.warning(
-                        "inbound cid=%s stage=recovery_error error=%s",
+                        "inbound cid=%s stage=recovery_skip_error error=%s",
                         channel_id,
                         type(exc).__name__,
                     )
-                finally:
-                    if channel_id in self._recovery_cursors:
-                        cursor = self._recovery_cursors.pop(channel_id)
-                        self._recovery_cursors[channel_id] = cursor
+                self._recovery_cursors.pop(channel_id, None)
+            floors = getattr(self, "_failed_receipt_floors", None)
+            if floors:
+                floors.clear()
+                with contextlib.suppress(Exception):
+                    self._save_failed_receipt_floors()
             self._watermarks.save()
+            if skipped:
+                logger.info(
+                    "Skipped offline backlog in %s channel(s); not answering old messages",
+                    skipped,
+                )
 
     async def _retry_pending_inbound(self) -> None:
         journal = getattr(self, "_request_journal", None)
@@ -6036,12 +6053,17 @@ class MaxwellBot(commands.Bot):
             after=self._inbound_retry_after,
             before=self._inbound_retry_before,
         )
+        boot = float(getattr(self, "_process_started_at", 0) or 0)
         handled = 0
         for row in rows:
             if handled >= 20:
                 break
             mid, cid = row["message_id"], row["channel_id"]
             self._inbound_retry_after = (row["created_at"], mid)
+            if boot and float(row.get("created_at") or 0) < boot:
+                with contextlib.suppress(Exception):
+                    journal.update(mid, "suppressed", reason="stale_offline")
+                continue
             if self._reply_queue.contains(cid, mid) or mid in self._inbound_processing:
                 continue
             if self._reply_queue.depth(cid) >= self._reply_queue.max_directed:

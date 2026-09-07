@@ -112,8 +112,9 @@ DEFAULT_CONTROL = {
     "live_turn_timeout_seconds": 180,
     "inbound_retry_attempts": 2,
     "inbound_retry_delay_seconds": 5,
-    # Page size, not a cap on the total recoverable backlog.
-    "gap_recovery_max_messages": 20,
+    # Unused for answering: startup skips the offline backlog instead of
+    # replaying history. Kept so old control.json keys still sanitize.
+    "gap_recovery_max_messages": 0,
     # After a mention/reply (or after Maxwell posts in a room), keep
     # watching that whole channel so a directed follow-up does not need
     # another @ or Discord reply. Each later line can spend a full LLM
