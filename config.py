@@ -197,6 +197,12 @@ class Config:
     # at startup with a sentence that says what to do.
     OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "").strip()
     OLLAMA_REM_MODEL = os.getenv("OLLAMA_REM_MODEL") or OLLAMA_MODEL
+    # Partner bot (Uni/GF) can run its own model/endpoint. Blank fields
+    # inherit the main OLLAMA_* values, so unset = current behavior.
+    GF_MODEL = os.getenv("GF_MODEL", "").strip()
+    GF_BASE_URL = os.getenv("GF_BASE_URL", "").strip()
+    GF_API_KEY = os.getenv("GF_API_KEY", "").strip()
+    GF_REASONING_EFFORT = os.getenv("GF_REASONING_EFFORT", "").strip()
     # max_tokens = max *output* tokens per completion (not context window).
     # minimax-m3 allows huge context but caps output ~131072; 8192 is a sane default.
     OLLAMA_MAX_TOKENS = _int_env(

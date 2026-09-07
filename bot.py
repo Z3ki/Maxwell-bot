@@ -3321,13 +3321,37 @@ class MaxwellBot(commands.Bot):
         self._tasks = [t for t in self._tasks if not t.done()]
 
     def _setup_ai(self):
+        # Partner bot gets its own model/endpoint when GF_* is configured;
+        # blanks fall back to the main values (behavior unchanged by default).
+        is_gf = bool(getattr(self, "_is_gf", False))
+        base_url = (
+            self.config.GF_BASE_URL or self.config.OLLAMA_BASE_URL
+            if is_gf
+            else self.config.OLLAMA_BASE_URL
+        )
+        model = (
+            self.config.GF_MODEL or self.config.OLLAMA_MODEL
+            if is_gf
+            else self.config.OLLAMA_MODEL
+        )
+        api_key = (
+            self.config.GF_API_KEY or self.config.OLLAMA_API_KEY
+            if is_gf
+            else self.config.OLLAMA_API_KEY
+        )
+        reasoning_effort = (
+            self.config.GF_REASONING_EFFORT if is_gf else ""
+        )
         self.ai_provider = OllamaProvider(
-            base_url=self.config.OLLAMA_BASE_URL,
-            model=self.config.OLLAMA_MODEL,
+            base_url=base_url,
+            model=model,
             max_tokens=self.config.OLLAMA_MAX_TOKENS,
             temperature=self.config.OLLAMA_TEMPERATURE,
-            api_key=self.config.OLLAMA_API_KEY,
-            disable_reasoning=self.config.OLLAMA_DISABLE_REASONING,
+            api_key=api_key,
+            disable_reasoning=(
+                False if is_gf else self.config.OLLAMA_DISABLE_REASONING
+            ),
+            reasoning_effort=reasoning_effort,
             fallback_base_url=self.config.OLLAMA_FALLBACK_BASE_URL,
             fallback_model=self.config.OLLAMA_FALLBACK_MODEL,
             fallback_api_key=self.config.OLLAMA_FALLBACK_API_KEY,
