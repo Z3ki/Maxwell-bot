@@ -7161,7 +7161,7 @@ class MaxwellBot(commands.Bot):
 
         if message.author.bot:
             if not self._control.get("reply_to_bots", True):
-                return
+                return "bot_author"
 
         # Every human line updates the room's pace and engagement, even
         # the ones that never become a turn — deliberately above the
