@@ -12,7 +12,7 @@ The newcomer path is one command:
 curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/install.sh | bash
 ```
 
-Maxwell is a Discord self-bot backed by any OpenAI-compatible LLM. The installer fetches this repository, installs system and Python dependencies, creates `.venv`, walks through Discord token/provider/owner/dashboard configuration, verifies the result with `doctor.py`, and writes `run.sh`.
+Maxwell is a Discord self-bot backed by any OpenAI-compatible LLM. The installer fetches this repository, writes `.env`, and runs Maxwell **inside Docker** so host Python/ffmpeg/package versions cannot fight it. The only host dependency is Docker Engine (and Compose).
 
 **Self-bot warning:** Maxwell uses `discord.py-self` with a Discord user token. Self-bots may violate Discord's Terms of Service and can put the account at risk. The installer asks you to confirm this before continuing.
 
@@ -27,28 +27,28 @@ Read these first if you are new to the project:
 ```bash
 git clone https://github.com/Z3ki/Maxwell-bot.git maxwell
 cd maxwell
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
 cp .env.example .env      # fill in DISCORD_TOKEN, OLLAMA_BASE_URL, OLLAMA_MODEL
-python3 doctor.py
-python3 bot.py
+# MAXWELL_HOST_BIND must be the host path of this checkout
+# (install.sh sets it; for a manual clone use the absolute path here)
+docker compose up -d --build
+docker compose exec maxwell python3 doctor.py
 ```
 
-`python3 doctor.py --probe` also calls your model and embedding endpoints, so you find out the URL, key, or model is wrong before the bot does.
+`python3 doctor.py --probe` (inside the container) also calls your model and embedding endpoints, so you find out the URL, key, or model is wrong before the bot does.
 
 ### Running after install
 
 ```bash
 cd ~/maxwell
-./run.sh                         # bot
-. .venv/bin/activate
-python3 api/api_server.py        # dashboard/API (optional)
-pm2 start ecosystem.config.js    # optional process manager
+./run.sh -d                                    # docker compose up -d
+docker compose logs -f maxwell                 # bot + dashboard logs
+docker compose exec maxwell python3 doctor.py  # install check
+docker compose down                            # stop
 ```
 
-One thing is worth knowing up front: the `shell` tool runs inside a Docker container, so it needs a working Docker daemon your user can reach. The installer offers to install Docker or writes `ENABLE_SHELL=false` so the default is never left enabled silently when Docker is unavailable.
+The dashboard/API is started in the same container (http://127.0.0.1:8765). The shell sandbox and site backends are sibling containers; `MAXWELL_HOST_BIND` is how they bind-mount this checkout through the host Docker daemon.
+
+Already on a host venv/PM2 install? `git pull --ff-only && ./install.sh --local` keeps `.env` and `data/`, stops the host bot/API, and starts Docker. Details: [Upgrading from a host install](docs/INSTALL.md#upgrading-from-a-host--venv--pm2-install).
 
 ## Features
 
@@ -71,6 +71,8 @@ One thing is worth knowing up front: the `shell` tool runs inside a Docker conta
 ```
 bot.py              Main bot entry point
 bot_tools.py        Tool implementations
+discord_threads.py  Discord thread create/control + stored briefs
+docker-compose.yml  Supported runtime (Maxwell in Docker)
 providers.py        OpenAI-compatible provider wrapper
 config.py           Environment-backed configuration (incl. feature detection)
 rag_memory.py       RAG vector memory (SQLite + numpy + embeddings API)
@@ -298,7 +300,6 @@ All commands use the `,` prefix. Admin commands require the user to be in the ad
 | `,x read [@handle]` | Yes | Home timeline, or that account's posts |
 | `,x search <query>` / `,x tweet <id\|url>` | Yes | One search or one post |
 | `,x post <text>` | Yes | Post to X by hand (spends the hourly budget) |
-| `,guide [goal]` / `,guided-goal [goal]` | No | Create a thread `guide: <goal>` and ask 5 clarifying questions before building — use when your site/app request is vague; Maxwell also auto-triggers `guide` tool when you say "build a maze" with no spec |
 | `,vc join` | No | Join your current VC and start live listening |
 | `,vc leave` | No | Stop listening and disconnect from VC |
 | `,vc listen` | No | Start live VC listening while staying connected |
@@ -349,7 +350,7 @@ Call it once after a publish or edit — `fetch_url` only sees source, not
 runtime. Fix with `edit_site` / `site_server`, then test once more. Repeating
 `site_test` on the same URL without changing a file is refused.
 
-Maxwell can now edit **any** site (ownership check removed for `edit_site`/`site_server`/`site_test` so he can fix a site even if you didn't create it), and `create_site`/`site_server` is enforced for neural/synced builds. For vague requests (`"build a maze"` with no spec) use `,guide <goal>` or `,guided-goal` — Maxwell creates a thread `guide: <goal>` and asks 5 clarifying questions (purpose, must-have features, style, realtime/backend, data). He also auto-calls the `guide` tool himself when he detects vagueness instead of one-shot building.
+Maxwell can now edit **any** site (ownership check removed for `edit_site`/`site_server`/`site_test` so he can fix a site even if you didn't create it), and `create_site`/`site_server` is enforced for neural/synced builds. To spin a focused conversation off the parent channel, Maxwell calls `create_thread` with a **required** `context` brief — that brief is injected into every turn in the thread so thread-Maxwell is not starting cold. `thread_control` adds more context, renames, archives, or lists those threads. There is no guided-goal questionnaire.
 
 ### Site backends
 

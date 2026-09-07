@@ -46,6 +46,7 @@ from utils import (  # single source of truth, fd-safe
     FileLock,
     _atomic_json_write_sync,
     _safe_int,
+    docker_bind_path,
     is_direct_image_url,
     is_gif_page_url,
 )
@@ -6428,69 +6429,6 @@ class ListSitesTool(Tool):
 _WEB_REPLY_CTX_RE = re.compile(r"\[Latest message replies to[^\]]*\]", re.IGNORECASE)
 
 
-class GuideTool(Tool):
-    """Guided-goal: create a thread and collect clarifications before building."""
-
-    def get_description(self):
-        return (
-            "Start a guided build: create a thread named 'guide: <goal>' and ask "
-            "clarifying questions before you build. Optional — only when you "
-            "genuinely cannot start without answers. Params: goal (short "
-            "description of what they want)."
-        )
-
-    async def execute(self, message: Message, goal: str | None = None, **kwargs) -> str:
-        raw_goal = str(goal or kwargs.get("text") or kwargs.get("prompt") or "").strip()
-        if not raw_goal:
-            raw_goal = (message.content or "").strip()[:200] or "your project"
-        short = re.sub(r"\s+", " ", raw_goal)[:50].strip() or "project"
-        thread_name = f"guide: {short}"
-        questionnaire = (
-            f"**Guided build — {short}**\n"
-            f"<@{message.author.id}> let's nail the spec before I build it:\n"
-            "1) **Purpose / audience** — who is it for, what problem does it solve?\n"
-            "2) **Must-have features** — list 3-5 things it must do\n"
-            "3) **Look & feel** — style, vibe, colors, any reference?\n"
-            "4) **Realtime / backend** — live updates, multiplayer, accounts, or a static page?\n"
-            "5) **Data / persistence** — save state? how long should it live?\n"
-            "Reply in this thread with your answers (numbers are fine). I'll then build it and `site_test` it."
-        )
-        thread = None
-        err = None
-        try:
-            if hasattr(message, "create_thread"):
-                thread = await message.create_thread(
-                    name=thread_name, auto_archive_duration=60
-                )
-            elif hasattr(message.channel, "create_thread"):
-                import discord
-
-                thread = await message.channel.create_thread(
-                    name=thread_name,
-                    auto_archive_duration=60,
-                    type=discord.ChannelType.public_thread,
-                    message=message,
-                )
-        except Exception as e:
-            err = str(e)[:200]
-        if thread is not None:
-            try:
-                await thread.send(questionnaire)
-            except Exception as e:
-                err = str(e)[:200]
-            url = (
-                getattr(thread, "jump_url", None)
-                or getattr(thread, "mention", None)
-                or thread_name
-            )
-            return f"Guide thread created: {url} — questionnaire posted. Waiting for replies in thread {getattr(thread, 'id', '')}."
-        try:
-            await message.channel.send(questionnaire)
-        except Exception as e:
-            err = str(e)[:200]
-        return f"Guide posted in channel (no thread: {err or 'DMs have no threads'}) — waiting for replies."
-
-
 _WEB_SNIPPET_CHARS = 400
 
 
@@ -7988,7 +7926,9 @@ class ShellTool(Tool):
         except Exception as exc:
             raise RuntimeError(f"could not prepare sandbox image: {exc}") from exc
 
-        shell_host = os.path.join(os.path.dirname(__file__), "shelldocker")
+        shell_host = docker_bind_path(
+            os.path.join(os.path.dirname(__file__), "shelldocker")
+        )
         run_args = [
             "run",
             "-d",

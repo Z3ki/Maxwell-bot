@@ -6,7 +6,7 @@
 curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/install.sh | bash
 ```
 
-The installer explains that Maxwell is a Discord self-bot, warns that self-bots may violate Discord's Terms of Service, installs system packages, clones/updates the repo (`MAXWELL_REPO_URL`, defaulting to the upstream GitHub URL), creates `.venv`, installs Python dependencies, asks for configuration, runs `doctor.py`, writes `run.sh`, and prints start/update instructions.
+The installer explains that Maxwell is a Discord self-bot, warns that self-bots may violate Discord's Terms of Service, clones/updates the repo (`MAXWELL_REPO_URL`, defaulting to the upstream GitHub URL), writes `.env`, and runs Maxwell **in Docker**. Host Python, ffmpeg, and pip packages are not used at runtime.
 
 It will ask for:
 
@@ -15,7 +15,6 @@ It will ask for:
 3. Discord owner user ID(s).
 4. Dashboard/admin password.
 5. Whether to enable token-spending background loops.
-6. Whether to install Docker or disable the shell tool.
 
 Prompts read from `/dev/tty`, so they work even when the script itself arrives through `curl | bash`. If no TTY exists, set environment variables and run non-interactively.
 
@@ -30,45 +29,28 @@ OLLAMA_MODEL="moonshotai/kimi-k2.6:free" \
 OLLAMA_API_KEY="your-openrouter-key" \
 MAXWELL_OWNER_IDS="123456789012345678" \
 MAXWELL_ADMIN_PASSWORD="change-me" \
-MAXWELL_INSTALL_EXTRAS=no \
-MAXWELL_INSTALL_DOCKER=no \
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/install.sh)"
 ```
 
 To install from a fork or mirror, set `MAXWELL_REPO_URL` (and optionally `MAXWELL_BRANCH`). Identity (`BOT_NAME`, `CREATOR_NAME`, `CREATOR_ID`, `MAXWELL_OWNER_IDS`, `BOT_INVITE_URL`, and related IDs) is configured in `.env` after install — blank IDs mean no baked-in owner. See [CONFIGURATION.md](CONFIGURATION.md).
 
-For sandboxes or CI where system packages must not be installed, add `MAXWELL_SKIP_SYSTEM_DEPS=1`. Use it only after preinstalling `git`, `curl`, and Python 3.11+ with venv/pip.
+For sandboxes or CI where Docker must not be installed by the script, add `MAXWELL_SKIP_SYSTEM_DEPS=1`. Use it only after Docker Engine + Compose already work as your user.
 
 ## Requirements
 
 | Requirement | Notes |
 |---|---|
-| OS | Debian/Ubuntu (`apt-get`), Fedora/RHEL (`dnf`), Arch (`pacman`), or macOS with Homebrew. |
-| Python | 3.11 or newer, with `venv` and `pip`. |
-| Disk/RAM | A few hundred MB for the checkout and venv; more for optional packages, Docker images, and local LLM models. 1 GB+ RAM is recommended for the bot process; local models need much more. |
-| Network | GitHub, PyPI, Discord, and your LLM endpoint. |
-| Optional Docker | Required only for the `shell` tool. |
-| Optional media packages | `ffmpeg`, opus/libopus, libsodium, `espeak-ng`, and Node.js unlock video, voice, TTS, and YouTube helpers. |
+| OS | Debian/Ubuntu, Fedora/RHEL, Arch, or macOS with Docker Desktop. |
+| Docker | Engine + Compose. Linux uses host networking (`docker-compose.yml`); macOS/Windows uses `docker-compose.bridge.yml`. |
+| Python on the host | Only needed once, to write `.env` during install. Maxwell itself runs in the image (Python 3.12). |
+| Disk/RAM | A few hundred MB for the checkout; more for Docker images and local LLM models. 1 GB+ RAM is recommended for the bot process; local models need much more. |
+| Network | GitHub, PyPI (image build), Discord, and your LLM endpoint. |
 
 ## Manual install
 
 ```bash
-sudo apt update
-sudo apt install -y git python3 python3-venv python3-pip
-```
-
-```bash
 git clone https://github.com/Z3ki/Maxwell-bot.git maxwell
 cd maxwell
-```
-
-That URL is the upstream repo. A fork or mirror is fine; the installer equivalent is `MAXWELL_REPO_URL`. Then:
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
 cp .env.example .env
 chmod 600 .env
 ```
@@ -79,23 +61,20 @@ Edit `.env` and set at least:
 DISCORD_TOKEN=your-discord-user-token
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=qwen3:8b
+MAXWELL_HOST_BIND=/absolute/path/to/this/checkout
 ```
 
 Optional identity (`BOT_NAME`, `CREATOR_NAME`, `CREATOR_ID`, `BOT_INVITE_URL`, …) is documented in [CONFIGURATION.md](CONFIGURATION.md). Empty IDs mean no baked-in owner.
 
-Then verify and run:
+Then:
 
 ```bash
-python3 doctor.py
-python3 doctor.py --probe
-python3 bot.py
+docker compose up -d --build
+docker compose exec maxwell python3 doctor.py
+docker compose exec maxwell python3 doctor.py --probe
 ```
 
-The API/dashboard is separate:
-
-```bash
-python3 api/api_server.py
-```
+The dashboard/API starts in the same container on port 8765.
 
 ## Credentials and provider setup
 
@@ -174,92 +153,55 @@ OLLAMA_API_KEY=provider-key-if-needed
 
 A bare host such as `http://localhost:11434` is normalized by Maxwell with `/v1` appended. A URL that already has a path, such as `https://openrouter.ai/api/v1`, is used as-is.
 
-## Optional features and packages
+## Optional features
 
-Install all optional Python packages with:
+The Docker image already includes the optional Python packages and system tools (ffmpeg, opus, espeak-ng, Node, Chromium). Features still honour `ENABLE_*=auto|true|false` in `.env`.
 
-```bash
-python -m pip install -r requirements-optional.txt
-```
+| Feature | What it needs besides the image |
+|---|---|
+| Web search | nothing extra |
+| YouTube | nothing extra (Node is in the image) |
+| Video input | nothing extra (ffmpeg is in the image) |
+| Voice channels | a reachable Discord voice UDP path; host networking on Linux |
+| TTS | nothing extra for espeak/gTTS |
+| RAG memory | a reachable embeddings endpoint, e.g. `ollama pull qwen3-embedding:0.6b` on the host |
+| Shell tool | docker.sock mounted into the Maxwell container (Compose does this) |
 
-| Feature | Python package(s) | System package(s) |
-|---|---|---|
-| Web search | `ddgs` | none |
-| YouTube | `yt-dlp`, `yt-dlp-ejs` | `nodejs` or another JS runtime for YouTube challenges |
-| Video input | core code | `ffmpeg` |
-| Voice channels | `PyNaCl`, `davey`, `discord-ext-voice-recv`, `nvidia-riva-client` | opus/libopus, libsodium, `ffmpeg` |
-| TTS | `gTTS` for Google TTS | `espeak-ng` for local TTS, `ffmpeg` for VC playback |
-| RAG memory | core code | reachable embeddings endpoint, e.g. `ollama pull qwen3-embedding:0.6b` |
-| Shell tool | core code | Docker Engine and reachable daemon |
+## Docker
 
-System package examples:
+Maxwell **is** a container. Compose bind-mounts this checkout at `/app` and docker.sock so:
 
-```bash
-# Debian/Ubuntu
-sudo apt install ffmpeg libopus0 libsodium-dev espeak-ng nodejs
+- The bot/API run isolated from host Python.
+- The `shell` sandbox and `site_server` backends are sibling containers on the host daemon.
+- `MAXWELL_HOST_BIND` is the host path of the checkout, used when those siblings bind-mount files.
 
-# Fedora/RHEL
-sudo dnf install ffmpeg opus libsodium-devel espeak-ng nodejs
-
-# Arch
-sudo pacman -Sy --needed ffmpeg opus libsodium espeak-ng nodejs
-
-# macOS/Homebrew
-brew install ffmpeg opus libsodium espeak-ng node
-```
-
-## Docker for the shell tool
-
-The shell tool runs inside a Docker container and requires a Docker daemon reachable by the bot user.
-
-- If Docker works, keep `ENABLE_SHELL=true`.
-- If Docker is absent or the current user cannot access the daemon, set `ENABLE_SHELL=false`.
-- On Linux, after adding a user to the `docker` group, log out and back in before retrying.
-
-The installer never leaves the default shell tool enabled silently when Docker is unavailable; it writes `ENABLE_SHELL=false` unless Docker is selected and reachable.
+Linux uses `network_mode: host` so `localhost` Ollama, site backends on `127.0.0.1:8800-8899`, and the dashboard on `:8765` work as before. macOS/Windows use `docker-compose.bridge.yml`; the installer rewrites `localhost` in `.env` to `host.docker.internal`.
 
 ## Running Maxwell
 
-Foreground bot:
+```bash
+cd ~/maxwell
+./run.sh -d
+docker compose logs -f maxwell
+docker compose exec maxwell python3 doctor.py
+docker compose down
+```
+
+Dashboard: `http://127.0.0.1:8765`.
+
+For reverse proxying the dashboard and generated sites, adapt [`examples/Caddyfile.example`](../examples/Caddyfile.example). It proxies `/api/*`, `/data/*`, and generated site backend routes to `127.0.0.1:8765`.
+
+## Upgrading from a host / venv / PM2 install
+
+If Maxwell is still running on the host (`python3 bot.py`, `.venv`, `pm2 start ecosystem.config.js`, or a systemd user unit), do not keep that process after this release — two clients on the same Discord token will fight.
 
 ```bash
 cd ~/maxwell
-./run.sh
+git pull --ff-only
+./install.sh --local
 ```
 
-Equivalent manual command:
-
-```bash
-cd ~/maxwell
-. .venv/bin/activate
-python3 bot.py
-```
-
-Dashboard/API:
-
-```bash
-cd ~/maxwell
-. .venv/bin/activate
-python3 api/api_server.py
-```
-
-PM2:
-
-```bash
-pm2 start ecosystem.config.js
-pm2 logs maxwell-bot maxwell-api
-```
-
-`ecosystem.config.js` uses `.venv/bin/python3` when it exists and only starts an `ollama` PM2 process when `ollama` is on `PATH` unless `MAXWELL_PM2_OLLAMA=true|false` overrides it.
-
-Linux systemd user service (created optionally by the installer):
-
-```bash
-systemctl --user enable --now maxwell
-systemctl --user status maxwell
-```
-
-For reverse proxying the dashboard and generated sites, start `api/api_server.py` and adapt [`examples/Caddyfile.example`](../examples/Caddyfile.example). It proxies `/api/*`, `/data/*`, and generated site backend routes to `127.0.0.1:8765`.
+That keeps `.env`, `data/`, and generated sites, sets `MAXWELL_HOST_BIND`, stops `maxwell-bot` / `maxwell-api` in PM2 (and a systemd user service named `maxwell` if you had one), and starts the Docker stack. Host Ollama is left running. After Discord looks healthy you can delete `.venv`. `pm2 restart` on the old names will not bring the host bot back; use `docker compose up -d` from here on.
 
 ## Updating and uninstalling
 
@@ -281,25 +223,23 @@ cd ~/maxwell
 Uninstall a one-user install:
 
 ```bash
-systemctl --user disable --now maxwell 2>/dev/null || true
-rm -f ~/.config/systemd/user/maxwell.service
+cd ~/maxwell
+docker compose down --rmi local
 rm -rf ~/maxwell
 ```
 
-Remove Docker, Node, or system media packages separately with your OS package manager if you installed them only for Maxwell.
+Ollama, if you installed it on the host, is separate.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| Python too old | Install Python 3.11+ and make sure `python3 -V` shows it. |
-| `python3 -m venv` fails | Debian/Ubuntu: `sudo apt install python3-venv`. |
-| `doctor.py` says core packages missing | Activate `.venv` and run `python -m pip install -r requirements.txt`. |
+| `docker info` fails | Start Docker. On Linux, add your user to the `docker` group and re-login. |
+| Compose cannot find the image | `docker compose up -d --build` from the checkout. |
+| Shell/site_server bind-mounts fail | Set `MAXWELL_HOST_BIND` to the absolute host path of the checkout (install.sh does this). |
 | `doctor.py --probe` returns 404 | Check `OLLAMA_BASE_URL` and model name. Bare Ollama hosts should be `http://localhost:11434`; hosted APIs usually include `/v1`. |
 | `doctor.py --probe` returns 401/403 | Check `OLLAMA_API_KEY` or provider account access. |
-| Docker daemon unreachable | Start Docker and verify `docker info`. If permission is denied, add your user to the `docker` group and re-login, or set `ENABLE_SHELL=false`. |
+| Local Ollama unreachable from the container | Linux host networking should see `localhost`. On Docker Desktop, use `http://host.docker.internal:11434`. |
 | Discord token invalid | Re-copy the `authorization` header from a logged-in Discord browser session. |
-| `pip` build failures for media packages | Install compiler/system headers, upgrade pip, or skip optional extras. Core install does not need optional media packages. |
-| macOS bash concerns | The installer avoids Bash 4-only syntax and works with macOS Bash 3.2, but Homebrew is required for packages. |
 | `curl | bash` prompts do not appear | Run from an interactive terminal with `/dev/tty`, or use the unattended environment variables. |
-| Dashboard returns 503 | Set `MAXWELL_ADMIN_PASSWORD` in `.env` and restart `api/api_server.py`. |
+| Dashboard returns 503 | Set `MAXWELL_ADMIN_PASSWORD` in `.env` and `docker compose up -d`. |

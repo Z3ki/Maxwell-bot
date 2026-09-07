@@ -15,7 +15,8 @@ The installer writes `.env` from `.env.example` and updates only the keys it ask
 | `MAXWELL_ADMIN_PASSWORD` | Strongly recommended | Password for the admin API/dashboard. Blank makes the API return 503. |
 | `ENABLE_AUTONOMY` | Optional | Timed self-directed background actions; off by default to avoid surprise token spend. |
 | `ENABLE_REM` | Optional | Timed memory consolidation (also accepted as `REM_ENABLED`); off by default to avoid surprise token spend. |
-| `ENABLE_SHELL` | Optional | Shell tool. Requires Docker; the installer disables it when Docker is unavailable. |
+| `ENABLE_SHELL` | Optional | Shell tool. The supported Docker install leaves this on; the sandbox is a sibling container. |
+| `MAXWELL_HOST_BIND` | Set by installer | Host path of this checkout, used when sibling containers bind-mount files. |
 
 See [`.env.example`](../.env.example) for the full set of advanced knobs, including embeddings, dashboard host/port, TTS, X/Twitter, email, captcha solving, and tool-specific limits.
 

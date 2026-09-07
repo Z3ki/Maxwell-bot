@@ -209,6 +209,9 @@ class Config:
     # for its own sake. Raise it back per-install with OLLAMA_TEMPERATURE.
     OLLAMA_TEMPERATURE = _float_env("OLLAMA_TEMPERATURE", 0.7, min_value=0.0)
     OLLAMA_DISABLE_REASONING = _bool_env("OLLAMA_DISABLE_REASONING", True)
+    # Optional chat-completions reasoning_effort (e.g. "low"). Ignored when
+    # OLLAMA_DISABLE_REASONING is on. Blank leaves the field off the payload.
+    OLLAMA_REASONING_EFFORT = os.getenv("OLLAMA_REASONING_EFFORT", "").strip()
     OLLAMA_FALLBACK_BASE_URL = os.getenv("OLLAMA_FALLBACK_BASE_URL", "").strip()
     OLLAMA_FALLBACK_API_KEY = os.getenv("OLLAMA_FALLBACK_API_KEY", "").strip()
     OLLAMA_FALLBACK_MODEL = os.getenv("OLLAMA_FALLBACK_MODEL", "").strip()
@@ -499,6 +502,10 @@ class Config:
     DATA_DIR = os.getenv("DATA_DIR", "data")
     LOGS_DIR = os.getenv("LOGS_DIR", os.getenv("LOGS", "logs"))
     LOG_LEVEL = os.getenv("LOG_LEVEL", "info")
+    # Host path of this checkout when Maxwell runs in Docker. Sibling
+    # containers (shell sandbox, site backends) bind-mount through the
+    # host daemon, so in-container paths like /app must be rewritten.
+    MAXWELL_HOST_BIND = os.getenv("MAXWELL_HOST_BIND", "").strip()
 
     MAXWELL_SITE_DIR = os.getenv("MAXWELL_SITE_DIR", "public/bot")
     MAXWELL_PUBLIC_BASE_URL = os.getenv(

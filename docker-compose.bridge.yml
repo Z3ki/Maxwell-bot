@@ -1,0 +1,30 @@
+# Used when host networking is not available (Docker Desktop on macOS/Windows).
+# Local LLM URLs in .env should use host.docker.internal instead of localhost
+# (install.sh rewrites them). Site-backend loopback ports are not published
+# here; prefer Linux + docker-compose.yml for that.
+services:
+  maxwell:
+    build:
+      context: .
+      dockerfile: docker/maxwell.Dockerfile
+    image: maxwell:local
+    container_name: maxwell
+    restart: unless-stopped
+    init: true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      MAXWELL_IN_DOCKER: "1"
+      MAXWELL_HOST_BIND: ${MAXWELL_HOST_BIND:-}
+      MAXWELL_APP_ROOT: /app
+      MAXWELL_API_HOST: 0.0.0.0
+    volumes:
+      - .:/app
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "8765:8765"
+    stop_grace_period: 20s

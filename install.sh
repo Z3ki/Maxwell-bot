@@ -29,35 +29,35 @@ REPO_URL="${MAXWELL_REPO_URL:-https://github.com/Z3ki/Maxwell-bot.git}"
 BRANCH="${MAXWELL_BRANCH:-main}"
 RECONFIGURE=0
 LOCAL_MODE=0
-NO_EXTRAS=0
 NONINTERACTIVE="${MAXWELL_NONINTERACTIVE:-0}"
 SKIP_SYSTEM_DEPS="${MAXWELL_SKIP_SYSTEM_DEPS:-0}"
 TTY=""
 OS_FAMILY=""
-PYTHON_BIN="python3"
+COMPOSE=()
 
 usage() {
   cat <<'EOF'
-Maxwell installer
+Maxwell installer (Docker)
 
 Usage:
   bash install.sh [options]
 
+Maxwell runs in Docker so host Python, ffmpeg, and package versions cannot
+fight it. The only host dependency is Docker Engine (and Compose).
+
 Options:
   --help              Show this help.
   --reconfigure       Run the configuration wizard even when .env exists.
-  --no-extras         Do not install optional Python/system extras.
   --non-interactive   Read all answers from environment variables.
   --dir <path>        Install/update Maxwell in this directory.
-  --local             Configure the current checkout instead of cloning/updating.
+  --local             Configure the current checkout instead of cloning.
 
 Useful environment variables:
   MAXWELL_INSTALL_DIR, MAXWELL_REPO_URL, MAXWELL_BRANCH,
   MAXWELL_NONINTERACTIVE=1, MAXWELL_SKIP_SYSTEM_DEPS=1,
   DISCORD_TOKEN, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_API_KEY,
   MAXWELL_OWNER_IDS, MAXWELL_ADMIN_PASSWORD,
-  BOT_NAME, CREATOR_NAME, CREATOR_ID, COMMAND_PREFIX,
-  MAXWELL_INSTALL_EXTRAS=yes|no, MAXWELL_INSTALL_DOCKER=yes|no
+  BOT_NAME, CREATOR_NAME, CREATOR_ID, COMMAND_PREFIX
 EOF
 }
 
@@ -65,7 +65,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --help|-h) usage; exit 0 ;;
     --reconfigure) RECONFIGURE=1 ;;
-    --no-extras) NO_EXTRAS=1; MAXWELL_INSTALL_EXTRAS=no ;;
+    --no-extras) warn "--no-extras is ignored; extras ship in the Docker image." ;;
     --non-interactive) NONINTERACTIVE=1 ;;
     --dir) shift; [ "$#" -gt 0 ] || fail "--dir requires a path"; INSTALL_DIR="$1" ;;
     --local) LOCAL_MODE=1; INSTALL_DIR="$SCRIPT_DIR"; SKIP_SYSTEM_DEPS="${MAXWELL_SKIP_SYSTEM_DEPS:-1}" ;;
@@ -139,9 +139,9 @@ run_as_root() {
     "$@"
   else
     if ! command -v sudo >/dev/null 2>&1; then
-      fail "sudo is required to install system packages as a non-root user. Install the packages manually or set MAXWELL_SKIP_SYSTEM_DEPS=1."
+      fail "sudo is required to install Docker as a non-root user, or set MAXWELL_SKIP_SYSTEM_DEPS=1 after installing Docker yourself."
     fi
-    warn "Using sudo to install system packages needed by Maxwell. You may be prompted for your password."
+    warn "Using sudo. You may be prompted for your password."
     sudo "$@"
   fi
 }
@@ -152,60 +152,103 @@ detect_os() {
   if command -v pacman >/dev/null 2>&1; then OS_FAMILY=pacman; return; fi
   if [ "$(uname -s 2>/dev/null || printf unknown)" = "Darwin" ]; then
     if command -v brew >/dev/null 2>&1; then OS_FAMILY=brew; return; fi
-    fail "macOS detected but Homebrew is missing. Install Homebrew plus: git curl python@3.11 (or newer)."
+    fail "macOS detected but Homebrew is missing. Install Docker Desktop, then re-run."
   fi
   cat >&2 <<EOF
 Unsupported OS/package manager.
-Install these manually, then re-run with MAXWELL_SKIP_SYSTEM_DEPS=1:
-  Required: git curl Python 3.11+ with venv and pip
-  Optional extras: ffmpeg, libopus/opus, libsodium, espeak-ng, nodejs
-  Optional shell tool: Docker Engine with a daemon reachable by your user
+Install Docker Engine + Compose, then re-run with MAXWELL_SKIP_SYSTEM_DEPS=1.
 EOF
   exit 1
 }
 
-install_core_system_deps() {
-  [ "$SKIP_SYSTEM_DEPS" = "1" ] && { warn "Skipping system package installation (MAXWELL_SKIP_SYSTEM_DEPS=1)."; return; }
-  detect_os
-  step "Installing required system packages"
-  case "$OS_FAMILY" in
-    apt) run_as_root apt-get update; run_as_root apt-get install -y git curl ca-certificates python3 python3-venv python3-pip ;;
-    dnf) run_as_root dnf install -y git curl ca-certificates python3 python3-pip ;;
-    pacman) run_as_root pacman -Sy --needed --noconfirm git curl ca-certificates python python-pip ;;
-    brew) brew install git curl python ;;
-  esac
+docker_info_ok() {
+  docker info >/dev/null 2>&1
 }
 
-install_extra_system_deps() {
-  [ "$SKIP_SYSTEM_DEPS" = "1" ] && { warn "Skipping optional system packages (MAXWELL_SKIP_SYSTEM_DEPS=1)."; return; }
-  [ -n "$OS_FAMILY" ] || detect_os
-  step "Installing optional system packages"
-  case "$OS_FAMILY" in
-    apt) run_as_root apt-get update; run_as_root apt-get install -y ffmpeg libopus0 libsodium-dev espeak-ng nodejs ;;
-    dnf)
-      run_as_root dnf install -y opus libsodium-devel espeak-ng nodejs
-      run_as_root dnf install -y ffmpeg || warn "ffmpeg not in default dnf repos (enable RPM Fusion for voice support)."
-      ;;
-    pacman) run_as_root pacman -Sy --needed --noconfirm ffmpeg opus libsodium espeak-ng nodejs ;;
-    brew) brew install ffmpeg opus libsodium espeak-ng node ;;
-  esac
-}
-
-verify_python() {
-  command -v python3 >/dev/null 2>&1 || fail "python3 not found. Install Python 3.11+ with venv and pip."
-  if ! python3 - <<'PY'
-import sys
-raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
-PY
-  then
-    fail "Python 3.11+ required; found $(python3 -V 2>&1)."
+resolve_compose() {
+  if docker compose version >/dev/null 2>&1; then
+    COMPOSE=(docker compose)
+    return 0
   fi
-  PYTHON_BIN=python3
-  ok "$(python3 -V)"
+  if command -v docker-compose >/dev/null 2>&1; then
+    COMPOSE=(docker-compose)
+    return 0
+  fi
+  return 1
+}
+
+compose_file_for_host() {
+  if [ "$(uname -s 2>/dev/null || printf unknown)" = "Linux" ]; then
+    printf '%s' "docker-compose.yml"
+  else
+    printf '%s' "docker-compose.bridge.yml"
+  fi
+}
+
+rewrite_localhost_for_bridge() {
+  [ "$(uname -s 2>/dev/null || printf unknown)" = "Linux" ] && return 0
+  [ -f .env ] || return 0
+  python3 - "$PWD/.env" <<'PY' || true
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+updated = re.sub(
+    r"(localhost|127\.0\.0\.1)",
+    "host.docker.internal",
+    text,
+)
+if updated != text:
+    path.write_text(updated, encoding="utf-8")
+PY
+  warn "Non-Linux Docker: rewrote localhost/127.0.0.1 in .env to host.docker.internal so the container can reach host services."
+}
+
+install_docker() {
+  if docker_info_ok && resolve_compose; then
+    ok "Docker and Compose are ready"
+    return 0
+  fi
+  [ "$SKIP_SYSTEM_DEPS" = "1" ] && fail "Docker is not usable and MAXWELL_SKIP_SYSTEM_DEPS=1. Install Docker Engine + Compose, then re-run."
+  detect_os
+  step "Installing Docker"
+  case "$OS_FAMILY" in
+    apt|dnf)
+      curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+      run_as_root sh /tmp/get-docker.sh
+      rm -f /tmp/get-docker.sh
+      ;;
+    pacman)
+      run_as_root pacman -Sy --needed --noconfirm docker docker-compose
+      run_as_root systemctl enable --now docker || true
+      ;;
+    brew)
+      warn "Installing Docker Desktop with Homebrew. Start Docker Desktop after installation, then re-run."
+      brew install --cask docker
+      ;;
+  esac
+  target_user="${USER:-$(id -un 2>/dev/null || printf '')}"
+  if command -v docker >/dev/null 2>&1 && [ "$(id -u)" -ne 0 ] && [ -n "$target_user" ] && getent group docker >/dev/null 2>&1; then
+    run_as_root usermod -aG docker "$target_user" || true
+    warn "Added $target_user to the docker group. If docker info still fails, log out and back in."
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    run_as_root systemctl enable --now docker || true
+  fi
+  if docker_info_ok && resolve_compose; then
+    ok "Docker and Compose are ready"
+    return 0
+  fi
+  if run_as_root docker info >/dev/null 2>&1; then
+    fail "Docker works with sudo but not as this user. Log out and back in (docker group), then re-run."
+  fi
+  fail "Docker is required. Install Docker Engine + Compose and re-run."
 }
 
 clone_or_update() {
   step "Getting Maxwell"
+  if [ "$LOCAL_MODE" != "1" ]; then
+    command -v git >/dev/null 2>&1 || fail "git is required to fetch Maxwell."
+  fi
   if [ "$LOCAL_MODE" = "1" ]; then
     [ -f "$INSTALL_DIR/bot.py" ] || fail "--local must be run from a Maxwell checkout."
     cd "$INSTALL_DIR"
@@ -229,7 +272,8 @@ clone_or_update() {
 }
 
 set_env_value() {
-  SET_ENV_VALUE="$2" "$PYTHON_BIN" scripts/set_env.py .env "$1"
+  command -v python3 >/dev/null 2>&1 || fail "python3 is needed once to write .env. Maxwell itself runs in Docker."
+  SET_ENV_VALUE="$2" python3 scripts/set_env.py .env "$1"
 }
 
 copy_env_if_needed() {
@@ -237,79 +281,6 @@ copy_env_if_needed() {
     cp .env.example .env
     chmod 600 .env
     ok "created .env from .env.example"
-  fi
-}
-
-install_python_deps() {
-  step "Installing Python dependencies"
-  if [ ! -d .venv ]; then
-    "$PYTHON_BIN" -m venv .venv || fail "Could not create .venv. On Debian/Ubuntu, install python3-venv."
-    ok "created .venv"
-  fi
-  # shellcheck disable=SC1091
-  . .venv/bin/activate
-  python -m pip install --quiet --upgrade pip
-  python -m pip install --quiet -r requirements.txt
-  ok "core Python dependencies installed"
-
-  printf '  Optional extras unlock: web search (ddgs), YouTube (yt-dlp), voice/VC (PyNaCl + opus), TTS (gTTS/espeak), and video/audio helpers (ffmpeg/node).\n'
-  extras_default=no
-  [ "$NO_EXTRAS" = "1" ] && extras_default=no
-  extras=$(yes_no "Install optional extras too?" "$extras_default" "${MAXWELL_INSTALL_EXTRAS:-}")
-  if [ "$extras" = "yes" ]; then
-    install_extra_system_deps
-    python -m pip install --quiet -r requirements-optional.txt
-    ok "optional Python extras installed"
-  else
-    ok "optional extras skipped"
-  fi
-}
-
-docker_reachable() {
-  command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
-}
-
-install_docker_if_requested() {
-  if docker_reachable; then
-    ok "Docker daemon reachable"
-    return 0
-  fi
-  warn "The shell tool runs commands inside Docker, but Docker is absent or unreachable."
-  docker_choice=$(yes_no "Install/enable Docker for the shell tool?" "no" "${MAXWELL_INSTALL_DOCKER:-}")
-  if [ "$docker_choice" != "yes" ]; then
-    set_env_value ENABLE_SHELL false
-    warn "Set ENABLE_SHELL=false in .env. Re-enable it after Docker works."
-    return 0
-  fi
-  [ "$SKIP_SYSTEM_DEPS" = "1" ] && { warn "Cannot install Docker while MAXWELL_SKIP_SYSTEM_DEPS=1; disabling shell."; set_env_value ENABLE_SHELL false; return 0; }
-  [ -n "$OS_FAMILY" ] || detect_os
-  step "Installing Docker"
-  case "$OS_FAMILY" in
-    apt|dnf)
-      curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
-      run_as_root sh /tmp/get-docker.sh
-      rm -f /tmp/get-docker.sh
-      ;;
-    pacman)
-      run_as_root pacman -Sy --needed --noconfirm docker
-      run_as_root systemctl enable --now docker || true
-      ;;
-    brew)
-      warn "Installing Docker Desktop with Homebrew. Start Docker Desktop after installation."
-      brew install --cask docker
-      ;;
-  esac
-  target_user="${USER:-$(id -un 2>/dev/null || printf '')}"
-  if command -v docker >/dev/null 2>&1 && [ "$(id -u)" -ne 0 ] && [ -n "$target_user" ] && getent group docker >/dev/null 2>&1; then
-    run_as_root usermod -aG docker "$target_user" || true
-    warn "Added $target_user to the docker group. Log out and back in before using Docker without sudo."
-  fi
-  if docker_reachable || run_as_root docker info >/dev/null 2>&1; then
-    set_env_value ENABLE_SHELL true
-    ok "Docker daemon is running; shell tool enabled"
-  else
-    set_env_value ENABLE_SHELL false
-    warn "Docker is still not reachable; set ENABLE_SHELL=false. Re-run --reconfigure after fixing Docker."
   fi
 }
 
@@ -347,7 +318,7 @@ configure_env() {
       *) warn "Unknown choice; using Local Ollama defaults." ;;
     esac
     if [ "$provider" = "1" ]; then
-      ollama_choice=$(yes_no "Install Ollama and pull the selected model?" "no" "")
+      ollama_choice=$(yes_no "Install Ollama on this host and pull the selected model?" "no" "")
       if [ "$ollama_choice" = "yes" ]; then
         if [ "$(uname -s 2>/dev/null || printf unknown)" = "Linux" ]; then
           curl -fsSL https://ollama.com/install.sh -o /tmp/ollama-install.sh
@@ -440,7 +411,13 @@ configure_env() {
     set_env_value ENABLE_REM false
   fi
 
-  install_docker_if_requested
+  set_env_value ENABLE_SHELL true
+}
+
+write_host_bind() {
+  host_bind="$(pwd -P)"
+  set_env_value MAXWELL_HOST_BIND "$host_bind"
+  ok "MAXWELL_HOST_BIND=$host_bind (so sibling containers can bind-mount this checkout)"
 }
 
 write_run_script() {
@@ -448,63 +425,89 @@ write_run_script() {
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
-. .venv/bin/activate
-exec python3 bot.py "$@"
+if [ -z "${COMPOSE_FILE:-}" ]; then
+  if [ "$(uname -s 2>/dev/null || printf unknown)" = "Linux" ]; then
+    export COMPOSE_FILE=docker-compose.yml
+  else
+    export COMPOSE_FILE=docker-compose.bridge.yml
+  fi
+fi
+if docker compose version >/dev/null 2>&1; then
+  exec docker compose up "$@"
+fi
+if command -v docker-compose >/dev/null 2>&1; then
+  exec docker-compose up "$@"
+fi
+echo "docker compose is required" >&2
+exit 1
 EOF
   chmod +x run.sh
-  ok "wrote run.sh"
+  ok "wrote run.sh (docker compose up)"
 }
 
-offer_systemd() {
-  [ "$NONINTERACTIVE" = "1" ] && return 0
-  [ "$(uname -s 2>/dev/null || printf unknown)" = "Linux" ] || return 0
-  choice=$(yes_no "Create a systemd user service for Maxwell?" "no" "")
-  [ "$choice" = "yes" ] || return 0
-  mkdir -p "$HOME/.config/systemd/user"
-  service="$HOME/.config/systemd/user/maxwell.service"
-  cat > "$service" <<EOF
-[Unit]
-Description=Maxwell Discord self-bot
-After=network-online.target
+stop_host_maxwell() {
+  # Old installs ran bot.py from a venv under PM2 or systemd. Two Maxwells
+  # on one Discord token fight each other, so the host process has to go
+  # before the container starts. .env and data/ stay.
+  step "Checking for a host Maxwell (venv / PM2 / systemd)"
+  stopped=0
+  if command -v pm2 >/dev/null 2>&1; then
+    for name in maxwell-bot maxwell-api; do
+      if pm2 describe "$name" >/dev/null 2>&1; then
+        pm2 stop "$name" >/dev/null 2>&1 || true
+        pm2 delete "$name" >/dev/null 2>&1 || true
+        ok "stopped pm2 process $name"
+        stopped=1
+      fi
+    done
+    if [ "$stopped" = "1" ]; then
+      pm2 save >/dev/null 2>&1 || true
+    fi
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl --user is-active --quiet maxwell 2>/dev/null; then
+      systemctl --user disable --now maxwell >/dev/null 2>&1 || true
+      ok "stopped systemd user service maxwell"
+      stopped=1
+    fi
+  fi
+  if [ "$stopped" = "1" ]; then
+    warn "Host Maxwell was stopped so Docker can take over. .env and data/ are unchanged. Delete .venv after this looks healthy."
+  elif [ -d .venv ]; then
+    warn "Found an old .venv from a host install. Maxwell now runs in Docker; you can delete .venv later."
+  else
+    ok "no host Maxwell process to stop"
+  fi
+}
 
-[Service]
-Type=simple
-WorkingDirectory=$(pwd -P)
-ExecStart=$(pwd -P)/.venv/bin/python3 bot.py
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-EOF
-  systemctl --user daemon-reload || true
-  ok "wrote $service"
-  printf '  Enable it with: systemctl --user enable --now maxwell\n'
+start_stack() {
+  step "Building and starting Maxwell in Docker"
+  mkdir -p data public/bot shelldocker logs data/exports
+  export COMPOSE_FILE
+  COMPOSE_FILE="$(compose_file_for_host)"
+  rewrite_localhost_for_bridge
+  if ! resolve_compose; then
+    fail "docker compose is not available"
+  fi
+  stop_host_maxwell
+  "${COMPOSE[@]}" -f "$COMPOSE_FILE" up -d --build
+  ok "container started"
 }
 
 run_doctor() {
   step "Verifying installation"
-  # shellcheck disable=SC1091
-  . .venv/bin/activate
-  if python3 doctor.py; then
-    ok "doctor.py reports the install is ready to start"
+  COMPOSE_FILE="$(compose_file_for_host)"
+  resolve_compose || return 0
+  if "${COMPOSE[@]}" -f "$COMPOSE_FILE" exec -T maxwell python3 doctor.py; then
+    ok "doctor.py reports the install is ready"
   else
-    warn "doctor.py found startup blockers. Fix the items above, then run python3 doctor.py again."
-  fi
-  if grep -q '^DISCORD_TOKEN=.' .env && grep -q '^OLLAMA_MODEL=.' .env; then
-    if python3 doctor.py --probe; then
-      ok "live endpoint probe succeeded"
-    else
-      warn "doctor.py --probe failed. Check docs/INSTALL.md troubleshooting for URL/key/model fixes."
-    fi
-  else
-    warn "Skipping live probe because DISCORD_TOKEN or OLLAMA_MODEL is blank."
+    warn "doctor.py found issues. Inspect with: docker compose -f $COMPOSE_FILE logs maxwell"
   fi
 }
 
 banner_and_confirm() {
   printf '%sMaxwell installer%s\n' "$BOLD" "$RESET"
-  printf 'Maxwell is a Discord self-bot backed by any OpenAI-compatible LLM. This installer fetches the app, installs dependencies, creates a virtualenv, and walks you through configuration.\n\n'
+  printf 'Maxwell is a Discord self-bot backed by any OpenAI-compatible LLM. This installer fetches the app, writes .env, and runs Maxwell in Docker.\n\n'
   printf '%sWarning:%s Maxwell uses discord.py-self/self_bot=True. Self-bots may violate Discord Terms of Service and can put your account at risk.\n' "$YELLOW" "$RESET"
   if [ "$NONINTERACTIVE" != "1" ]; then
     answer=$(prompt "Type I UNDERSTAND to continue" "")
@@ -516,26 +519,33 @@ banner_and_confirm() {
 
 final_summary() {
   step "Done"
+  compose="$(compose_file_for_host)"
   cat <<EOF
   Install path: $(pwd -P)
-  Start the bot: cd $(pwd -P) && ./run.sh
-  Start dashboard/API: cd $(pwd -P) && . .venv/bin/activate && python3 api/api_server.py
-  PM2 alternative: pm2 start ecosystem.config.js && pm2 logs maxwell-bot maxwell-api
-  Edit configuration later: $(pwd -P)/.env
-  Re-run the wizard: ./install.sh --local --reconfigure
-  Update later: ./install.sh --local, or git pull --ff-only && ./install.sh --local
+  Maxwell runs in Docker, not on the host Python.
+
+  Start:     cd $(pwd -P) && ./run.sh -d
+             (or: docker compose -f $compose up -d)
+  Logs:      docker compose -f $compose logs -f maxwell
+  Stop:      docker compose -f $compose down
+  Doctor:    docker compose -f $compose exec maxwell python3 doctor.py
+  Dashboard: http://127.0.0.1:8765
+  Edit config: $(pwd -P)/.env   then   docker compose -f $compose up -d
+  Reconfigure: ./install.sh --local --reconfigure
+  Update:      git pull --ff-only && ./install.sh --local
+  Old venv/PM2 install: that same update command stops host Maxwell and starts Docker.
 EOF
 }
 
 main() {
   banner_and_confirm
-  install_core_system_deps
-  verify_python
+  install_docker
   clone_or_update
-  install_python_deps
+  copy_env_if_needed
   configure_env
+  write_host_bind
   write_run_script
-  offer_systemd
+  start_stack
   run_doctor
   final_summary
 }

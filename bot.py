@@ -262,7 +262,6 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     EditServerTool,
     AuditLogTool,
     ListSitesTool,
-    GuideTool,
     LookupUserTool,
     ManagePluginTool,
     MoreToolsTool,
@@ -353,6 +352,12 @@ from providers import (  # noqa: E402
 )
 from rag_memory import RAGMemoryManager, RemEventLog, _parse_iso  # noqa: E402
 from jobs import BackgroundJobManager, SpawnBackgroundTool  # noqa: E402
+from discord_threads import (  # noqa: E402
+    CreateThreadTool,
+    ThreadControlTool,
+    ThreadStore,
+    is_discord_thread,
+)
 from rem import RemStore, load_rem_defaults, run_rem_once  # noqa: E402
 from tool_progress import make_progress as _make_tool_progress  # noqa: E402
 from tool_registry import (  # noqa: E402 — reasoning now rides inside tool calls
@@ -2219,7 +2224,6 @@ TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "wait",
     "sleep",
     "clear_sleep",
-    "guide",
 }
 
 # Jailbreak / freedom-mode. OFF per server unless an admin runs `,jailbreak on`.
@@ -2424,7 +2428,11 @@ TOOL_PROTOCOL = (
     "create_site backend is OPTIONAL. Static HTML/CSS/JS is fine. Only pass backend=true and "
     "use site_server when the site actually needs server-side state, an API, websocket, auth, "
     "or persistence. Do not spin up FastAPI for a landing page or brochure.\n"
-    "If a site request is vague, call guide(goal=...) to clarify. Otherwise build it.\n"
+    "To spin off focused work, create_thread with name= and context= (required). "
+    "context= is injected into every turn in that thread so thread-you is not cold — "
+    "put the goal, decisions so far, and what to do next. Use thread_control to add "
+    "context, rename, archive, or list. Do not open a questionnaire thread; brief "
+    "thread-you and work there.\n"
     "LONG TASKS GO TO BACKGROUND: if a job takes many tool calls (full site build, deep research), "
     "call spawn_background(goal=...) FIRST, then send_message ONE short ack line naming the job id "
     "and end the turn. Never start a long build inline when you could spawn it.\n"
@@ -2462,6 +2470,8 @@ LEAN_TOOL_PROTOCOL = (
     "with the finished answer. Never send_message to say you are about to start "
     "('on it', 'working on it', 'checking'). Do not pair send_message with a "
     "[returns output] tool in the same batch.\n"
+    "For a focused Discord thread, create_thread with a real context brief so "
+    "thread-you is not cold.\n"
     "## What comes back\n"
     "[returns output] — you get another turn with the result; never state it "
     "before you see it, and do not send_message in that same batch. "
@@ -2764,6 +2774,12 @@ def _prepare_tool_params(name: str, params: dict | None) -> dict:
             if alt not in (None, ""):
                 out["content"] = alt
                 break
+    if (
+        name == "create_thread"
+        and leftover_message not in (None, "")
+        and not str(out.get("opening") or "").strip()
+    ):
+        out["opening"] = leftover_message
     return out
 
 
@@ -3269,6 +3285,7 @@ class MaxwellBot(commands.Bot):
             temperature=self.config.OLLAMA_TEMPERATURE,
             api_key=self.config.OLLAMA_API_KEY,
             disable_reasoning=self.config.OLLAMA_DISABLE_REASONING,
+            reasoning_effort=getattr(self.config, "OLLAMA_REASONING_EFFORT", "") or "",
             fallback_base_url=self.config.OLLAMA_FALLBACK_BASE_URL,
             fallback_model=self.config.OLLAMA_FALLBACK_MODEL,
             fallback_api_key=self.config.OLLAMA_FALLBACK_API_KEY,
@@ -3666,6 +3683,8 @@ class MaxwellBot(commands.Bot):
             self.config.DATA_DIR, run_history=self.config.REM_RUN_HISTORY
         )
         self.inbox = InboxStore(self.config.DATA_DIR)
+        self.thread_store = ThreadStore(self.config.DATA_DIR)
+        self.thread_store.load()
         # Notice ids the last prompt carried, marked read once he speaks.
         self._inbox_shown_ids: list[str] = []
         # Mail is pull-only through the email_* tools, so an unread message is
@@ -3794,7 +3813,8 @@ class MaxwellBot(commands.Bot):
             self.tools["site_test"] = SiteTestTool(self)
             self.tools["list_sites"] = ListSitesTool(self)
             self.tools["host_file"] = HostFileTool(self)
-            self.tools["guide"] = GuideTool(self)
+        self.tools["create_thread"] = CreateThreadTool(self)
+        self.tools["thread_control"] = ThreadControlTool(self)
         # Background sub-agent jobs: always registered (the tool itself is
         # the escape hatch for long turns, independent of the site feature).
         self.tools["spawn_background"] = SpawnBackgroundTool(self)
@@ -4130,7 +4150,7 @@ class MaxwellBot(commands.Bot):
             # Legacy tools can send directly, without the slowmode wrapper.
             if name in {
                 "image_generator", "hd_image", "create_poll", "join_server",
-                "guide", "send_message", "send_file", "shell", "send_meme",
+                "create_thread", "thread_control", "send_message", "send_file", "shell", "send_meme",
                 "send_media", "tts", "forward_message",
             }:
                 state["send_attempted"] = True
@@ -7491,10 +7511,6 @@ class MaxwellBot(commands.Bot):
             "jailbreak",
             "progress",
             "admin",
-            "guide",
-            "guided",
-            "guided-goal",
-            "guided_goal",
             "solo",
             "help",
             "x",
@@ -7979,16 +7995,6 @@ class MaxwellBot(commands.Bot):
                         self._admins.add(uid)
                         self._save_admins()
                         await message.channel.send(f"Added <@{uid}> to admins.")
-            elif cmd in ("guide", "guided", "guided-goal", "guided_goal"):
-                goal = (args or "").strip() or "your project"
-                tool = self.tools.get("guide")
-                if tool:
-                    res = await tool.execute(message, goal=goal)
-                    await message.channel.send(res[:1900])
-                else:
-                    await message.channel.send(
-                        "Guide tool not available (ENABLE_CREATE_SITE off)."
-                    )
             elif cmd == "solo":
                 await self._handle_solo_command(message, args)
             elif cmd == "debug":
@@ -7997,7 +8003,6 @@ class MaxwellBot(commands.Bot):
             elif cmd == "help":
                 await message.channel.send(
                     "Commands:\n"
-                    "` ,guide [goal]` / `,guided-goal [goal]` - create a thread and ask 5 clarifying questions before building (use when request is vague)\n"
                     "` ,help` - show this list\n"
                     "` ,debug` - last LLM call TTFT / TPS / tokens (admin)\n"
                     "` ,stop` - stop active response in this channel\n"
@@ -16058,6 +16063,11 @@ class MaxwellBot(commands.Bot):
         # leftover no-op from the old gated catalog — keep the handler so a
         # stale call does not error, but do not offer it.
         names.discard("more_tools")
+        channel = getattr(message, "channel", None) if message is not None else None
+        if is_discord_thread(channel) or (
+            message is not None and getattr(message, "guild", None) is None
+        ):
+            names.discard("create_thread")
         return names
 
     def _tools_for_turn(self, platform: str, message=None) -> dict[str, Any]:
@@ -16198,6 +16208,17 @@ class MaxwellBot(commands.Bot):
                 "or the topic is current; do not guess from training data."
             )
         return header + "\n\n" + TOOL_PROTOCOL
+
+    def _thread_prompt_block(self, message) -> str:
+        """Brief injected when this turn is inside a Discord thread."""
+        store = getattr(self, "thread_store", None)
+        if store is None:
+            return ""
+        try:
+            return store.prompt_block(message)
+        except Exception:
+            logger.debug("thread prompt block skipped", exc_info=True)
+            return ""
 
     @staticmethod
     def _topic_tokens(text: str) -> set[str]:
@@ -16741,15 +16762,14 @@ class MaxwellBot(commands.Bot):
         channel_name = getattr(message.channel, "name", None) or (
             "DM" if isinstance(message.channel, discord.DMChannel) else "unknown"
         )
-        channel_kind = (
-            "DM"
-            if isinstance(message.channel, discord.DMChannel)
-            else (
-                "group"
-                if isinstance(message.channel, discord.GroupChannel)
-                else "guild"
-            )
-        )
+        if isinstance(message.channel, discord.DMChannel):
+            channel_kind = "DM"
+        elif is_discord_thread(message.channel):
+            channel_kind = "thread"
+        elif isinstance(message.channel, discord.GroupChannel):
+            channel_kind = "group"
+        else:
+            channel_kind = "guild"
         # Live guild nick (or account name in DMs). Read from guild.me each
         # turn so a set_nickname / manual nick change is visible on the next
         # call; do not stash this on the bot.
@@ -16766,6 +16786,9 @@ class MaxwellBot(commands.Bot):
         dynamic_parts.append(
             f"User: {message.author.display_name} ({message.author.id}, {user_kind}) | {local_now.strftime('%a %b %d %I:%M %p')} AST | Channel: #{channel_name} ({channel_id}, {channel_kind})"
         )
+        thread_block = MaxwellBot._thread_prompt_block(self, message)
+        if thread_block:
+            dynamic_parts.append(thread_block)
         # ─── per-tier context budget ────────────────────────────────────
         # Every lookup tier below (long-term facts, recalled messages, cached
         # web results, cross-context facts, and the entity profile) used to be
@@ -17155,11 +17178,17 @@ class MaxwellBot(commands.Bot):
         # cross-context facts above ARE global. If a user references
         # something from a different channel, treat it as something
         # THEY remember, not something you remember.
-        scope_channel_label = (
-            f"DM with {message.author.display_name}"
-            if isinstance(message.channel, discord.DMChannel)
-            else f"#{channel_name}"
-        )
+        if isinstance(message.channel, discord.DMChannel):
+            scope_channel_label = f"DM with {message.author.display_name}"
+        elif is_discord_thread(message.channel):
+            parent = getattr(message.channel, "parent", None)
+            parent_name = getattr(parent, "name", None)
+            if parent_name:
+                scope_channel_label = f"thread #{channel_name} (child of #{parent_name})"
+            else:
+                scope_channel_label = f"thread #{channel_name}"
+        else:
+            scope_channel_label = f"#{channel_name}"
         dynamic_parts.append(
             f"Memory scope: transcript is {scope_channel_label} ({channel_id}) only. "
             "LTM and cross-context facts are global."

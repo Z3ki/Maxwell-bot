@@ -85,6 +85,33 @@ def is_direct_image_url(url: str) -> bool:
     return Path(path).suffix in _DIRECT_IMAGE_EXTS
 
 
+def docker_bind_path(path: str | Path, *, app_root: str | Path | None = None) -> str:
+    """Path the Docker daemon should use for a bind mount.
+
+    ``docker run -v`` is resolved by the *host* daemon. When Maxwell itself
+    runs in a container with the repo bind-mounted, in-container paths like
+    ``/app/shelldocker`` do not exist on the host. Set ``MAXWELL_HOST_BIND``
+    to the host path of the repo root; paths under the process app root are
+    rewritten to that host path. Anything outside the app root is returned
+    unchanged.
+    """
+    raw = os.path.abspath(os.path.expanduser(str(path)))
+    host_root = os.environ.get("MAXWELL_HOST_BIND", "").strip()
+    if not host_root:
+        return raw
+    if app_root is None:
+        env_root = os.environ.get("MAXWELL_APP_ROOT", "").strip()
+        app_root = env_root or os.path.dirname(os.path.abspath(__file__))
+    container_root = os.path.abspath(os.path.expanduser(str(app_root)))
+    prefix = container_root.rstrip(os.sep) + os.sep
+    if raw == container_root:
+        return os.path.abspath(host_root)
+    if not raw.startswith(prefix):
+        return raw
+    rel = raw[len(prefix) :]
+    return os.path.abspath(os.path.join(host_root, rel))
+
+
 # Human-readable labels for Discord system message types (welcome messages,
 # joins, boosts, pins, stage, incidents, etc.). Ordinary chat types are
 # skipped in the annotator. Anything unmapped falls back to the enum name.

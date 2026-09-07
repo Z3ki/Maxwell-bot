@@ -510,11 +510,30 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         },
         ["name"],
     ),
-    "guide": _obj(
+    "create_thread": _obj(
         {
-            "goal": _str(
-                "Short description of what the user wants built (e.g. 'coop neural worm maze with backend sync'). Used as thread title and to tailor the 5 clarifying questions."
+            "name": _str("Discord thread title (max 100 chars)"),
+            "context": _str(
+                "Required brief for the Maxwell that will talk in this thread: "
+                "goal, decisions so far, constraints, what to do next. Injected "
+                "into every turn in the thread."
             ),
+            "opening": _str("Optional first message posted in the new thread"),
+            "auto_archive": _int(
+                "Auto-archive minutes: 60, 1440, 4320, or 10080 (default 1440)"
+            ),
+        },
+        ["context"],
+    ),
+    "thread_control": _obj(
+        {
+            "action": _str(
+                "status | list | context | rename | archive | unarchive"
+            ),
+            "thread_id": _str("Discord thread id; default is the current thread"),
+            "context": _str("Brief to add or replace (action=context)"),
+            "mode": _str("append (default) or replace, for action=context"),
+            "name": _str("New title, for action=rename"),
         },
     ),
     "spawn_background": _obj(
@@ -857,7 +876,8 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "site_test",
         "list_sites",
         "host_file",
-        "guide",
+        "create_thread",
+        "thread_control",
         "web_search",
         "fetch_url",
         "see_image",

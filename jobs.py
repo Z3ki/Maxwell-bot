@@ -642,6 +642,24 @@ async def run_background_job(bot: Any, job_id: str) -> None:
         thread_err = str(exc)[:200]
     if thread is not None:
         manager.mark(job.id, thread_id=str(getattr(thread, "id", "") or ""))
+        store = getattr(bot, "thread_store", None)
+        if store is not None:
+            brief = job.goal
+            extra = str(getattr(job, "context", "") or "").strip()
+            if extra:
+                brief = f"{brief}\n{extra}"
+            try:
+                await store.remember(
+                    thread,
+                    parent_message=orig_message,
+                    context=(
+                        f"Background job `{job.id}`.\n{brief}\n"
+                        "Progress and the finished result belong in this thread."
+                    ),
+                    source="spawn_background",
+                )
+            except Exception:
+                logger.debug("could not store background-job thread brief", exc_info=True)
         await _post_thread(
             thread,
             f"Job `{job.id}` running — `{_short(job.goal, 120)}`\n"

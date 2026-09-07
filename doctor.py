@@ -129,22 +129,34 @@ def check_system_tools() -> None:
 
 
 def check_docker(cfg) -> None:
-    """The shell tool runs in a container, so Docker is required.
+    """Maxwell and the shell sandbox both talk to a Docker daemon.
 
-    Nothing else reported this: `shell` would just fail at call time with a
-    docker error the operator only saw in a Discord reply.
+    The supported install runs Maxwell itself in Compose and bind-mounts
+    docker.sock so sibling containers (shell, site backends) still work.
     """
-    if cfg is None or not getattr(cfg, "ENABLE_SHELL", False):
-        return
-    head("Docker (needed by the shell tool)")
+    head("Docker")
     import shutil
     import subprocess
 
+    in_docker = Path("/.dockerenv").exists() or bool(
+        os.environ.get("MAXWELL_IN_DOCKER", "").strip()
+    )
+    if in_docker:
+        line("ok", "running inside a container")
+        bind = (os.environ.get("MAXWELL_HOST_BIND") or "").strip()
+        if bind:
+            line("ok", "MAXWELL_HOST_BIND", bind)
+        else:
+            line(
+                "warn",
+                "MAXWELL_HOST_BIND unset",
+                "sibling containers cannot bind-mount this checkout",
+            )
     if not shutil.which("docker"):
         line(
             "warn",
-            "docker not found",
-            "shell will fail; install Docker or set ENABLE_SHELL=false",
+            "docker CLI not found",
+            "shell/site_server will fail; the supported install is Docker Compose",
         )
         return
     try:
@@ -164,7 +176,7 @@ def check_docker(cfg) -> None:
         line(
             "warn",
             "docker installed but not reachable",
-            (detail[-1][:120] if detail else "is the daemon running, and are you in the docker group?"),
+            (detail[-1][:120] if detail else "is the daemon running, and is docker.sock mounted?"),
         )
 
 
@@ -305,7 +317,7 @@ def main() -> int:
         for item in problems:
             print(f"  {RED}→{RESET} {item}")
         return 1
-    print(f"  {GREEN}Ready.{RESET} Start with: python3 bot.py")
+    print(f"  {GREEN}Ready.{RESET} Start with: docker compose up -d")
     if not args.probe:
         print(f"  {DIM}Run `python3 doctor.py --probe` to test the endpoints too.{RESET}")
     return 0

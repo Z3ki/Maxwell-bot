@@ -1,3 +1,5 @@
+# Shell-tool sandbox (image name: maxwell-shell).
+# The bot itself is docker/maxwell.Dockerfile, started via docker-compose.yml.
 FROM ubuntu:26.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

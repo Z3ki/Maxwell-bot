@@ -202,9 +202,12 @@ def test_silent_tools_do_not_tell_the_model_to_send_a_placeholder():
     assert "same batch" not in text
 
 
-def test_guide_is_a_result_tool():
-    assert "guide" in RESULT_TOOL_NAMES
-    assert "returns output" in result_contract("guide")
+def test_create_thread_is_a_result_tool():
+    assert "create_thread" in RESULT_TOOL_NAMES
+    assert "thread_control" in RESULT_TOOL_NAMES
+    assert "guide" not in RESULT_TOOL_NAMES
+    assert "returns output" in result_contract("create_thread")
+    assert "returns output" in result_contract("thread_control")
 
 
 def test_attachment_note_keeps_mime_charset_and_cdn_query_string():

@@ -38,7 +38,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from utils import FileLock, _atomic_json_write_sync
+from utils import FileLock, _atomic_json_write_sync, docker_bind_path
 
 logger = logging.getLogger(__name__)
 
@@ -797,8 +797,8 @@ async def _start_unlocked(
         "--read-only",
         "--tmpfs", "/tmp:rw,noexec,nosuid,size=32m",
         "-p", f"127.0.0.1:{port}:{CONTAINER_PORT}",
-        "-v", f"{source.resolve()}:/app:ro",
-        "-v", f"{state_dir(data_dir, slug).resolve()}:/data:rw",
+        "-v", f"{docker_bind_path(source.resolve())}:/app:ro",
+        "-v", f"{docker_bind_path(state_dir(data_dir, slug).resolve())}:/data:rw",
         "-e", f"PORT={CONTAINER_PORT}",
         "-e", f"SITE_SLUG={slug}",
         "-e", f"SITE_BASE_PATH=/bot/{slug}/api",

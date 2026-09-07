@@ -40,6 +40,14 @@ def test_full_protocol_discourages_needless_questions():
     assert "only ask a question when you genuinely cannot proceed" in text
 
 
+def test_protocol_uses_create_thread_not_guided_goal():
+    text = TOOL_PROTOCOL.lower()
+    assert "create_thread" in text
+    assert "thread-you" in text
+    assert "call guide(" not in text
+    assert "guided-goal" not in text
+
+
 def test_lean_protocol_also_asks_for_proactive_work():
     """Ordinary chat turns carry the lean block, so it needs this too."""
     assert "be proactive" in LEAN_TOOL_PROTOCOL.lower()

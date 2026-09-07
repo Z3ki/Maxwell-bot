@@ -1,0 +1,28 @@
+# Linux default. Host networking keeps localhost Ollama, site backends on
+# 127.0.0.1:8800-8899, Discord voice UDP, and the dashboard on :8765 working
+# without port-map gymnastics. Python and system packages stay inside the
+# image so they cannot fight the host.
+#
+# macOS/Windows: install.sh uses docker-compose.bridge.yml instead.
+services:
+  maxwell:
+    build:
+      context: .
+      dockerfile: docker/maxwell.Dockerfile
+    image: maxwell:local
+    container_name: maxwell
+    restart: unless-stopped
+    init: true
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      MAXWELL_IN_DOCKER: "1"
+      MAXWELL_HOST_BIND: ${MAXWELL_HOST_BIND:-}
+      MAXWELL_APP_ROOT: /app
+    volumes:
+      - .:/app
+      - /var/run/docker.sock:/var/run/docker.sock
+    stop_grace_period: 20s
