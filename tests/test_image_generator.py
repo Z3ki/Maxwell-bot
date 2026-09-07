@@ -1,9 +1,14 @@
 """image_generator: Pollinations is the primary (and only) generator."""
 
 import asyncio
+import base64
+import json
 from types import SimpleNamespace
 
-from bot_tools import ImageGeneratorTool
+import discord
+import pytest
+
+from bot_tools import HDImageGeneratorTool, ImageGeneratorTool
 
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
@@ -11,6 +16,7 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 
 class _Posted:
     def __init__(self):
+        self.id = 123
         self.attachments = [SimpleNamespace(url="https://cdn.discordapp.com/gen.png")]
 
 
@@ -130,3 +136,52 @@ def test_pollinations_posts_image_bytes(monkeypatch):
     assert message.channel.files
     assert "Image sent to chat" in result
     assert "https://cdn.discordapp.com/gen.png" in result
+
+
+@pytest.mark.parametrize("hd", [False, True])
+@pytest.mark.parametrize("forbidden", [False, True])
+def test_generated_images_record_confirmed_delivery(monkeypatch, hd, forbidden):
+    bot = _tool().bot
+    bot.config.OLLAMA_BASE_URL = "https://example.invalid/v1"
+    receipts = []
+    bot._record_delivery = lambda origin, sent: receipts.append((origin, sent.id))
+    message = _Message()
+    if forbidden:
+        async def denied(**_kwargs):
+            raise discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "")
+
+        message.channel.send = denied
+
+    class Response:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def text(self):
+            image = "data:image/png;base64," + base64.b64encode(PNG).decode()
+            return json.dumps({"choices": [{"message": {"content": image}}]})
+
+    async def session():
+        return SimpleNamespace(post=lambda *_args, **_kwargs: Response())
+
+    monkeypatch.setattr("bot_tools._get_shared_session", session)
+    monkeypatch.setattr(
+        "bot_tools._persist_public_image",
+        lambda *_args, **_kwargs: (None, None),
+    )
+    if hd:
+        result = asyncio.run(HDImageGeneratorTool(bot).execute(message, prompt="a fox"))
+    else:
+        result = asyncio.run(ImageGeneratorTool(bot)._deliver_generated_image(
+            message, "a fox", PNG, prefix="test"
+        ))
+    if forbidden:
+        assert result.startswith("Error:")
+        assert receipts == []
+    else:
+        assert not result.startswith("Error:")
+        assert receipts == [(message, 123)]

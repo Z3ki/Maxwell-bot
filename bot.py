@@ -2551,7 +2551,10 @@ def _tool_results_need_followup(tool_results: list[str]) -> bool:
     for result in tool_results:
         # Check for error prefixes, not just the substring "Error" anywhere
         # (prevents false positives like "Error handling in Python" search results)
-        if result.startswith(("Error:", "Error ")) or "\nError:" in result:
+        if (
+            result.startswith(("Error:", "Error ", "Tool no_response: Error:"))
+            or "\nError:" in result
+        ):
             return True
         if any(result.startswith(f"Tool {name}:") for name in FOLLOWUP_TOOL_NAMES):
             has_followup_signal = True
@@ -3391,13 +3394,15 @@ class MaxwellBot(commands.Bot):
         for key, value in self._night_fallback_kwargs().items():
             kwargs.setdefault(key, value)
         message = _current_inbound.get()
+        if message is not None:
+            kwargs.setdefault("request_id", str(getattr(message, "id", "") or ""))
         started = time.monotonic()
         try:
             return await self.ai_provider.generate_response(messages, **kwargs)
         finally:
             if message is not None:
                 logger.info(
-                    "inbound mid=%s cid=%s stage=provider duration_ms=%d model=%s",
+                    "inbound mid=%s cid=%s stage=provider duration_ms=%d requested_model=%s",
                     getattr(message, "id", ""),
                     getattr(getattr(message, "channel", None), "id", ""),
                     (time.monotonic() - started) * 1000,
@@ -4106,12 +4111,10 @@ class MaxwellBot(commands.Bot):
             stats = {}
             self._reply_drop_counts = stats
         stats[why] = int(stats.get(why, 0) or 0) + 1
-        MaxwellBot._record_request_outcome(
-            self,
-            entry.message,
-            "deferred" if why == "deferred" else "superseded",
-            f"queue_{why}",
+        status = {"deferred": "deferred", "channel cleared": "superseded"}.get(
+            why, "suppressed"
         )
+        MaxwellBot._record_request_outcome(self, entry.message, status, f"queue_{why}")
 
     def _request_state(self, message) -> dict:
         journal = getattr(self, "_request_journal", None)
@@ -4121,7 +4124,11 @@ class MaxwellBot(commands.Bot):
     def _record_request_outcome(self, message, status: str, reason: str = "") -> None:
         journal = getattr(self, "_request_journal", None)
         row = MaxwellBot._request_state(self, message)
-        if not row or row["status"] in _REQUEST_TERMINAL:
+        if not row:
+            return
+        if row["status"] in _REQUEST_TERMINAL and not (
+            row["status"] == status == "delivered" and reason == "partial_delivery"
+        ):
             return
         journal.update(row["message_id"], status, reason=reason)
         logger.info(
@@ -5803,18 +5810,27 @@ class MaxwellBot(commands.Bot):
         journal = getattr(self, "_request_journal", None)
         if journal is None:
             return
-        delay = self._inbound_setting("inbound_retry_delay_seconds", 5, 0, 300)
+        delay = self._inbound_setting("inbound_retry_delay_seconds", 5, 1, 300)
+        if getattr(self, "_inbound_retry_before", None) is None:
+            self._inbound_retry_before = time.time()
+            self._inbound_retry_after = None
+        rows = journal.pending(
+            limit=1000,
+            after=self._inbound_retry_after,
+            before=self._inbound_retry_before,
+        )
         handled = 0
-        for row in journal.pending(limit=1000):
+        for row in rows:
+            if handled >= 20:
+                break
             mid, cid = row["message_id"], row["channel_id"]
+            self._inbound_retry_after = (row["created_at"], mid)
             if self._reply_queue.contains(cid, mid) or mid in self._inbound_processing:
                 continue
             if self._reply_queue.depth(cid) >= self._reply_queue.max_directed:
                 continue
             if time.time() - float(row["updated_at"]) < delay * max(1, row["attempts"]):
                 continue
-            if handled >= 20:
-                break
             handled += 1
             message = SimpleNamespace(id=mid, channel=SimpleNamespace(id=cid))
             try:
@@ -5829,10 +5845,22 @@ class MaxwellBot(commands.Bot):
             except (discord.Forbidden, discord.NotFound) as exc:
                 self._record_request_outcome(message, "failed", type(exc).__name__)
             except Exception as exc:
-                journal.begin(mid)
+                current = journal.get(mid)
+                if (
+                    current
+                    and current["status"] not in _REQUEST_TERMINAL
+                    and not current["effects_started"]
+                ):
+                    journal.begin(mid)
                 await self._request_failure(
                     message, f"fetch:{type(exc).__name__}", retryable=True
                 )
+        else:
+            if len(rows) < 1000:
+                # Finish a fixed receipt-time snapshot before including new
+                # arrivals; sustained traffic cannot extend a sweep forever.
+                self._inbound_retry_before = None
+                self._inbound_retry_after = None
 
     async def _inbound_retry_loop(self):
         await self.wait_until_ready()
@@ -6914,8 +6942,13 @@ class MaxwellBot(commands.Bot):
                 channel_id,
                 type(exc).__name__,
             )
-            if journal is not None and journal.get(message_id):
-                journal.begin(message_id)
+            row = journal.get(message_id) if journal is not None else None
+            if row:
+                if (
+                    row["status"] not in _REQUEST_TERMINAL
+                    and not row["effects_started"]
+                ):
+                    journal.begin(message_id)
                 await self._request_failure(
                     message,
                     f"admission:{type(exc).__name__}",
@@ -7622,6 +7655,7 @@ class MaxwellBot(commands.Bot):
             return False
         if cmd in set(self._control.get("disabled_commands", []) or []):
             return
+        MaxwellBot._mark_request_effect(self, message)
         admin_commands = {
             "prompt",
             "clearprompt",

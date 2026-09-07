@@ -678,6 +678,35 @@ def test_journal_pending_cursor_handles_ties_and_status_changes(tmp_path, monkey
     assert journal.get("2")["updated_at"] > cursor[0]
 
 
+@pytest.mark.parametrize("snapshot", [0.0, 100.0])
+def test_journal_pending_snapshot_bounds_sweep_without_excluding_boundary(
+    tmp_path, monkeypatch, snapshot
+):
+    now = [snapshot - 1]
+    monkeypatch.setattr(message_pipeline.time, "time", lambda: now[0])
+    journal = RequestJournal(tmp_path / "requests.sqlite3")
+    journal.accept("1", "channel")
+    now[0] = snapshot
+    journal.accept("2", "channel")
+    journal.accept("3", "channel")
+    page = journal.pending(1, before=snapshot)
+    assert [row["message_id"] for row in page] == ["1"]
+    cursor = page[-1]["created_at"], page[-1]["message_id"]
+
+    now[0] = snapshot + 1
+    journal.accept("4", "channel")
+    journal.update("2", "deferred")
+    page = journal.pending(100, after=cursor, before=snapshot)
+    assert [row["message_id"] for row in page] == ["2", "3"]
+    assert journal.get("2")["updated_at"] > snapshot
+    cursor = page[-1]["created_at"], page[-1]["message_id"]
+    assert journal.pending(100, after=cursor, before=snapshot) == []
+    assert [row["message_id"] for row in journal.pending(before=snapshot)] == [
+        "1", "2", "3"
+    ]
+    assert [row["message_id"] for row in journal.pending()] == ["1", "2", "3", "4"]
+
+
 @pytest.mark.parametrize(
     "status",
     [

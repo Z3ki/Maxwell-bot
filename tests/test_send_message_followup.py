@@ -173,5 +173,11 @@ def test_no_response_stays_terminal():
     assert _only_promise_results(results) is False
 
 
+def test_rejected_no_response_is_returned_to_the_model():
+    results = ["Tool no_response: Error: this direct request has not received an answer."]
+    assert _tool_results_need_followup(results) is True
+    assert _only_promise_results(results) is False
+
+
 def test_error_still_forces_followup():
     assert _tool_results_need_followup(["Tool shell: Error - boom"]) is True

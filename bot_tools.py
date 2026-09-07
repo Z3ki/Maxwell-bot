@@ -1308,6 +1308,9 @@ class ImageGeneratorTool(Tool):
         self._signal_streaming(message)
         try:
             sent_msg = await message.channel.send(file=file)
+            record_delivery = getattr(self.bot, "_record_delivery", None)
+            if callable(record_delivery) and sent_msg is not None:
+                record_delivery(message, sent_msg)
         except discord.Forbidden:
             logger.warning(
                 f"Cannot send image in {message.channel.id} — missing permissions"
@@ -1753,6 +1756,9 @@ class HDImageGeneratorTool(Tool):
         self._signal_streaming(message)
         try:
             sent_msg = await message.channel.send(file=file)
+            record_delivery = getattr(self.bot, "_record_delivery", None)
+            if callable(record_delivery) and sent_msg is not None:
+                record_delivery(message, sent_msg)
         except discord.Forbidden:
             logger.warning(
                 f"Cannot send HD image in {message.channel.id} — missing permissions"

@@ -57,9 +57,10 @@ directory private and persistent across deployments.
   The next DM or ping does not cancel this work.
 - **Failed:** inspect the recorded failure reason. An uncertain tool/send outcome
   is deliberately not replayed automatically.
-- **Delivered:** use the response ID to find the actual Discord message. A
+- **Delivered:** use the response ID, when available, to find the actual Discord message. A
   generated answer, typing indicator, or progress placeholder is not proof of
   delivery. A partial multi-message reply is distinguished from a complete send.
+  Voice-tool delivery currently records confirmation without a response ID.
 
 LLM traces now include the triggering message ID, allowing model/tool decisions
 to be joined to receipt and delivery. Their short ring is not a durable record;

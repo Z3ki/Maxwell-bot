@@ -64,6 +64,10 @@ def _bot(path, *, capacity=2):
         await bot._send_with_slowmode(message.channel, "answer", reply_to=message)
 
     bot._handle_message = answer
+    setting = bot._inbound_setting
+    bot._inbound_setting = lambda key, default, low, high: (
+        0 if key == "inbound_retry_delay_seconds" else setting(key, default, low, high)
+    )
     return bot
 
 
@@ -642,3 +646,166 @@ def test_reliability_logs_have_ids_not_message_contents(tmp_path, caplog):
     assert "mid=101" in caplog.text
     assert "stage=delivered" in caplog.text
     assert "private-inbound-content-sentinel" not in caplog.text
+
+
+def test_delivery_preserves_status_and_records_partial_diagnostic(tmp_path):
+    bot = _bot(tmp_path)
+    message = _message(bot)
+    bot._request_journal.accept(message.id, 22, 11, directed=True)
+    bot._mark_request_effect(message)
+    bot._record_delivery(message, SimpleNamespace(id=12345))
+    bot._record_request_outcome(
+        message, "suppressed", reason="model_no_response:already_answered"
+    )
+    assert bot._request_state(message)["status"] == "delivered"
+    bot._record_request_outcome(message, "delivered", reason="partial_delivery")
+    row = bot._request_state(message)
+    assert row["status"] == "delivered"
+    assert row["response_id"] == "12345"
+    assert row["reason"] == "partial_delivery"
+
+
+@pytest.mark.parametrize(
+    ("reason", "status"),
+    [
+        ("deferred", "deferred"),
+        ("stale", "suppressed"),
+        ("queue full", "suppressed"),
+        ("superseded", "suppressed"),
+        ("channel cleared", "superseded"),
+    ],
+)
+def test_queue_drop_reasons_preserve_durable_overflow(tmp_path, reason, status):
+    bot = _bot(tmp_path)
+    message = _message(bot)
+    bot._request_journal.accept(message.id, 22, 11, directed=True)
+    bot._on_reply_queue_drop("22", SimpleNamespace(message=message), reason)
+    assert bot._request_state(message)["status"] == status
+
+
+def test_explicit_command_is_checkpointed_before_execution(tmp_path):
+    bot = _bot(tmp_path)
+    message = _message(bot, content=",stop")
+    sends = []
+
+    async def send(content, **_kwargs):
+        assert bot._request_state(message)["effects_started"] is True
+        sends.append(content)
+        return SimpleNamespace(id=12345)
+
+    message.channel.send = send
+    asyncio.run(bot.on_message(message))
+    assert sends == ["nothing to stop"]
+    row = bot._request_state(message)
+    assert row["status"] == "suppressed"
+    assert row["reason"] == "command"
+    assert row["effects_started"] is True
+
+
+def test_restart_mid_gap_keeps_conservative_persisted_cursor(tmp_path):
+    first = _bot(tmp_path)
+    first._control["gap_recovery_max_messages"] = 2
+    first._watermarks.note(22, 100)
+    first._watermarks.save()
+    first._capture_recovery_snapshot()
+    backlog = [_message(first, mid) for mid in (101, 102, 103, 200)]
+    history_starts = []
+
+    async def history(*, limit, after, oldest_first):
+        assert oldest_first
+        history_starts.append(after.id)
+        for message in [m for m in backlog if m.id > after.id][:limit]:
+            yield message
+
+    backlog[0].channel.history = history
+
+    async def before_restart():
+        await first.on_message(backlog[-1])
+        await _drain(first)
+        await first._recover_missed_messages(settle=False)
+        await _drain(first)
+
+    asyncio.run(before_restart())
+    assert first._watermarks.get(22) == 102
+
+    restarted = _bot(tmp_path)
+    restarted._control["gap_recovery_max_messages"] = 2
+    restarted._channels_for_test[22] = backlog[0].channel
+    restarted._watermarks.load()
+    restarted._capture_recovery_snapshot()
+    restarted._request_journal.recover()
+
+    async def after_restart():
+        await restarted._recover_missed_messages(settle=False)
+        await _drain(restarted)
+
+    asyncio.run(after_restart())
+    assert history_starts == [100, 102]
+    assert restarted._request_state(backlog[2])["status"] == "delivered"
+    # The newer live message was already delivered before the crash.
+    assert len(backlog[0].channel.sent) == 4
+
+
+def test_pending_sweep_reaches_new_rooms_beyond_busy_first_page(tmp_path):
+    bot = _bot(tmp_path)
+    journal = bot._request_journal
+    for mid in range(1, 1002):
+        journal.accept(mid, 22, 11, directed=True)
+        bot._inbound_processing.add(str(mid))
+    waiting = _message(bot, 1002, 23)
+    journal.accept(waiting.id, 23, 11, directed=True)
+
+    async def run():
+        await bot._retry_pending_inbound()
+        assert bot._request_state(waiting)["status"] == "received"
+        newer = _message(bot, 1003, 24)
+        journal.accept(newer.id, 24, 11, directed=True)
+        await bot._retry_pending_inbound()
+        await _drain(bot)
+        assert bot._request_state(waiting)["status"] == "delivered"
+        assert bot._request_state(newer)["status"] == "received"
+        # A fresh, bounded sweep includes the newly arrived room.
+        await bot._retry_pending_inbound()
+        await bot._retry_pending_inbound()
+        await _drain(bot)
+        assert bot._request_state(newer)["status"] == "delivered"
+
+    asyncio.run(run())
+
+
+def test_command_exception_after_effect_is_terminal_not_retried(tmp_path):
+    bot = _bot(tmp_path)
+    message = _message(bot, content=",stop")
+    message.channel.send = AsyncMock(side_effect=TimeoutError)
+
+    async def run():
+        await bot.on_message(message)
+        count = message.channel.send.await_count
+        await bot._retry_pending_inbound()
+        assert message.channel.send.await_count == count
+
+    asyncio.run(run())
+    row = bot._request_state(message)
+    assert row["status"] == "failed"
+    assert row["effects_started"] is True
+
+
+def test_provider_call_receives_request_id_for_local_trace(tmp_path, caplog):
+    bot = _bot(tmp_path)
+    message = _message(bot)
+    bot._night_fallback_kwargs = lambda: {}
+    bot.ai_provider = SimpleNamespace(
+        generate_response=AsyncMock(return_value="answer"), model="configured-model"
+    )
+
+    async def run():
+        token = _current_inbound.set(message)
+        try:
+            assert await bot._generate_response([]) == "answer"
+        finally:
+            _current_inbound.reset(token)
+
+    with caplog.at_level("INFO"):
+        asyncio.run(run())
+    bot.ai_provider.generate_response.assert_awaited_once_with([], request_id="101")
+    assert "requested_model=configured-model" in caplog.text

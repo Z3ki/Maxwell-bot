@@ -658,13 +658,16 @@ class RequestJournal:
         limit: int = 100,
         *,
         after: tuple[float, str] | None = None,
+        before: float | None = None,
     ) -> list[dict[str, Any]]:
         """Oldest unfinished, effect-free requests, with stable keyset paging.
 
         Pass ``(last_row["created_at"], last_row["message_id"])`` as ``after``
         to inspect the next page even when earlier requests remain busy. Start
         a fresh sweep without a cursor after reaching the end. Status updates
-        and terminal pruning do not invalidate the cursor.
+        and terminal pruning do not invalidate the cursor. An inclusive
+        ``before`` creation timestamp bounds a sweep so newer arrivals wait
+        until the next sweep rather than extending the current one indefinitely.
         """
         query = """
             SELECT * FROM requests
@@ -675,6 +678,9 @@ class RequestJournal:
         if after is not None:
             query += " AND (created_at, message_id) > (?, ?)"
             parameters.extend((float(after[0]), str(after[1])))
+        if before is not None:
+            query += " AND created_at <= ?"
+            parameters.append(float(before))
         query += " ORDER BY created_at, message_id LIMIT ?"
         parameters.append(max(0, int(limit)))
         with self._transaction() as connection:

@@ -167,12 +167,12 @@ def _build_test_bot(tools_dict):
     async def fake_execute_tool_by_name(self_obj, message, name, params, **kw):
         tool = self_obj.tools.get(name)
         if tool is None:
-            return f"Error: tool {name!r} not registered"
+            return f"Tool {name}: Error: tool {name!r} not registered"
         try:
             res = await tool.execute(message, **params)
-            return res if isinstance(res, str) else str(res)
+            return f"Tool {name}: {res}"
         except Exception as e:
-            return f"Error: {e}"
+            return f"Tool {name}: Error: {e}"
 
     # Save the real method BEFORE patching. The fixture restores it.
     _SAVED["real"] = MaxwellBot._execute_tool_by_name
@@ -303,9 +303,9 @@ def test_send_message_then_wait_then_send_message_runs_in_order():
     ], f"Out-of-order or missing events: {events}"
 
 
-def test_no_response_blocks_later_send_message():
-    """no_response must be exclusive — a later send_message in the same
-    batch gets rejected with an error the model can see."""
+@pytest.mark.parametrize("allowed", [True, False])
+def test_no_response_blocks_later_send_message_only_on_success(allowed):
+    """Rejected silence must leave a later visible response executable."""
     from bot import MaxwellBot
 
     sent = []
@@ -316,7 +316,7 @@ def test_no_response_blocks_later_send_message():
 
     async def fake_no_response(message, **kwargs):
         sent.append("NO_RESPONSE")
-        return "__NO_RESPONSE__"
+        return "__NO_RESPONSE__" if allowed else "Error: direct response required"
 
     bot = _build_test_bot(
         {
@@ -368,8 +368,7 @@ def test_no_response_blocks_later_send_message():
 
     asyncio.run(run())
 
-    # Only the no_response actually fired; the send_message was rejected
-    assert sent == ["NO_RESPONSE"]
+    assert sent == (["NO_RESPONSE"] if allowed else ["NO_RESPONSE", "hi"])
 
 
 def test_two_send_messages_in_a_row_both_fire_in_order():
