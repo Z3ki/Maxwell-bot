@@ -53,7 +53,21 @@ GIF_PAGE_URL_RE = re.compile(
 )
 
 _DIRECT_IMAGE_EXTS = frozenset(
-    {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif", ".avif", ".apng", ".gifv"}
+    {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".webp",
+        ".bmp",
+        ".tif",
+        ".tiff",
+        ".heic",
+        ".heif",
+        ".avif",
+        ".apng",
+        ".gifv",
+    }
 )
 
 
@@ -271,10 +285,35 @@ def _attachment_is_clip(att: Any) -> bool:
     return False
 
 
+def _first_http_url(*values: Any) -> str:
+    """First http(s) URL, keeping query strings (Discord CDN ``ex/is/hm``)."""
+    for value in values:
+        if value is None:
+            continue
+        url = str(value).strip()
+        if url.startswith(("http://", "https://")):
+            return url
+    return ""
+
+
+def _media_http_url(value: Any) -> str:
+    """Direct URL from a string or Discord media object. Prefer url over proxy_url."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return _first_http_url(value)
+    return _first_http_url(
+        getattr(value, "url", None),
+        getattr(value, "proxy_url", None),
+    )
+
+
 def _attachment_annotation(att: Any) -> str:
     name = str(getattr(att, "filename", "") or "file")
     ctype = str(getattr(att, "content_type", "") or "").split(";")[0].lower()
     lower = name.lower()
+    url = _media_http_url(att)
+    url_bit = f" {url}" if url else ""
     extras: list[str] = []
     spoiler = getattr(att, "is_spoiler", None)
     if callable(spoiler):
@@ -311,7 +350,7 @@ def _attachment_annotation(att: Any) -> str:
     if _attachment_is_voice(att):
         dur = getattr(att, "duration", None)
         dur_bit = f" {float(dur):.0f}s" if dur else ""
-        return f"[voice message:{dur_bit} {name}]{extra}"
+        return f"[voice message:{dur_bit} {name}{url_bit}]{extra}"
     if ctype.startswith("image/") or lower.endswith(
         (
             ".png",
@@ -328,20 +367,20 @@ def _attachment_annotation(att: Any) -> str:
             ".apng",
         )
     ):
-        return f"[image: {name}]{extra}"
+        return f"[image: {name}{url_bit}]{extra}"
     if ctype.startswith("audio/") or lower.endswith(
         (".mp3", ".wav", ".ogg", ".oga", ".opus", ".m4a", ".flac", ".aac", ".wma")
     ):
         dur = getattr(att, "duration", None)
         dur_bit = f" {float(dur):.0f}s" if dur else ""
-        return f"[audio:{dur_bit} {name}]{extra}"
+        return f"[audio:{dur_bit} {name}{url_bit}]{extra}"
     if ctype.startswith("video/") or lower.endswith(
         (".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".mpeg", ".mpg", ".3gp")
     ):
         dur = getattr(att, "duration", None)
         dur_bit = f" {float(dur):.0f}s" if dur else ""
-        return f"[video:{dur_bit} {name}]{extra}"
-    return f"[file: {name}]{extra}"
+        return f"[video:{dur_bit} {name}{url_bit}]{extra}"
+    return f"[file: {name}{url_bit}]{extra}"
 
 
 def iter_message_snapshots(message: Any) -> list:
@@ -370,6 +409,115 @@ def iter_message_snapshots(message: Any) -> list:
 def iter_message_payloads(message: Any) -> list:
     """The wrapping message plus any forwarded snapshots."""
     return [message, *iter_message_snapshots(message)]
+
+
+def _payload_attr_items(message: Any, name: str, cap: int) -> list:
+    """Collect ``name`` from the wrapping message and forwarded snapshots."""
+    items: list = []
+    for source in iter_message_payloads(message):
+        for item in list(getattr(source, name, None) or []):
+            if item is None:
+                continue
+            items.append(item)
+            if len(items) >= cap:
+                return items
+    return items
+
+
+def _format_compact_attachment(att: Any) -> str:
+    filename = str(getattr(att, "filename", None) or "attachment")
+    mime = str(getattr(att, "content_type", None) or "").strip()
+    if mime:
+        extra = mime
+    else:
+        size = getattr(att, "size", None)
+        try:
+            extra = f"{int(size)} bytes"
+        except (TypeError, ValueError):
+            extra = "unknown"
+    url = _media_http_url(att)
+    if url:
+        return f"{filename} ({extra}) {url}"
+    return f"{filename} ({extra})"
+
+
+def _compact_attachments_note(
+    message: Any, *, raw_content: str = "", cap: int = 5
+) -> str:
+    """``[attachments: name (mime) url]`` — skip if content already has one."""
+    if "[attachments:" in str(raw_content or ""):
+        return ""
+    names = [
+        _format_compact_attachment(att)
+        for att in _payload_attr_items(message, "attachments", cap)
+    ]
+    if not names:
+        return ""
+    return "[attachments: " + ", ".join(names) + "]"
+
+
+def _embed_type_name(embed: Any) -> str:
+    et = getattr(embed, "type", None)
+    if et is None:
+        return "rich"
+    name = getattr(et, "name", None)
+    if name not in (None, ""):
+        text = str(name).strip()
+        if text:
+            return text
+    text = str(et).strip()
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    return text or "rich"
+
+
+def _embed_title_text(embed: Any, *, limit: int = 120) -> str:
+    raw = getattr(embed, "title", None) or getattr(embed, "description", None) or ""
+    title = re.sub(r"\s+", " ", str(raw)).strip().replace('"', "'")
+    if len(title) > limit:
+        return title[:limit]
+    return title
+
+
+def _embed_target_urls(embed: Any) -> list[str]:
+    """Unique http(s) URLs: embed/image/video, thumbnail only if those are missing."""
+    urls: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        url = _media_http_url(value)
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+
+    add(getattr(embed, "url", None))
+    add(getattr(embed, "image", None))
+    add(getattr(embed, "video", None))
+    if not urls:
+        add(getattr(embed, "thumbnail", None))
+    return urls
+
+
+def _format_compact_embed(embed: Any) -> str:
+    bits = [_embed_type_name(embed)]
+    title = _embed_title_text(embed)
+    if title:
+        bits.append(f'"{title}"')
+    bits.extend(_embed_target_urls(embed))
+    return " ".join(bits)
+
+
+def _compact_embeds_note(message: Any, *, raw_content: str = "", cap: int = 3) -> str:
+    """``[embeds: type "title" url]`` — skip if content already has one."""
+    if "[embeds:" in str(raw_content or ""):
+        return ""
+    items = [
+        _format_compact_embed(embed)
+        for embed in _payload_attr_items(message, "embeds", cap)
+    ]
+    if not items:
+        return ""
+    return "[embeds: " + "; ".join(items) + "]"
 
 
 def message_combined_content(message: Any) -> str:
@@ -551,9 +699,7 @@ def _purchase_annotation(message: Any) -> str | None:
     if note is None:
         return None
     gp = getattr(note, "guild_product_purchase", None)
-    name = (
-        str(getattr(gp, "product_name", "") or "").strip() if gp is not None else ""
-    )
+    name = str(getattr(gp, "product_name", "") or "").strip() if gp is not None else ""
     if name:
         return f"[purchase: {name}]"
     return "[purchase notification]"
@@ -586,7 +732,9 @@ def _message_flags_annotation(message: Any) -> str | None:
     return "[flags: " + ", ".join(bits) + "]"
 
 
-def _render_message_annotations(message: Any, raw_content: str = "") -> str:
+def _render_message_annotations(
+    message: Any, raw_content: str = "", *, compact: bool = True
+) -> str:
     """Extra structured context Discord messages carry outside plain content:
     polls, app commands, system events, embeds, attachments, buttons/selects,
     and direct media URLs. Returns annotation lines (joined), or ''.
@@ -628,6 +776,10 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
         except Exception as e:
             logger.debug("Attachment annotation failed: %s", e)
             continue
+    if compact:
+        att_note = _compact_attachments_note(message, raw_content=raw_content)
+        if att_note:
+            parts.append(att_note)
 
     parts.extend(_component_annotations(message))
 
@@ -662,7 +814,7 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
         try:
             title = str(getattr(e, "title", None) or "").strip()
             desc = str(getattr(e, "description", None) or "").strip()
-            url = str(getattr(e, "url", None) or "").strip()
+            url = _media_http_url(getattr(e, "url", None))
             ea = getattr(e, "author", None)
             aname = str(getattr(ea, "name", "")) if ea is not None else ""
             fields = []
@@ -671,19 +823,12 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
                     fn = str(getattr(f, "name", "") or "")
                     fv = str(getattr(f, "value", "") or "")[:160]
                     fields.append(f"{fn}: {fv}")
-                except Exception as e:
-                    logger.debug("Embed field unreadable: %s", e)
+                except Exception as field_err:
+                    logger.debug("Embed field unreadable: %s", field_err)
                     continue
-            img = getattr(e, "image", None)
-            thumb = getattr(e, "thumbnail", None)
-            video = getattr(e, "video", None)
-            img_url = str(getattr(img, "url", "") or "") if img is not None else ""
-            thumb_url = (
-                str(getattr(thumb, "url", "") or "") if thumb is not None else ""
-            )
-            video_url = (
-                str(getattr(video, "url", "") or "") if video is not None else ""
-            )
+            img_url = _media_http_url(getattr(e, "image", None))
+            thumb_url = _media_http_url(getattr(e, "thumbnail", None))
+            video_url = _media_http_url(getattr(e, "video", None))
             footer = getattr(e, "footer", None)
             footer_text = (
                 str(getattr(footer, "text", "") or "").strip()
@@ -696,7 +841,10 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
                 if provider is not None
                 else ""
             )
+            etype = _embed_type_name(e)
             line = "[embed:"
+            if etype:
+                line += f" {etype}"
             if title:
                 line += f" {title[:200]}"
             if aname:
@@ -719,6 +867,10 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
         except Exception as e:
             logger.debug("Embed annotation failed: %s", e)
             continue
+    if compact:
+        embed_note = _compact_embeds_note(message, raw_content=raw_content)
+        if embed_note:
+            parts.append(embed_note)
 
     # Direct media URLs inside the message text (imgur/discord CDN/mp4 etc.)
     found: list[tuple[str, str]] = []
@@ -781,7 +933,7 @@ def _render_message_annotations(message: Any, raw_content: str = "") -> str:
             header += f": {snap_text[:1500]}"
         header += "]"
         parts.append(header)
-        nested = _render_message_annotations(snap, raw_content=snap_text)
+        nested = _render_message_annotations(snap, raw_content=snap_text, compact=False)
         if nested:
             parts.append(nested)
 

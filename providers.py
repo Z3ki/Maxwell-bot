@@ -1506,6 +1506,7 @@ class ProviderEndpoint:
     model: str
     api_key: str = ""
     disable_reasoning: bool = False
+    reasoning_effort: str = ""
 
 
 def normalize_base_url(base_url: str) -> str:
@@ -1551,9 +1552,11 @@ class OllamaProvider:
         vision_api_key: str = "",
         vision_disable_reasoning: bool = True,
         empty_response_retries: int | None = None,
+        reasoning_effort: str = "",
     ):
         self.base_url = normalize_base_url(base_url)
         self.model = model
+        self.reasoning_effort = (reasoning_effort or "").strip()
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.api_key = api_key.strip()
@@ -1573,8 +1576,13 @@ class OllamaProvider:
         self.enable_audio_input = bool(enable_audio_input)
         self._endpoints = [
             ProviderEndpoint(
-                "primary", self.base_url, self.model, self.api_key, disable_reasoning
-            ),
+                "primary",
+                self.base_url,
+                self.model,
+                self.api_key,
+                disable_reasoning,
+                self.reasoning_effort,
+            )
         ]
         if fallback_base_url and fallback_model:
             self._endpoints.append(
@@ -1847,6 +1855,16 @@ class OllamaProvider:
             # with an empty content delta. Pin thinking on so the visible
             # reply actually arrives.
             data["thinking"] = {"type": "enabled"}
+        if (
+            not use_disable_reasoning
+            and self.reasoning_effort
+            and endpoint.name == "primary"
+        ):
+            # Explicit per-provider effort (e.g. grok-4.6 "low").
+            # Top-level shape only: the nested `reasoning.effort` variant
+            # tested slower through CLIProxyAPI, and "none" stays reserved
+            # for the disable_reasoning path above.
+            data["reasoning_effort"] = self.reasoning_effort
         if tools:
             data["tools"] = tools
             data["tool_choice"] = "auto"
