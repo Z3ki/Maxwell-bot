@@ -182,6 +182,30 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "guild_id": _str("Optional server ID for one-server detail"),
         }
     ),
+    "list_channels": _obj(
+        {
+            "guild_id": _str("Optional server ID"),
+            "kind": _str("text | voice | category | forum | stage | all"),
+            "query": _str("Optional name/topic filter"),
+            "category_id": _str("Optional parent category ID"),
+        }
+    ),
+    "list_roles": _obj(
+        {
+            "guild_id": _str("Optional server ID"),
+            "query": _str("Optional role name/id filter"),
+        }
+    ),
+    "list_members": _obj(
+        {
+            "guild_id": _str("Optional server ID"),
+            "query": _str("Name, nick, or user id filter"),
+            "role": _str("Optional role name or id"),
+            "role_id": _str("Optional role id"),
+            "status": _str("online | idle | dnd | offline | all"),
+            "limit": _int("Max members to show (default 40, max 80)"),
+        }
+    ),
     "create_category": _obj(
         {
             "name": _str("Category name"),
@@ -854,6 +878,9 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         # text at all.
         "change_avatar",
         "list_servers",
+        "list_channels",
+        "list_roles",
+        "list_members",
         "create_site",
         "edit_site",
         "delete_site",

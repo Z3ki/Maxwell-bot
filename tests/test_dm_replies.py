@@ -88,6 +88,9 @@ def test_private_chat_helper_and_blocked_tools():
     assert "kick_member" in DM_BLOCKED_TOOLS
     assert "ban_member" in DM_BLOCKED_TOOLS
     assert "forward_message" in DM_BLOCKED_TOOLS
+    assert "list_channels" in DM_BLOCKED_TOOLS
+    assert "list_roles" in DM_BLOCKED_TOOLS
+    assert "list_members" in DM_BLOCKED_TOOLS
     assert "shell" not in DM_BLOCKED_TOOLS
     assert "create_site" not in DM_BLOCKED_TOOLS
     assert "site_server" not in DM_BLOCKED_TOOLS

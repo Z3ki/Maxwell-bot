@@ -244,6 +244,9 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     JoinVcTool,
     LeaveServerTool,
     LeaveVcTool,
+    ListChannelsTool,
+    ListMembersTool,
+    ListRolesTool,
     KickMemberTool,
     BanMemberTool,
     UnbanMemberTool,
@@ -303,6 +306,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     _IMAGE_FETCH_UA,
     DM_BLOCKED_TOOLS,
     _guild_access_line,
+    _guild_room_context,
     _get_shared_session,
     _is_private_chat,
     _is_safe_url,
@@ -2449,6 +2453,9 @@ TOOL_PROTOCOL = (
     "chess: you play your own moves. chess_move returns legal moves annotated with tactical "
     "value — read it, pick strongest, pass as move=. Nothing plays for you. Play to win.\n"
     "Sites, games, code, search, plugins and chat are open to everyone. "
+    "Need ids or a server map? list_channels, list_roles, and list_members "
+    "(alias list_users) return ids, topics, perms, nicks, status, and voice — "
+    "don't guess names. "
     "join_server is admin-only — if a non-admin sends an invite, tell them it needs an admin and do not call it. "
     "In DMs, Discord moderation and server tools (kick, ban, timeout, purge, channels, "
     "roles, server settings, forwarding, joining/leaving servers) are not available. "
@@ -3835,6 +3842,9 @@ class MaxwellBot(commands.Bot):
             self.tools["tts"] = TtsTool(self)
         self.tools["list_servers"] = ListServersTool(self)
         self.tools["list_admin_servers"] = ListAdminServersTool(self)
+        self.tools["list_channels"] = ListChannelsTool(self)
+        self.tools["list_roles"] = ListRolesTool(self)
+        self.tools["list_members"] = ListMembersTool(self)
         self.tools["create_category"] = CreateCategoryTool(self)
         self.tools["create_channel"] = CreateChannelTool(self)
         self.tools["edit_channel"] = EditChannelTool(self)
@@ -15455,6 +15465,10 @@ class MaxwellBot(commands.Bot):
             "msg": "send_message",
             "message": "send_message",
             "dm": "send_message",
+            "list_users": "list_members",
+            "list_user": "list_members",
+            "list_channel": "list_channels",
+            "list_role": "list_roles",
         }
         raw_name = name
         if name not in self.tools and name in _TOOL_ALIASES:
@@ -17132,6 +17146,15 @@ class MaxwellBot(commands.Bot):
         access = _guild_access_line(getattr(message, "guild", None))
         if access:
             dynamic_parts.append(access)
+        room = _guild_room_context(
+            getattr(message, "guild", None),
+            getattr(message, "channel", None),
+            recent_users=(getattr(self, "_recent_users", None) or {}).get(
+                str(channel_id)
+            ),
+        )
+        if room:
+            dynamic_parts.append(room)
         dynamic_parts.append(
             f"User: {message.author.display_name} ({message.author.id}, {user_kind}) | {local_now.strftime('%a %b %d %I:%M %p')} AST | Channel: #{channel_name} ({channel_id}, {channel_kind})"
         )

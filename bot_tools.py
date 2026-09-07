@@ -788,6 +788,9 @@ DM_BLOCKED_TOOLS = frozenset(_ALL_MOD_TOOLS) | {
     "server_setup",
     "list_admin_servers",
     "list_servers",
+    "list_channels",
+    "list_roles",
+    "list_members",
     "forward_message",
     "set_nickname",
     "update_server_prompt",
@@ -1162,6 +1165,507 @@ def _colour_from_text(raw):
 def _channel_label(channel) -> str:
     name = getattr(channel, "name", None) or str(getattr(channel, "id", "unknown"))
     return f"#{name} ({getattr(channel, 'id', '?')})"
+
+
+def _channel_kind(channel) -> str:
+    if channel is None:
+        return "unknown"
+    if isinstance(channel, discord.CategoryChannel):
+        return "category"
+    if isinstance(channel, discord.VoiceChannel):
+        return "voice"
+    stage = getattr(discord, "StageChannel", None)
+    if stage is not None and isinstance(channel, stage):
+        return "stage"
+    forum = getattr(discord, "ForumChannel", None)
+    if forum is not None and isinstance(channel, forum):
+        return "forum"
+    if isinstance(channel, discord.Thread):
+        return "thread"
+    type_val = getattr(channel, "type", None)
+    type_name = str(getattr(type_val, "name", type_val) or "").lower().replace(" ", "_")
+    mapping = {
+        "text": "text",
+        "0": "text",
+        "voice": "voice",
+        "2": "voice",
+        "category": "category",
+        "4": "category",
+        "forum": "forum",
+        "15": "forum",
+        "stage_voice": "stage",
+        "stage": "stage",
+        "13": "stage",
+        "news": "announcement",
+        "5": "announcement",
+        "public_thread": "thread",
+        "private_thread": "thread",
+        "news_thread": "thread",
+    }
+    if type_name in mapping:
+        return mapping[type_name]
+    hinted = str(getattr(channel, "kind", "") or "").strip().lower()
+    if hinted:
+        return hinted
+    if getattr(channel, "bitrate", None) is not None:
+        return "voice"
+    if getattr(channel, "category_id", None) is None and getattr(
+        channel, "channels", None
+    ) is not None:
+        return "category"
+    return "text"
+
+
+def _query_hit(query: str | None, *parts) -> bool:
+    wanted = str(query or "").strip().lower()
+    if not wanted:
+        return True
+    blob = " ".join(str(p or "") for p in parts).lower()
+    return wanted in blob
+
+
+def _dt_day(value) -> str:
+    if value is None:
+        return ""
+    fmt = getattr(value, "strftime", None)
+    if callable(fmt):
+        with contextlib.suppress(Exception):
+            return str(fmt("%Y-%m-%d"))
+    return str(value)[:10]
+
+
+def _role_color_hex(role) -> str:
+    colour = getattr(role, "colour", None)
+    if colour is None:
+        colour = getattr(role, "color", None)
+    val = getattr(colour, "value", colour)
+    try:
+        n = int(val)
+    except (TypeError, ValueError):
+        return ""
+    if n <= 0:
+        return ""
+    return f"#{n:06X}"
+
+
+def _role_elevated_perms(role) -> list[str]:
+    role_perms = getattr(role, "permissions", None)
+    if role_perms is None:
+        return []
+    if getattr(role_perms, "administrator", False):
+        return ["administrator"]
+    granted = [
+        _canon_perm(n)
+        for n in _MOD_PERM_NAMES
+        if n != "administrator" and getattr(role_perms, n, False)
+    ]
+    return list(dict.fromkeys(granted))
+
+
+def _format_role_line(role) -> str:
+    bits = [_role_label(role)]
+    color = _role_color_hex(role)
+    if color:
+        bits.append(color)
+    members = getattr(role, "members", None)
+    if members is not None:
+        with contextlib.suppress(Exception):
+            bits.append(f"{len(members)} members")
+    flags = []
+    if getattr(role, "hoist", False):
+        flags.append("hoist")
+    if getattr(role, "mentionable", False):
+        flags.append("mentionable")
+    if getattr(role, "managed", False):
+        flags.append("managed")
+    if flags:
+        bits.append(" ".join(flags))
+    granted = _role_elevated_perms(role)
+    if granted:
+        bits.append("grants " + ", ".join(granted))
+    return " | ".join(bits)
+
+
+def _format_channel_line(channel, *, include_topic: bool = True) -> str:
+    kind = _channel_kind(channel)
+    name = getattr(channel, "name", None) or str(getattr(channel, "id", "unknown"))
+    prefix = "#" if kind not in {"voice", "stage", "category"} else ""
+    if kind == "category":
+        prefix = ""
+    bits = [f"{prefix}{name} ({getattr(channel, 'id', '?')}) {kind}"]
+    topic = str(getattr(channel, "topic", None) or "").replace("\n", " ").strip()
+    if include_topic and topic:
+        bits.append("topic=" + topic[:80] + ("…" if len(topic) > 80 else ""))
+    if getattr(channel, "nsfw", False):
+        bits.append("nsfw")
+    slow = getattr(channel, "slowmode_delay", None)
+    if isinstance(slow, int) and slow > 0:
+        bits.append(f"slowmode={slow}s")
+    if kind in {"voice", "stage"}:
+        present = list(getattr(channel, "members", None) or [])
+        limit = getattr(channel, "user_limit", 0) or 0
+        bits.append(f"users={len(present)}" + (f"/{limit}" if limit else ""))
+        if present:
+            names = []
+            for member in present[:6]:
+                names.append(
+                    getattr(member, "display_name", None)
+                    or getattr(member, "name", None)
+                    or str(getattr(member, "id", "?"))
+                )
+            extra = f" +{len(present) - 6}" if len(present) > 6 else ""
+            bits.append("in=" + ", ".join(names) + extra)
+        bitrate = getattr(channel, "bitrate", None)
+        if bitrate:
+            bits.append(f"{int(bitrate) // 1000}kbps")
+    return " | ".join(bits)
+
+
+def _format_member_line(member) -> str:
+    uid = getattr(member, "id", "?")
+    username = getattr(member, "name", None) or str(uid)
+    display = getattr(member, "display_name", None) or username
+    bits = [f"{display} ({uid}) @{username}"]
+    nick = getattr(member, "nick", None)
+    if nick and str(nick) != str(display):
+        bits.append(f"nick={nick}")
+    if getattr(member, "bot", False):
+        bits.append("bot")
+    if getattr(member, "pending", False):
+        bits.append("pending")
+    roles = [
+        getattr(r, "name", "role")
+        for r in (getattr(member, "roles", None) or [])
+        if getattr(r, "name", "") not in {"", "@everyone"}
+    ]
+    if roles:
+        shown = roles[:6]
+        extra = f" +{len(roles) - 6}" if len(roles) > 6 else ""
+        bits.append("roles=" + ", ".join(shown) + extra)
+    status = getattr(member, "status", None)
+    status_name = str(getattr(status, "name", status) or "").lower()
+    if status_name and status_name not in {"none", "offline"}:
+        bits.append(f"status={status_name}")
+    elif status_name == "offline":
+        bits.append("status=offline")
+    joined = _dt_day(getattr(member, "joined_at", None))
+    if joined:
+        bits.append(f"joined={joined}")
+    timeout = getattr(member, "timed_out_until", None) or getattr(
+        member, "communication_disabled_until", None
+    )
+    if timeout:
+        bits.append("timed_out_until=" + _dt_day(timeout))
+    voice = getattr(getattr(member, "voice", None), "channel", None)
+    if voice is not None:
+        bits.append("voice=" + _channel_label(voice))
+    return " | ".join(bits)
+
+
+def _guild_channels(guild) -> list:
+    seen: dict[int, object] = {}
+    buckets = [
+        getattr(guild, "channels", None),
+        getattr(guild, "categories", None),
+        getattr(guild, "text_channels", None),
+        getattr(guild, "voice_channels", None),
+        getattr(guild, "stage_channels", None),
+        getattr(guild, "forums", None),
+        getattr(guild, "forum_channels", None),
+        getattr(guild, "threads", None),
+    ]
+    for bucket in buckets:
+        for channel in bucket or []:
+            cid = getattr(channel, "id", None)
+            if cid is None:
+                continue
+            seen[int(cid)] = channel
+    return list(seen.values())
+
+
+def _channel_category_id(channel):
+    cid = getattr(channel, "category_id", None)
+    if cid is not None:
+        return cid
+    parent = getattr(channel, "category", None)
+    return getattr(parent, "id", None)
+
+
+def _render_channel_map(
+    guild,
+    *,
+    kind: str | None = None,
+    query: str | None = None,
+    category_id: str | None = None,
+    limit: int = 80,
+    include_topic: bool = True,
+) -> str:
+    wanted_kind = str(kind or "all").strip().lower()
+    if wanted_kind in {"", "all", "*"}:
+        wanted_kind = "all"
+    cat_filter = _parse_snowflake(category_id)
+    channels = _guild_channels(guild)
+    categories = [ch for ch in channels if _channel_kind(ch) == "category"]
+    categories.sort(key=lambda ch: int(getattr(ch, "position", 0) or 0))
+    children: dict[object, list] = {}
+    uncategorized: list = []
+    for channel in channels:
+        ch_kind = _channel_kind(channel)
+        if ch_kind == "category":
+            continue
+        if wanted_kind != "all" and ch_kind != wanted_kind:
+            continue
+        if not _query_hit(
+            query, getattr(channel, "name", ""), getattr(channel, "topic", "")
+        ):
+            continue
+        parent = _channel_category_id(channel)
+        if cat_filter is not None and parent != cat_filter:
+            continue
+        if parent is None:
+            uncategorized.append(channel)
+        else:
+            children.setdefault(parent, []).append(channel)
+    for group in children.values():
+        group.sort(key=lambda ch: int(getattr(ch, "position", 0) or 0))
+    uncategorized.sort(key=lambda ch: int(getattr(ch, "position", 0) or 0))
+
+    lines: list[str] = []
+    shown = 0
+    total_match = sum(len(v) for v in children.values()) + len(uncategorized)
+    if wanted_kind in {"all", "category"}:
+        for cat in categories:
+            if cat_filter is not None and getattr(cat, "id", None) != cat_filter:
+                continue
+            if not _query_hit(query, getattr(cat, "name", "")) and not children.get(
+                getattr(cat, "id", None)
+            ):
+                continue
+            if shown >= limit:
+                break
+            lines.append(_format_channel_line(cat, include_topic=False))
+            shown += 1
+            for child in children.get(getattr(cat, "id", None), []):
+                if shown >= limit:
+                    break
+                lines.append("  " + _format_channel_line(child, include_topic=include_topic))
+                shown += 1
+    else:
+        for cat in categories:
+            kids = children.get(getattr(cat, "id", None), [])
+            if not kids:
+                continue
+            lines.append(_format_channel_line(cat, include_topic=False))
+            for child in kids:
+                if shown >= limit:
+                    break
+                lines.append("  " + _format_channel_line(child, include_topic=include_topic))
+                shown += 1
+            if shown >= limit:
+                break
+    leftover = uncategorized
+    if leftover and shown < limit and cat_filter is None:
+        if wanted_kind in {"all", "category"} or leftover:
+            lines.append("uncategorized")
+        for child in leftover:
+            if shown >= limit:
+                break
+            lines.append("  " + _format_channel_line(child, include_topic=include_topic))
+            shown += 1
+    if not lines:
+        return f"No channels matched in {getattr(guild, 'name', 'this server')}."
+    header = (
+        f"Channels in {getattr(guild, 'name', 'server')} "
+        f"({getattr(guild, 'id', '?')}): showing {shown}"
+        + (f" of {total_match}" if total_match > shown else "")
+    )
+    if total_match > shown:
+        header += ". Narrow with query= or kind=."
+    return header + "\n" + "\n".join(lines)
+
+
+def _render_role_list(guild, *, query: str | None = None, limit: int = 50) -> str:
+    roles = sorted(
+        getattr(guild, "roles", []) or [],
+        key=lambda r: int(getattr(r, "position", 0) or 0),
+        reverse=True,
+    )
+    matched = [
+        role
+        for role in roles
+        if _query_hit(query, getattr(role, "name", ""), getattr(role, "id", ""))
+    ]
+    lines = [_format_role_line(role) for role in matched[:limit]]
+    header = (
+        f"Roles in {getattr(guild, 'name', 'server')} "
+        f"({getattr(guild, 'id', '?')}): {len(matched)}/{len(roles)}"
+    )
+    if len(matched) > limit:
+        header += f", showing {limit}. Narrow with query=."
+    return header + "\n" + "\n".join(lines or ["none"])
+
+
+def _member_status_name(member) -> str:
+    status = getattr(member, "status", None)
+    return str(getattr(status, "name", status) or "").lower()
+
+
+def _render_member_list(
+    guild,
+    *,
+    query: str | None = None,
+    role_spec: str | None = None,
+    status: str | None = None,
+    limit: int = 40,
+) -> str:
+    members = list(getattr(guild, "members", []) or [])
+    approx = getattr(guild, "member_count", None) or len(members)
+    role = None
+    if role_spec:
+        role, error = _find_role(guild, role_spec)
+        if error:
+            return error
+    wanted_status = str(status or "").strip().lower()
+    if wanted_status in {"", "all", "*"}:
+        wanted_status = ""
+    matched = []
+    for member in members:
+        if role is not None:
+            their_roles = getattr(member, "roles", None) or []
+            role_id = getattr(role, "id", None)
+            if all(getattr(r, "id", None) != role_id for r in their_roles):
+                continue
+        if wanted_status:
+            if _member_status_name(member) != wanted_status:
+                continue
+        if not _query_hit(
+            query,
+            getattr(member, "name", ""),
+            getattr(member, "display_name", ""),
+            getattr(member, "global_name", ""),
+            getattr(member, "nick", ""),
+            getattr(member, "id", ""),
+        ):
+            continue
+        matched.append(member)
+
+    def _sort_key(member):
+        st = _member_status_name(member)
+        rank = {"online": 0, "idle": 1, "dnd": 2, "offline": 3}.get(st, 4)
+        name = (
+            getattr(member, "display_name", None) or getattr(member, "name", "") or ""
+        ).lower()
+        return (rank, name)
+
+    matched.sort(key=_sort_key)
+    lines = [_format_member_line(m) for m in matched[:limit]]
+    header = (
+        f"Members in {getattr(guild, 'name', 'server')} "
+        f"({getattr(guild, 'id', '?')}): showing {min(len(matched), limit)} of "
+        f"{len(matched)} matched, cache {len(members)}/~{approx}"
+    )
+    if len(members) < int(approx or 0) * 0.6:
+        header += " (cache is partial — search by id or query)"
+    if len(matched) > limit:
+        header += ". Narrow with query= or role=."
+    return header + "\n" + "\n".join(lines or ["none"])
+
+
+def _guild_server_line(guild) -> str:
+    name = getattr(guild, "name", "server")
+    gid = getattr(guild, "id", "?")
+    members = list(getattr(guild, "members", []) or [])
+    approx = getattr(guild, "member_count", None) or len(members)
+    me = _guild_me(guild)
+    nick = ""
+    if me is not None:
+        nick = getattr(me, "nick", None) or getattr(me, "display_name", "") or ""
+    channels = _guild_channels(guild)
+    n_text = sum(1 for ch in channels if _channel_kind(ch) == "text")
+    n_voice = sum(1 for ch in channels if _channel_kind(ch) in {"voice", "stage"})
+    n_cat = sum(1 for ch in channels if _channel_kind(ch) == "category")
+    owner = getattr(guild, "owner_id", None) or getattr(
+        getattr(guild, "owner", None), "id", None
+    )
+    bits = [f"{name} (ID: {gid})", f"members~{approx}"]
+    if owner:
+        bits.append(f"owner={owner}")
+    if nick:
+        bits.append(f"my_nick={nick}")
+    bits.append(f"channels={n_text}t/{n_voice}v/{n_cat}c")
+    return " | ".join(bits)
+
+
+def _guild_room_context(
+    guild,
+    channel=None,
+    recent_users=None,
+    *,
+    max_chars: int = 2200,
+) -> str:
+    """Compact server map for the per-turn prompt. Empty outside a guild."""
+    if guild is None:
+        return ""
+    parts: list[str] = []
+    if channel is not None:
+        cat = getattr(channel, "category", None)
+        cat_bit = ""
+        if cat is not None:
+            cat_bit = (
+                f" | category={getattr(cat, 'name', 'category')} "
+                f"({getattr(cat, 'id', '?')})"
+            )
+        parts.append("This channel: " + _format_channel_line(channel) + cat_bit)
+    channels = _guild_channels(guild)
+    n_text = sum(1 for ch in channels if _channel_kind(ch) == "text")
+    n_voice = sum(1 for ch in channels if _channel_kind(ch) in {"voice", "stage"})
+    n_cat = sum(1 for ch in channels if _channel_kind(ch) == "category")
+    n_forum = sum(1 for ch in channels if _channel_kind(ch) == "forum")
+    parts.append(
+        f"Server map {getattr(guild, 'name', 'server')} ({getattr(guild, 'id', '?')}): "
+        f"{n_cat} categories, {n_text} text, {n_voice} voice"
+        + (f", {n_forum} forum" if n_forum else "")
+        + f", {len(getattr(guild, 'roles', []) or [])} roles, "
+        f"~{getattr(guild, 'member_count', None) or len(getattr(guild, 'members', []) or [])} members. "
+        "Use list_channels / list_roles / list_members for the full ids."
+    )
+    if channels:
+        parts.append(
+            _render_channel_map(
+                guild, limit=24, include_topic=False
+            )
+        )
+    roles = list(getattr(guild, "roles", []) or [])
+    if roles:
+        parts.append(_render_role_list(guild, limit=16))
+    people: list[str] = []
+    seen: set[str] = set()
+    getter = getattr(guild, "get_member", None)
+    for uid, name in list((recent_users or {}).items())[:12]:
+        uid_s = str(uid)
+        if uid_s in seen:
+            continue
+        seen.add(uid_s)
+        member = None
+        if callable(getter):
+            with contextlib.suppress(Exception):
+                member = getter(int(uid) if str(uid).isdigit() else uid)
+        if member is not None:
+            people.append(_format_member_line(member))
+        else:
+            people.append(f"{name} ({uid})")
+    if _channel_kind(channel) in {"voice", "stage"}:
+        for member in list(getattr(channel, "members", None) or [])[:8]:
+            uid_s = str(getattr(member, "id", ""))
+            if uid_s and uid_s not in seen:
+                seen.add(uid_s)
+                people.append(_format_member_line(member))
+    if people:
+        parts.append("People in this room:\n" + "\n".join(people[:12]))
+    text = "\n".join(p for p in parts if p)
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 24].rstrip() + "\n… truncated; use list_* tools"
 
 
 async def _get_guild_channel(bot, channel_id):
@@ -3162,21 +3666,23 @@ class ListServersTool(Tool):
     """List all servers and group chats the bot is in"""
 
     def get_description(self):
-        return "List your servers and group chats. No params."
+        return (
+            "List your servers and group chats with ids, member counts, owner, "
+            "your nick, and channel counts. No params."
+        )
 
     async def execute(self, message: Message, **kwargs) -> str:
         lines = []
-        if self.bot.guilds:
-            lines.append(f"Servers ({len(self.bot.guilds)}):")
-            lines.extend(
-                f"  • {guild.name} (ID: {guild.id})" for guild in self.bot.guilds[:20]
-            )
-            if len(self.bot.guilds) > 20:
-                lines.append(f"  ... and {len(self.bot.guilds) - 20} more")
+        guilds = list(getattr(self.bot, "guilds", None) or [])
+        if guilds:
+            lines.append(f"Servers ({len(guilds)}):")
+            lines.extend(f"  • {_guild_server_line(guild)}" for guild in guilds[:20])
+            if len(guilds) > 20:
+                lines.append(f"  ... and {len(guilds) - 20} more")
 
         group_channels = [
             ch
-            for ch in self.bot.private_channels
+            for ch in (getattr(self.bot, "private_channels", None) or [])
             if isinstance(ch, discord.GroupChannel)
         ]
         if group_channels:
@@ -3241,6 +3747,106 @@ class ListAdminServersTool(Tool):
                 "Don't try kick/ban/channel/role tools until this lists a target."
             )
         return "\n\n".join(blocks)
+
+
+class ListChannelsTool(Tool):
+    """List a guild's channels with ids and settings."""
+
+    def get_description(self):
+        return (
+            "List this server's channels with ids, type, category, topic, nsfw, "
+            "slowmode, and who is in voice. Params: guild_id (optional), "
+            "kind (text|voice|category|forum|stage|all), query (optional name "
+            "filter), category_id (optional)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        guild_id: str | None = None,
+        kind: str | None = None,
+        query: str | None = None,
+        category_id: str | None = None,
+        **kwargs,
+    ) -> str:
+        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        if error:
+            return error
+        if guild is None:
+            return "Error: guild is unavailable"
+        return _render_channel_map(
+            guild,
+            kind=kind,
+            query=query,
+            category_id=category_id,
+            limit=80,
+            include_topic=True,
+        )
+
+
+class ListRolesTool(Tool):
+    """Read-only role listing with ids, counts, and elevated perms."""
+
+    def get_description(self):
+        return (
+            "List this server's roles with ids, position, color, member count, "
+            "hoist/mentionable, and elevated perms. Read-only — does not need "
+            "manage_roles. Params: guild_id (optional), query (optional name filter)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        guild_id: str | None = None,
+        query: str | None = None,
+        **kwargs,
+    ) -> str:
+        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        if error:
+            return error
+        if guild is None:
+            return "Error: guild is unavailable"
+        return _render_role_list(guild, query=query, limit=50)
+
+
+class ListMembersTool(Tool):
+    """List guild members with nicks, roles, status, and voice."""
+
+    def get_description(self):
+        return (
+            "List members in this server: id, nick, username, roles, status, "
+            "joined date, timeout, voice. Params: guild_id (optional), "
+            "query (name/nick/id), role or role_id (optional), "
+            "status (online|idle|dnd|offline|all), limit (default 40, max 80)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        guild_id: str | None = None,
+        query: str | None = None,
+        role: str | None = None,
+        role_id: str | None = None,
+        status: str | None = None,
+        limit: str | int | None = None,
+        **kwargs,
+    ) -> str:
+        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        if error:
+            return error
+        if guild is None:
+            return "Error: guild is unavailable"
+        try:
+            cap = max(1, min(int(limit or 40), 80))
+        except (TypeError, ValueError):
+            cap = 40
+        return _render_member_list(
+            guild,
+            query=query,
+            role_spec=role_id or role,
+            status=status,
+            limit=cap,
+        )
 
 
 class CreateCategoryTool(Tool):
@@ -3799,15 +4405,7 @@ class ManageRoleTool(Tool):
         act = str(action or "list").strip().lower()
         why = _mod_reason(message)
         if act == "list":
-            roles = sorted(
-                getattr(guild, "roles", []) or [],
-                key=lambda r: int(getattr(r, "position", 0) or 0),
-                reverse=True,
-            )
-            lines = [_role_label(role) for role in roles[:40]]
-            return f"Roles in {guild.name} ({len(roles)}):\n" + "\n".join(
-                lines or ["none"]
-            )
+            return _render_role_list(guild, limit=40)
         if act == "create":
             clean = _clean_discord_name(name)
             if not clean:

@@ -155,6 +155,8 @@ def test_build_messages_injects_guild_nick_into_dynamic_context():
     assert "Your name here: Sparky" in volatile
     assert "server nickname in Cool Guild" in volatile
     assert "Your Discord access in Cool Guild" in volatile
+    assert "Server map Cool Guild" in volatile
+    assert "list_channels / list_roles / list_members" in volatile
     assert "Your name here: Sparky" not in static
     # Core identity is still Maxwell; the nick is the server-facing name.
     assert "You are Maxwell" in static
