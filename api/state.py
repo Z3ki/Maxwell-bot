@@ -309,6 +309,12 @@ def _sanitize_control(control):
     out["create_site_quota_per_user"] = max(
         0, min(_safe_int(out.get("create_site_quota_per_user"), 50), 10000)
     )
+    out["autofix_max_per_hour"] = max(
+        1, min(_safe_int(out.get("autofix_max_per_hour"), 3), 20)
+    )
+    out["autofix_cooldown_hours"] = max(
+        1, min(_safe_int(out.get("autofix_cooldown_hours"), 24), 168)
+    )
     out["autonomy_goal_stale_days"] = max(
         1, min(_safe_int(out.get("autonomy_goal_stale_days"), 14), 365)
     )

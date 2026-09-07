@@ -1358,6 +1358,10 @@
             { k: "log_messages", t: "bool" },
             { k: "error_replies", t: "bool" },
             { k: "error_details", t: "bool", hint: "put the real exception in the apology line" },
+            { k: "autofix_enabled", t: "bool", hint: "on a tool crash, Maxwell drafts a fix PR from this process (no sub-agent)" },
+            { k: "autofix_open_pr", t: "bool", hint: "push a topic branch and open a GitHub PR; never merges, never pushes main" },
+            { k: "autofix_max_per_hour", t: "int", min: 1, max: 20 },
+            { k: "autofix_cooldown_hours", t: "int", min: 1, max: 168, hint: "same crash fingerprint will not open another PR inside this window" },
           ],
         },
         {

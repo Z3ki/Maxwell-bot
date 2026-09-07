@@ -352,6 +352,7 @@ from providers import (  # noqa: E402
 )
 from rag_memory import RAGMemoryManager, RemEventLog, _parse_iso  # noqa: E402
 from jobs import BackgroundJobManager, SpawnBackgroundTool  # noqa: E402
+from autofix import schedule_tool_autofix  # noqa: E402
 from discord_threads import (  # noqa: E402
     CreateThreadTool,
     ThreadControlTool,
@@ -4141,28 +4142,41 @@ class MaxwellBot(commands.Bot):
         except (TypeError, ValueError):
             return default
 
-    async def _invoke_request_tool(self, message, name: str, tool, **params):
-        """Track live completion separately from the durable no-replay checkpoint."""
-        if name not in {"no_response", "more_tools", "reasoning"}:
-            MaxwellBot._mark_request_effect(self, message)
+    async def _invoke_request_tool(
+        self, inbound_message, tool_identifier: str, handler, /, **tool_args
+    ):
+        """Track live completion separately from the durable no-replay checkpoint.
+
+        Dispatcher parameters are positional-only and must not share names with
+        tool arguments. ``create_site(name=...)`` / ``host_file(name=...)`` used
+        to raise ``TypeError: got multiple values for argument 'name'`` because
+        the identifier was also called ``name``.
+        """
+        if tool_identifier not in {"no_response", "more_tools", "reasoning"}:
+            MaxwellBot._mark_request_effect(self, inbound_message)
         state = _current_inbound_effects.get()
-        if state and state["message_id"] != str(getattr(message, "id", "") or ""):
+        if state and state["message_id"] != str(
+            getattr(inbound_message, "id", "") or ""
+        ):
             state = None
         if state is not None:
             state["tools_running"] += 1
-            if name not in RESULT_TOOL_NAMES and name not in {
+            if tool_identifier not in RESULT_TOOL_NAMES and tool_identifier not in {
                 "no_response", "more_tools", "reasoning"
             }:
                 state["uncertain"] = True
             # Legacy tools can send directly, without the slowmode wrapper.
-            if name in {
+            if tool_identifier in {
                 "image_generator", "hd_image", "create_poll", "join_server",
                 "create_thread", "thread_control", "send_message", "send_file", "shell", "send_meme",
                 "send_media", "tts", "forward_message",
             }:
                 state["send_attempted"] = True
         try:
-            result = await tool.execute(message, **params)
+            # Model-supplied kwargs must never shadow the Discord message object.
+            tool_args.pop("message", None)
+            tool_args.pop("self", None)
+            result = await handler.execute(inbound_message, **tool_args)
             if state is not None:
                 if str(result or "").lstrip().lower().startswith(
                     ("error", "could not", "failed", "refused")
@@ -15256,6 +15270,12 @@ class MaxwellBot(commands.Bot):
             )
             self._tool_breaker.record_failure(name)
             result_text = f"Error - {e}"
+            try:
+                schedule_tool_autofix(
+                    self, tool_name=name, tool_args=params, exc=e
+                )
+            except Exception:
+                logger.debug("autofix schedule failed", exc_info=True)
         # Record the reasoning the model gave for THIS tool call, attached to the
         # real action and its result. Swallowed failures (see record_reasoning).
         await record_reasoning(

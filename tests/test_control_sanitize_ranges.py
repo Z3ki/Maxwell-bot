@@ -82,6 +82,8 @@ def test_out_of_range_is_clamped_not_defaulted():
         ("inbound_retry_attempts", 1, 5),
         ("inbound_retry_delay_seconds", 1, 300),
         ("gap_recovery_max_messages", 0, 100),
+        ("autofix_max_per_hour", 1, 20),
+        ("autofix_cooldown_hours", 1, 168),
     ],
 )
 def test_inbound_reliability_limits(key, low, high):
@@ -91,7 +93,15 @@ def test_inbound_reliability_limits(key, low, high):
     assert _sanitize_control({key: "nan"})[key] == DEFAULT_CONTROL[key]
 
 
-@pytest.mark.parametrize("key", ["require_direct_response", "respond_to_edited_mentions"])
+@pytest.mark.parametrize(
+    "key",
+    [
+        "require_direct_response",
+        "respond_to_edited_mentions",
+        "autofix_enabled",
+        "autofix_open_pr",
+    ],
+)
 def test_inbound_policy_booleans(key):
     assert _sanitize_control({key: "false"})[key] is False
     assert _sanitize_control({key: "true"})[key] is True

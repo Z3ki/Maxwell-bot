@@ -20,6 +20,15 @@ The installer writes `.env` from `.env.example` and updates only the keys it ask
 
 See [`.env.example`](../.env.example) for the full set of advanced knobs, including embeddings, dashboard host/port, TTS, X/Twitter, email, captcha solving, and tool-specific limits.
 
+## Autofix (self-heal PRs)
+
+When a tool handler raises a programming error (for example `TypeError` from a
+dispatcher clash), Maxwell's own chat model — not a sub-agent — drafts a
+minimal patch and a unit test, commits them on `fix/autofix-<error>-<timestamp>`,
+and opens a GitHub pull request. It never checks out or pushes `main` and never
+auto-merges. Turn it off with the dashboard `autofix_enabled` switch or
+`MAXWELL_AUTOFIX=false`. Opening PRs needs `gh` or `GITHUB_TOKEN`.
+
 ## Message reliability
 
 These controls live in the dashboard's **Replies & Triggers** and

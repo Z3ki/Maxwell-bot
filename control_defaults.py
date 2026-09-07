@@ -33,6 +33,13 @@ DEFAULT_CONTROL = {
     # by tailing pm2 logs, which meant every user report was "it just said
     # sorry". Turn off if you don't want internals visible in a channel.
     "error_details": True,
+    # When a tool handler raises a programming error (TypeError, …), Maxwell
+    # himself (not a sub-agent) drafts a patch + test on a topic branch and
+    # opens a PR. Never pushes to main, never auto-merges.
+    "autofix_enabled": True,
+    "autofix_open_pr": True,
+    "autofix_max_per_hour": 3,
+    "autofix_cooldown_hours": 24,
     "typing_indicator": True,
     "store_memory": True,
     "long_term_memory_enabled": True,
