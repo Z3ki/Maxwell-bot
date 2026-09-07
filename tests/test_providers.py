@@ -1036,6 +1036,136 @@ def test_unhandled_4xx_single_endpoint_still_raises():
     assert len(session.payloads) == 1
 
 
+def test_sse_ttft_skips_role_keepalive_and_usage_frames(monkeypatch):
+    """TTFT is the first generated delta, not the role opener or usage trailer."""
+    import providers
+    from providers import _read_sse_response
+
+    frames = [
+        {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+        {"choices": [{"index": 0, "delta": {"content": ""}}]},
+        {"choices": [{"index": 0, "delta": {"content": "Hel"}}]},
+        {"choices": [{"index": 0, "delta": {"content": "lo"}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+        {
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 8,
+                "completion_tokens": 2,
+                "total_tokens": 10,
+            },
+        },
+    ]
+    blob = "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames)
+    blob += "data: [DONE]\n\n"
+    stamps = []
+
+    def fake_counter():
+        stamps.append(10.0 + 0.5 * len(stamps))
+        return stamps[-1]
+
+    monkeypatch.setattr(providers.time, "perf_counter", fake_counter)
+
+    class Resp:
+        content = _FakeAsyncStream([blob.encode("utf-8")])
+
+    merged = asyncio.run(_read_sse_response(Resp()))
+    assert merged["__first_token_s__"] == 10.0
+    assert merged["__last_token_s__"] == 10.5
+    assert merged["choices"][0]["message"]["content"] == "Hello"
+    assert merged["usage"]["completion_tokens"] == 2
+    assert len(stamps) == 2
+
+
+def test_sse_ttft_counts_gemini_reasoning_details(monkeypatch):
+    import providers
+    from providers import _read_sse_response, _sse_delta_has_output
+
+    assert _sse_delta_has_output(
+        {"reasoning_details": [{"type": "reasoning.text", "text": "hmm"}]}
+    )
+    assert not _sse_delta_has_output({"role": "assistant"})
+
+    frames = [
+        {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "reasoning_details": [
+                            {"type": "reasoning.text", "text": "plan"}
+                        ]
+                    },
+                }
+            ]
+        },
+        {"choices": [{"index": 0, "delta": {"content": "ok"}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+    ]
+    blob = "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames)
+    blob += "data: [DONE]\n\n"
+    stamps = []
+
+    def fake_counter():
+        stamps.append(5.0 + len(stamps))
+        return stamps[-1]
+
+    monkeypatch.setattr(providers.time, "perf_counter", fake_counter)
+
+    class Resp:
+        content = _FakeAsyncStream([blob.encode("utf-8")])
+
+    merged = asyncio.run(_read_sse_response(Resp()))
+    assert merged["__first_token_s__"] == 5.0
+    assert merged["__last_token_s__"] == 6.0
+    assert merged["choices"][0]["message"]["content"] == "ok"
+
+
+def test_payload_asks_for_streaming_usage():
+    provider = OllamaProvider("http://example.test", "base-model", 10, 0.5)
+    data = provider._request_payload(
+        provider._endpoints[0], [{"role": "user", "content": "hi"}]
+    )
+    assert data["stream"] is True
+    assert data["stream_options"] == {"include_usage": True}
+
+
+def test_payload_omits_stream_usage_after_reject():
+    provider = OllamaProvider("http://example.test", "base-model", 10, 0.5)
+    provider._endpoints_without_stream_usage.add("primary")
+    data = provider._request_payload(
+        provider._endpoints[0], [{"role": "user", "content": "hi"}]
+    )
+    assert "stream_options" not in data
+
+
+def test_stream_options_rejected_is_learned_and_resent():
+    provider = OllamaProvider("http://primary.test/v1", "picky-model", 10, 0.5)
+    provider.available = True
+    session = FakeSequenceSession(
+        [
+            FakeErrorResponse(
+                400,
+                '{"error":{"message":"unknown field stream_options"}}',
+            ),
+            FakeResponse(),
+        ]
+    )
+    provider._session = session
+
+    async def run():
+        message = await provider.generate_chat_completion(
+            [{"role": "user", "content": "hi"}]
+        )
+        assert message["content"] == "ok"
+
+    asyncio.run(run())
+    assert session.payloads[0]["stream_options"] == {"include_usage": True}
+    assert "stream_options" not in session.payloads[1]
+    assert "primary" in provider._endpoints_without_stream_usage
+
+
 def test_temperature_constraint_is_learned_and_resent():
     """'only 0.6 is allowed' must resend at 0.6, not burn retries."""
     provider = OllamaProvider("http://primary.test/v1", "picky-model", 10, 0.9)

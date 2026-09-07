@@ -2054,7 +2054,7 @@ class SetActivityTool(Tool):
                 self.bot._current_game = None
             activities = self.bot._build_activities()
             if not activities:
-                await self.bot.change_presence(activity=None, edit_settings=True)
+                await self.bot.change_presence(activity=None, edit_settings=False)
             else:
                 await self.bot.change_presence(
                     activities=activities, edit_settings=bool(self.bot._custom_status)
@@ -2846,7 +2846,15 @@ class LookupUserTool(Tool):
             return f"Error: Could not extract a numeric user ID from '{user_id}'"
         uid_int = int(cleaned)
         try:
-            user = await self.bot.fetch_user(uid_int)
+            user = None
+            getter = getattr(self.bot, "get_user", None)
+            if callable(getter):
+                with contextlib.suppress(Exception):
+                    cached = getter(uid_int)
+                    if cached is not None and int(cached.id) == uid_int:
+                        user = cached
+            if user is None:
+                user = await self.bot.fetch_user(uid_int)
             if not user:
                 return f"Error: User {user_id} not found"
             created = (
@@ -2864,14 +2872,9 @@ class LookupUserTool(Tool):
                 f"Bot: {user.bot}",
             ]
 
-            # Attempt bio / about me retrieval
+            # Bio from the user object only. fetch_user_profile is a
+            # separate REST call Discord watches on user accounts.
             bio = getattr(user, "bio", None)
-            if not bio and hasattr(self.bot, "fetch_user_profile"):
-                try:
-                    prof = await self.bot.fetch_user_profile(uid_int)
-                    bio = getattr(prof, "bio", None)
-                except Exception:
-                    bio = None
             if bio:
                 info_lines.append(f"Bio: {bio}")
 
@@ -2891,11 +2894,6 @@ class LookupUserTool(Tool):
             guild = getattr(message, "guild", None)
             if guild:
                 member = guild.get_member(uid_int)
-                if not member and hasattr(guild, "fetch_member"):
-                    try:
-                        member = await guild.fetch_member(uid_int)
-                    except Exception:
-                        member = None
                 if member:
                     if getattr(member, "nick", None):
                         info_lines.append(f"Server Nickname: {member.nick}")
@@ -2938,7 +2936,10 @@ class SearchMessagesTool(Tool):
     """Search for messages in the server"""
 
     def get_description(self):
-        return "Search messages in this server. Params: query (required), limit (optional, default 5)."
+        return (
+            "Search recent messages in this channel only. "
+            "Params: query (required), limit (optional, default 5, max 10)."
+        )
 
     async def execute(
         self, message: Message, query: str | None = None, limit: str = "5", **kwargs
@@ -2947,80 +2948,47 @@ class SearchMessagesTool(Tool):
         if not message.guild and not chan:
             return "Error: Channel context unavailable"
         try:
-            search_limit = max(1, min(int(limit), 25))
+            search_limit = max(1, min(int(limit), 10))
             results = []
             clean_query = str(query or "").strip().lower()
 
-            # If query is empty or blank, fetch recent channel history
-            if not clean_query:
-                if chan and hasattr(chan, "history"):
-                    async for msg in chan.history(limit=search_limit):
-                        snippet = msg.content[:150] + (
-                            "..." if len(msg.content) > 150 else ""
-                        )
-                        results.append(
-                            f"[{msg.id}] {msg.author.display_name}: {snippet}"
-                        )
-                    if not results:
-                        return "No recent messages found in this channel"
-                    return f"Recent messages ({len(results)}):\n" + "\n".join(results)
-                return "Error: query is required"
+            if not chan or not hasattr(chan, "history"):
+                return "Error: Channel context unavailable"
 
-            # 1. First search recent history in current channel (bots can always read accessible channel history)
-            if chan and hasattr(chan, "history"):
-                try:
-                    async for msg in chan.history(limit=100):
-                        if clean_query in (msg.content or "").lower():
-                            snippet = msg.content[:150] + (
-                                "..." if len(msg.content) > 150 else ""
-                            )
-                            results.append(
-                                f"[#{getattr(chan, 'name', 'chat')} - {msg.id}] {msg.author.display_name}: {snippet}"
-                            )
-                            if len(results) >= search_limit:
-                                break
-                except Exception as e:
-                    # Without this log a permissions/rate-limit failure was
-                    # indistinguishable from "no messages matched".
-                    logger.warning(
-                        "search_messages: current-channel scan failed: %s", e
+            # This channel only. A guild-wide history walk (8 rooms × 50)
+            # is how selfbots get 429'd and flagged.
+            scan = (
+                search_limit
+                if not clean_query
+                else min(40, max(search_limit * 4, 15))
+            )
+            try:
+                async for msg in chan.history(limit=scan):
+                    if clean_query and clean_query not in (msg.content or "").lower():
+                        continue
+                    snippet = msg.content[:150] + (
+                        "..." if len(msg.content) > 150 else ""
                     )
-
-            # 2. If not enough results and in a guild, search across other accessible text channels
-            if len(results) < search_limit and getattr(message, "guild", None):
-                guild = message.guild
-                channels_to_check = [
-                    c
-                    for c in getattr(guild, "text_channels", [])
-                    if c.id != getattr(chan, "id", None)
-                    and c.permissions_for(guild.me).read_messages
-                ][:8]
-                for c in channels_to_check:
+                    label = getattr(chan, "name", "chat")
+                    results.append(
+                        f"[#{label} - {msg.id}] {msg.author.display_name}: {snippet}"
+                    )
                     if len(results) >= search_limit:
                         break
-                    try:
-                        async for msg in c.history(limit=50):
-                            if clean_query in (msg.content or "").lower():
-                                snippet = msg.content[:150] + (
-                                    "..." if len(msg.content) > 150 else ""
-                                )
-                                results.append(
-                                    f"[#{c.name} - {msg.id}] {msg.author.display_name}: {snippet}"
-                                )
-                                if len(results) >= search_limit:
-                                    break
-                    except Exception as e:
-                        # Expected for channels we cannot read; keep scanning.
-                        logger.debug(
-                            "search_messages: skipping #%s: %s",
-                            getattr(c, "name", "?"),
-                            e,
-                        )
-                        continue
+            except Exception as e:
+                logger.warning("search_messages: channel scan failed: %s", e)
+                return f"Error searching messages: {e}"
 
             if not results:
-                return f"No messages found matching '{query}'"
-            return "Search results:\n" + "\n".join(results)
+                if not clean_query:
+                    return "No recent messages found in this channel"
+                return f"No messages found matching '{query}' in this channel"
+            heading = (
+                f"Recent messages ({len(results)}):\n"
+                if not clean_query
+                else "Search results:\n"
+            )
+            return heading + "\n".join(results)
         except Exception as e:
             return f"Error searching messages: {e}"
 
@@ -6615,7 +6583,7 @@ _CHANNEL_HISTORY_TIMEOUT = 2.5
 _FETCH_MESSAGE_TIMEOUT = 2.0
 
 
-async def _iter_recent_channel_messages(message, bot=None, limit: int = 40):
+async def _iter_recent_channel_messages(message, bot=None, limit: int = 20):
     """Live Discord history only.
 
     Do not fetch_message() every RAG/memory row. That path 429s Discord and

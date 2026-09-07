@@ -21,6 +21,7 @@ def test_lookup_user_with_bio_and_profile():
         mock_user.banner.url = "https://cdn.discordapp.com/banners/123/banner.png"
         mock_user.accent_color = 0xFF5733
 
+        bot.get_user = MagicMock(return_value=None)
         bot.fetch_user = AsyncMock(return_value=mock_user)
         bot.fetch_user_profile = AsyncMock(side_effect=AttributeError("No profile endpoint"))
 

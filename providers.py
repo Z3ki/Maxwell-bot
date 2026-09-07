@@ -655,9 +655,11 @@ async def _read_sse_response(
     the non-streamed response shape so the rest of the request handler does
     not need to care which mode produced the response.
 
-    Returns the merged dict, plus (via a sentinel) the time the first content
-    delta was received — encoded as ``__first_token_ms__`` in the returned
-    dict and popped by the caller.
+    Returns the merged dict plus sentinels popped by the caller:
+    ``__first_token_s__`` / ``__last_token_s__`` are ``perf_counter`` times of
+    the first and last frames that carried generated output (content,
+    reasoning, or a tool-call delta) — not the role-only opener or a trailing
+    usage/[DONE] frame.
 
     Raises RuntimeError if the stream is malformed (no choices ever arrive) so
     the upstream retry logic can take over.
@@ -669,6 +671,7 @@ async def _read_sse_response(
     finish_reason: str | None = None
     reasoning_parts: list[str] = []
     first_token_s: float | None = None
+    last_token_s: float | None = None
     done = False
     # When custom_tool_calls=True, we route text deltas through this buffer
     # which incrementally extracts bare-JSON tool calls ({"name": "...",
@@ -749,9 +752,20 @@ async def _read_sse_response(
                 # Malformed frame — skip rather than fail the whole stream.
                 # Providers occasionally send keepalives or partial frames.
                 continue
-            if first_token_s is None:
-                first_token_s = time.perf_counter()
-            for choice in obj.get("choices", []) or []:
+            choices = obj.get("choices") or []
+            # TTFT is time-to-first-generated-output, not time-to-first-SSE
+            # frame. Role-only openers, empty deltas, finish_reason, and the
+            # trailing usage chunk would otherwise make TTFT ~= TTFB and
+            # stretch the decode window through post-generation drain.
+            if any(
+                _sse_delta_has_output((choice or {}).get("delta") or {})
+                for choice in choices
+            ):
+                now = time.perf_counter()
+                if first_token_s is None:
+                    first_token_s = now
+                last_token_s = now
+            for choice in choices:
                 idx = choice.get("index", 0)
                 # Ensure the choices slot for this index exists.
                 while len(merged["choices"]) <= idx:
@@ -999,6 +1013,7 @@ async def _read_sse_response(
         "finish_reason": finish_reason,
     }
     merged["__first_token_s__"] = first_token_s
+    merged["__last_token_s__"] = last_token_s
     return merged
 
 
@@ -1015,10 +1030,143 @@ DEFAULT_EMPTY_RESPONSE_RETRIES = 2
 TIMING_HISTORY_MAX = 24
 
 
+def _coerce_token_count(value) -> int:
+    if value is None or value is False:
+        return 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        try:
+            return max(0, int(float(value)))
+        except (TypeError, ValueError):
+            return 0
+
+
+def _first_present_token_count(raw: dict, *keys: str) -> int:
+    for key in keys:
+        if key in raw and raw[key] is not None:
+            return _coerce_token_count(raw[key])
+    return 0
+
+
+def _normalize_llm_usage(raw) -> dict:
+    """Map OpenAI / OpenRouter / Ollama usage blobs onto one shape."""
+    if not isinstance(raw, dict):
+        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    prompt = _first_present_token_count(
+        raw, "prompt_tokens", "input_tokens", "prompt_eval_count"
+    )
+    completion = _first_present_token_count(
+        raw, "completion_tokens", "output_tokens", "eval_count"
+    )
+    total = _first_present_token_count(raw, "total_tokens") or (prompt + completion)
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total,
+    }
+
+
+def _estimate_completion_tokens(
+    content: str = "",
+    reasoning: str = "",
+    tool_calls=None,
+) -> int:
+    """Fallback output-token count when the provider omitted usage (~4 chars/tok)."""
+    chunks = [str(content or ""), str(reasoning or "")]
+    for tc in tool_calls or []:
+        if not isinstance(tc, dict):
+            continue
+        fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+        chunks.append(str((fn or {}).get("name") or ""))
+        args = (fn or {}).get("arguments")
+        if isinstance(args, dict):
+            try:
+                chunks.append(json.dumps(args, ensure_ascii=False))
+            except (TypeError, ValueError):
+                chunks.append(str(args))
+        elif args:
+            chunks.append(str(args))
+    n = sum(len(part) for part in chunks)
+    if n <= 0:
+        return 0
+    return max(1, (n + 3) // 4)
+
+
+def _nonempty_output_value(val) -> bool:
+    if val is None or val is False:
+        return False
+    if isinstance(val, str):
+        return bool(val)
+    if isinstance(val, (list, dict, tuple, set)):
+        return bool(val)
+    return True
+
+
+# SSE delta keys that are protocol chrome, not generated tokens.
+_SSE_PROTOCOL_DELTA_KEYS = {"role", "index"}
+
+
+def _sse_delta_has_output(delta) -> bool:
+    """True when this SSE delta carries generated output, not protocol chrome.
+
+    Gemini/OpenRouter often stream thinking as ``reasoning_details`` / ``thought``
+    rather than ``content``. Counting only content/tool_calls made last-token
+    equal first-token, so TPS became n/a on every bursty call.
+    """
+    if not isinstance(delta, dict) or not delta:
+        return False
+    if _nonempty_output_value(delta.get("content")):
+        return True
+    for key in (
+        "reasoning_content",
+        "reasoning",
+        "reasoning_details",
+        "thought",
+        "thinking",
+        "thoughts",
+        "extra_content",
+        "function_call",
+        "refusal",
+    ):
+        if _nonempty_output_value(delta.get(key)):
+            return True
+    for tc in delta.get("tool_calls") or []:
+        if not isinstance(tc, dict):
+            continue
+        if tc.get("id") or tc.get("type"):
+            return True
+        fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+        if fn and (fn.get("name") or fn.get("arguments")):
+            return True
+    for key, val in delta.items():
+        if key in _SSE_PROTOCOL_DELTA_KEYS or key == "tool_calls":
+            continue
+        if _nonempty_output_value(val):
+            return True
+    return False
+
+
+def _is_stream_options_rejected(status: int, error_text: str) -> bool:
+    if status not in (400, 422):
+        return False
+    text = (error_text or "").lower()
+    return "stream_options" in text or "include_usage" in text
+
+
+# Decode window shorter than this is measurement noise, not a TPS sample.
+_MIN_TPS_WINDOW_MS = 20.0
+# Below this, last-first is a one-shot SSE burst (Gemini dumps the whole
+# reply after TTFB). Using that 5–30ms drain as decode TPS yields thousands
+# of fake tokens/sec. Fall back to end-to-end throughput instead.
+_MIN_DECODE_SPAN_MS = 100.0
+
+
 def compute_llm_timing(
     *,
     request_start: float,
     first_token_s: float | None,
+    last_token_s: float | None = None,
     ended_at: float | None = None,
     headers_ms: float = 0.0,
     usage: dict | None = None,
@@ -1027,13 +1175,18 @@ def compute_llm_timing(
     stream: bool = False,
     content_chars: int = 0,
     tool_calls: int = 0,
+    content: str = "",
+    reasoning: str = "",
+    tool_call_payloads=None,
 ) -> dict:
     """TTFT, generation window, and tokens/sec for one provider call.
 
-    Streaming TTFT is time-to-first-SSE-frame. TPS is completion tokens over
-    the post-TTFT window when that window is long enough; otherwise over the
-    whole request (typical for non-streaming, where the first token is the
-    whole body).
+    Streaming TTFT is time-to-first-generated-output (content, reasoning, or a
+    tool-call delta), not the role-only SSE opener. Decode TPS is completion
+    tokens over the first-token → last-token window. Non-streaming calls have
+    no visible first token, so TTFT equals total latency and TPS uses the
+    full request. When the provider omits usage, completion tokens are
+    estimated from the output text (~4 chars/token) and marked as such.
     """
     ended = float(ended_at) if ended_at is not None else time.perf_counter()
     total_ms = max(0.0, (ended - float(request_start)) * 1000.0)
@@ -1041,21 +1194,48 @@ def compute_llm_timing(
         ttft_ms = max(0.0, (float(first_token_s) - float(request_start)) * 1000.0)
     else:
         ttft_ms = total_ms
-    gen_ms = max(0.0, total_ms - ttft_ms)
-    raw = usage if isinstance(usage, dict) else {}
-
-    def _tok(key: str) -> int:
-        try:
-            return max(0, int(raw.get(key) or 0))
-        except (TypeError, ValueError):
-            return 0
-
-    prompt = _tok("prompt_tokens")
-    completion = _tok("completion_tokens")
-    total_tok = _tok("total_tokens") or (prompt + completion)
-    window_ms = gen_ms if stream and gen_ms >= 20.0 else total_ms
+    tail_ms = max(0.0, total_ms - ttft_ms)
+    if (
+        stream
+        and last_token_s is not None
+        and first_token_s is not None
+    ):
+        decode_span_ms = max(
+            0.0, (float(last_token_s) - float(first_token_s)) * 1000.0
+        )
+    else:
+        # No last-token stamp: time after first token until the body ends.
+        decode_span_ms = tail_ms
+    if decode_span_ms >= _MIN_DECODE_SPAN_MS:
+        gen_ms = decode_span_ms
+        window_ms = decode_span_ms
+    elif stream:
+        # One SSE burst after a long wait. Report the drain as gen, but TPS
+        # over the full request so we don't print n/a or 10k tps.
+        gen_ms = decode_span_ms
+        window_ms = total_ms
+    else:
+        gen_ms = tail_ms
+        window_ms = total_ms
+    normalized = _normalize_llm_usage(usage)
+    prompt = normalized["prompt_tokens"]
+    completion = normalized["completion_tokens"]
+    total_tok = normalized["total_tokens"]
+    tokens_estimated = False
+    if completion <= 0:
+        estimated = _estimate_completion_tokens(
+            content or "",
+            reasoning or "",
+            tool_call_payloads,
+        )
+        if estimated <= 0 and content_chars:
+            estimated = max(1, (int(content_chars) + 3) // 4)
+        if estimated > 0:
+            completion = estimated
+            total_tok = prompt + completion
+            tokens_estimated = True
     tps = None
-    if completion > 0 and window_ms >= 20.0:
+    if completion > 0 and window_ms >= _MIN_TPS_WINDOW_MS:
         tps = round(completion / (window_ms / 1000.0), 1)
     try:
         headers_val = float(headers_ms or 0.0)
@@ -1073,6 +1253,7 @@ def compute_llm_timing(
         "prompt_tokens": prompt,
         "completion_tokens": completion,
         "total_tokens": total_tok,
+        "tokens_estimated": tokens_estimated,
         "tps": tps,
         "content_chars": int(content_chars or 0),
         "tool_calls": int(tool_calls or 0),
@@ -1109,9 +1290,14 @@ def format_timing_debug(
                     f"(min {min(ttfts):.0f} / max {max(ttfts):.0f})"
                 )
             if tpss:
+                weighted = _weighted_tps(window)
+                weighted_s = (
+                    f"  weighted {weighted:.1f}" if weighted is not None else ""
+                )
                 lines.append(
                     f"  avg tps {sum(tpss) / len(tpss):.1f}  "
                     f"(min {min(tpss):.1f} / max {max(tpss):.1f})"
+                    f"{weighted_s}"
                 )
             for rec in reversed(window[:-1][:5]):
                 tps = rec.get("tps")
@@ -1132,15 +1318,45 @@ def format_timing_debug(
     return "\n".join(lines)
 
 
+def _weighted_tps(records) -> float | None:
+    """Token-weighted decode TPS: sum(out tokens) / sum(decode seconds)."""
+    tokens = 0.0
+    seconds = 0.0
+    for rec in records or []:
+        if not isinstance(rec, dict) or rec.get("tps") is None:
+            continue
+        try:
+            out = float(rec.get("completion_tokens") or 0)
+            gen_ms = float(rec.get("gen_ms") or 0)
+        except (TypeError, ValueError):
+            continue
+        if out <= 0 or gen_ms < _MIN_TPS_WINDOW_MS:
+            continue
+        tokens += out
+        seconds += gen_ms / 1000.0
+    if tokens <= 0 or seconds <= 0:
+        return None
+    return tokens / seconds
+
+
 def _format_timing_row(rec: dict, indent: str = "") -> list[str]:
     tps = rec.get("tps")
     tps_s = f"{tps}" if tps is not None else "n/a"
+    if rec.get("tokens_estimated") and tps is not None:
+        tps_s = f"{tps_s} est"
     ep = rec.get("endpoint") or "?"
     model = rec.get("model") or "?"
+    try:
+        headers_val = float(rec.get("headers_ms") or 0)
+    except (TypeError, ValueError):
+        headers_val = 0.0
+    ttft_s = f"ttft {float(rec.get('ttft_ms') or 0):.0f}ms"
+    if headers_val >= 1.0:
+        ttft_s += f" (headers {headers_val:.0f}ms)"
     return [
         f"{indent}{ep}  {model}",
         (
-            f"{indent}ttft {float(rec.get('ttft_ms') or 0):.0f}ms  "
+            f"{indent}{ttft_s}  "
             f"total {float(rec.get('total_ms') or 0):.0f}ms  "
             f"gen {float(rec.get('gen_ms') or 0):.0f}ms"
         ),
@@ -1624,6 +1840,10 @@ class OllamaProvider:
         # Same idea for models that accept exactly one temperature (Console Go
         # rejects anything but 0.6 with a 400). Learned once, applied up front.
         self._endpoint_temperatures: dict[str, float] = {}
+        # Endpoints that 400 on stream_options.include_usage (older Ollama).
+        # Learned once, then we stop sending it and fall back to estimating
+        # completion tokens from the output text.
+        self._endpoints_without_stream_usage: set[str] = set()
         # Endpoints that have proven they cannot accept attachments (e.g. a
         # text-only fallback like inclusionai/ling-3.0-flash 404ing with "No
         # endpoints found that support image input"). Remembered across calls
@@ -1868,6 +2088,13 @@ class OllamaProvider:
         if tools:
             data["tools"] = tools
             data["tool_choice"] = "auto"
+        if (
+            data.get("stream")
+            and endpoint.name not in self._endpoints_without_stream_usage
+        ):
+            # OpenAI/OpenRouter omit streaming usage unless asked. Without it
+            # completion_tokens is 0 and TPS is guessed or missing.
+            data["stream_options"] = {"include_usage": True}
         return data
 
     async def _get_session(self):
@@ -2208,6 +2435,7 @@ class OllamaProvider:
                 # failure path. Keep the caller's reasoning preference intact:
                 # some models reject an explicit reasoning-disabled parameter.
                 data["stream"] = False
+                data.pop("stream_options", None)
             request_start = time.perf_counter()
             media_parts = sum(
                 1
@@ -2529,6 +2757,18 @@ class OllamaProvider:
                         # Some models accept exactly one temperature and 400 on
                         # anything else. Learn it and resend to the SAME endpoint
                         # rather than burning retries / falling back needlessly.
+                        if _is_stream_options_rejected(
+                            resp.status, error_text
+                        ) and data.get("stream_options"):
+                            self._endpoints_without_stream_usage.add(endpoint.name)
+                            logger.warning(
+                                "Provider endpoint %s rejected stream_options; "
+                                "resending without include_usage",
+                                endpoint.name,
+                            )
+                            if attempt >= max_attempts:
+                                max_attempts = attempt + 1
+                            continue
                         required_temp = _required_temperature(resp.status, error_text)
                         if (
                             required_temp is not None
@@ -2577,6 +2817,8 @@ class OllamaProvider:
 
                     json_ms = 0.0
                     first_token_s = None
+                    last_token_s = None
+                    ended_at = None
                     if data.get("stream"):
                         merged = await _read_sse_response(
                             resp,
@@ -2584,10 +2826,12 @@ class OllamaProvider:
                             on_token=on_token,
                             custom_tool_calls=custom_tool_calls,
                         )
+                        ended_at = time.perf_counter()
                         result = {
                             k: v for k, v in merged.items() if not k.startswith("__")
                         }
                         first_token_s = merged.get("__first_token_s__")
+                        last_token_s = merged.get("__last_token_s__")
                         # Streaming has no JSON-parse step; report the
                         # time-to-first-token so the latency log stays useful
                         # instead of fabricating a json_ms value.
@@ -2595,7 +2839,8 @@ class OllamaProvider:
                             json_ms = (first_token_s - request_start) * 1000
                     else:
                         result = await resp.json()
-                        json_ms = (time.perf_counter() - request_start) * 1000
+                        ended_at = time.perf_counter()
+                        json_ms = (ended_at - request_start) * 1000
                     if not isinstance(result, dict):
                         result_preview = (
                             str(result)[:600] if result is not None else "None"
@@ -2789,15 +3034,17 @@ class OllamaProvider:
                             continue
                         raise ProviderEmptyResponseError("Empty response from provider")
 
-                    usage = result.get("usage", {})
+                    usage = _normalize_llm_usage(result.get("usage", {}))
                     self._last_usage = {
-                        "prompt_tokens": usage.get("prompt_tokens", 0),
-                        "completion_tokens": usage.get("completion_tokens", 0),
-                        "total_tokens": usage.get("total_tokens", 0),
+                        "prompt_tokens": usage["prompt_tokens"],
+                        "completion_tokens": usage["completion_tokens"],
+                        "total_tokens": usage["total_tokens"],
                     }
                     timing = compute_llm_timing(
                         request_start=request_start,
                         first_token_s=first_token_s,
+                        last_token_s=last_token_s,
+                        ended_at=ended_at,
                         headers_ms=headers_ms,
                         usage=self._last_usage,
                         endpoint=endpoint.name,
@@ -2805,6 +3052,13 @@ class OllamaProvider:
                         stream=bool(data.get("stream")),
                         content_chars=len(content or ""),
                         tool_calls=len(message.get("tool_calls") or []),
+                        content=content or "",
+                        reasoning=str(
+                            message.get("reasoning_content")
+                            or message.get("reasoning")
+                            or ""
+                        ),
+                        tool_call_payloads=message.get("tool_calls") or [],
                     )
                     self._last_timing = timing
                     self._timing_history.append(timing)

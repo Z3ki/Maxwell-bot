@@ -608,7 +608,10 @@ def test_gather_context_keeps_every_active_room(tmp_path):
     bot = SimpleNamespace(
         config=SimpleNamespace(DATA_DIR=str(tmp_path)),
         _auto_channels={str(ch.id) for ch in rooms},
-        _control={"bot_enabled": True},
+        _control={
+            "bot_enabled": True,
+            "autonomy_activity_channels": 12,
+        },
         tools={},
         user=SimpleNamespace(id=42, display_name="Maxwell", name="Maxwell"),
         guilds=[

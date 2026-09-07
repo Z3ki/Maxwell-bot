@@ -43,6 +43,81 @@ def test_compute_nonstream_uses_total_window():
     assert rec["tps"] == 20.0
 
 
+def test_compute_streaming_tps_uses_last_token_not_stream_end():
+    rec = compute_llm_timing(
+        request_start=0.0,
+        first_token_s=0.4,
+        last_token_s=1.4,
+        ended_at=2.0,
+        usage={"prompt_tokens": 10, "completion_tokens": 100, "total_tokens": 110},
+        stream=True,
+    )
+    assert rec["ttft_ms"] == 400.0
+    assert rec["total_ms"] == 2000.0
+    assert rec["gen_ms"] == 1000.0
+    assert rec["tps"] == 100.0
+    assert rec["tokens_estimated"] is False
+
+
+def test_compute_estimates_tokens_when_usage_missing():
+    rec = compute_llm_timing(
+        request_start=0.0,
+        first_token_s=0.2,
+        last_token_s=1.2,
+        ended_at=1.3,
+        usage={},
+        stream=True,
+        content="abcd" * 50,
+    )
+    assert rec["tokens_estimated"] is True
+    assert rec["completion_tokens"] == 50
+    assert rec["tps"] == 50.0
+
+
+def test_compute_accepts_input_output_token_aliases():
+    rec = compute_llm_timing(
+        request_start=0.0,
+        first_token_s=0.1,
+        last_token_s=1.1,
+        ended_at=1.2,
+        usage={"input_tokens": 12, "output_tokens": 40},
+        stream=True,
+    )
+    assert rec["prompt_tokens"] == 12
+    assert rec["completion_tokens"] == 40
+    assert rec["tps"] == 40.0
+    assert rec["tokens_estimated"] is False
+
+
+def test_streaming_tps_uses_e2e_when_decode_is_a_single_burst():
+    rec = compute_llm_timing(
+        request_start=0.0,
+        first_token_s=1.0,
+        last_token_s=1.0,
+        ended_at=1.01,
+        usage={"completion_tokens": 80},
+        stream=True,
+    )
+    assert rec["ttft_ms"] == 1000.0
+    assert rec["gen_ms"] == 0.0
+    assert rec["total_ms"] == 1010.0
+    assert rec["tps"] == 79.2
+
+
+def test_tiny_decode_span_does_not_report_thousands_of_tps():
+    rec = compute_llm_timing(
+        request_start=0.0,
+        first_token_s=5.645,
+        last_token_s=5.670,
+        ended_at=5.6706,
+        usage={"completion_tokens": 252},
+        stream=True,
+    )
+    assert rec["gen_ms"] == 25.0
+    assert rec["tps"] == round(252 / 5.6706, 1)
+    assert rec["tps"] < 200.0
+
+
 def test_format_timing_debug_empty():
     text = format_timing_debug([], daily={"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3})
     assert "no calls recorded" in text
@@ -58,12 +133,38 @@ def test_format_timing_debug_last_call():
         endpoint="primary",
         model="m",
         stream=True,
+        headers_ms=80.0,
     )
     text = format_timing_debug([rec])
     assert "last call" in text
     assert "ttft 200ms" in text
+    assert "headers 80ms" in text
     assert "tps 50.0" in text
     assert "primary" in text
+
+
+def test_format_timing_debug_weighted_tps():
+    short = compute_llm_timing(
+        request_start=0.0,
+        first_token_s=1.0,
+        last_token_s=2.0,
+        ended_at=2.1,
+        usage={"completion_tokens": 10},
+        stream=True,
+        endpoint="primary",
+    )
+    long = compute_llm_timing(
+        request_start=0.0,
+        first_token_s=1.0,
+        last_token_s=1.5,
+        ended_at=1.6,
+        usage={"completion_tokens": 90},
+        stream=True,
+        endpoint="primary",
+    )
+    text = format_timing_debug([short, long])
+    assert "avg tps 95.0" in text
+    assert "weighted 66.7" in text
 
 
 def test_collect_debug_stats_from_provider():

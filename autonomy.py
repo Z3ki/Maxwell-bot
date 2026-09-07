@@ -1120,21 +1120,21 @@ class AutonomyEngine:
 
     def _activity_channel_limit(self) -> int:
         raw = (getattr(self.bot, "_control", None) or {}).get(
-            "autonomy_activity_channels", 20
+            "autonomy_activity_channels", 6
         )
         try:
-            return max(4, min(int(raw), 40))
+            return max(2, min(int(raw), 12))
         except (TypeError, ValueError):
-            return 20
+            return 6
 
     def _activity_history_limit(self) -> int:
         raw = (getattr(self.bot, "_control", None) or {}).get(
-            "autonomy_activity_messages", 80
+            "autonomy_activity_messages", 12
         )
         try:
-            return max(8, min(int(raw), 200))
+            return max(5, min(int(raw), 25))
         except (TypeError, ValueError):
-            return 80
+            return 12
 
     def _dm_history_limit(self) -> int:
         """Messages to read per DM. Each 100 costs one REST round-trip.

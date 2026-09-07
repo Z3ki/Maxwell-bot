@@ -3243,18 +3243,12 @@ class MaxwellBot(commands.Bot):
         ]
 
     async def _user_label(self, uid: str, *, guild=None) -> str:
-        """`DisplayName (id)` for commands. Falls back to the id if unknown."""
+        """`DisplayName (id)` for commands. Falls back to the id if unknown.
+
+        Cache only — listing blacklist/admins must not GET /users for every id.
+        """
         uid = str(uid or "").strip()
         name = self._cached_user_display_name(uid, guild=guild)
-        if not name:
-            with contextlib.suppress(Exception):
-                user = await self.fetch_user(int(uid))
-                if user is not None:
-                    name = str(
-                        getattr(user, "display_name", None)
-                        or getattr(user, "name", "")
-                        or ""
-                    )
         if name:
             return f"{name} ({uid})"
         return uid
@@ -3915,6 +3909,24 @@ class MaxwellBot(commands.Bot):
         """Send presence to Discord. Tests replace this to avoid super()."""
         return await super().change_presence(**kwargs)
 
+    async def fetch_user(self, user_id, /):
+        """Prefer the gateway cache. Bare fetch_user always hits REST."""
+        cached = None
+        with contextlib.suppress(Exception):
+            cached = self.get_user(int(user_id))
+        if cached is not None:
+            return cached
+        return await super().fetch_user(user_id)
+
+    async def fetch_channel(self, channel_id, /):
+        """Prefer the gateway cache. Bare fetch_channel always hits REST."""
+        cached = None
+        with contextlib.suppress(Exception):
+            cached = self.get_channel(int(channel_id))
+        if cached is not None:
+            return cached
+        return await super().fetch_channel(channel_id)
+
     async def change_presence(
         self,
         *,
@@ -3923,7 +3935,7 @@ class MaxwellBot(commands.Bot):
         status=MISSING,
         afk=MISSING,
         idle_since=MISSING,
-        edit_settings=True,
+        edit_settings=False,
     ):
         overlay = bool(getattr(self, "_sleep_presence_overlay", False))
         if status is not MISSING and status is not None and not overlay:
@@ -5581,7 +5593,11 @@ class MaxwellBot(commands.Bot):
         self._gateway_last_ok = time.monotonic()
         self._gateway_last_disconnect = None
         if self.user:
-            self.bot_name = self.user.display_name
+            # BOT_NAME is the identity. Do not replace it with the Discord
+            # account's global display name — that account may be a stand-in
+            # (Uni / gf token) while the bot is still Maxwell.
+            configured = str(getattr(self.config, "BOT_NAME", "") or "").strip()
+            self.bot_name = configured or self.user.display_name
             ident = getattr(self, "_identity", None)
             if isinstance(ident, dict):
                 uid = str(self.user.id)
