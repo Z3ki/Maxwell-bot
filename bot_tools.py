@@ -50,6 +50,7 @@ from utils import (  # single source of truth, fd-safe
     is_direct_image_url,
     is_gif_page_url,
 )
+from discord_account import discord_user_client, user_only_unavailable
 
 logger = logging.getLogger(__name__)
 
@@ -1995,10 +1996,13 @@ class ChangePresenceTool(Tool):
             return f"Error: status must be one of {', '.join(valid)}"
         status_obj = getattr(Status, status, Status.online)
         activities = self.bot._build_activities()
+        edit_settings = bool(self.bot._custom_status) and discord_user_client(
+            self.bot
+        ) is self.bot
         await self.bot.change_presence(
             status=status_obj,
             activities=activities,
-            edit_settings=bool(self.bot._custom_status),
+            edit_settings=edit_settings,
         )
         # Silent: no DM, no channel echo, no LLM-visible text. The status
         # change is already visible on the bot's profile. Returning "" tells
@@ -2057,7 +2061,9 @@ class SetActivityTool(Tool):
                 await self.bot.change_presence(activity=None, edit_settings=False)
             else:
                 await self.bot.change_presence(
-                    activities=activities, edit_settings=bool(self.bot._custom_status)
+                    activities=activities,
+                    edit_settings=bool(self.bot._custom_status)
+                    and discord_user_client(self.bot) is self.bot,
                 )
             # Silent: the cleared status is already visible on the profile.
             # No DM, no channel echo, no LLM-visible text.
@@ -2083,7 +2089,9 @@ class SetActivityTool(Tool):
 
         activities = self.bot._build_activities()
         await self.bot.change_presence(
-            activities=activities, edit_settings=bool(self.bot._custom_status)
+            activities=activities,
+            edit_settings=bool(self.bot._custom_status)
+            and discord_user_client(self.bot) is self.bot,
         )
         # Silent: the new status is already visible on the profile. No DM,
         # no channel echo, no LLM-visible text — the user can see it
@@ -2387,7 +2395,8 @@ class JoinServerTool(Tool):
         return (
             "Join a Discord server via invite code or full invite URL "
             "(https://discord.gg/code). Restricted to admins — if anyone else "
-            "asks, say it needs an admin and do not call this. Always pass the "
+            "asks, say it needs an admin and do not call this. Needs the Discord "
+            "user account; official bot accounts cannot accept invites. Always pass the "
             "exact link or code the user gave — do not invent or reuse another "
             "invite. Reports name, gates, captcha, and errors. "
             "Params: invite (required)."
@@ -2412,6 +2421,9 @@ class JoinServerTool(Tool):
                 "Error: joining a server is restricted to admins. Ask an admin "
                 "to run it, or send them the invite."
             )
+        user_bot = discord_user_client(self.bot)
+        if user_bot is None:
+            return user_only_unavailable("join_server")
         raw = _invite_raw_from_params(invite, kwargs)
         code = _extract_invite_code(raw)
         if not code:
@@ -2420,7 +2432,7 @@ class JoinServerTool(Tool):
                 f"'{raw or invite}'. Pass a link like discord.gg/xyz or a bare code."
             )
         try:
-            inv = await self.bot.fetch_invite(code, with_counts=True)
+            inv = await user_bot.fetch_invite(code, with_counts=True)
         except discord.NotFound:
             return f"Error: invite '{code}' is invalid or expired"
         except discord.Forbidden:
@@ -2445,7 +2457,7 @@ class JoinServerTool(Tool):
         if features:
             lines.append(f"  features: {', '.join(features)}")
 
-        if gid and self.bot.get_guild(gid):
+        if gid and user_bot.get_guild(gid):
             return "\n".join(lines + [f"Already in {gname} — no join needed."])
 
         manual_approval = "MEMBER_VERIFICATION_MANUAL_APPROVAL" in features
@@ -2510,7 +2522,7 @@ class JoinServerTool(Tool):
                 joined_guild = None
                 for _ in range(12):
                     joined_guild = (
-                        self.bot.get_guild(gid2 or gid) if (gid2 or gid) else None
+                        user_bot.get_guild(gid2 or gid) if (gid2 or gid) else None
                     )
                     if joined_guild is not None:
                         break
@@ -2565,7 +2577,7 @@ class JoinServerTool(Tool):
         # guilds with member chunking can take a while).
         joined_guild = None
         for _ in range(25):
-            joined_guild = self.bot.get_guild(gid) if gid else None
+            joined_guild = user_bot.get_guild(gid) if gid else None
             if joined_guild is not None:
                 break
             await asyncio.sleep(1)
@@ -2722,6 +2734,8 @@ class ServerSetupTool(Tool):
         # Models hand booleans over as "true"/"false" strings often enough
         # that bool("false") would silently flip this into a real submit.
         dry_run = parse_bool(list_only, False)
+        if discord_user_client(self.bot) is None:
+            return user_only_unavailable("server_setup")
         try:
             result = await self.bot._auto_onboard(
                 guild,

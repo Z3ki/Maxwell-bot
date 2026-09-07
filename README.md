@@ -2,7 +2,7 @@
 
 Maxwell is a Discord self-bot backed by any OpenAI-compatible API. It reads text, images, audio, video, file attachments, and Discord embeds, then responds using an LLM with tool-calling support. It includes a web dashboard, admin API, and temporary site generation.
 
-**This is a self-bot** (`discord.py-self`, `self_bot=True`). Self-bots may violate Discord ToS. Use at your own risk.
+**This is a self-bot** (`discord.py-self`, `self_bot=True`). Self-bots may violate Discord ToS. Use at your own risk. Set `DISCORD_BOT_TOKEN` as well to fall back to (or run alongside) an official bot account — both connections share one Maxwell brain.
 
 ## Quick start
 
@@ -105,6 +105,7 @@ required values are the first thing in the file. The ones that matter:
 | Variable | Description |
 |---|---|
 | `DISCORD_TOKEN` | Discord user token (self-bot — may violate Discord ToS) |
+| `DISCORD_BOT_TOKEN` | Official bot token. Fallback if the user token is rejected; with both set, both accounts run as one Maxwell |
 | `OLLAMA_BASE_URL` | Any OpenAI-compatible API base URL. A bare host gets `/v1` appended. |
 | `OLLAMA_MODEL` | Model name your endpoint serves. No default — an unset value fails at startup with a clear message instead of a 404 later. |
 

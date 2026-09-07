@@ -183,7 +183,16 @@ def _feature_env(
 
 
 class Config:
-    DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+    DISCORD_TOKEN = (os.getenv("DISCORD_TOKEN") or "").strip()
+    # Official bot application token (Developer Portal). Optional. Used when
+    # the user token is rejected, or together with it so both connections
+    # share one Maxwell brain.
+    DISCORD_BOT_TOKEN = (os.getenv("DISCORD_BOT_TOKEN") or "").strip()
+    # auto = try user then bot, run every token that works.
+    # user = only DISCORD_TOKEN. bot = only DISCORD_BOT_TOKEN.
+    DISCORD_ACCOUNT_MODE = (
+        os.getenv("DISCORD_ACCOUNT_MODE") or "auto"
+    ).strip().lower() or "auto"
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
     TELEGRAM_WEBHOOK_URL = os.getenv("TELEGRAM_WEBHOOK_URL", "").strip()
     TELEGRAM_WEBHOOK_PORT = _int_env(
@@ -621,10 +630,12 @@ class Config:
         # The only two hard requirements. Anything else has a default or
         # degrades to "feature off", which is the whole point of the
         # ENABLE_*=auto design.
-        if not cls.DISCORD_TOKEN:
+        if cls.DISCORD_ACCOUNT_MODE not in {"auto", "user", "bot"}:
+            cls.DISCORD_ACCOUNT_MODE = "auto"
+        if not cls.DISCORD_TOKEN and not cls.DISCORD_BOT_TOKEN:
             raise ValueError(
-                "DISCORD_TOKEN is required. Run ./setup.sh, or set it in .env, "
-                "then start the bot again."
+                "DISCORD_TOKEN and/or DISCORD_BOT_TOKEN is required. "
+                "Run ./setup.sh, or set them in .env, then start the bot again."
             )
         if not cls.OLLAMA_BASE_URL:
             raise ValueError(

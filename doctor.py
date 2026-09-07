@@ -81,8 +81,23 @@ def check_required_settings(cfg) -> None:
     if cfg.DISCORD_TOKEN:
         line("ok", "DISCORD_TOKEN set")
     else:
-        line("bad", "DISCORD_TOKEN missing", "the bot cannot start without it")
-        problems.append("set DISCORD_TOKEN in .env")
+        line(
+            "warn" if getattr(cfg, "DISCORD_BOT_TOKEN", "") else "bad",
+            "DISCORD_TOKEN missing",
+            "user-account self-bot token; optional if DISCORD_BOT_TOKEN is set",
+        )
+        if not getattr(cfg, "DISCORD_BOT_TOKEN", ""):
+            problems.append("set DISCORD_TOKEN and/or DISCORD_BOT_TOKEN in .env")
+    if getattr(cfg, "DISCORD_BOT_TOKEN", ""):
+        line("ok", "DISCORD_BOT_TOKEN set", "official bot fallback / dual-account")
+    else:
+        line(
+            "warn",
+            "DISCORD_BOT_TOKEN unset",
+            "set this so a rejected user token falls back to an official bot account",
+        )
+    mode = getattr(cfg, "DISCORD_ACCOUNT_MODE", "auto") or "auto"
+    line("ok", "DISCORD_ACCOUNT_MODE", mode)
     if cfg.OLLAMA_BASE_URL and cfg.OLLAMA_MODEL:
         line("ok", "model endpoint", f"{cfg.OLLAMA_MODEL} @ {cfg.OLLAMA_BASE_URL}")
     else:

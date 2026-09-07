@@ -358,6 +358,18 @@ from discord_threads import (  # noqa: E402
     ThreadStore,
     is_discord_thread,
 )
+from discord_account import (  # noqa: E402
+    USER_ONLY_TOOLS,
+    account_ids as _discord_account_ids,
+    apply_bot_account_patches,
+    discord_user_client as _discord_user_client,
+    install_library_patches,
+    make_companion,
+    pick_primary,
+    resolve_accounts,
+    user_only_unavailable,
+    user_tools_enabled,
+)
 from rem import RemStore, load_rem_defaults, run_rem_once  # noqa: E402
 from tool_progress import make_progress as _make_tool_progress  # noqa: E402
 from tool_registry import (  # noqa: E402 — reasoning now rides inside tool calls
@@ -2435,6 +2447,8 @@ TOOL_PROTOCOL = (
     "value — read it, pick strongest, pass as move=. Nothing plays for you. Play to win.\n"
     "Sites, games, code, search, plugins and chat are open to everyone. "
     "join_server is admin-only — if a non-admin sends an invite, tell them it needs an admin and do not call it. "
+    "join_server and server_setup need the Discord user account. If only the official "
+    "bot account is connected, do not call them; share BOT_INVITE_URL so a human can add the bot. "
     "Structural tools (create_channel, edit_channel, delete_channel, lock_channel, manage_role, "
     "set_channel_permissions, edit_server, set_member_nickname) require owner/admin authorization. "
     "Emergencies (scams, phishing, raid nukers, drainers): invoke purge_messages and timeout_member/ban_member "
@@ -2781,21 +2795,47 @@ def _prepare_tool_params(name: str, params: dict | None) -> dict:
 class MaxwellBot(commands.Bot):
     """AI-powered Discord bot."""
 
-    def __init__(self):
+    def __init__(self, *, account_kind: str = "user", planned_kinds: set[str] | None = None):
         # discord.py-self 2.1+ (and official discord.py if it ever shadows
         # the fork) require intents=. 2.2.0a on some hosts has no Intents
         # type at all. Pass it only when the installed library has it.
+        kind = str(account_kind or "user").strip().lower()
+        self.account_kind = "bot" if kind == "bot" else "user"
+        self._planned_kinds = {self.account_kind}
+        if planned_kinds:
+            self._planned_kinds.update(
+                str(x).strip().lower() for x in planned_kinds if str(x).strip()
+            )
+        self._peer = None
+        self._peer_token = None
+        self._peer_kind = None
+        self._account_ids: set[int] = set()
         init_kwargs = {
             "command_prefix": ",",
-            "self_bot": True,
+            "self_bot": self.account_kind == "user",
             "help_command": None,
-            "captcha_handler": self._handle_captcha,
-            "mobile_status": True,
         }
+        if self.account_kind == "user":
+            init_kwargs["captcha_handler"] = self._handle_captcha
+            init_kwargs["mobile_status"] = True
+        else:
+            init_kwargs["guild_subscriptions"] = False
+            init_kwargs["chunk_guilds_at_startup"] = False
         intents_cls = getattr(discord, "Intents", None)
         if intents_cls is not None:
             init_kwargs["intents"] = intents_cls.all()
-        super().__init__(**init_kwargs)
+        try:
+            super().__init__(**init_kwargs)
+        except TypeError:
+            for key in (
+                "guild_subscriptions",
+                "chunk_guilds_at_startup",
+                "mobile_status",
+                "captcha_handler",
+                "intents",
+            ):
+                init_kwargs.pop(key, None)
+            super().__init__(**init_kwargs)
         self.config = Config()
         ident = identity_values(self.config)
         self._identity = ident
@@ -3769,8 +3809,9 @@ class MaxwellBot(commands.Bot):
         self.tools["create_invite"] = CreateInviteTool(self)
         self.tools["lookup_user"] = LookupUserTool(self)
         self.tools["manage_plugin"] = ManagePluginTool(self)
-        self.tools["join_server"] = JoinServerTool(self)
-        self.tools["server_setup"] = ServerSetupTool(self)
+        if user_tools_enabled(self._planned_kinds):
+            self.tools["join_server"] = JoinServerTool(self)
+            self.tools["server_setup"] = ServerSetupTool(self)
         self.tools["leave_server"] = LeaveServerTool(self)
         self.tools["search_messages"] = SearchMessagesTool(self)
         self.tools["set_nickname"] = SetNicknameTool(self)
@@ -3894,6 +3935,65 @@ class MaxwellBot(commands.Bot):
             activities.append(self._custom_status)
         return activities
 
+    def discord_user_client(self):
+        return _discord_user_client(self)
+
+    def discord_bot_client(self):
+        from discord_account import discord_bot_client as _bot_client
+
+        return _bot_client(self)
+
+    def _self_ids(self) -> set[int]:
+        return _discord_account_ids(self)
+
+    def _register_self_user(self, user) -> None:
+        uid = getattr(user, "id", None)
+        if uid is None:
+            return
+        self._account_ids.add(int(uid))
+
+    def get_channel(self, channel_id, /):
+        ch = super().get_channel(channel_id)
+        if ch is None:
+            peer = getattr(self, "_peer", None)
+            if peer is not None:
+                with contextlib.suppress(Exception):
+                    ch = peer.get_channel(channel_id)
+        return ch
+
+    def get_guild(self, guild_id, /):
+        guild = super().get_guild(guild_id)
+        if guild is None:
+            peer = getattr(self, "_peer", None)
+            if peer is not None:
+                with contextlib.suppress(Exception):
+                    guild = peer.get_guild(guild_id)
+        return guild
+
+    def get_user(self, user_id, /):
+        user = super().get_user(user_id)
+        if user is None:
+            peer = getattr(self, "_peer", None)
+            if peer is not None:
+                with contextlib.suppress(Exception):
+                    user = peer.get_user(user_id)
+        return user
+
+    @property
+    def guilds(self):
+        seen: dict[int, Any] = {}
+        for guild in super().guilds:
+            gid = getattr(guild, "id", None)
+            if gid is not None:
+                seen[int(gid)] = guild
+        peer = getattr(self, "_peer", None)
+        if peer is not None:
+            for guild in getattr(peer, "guilds", []) or []:
+                gid = getattr(guild, "id", None)
+                if gid is not None:
+                    seen.setdefault(int(gid), guild)
+        return list(seen.values())
+
     def _sleep_window_active(self) -> bool:
         """True while a sleep deadline is in the future. No auto-clear."""
         until = float(getattr(self, "_sleep_until", 0.0) or 0.0)
@@ -3916,7 +4016,13 @@ class MaxwellBot(commands.Bot):
             cached = self.get_user(int(user_id))
         if cached is not None:
             return cached
-        return await super().fetch_user(user_id)
+        try:
+            return await super().fetch_user(user_id)
+        except Exception:
+            peer = getattr(self, "_peer", None)
+            if peer is not None:
+                return await peer.fetch_user(user_id)
+            raise
 
     async def fetch_channel(self, channel_id, /):
         """Prefer the gateway cache. Bare fetch_channel always hits REST."""
@@ -3925,7 +4031,13 @@ class MaxwellBot(commands.Bot):
             cached = self.get_channel(int(channel_id))
         if cached is not None:
             return cached
-        return await super().fetch_channel(channel_id)
+        try:
+            return await super().fetch_channel(channel_id)
+        except Exception:
+            peer = getattr(self, "_peer", None)
+            if peer is not None:
+                return await peer.fetch_channel(channel_id)
+            raise
 
     async def change_presence(
         self,
@@ -3942,9 +4054,15 @@ class MaxwellBot(commands.Bot):
             self._current_status = status
         if not overlay and self._sleep_window_active():
             status = discord.Status.idle
+        # User-settings writes (custom status) only exist on a user account.
+        if (
+            getattr(self, "account_kind", "user") != "user"
+            or _discord_user_client(self) is not self
+        ):
+            edit_settings = False
         pusher = getattr(self, "_push_presence", None)
         if callable(pusher):
-            return await pusher(
+            result = await pusher(
                 activity=activity,
                 activities=activities,
                 status=status,
@@ -3952,14 +4070,27 @@ class MaxwellBot(commands.Bot):
                 idle_since=idle_since,
                 edit_settings=edit_settings,
             )
-        return await super().change_presence(
-            activity=activity,
-            activities=activities,
-            status=status,
-            afk=afk,
-            idle_since=idle_since,
-            edit_settings=edit_settings,
-        )
+        else:
+            result = await super().change_presence(
+                activity=activity,
+                activities=activities,
+                status=status,
+                afk=afk,
+                idle_since=idle_since,
+                edit_settings=edit_settings,
+            )
+        peer = getattr(self, "_peer", None)
+        if peer is not None:
+            with contextlib.suppress(Exception):
+                await peer.change_presence(
+                    activity=activity,
+                    activities=activities,
+                    status=status,
+                    afk=afk,
+                    idle_since=idle_since,
+                    edit_settings=False,
+                )
+        return result
 
     def _get_personality(self) -> str:
         """Get base personality with age injected dynamically."""
@@ -4460,25 +4591,38 @@ class MaxwellBot(commands.Bot):
 
     def _directly_addressed(self, message) -> bool:
         """Hard ping: DM, @Maxwell, or a Discord reply to Maxwell."""
-        if self.user is None:
+        getter = getattr(self, "_self_ids", None)
+        self_ids = getter() if callable(getter) else set()
+        uid = getattr(getattr(self, "user", None), "id", None)
+        if uid is not None:
+            self_ids = set(self_ids)
+            self_ids.add(uid)
+        if not self_ids:
             return False
         if isinstance(getattr(message, "channel", None), discord.DMChannel):
             return True
-        if self.user in (getattr(message, "mentions", None) or []):
+        mentions = getattr(message, "mentions", None) or []
+        if any(getattr(u, "id", None) in self_ids for u in mentions):
+            return True
+        if self.user is not None and self.user in mentions:
             return True
         if message_reference_is_forward(message):
             return False
         ref = getattr(message, "reference", None)
         resolved = getattr(ref, "resolved", None) if ref else None
         if resolved is not None and hasattr(resolved, "author"):
-            return getattr(resolved.author, "id", None) == self.user.id
+            return getattr(resolved.author, "id", None) in self_ids
         return False
 
     def _content_without_self_mention(self, content: str | None) -> str:
         text = str(content or "")
-        uid = getattr(self.user, "id", None)
+        getter = getattr(self, "_self_ids", None)
+        ids = set(getter()) if callable(getter) else set()
+        uid = getattr(getattr(self, "user", None), "id", None)
         if uid is not None:
-            text = re.sub(rf"<@!?{uid}>", "", text)
+            ids.add(uid)
+        for sid in ids:
+            text = re.sub(rf"<@!?{sid}>", "", text)
         return text.strip()
 
     def _is_bare_ping(self, message, content: str | None = None) -> bool:
@@ -4505,7 +4649,17 @@ class MaxwellBot(commands.Bot):
         guild = getattr(message, "guild", None)
         if not guild:
             return False
-        me = guild.me or (guild.get_member(self.user.id) if self.user else None)
+        me = guild.me
+        if me is None:
+            getter = getattr(self, "_self_ids", None)
+            ids = list(getter()) if callable(getter) else []
+            uid = getattr(getattr(self, "user", None), "id", None)
+            if uid is not None:
+                ids.append(uid)
+            for sid in ids:
+                me = guild.get_member(sid)
+                if me:
+                    break
         if not me:
             return False
         bot_roles = set(getattr(me, "roles", []) or [])
@@ -4515,11 +4669,17 @@ class MaxwellBot(commands.Bot):
     def _addressing_someone_else(self, message) -> bool:
         """@ someone other than Maxwell, and not also @ Maxwell."""
         mentions = list(getattr(message, "mentions", None) or [])
-        if not mentions or self.user is None:
+        if not mentions:
             return False
-        me_id = getattr(self.user, "id", None)
-        others = [u for u in mentions if getattr(u, "id", None) != me_id]
-        me = any(getattr(u, "id", None) == me_id for u in mentions)
+        getter = getattr(self, "_self_ids", None)
+        me_ids = set(getter()) if callable(getter) else set()
+        uid = getattr(getattr(self, "user", None), "id", None)
+        if uid is not None:
+            me_ids.add(uid)
+        if not me_ids:
+            return False
+        others = [u for u in mentions if getattr(u, "id", None) not in me_ids]
+        me = any(getattr(u, "id", None) in me_ids for u in mentions)
         return bool(others) and not me
 
     def _watch_followup_is_directed(self, message) -> bool:
@@ -4540,10 +4700,16 @@ class MaxwellBot(commands.Bot):
     _MAX_REPLY_CHAIN = 6
 
     def _author_is_self(self, msg) -> bool:
-        self_id = getattr(self.user, "id", None) if getattr(self, "user", None) else None
-        if self_id is None or msg is None:
+        if msg is None:
             return False
-        return getattr(getattr(msg, "author", None), "id", None) == self_id
+        author_id = getattr(getattr(msg, "author", None), "id", None)
+        if author_id is None:
+            return False
+        getter = getattr(self, "_self_ids", None)
+        if callable(getter):
+            return author_id in getter()
+        self_id = getattr(self.user, "id", None) if getattr(self, "user", None) else None
+        return self_id is not None and author_id == self_id
 
     def _iter_resolved_reply_chain(self, message):
         """Parents of `message`, nearest first. Relies on refs already resolved."""
@@ -5552,7 +5718,37 @@ class MaxwellBot(commands.Bot):
             else:
                 self._tasks.append(asyncio.create_task(self._telegram_loop()))
                 logger.info("Telegram polling loop scheduled")
+        if getattr(self, "_peer_token", None) and getattr(self, "_peer_kind", None):
+            self._tasks.append(
+                asyncio.create_task(self._run_peer(), name="discord-peer")
+            )
         logger.info("Bot setup complete")
+
+    async def _run_peer(self):
+        kind = self._peer_kind
+        token = self._peer_token
+        if not kind or not token:
+            return
+        peer = None
+        try:
+            peer = make_companion(self, kind)
+            self._peer = peer
+            logger.info("Starting companion Discord %s account", kind)
+            await peer.start(token)
+        except discord.LoginFailure:
+            logger.error(
+                "Companion %s account rejected. Continuing with the primary account only.",
+                kind,
+            )
+            self._peer = None
+        except asyncio.CancelledError:
+            if peer is not None:
+                with contextlib.suppress(Exception):
+                    await peer.close()
+            raise
+        except Exception:
+            logger.exception("Companion %s account stopped", kind)
+            self._peer = None
 
     async def on_error(self, event, *args, **kwargs):
         logger.exception("discord event %s failed", event)
@@ -5598,6 +5794,7 @@ class MaxwellBot(commands.Bot):
             # (Uni / gf token) while the bot is still Maxwell.
             configured = str(getattr(self.config, "BOT_NAME", "") or "").strip()
             self.bot_name = configured or self.user.display_name
+            self._register_self_user(self.user)
             ident = getattr(self, "_identity", None)
             if isinstance(ident, dict):
                 uid = str(self.user.id)
@@ -5605,7 +5802,13 @@ class MaxwellBot(commands.Bot):
                 ident["self_id_paren"] = f" (ID {uid})" if uid else ""
                 self._base_knowledge = fill_identity(MAXWELL_BASE_KNOWLEDGE, ident)
                 self._discord_chat_protocol = fill_identity(DISCORD_CHAT_PROTOCOL, ident)
-            logger.info(f"Logged in as {self.bot_name} ({self.user.id})")
+            kind = getattr(self, "account_kind", "user")
+            logger.info(
+                "Logged in as %s (%s) [%s account]",
+                self.bot_name,
+                self.user.id,
+                kind,
+            )
         logger.info(f"Connected to {len(self.guilds)} guilds")
         self._load_emojis()
         try:
@@ -15197,6 +15400,8 @@ class MaxwellBot(commands.Bot):
                 params["content"] = content
             if name in disabled:
                 result_text = "Error - tool is disabled"
+            elif name in USER_ONLY_TOOLS and _discord_user_client(self) is None:
+                result_text = user_only_unavailable(name)
             elif name not in compatible and not plugin_allowed:
                 result_text = "Error - tool is not available on this platform"
             elif name not in self.tools and not plugin_allowed:
@@ -16053,6 +16258,10 @@ class MaxwellBot(commands.Bot):
         compatible = MaxwellBot._compatible_tool_names(self, platform)
         disabled = set(self._control.get("disabled_tools", []) or [])
         names = {n for n in compatible if n not in disabled}
+        if not user_tools_enabled(getattr(self, "_planned_kinds", {"user"})):
+            names.difference_update(USER_ONLY_TOOLS)
+        if _discord_user_client(self) is None:
+            names.difference_update(USER_ONLY_TOOLS)
 
         # Include enabled plugin tools for this user or global
         plugin_manager = getattr(self, "plugin_manager", None)
@@ -18572,7 +18781,39 @@ async def main():
         loop.set_exception_handler(_loop_exception_handler)
     except Exception:
         pass
-    bot = MaxwellBot()
+    install_library_patches()
+    accounts = await resolve_accounts(
+        Config.DISCORD_TOKEN,
+        getattr(Config, "DISCORD_BOT_TOKEN", "") or "",
+        getattr(Config, "DISCORD_ACCOUNT_MODE", "auto") or "auto",
+    )
+    if not accounts:
+        logger.error(
+            "No Discord account accepted login. Set DISCORD_TOKEN (user) "
+            "and/or DISCORD_BOT_TOKEN (official bot) in .env and restart. "
+            "Sleeping 30s so a process manager cannot 401-flood Discord."
+        )
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.sleep(30)
+        raise SystemExit(2)
+    primary, companion = pick_primary(accounts)
+    planned = {a.kind for a in accounts}
+    bot = MaxwellBot(account_kind=primary.kind, planned_kinds=planned)
+    if primary.kind == "bot":
+        apply_bot_account_patches(bot)
+    if companion is not None:
+        bot._peer_kind = companion.kind
+        bot._peer_token = companion.token
+    logger.info(
+        "Discord primary=%s (%s)%s",
+        primary.kind,
+        primary.label,
+        (
+            f"; companion={companion.kind} ({companion.label})"
+            if companion is not None
+            else ""
+        ),
+    )
     bot._gateway_last_ok = time.monotonic()
     bot._gateway_last_disconnect = None
     _shutdown_called = False
@@ -18621,14 +18862,13 @@ async def main():
         loop.add_signal_handler(sig, _request_shutdown, sig)
 
     try:
-        if not bot.config.DISCORD_TOKEN:
-            raise RuntimeError("DISCORD_TOKEN is not configured")
-        await bot.start(bot.config.DISCORD_TOKEN)
+        await bot.start(primary.token)
     except discord.LoginFailure:
         logger.error(
-            "Discord rejected the token (DISCORD_TOKEN). Not retrying in a tight loop — "
-            "update it in .env and restart. Sleeping 30s so a process manager "
-            "cannot 401-flood Discord."
+            "Discord rejected the %s token after probe. Not retrying in a tight "
+            "loop — update DISCORD_TOKEN / DISCORD_BOT_TOKEN in .env and restart. "
+            "Sleeping 30s so a process manager cannot 401-flood Discord.",
+            primary.kind,
         )
         with contextlib.suppress(asyncio.CancelledError):
             await asyncio.sleep(30)
@@ -18744,6 +18984,12 @@ async def main():
             await close_shared_session()
         except Exception as e:
             logger.error(f"Failed to close shared session: {e}")
+        try:
+            peer = getattr(bot, "_peer", None)
+            if peer is not None:
+                await peer.close()
+        except Exception as e:
+            logger.error(f"Failed to close companion Discord client: {e}")
         try:
             await bot.close()
         except Exception as e:

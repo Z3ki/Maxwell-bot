@@ -129,6 +129,17 @@ def test_minimum_install_only_needs_token_and_model():
     )
 
 
+def test_validate_accepts_bot_token_without_user_token():
+    env = {k: v for k, v in MINIMUM_ENV.items() if k != "DISCORD_TOKEN"}
+    env["DISCORD_BOT_TOKEN"] = "bot-token"
+    assert (
+        _run(
+            "from config import Config; Config.validate(); print('valid')", env
+        )
+        == "valid"
+    )
+
+
 @pytest.mark.parametrize(
     "missing,expected",
     [

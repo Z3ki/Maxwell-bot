@@ -55,7 +55,7 @@ Options:
 Useful environment variables:
   MAXWELL_INSTALL_DIR, MAXWELL_REPO_URL, MAXWELL_BRANCH,
   MAXWELL_NONINTERACTIVE=1, MAXWELL_SKIP_SYSTEM_DEPS=1,
-  DISCORD_TOKEN, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_API_KEY,
+  DISCORD_TOKEN, DISCORD_BOT_TOKEN, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_API_KEY,
   MAXWELL_OWNER_IDS, MAXWELL_ADMIN_PASSWORD,
   BOT_NAME, CREATOR_NAME, CREATOR_ID, COMMAND_PREFIX
 EOF
@@ -298,8 +298,10 @@ configure_env() {
 
   printf '\n%sStep 1/5: Discord user token%s\n' "$BOLD" "$RESET"
   printf '  This is a self-bot user token. In a browser, open Discord, DevTools, Network, select a discord.com/api request, and copy the authorization header. You can also inspect Application/Local Storage. This may violate Discord ToS.\n'
-  token=$(prompt_secret "Discord token (blank to skip)" "${DISCORD_TOKEN:-}")
-  if [ -n "$token" ]; then set_env_value DISCORD_TOKEN "$token"; ok "Discord token saved"; else warn "DISCORD_TOKEN left blank; the bot cannot start until you edit .env."; fi
+  token=$(prompt_secret "Discord user token (blank to skip)" "${DISCORD_TOKEN:-}")
+  if [ -n "$token" ]; then set_env_value DISCORD_TOKEN "$token"; ok "Discord user token saved"; else warn "DISCORD_TOKEN left blank; set DISCORD_BOT_TOKEN or edit .env before starting."; fi
+  bot_token=$(prompt_secret "Official Discord bot token (blank to skip; used if the user token fails)" "${DISCORD_BOT_TOKEN:-}")
+  if [ -n "$bot_token" ]; then set_env_value DISCORD_BOT_TOKEN "$bot_token"; ok "Discord bot token saved"; else warn "DISCORD_BOT_TOKEN left blank; Maxwell cannot fall back if the user token is rejected."; fi
 
   printf '\n%sStep 2/5: LLM provider%s\n' "$BOLD" "$RESET"
   base_default="${OLLAMA_BASE_URL:-http://localhost:11434}"

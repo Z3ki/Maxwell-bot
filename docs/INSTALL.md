@@ -10,7 +10,7 @@ The installer explains that Maxwell is a Discord self-bot, warns that self-bots 
 
 It will ask for:
 
-1. Discord user token.
+1. Discord user token, and optionally an official bot token (`DISCORD_BOT_TOKEN`) used if the user token is rejected or to cover extra servers as the same Maxwell.
 2. LLM provider, model, and optional API key.
 3. Discord owner user ID(s).
 4. Dashboard/admin password.
@@ -24,6 +24,7 @@ Prompts read from `/dev/tty`, so they work even when the script itself arrives t
 MAXWELL_NONINTERACTIVE=1 \
 MAXWELL_INSTALL_DIR="$HOME/maxwell" \
 DISCORD_TOKEN="your-discord-user-token" \
+DISCORD_BOT_TOKEN="your-discord-bot-token" \
 OLLAMA_BASE_URL="https://openrouter.ai/api/v1" \
 OLLAMA_MODEL="moonshotai/kimi-k2.6:free" \
 OLLAMA_API_KEY="your-openrouter-key" \
@@ -59,6 +60,8 @@ Edit `.env` and set at least:
 
 ```ini
 DISCORD_TOKEN=your-discord-user-token
+# Optional official bot token — fallback, or dual-account as one Maxwell
+# DISCORD_BOT_TOKEN=your-discord-bot-token
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=qwen3:8b
 MAXWELL_HOST_BIND=/absolute/path/to/this/checkout
