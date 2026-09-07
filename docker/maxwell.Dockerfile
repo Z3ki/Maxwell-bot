@@ -22,8 +22,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt requirements-optional.txt ./
+# discord-ext-voice-recv depends on official discord.py, which overwrites
+# the discord.py-self fork. Reinstall the self-bot library last so `import
+# discord` is the user-API wrapper Maxwell actually needs.
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt -r requirements-optional.txt
+    && pip install --no-cache-dir -r requirements.txt -r requirements-optional.txt \
+    && pip uninstall -y discord.py \
+    && pip install --no-cache-dir --force-reinstall --no-deps "discord.py-self>=2.0.0"
 
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

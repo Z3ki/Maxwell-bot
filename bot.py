@@ -2787,13 +2787,20 @@ class MaxwellBot(commands.Bot):
     """AI-powered Discord bot."""
 
     def __init__(self):
-        super().__init__(
-            command_prefix=",",
-            self_bot=True,
-            help_command=None,
-            captcha_handler=self._handle_captcha,
-            mobile_status=True,
-        )
+        # discord.py-self 2.1+ (and official discord.py if it ever shadows
+        # the fork) require intents=. 2.2.0a on some hosts has no Intents
+        # type at all. Pass it only when the installed library has it.
+        init_kwargs = {
+            "command_prefix": ",",
+            "self_bot": True,
+            "help_command": None,
+            "captcha_handler": self._handle_captcha,
+            "mobile_status": True,
+        }
+        intents_cls = getattr(discord, "Intents", None)
+        if intents_cls is not None:
+            init_kwargs["intents"] = intents_cls.all()
+        super().__init__(**init_kwargs)
         self.config = Config()
         ident = identity_values(self.config)
         self._identity = ident
