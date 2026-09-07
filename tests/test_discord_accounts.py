@@ -22,6 +22,17 @@ from bot_tools import JoinServerTool, ServerSetupTool
 from bot import MaxwellBot, TOOL_PROTOCOL
 
 
+def test_ensure_bot_http_token_prefixes_authorization():
+    from discord_account import _ensure_bot_http_token
+
+    http = SimpleNamespace(_bot_account=True, token="abc.def.ghi")
+    _ensure_bot_http_token(http)
+    assert http.token == "Bot abc.def.ghi"
+    assert http._raw_token == "abc.def.ghi"
+    _ensure_bot_http_token(http)
+    assert http.token == "Bot abc.def.ghi"
+
+
 def test_user_only_tools_are_the_invite_and_onboarding_ones():
     assert USER_ONLY_TOOLS == frozenset({"join_server", "server_setup"})
 

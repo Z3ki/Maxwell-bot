@@ -236,15 +236,37 @@ def _make_client(kwargs: dict[str, Any]) -> discord.Client:
     return discord.Client()
 
 
+def _ensure_bot_http_token(http: Any) -> None:
+    """discord.py-self stores the raw token and sends it as Authorization.
+
+    Official bot accounts need ``Bot <token>`` on HTTP, but IDENTIFY still
+    wants the raw token. Keep both on the HTTP client.
+    """
+    if http is None or not getattr(http, "_bot_account", False):
+        return
+    current = getattr(http, "token", None)
+    if not isinstance(current, str) or not current.strip():
+        return
+    raw = _strip_bot_prefix(current)
+    http._raw_token = raw
+    http.token = f"Bot {raw}"
+
+
 def install_library_patches() -> None:
     """Idempotent class-level patches. No-op unless ``http._bot_account``."""
     global _PATCHED
-    if _PATCHED:
+    from discord.http import HTTPClient
+
+    if getattr(HTTPClient, "_maxwell_bot_http", False):
+        _PATCHED = True
         return
     _patch_http_token()
+    _patch_http_static_login()
+    _patch_http_request_auth()
     _patch_http_gateway()
     _patch_identify()
     _patch_ready()
+    HTTPClient._maxwell_bot_http = True
     _PATCHED = True
 
 
@@ -281,6 +303,35 @@ def _patch_http_token() -> None:
             original(self, raw)
 
     HTTPClient._token = _token  # type: ignore[method-assign]
+
+
+def _patch_http_static_login() -> None:
+    """static_login assigns ``self.token = token`` and never calls ``_token``."""
+    from discord.http import HTTPClient
+
+    original = HTTPClient.static_login
+
+    async def static_login(self, token: str):  # type: ignore[no-untyped-def]
+        if getattr(self, "_bot_account", False):
+            raw = _strip_bot_prefix(token)
+            self._raw_token = raw
+            token = f"Bot {raw}"
+        return await original(self, token)
+
+    HTTPClient.static_login = static_login  # type: ignore[method-assign]
+
+
+def _patch_http_request_auth() -> None:
+    """Catch any later raw-token assignment before the header is sent."""
+    from discord.http import HTTPClient
+
+    original = HTTPClient.request
+
+    def request(self, route, *args, **kwargs):  # type: ignore[no-untyped-def]
+        _ensure_bot_http_token(self)
+        return original(self, route, *args, **kwargs)
+
+    HTTPClient.request = request  # type: ignore[method-assign]
 
 
 def _patch_http_gateway() -> None:
