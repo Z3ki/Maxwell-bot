@@ -362,6 +362,7 @@ from discord_account import (  # noqa: E402
     USER_ONLY_TOOLS,
     account_ids as _discord_account_ids,
     apply_bot_account_patches,
+    clear_application_commands,
     discord_user_client as _discord_user_client,
     install_library_patches,
     make_companion,
@@ -5809,6 +5810,8 @@ class MaxwellBot(commands.Bot):
                 self.user.id,
                 kind,
             )
+            if kind == "bot":
+                self._spawn_detached(self._clear_slash_commands())
         logger.info(f"Connected to {len(self.guilds)} guilds")
         self._load_emojis()
         try:
@@ -5826,6 +5829,40 @@ class MaxwellBot(commands.Bot):
         # Reconcile history to find any messages missing from durable receipt.
         self._spawn_detached(self._recover_missed_messages())
         self._dispatch_plugin_event("on_ready")
+
+    async def _clear_slash_commands(self) -> None:
+        """Maxwell never uses slash commands. Wipe any leftover registrations."""
+        token = (
+            getattr(getattr(self, "http", None), "_raw_token", None)
+            or getattr(getattr(self, "http", None), "token", None)
+            or getattr(getattr(self, "config", None), "DISCORD_BOT_TOKEN", "")
+        )
+        if not token:
+            return
+        guild_ids = []
+        for guild in getattr(self, "guilds", []) or []:
+            gid = getattr(guild, "id", None)
+            if gid is not None:
+                guild_ids.append(int(gid))
+        app_id = getattr(self, "application_id", None) or getattr(
+            getattr(self, "user", None), "id", None
+        )
+        try:
+            removed = await clear_application_commands(
+                str(token),
+                application_id=app_id,
+                guild_ids=guild_ids,
+            )
+        except Exception:
+            logger.exception("Failed to clear slash commands")
+            return
+        total = int(removed.get("global", 0)) + int(removed.get("guild", 0))
+        if total:
+            logger.info(
+                "Removed leftover slash commands: global=%s guild=%s",
+                removed.get("global", 0),
+                removed.get("guild", 0),
+            )
 
     def _spawn_detached(self, coro) -> None:
         """Fire-and-forget with a strong reference so it cannot be GC'd."""
@@ -12199,10 +12236,27 @@ class MaxwellBot(commands.Bot):
                     sent = await reply_to.reply(content=content, file=file, **kwargs)
             except discord.Forbidden:
                 logger.warning(
-                    "reply failed (forbidden) in channel %s",
+                    "reply failed (forbidden) in channel %s; falling back to send",
                     getattr(channel, "id", "?"),
                 )
-                return None
+                try:
+                    if stickers:
+                        sent = await channel.send(
+                            content=content, file=file, stickers=stickers, **kwargs
+                        )
+                    else:
+                        sent = await channel.send(content=content, file=file, **kwargs)
+                except (discord.Forbidden, discord.NotFound) as exc:
+                    logger.warning(
+                        "fallback send failed (%s) in channel %s",
+                        exc.__class__.__name__,
+                        getattr(channel, "id", "?"),
+                    )
+                    return None
+                self._mark_bot_sent(channel)
+                if request is not None:
+                    MaxwellBot._record_delivery(self, request, sent)
+                return sent
             except (discord.NotFound, discord.HTTPException) as exc:
                 # A deleted parent does NOT come back as a 404. Discord
                 # answers the send with 400 "Invalid Form Body / In

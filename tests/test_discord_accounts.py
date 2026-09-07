@@ -22,6 +22,57 @@ from bot_tools import JoinServerTool, ServerSetupTool
 from bot import MaxwellBot, TOOL_PROTOCOL
 
 
+def test_clear_application_commands_puts_empty_list(monkeypatch):
+    calls = []
+
+    class FakeResp:
+        def __init__(self, status, payload):
+            self.status = status
+            self._payload = payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def json(self):
+            return self._payload
+
+        async def text(self):
+            return ""
+
+    class FakeSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        def get(self, url, **kwargs):
+            calls.append(("GET", url))
+            if url.endswith("/oauth2/applications/@me"):
+                return FakeResp(200, {"id": "99"})
+            if url.endswith("/commands"):
+                return FakeResp(200, [{"id": "1", "name": "help"}, {"id": "2", "name": "stop"}])
+            return FakeResp(200, [])
+
+        def put(self, url, **kwargs):
+            calls.append(("PUT", url, kwargs.get("json")))
+            return FakeResp(200, [])
+
+    import discord_account as mod
+    import aiohttp
+
+    monkeypatch.setattr(aiohttp, "ClientSession", FakeSession)
+    removed = asyncio.run(mod.clear_application_commands("tok"))
+    assert removed["global"] == 2
+    assert ("PUT", "https://discord.com/api/v10/applications/99/commands", []) in calls
+
+
 def test_ensure_bot_http_token_prefixes_authorization():
     from discord_account import _ensure_bot_http_token
 

@@ -252,21 +252,26 @@ def _ensure_bot_http_token(http: Any) -> None:
     http.token = f"Bot {raw}"
 
 
+_HTTP_PATCH_VERSION = 2
+
+
 def install_library_patches() -> None:
     """Idempotent class-level patches. No-op unless ``http._bot_account``."""
     global _PATCHED
     from discord.http import HTTPClient
 
-    if getattr(HTTPClient, "_maxwell_bot_http", False):
+    if int(getattr(HTTPClient, "_maxwell_bot_http_version", 0) or 0) >= _HTTP_PATCH_VERSION:
         _PATCHED = True
         return
     _patch_http_token()
     _patch_http_static_login()
     _patch_http_request_auth()
+    _patch_http_close()
     _patch_http_gateway()
     _patch_identify()
     _patch_ready()
     HTTPClient._maxwell_bot_http = True
+    HTTPClient._maxwell_bot_http_version = _HTTP_PATCH_VERSION
     _PATCHED = True
 
 
@@ -321,17 +326,239 @@ def _patch_http_static_login() -> None:
     HTTPClient.static_login = static_login  # type: ignore[method-assign]
 
 
+BOT_USER_AGENT = "DiscordBot (https://github.com/Z3ki/Maxwell-bot, 1.0)"
+_DISCORD_API = "https://discord.com/api/v10"
+
+
+async def _ensure_aiohttp(http: Any):
+    import aiohttp
+
+    session = getattr(http, "_maxwell_aiohttp", None)
+    if session is None or getattr(session, "closed", False):
+        session = aiohttp.ClientSession()
+        http._maxwell_aiohttp = session
+    return session
+
+
+async def _aiohttp_bot_request(http: Any, route: Any, *, files=None, form=None, **kwargs):
+    """REST for official bot tokens: aiohttp, no Chrome impersonation.
+
+    discord.py-self's curl_cffi browser fingerprint + ``Bot`` auth is what
+    Cloudflare 1020s (error 40333) on channel/message routes.
+    """
+    import aiohttp
+    from discord.errors import DiscordServerError, Forbidden, HTTPException, NotFound
+
+    _ensure_bot_http_token(http)
+    method = str(getattr(route, "method", "GET") or "GET").upper()
+    url = str(getattr(route, "url", "") or "")
+    session = await _ensure_aiohttp(http)
+    headers = {
+        "Authorization": http.token,
+        "User-Agent": BOT_USER_AGENT,
+        "Accept": "application/json",
+    }
+    if kwargs.pop("auth", True) is False:
+        headers.pop("Authorization", None)
+    reason = kwargs.pop("reason", None)
+    if reason:
+        headers["X-Audit-Log-Reason"] = str(reason)
+    kwargs.pop("context_properties", None)
+    extra = kwargs.pop("headers", None)
+    if isinstance(extra, dict):
+        # Chrome client-hint dumps from discord.py-self must not ride along.
+        for key, value in extra.items():
+            kl = str(key).lower()
+            if kl.startswith("sec-") or kl in {
+                "origin",
+                "referer",
+                "x-super-properties",
+                "x-context-properties",
+                "x-debug-options",
+            }:
+                continue
+            headers[key] = value
+
+    json_payload = kwargs.pop("json", None)
+    data = kwargs.pop("data", None)
+    params = kwargs.pop("params", None)
+    kwargs.pop("proxy", None)
+    kwargs.pop("proxy_auth", None)
+    kwargs.pop("interface", None)
+
+    formdata = None
+    if form or files:
+        formdata = aiohttp.FormData()
+        if json_payload is not None:
+            import json as _json
+
+            formdata.add_field("payload_json", _json.dumps(json_payload))
+            json_payload = None
+        elif data is not None and not isinstance(data, (bytes, bytearray)):
+            formdata.add_field("payload_json", data)
+            data = None
+        for part in form or []:
+            name = part.get("name") or "file"
+            part_data = part.get("data")
+            formdata.add_field(
+                name,
+                part_data,
+                filename=part.get("filename"),
+                content_type=part.get("content_type"),
+            )
+        for idx, file_obj in enumerate(files or []):
+            fp = getattr(file_obj, "fp", file_obj)
+            filename = getattr(file_obj, "filename", None) or f"file{idx}"
+            formdata.add_field(f"files[{idx}]", fp, filename=filename)
+
+    body = formdata if formdata is not None else data
+    last_error: Exception | None = None
+    for attempt in range(5):
+        try:
+            async with session.request(
+                method,
+                url,
+                headers=headers,
+                json=json_payload if formdata is None else None,
+                data=body,
+                params=params,
+            ) as resp:
+                ctype = (resp.content_type or "").lower()
+                if resp.status == 204:
+                    payload = None
+                elif "json" in ctype:
+                    payload = await resp.json(content_type=None)
+                else:
+                    text = await resp.text()
+                    payload = text
+                if 200 <= resp.status < 300:
+                    return payload
+                if resp.status == 429:
+                    retry = resp.headers.get("Retry-After") or "1"
+                    try:
+                        delay = float(retry)
+                    except (TypeError, ValueError):
+                        delay = 1.0
+                    if isinstance(payload, dict) and payload.get("retry_after") is not None:
+                        with contextlib.suppress(TypeError, ValueError):
+                            delay = float(payload["retry_after"])
+                    await asyncio.sleep(max(delay, 0.2))
+                    continue
+                if resp.status in {502, 504, 507, 522, 523, 524}:
+                    await asyncio.sleep(1 + attempt * 2)
+                    continue
+                if resp.status == 403:
+                    raise Forbidden(resp, payload)
+                if resp.status == 404:
+                    raise NotFound(resp, payload)
+                if resp.status >= 500:
+                    raise DiscordServerError(resp, payload)
+                raise HTTPException(resp, payload)
+        except (Forbidden, NotFound, HTTPException, DiscordServerError):
+            raise
+        except Exception as exc:
+            last_error = exc
+            await asyncio.sleep(1 + attempt)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Discord bot HTTP request failed")
+
+
 def _patch_http_request_auth() -> None:
-    """Catch any later raw-token assignment before the header is sent."""
+    """Bot REST goes through aiohttp; user accounts keep curl_cffi."""
     from discord.http import HTTPClient
 
     original = HTTPClient.request
 
-    def request(self, route, *args, **kwargs):  # type: ignore[no-untyped-def]
+    async def request(self, route, *args, files=None, form=None, **kwargs):  # type: ignore[no-untyped-def]
         _ensure_bot_http_token(self)
-        return original(self, route, *args, **kwargs)
+        if getattr(self, "_bot_account", False):
+            if args:
+                # discord.py-self only ever uses keyword files/form.
+                kwargs.setdefault("files", files)
+                kwargs.setdefault("form", form)
+                return await _aiohttp_bot_request(self, route, **kwargs)
+            return await _aiohttp_bot_request(self, route, files=files, form=form, **kwargs)
+        return await original(self, route, files=files, form=form, **kwargs)
 
     HTTPClient.request = request  # type: ignore[method-assign]
+
+
+def _patch_http_close() -> None:
+    from discord.http import HTTPClient
+
+    original = HTTPClient.close
+
+    async def close(self):  # type: ignore[no-untyped-def]
+        session = getattr(self, "_maxwell_aiohttp", None)
+        if session is not None:
+            with contextlib.suppress(Exception):
+                await session.close()
+            self._maxwell_aiohttp = None
+        return await original(self)
+
+    HTTPClient.close = close  # type: ignore[method-assign]
+
+
+async def clear_application_commands(
+    token: str,
+    *,
+    application_id: str | int | None = None,
+    guild_ids: Iterable[int] | None = None,
+) -> dict[str, int]:
+    """Overwrite registered slash/app commands with an empty list.
+
+    Leftover commands (from OpenClaw or another bot on the same application)
+    stay on Discord until something PUTs a new set. Maxwell does not use
+    slash commands, so startup wipes them.
+    """
+    import aiohttp
+
+    token = _strip_bot_prefix(token)
+    removed = {"global": 0, "guild": 0}
+    headers = {
+        "Authorization": f"Bot {token}",
+        "User-Agent": BOT_USER_AGENT,
+        "Content-Type": "application/json",
+    }
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        app_id = str(application_id or "").strip()
+        if not app_id:
+            async with session.get(f"{_DISCORD_API}/oauth2/applications/@me") as resp:
+                data = await resp.json() if resp.status == 200 else {}
+                app_id = str((data or {}).get("id") or "")
+        if not app_id:
+            logger.warning("Could not resolve application id; slash commands not cleared")
+            return removed
+        async with session.get(f"{_DISCORD_API}/applications/{app_id}/commands") as resp:
+            current = await resp.json() if resp.status == 200 else []
+        removed["global"] = len(current) if isinstance(current, list) else 0
+        async with session.put(
+            f"{_DISCORD_API}/applications/{app_id}/commands", json=[]
+        ) as resp:
+            if resp.status not in {200, 201}:
+                body = await resp.text()
+                logger.warning(
+                    "Failed to clear global slash commands: HTTP %s %s",
+                    resp.status,
+                    body[:200],
+                )
+            else:
+                logger.info("Cleared %s global slash command(s)", removed["global"])
+        for gid in guild_ids or ():
+            async with session.get(
+                f"{_DISCORD_API}/applications/{app_id}/guilds/{gid}/commands"
+            ) as resp:
+                current = await resp.json() if resp.status == 200 else []
+            n = len(current) if isinstance(current, list) else 0
+            async with session.put(
+                f"{_DISCORD_API}/applications/{app_id}/guilds/{gid}/commands",
+                json=[],
+            ) as resp:
+                if resp.status in {200, 201}:
+                    removed["guild"] += n
+    return removed
 
 
 def _patch_http_gateway() -> None:
