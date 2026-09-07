@@ -1154,14 +1154,6 @@ def _is_stream_options_rejected(status: int, error_text: str) -> bool:
     return "stream_options" in text or "include_usage" in text
 
 
-# Decode window shorter than this is measurement noise, not a TPS sample.
-_MIN_TPS_WINDOW_MS = 20.0
-# Below this, last-first is a one-shot SSE burst (Gemini dumps the whole
-# reply after TTFB). Using that 5–30ms drain as decode TPS yields thousands
-# of fake tokens/sec. Fall back to end-to-end throughput instead.
-_MIN_DECODE_SPAN_MS = 100.0
-
-
 def compute_llm_timing(
     *,
     request_start: float,
@@ -1182,11 +1174,12 @@ def compute_llm_timing(
     """TTFT, generation window, and tokens/sec for one provider call.
 
     Streaming TTFT is time-to-first-generated-output (content, reasoning, or a
-    tool-call delta), not the role-only SSE opener. Decode TPS is completion
-    tokens over the first-token → last-token window. Non-streaming calls have
-    no visible first token, so TTFT equals total latency and TPS uses the
-    full request. When the provider omits usage, completion tokens are
-    estimated from the output text (~4 chars/token) and marked as such.
+    tool-call delta), not the role-only SSE opener. Decode TPS is
+    ``(completion_tokens - 1) / generation_seconds`` after the first token,
+    so handshake/TTFT latency is not counted as slow generation. Non-streaming
+    calls have no visible first token, so TTFT equals total latency and TPS
+    uses the full request. When the provider omits usage, completion tokens
+    are estimated from the output text (~4 chars/token) and marked as such.
     """
     ended = float(ended_at) if ended_at is not None else time.perf_counter()
     total_ms = max(0.0, (ended - float(request_start)) * 1000.0)
@@ -1206,17 +1199,10 @@ def compute_llm_timing(
     else:
         # No last-token stamp: time after first token until the body ends.
         decode_span_ms = tail_ms
-    if decode_span_ms >= _MIN_DECODE_SPAN_MS:
-        gen_ms = decode_span_ms
-        window_ms = decode_span_ms
-    elif stream:
-        # One SSE burst after a long wait. Report the drain as gen, but TPS
-        # over the full request so we don't print n/a or 10k tps.
-        gen_ms = decode_span_ms
-        window_ms = total_ms
-    else:
-        gen_ms = tail_ms
-        window_ms = total_ms
+    # Prefer last-first (excludes the usage-chunk drain). On a one-shot SSE
+    # burst last == first, so fall back to total - TTFT rather than folding
+    # the handshake into tokens/sec.
+    gen_ms = decode_span_ms if decode_span_ms > 0 else tail_ms
     normalized = _normalize_llm_usage(usage)
     prompt = normalized["prompt_tokens"]
     completion = normalized["completion_tokens"]
@@ -1234,9 +1220,12 @@ def compute_llm_timing(
             completion = estimated
             total_tok = prompt + completion
             tokens_estimated = True
-    tps = None
-    if completion > 0 and window_ms >= _MIN_TPS_WINDOW_MS:
-        tps = round(completion / (window_ms / 1000.0), 1)
+    streamed = bool(stream) and first_token_s is not None
+    tps = _decode_tps(
+        completion,
+        gen_ms if streamed else total_ms,
+        exclude_first=streamed,
+    )
     try:
         headers_val = float(headers_ms or 0.0)
     except (TypeError, ValueError):
@@ -1318,8 +1307,26 @@ def format_timing_debug(
     return "\n".join(lines)
 
 
+def _decode_tps(
+    completion: int, window_ms: float, *, exclude_first: bool
+) -> float | None:
+    """Tokens/sec over ``window_ms``. Streaming excludes the first token (TTFT)."""
+    if completion <= 0:
+        return None
+    try:
+        window = float(window_ms or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if window <= 0:
+        return 0.0 if exclude_first else None
+    tokens = float(completion - 1) if exclude_first else float(completion)
+    if tokens <= 0:
+        return 0.0
+    return round(tokens / (window / 1000.0), 1)
+
+
 def _weighted_tps(records) -> float | None:
-    """Token-weighted decode TPS: sum(out tokens) / sum(decode seconds)."""
+    """Token-weighted decode TPS: sum(out tokens - 1) / sum(decode seconds)."""
     tokens = 0.0
     seconds = 0.0
     for rec in records or []:
@@ -1330,9 +1337,18 @@ def _weighted_tps(records) -> float | None:
             gen_ms = float(rec.get("gen_ms") or 0)
         except (TypeError, ValueError):
             continue
-        if out <= 0 or gen_ms < _MIN_TPS_WINDOW_MS:
+        if gen_ms <= 0:
+            try:
+                gen_ms = max(
+                    0.0,
+                    float(rec.get("total_ms") or 0)
+                    - float(rec.get("ttft_ms") or 0),
+                )
+            except (TypeError, ValueError):
+                continue
+        if out <= 1 or gen_ms <= 0:
             continue
-        tokens += out
+        tokens += out - 1
         seconds += gen_ms / 1000.0
     if tokens <= 0 or seconds <= 0:
         return None

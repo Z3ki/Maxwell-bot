@@ -25,6 +25,9 @@ services:
     volumes:
       - .:/app
       - /var/run/docker.sock:/var/run/docker.sock
+      # Host CLI, not Debian docker.io from the image (API 1.41). Engine 25+
+      # refuses clients below 1.44; this binary already talks to this daemon.
+      - ${DOCKER_BIN:-/usr/bin/docker}:/usr/bin/docker:ro
       # Caddy serves generated sites from MAXWELL_SITE_DIR on the *host*.
       # Without this mount, create_site writes into the container overlay and
       # the public URL 404s. Empty SITE_DIR falls back to public/bot under /app

@@ -25,7 +25,7 @@ def test_compute_streaming_ttft_and_tps():
     assert rec["ttft_ms"] == 400.0
     assert rec["total_ms"] == 2400.0
     assert rec["gen_ms"] == 2000.0
-    assert rec["tps"] == 100.0
+    assert rec["tps"] == 99.5
     assert rec["prompt_tokens"] == 800
     assert rec["completion_tokens"] == 200
     assert rec["endpoint"] == "primary"
@@ -55,7 +55,7 @@ def test_compute_streaming_tps_uses_last_token_not_stream_end():
     assert rec["ttft_ms"] == 400.0
     assert rec["total_ms"] == 2000.0
     assert rec["gen_ms"] == 1000.0
-    assert rec["tps"] == 100.0
+    assert rec["tps"] == 99.0
     assert rec["tokens_estimated"] is False
 
 
@@ -71,7 +71,7 @@ def test_compute_estimates_tokens_when_usage_missing():
     )
     assert rec["tokens_estimated"] is True
     assert rec["completion_tokens"] == 50
-    assert rec["tps"] == 50.0
+    assert rec["tps"] == 49.0
 
 
 def test_compute_accepts_input_output_token_aliases():
@@ -85,11 +85,11 @@ def test_compute_accepts_input_output_token_aliases():
     )
     assert rec["prompt_tokens"] == 12
     assert rec["completion_tokens"] == 40
-    assert rec["tps"] == 40.0
+    assert rec["tps"] == 39.0
     assert rec["tokens_estimated"] is False
 
 
-def test_streaming_tps_uses_e2e_when_decode_is_a_single_burst():
+def test_streaming_tps_excludes_ttft_on_single_burst():
     rec = compute_llm_timing(
         request_start=0.0,
         first_token_s=1.0,
@@ -99,12 +99,13 @@ def test_streaming_tps_uses_e2e_when_decode_is_a_single_burst():
         stream=True,
     )
     assert rec["ttft_ms"] == 1000.0
-    assert rec["gen_ms"] == 0.0
+    assert rec["gen_ms"] == 10.0
     assert rec["total_ms"] == 1010.0
-    assert rec["tps"] == 79.2
+    # (80 - 1) / 0.01s after first token — not 80 / 1.01s wall time.
+    assert rec["tps"] == 7900.0
 
 
-def test_tiny_decode_span_does_not_report_thousands_of_tps():
+def test_streaming_tps_uses_generation_window_not_wall_time():
     rec = compute_llm_timing(
         request_start=0.0,
         first_token_s=5.645,
@@ -114,8 +115,36 @@ def test_tiny_decode_span_does_not_report_thousands_of_tps():
         stream=True,
     )
     assert rec["gen_ms"] == 25.0
-    assert rec["tps"] == round(252 / 5.6706, 1)
-    assert rec["tps"] < 200.0
+    assert rec["tps"] == round(251 / 0.025, 1)
+    # Must not dilute decode TPS with the 5.6s TTFT (that was ~44 tps).
+    assert rec["tps"] > 200.0
+
+
+def test_streaming_tps_short_turn_not_punished_by_handshake():
+    rec = compute_llm_timing(
+        request_start=0.0,
+        first_token_s=1.853,
+        last_token_s=1.869,
+        ended_at=1.8688,
+        usage={"completion_tokens": 8},
+        stream=True,
+    )
+    assert rec["ttft_ms"] == 1853.0
+    assert rec["gen_ms"] == 16.0
+    assert rec["tps"] == 437.5
+    assert rec["tps"] != round(8 / 1.8688, 1)
+
+
+def test_streaming_tps_zero_when_only_first_token():
+    rec = compute_llm_timing(
+        request_start=0.0,
+        first_token_s=0.5,
+        last_token_s=0.6,
+        ended_at=0.7,
+        usage={"completion_tokens": 1},
+        stream=True,
+    )
+    assert rec["tps"] == 0.0
 
 
 def test_format_timing_debug_empty():
@@ -139,7 +168,7 @@ def test_format_timing_debug_last_call():
     assert "last call" in text
     assert "ttft 200ms" in text
     assert "headers 80ms" in text
-    assert "tps 50.0" in text
+    assert "tps 49.0" in text
     assert "primary" in text
 
 
@@ -163,8 +192,8 @@ def test_format_timing_debug_weighted_tps():
         endpoint="primary",
     )
     text = format_timing_debug([short, long])
-    assert "avg tps 95.0" in text
-    assert "weighted 66.7" in text
+    assert "avg tps 93.5" in text
+    assert "weighted 65.3" in text
 
 
 def test_collect_debug_stats_from_provider():
@@ -276,7 +305,7 @@ def test_debug_command_admin_gating_and_output():
         body = msg.channel.sent[0]
         assert body.startswith("```")
         assert "ttft 300ms" in body
-        assert "tps 40.0" in body
+        assert "tps 39.0" in body
         assert "queue depth 2" in body
 
     asyncio.run(run())

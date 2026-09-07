@@ -238,7 +238,7 @@ def check_docker(cfg) -> None:
         line(
             "warn",
             "docker CLI not found",
-            "shell/site_server will fail; the supported install is Docker Compose",
+            "shell/site_server need the host docker binary bind-mounted; supported install is Docker Compose",
         )
         return
     try:

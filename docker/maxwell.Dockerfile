@@ -12,7 +12,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libsodium-dev \
         espeak-ng \
         nodejs \
-        docker.io \
         chromium \
         fonts-liberation \
         fonts-dejavu-core \
@@ -34,6 +33,9 @@ COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # Live checkout is bind-mounted over /app at runtime (see docker-compose.yml).
+# Docker CLI comes from the host via compose (`/usr/bin/docker` + docker.sock),
+# not a second client in this image — bookworm docker.io speaks API 1.41 and
+# current Engine rejects it.
 COPY . /app
 
 ENV PYTHONUNBUFFERED=1 \
