@@ -793,7 +793,7 @@ def test_command_exception_after_effect_is_terminal_not_retried(tmp_path):
 def test_provider_call_receives_request_id_for_local_trace(tmp_path, caplog):
     bot = _bot(tmp_path)
     message = _message(bot)
-    bot._night_fallback_kwargs = lambda: {}
+    bot._night_fallback_kwargs = dict
     bot.ai_provider = SimpleNamespace(
         generate_response=AsyncMock(return_value="answer"), model="configured-model"
     )
@@ -809,3 +809,205 @@ def test_provider_call_receives_request_id_for_local_trace(tmp_path, caplog):
         asyncio.run(run())
     bot.ai_provider.generate_response.assert_awaited_once_with([], request_id="101")
     assert "requested_model=configured-model" in caplog.text
+
+
+def test_completed_tool_then_empty_output_gets_ack_without_reexecuting(tmp_path):
+    bot = _bot(tmp_path)
+    bot._control["error_replies"] = True
+    message = _message(bot)
+    tool = SimpleNamespace(execute=AsyncMock(return_value="read completed"))
+
+    async def handle(msg, _content):
+        await bot._invoke_request_tool(msg, "fetch_url", tool, url="https://example.org")
+
+    bot._handle_message = handle
+
+    async def run():
+        await bot.on_message(message)
+        await _drain(bot)
+        await bot._retry_pending_inbound()
+
+    asyncio.run(run())
+    tool.execute.assert_awaited_once()
+    assert len(message.channel.sent) == 1
+    assert "won't repeat those actions" in message.channel.sent[0].content
+    assert bot._request_state(message)["status"] == "delivered"
+    assert bot._request_state(message)["attempts"] == 1
+
+
+def test_completed_tool_then_failed_send_gets_no_second_send(tmp_path):
+    bot = _bot(tmp_path)
+    bot._control["error_replies"] = True
+    message = _message(bot)
+    tool = SimpleNamespace(execute=AsyncMock(return_value="read completed"))
+    message.channel.send = AsyncMock(side_effect=discord.Forbidden(
+        SimpleNamespace(status=403, reason="Forbidden"), "Missing permissions"
+    ))
+
+    async def handle(msg, _content):
+        await bot._invoke_request_tool(msg, "fetch_url", tool)
+        await bot._send_with_slowmode(msg.channel, "answer")
+
+    bot._handle_message = handle
+
+    async def run():
+        await bot.on_message(message)
+        await _drain(bot)
+        await bot._retry_pending_inbound()
+
+    asyncio.run(run())
+    tool.execute.assert_awaited_once()
+    message.channel.send.assert_awaited_once()
+    assert bot._request_state(message)["status"] == "failed"
+
+
+def test_uncertain_tool_result_does_not_enable_fallback_send(tmp_path):
+    bot = _bot(tmp_path)
+    bot._control["error_replies"] = True
+    message = _message(bot)
+    tool = SimpleNamespace(execute=AsyncMock(return_value="Error: outcome unknown"))
+
+    async def handle(msg, _content):
+        await bot._invoke_request_tool(msg, "fetch_url", tool)
+
+    bot._handle_message = handle
+
+    async def run():
+        await bot.on_message(message)
+        await _drain(bot)
+        await bot._retry_pending_inbound()
+
+    asyncio.run(run())
+    tool.execute.assert_awaited_once()
+    assert message.channel.sent == []
+    assert bot._request_state(message)["status"] == "failed"
+
+
+@pytest.mark.parametrize("prior_watermark", [None, 100, 200])
+def test_failed_receipt_floor_survives_new_live_message_and_restart(
+    tmp_path, monkeypatch, prior_watermark
+):
+    bot = _bot(tmp_path)
+    missing, newer = _message(bot, 101), _message(bot, 102)
+    if prior_watermark is not None:
+        bot._watermarks.note(22, prior_watermark)
+        bot._watermarks.save()
+    accept = bot._request_journal.accept
+
+    def fail_missing_once(mid, *args, **kwargs):
+        if str(mid) == "101":
+            raise OSError("receipt unavailable")
+        return accept(mid, *args, **kwargs)
+
+    monkeypatch.setattr(bot._request_journal, "accept", fail_missing_once)
+
+    async def before_restart():
+        await bot.on_message(missing)
+        await bot.on_message(newer)
+        await _drain(bot)
+        bot._watermarks.save()
+
+    asyncio.run(before_restart())
+    assert bot._request_state(missing) == {}
+    assert bot._watermarks.get(22) == prior_watermark
+    assert bot._recovery_cursors["22"] == 100
+
+    restarted = _bot(tmp_path)
+    restarted._channels_for_test[22] = missing.channel
+    restarted._watermarks.load()
+    restarted._capture_recovery_snapshot()
+    restarted._request_journal.recover()
+
+    async def history(*, after, **_kwargs):
+        assert after.id == 100
+        yield missing
+        yield newer
+
+    missing.channel.history = history
+
+    async def after_restart():
+        await restarted._recover_missed_messages(settle=False)
+        await _drain(restarted)
+
+    asyncio.run(after_restart())
+    assert restarted._request_state(missing)["status"] == "delivered"
+    assert len(missing.channel.sent) == 2
+    assert json.loads((tmp_path / "inbound_recovery_floors.json").read_text()) == {}
+
+
+def test_receipt_failure_during_empty_gap_page_cannot_clear_new_floor(tmp_path, monkeypatch):
+    bot = _bot(tmp_path)
+    message = _message(bot)
+    bot._watermarks.note(22, 100)
+    bot._capture_recovery_snapshot()
+
+    def failed_accept(*_args, **_kwargs):
+        raise OSError("receipt unavailable")
+
+    monkeypatch.setattr(bot._request_journal, "accept", failed_accept)
+
+    async def history(**_kwargs):
+        await bot.on_message(message)
+        for old in []:
+            yield old
+
+    message.channel.history = history
+    asyncio.run(bot._recover_missed_messages(settle=False))
+    assert bot._recovery_cursors["22"] == 100
+    assert json.loads((tmp_path / "inbound_recovery_floors.json").read_text()) == {"22": 100}
+
+
+@pytest.mark.parametrize("forbidden", [False, True])
+def test_failed_retry_fetch_cannot_fail_concurrent_live_turn(tmp_path, forbidden):
+    bot = _bot(tmp_path)
+    message = _message(bot)
+    bot._request_journal.accept(message.id, 22, 11, directed=True)
+
+    async def run():
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def handle(msg, _content):
+            started.set()
+            await release.wait()
+            await bot._send_with_slowmode(msg.channel, "answer")
+
+        async def fetch(_mid):
+            await bot.on_message(message)
+            await started.wait()
+            if forbidden:
+                raise discord.Forbidden(
+                    SimpleNamespace(status=403, reason="Forbidden"), "permissions"
+                )
+            raise TimeoutError
+
+        bot._handle_message = handle
+        message.channel.fetch_message = fetch
+        await bot._retry_pending_inbound()
+        assert bot._request_state(message)["status"] == "running"
+        assert bot._request_state(message)["attempts"] == 1
+        release.set()
+        await _drain(bot)
+
+    asyncio.run(run())
+    assert bot._request_state(message)["status"] == "delivered"
+    assert len(message.channel.sent) == 1
+
+
+@pytest.mark.parametrize("change", ["processing", "terminal", "effects", "updated"])
+def test_retry_fetch_failure_preserves_newer_receipt_owner(tmp_path, change):
+    bot = _bot(tmp_path)
+    message = _message(bot)
+    journal = bot._request_journal
+    journal.accept(message.id, 22, 11, directed=True)
+    original = journal.get(message.id)
+    if change == "processing":
+        bot._inbound_processing.add(str(message.id))
+    elif change == "terminal":
+        journal.update(message.id, "superseded", reason="explicit_stop")
+    elif change == "effects":
+        journal.update(message.id, "running", effects_started=True)
+    else:
+        journal.update(message.id, "deferred", reason="live_retry")
+    expected = journal.get(message.id)
+    asyncio.run(bot._pending_fetch_failed(original, message, TimeoutError()))
+    assert journal.get(message.id) == expected
