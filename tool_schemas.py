@@ -493,23 +493,6 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "name": _str("Optional short slug for the public URL path"),
         },
     ),
-    "site_test": _obj(
-        {
-            "name": _str("Slug of the site to test (see list_sites)"),
-            "path": _str(
-                "Optional subpage (about/) or this site's full public URL. "
-                "Default is the homepage."
-            ),
-            "url": _str("Alias of path: this site's full public URL"),
-            "wait": _num(
-                "Seconds to let JavaScript run after load (default 2, max 15)"
-            ),
-            "screenshot": _bool(
-                "Attach a screenshot of the loaded page (default true)"
-            ),
-        },
-        ["name"],
-    ),
     "create_thread": _obj(
         {
             "name": _str("Discord thread title (max 100 chars)"),
@@ -873,7 +856,6 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "edit_site",
         "delete_site",
         "site_server",
-        "site_test",
         "list_sites",
         "host_file",
         "create_thread",
@@ -1962,7 +1944,6 @@ KEEP_FULL_TOOL_ARGS: frozenset[str] = frozenset(
         "create_site",
         "edit_site",
         "site_server",
-        "site_test",
     }
 )
 

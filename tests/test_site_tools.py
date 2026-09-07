@@ -74,7 +74,7 @@ def test_extra_files_land_next_to_index(bot, tmp_path):
     assert (root / "app.js").read_text() == "console.log(1)"
     assert (root / "about" / "index.html").read_text() == "<p>about</p>"
     assert "style.css" in out
-    assert "site_test" in out
+    assert "site_test" not in out
 
 
 def test_files_accepts_a_list_of_objects(bot, tmp_path):

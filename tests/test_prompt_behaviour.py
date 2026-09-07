@@ -125,10 +125,10 @@ def test_protocol_calls_a_loading_shell_a_failure():
     assert "built nothing" in text
 
 
-def test_protocol_requires_site_test_before_claiming_it_works():
+def test_protocol_does_not_force_site_test():
     text = TOOL_PROTOCOL.lower()
-    assert "do not tell anyone a site works before site_test" in text
-    assert "not actually rendered" in text
+    assert "site_test" not in text
+    assert "call site_test" not in text
 
 
 def test_protocol_tells_it_to_write_as_much_code_as_needed():

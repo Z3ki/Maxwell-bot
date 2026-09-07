@@ -420,7 +420,6 @@ KNOWN_TOOLS = [
     "edit_site",
     "delete_site",
     "site_server",
-    "site_test",
     "list_sites",
     "host_file",
     "create_thread",

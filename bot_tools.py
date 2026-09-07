@@ -4649,8 +4649,8 @@ def site_read_loop_guard(
         return (
             "STOP. You have re-read site files repeatedly this turn without "
             "changing anything. The source is already in this turn. Call "
-            "action=write or action=replace with a real change, or site_test "
-            f"once, then send_message with the URL. {SITE_READ_LOOP_MARKER}"
+            "action=write or action=replace with a real change, then "
+            f"send_message with the URL. {SITE_READ_LOOP_MARKER}"
         )
     if key in cache:
         return (
@@ -5114,7 +5114,7 @@ class CreateSiteTool(Tool):
             "Static HTML/CSS/JS is first-class. Use backend=true + site_server only when "
             "the page needs server-side state, REST, websockets, auth, or persistence "
             "(Python in site_servers/<slug>/app.py, FastAPI+uvicorn on $PORT). "
-            "Always site_test + fix before claiming it works. When a backend exists, "
+            "When a backend exists, "
             "frontend API calls are RELATIVE ('api/notes', never '/api/...' — absolute "
             "paths 404 under /bot/<name>/)."
         )
@@ -5442,12 +5442,6 @@ class CreateSiteTool(Tool):
                     "site is done:\n"
                     + "\n".join(f"  • {item}" for item in api_paths)
                 )
-            result += (
-                f'\nTest it with site_test(name="{slug}") before telling '
-                "the user it works — that loads the page in a real browser, "
-                "catches console errors, reports whether anything actually "
-                "rendered, and returns a screenshot."
-            )
             if image_urls:
                 result += f"\nEmbedded images ({len(image_urls)}):\n" + "\n".join(
                     f"  - {url}" for url in image_urls
@@ -5605,7 +5599,6 @@ class EditSiteTool(_SiteOwnedTool):
             "occurrence), delete (remove a file), rename, backend (on/off/status/"
             "clear the KV store — not the Python server), extend. "
             "Python backend code is site_server (write/replace/read), not this. "
-            "After an edit, site_test loads the live page once. "
             "Params: name, action, path, content, files, find, replace, all, "
             "title, encoding, backend, permanent, start_line. "
             "Prefer this over re-running create_site for a tweak."
@@ -5739,8 +5732,7 @@ class EditSiteTool(_SiteOwnedTool):
                 else ""
             )
             return (
-                f"Wrote {', '.join(written)} → {url}\n"
-                f'Call site_test(name="{slug}") to load it and check the console.'
+                f"Wrote {', '.join(written)} → {url}"
                 + api_note
                 + _site_graph_note(self.bot, slug)
             )
@@ -5780,8 +5772,7 @@ class EditSiteTool(_SiteOwnedTool):
                     f" ({hits - 1} more occurrence(s) left alone)" if hits > 1 else ""
                 )
             return (
-                f"Patched {rel}{extra} → {url}\n"
-                f'Call site_test(name="{slug}") to load it and check the console.'
+                f"Patched {rel}{extra} → {url}"
                 + _site_graph_note(self.bot, slug)
             )
 
@@ -5865,8 +5856,7 @@ class SiteServerTool(_SiteOwnedTool):
             "rm (delete a helper file, not app.py), delete (tear the server down). "
             "app.py listens on 0.0.0.0:$PORT. flask+waitress for plain HTTP, "
             "fastapi+uvicorn for WebSockets. Only /data is writable and persists. "
-            "Frontend pages: edit_site. This tool is the server. "
-            "After a change, site_test loads the page and shows console errors."
+            "Frontend pages: edit_site. This tool is the server."
         )
 
     async def execute(
@@ -6339,11 +6329,8 @@ class ListSitesTool(Tool):
     def get_description(self):
         return (
             "List the sites you published: slug, URL, title, time left, "
-            "whether each has a KV store or a Python server, and whether its "
-            "last site_test actually rendered. A site marked BROKEN or 'never "
-            "tested' is not known to work — do not tell anyone it does until "
-            "site_test says it loaded clean. The slug is what edit_site, "
-            "site_server, site_test, and delete_site take. No params."
+            "whether each has a KV store or a Python server. The slug is what "
+            "edit_site, site_server, and delete_site take. No params."
         )
 
     async def execute(self, message: Message, all_users: bool = False, **kwargs) -> str:
@@ -6374,8 +6361,6 @@ class ListSitesTool(Tool):
             "https://maxwell.example.com",
         ).rstrip("/")
         lines = []
-        unverified: list[str] = []
-        broken: list[str] = []
         for slug, data in selected_sites.items():
             title = data.get("title", "untitled")
             marks = []
@@ -6387,9 +6372,6 @@ class ListSitesTool(Tool):
             if (is_admin or all_users) and data.get("user_id"):
                 owner_uid = str(data.get("user_id"))
                 owner_label = f" [owner: {owner_uid}]"
-            # "Listed" is not "works". A site whose last site_test found a
-            # loading shell must not read as live here, and one that has never
-            # been tested must not read as verified.
             health = data.get("health")
             if isinstance(health, dict):
                 if health.get("ok"):
@@ -6397,10 +6379,6 @@ class ListSitesTool(Tool):
                 else:
                     reason = str(health.get("stub") or "broken")
                     marks.append("BROKEN: " + reason[:80])
-                    broken.append(slug)
-            else:
-                marks.append("never tested")
-                unverified.append(slug)
             tail = f" [{', '.join(marks)}]" if marks else ""
             lines.append(
                 f"  • {slug} — {base_url}/bot/{slug}/ — '{title}' "
@@ -6409,21 +6387,7 @@ class ListSitesTool(Tool):
         header = (
             "All active sites:\n" if (is_admin or all_users) else "Your active sites:\n"
         )
-        out = header + "\n".join(lines)
-        if broken:
-            out += (
-                "\n\nThese failed their last site_test and are NOT working: "
-                + ", ".join(broken[:10])
-                + ". Fix them with edit_site and re-run site_test before telling "
-                "anyone they are live."
-            )
-        if unverified:
-            out += (
-                "\n\nNever verified in a browser: "
-                + ", ".join(unverified[:10])
-                + ". Run site_test before claiming any of these work."
-            )
-        return out
+        return header + "\n".join(lines)
 
 
 _WEB_REPLY_CTX_RE = re.compile(r"\[Latest message replies to[^\]]*\]", re.IGNORECASE)

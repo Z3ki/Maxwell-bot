@@ -280,7 +280,6 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     SetNicknameTool,
     ShellTool,
     SiteServerTool,
-    SiteTestTool,
     SleepTool,
     TtsTool,
     TypingTool,
@@ -2185,7 +2184,6 @@ TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "edit_site",
     "delete_site",
     "site_server",
-    "site_test",
     "list_sites",
     "host_file",
     "web_search",
@@ -2420,12 +2418,8 @@ TOOL_PROTOCOL = (
     "no 'lorem ipsum', no 'TODO', no 'coming soon', no '[insert here]', no empty href='#' nav, "
     "no commented-out 'implement later', no fake returns. If you ship a shell that says "
     "'Loading…' and the app never mounts, you have built nothing. If the page needs 900 lines to "
-    "actually work, write 900 lines.\n"
-    "After live, call site_test once — it loads the page in a browser and reports errors, "
-    "failed requests, rendering, and screenshot. If site_test says NOT ACTUALLY RENDERED, "
-    "fix and patch with edit_site or site_server action=write/replace. Then test once more. "
-    "Do not ping-pong action=read on large files. Do not recreate the site to change a line. "
-    "Do not tell anyone a site works before site_test says it loaded clean.\n"
+    "actually work, write 900 lines. "
+    "Do not ping-pong action=read on large files. Do not recreate the site to change a line.\n"
     "create_site backend is OPTIONAL. Static HTML/CSS/JS is fine. Only pass backend=true and "
     "use site_server when the site actually needs server-side state, an API, websocket, auth, "
     "or persistence. Do not spin up FastAPI for a landing page or brochure.\n"
@@ -3818,7 +3812,6 @@ class MaxwellBot(commands.Bot):
             self.tools["edit_site"] = EditSiteTool(self)
             self.tools["delete_site"] = DeleteSiteTool(self)
             self.tools["site_server"] = SiteServerTool(self)
-            self.tools["site_test"] = SiteTestTool(self)
             self.tools["list_sites"] = ListSitesTool(self)
             self.tools["host_file"] = HostFileTool(self)
         self.tools["create_thread"] = CreateThreadTool(self)
@@ -15751,7 +15744,6 @@ class MaxwellBot(commands.Bot):
             "create_site",
             "edit_site",
             "site_server",
-            "site_test",
         }
         seen_images: set[str] = set()
         seen_audio: set[str] = set()

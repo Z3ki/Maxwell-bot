@@ -716,8 +716,7 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                 + "Work:\n"
                 "1. Tools first (create_site / edit_site / host_file; site_server only if the goal needs a backend; shell only if no tool fits).\n"
                 "2. Sites may be static HTML/CSS/JS. Use site_server and relative API paths "
-                "(`api/notes`, never `/api/...`) only when the goal needs a backend. "
-                "Then site_test → fix → retest. Don't claim done with console errors.\n"
+                "(`api/notes`, never `/api/...`) only when the goal needs a backend.\n"
                 "3. Patch live files via tools. No shadow copies under the workspace root.\n"
                 "4. One route = one definition; don't remount the same path.\n"
                 "Last message MUST be `Built <title>: <url> — <one line>` with the real "
@@ -842,8 +841,8 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                         "role": "user",
                         "content": (
                             "No site file changed in 15 steps. Stop grepping/re-reading. "
-                            "Next: edit_site write (site_server only if this goal needs a backend), "
-                            "or site_test. Then the single-line summary."
+                            "Next: edit_site write (site_server only if this goal needs a backend). "
+                            "Then the single-line summary."
                         ),
                     }
                 )

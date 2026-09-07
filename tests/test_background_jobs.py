@@ -410,9 +410,9 @@ def _tool(name):
 def test_worker_catalog_hides_spawner_and_channel_post():
     from jobs import _worker_tools
 
-    tools = [_tool("spawn_background"), _tool("send_message"), _tool("shell"), _tool("site_test")]
+    tools = [_tool("spawn_background"), _tool("send_message"), _tool("shell"), _tool("create_site")]
     kept = {(t["function"]["name"]) for t in _worker_tools(tools)}
-    assert kept == {"shell", "site_test"}
+    assert kept == {"shell", "create_site"}
 
 
 def test_delivery_line_vague_final_falls_back_to_thread():
