@@ -301,8 +301,10 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     __CHESS_IMPORTED__ as _CHESS_IMPORTED,
     forget_shell_progress,
     _IMAGE_FETCH_UA,
+    DM_BLOCKED_TOOLS,
     _guild_access_line,
     _get_shared_session,
+    _is_private_chat,
     _is_safe_url,
     _read_response_limited,
     close_shared_session,
@@ -2448,9 +2450,12 @@ TOOL_PROTOCOL = (
     "value — read it, pick strongest, pass as move=. Nothing plays for you. Play to win.\n"
     "Sites, games, code, search, plugins and chat are open to everyone. "
     "join_server is admin-only — if a non-admin sends an invite, tell them it needs an admin and do not call it. "
-    "DMs are admin-only. send_message stays in the current chat; sending to another "
-    "channel or DM is admin-only — if a non-admin asks you to speak somewhere else, "
-    "tell them it needs an admin and reply here instead. "
+    "In DMs, Discord moderation and server tools (kick, ban, timeout, purge, channels, "
+    "roles, server settings, forwarding, joining/leaving servers) are not available. "
+    "send_message stays in the current chat; from a DM you cannot send to another "
+    "channel or server. From a server, sending to another channel or DM is admin-only — "
+    "if a non-admin asks you to speak somewhere else, tell them it needs an admin and "
+    "reply here instead. Shell, sites, search, and ordinary chat tools stay available in DMs. "
     "join_server and server_setup need the Discord user account. If only the official "
     "bot account is connected, do not call them; share BOT_INVITE_URL so a human can add the bot. "
     "Structural tools (create_channel, edit_channel, delete_channel, lock_channel, manage_role, "
@@ -2477,7 +2482,8 @@ LEAN_TOOL_PROTOCOL = (
     "training data. Skip lookup only for banter and opinions.\n"
     "Visible replies go through send_message (or no_response to stay silent). "
     "Do not also write the same text as raw assistant content.\n"
-    "DMs are admin-only. send_message stays in this chat unless the caller is an admin.\n"
+    "In DMs, Discord mod/server tools and sending to other channels are not available. "
+    "send_message stays in this chat.\n"
     "ONE send_message holds your whole reply. Consecutive short messages read "
     "as spam. If you have nothing new to add, use no_response.\n"
     "Do the work first. Call the tools that do the job, then send_message once "
@@ -7252,8 +7258,8 @@ class MaxwellBot(commands.Bot):
         ) and not self._is_admin(message.author.id):
             return "ignored_author"
 
-        # Non-admin DMs never run commands or start a turn. reply_dms is the
-        # master off switch even for admins.
+        # DMs are off unless reply_dms is on. When on, anyone can DM; the
+        # turn still hides Discord mod/server tools (see DM_BLOCKED_TOOLS).
         if isinstance(message.channel, discord.DMChannel) and not self._dm_replies_allowed(
             message
         ):
@@ -9829,16 +9835,10 @@ class MaxwellBot(commands.Bot):
         return str(user_id) in self._admins
 
     def _dm_replies_allowed(self, message) -> bool:
-        """Inbound DMs are admin-only. reply_dms=false turns them off entirely."""
+        """Inbound DMs follow reply_dms. Off blocks everyone, including admins."""
         if not isinstance(getattr(message, "channel", None), discord.DMChannel):
             return True
-        if not (getattr(self, "_control", None) or {}).get("reply_dms", False):
-            return False
-        author_id = getattr(getattr(message, "author", None), "id", None)
-        try:
-            return bool(author_id is not None and self._is_admin(author_id))
-        except Exception:
-            return False
+        return bool((getattr(self, "_control", None) or {}).get("reply_dms", False))
 
     def _save_admins(self):
         self._save_str_set(
@@ -15500,6 +15500,11 @@ class MaxwellBot(commands.Bot):
                 params["content"] = content
             if name in disabled:
                 result_text = "Error - tool is disabled"
+            elif name in DM_BLOCKED_TOOLS and _is_private_chat(message):
+                result_text = (
+                    "Error: Discord server and moderation tools are not "
+                    "available in DMs. Reply here instead."
+                )
             elif name in USER_ONLY_TOOLS and _discord_user_client(self) is None:
                 result_text = user_only_unavailable(name)
             elif name not in compatible and not plugin_allowed:
@@ -16408,10 +16413,10 @@ class MaxwellBot(commands.Bot):
         # stale call does not error, but do not offer it.
         names.discard("more_tools")
         channel = getattr(message, "channel", None) if message is not None else None
-        if is_discord_thread(channel) or (
-            message is not None and getattr(message, "guild", None) is None
-        ):
+        if is_discord_thread(channel):
             names.discard("create_thread")
+        if _is_private_chat(message):
+            names.difference_update(DM_BLOCKED_TOOLS)
         return names
 
     def _tools_for_turn(self, platform: str, message=None) -> dict[str, Any]:

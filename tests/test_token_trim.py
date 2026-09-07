@@ -77,12 +77,13 @@ def _live_bot(extra_tools=None):
     return bot
 
 
-def _msg(content, *, mentions=None, watch_followup=False):
+def _msg(content, *, mentions=None, watch_followup=False, dm=False):
+    guild = None if dm else SimpleNamespace(id=1)
     msg = SimpleNamespace(
         content=content,
-        channel=SimpleNamespace(id=99),
+        channel=SimpleNamespace(id=99, guild=guild),
         mentions=list(mentions or []),
-        guild=None,
+        guild=guild,
         reference=None,
     )
     if watch_followup:
@@ -148,6 +149,35 @@ def test_disabled_tools_still_hidden():
     catalog = prompt.split("## Tool contract")[0]
     assert "shell" not in catalog
     assert "youtube" not in catalog
+
+
+def test_dms_hide_mod_tools_and_keep_shell_and_site():
+    bot = _live_bot(
+        extra_tools={
+            "kick_member": FakeTool(),
+            "ban_member": FakeTool(),
+            "purge_messages": FakeTool(),
+            "forward_message": FakeTool(),
+            "join_server": FakeTool(),
+            "create_channel": FakeTool(),
+            "site_server": FakeTool(),
+        }
+    )
+    names = _tool_names(bot, _msg("hi", dm=True), "hi")
+    assert "kick_member" not in names
+    assert "ban_member" not in names
+    assert "purge_messages" not in names
+    assert "forward_message" not in names
+    assert "join_server" not in names
+    assert "create_channel" not in names
+    assert "shell" in names
+    assert "create_site" in names
+    assert "list_sites" in names
+    assert "site_server" in names
+    assert "send_message" in names
+    guild_names = _tool_names(bot, _msg("hi"), "hi")
+    assert "kick_member" in guild_names
+    assert "shell" in guild_names
 
 
 def test_short_live_turn_for_watch_followup_not_hard_ping():

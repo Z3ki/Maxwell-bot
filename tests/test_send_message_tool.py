@@ -9,18 +9,21 @@ from bot_tools import (
 
 
 class FakeChannel:
-    def __init__(self, cid=99):
+    def __init__(self, cid=99, guild=None):
         self.id = cid
         self.sent = []
+        self.guild = guild
 
     async def send(self, text):
         self.sent.append(text)
 
 
 class FakeMessage:
-    def __init__(self, author_id=11, channel_id=99):
-        self.channel = FakeChannel(channel_id)
+    def __init__(self, author_id=11, channel_id=99, *, dm=False):
+        guild = None if dm else SimpleNamespace(id=1)
+        self.channel = FakeChannel(channel_id, guild=guild)
         self.author = SimpleNamespace(id=author_id)
+        self.guild = guild
         self.replies = []
 
     async def reply(self, text):
@@ -308,9 +311,44 @@ def test_send_message_same_channel_id_allowed_for_non_admin():
     asyncio.run(run())
 
 
+def test_send_message_cross_channel_from_dm_refuses_even_admin():
+    class Target:
+        def __init__(self):
+            self.id = 123456789
+            self.sent = []
+            self.guild = SimpleNamespace(id=2)
+
+        async def send(self, text):
+            self.sent.append(text)
+
+    class Bot:
+        def __init__(self):
+            self.target = Target()
+
+        def get_channel(self, cid):
+            return self.target if cid == 123456789 else None
+
+        def _is_admin(self, _uid):
+            return True
+
+    async def run():
+        bot = Bot()
+        msg = FakeMessage(author_id=42, channel_id=99, dm=True)
+        result = await SendMessageTool(bot).execute(
+            msg, content="post this in general", channel_id="123456789"
+        )
+        assert result.startswith("Error:")
+        assert "dm" in result.lower()
+        assert bot.target.sent == []
+        assert msg.replies == []
+        assert msg.channel.sent == []
+
+    asyncio.run(run())
+
+
 def test_send_message_same_dm_recipient_allowed_for_non_admin():
     async def run():
-        msg = FakeMessage(author_id=11, channel_id=1546631263928979457)
+        msg = FakeMessage(author_id=11, channel_id=1546631263928979457, dm=True)
         msg.channel.recipient = SimpleNamespace(id=1003210843984498748)
         bot = SimpleNamespace(
             _is_admin=lambda _uid: False,

@@ -103,7 +103,7 @@ DEFAULT_CONTROL = {
     "self_repetition_note_enabled": True,
     "emoji_context_enabled": True,
     "music_context_enabled": True,
-    "reply_dms": False,
+    "reply_dms": True,
     "reply_groups": True,
     "reply_mentions": True,
     # Direct requests must end in a visible answer, not discretionary silence.

@@ -542,7 +542,8 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         {
             "channel_id": _str(
                 "Optional channel ID or DM recipient user ID. Other chats are "
-                "admin-only; omit to reply here."
+                "not available from DMs; from a server they are admin-only. "
+                "Omit to reply here."
             ),
             "content": _str("Message text (Discord markdown OK)"),
             "reply": _bool(

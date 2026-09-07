@@ -613,6 +613,20 @@ def _caller_is_admin(bot, message) -> bool:
         return False
 
 
+def _is_private_chat(message) -> bool:
+    """True for 1:1 DMs and group DMs. False when there is no message."""
+    if message is None:
+        return False
+    channel = getattr(message, "channel", None)
+    if isinstance(channel, (discord.DMChannel, discord.GroupChannel)):
+        return True
+    if getattr(message, "guild", None) is not None:
+        return False
+    if getattr(channel, "guild", None) is not None:
+        return False
+    return True
+
+
 def _destination_is_current_chat(message, dest_id: int) -> bool:
     """True when dest_id is this channel, or the other person in this DM."""
     channel = getattr(message, "channel", None)
@@ -764,6 +778,24 @@ _CAP_TOOLS: dict[str, tuple[str, ...]] = {
 _ALL_MOD_TOOLS = tuple(
     dict.fromkeys(name for names in _CAP_TOOLS.values() for name in names)
 )
+# Guild/moderation tools plus anything that posts into another Discord room.
+# Hidden and refused in DMs/group DMs so opening DMs does not hand strangers
+# a remote mod console. Shell, sites, search, and current-chat send_message
+# stay available.
+DM_BLOCKED_TOOLS = frozenset(_ALL_MOD_TOOLS) | {
+    "join_server",
+    "leave_server",
+    "server_setup",
+    "list_admin_servers",
+    "list_servers",
+    "forward_message",
+    "set_nickname",
+    "update_server_prompt",
+    "create_thread",
+    "thread_control",
+    "join_vc",
+    "leave_vc",
+}
 _SNOWFLAKE_RE = re.compile(r"(\d{15,22})")
 _DURATION_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhd])?\s*$", re.I)
 
@@ -3076,6 +3108,8 @@ class ForwardMessageTool(Tool):
     ) -> str:
         if not message_id or not channel_id:
             return "Error: message_id and channel_id are required"
+        if _is_private_chat(message):
+            return "Error: forwarding to another channel is not available in DMs"
         try:
             dest = self.bot.get_channel(int(channel_id))
             if not dest:
@@ -6818,8 +6852,8 @@ class SendMessageTool(Tool):
             "Params: content (required), reply (optional bool, default true — Discord "
             "quote-reply is on; pass false only for a standalone line with no quote), "
             "reply_to (optional short quote or who said it, like nah or alice — not an id). "
-            "channel_id/user_id to another channel or DM is admin-only — everyone else "
-            "must reply in this chat."
+            "channel_id/user_id to another channel or server is not available from DMs. "
+            "From a server, that is admin-only — everyone else must reply in this chat."
         )
 
     @staticmethod
@@ -6866,6 +6900,11 @@ class SendMessageTool(Tool):
             cross_chat = bool(
                 dest_id and not _destination_is_current_chat(message, dest_id)
             )
+            if cross_chat and _is_private_chat(message):
+                return (
+                    "Error: sending to another channel or server is not "
+                    "available in DMs. Reply in this chat instead."
+                )
             if cross_chat and not _caller_is_admin(self.bot, message):
                 return (
                     "Error: sending to another channel or DM is restricted "

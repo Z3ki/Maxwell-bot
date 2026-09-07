@@ -53,9 +53,10 @@ def test_tool_protocol_states_the_join_server_restriction():
 
 def test_tool_protocol_states_dm_and_cross_chat_restrictions():
     text = TOOL_PROTOCOL.lower()
-    assert "dms are admin-only" in text
+    assert "in dms, discord moderation" in text
     assert "send_message stays in the current chat" in text
-    assert "sending to another" in text
+    assert "from a dm you cannot send" in text
+    assert "shell, sites" in text
 
 
 def test_tool_descriptions_do_not_say_admin_only():
@@ -93,6 +94,7 @@ def test_send_message_description_announces_cross_chat_restriction():
     desc = SendMessageTool(SimpleNamespace()).get_description().lower()
     assert "admin-only" in desc
     assert "channel_id" in desc
+    assert "not available from dms" in desc
 
 
 def test_join_server_refuses_a_non_admin():
