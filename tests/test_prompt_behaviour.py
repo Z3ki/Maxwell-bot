@@ -8,7 +8,8 @@ one of those, so a future prompt edit cannot quietly drop it.
 
 from types import SimpleNamespace
 
-from bot import LEAN_TOOL_PROTOCOL, TOOL_PROTOCOL
+from bot import LEAN_TOOL_PROTOCOL, MAXWELL_BASE_KNOWLEDGE, TOOL_PROTOCOL
+from control_defaults import DEFAULT_CONTROL
 from bot_tools import CreateSiteTool, _site_placeholder_warnings
 from tool_schemas import TOOL_PARAMETERS
 
@@ -244,6 +245,26 @@ def test_warnings_are_bounded():
 def test_no_sources_means_no_warnings():
     assert _site_placeholder_warnings(None, []) == []
     assert _site_placeholder_warnings("", []) == []
+
+
+# --------------------------------------------------------------------------
+# honesty: not a yes-man
+# --------------------------------------------------------------------------
+
+
+def test_personality_forbids_yes_man_energy():
+    text = DEFAULT_CONTROL["base_personality"].lower()
+    assert "never a yes-man" in text
+    assert "always be truthful" in text
+    assert "if you disagree, say so" in text
+    assert "never invent facts" in text
+
+
+def test_base_knowledge_forbids_yes_man_energy():
+    text = MAXWELL_BASE_KNOWLEDGE.lower()
+    assert "never a yes-man" in text
+    assert "always truthful" in text
+    assert "never invent facts" in text
 
 
 # --------------------------------------------------------------------------
