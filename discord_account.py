@@ -9,6 +9,7 @@ handles both connections so they act as a single Maxwell:
 - both Discord user IDs count as "self"
 - tools that only a user account can perform (invite-join, onboarding)
   stay off the official bot
+- user-account REST is serialized and global 429s queue instead of bursting
 
 discord.py-self speaks the user API. Official bot tokens need a ``Bot ``
 Authorization prefix, bot IDENTIFY (intents), and READY without
@@ -21,13 +22,47 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any, Iterable
 
 import discord
 
 logger = logging.getLogger(__name__)
+
+
+def _env_float(name: str, default: float, lo: float, hi: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        value = default
+    else:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = default
+    return max(lo, min(hi, value))
+
+
+def _env_int(name: str, default: int, lo: int, hi: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        value = default
+    else:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = default
+    return max(lo, min(hi, value))
+
+
+# User-account REST is a ban surface. Official bots can burst; self-bots
+# cannot. Keep one in-flight call, space the next one, and when Discord
+# returns a global 429 park every queued request until retry_after.
+_USER_REST_MIN_INTERVAL = _env_float("MAXWELL_USER_REST_MIN_INTERVAL", 0.4, 0.05, 5.0)
+_USER_REST_MAX_INFLIGHT = _env_int("MAXWELL_USER_REST_MAX_INFLIGHT", 1, 1, 4)
+_USER_REST_429_RETRIES = _env_int("MAXWELL_USER_REST_429_RETRIES", 8, 1, 20)
 
 # Tools that call user-account-only Discord endpoints. Official bot
 # accounts cannot accept invites, complete guild onboarding, or sit in
@@ -40,6 +75,130 @@ USER_ONLY_UNAVAILABLE = (
     "The official bot account cannot do it. Add the user token, or send "
     "people the bot invite URL (BOT_INVITE_URL) so they can add the bot."
 )
+
+
+class UserRestGate:
+    """FIFO throttle for user-account Discord REST.
+
+    Official bot tokens keep discord.py's normal buckets. User tokens share
+    one gate: at most a few in-flight calls, a minimum gap between them, and
+    a global cooldown that parks the whole queue when Discord says 429.
+    """
+
+    def __init__(
+        self,
+        *,
+        min_interval: float | None = None,
+        max_inflight: int | None = None,
+    ) -> None:
+        self.min_interval = (
+            _USER_REST_MIN_INTERVAL
+            if min_interval is None
+            else max(0.0, float(min_interval))
+        )
+        self.max_inflight = (
+            _USER_REST_MAX_INFLIGHT
+            if max_inflight is None
+            else max(1, int(max_inflight))
+        )
+        self._sema: asyncio.Semaphore | None = None
+        self._next_slot = 0.0
+        self._global_until = 0.0
+
+    def _sema_obj(self) -> asyncio.Semaphore:
+        if self._sema is None:
+            self._sema = asyncio.Semaphore(self.max_inflight)
+        return self._sema
+
+    def note_global(self, retry_after: float) -> None:
+        try:
+            delay = float(retry_after)
+        except (TypeError, ValueError):
+            delay = 1.0
+        until = time.monotonic() + max(delay, 0.2)
+        if until > self._global_until:
+            self._global_until = until
+
+    def reset(self) -> None:
+        self._sema = None
+        self._next_slot = 0.0
+        self._global_until = 0.0
+
+    @contextlib.asynccontextmanager
+    async def slot(self):
+        sema = self._sema_obj()
+        await sema.acquire()
+        try:
+            now = time.monotonic()
+            wait_until = max(self._global_until, self._next_slot)
+            delay = wait_until - now
+            if delay > 0:
+                if self._global_until > now and delay >= 0.2:
+                    logger.warning(
+                        "User Discord REST queued %.1fs (global rate limit)",
+                        delay,
+                    )
+                await asyncio.sleep(delay)
+            yield
+        finally:
+            self._next_slot = time.monotonic() + self.min_interval
+            sema.release()
+
+
+_USER_REST = UserRestGate()
+
+
+def _retry_after_seconds(exc: BaseException) -> float | None:
+    """Seconds to park the user REST queue, or None if this is not a 429."""
+    name = type(exc).__name__
+    text = str(exc).lower()
+    if "cloudflare ban" in text or "cloudflare access denied" in text:
+        return None
+    status = getattr(exc, "status", None)
+    response = getattr(exc, "response", None)
+    if status is None and response is not None:
+        status = getattr(response, "status", None)
+        if status is None:
+            status = getattr(response, "status_code", None)
+    if name != "RateLimited" and status != 429:
+        return None
+    retry = getattr(exc, "retry_after", None)
+    if retry is None and response is not None:
+        headers = getattr(response, "headers", None) or {}
+        getter = getattr(headers, "get", None)
+        if callable(getter):
+            retry = getter("Retry-After") or getter("retry-after")
+    try:
+        delay = float(retry) if retry is not None else 1.0
+    except (TypeError, ValueError):
+        delay = 1.0
+    return max(delay, 0.2)
+
+
+async def user_account_request(http, original, route, *, files=None, form=None, **kwargs):
+    """Run one user-account REST call through the global queue."""
+    last_error: BaseException | None = None
+    for attempt in range(_USER_REST_429_RETRIES):
+        async with _USER_REST.slot():
+            try:
+                return await original(http, route, files=files, form=form, **kwargs)
+            except Exception as exc:
+                delay = _retry_after_seconds(exc)
+                if delay is None:
+                    raise
+                last_error = exc
+                logger.warning(
+                    "User Discord REST 429; queueing %.2fs (attempt %s/%s)",
+                    delay,
+                    attempt + 1,
+                    _USER_REST_429_RETRIES,
+                )
+                _USER_REST.note_global(delay)
+                continue
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("user Discord REST failed")
+
 
 # Typical privileged + unprivileged intents so MESSAGE_CONTENT works.
 # The developer portal must allow the privileged bits or IDENTIFY closes.
@@ -252,11 +411,11 @@ def _ensure_bot_http_token(http: Any) -> None:
     http.token = f"Bot {raw}"
 
 
-_HTTP_PATCH_VERSION = 2
+_HTTP_PATCH_VERSION = 3
 
 
 def install_library_patches() -> None:
-    """Idempotent class-level patches. No-op unless ``http._bot_account``."""
+    """Idempotent class-level patches for bot HTTP and user REST queuing."""
     global _PATCHED
     from discord.http import HTTPClient
 
@@ -465,7 +624,7 @@ async def _aiohttp_bot_request(http: Any, route: Any, *, files=None, form=None, 
 
 
 def _patch_http_request_auth() -> None:
-    """Bot REST goes through aiohttp; user accounts keep curl_cffi."""
+    """Bot REST goes through aiohttp; user accounts keep curl_cffi, queued."""
     from discord.http import HTTPClient
 
     original = HTTPClient.request
@@ -479,7 +638,9 @@ def _patch_http_request_auth() -> None:
                 kwargs.setdefault("form", form)
                 return await _aiohttp_bot_request(self, route, **kwargs)
             return await _aiohttp_bot_request(self, route, files=files, form=form, **kwargs)
-        return await original(self, route, files=files, form=form, **kwargs)
+        return await user_account_request(
+            self, original, route, files=files, form=form, **kwargs
+        )
 
     HTTPClient.request = request  # type: ignore[method-assign]
 

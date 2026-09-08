@@ -5092,13 +5092,14 @@ class MaxwellBot(commands.Bot):
             poller.max_backoff = max(poller.interval, poller.max_backoff)
 
     def _conversation_watch_seconds(self) -> float:
+        fallback = float(DEFAULT_CONTROL["conversation_watch_seconds"])
         raw = (getattr(self, "_control", None) or {}).get(
-            "conversation_watch_seconds", 180
+            "conversation_watch_seconds", fallback
         )
         try:
             return max(0.0, min(float(raw), 3600.0))
         except (TypeError, ValueError):
-            return 180.0
+            return fallback
 
     def _conversation_watch_enabled(self) -> bool:
         """Master switch for the post-reply 'should I talk?' poll.
@@ -5115,7 +5116,10 @@ class MaxwellBot(commands.Bot):
                 return float(getter()) > 0
             except (TypeError, ValueError):
                 return True
-        raw = control.get("conversation_watch_seconds", 180)
+        raw = control.get(
+            "conversation_watch_seconds",
+            DEFAULT_CONTROL["conversation_watch_seconds"],
+        )
         try:
             return max(0.0, min(float(raw), 3600.0)) > 0
         except (TypeError, ValueError):
@@ -5816,8 +5820,7 @@ class MaxwellBot(commands.Bot):
         self._gateway_last_disconnect = None
         if self.user:
             # BOT_NAME is the identity. Do not replace it with the Discord
-            # account's global display name — that account may be a stand-in
-            # (Uni / gf token) while the bot is still Maxwell.
+            # account's global display name.
             configured = str(getattr(self.config, "BOT_NAME", "") or "").strip()
             self.bot_name = configured or self.user.display_name
             self._register_self_user(self.user)

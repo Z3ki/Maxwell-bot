@@ -317,6 +317,69 @@ def test_user_only_unavailable_names_the_tool():
     assert "DISCORD_TOKEN" in text
 
 
+def test_user_rest_gate_serializes_and_queues_global_cooldown():
+    from discord_account import UserRestGate
+
+    gate = UserRestGate(min_interval=0.0, max_inflight=1)
+    order = []
+
+    async def run():
+        async def one(i):
+            async with gate.slot():
+                order.append(i)
+                await asyncio.sleep(0.02)
+
+        await asyncio.gather(one(1), one(2), one(3))
+        gate.note_global(0.12)
+        started = asyncio.get_running_loop().time()
+        async with gate.slot():
+            elapsed = asyncio.get_running_loop().time() - started
+        assert elapsed >= 0.1
+
+    asyncio.run(run())
+    assert order == [1, 2, 3]
+
+
+def test_user_account_request_retries_rate_limited(monkeypatch):
+    from discord.errors import RateLimited
+    from discord_account import UserRestGate
+    import discord_account as mod
+
+    gate = UserRestGate(min_interval=0.0, max_inflight=1)
+    monkeypatch.setattr(mod, "_USER_REST", gate)
+    monkeypatch.setattr(mod, "_USER_REST_429_RETRIES", 3)
+    calls = {"n": 0}
+
+    async def original(_http, _route, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RateLimited(0.01)
+        return "ok"
+
+    out = asyncio.run(mod.user_account_request(SimpleNamespace(), original, "route"))
+    assert out == "ok"
+    assert calls["n"] == 2
+
+
+def test_user_account_request_does_not_retry_forbidden():
+    from discord_account import user_account_request
+
+    class Forbidden(Exception):
+        status = 403
+
+    async def original(_http, _route, **_kwargs):
+        raise Forbidden("nope")
+
+    async def run():
+        try:
+            await user_account_request(SimpleNamespace(), original, "route")
+        except Forbidden:
+            return "caught"
+        return "missed"
+
+    assert asyncio.run(run()) == "caught"
+
+
 def test_client_sees_channel_false_without_client():
     assert client_sees_channel(None, 1) is False
 

@@ -183,7 +183,14 @@ def _sanitize_control(control):
         0, min(out["per_user_cooldown_seconds"], 3600)
     )
     out["conversation_watch_seconds"] = max(
-        0, min(_safe_int(out.get("conversation_watch_seconds"), 180), 3600)
+        0,
+        min(
+            _safe_int(
+                out.get("conversation_watch_seconds"),
+                DEFAULT_CONTROL.get("conversation_watch_seconds", 60),
+            ),
+            3600,
+        ),
     )
     try:
         _watch_debounce = float(
@@ -196,7 +203,9 @@ def _sanitize_control(control):
     try:
         _watch_pressure = float(out.get("conversation_watch_pressure"))
     except (TypeError, ValueError):
-        _watch_pressure = 0.4
+        _watch_pressure = float(
+            DEFAULT_CONTROL.get("conversation_watch_pressure", 0.55)
+        )
     out["conversation_watch_pressure"] = max(0.0, min(_watch_pressure, 1.0))
     # 0 = sites never expire; otherwise a year is the ceiling.
     out["site_ttl_hours"] = max(0, min(_safe_int(out.get("site_ttl_hours"), 24), 8760))

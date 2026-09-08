@@ -28,7 +28,7 @@ BASE = 180.0
 def test_a_room_ignoring_him_falls_out_of_watch_sooner():
     engaged = WatchState(engaged_at=1000.0)
     ignored = WatchState(engaged_at=1000.0, silent_streak=4)
-    assert window_seconds(engaged, BASE, 1000.0) > BASE
+    assert window_seconds(engaged, BASE, 1000.0) >= BASE
     assert window_seconds(ignored, BASE, 1000.0) < BASE
 
 
@@ -268,11 +268,14 @@ def test_only_named_or_live_lines_clear_the_bar():
     cold = WatchState()
     named = AddressSignal(names_him=True, text_length=40)
     plain = AddressSignal(text_length=40)
+    question = AddressSignal(is_question=True, text_length=40)
     assert should_consider_reply(reply_pressure(named, cold, 0.0, BASE))
     assert not should_consider_reply(reply_pressure(plain, cold, 0.0, BASE))
-    # Mid-exchange — they addressed him seconds ago — a plain line lands.
+    # After a ping, unrelated chatter must not become a turn.
     live = WatchState(engaged_at=1000.0)
-    assert should_consider_reply(reply_pressure(plain, live, 1005.0, BASE))
+    assert not should_consider_reply(reply_pressure(plain, live, 1005.0, BASE))
+    # A question in that same live beat can still be for him.
+    assert should_consider_reply(reply_pressure(question, live, 1005.0, BASE))
     # The same room a minute later is no longer an exchange.
     assert not should_consider_reply(reply_pressure(plain, live, 1090.0, BASE))
     # Him having spoken is not the same as being spoken to.

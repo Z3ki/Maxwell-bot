@@ -33,9 +33,10 @@ from dataclasses import dataclass, field
 # --------------------------------------------------------------------------
 
 # Bounds on the adaptive watch window, as multiples of the configured base.
-# A room he is actively in conversation with can hold the watch about twice
-# as long as configured; a room ignoring him collapses to a quarter of it.
-WINDOW_MAX_FACTOR = 2.0
+# Configured seconds is the ceiling for a room he is in; ignored rooms
+# collapse toward a quarter of that. After a ping we want about a minute,
+# not a stretched two-to-three-minute linger in other people's chatter.
+WINDOW_MAX_FACTOR = 1.0
 WINDOW_MIN_FACTOR = 0.25
 
 # Bounds on the adaptive debounce, same idea. Fast rooms wait longer so a
@@ -51,7 +52,9 @@ SILENCE_PATIENCE = 4
 # turn nearly always finds something to say — so the "should I speak" call
 # was being made by the most agreeable judge available. This moves the first
 # cut to the signals, and only the lines that plausibly want him get asked.
-REPLY_PRESSURE_THRESHOLD = 0.4
+# Presence after a ping used to clear this bar on its own, so every "lol"
+# in the next few minutes became a turn. Stay above a lone presence score.
+REPLY_PRESSURE_THRESHOLD = 0.55
 
 
 @dataclass
@@ -235,16 +238,17 @@ def reply_pressure(signal: AddressSignal, state: WatchState, now: float,
         score += REPLY_PRESSURE_THRESHOLD + 0.15
     # A broadcast is aimed at the room. If the conversation is active or interesting, join naturally
     if signal.soft:
-        score += 0.25
+        score += 0.18
     # Continuity: is he actually a participant right now? Being addressed
-    # recently counts fully and clears the bar by itself; merely having
-    # spoken counts for less (presence_factor discounts it), because him
-    # talking is not evidence anyone wants him to keep going.
-    score += 0.45 * presence_factor(state, now, base_window)
+    # recently is not enough on its own — that is how he used to jump into
+    # side chatter after a ping. Presence only helps a second signal
+    # (his name, a question) over the bar.
+    score += 0.22 * presence_factor(state, now, base_window)
     # A question in a room he is part of is more likely aimed at him than a
-    # statement is — but only as a tie-breaker on top of real continuity.
+    # statement is. Together with fresh presence this can clear the bar;
+    # a question in a cold room cannot.
     if signal.is_question:
-        score += 0.08
+        score += 0.35
     if signal.has_media:
         score += 0.03
     # Explicitly aimed elsewhere. Not disqualifying — people talk to two

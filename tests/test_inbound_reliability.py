@@ -49,7 +49,6 @@ def _bot(path, *, capacity=2):
     bot.clear_message_taint = lambda _message: None
     bot._update_recent_users = lambda *_args: None
     bot._maybe_schedule_context_extraction = lambda _message: None
-    bot._reset_partner_reply_budget_for_human = lambda _message: None
     bot._ensure_reply_chain_resolved = AsyncMock()
     bot._respect_slowmode = AsyncMock()
     bot._mark_bot_sent = lambda _channel: None

@@ -116,22 +116,20 @@ DEFAULT_CONTROL = {
     # replaying history. Kept so old control.json keys still sanitize.
     "gap_recovery_max_messages": 0,
     # After a mention/reply (or after Maxwell posts in a room), keep
-    # watching that whole channel so a directed follow-up does not need
-    # another @ or Discord reply. Each later line can spend a full LLM
-    # turn deciding whether to speak — that is token-expensive, so the
-    # bool is the master switch. Seconds=0 also disables (legacy).
+    # watching that whole channel for about a minute so a directed
+    # follow-up does not need another @. Unrelated chatter in that
+    # window should stay silent. Seconds=0 also disables (legacy).
     "conversation_watch_enabled": True,
-    "conversation_watch_seconds": 180,
+    "conversation_watch_seconds": 60,
     # Watch follow-ups wait this long for more lines, then one reply.
     # Hard @ / reply-to-Maxwell still go out immediately.
     "conversation_watch_debounce_seconds": 1,
     # How much a line nobody pinged him with has to look like it wants an
     # answer before it is worth an LLM turn (0..1, see
-    # watch_policy.reply_pressure). Every watched line used to become a turn,
-    # and a model asked "should you reply?" nearly always says yes — so the
-    # first cut is made here, on the signals, and only lines that plausibly
-    # want him get asked. Lower is chattier; 1.0 means only hard pings.
-    "conversation_watch_pressure": 0.4,
+    # watch_policy.reply_pressure). After a ping, unrelated chatter used
+    # to clear this bar on presence alone. Higher is stricter; 1.0 means
+    # only hard pings.
+    "conversation_watch_pressure": 0.55,
     # How often the background IMAP poll files new unread mail as inbox
     # notices. Only runs when ENABLE_EMAIL_TOOLS and a mailbox password are
     # set. Floor 30s, ceiling 1h.

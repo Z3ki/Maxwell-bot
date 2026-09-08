@@ -131,14 +131,14 @@ async def _drain(bot, spins=400):
             return
 
 
-def test_watch_default_is_three_minutes():
+def test_watch_default_is_one_minute():
     assert DEFAULT_CONTROL["conversation_watch_enabled"] is True
-    assert DEFAULT_CONTROL["conversation_watch_seconds"] == 180
+    assert DEFAULT_CONTROL["conversation_watch_seconds"] == 60
     missing = SimpleNamespace(_control={})
     assert MaxwellBot._conversation_watch_enabled(missing) is True
-    assert MaxwellBot._conversation_watch_seconds(missing) == 180.0
+    assert MaxwellBot._conversation_watch_seconds(missing) == 60.0
     garbage = SimpleNamespace(_control={"conversation_watch_seconds": "nope"})
-    assert MaxwellBot._conversation_watch_seconds(garbage) == 180.0
+    assert MaxwellBot._conversation_watch_seconds(garbage) == 60.0
 
 
 def test_watch_disabled_when_toggle_off():
@@ -198,7 +198,7 @@ def test_watch_only_spends_a_turn_on_lines_that_ask_for_him():
 
 
 def test_a_live_exchange_still_carries_without_an_at():
-    """The point of the watch: once they are talking to him, plain lines land."""
+    """After a ping, only a related follow-up (question / his name) lands."""
     bot = _bot()
 
     async def run():
@@ -207,8 +207,10 @@ def test_a_live_exchange_still_carries_without_an_at():
         ping = _plain_followup(content="hey")
         ping.mentions = [bot.user]
         MaxwellBot._note_watch_message(bot, ping)  # records the engagement
-        plain = _plain_followup(content="wow fancy i am doing fine myself")
-        assert MaxwellBot._should_live_reply(bot, plain) is True
+        chatter = _plain_followup(content="wow fancy i am doing fine myself")
+        assert MaxwellBot._should_live_reply(bot, chatter) is False
+        question = _plain_followup(content="did you see that?")
+        assert MaxwellBot._should_live_reply(bot, question) is True
 
     asyncio.run(run())
 
@@ -223,10 +225,10 @@ def test_being_ignored_raises_the_bar():
         ping = _plain_followup(content="hey")
         ping.mentions = [bot.user]
         MaxwellBot._note_watch_message(bot, ping)
-        plain = _plain_followup(content="wow fancy i am doing fine myself")
-        assert MaxwellBot._should_live_reply(bot, plain) is True
+        question = _plain_followup(content="did you see that?")
+        assert MaxwellBot._should_live_reply(bot, question) is True
         bot._watch_states[str(cid)].silent_streak = 2
-        assert MaxwellBot._should_live_reply(bot, plain) is False
+        assert MaxwellBot._should_live_reply(bot, question) is False
 
     asyncio.run(run())
 
@@ -277,7 +279,7 @@ def test_busy_covers_rem():
 
 def test_pressure_bar_is_configurable():
     bot = _bot()
-    assert MaxwellBot._watch_pressure_threshold(bot) == 0.4
+    assert MaxwellBot._watch_pressure_threshold(bot) == 0.55
 
     async def run():
         cid = 1506001126426808511
