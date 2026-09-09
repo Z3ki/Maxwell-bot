@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Runtime for site backends written by Maxwell (see site_server.py).
 #
 # Sized for what people actually build: a site with accounts, a database, and
@@ -7,9 +8,16 @@
 #
 # A site that needs something not in this list passes `packages` to
 # site_server, which builds a per-site image FROM this one.
-FROM python:3.12-slim
+FROM python:3.12-slim-bookworm
 
-RUN pip install --no-cache-dir \
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PORT=8000 \
+    HOME=/tmp
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install \
     # request/response
     flask==3.1.0 \
     waitress==3.0.2 \
@@ -32,14 +40,11 @@ RUN pip install --no-cache-dir \
 
 # Unprivileged. The code mount is read-only; /data is the only writable path
 # that survives a restart.
-RUN useradd -m -u 10001 site
-RUN mkdir -p /data && chown site:site /data
+RUN useradd -m -u 10001 site \
+    && mkdir -p /data \
+    && chown site:site /data
 
 USER site
 WORKDIR /app
-ENV PORT=8000 \
-    PYTHONUNBUFFERED=1 \
-    HOME=/tmp
-
 EXPOSE 8000
 CMD ["python", "app.py"]

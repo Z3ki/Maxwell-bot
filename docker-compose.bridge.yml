@@ -13,6 +13,22 @@ services:
     init: true
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 4g
+    memswap_limit: 4g
+    cpus: "2.0"
+    pids_limit: 2048
+    shm_size: 256mb
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
     env_file:
       - .env
     environment:
@@ -24,7 +40,7 @@ services:
       MAXWELL_API_HOST: 0.0.0.0
     volumes:
       - .:/app
-      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock:ro
       # Same host path Caddy serves. See docker-compose.yml.
       - ${MAXWELL_SITE_DIR:-./public/bot}:${MAXWELL_SITE_DIR:-/app/public/bot}
     ports:

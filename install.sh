@@ -492,6 +492,7 @@ start_stack() {
     fail "docker compose is not available"
   fi
   stop_host_maxwell
+  export DOCKER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1
   "${COMPOSE[@]}" -f "$COMPOSE_FILE" up -d --build
   ok "container started"
 }

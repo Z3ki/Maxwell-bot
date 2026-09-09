@@ -177,11 +177,12 @@ The Docker image already includes the optional Python packages and system tools 
 
 ## Docker
 
-Maxwell **is** a container. Compose bind-mounts this checkout at `/app` and docker.sock so:
+Maxwell **is** a container. Compose bind-mounts this checkout at `/app` and docker.sock (read-only) so:
 
-- The bot/API run isolated from host Python.
+- The bot/API run isolated from host Python, with dropped capabilities, `no-new-privileges`, 4 GB / 2 CPU / 2048 pids, and log rotation.
 - The `shell` sandbox and `site_server` backends are sibling containers on the host daemon.
 - `MAXWELL_HOST_BIND` is the host path of the checkout, used when those siblings bind-mount files.
+- Images are multi-stage / slim with BuildKit caches so `docker compose up --build` is incremental.
 
 Linux uses `network_mode: host` so `localhost` Ollama, site backends on `127.0.0.1:8800-8899`, and the dashboard on `:8765` work as before. macOS/Windows use `docker-compose.bridge.yml`; the installer rewrites `localhost` in `.env` to `host.docker.internal`.
 
