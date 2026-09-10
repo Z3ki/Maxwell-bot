@@ -182,6 +182,45 @@ def test_manager_get_normalizes_persisted_case(tmp_path):
 # spawn tool
 
 
+def test_a2a_delegation_via_spawn_background(tmp_path):
+    """One agent can delegate to another via spawn_background.
+
+    The old subagent_delegate / sub_agent tool was removed. spawn_background
+    in jobs.py is the A2A wiring: the live turn hands a goal to a detached
+    worker and gets a job id back.
+    """
+
+    async def scenario():
+        manager = BackgroundJobManager(data_path=str(tmp_path / "jobs.json"))
+        bot = StubBot(manager)
+        tool = SpawnBackgroundTool(bot)
+        message = FakeMessage()
+        launched = []
+
+        async def fake_runner(worker_bot, jid):
+            launched.append((worker_bot is bot, jid))
+
+        import jobs as jobs_mod
+
+        real = jobs_mod.run_background_job
+        jobs_mod.run_background_job = fake_runner
+        try:
+            result = await tool.execute(message, goal="research the launch")
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+        finally:
+            jobs_mod.run_background_job = real
+        assert "Background job `" in result
+        assert launched and launched[0][0] is True
+        job = manager.get(launched[0][1])
+        assert job is not None
+        assert job.goal == "research the launch"
+        return result
+
+    result = asyncio.run(scenario())
+    assert "send_message" in result
+
+
 def test_spawn_tool_acks_and_tracks_job(tmp_path):
     async def scenario():
         manager = BackgroundJobManager(data_path=str(tmp_path / "jobs.json"))

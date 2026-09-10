@@ -7543,6 +7543,12 @@ class SendMessageTool(Tool):
                 text, stickers = self.bot._extract_stickers_from_text(text, guild)
 
             chunks = self._chunks(text)
+            provider = getattr(self.bot, "ai_provider", None) if self.bot else None
+            timing = getattr(provider, "_last_timing", None) if provider else None
+            if timing and chunks:
+                from providers import append_timing_to_reply
+
+                chunks[-1] = append_timing_to_reply(chunks[-1], timing)
             if not chunks and stickers:
                 chunks = [""]
             target = None
@@ -9162,6 +9168,47 @@ _FETCH_HEADERS = {
         "application/json,text/plain;q=0.8,*/*;q=0.5"
     ),
 }
+_JINA_READER_PREFIX = "https://r.jina.ai/"
+
+
+def _is_too_large_error(exc: BaseException) -> bool:
+    return "response too large" in str(exc).lower()
+
+
+def _jina_reader_url(url: str) -> str:
+    raw = str(url or "").strip()
+    if raw.startswith(_JINA_READER_PREFIX):
+        return raw
+    return _JINA_READER_PREFIX + raw
+
+
+async def _fetch_via_jina_reader(
+    url: str,
+    *,
+    max_bytes: int,
+    timeout: float = 30.0,
+) -> tuple[str, str, bytes]:
+    """Retry a public URL through Jina Reader (extracted markdown).
+
+    SSRF is enforced on the *original* URL, not on whatever Jina fetches
+    server-side. Optional ``JINA_API_KEY`` is sent as Bearer; anonymous
+    otherwise.
+    """
+    if not _is_safe_url(url):
+        raise ValueError("Cannot fetch from private/internal URLs")
+    extra = {
+        "Accept": "text/markdown, text/plain;q=0.9, */*;q=0.5",
+    }
+    api_key = (os.getenv("JINA_API_KEY") or "").strip()
+    if api_key:
+        extra["Authorization"] = f"Bearer {api_key}"
+    _final, content_type, raw = await _fetch_public_url(
+        _jina_reader_url(url),
+        max_bytes=max_bytes,
+        timeout=timeout,
+        extra_headers=extra,
+    )
+    return url, content_type or "text/markdown", raw
 
 
 async def _fetch_public_url(
@@ -9169,6 +9216,7 @@ async def _fetch_public_url(
     *,
     max_bytes: int,
     timeout: float = 30.0,
+    extra_headers: dict | None = None,
 ) -> tuple[str, str, bytes]:
     """GET a public URL, following a few SSRF-checked redirects.
 
@@ -9178,6 +9226,9 @@ async def _fetch_public_url(
     user-facing message on refusal, HTTP errors, or timeout.
     """
     current = url
+    headers = dict(_FETCH_HEADERS)
+    if extra_headers:
+        headers.update(extra_headers)
     try:
         session = await _get_shared_session()
         for _hop in range(_MAX_FETCH_REDIRECTS + 1):
@@ -9187,7 +9238,7 @@ async def _fetch_public_url(
                 current,
                 timeout=aiohttp.ClientTimeout(total=timeout),
                 allow_redirects=False,
-                headers=_FETCH_HEADERS,
+                headers=headers,
             ) as resp:
                 if resp.status in _FETCH_REDIRECT_STATUSES:
                     loc = resp.headers.get("Location")
@@ -9282,11 +9333,25 @@ class FetchUrlTool(Tool):
             )
         except ValueError as e:
             msg = str(e)
-            if msg.startswith("Cannot fetch"):
+            if _is_too_large_error(e):
+                try:
+                    url, content_type, raw = await _fetch_via_jina_reader(
+                        url, max_bytes=self.MAX_BYTES
+                    )
+                except Exception as jina_exc:
+                    detail = str(jina_exc).strip() or type(jina_exc).__name__
+                    if detail.lower().startswith("error"):
+                        detail = detail.split(":", 1)[-1].strip() or detail
+                    return (
+                        "Error: page too large to fetch directly; "
+                        f"Jina Reader fallback failed: {detail}"
+                    )
+            elif msg.startswith("Cannot fetch"):
                 return f"Error: {msg}"
-            if msg.startswith(("HTTP", "timed out")):
+            elif msg.startswith(("HTTP", "timed out")):
                 return f"Error: {msg}"
-            return f"Error fetching URL: {msg}"
+            else:
+                return f"Error fetching URL: {msg}"
         except asyncio.TimeoutError:
             return f"Error: timed out fetching {url}"
         except Exception as e:

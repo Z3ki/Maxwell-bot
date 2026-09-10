@@ -30,6 +30,28 @@ class FakeMessage:
         self.replies.append(text)
 
 
+def test_send_message_appends_ttft_tps_suffix():
+    async def run():
+        bot = SimpleNamespace(
+            ai_provider=SimpleNamespace(
+                _last_timing={"ttft_ms": 200.0, "tps": 50.0}
+            )
+        )
+        tool = SendMessageTool(bot)
+        message = FakeMessage()
+        result = await tool.execute(message, content="hello there")
+        assert "__MESSAGE_SENT__" in result
+        assert "hello there" in result
+        # Suffix is user-facing only — not echoed back as tool prose.
+        assert "ttft" not in result
+        assert len(message.replies) == 1
+        assert message.replies[0].startswith("hello there")
+        assert "ttft 200ms" in message.replies[0]
+        assert "50.0 tps" in message.replies[0]
+
+    asyncio.run(run())
+
+
 def test_send_message_tool_splits_long_replies():
     async def run():
         tool = SendMessageTool(SimpleNamespace())

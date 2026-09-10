@@ -355,6 +355,7 @@ from providers import (  # noqa: E402
     OllamaProvider,
     ProviderEmptyResponseError,
     ProviderUsageExhaustedError,
+    append_timing_to_reply,
 )
 from rag_memory import RAGMemoryManager, RemEventLog, _parse_iso  # noqa: E402
 from jobs import BackgroundJobManager, SpawnBackgroundTool  # noqa: E402
@@ -15201,6 +15202,11 @@ class MaxwellBot(commands.Bot):
                     response, message.guild
                 )
                 chunks = self._split_response(response, limit=1900)
+                timing = getattr(
+                    getattr(self, "ai_provider", None), "_last_timing", None
+                )
+                if timing and chunks:
+                    chunks[-1] = append_timing_to_reply(chunks[-1], timing)
                 if not chunks and send_stickers:
                     chunks = [""]
                 # Fast-tool fix: try to transition the live progress message

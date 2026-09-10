@@ -1174,12 +1174,19 @@ def compute_llm_timing(
     """TTFT, generation window, and tokens/sec for one provider call.
 
     Streaming TTFT is time-to-first-generated-output (content, reasoning, or a
-    tool-call delta), not the role-only SSE opener. Decode TPS is
-    ``(completion_tokens - 1) / generation_seconds`` after the first token,
-    so handshake/TTFT latency is not counted as slow generation. Non-streaming
-    calls have no visible first token, so TTFT equals total latency and TPS
-    uses the full request. When the provider omits usage, completion tokens
-    are estimated from the output text (~4 chars/token) and marked as such.
+    tool-call delta), not the role-only SSE opener.
+
+    TPS formulas:
+    * Single turn (non-stream, or one SSE burst):
+      ``generation_time = (duration_ms - ttft_ms) / 1000``;
+      ``tps = output_tokens / generation_time``.
+      When TTFT equals duration (no visible first token), generation_time
+      falls back to the full request so TPS is still defined.
+    * Chunk streams (last chunk after first):
+      ``(output_tokens - 1) / (t_last_chunk - t_first_chunk)``.
+
+    When the provider omits usage, completion tokens are estimated from the
+    output text (~4 chars/token) and marked as such.
     """
     ended = float(ended_at) if ended_at is not None else time.perf_counter()
     total_ms = max(0.0, (ended - float(request_start)) * 1000.0)
@@ -1188,6 +1195,7 @@ def compute_llm_timing(
     else:
         ttft_ms = total_ms
     tail_ms = max(0.0, total_ms - ttft_ms)
+    chunk_stream = False
     if (
         stream
         and last_token_s is not None
@@ -1196,13 +1204,12 @@ def compute_llm_timing(
         decode_span_ms = max(
             0.0, (float(last_token_s) - float(first_token_s)) * 1000.0
         )
+        chunk_stream = decode_span_ms > 0
     else:
-        # No last-token stamp: time after first token until the body ends.
-        decode_span_ms = tail_ms
-    # Prefer last-first (excludes the usage-chunk drain). On a one-shot SSE
-    # burst last == first, so fall back to total - TTFT rather than folding
-    # the handshake into tokens/sec.
-    gen_ms = decode_span_ms if decode_span_ms > 0 else tail_ms
+        decode_span_ms = 0.0
+    # Chunk streams: last-first (excludes the usage-chunk drain).
+    # Single turn / one-shot burst: duration - TTFT.
+    gen_ms = decode_span_ms if chunk_stream else tail_ms
     normalized = _normalize_llm_usage(usage)
     prompt = normalized["prompt_tokens"]
     completion = normalized["completion_tokens"]
@@ -1220,12 +1227,11 @@ def compute_llm_timing(
             completion = estimated
             total_tok = prompt + completion
             tokens_estimated = True
-    streamed = bool(stream) and first_token_s is not None
-    tps = _decode_tps(
-        completion,
-        gen_ms if streamed else total_ms,
-        exclude_first=streamed,
-    )
+    if chunk_stream:
+        tps = _decode_tps(completion, gen_ms, exclude_first=True)
+    else:
+        window_ms = gen_ms if gen_ms > 0 else total_ms
+        tps = _decode_tps(completion, window_ms, exclude_first=False)
     try:
         headers_val = float(headers_ms or 0.0)
     except (TypeError, ValueError):
@@ -1280,14 +1286,16 @@ def format_timing_debug(
                 )
             if tpss:
                 weighted = _weighted_tps(window)
-                weighted_s = (
-                    f"  weighted {weighted:.1f}" if weighted is not None else ""
-                )
-                lines.append(
-                    f"  avg tps {sum(tpss) / len(tpss):.1f}  "
-                    f"(min {min(tpss):.1f} / max {max(tpss):.1f})"
-                    f"{weighted_s}"
-                )
+                if weighted is not None:
+                    lines.append(
+                        f"  tps {weighted:.1f}  "
+                        f"(min {min(tpss):.1f} / max {max(tpss):.1f})"
+                    )
+                else:
+                    lines.append(
+                        f"  tps n/a  "
+                        f"(min {min(tpss):.1f} / max {max(tpss):.1f})"
+                    )
             for rec in reversed(window[:-1][:5]):
                 tps = rec.get("tps")
                 tps_s = f"{tps} tps" if tps is not None else "tps n/a"
@@ -1310,7 +1318,12 @@ def format_timing_debug(
 def _decode_tps(
     completion: int, window_ms: float, *, exclude_first: bool
 ) -> float | None:
-    """Tokens/sec over ``window_ms``. Streaming excludes the first token (TTFT)."""
+    """Tokens/sec over ``window_ms``.
+
+    Chunk streams pass ``exclude_first=True`` so TPS is
+    ``(output_tokens - 1) / generation_time``. Single-turn uses the full
+    output-token count over ``(duration - TTFT)``.
+    """
     if completion <= 0:
         return None
     try:
@@ -1326,7 +1339,11 @@ def _decode_tps(
 
 
 def _weighted_tps(records) -> float | None:
-    """Token-weighted decode TPS: sum(out tokens - 1) / sum(decode seconds)."""
+    """Aggregate TPS: sum(output_tokens) / sum(generation_time).
+
+    Do not average per-call TPS figures — a 10-token burst and a 90-token
+    decode must weight by tokens and generation seconds.
+    """
     tokens = 0.0
     seconds = 0.0
     for rec in records or []:
@@ -1346,13 +1363,55 @@ def _weighted_tps(records) -> float | None:
                 )
             except (TypeError, ValueError):
                 continue
-        if out <= 1 or gen_ms <= 0:
+        if gen_ms <= 0:
+            try:
+                gen_ms = float(rec.get("total_ms") or 0)
+            except (TypeError, ValueError):
+                continue
+        if out <= 0 or gen_ms <= 0:
             continue
-        tokens += out - 1
+        tokens += out
         seconds += gen_ms / 1000.0
     if tokens <= 0 or seconds <= 0:
         return None
     return tokens / seconds
+
+
+def format_timing_reply_line(rec: dict | None) -> str:
+    """Compact Discord subtext: ``-# ttft 200ms · 49.0 tps``."""
+    if not isinstance(rec, dict) or not rec:
+        return ""
+    parts: list[str] = []
+    try:
+        ttft = rec.get("ttft_ms")
+        if ttft is not None:
+            parts.append(f"ttft {float(ttft):.0f}ms")
+    except (TypeError, ValueError):
+        pass
+    tps = rec.get("tps")
+    if tps is not None:
+        parts.append(f"{tps} tps")
+    if not parts:
+        return ""
+    return "-# " + " · ".join(parts)
+
+
+def append_timing_to_reply(text: str, rec: dict | None, *, limit: int = 1900) -> str:
+    """Append TTFT/TPS subtext to a user-facing reply, staying within ``limit``."""
+    line = format_timing_reply_line(rec)
+    if not line:
+        return text
+    body = str(text or "")
+    if line in body:
+        return body
+    sep = "\n" + line
+    combined = body + sep
+    if len(combined) <= limit:
+        return combined
+    room = limit - len(sep)
+    if room < 8:
+        return body
+    return body[:room].rstrip() + sep
 
 
 def _format_timing_row(rec: dict, indent: str = "") -> list[str]:

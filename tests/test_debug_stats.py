@@ -4,9 +4,17 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
+
 from bot import MaxwellBot
 from bot_tools import DebugTool, collect_debug_stats
-from providers import compute_llm_timing, format_timing_debug
+from providers import (
+    _weighted_tps,
+    append_timing_to_reply,
+    compute_llm_timing,
+    format_timing_debug,
+    format_timing_reply_line,
+)
 
 
 def test_compute_streaming_ttft_and_tps():
@@ -25,7 +33,8 @@ def test_compute_streaming_ttft_and_tps():
     assert rec["ttft_ms"] == 400.0
     assert rec["total_ms"] == 2400.0
     assert rec["gen_ms"] == 2000.0
-    assert rec["tps"] == 99.5
+    # Single turn (no last-chunk stamp): 200 tokens / 2.0s generation.
+    assert rec["tps"] == 100.0
     assert rec["prompt_tokens"] == 800
     assert rec["completion_tokens"] == 200
     assert rec["endpoint"] == "primary"
@@ -101,8 +110,9 @@ def test_streaming_tps_excludes_ttft_on_single_burst():
     assert rec["ttft_ms"] == 1000.0
     assert rec["gen_ms"] == 10.0
     assert rec["total_ms"] == 1010.0
-    # (80 - 1) / 0.01s after first token — not 80 / 1.01s wall time.
-    assert rec["tps"] == 7900.0
+    # Single burst: output_tokens / ((duration - ttft)/1000) = 80 / 0.01s
+    # — not 80 / 1.01s wall time, and not (80 - 1).
+    assert rec["tps"] == 8000.0
 
 
 def test_streaming_tps_uses_generation_window_not_wall_time():
@@ -133,6 +143,31 @@ def test_streaming_tps_short_turn_not_punished_by_handshake():
     assert rec["gen_ms"] == 16.0
     assert rec["tps"] == 437.5
     assert rec["tps"] != round(8 / 1.8688, 1)
+
+
+def test_single_turn_tps_is_tokens_over_generation_time():
+    rec = compute_llm_timing(
+        request_start=0.0,
+        first_token_s=0.5,
+        last_token_s=0.5,
+        ended_at=1.5,
+        usage={"completion_tokens": 100},
+        stream=True,
+    )
+    assert rec["gen_ms"] == 1000.0
+    assert rec["tps"] == 100.0
+
+
+def test_chunk_stream_tps_excludes_first_token():
+    rec = compute_llm_timing(
+        request_start=0.0,
+        first_token_s=0.2,
+        last_token_s=1.2,
+        ended_at=1.3,
+        usage={"completion_tokens": 21},
+        stream=True,
+    )
+    assert rec["tps"] == 20.0
 
 
 def test_streaming_tps_zero_when_only_first_token():
@@ -168,7 +203,7 @@ def test_format_timing_debug_last_call():
     assert "last call" in text
     assert "ttft 200ms" in text
     assert "headers 80ms" in text
-    assert "tps 49.0" in text
+    assert "tps 50.0" in text
     assert "primary" in text
 
 
@@ -192,8 +227,11 @@ def test_format_timing_debug_weighted_tps():
         endpoint="primary",
     )
     text = format_timing_debug([short, long])
-    assert "avg tps 93.5" in text
-    assert "weighted 65.3" in text
+    # Aggregate is sum(output_tokens)/sum(generation_time) = 100/1.5,
+    # never the mean of the two per-call TPS numbers (93.5).
+    assert "avg tps" not in text
+    assert "tps 66.7" in text
+    assert _weighted_tps([short, long]) == pytest.approx(100.0 / 1.5)
 
 
 def test_collect_debug_stats_from_provider():
@@ -244,6 +282,18 @@ def test_debug_tool_returns_stats():
     out = asyncio.run(DebugTool(bot).execute(msg))
     assert "ttft" in out
     assert "tps" in out
+
+
+def test_timing_reply_line_and_append():
+    rec = {"ttft_ms": 200.0, "tps": 50.0}
+    line = format_timing_reply_line(rec)
+    assert line == "-# ttft 200ms · 50.0 tps"
+    text = append_timing_to_reply("hello", rec)
+    assert text.startswith("hello")
+    assert "ttft 200ms" in text
+    assert "50.0 tps" in text
+    assert append_timing_to_reply("hello", None) == "hello"
+    assert append_timing_to_reply("hello", {}) == "hello"
 
 
 class FakeChannel:
@@ -305,7 +355,7 @@ def test_debug_command_admin_gating_and_output():
         body = msg.channel.sent[0]
         assert body.startswith("```")
         assert "ttft 300ms" in body
-        assert "tps 39.0" in body
+        assert "tps 40.0" in body
         assert "queue depth 2" in body
 
     asyncio.run(run())
