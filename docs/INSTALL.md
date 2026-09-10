@@ -43,7 +43,7 @@ For sandboxes or CI where Docker must not be installed by the script, add `MAXWE
 |---|---|
 | OS | Debian/Ubuntu, Fedora/RHEL, Arch, or macOS with Docker Desktop. |
 | Docker | Engine + Compose. Linux uses host networking (`docker-compose.yml`); macOS/Windows uses `docker-compose.bridge.yml`. |
-| Python on the host | Only needed once, to write `.env` during install. Maxwell itself runs in the image (Python 3.12). |
+| Python on the host | Needed to write `.env` during install. Maxwell itself runs in the image (Python 3.12). Local development/tests also support Python 3.11; requirements select NumPy 2.3.x there, and NumPy 2.5.1+ on Python 3.12+. |
 | Disk/RAM | A few hundred MB for the checkout; more for Docker images and local LLM models. 1 GB+ RAM is recommended for the bot process; local models need much more. |
 | Network | GitHub, PyPI (image build), Discord, and your LLM endpoint. |
 
@@ -184,7 +184,7 @@ Maxwell **is** a container. Compose bind-mounts this checkout at `/app` and dock
 - `MAXWELL_HOST_BIND` is the host path of the checkout, used when those siblings bind-mount files.
 - Images are multi-stage / slim with BuildKit caches so `docker compose up --build` is incremental.
 
-Linux uses `network_mode: host` so `localhost` Ollama, site backends on `127.0.0.1:8800-8899`, and the dashboard on `:8765` work as before. macOS/Windows use `docker-compose.bridge.yml`; the installer rewrites `localhost` in `.env` to `host.docker.internal`.
+Linux uses `network_mode: host` so `localhost` Ollama, site backends on `127.0.0.1:8800-8899`, and the dashboard on `:8765` work as before. macOS/Windows use `docker-compose.bridge.yml`; the installer rewrites only local outbound service addresses to `host.docker.internal`, leaving passwords, URL paths, and unrelated settings unchanged. It sets the API listener to `0.0.0.0` inside the container; Compose publishes it on host loopback only. For a manual bridge install, set `MAXWELL_API_HOST=0.0.0.0` in `.env` as well.
 
 ## Running Maxwell
 
@@ -198,7 +198,11 @@ docker compose down
 
 Dashboard: `http://127.0.0.1:8765`.
 
-For reverse proxying the dashboard and generated sites, adapt [`examples/Caddyfile.example`](../examples/Caddyfile.example). It proxies `/api/*`, `/data/*`, and generated site backend routes to `127.0.0.1:8765`.
+For reverse proxying, adapt [`examples/Caddyfile.example`](../examples/Caddyfile.example). It serves the dashboard and authenticated `/api/*` and `/data/*` routes on `admin.maxwell.example.com`, and generated sites plus their public backends on `maxwell.example.com`. Replace both example hostnames and configure DNS/TLS for each.
+
+Set `MAXWELL_PUBLIC_BASE_URL` to the generated-site origin and `DISCORD_REDIRECT_BASE` to the dashboard origin. If using Discord OAuth, register `https://<dashboard-host>/api/auth/discord/callback` and set `DISCORD_REDIRECT_URI` accordingly. Set `MAXWELL_CORS_ORIGIN` to the dashboard origin if accessing the admin API cross-origin.
+
+Do not serve generated HTML/JavaScript on the dashboard origin. It would share browser storage with dashboard credentials. Existing installations using one origin must migrate their reverse-proxy configuration; updating Python alone does not isolate static sites. After migration, clear credentials from the old origin and rotate any credentials that may have been exposed.
 
 ## Upgrading from a host / venv / PM2 install
 

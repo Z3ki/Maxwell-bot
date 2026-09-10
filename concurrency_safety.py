@@ -77,20 +77,18 @@ class ChannelWorkQueues:
                 try:
                     if work is None:
                         return
-                    if work.result.cancelled():
-                        # The submitter may have timed out or been cancelled
-                        # while this item was waiting. Do not execute a
-                        # callback whose caller no longer exists.
-                        continue
-                    try:
-                        work.result.set_result(await work.callback())
-                    except asyncio.CancelledError:
-                        if not work.result.done():
-                            work.result.cancel()
-                        raise
-                    except Exception as exc:
-                        if not work.result.done():
-                            work.result.set_exception(exc)
+                    if not work.result.cancelled():
+                        try:
+                            value = await work.callback()
+                            if not work.result.done():
+                                work.result.set_result(value)
+                        except asyncio.CancelledError:
+                            if not work.result.done():
+                                work.result.cancel()
+                            raise
+                        except Exception as exc:
+                            if not work.result.done():
+                                work.result.set_exception(exc)
                 finally:
                     queue.task_done()
                 # Workers are demand-driven. Removing an idle worker bounds
@@ -124,11 +122,19 @@ class ChannelWorkQueues:
         async with self._lock:
             self._closed = True
             workers = list(self._workers.values())
+            queues = list(self._queues.values())
             self._workers.clear()
             self._queues.clear()
         for worker in workers:
             worker.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
+        # A task cancelled before its first step never enters _run's finally.
+        for queue in queues:
+            while not queue.empty():
+                pending = queue.get_nowait()
+                if pending is not None and not pending.result.done():
+                    pending.result.cancel()
+                queue.task_done()
 
 
 class FairSemaphore:
@@ -296,7 +302,7 @@ class KeyedLocks:
             self._locks[k] = lock
         self._used[k] = time.monotonic()
         if len(self._locks) > self.max_idle:
-            self.prune()
+            self.prune(keep={k})
         return lock
 
     def prune(self, *, keep: set[str] | None = None, all_idle: bool = False) -> int:

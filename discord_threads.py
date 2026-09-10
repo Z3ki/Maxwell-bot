@@ -415,6 +415,35 @@ async def resolve_thread_channel(bot: Any, message: Any, thread_id: str | None) 
     return None
 
 
+def can_access_thread(message: Any, channel: Any) -> bool:
+    if not is_discord_thread(channel):
+        return False
+    guild_id = getattr(getattr(message, "guild", None), "id", None)
+    target_guild_id = getattr(getattr(channel, "guild", None), "id", None)
+    if guild_id is None or str(guild_id) != str(target_guild_id):
+        return False
+    author = getattr(message, "author", None)
+    if author is None:
+        return False
+    permissions_for = getattr(channel, "permissions_for", None)
+    permissions = None
+    if callable(permissions_for):
+        try:
+            permissions = permissions_for(author)
+        except Exception:
+            return False
+        if not getattr(permissions, "view_channel", False):
+            return False
+    is_private = getattr(channel, "is_private", None)
+    if callable(is_private) and is_private():
+        if not getattr(permissions, "manage_threads", False):
+            uid = getattr(author, "id", None)
+            member = getattr(channel, "get_member", None)
+            if uid is None or not callable(member) or member(uid) is None:
+                return False
+    return True
+
+
 class CreateThreadTool(Tool):
     """Open a Discord thread and hand thread-Maxwell a brief."""
 
@@ -533,6 +562,8 @@ class ThreadControlTool(Tool):
         store = getattr(self.bot, "thread_store", None)
         if store is None:
             return "Error: thread store is not available"
+        if getattr(message, "guild", None) is None:
+            return "Error: thread control is only available in servers, not DMs"
         act = str(action or kwargs.get("op") or "").strip().lower()
         if not act:
             act = "status" if is_discord_thread(getattr(message, "channel", None)) else "list"
@@ -545,6 +576,13 @@ class ThreadControlTool(Tool):
 
         if act in {"list", "ls"}:
             return self._list(store, message)
+        try:
+            channel = await resolve_thread_channel(self.bot, message, tid)
+        except Exception as exc:
+            logger.debug("Thread lookup failed: %s", exc)
+            return "Error: could not access that Discord thread"
+        if not can_access_thread(message, channel):
+            return "Error: choose a Discord thread you can access in this server"
         if act in {"status", "info", "show"}:
             return await self._status(store, message, tid)
         if act in {"context", "brief", "update", "add"}:
@@ -573,7 +611,15 @@ class ThreadControlTool(Tool):
             parent_id = str(getattr(channel, "parent_id", "") or "")
         else:
             parent_id = str(getattr(channel, "id", "") or "")
-        rows = store.list_for(guild_id=guild_id or None)
+        if not guild_id:
+            return "Error: thread control is only available in servers, not DMs"
+        rows = store.list_for(guild_id=guild_id)
+        getter = getattr(self.bot, "get_channel", None)
+        rows = [
+            rec for rec in rows
+            if callable(getter)
+            and can_access_thread(message, getter(_safe_int(rec.get("id"), 0)))
+        ]
         if not rows:
             return "No Discord threads with a stored brief in this server."
         here = []

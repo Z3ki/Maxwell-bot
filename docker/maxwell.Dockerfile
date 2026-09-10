@@ -9,6 +9,8 @@
 # containers (shell, site backends) can be spawned. Strength comes from
 # cap_drop / no-new-privileges / resource limits in Compose, not a fake USER.
 
+FROM docker:28-cli AS docker-cli
+
 FROM python:3.12-slim-bookworm AS deps
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -22,14 +24,14 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libsodium-dev
 
 WORKDIR /app
-COPY requirements.txt requirements-optional.txt ./
+COPY requirements.txt requirements-optional.txt requirements-dev.txt ./
 
 # discord-ext-voice-recv depends on official discord.py, which overwrites
 # the discord.py-self fork. Reinstall the self-bot library last so `import
 # discord` is the user-API wrapper Maxwell actually needs.
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip \
-    && pip install -r requirements.txt -r requirements-optional.txt \
+    && pip install -r requirements.txt -r requirements-optional.txt -r requirements-dev.txt \
     && pip uninstall -y discord.py \
     && pip install --force-reinstall --no-deps "discord.py-self>=2.0.0"
 
@@ -59,15 +61,15 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=deps /usr/local /usr/local
+COPY --from=docker-cli /usr/local/bin/docker /usr/bin/docker
 
 WORKDIR /app
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod 0555 /entrypoint.sh
 
 # Live checkout is bind-mounted over /app at runtime (see docker-compose.yml).
-# Docker CLI comes from the host via compose (`/usr/bin/docker` + docker.sock),
-# not a second client in this image — bookworm docker.io speaks API 1.41 and
-# current Engine rejects it.
+# Linux Compose can override this CLI with the host binary. Docker Desktop
+# needs a Linux CLI in the image; its host binary is not runnable here.
 COPY . /app
 
 ENTRYPOINT ["/entrypoint.sh"]
@@ -75,4 +77,4 @@ ENTRYPOINT ["/entrypoint.sh"]
 # API is started by the entrypoint unless MAXWELL_START_API=0. Bot process
 # presence is the real liveness signal (dashboard may be off).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD ["python3", "-c", "import pathlib,sys; sys.exit(0 if any(b'bot.py' in p.read_bytes() for p in pathlib.Path('/proc').glob('*/cmdline')) else 1)"]
+    CMD ["python3", "/app/docker/healthcheck.py"]

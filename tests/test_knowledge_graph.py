@@ -1,9 +1,7 @@
 """Hybrid knowledge graph: site routes + 1-hop facts next to vector RAG."""
 
-from pathlib import Path
 
 from knowledge_graph import (
-    KnowledgeGraph,
     extract_frontend_api_paths,
     extract_python_routes,
 )

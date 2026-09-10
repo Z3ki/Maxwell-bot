@@ -56,6 +56,8 @@ def check_core_packages() -> None:
         "aiofiles": "aiofiles",
         "dotenv": "python-dotenv",
         "numpy": "numpy",
+        "chess": "python-chess",
+        "PIL": "pillow",
     }
     for module, package in required.items():
         if find_spec(module):
@@ -67,7 +69,7 @@ def check_core_packages() -> None:
 
 def check_env_file() -> None:
     head("Configuration")
-    env_file = Path(os.getenv("MAXWELL_ENV_FILE", APP_ROOT / ".env"))
+    env_file = Path(os.getenv("MAXWELL_ENV_FILE") or APP_ROOT / ".env")
     if env_file.is_file():
         line("ok", ".env found", str(env_file))
     else:
@@ -126,6 +128,8 @@ def check_required_settings(cfg) -> None:
 
 
 def check_system_tools() -> None:
+    import shutil
+
     head("Optional system tools")
     tools = [
         ("ffmpeg", "video frames, TTS playback, audio conversion"),
@@ -134,10 +138,9 @@ def check_system_tools() -> None:
         ("node", "yt-dlp's YouTube JS challenge solver"),
     ]
     for binary, purpose in tools:
-        # Same resolution the bot uses: PATH, then this interpreter's bin dir.
-        from config import _has_binary
-
-        if _has_binary(binary):
+        # Stay usable even when config cannot import a missing core package.
+        sibling = Path(sys.executable).parent / binary
+        if shutil.which(binary) or (sibling.is_file() and os.access(sibling, os.X_OK)):
             line("ok", binary, purpose)
         else:
             line("warn", f"{binary} not found", f"needed for: {purpose}")

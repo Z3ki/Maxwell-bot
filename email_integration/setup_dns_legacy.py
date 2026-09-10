@@ -114,19 +114,30 @@ def _cf_request(
     return payload
 
 
-def _existing_record(token: str, fqdn: str, rtype: str) -> dict[str, Any] | None:
+def _existing_record(
+    token: str, fqdn: str, rtype: str, *, content_prefix: str = ""
+) -> dict[str, Any] | None:
     """Look up a record by exact name + type, return first match or None.
 
     CF's `match=any` lets name be a substring; we want exact, so we walk
     the results and filter ourselves. Returns None if no match.
     """
     name = fqdn.rstrip(".")
-    qs = urllib.parse.urlencode({"type": rtype, "name": name})
-    payload = _cf_request(token, "GET", f"/zones/{ZONE}/dns_records?{qs}")
-    for rec in payload.get("result", []):
-        if rec.get("name", "").rstrip(".") == name and rec.get("type") == rtype:
-            return rec
-    return None
+    page = 1
+    while True:
+        qs = urllib.parse.urlencode({"type": rtype, "name": name, "page": page})
+        payload = _cf_request(token, "GET", f"/zones/{ZONE}/dns_records?{qs}")
+        for rec in payload.get("result", []):
+            content = str(rec.get("content", "")).strip('" ')
+            if (
+                rec.get("name", "").rstrip(".") == name
+                and rec.get("type") == rtype
+                and (not content_prefix or content.split()[:1] == [content_prefix])
+            ):
+                return rec
+        if page >= (payload.get("result_info", {}).get("total_pages") or 1):
+            return None
+        page += 1
 
 
 def _upsert(
@@ -145,7 +156,10 @@ def _upsert(
         body["priority"] = int(priority if priority is not None else 10)
     if rtype in {"A", "AAAA", "CNAME"}:
         body["proxied"] = proxied
-    existing = _existing_record(token, name, rtype)
+    existing = _existing_record(
+        token, name, rtype,
+        content_prefix="v=spf1" if rtype == "TXT" and content.startswith("v=spf1 ") else "",
+    )
     if existing:
         # If the value is already what we want, skip the write. Re-PUTting
         # a record with the same content produces a `success: true` and
@@ -226,7 +240,7 @@ def main(argv: list[str]) -> int:
     # this domain later, add "include:_spf.google.com" to the same list.
     print("3. Setting SPF TXT record for z3ki.dev ...")
     spf_target = f"v=spf1 {args.mailgun_spf} -all"
-    existing_spf = _existing_record(args.token, "z3ki.dev", "TXT")
+    existing_spf = _existing_record(args.token, "z3ki.dev", "TXT", content_prefix="v=spf1")
     if existing_spf and "v=spf1" in existing_spf.get("content", ""):
         # Already have an SPF chain. Splice the Mailgun include into the
         # existing record (idempotent splice — if it's already there, noop).
@@ -235,7 +249,7 @@ def main(argv: list[str]) -> int:
         # Cloudflare TXT content is normally a single string but the
         # underlying API stores it as-is; if someone added a multi-string
         # SPF we would have a different problem. Assume single string here.
-        if clause in current:
+        if clause in current.strip('" ').split():
             print(f"  = TXT z3ki.dev (SPF already includes {clause})")
         else:
             new_content = current.replace(

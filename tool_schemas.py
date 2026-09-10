@@ -1560,6 +1560,28 @@ def _paren_call_re(names: frozenset) -> re.Pattern:
 _EMOTICON_CLOSE_RE = re.compile(r"[:;=xX8]-?\)$")
 
 
+def _quoted_argument_spans(text: str) -> list[tuple[int, int]]:
+    spans = []
+    for match in re.finditer(r"=\s*(['\"])", text):
+        if _inside(match.start(), spans):
+            continue
+        start = match.end() - 1
+        quote = match.group(1)
+        escaped = False
+        end = len(text)
+        for i in range(start + 1, len(text)):
+            ch = text[i]
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                end = i + 1
+                break
+        spans.append((start, end))
+    return spans
+
+
 def _balanced_paren_end(text: str, start: int) -> int:
     """Index just past the ``)`` closing the ``(`` at ``start``.
 
@@ -1567,7 +1589,10 @@ def _balanced_paren_end(text: str, start: int) -> int:
     is better than dropping the call and posting the dump.
     """
     depth = 0
+    quoted = _quoted_argument_spans(text)
     for i in range(start, len(text)):
+        if _inside(i, quoted):
+            continue
         ch = text[i]
         if ch == "(":
             depth += 1
@@ -1590,8 +1615,11 @@ def _strip_wrapping_quotes(value: str) -> str:
 def _pairs_from_paren_body(interior: str, name: str) -> dict[str, Any]:
     """Split ``key=value, key=value`` where values may contain commas."""
     props = _recovery_properties(name)
+    quoted = _quoted_argument_spans(interior)
     marks: list[tuple[int, int, str]] = []
     for match in _PAREN_ARG_KEY_RE.finditer(interior):
+        if _inside(match.start(), quoted):
+            continue
         key = match.group(1)
         if key not in props:
             continue
@@ -1712,7 +1740,9 @@ def recover_text_tool_calls(
     raw = str(text or "")
     if not raw.strip():
         return [], raw
-    allowed = {str(n).lower() for n in (known_names or ())} or None
+    allowed = (
+        {str(n).lower() for n in known_names} if known_names is not None else None
+    )
     # Recovery runs on every reply the provider did not attach tool_calls to —
     # which is most of them. Cheap substring gates keep an ordinary chat
     # message from paying for six regex scans it can never match.

@@ -824,17 +824,17 @@ def _render_message_annotations(
         except Exception as e:
             logger.debug("Interaction annotation failed: %s", e)
 
-    for extra in (
-        _system_event_annotation(message),
-        _thread_annotation(message),
-        _call_annotation(message),
-        _message_invite_activity_annotation(message),
-        _role_subscription_annotation(message),
-        _purchase_annotation(message),
-        _message_flags_annotation(message),
-    ):
-        if extra:
-            parts.append(extra)
+    parts.extend(
+        extra for extra in (
+            _system_event_annotation(message),
+            _thread_annotation(message),
+            _call_annotation(message),
+            _message_invite_activity_annotation(message),
+            _role_subscription_annotation(message),
+            _purchase_annotation(message),
+            _message_flags_annotation(message),
+        ) if extra
+    )
 
     embeds = list(getattr(message, "embeds", []) or [])
     for e in embeds[:3]:
@@ -907,7 +907,7 @@ def _render_message_annotations(
         if u in seen:
             continue
         seen.add(u)
-        ext = u.rsplit(".", 1)[-1].split("?")[0].lower() if "." in u else ""
+        ext = Path(urlparse(u).path).suffix.lstrip(".").lower()
         kind = {
             "png": "image",
             "jpg": "image",
@@ -1361,6 +1361,17 @@ def _truncate(text: str, budget: int) -> str:
     return text[: budget - len(suffix)] + suffix
 
 
+def _load_json_object_for_update(path: Path) -> dict:
+    """Missing state may be initialized; unreadable or invalid state must survive."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected a JSON object in {path.name}")  # noqa: TRY004
+    return data
+
+
 class JsonStateStore:
     """Lock-guarded JSON state + ring-buffered audit log on disk.
 
@@ -1394,7 +1405,10 @@ class JsonStateStore:
 
     async def save_state(self, state: dict):
         async with self._lock:
-            await asyncio.to_thread(_atomic_json_write_sync, self.state_file, state)
+            await asyncio.to_thread(
+                _with_file_lock, self.state_file,
+                lambda: _atomic_json_write_sync(self.state_file, state),
+            )
 
     async def patch_state(self, updates: dict) -> dict:
         """Shallow-merge `updates` into state under one lock."""
@@ -1402,13 +1416,15 @@ class JsonStateStore:
 
     async def update_state(self, fn) -> dict:
         """Read-modify-write under a single lock. fn(state) mutates in-place."""
+        def update():
+            with FileLock(self.state_file):
+                state = _load_json_object_for_update(self.state_file)
+                fn(state)
+                _atomic_json_write_sync(self.state_file, state)
+                return state
+
         async with self._lock:
-            state = await asyncio.to_thread(_load_json_safe, self.state_file, dict)
-            if not isinstance(state, dict):
-                state = {}
-            fn(state)
-            await asyncio.to_thread(_atomic_json_write_sync, self.state_file, state)
-            return state
+            return await asyncio.to_thread(update)
 
     # -- audit log --
 
@@ -1419,21 +1435,24 @@ class JsonStateStore:
             return entries if isinstance(entries, list) else []
 
     async def append_log_entry(self, entry: dict):
+        def append():
+            with FileLock(self.log_file):
+                data = _load_json_object_for_update(self.log_file)
+                entries = data.get("entries", [])
+                if not isinstance(entries, list):
+                    raise ValueError(f"Expected log entries in {self.log_file.name}")  # noqa: TRY004
+                entries.append(entry)
+                data["entries"] = entries[-self.log_ring_size :]
+                _atomic_json_write_sync(self.log_file, data)
+
         async with self._lock:
-            data = await asyncio.to_thread(_load_json_safe, self.log_file, dict)
-            entries = data.get("entries", []) if isinstance(data, dict) else []
-            if not isinstance(entries, list):
-                entries = []
-            entries.append(entry)
-            entries = entries[-self.log_ring_size :]  # ring buffer
-            await asyncio.to_thread(
-                _atomic_json_write_sync, self.log_file, {"entries": entries}
-            )
+            await asyncio.to_thread(append)
 
     async def clear_log(self):
         async with self._lock:
             await asyncio.to_thread(
-                _atomic_json_write_sync, self.log_file, {"entries": []}
+                _with_file_lock, self.log_file,
+                lambda: _atomic_json_write_sync(self.log_file, {"entries": []}),
             )
 
     async def record_error(self, error: str):

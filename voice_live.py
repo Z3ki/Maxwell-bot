@@ -34,7 +34,7 @@ def _safe_float(value, default: float) -> float:
 def _safe_int(value, default: int) -> int:
     try:
         return int(float(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -86,7 +86,7 @@ class LiveSpeechSink(voice_recv.AudioSink):
 
     def set_ignore_until(self, monotonic_ts: float):
         with self._lock:
-            self._ignore_until = max(self._ignore_until, float(monotonic_ts))
+            self._ignore_until = float(monotonic_ts)
             if not self._playback_started_at:
                 self._playback_started_at = time.monotonic()
 
@@ -159,9 +159,10 @@ class LiveSpeechSink(voice_recv.AudioSink):
                     st.active = bytearray()
                     for p in st.pre_roll:
                         st.active.extend(p)
+                else:
+                    st.active.extend(frame)
                 st.voiced_frames += 1
                 st.voiced_seconds += frame_dur
-                st.active.extend(frame)
                 max_secs = _safe_float(self.control.get("vc_max_seconds", 18.0), 18.0)
                 if len(st.active) >= int(
                     max_secs * self.sample_rate * self.channels * self.sample_width

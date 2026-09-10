@@ -20,6 +20,7 @@ import contextlib
 import inspect
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -136,7 +137,7 @@ class PluginContext:
             interval = float(seconds)
         except (TypeError, ValueError):
             raise ValueError("seconds must be a number") from None
-        if interval < MIN_JOB_INTERVAL_SECONDS:
+        if not math.isfinite(interval) or interval < MIN_JOB_INTERVAL_SECONDS:
             raise ValueError(
                 f"interval must be at least {MIN_JOB_INTERVAL_SECONDS}s "
                 "(a tighter loop starves the reply path)"
@@ -341,9 +342,7 @@ class PluginManager:
         actor = self._event_actor_id(args)
         filtered: list[tuple[str, Callable[..., Any]]] = []
         for plugin_name, callback in entries:
-            if actor is not None and not self.is_plugin_enabled_for_user(
-                plugin_name, actor
-            ):
+            if not self.is_plugin_enabled_for_user(plugin_name, actor):
                 continue
             filtered.append((plugin_name, callback))
         if not filtered:
@@ -367,7 +366,7 @@ class PluginManager:
         """The user an event is about, when it has one.
 
         Used to stop a disabled plugin from continuing to react. Events with no
-        discernible user (on_ready, on_guild_join) deliver unconditionally.
+        discernible user (on_ready, on_guild_join) require global enablement.
         """
         for arg in args:
             author = getattr(arg, "author", None)
@@ -390,19 +389,20 @@ class PluginManager:
         Called once the loop is running. ``load_plugins`` clears the task list,
         so a reload cannot end up with two copies of the same job.
         """
+        if self._jobs_started:
+            return 0
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("No running loop; plugin jobs not started")
+            return 0
         started = 0
         for plugin_name, specs in self._job_specs.items():
             for spec in specs:
-                try:
-                    task = asyncio.create_task(
-                        self._run_job(plugin_name, spec),
-                        name=f"plugin-job-{plugin_name}",
-                    )
-                except RuntimeError:
-                    logger.warning(
-                        "No running loop; plugin %r jobs not started", plugin_name
-                    )
-                    return started
+                task = loop.create_task(
+                    self._run_job(plugin_name, spec),
+                    name=f"plugin-job-{plugin_name}",
+                )
                 self._job_tasks.setdefault(plugin_name, []).append(task)
                 started += 1
         self._jobs_started = True
@@ -423,7 +423,8 @@ class PluginManager:
         while True:
             started = time.monotonic()
             try:
-                await callback()
+                if self.is_plugin_enabled_for_user(plugin_name, None):
+                    await callback()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -569,8 +570,10 @@ class PluginManager:
             if not name:
                 name = getattr(t, "__name__", str(t))
             tool_dict[name] = t
-            self.all_plugin_tools[name] = (plugin_name, t)
 
+        self.all_plugin_tools.update(
+            {name: (plugin_name, tool) for name, tool in tool_dict.items()}
+        )
         self.loaded_plugins[plugin_name] = {
             "manifest": manifest,
             "module": mod,
@@ -620,13 +623,21 @@ class PluginManager:
             if not callable(hook):
                 continue
             try:
-                params = list(inspect.signature(hook).parameters.values())
-                wants_ctx = len(params) >= 2 or any(
-                    p.kind is inspect.Parameter.VAR_KEYWORD for p in params
-                )
+                signature = inspect.signature(hook)
             except (TypeError, ValueError):
-                wants_ctx = False
-            res = hook(ctx.bot, ctx) if wants_ctx else hook(ctx.bot)
+                res = hook(ctx.bot)
+            else:
+                try:
+                    signature.bind(ctx.bot, ctx)
+                except TypeError:
+                    try:
+                        signature.bind(ctx.bot, ctx=ctx)
+                    except TypeError:
+                        res = hook(ctx.bot)
+                    else:
+                        res = hook(ctx.bot, ctx=ctx)
+                else:
+                    res = hook(ctx.bot, ctx)
             return res if isinstance(res, list) else []
         return []
 

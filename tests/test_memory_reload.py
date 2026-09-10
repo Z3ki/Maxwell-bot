@@ -6,12 +6,7 @@ from rag_memory import RAGMemoryManager
 
 def _run(coro):
     """Run an async coroutine in a fresh event loop."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+    return asyncio.run(coro)
 
 
 def test_long_term_memory_add_and_get(tmp_path):

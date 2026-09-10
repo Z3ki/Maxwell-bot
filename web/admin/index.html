@@ -816,6 +816,8 @@
         }
       }
       function logout(clear = true) {
+        if (S.pollTimer) clearInterval(S.pollTimer);
+        S.pollTimer = null;
         // Capture the token BEFORE clearing state so the server-side revoke
         // actually sends it (otherwise it always fires without the header).
         const revokeToken = S.discordToken;
@@ -836,6 +838,7 @@
         }
       }
       function startPolling() {
+        if (!S.auth && !S.discordToken) return;
         if (S.pollTimer) clearInterval(S.pollTimer);
         S.pollTimer = setInterval(() => loadAll(true), 15000);
       }
@@ -977,7 +980,7 @@
         }
       }
       async function loadAll(silent = false) {
-        if (S.loading) return;
+        if (S.loading || (!S.auth && !S.discordToken)) return;
         S.loading = true;
         if (!silent) {
           $("apiState").textContent = "loading";
@@ -1832,9 +1835,9 @@
           <div>
             <b>${esc(f.scope)}</b> ${badge("i" + f.importance, f.importance >= 8 ? "ok" : f.importance >= 5 ? "warn" : "bad")}
             <div style="margin-top:4px">${esc(f.content)}</div>
-            <div class="mono muted" style="margin-top:4px">${sid(f.id)} · ${esc(f.visibility)}</div>
+            <div class="mono muted" style="margin-top:4px">${esc(sid(f.id))} · ${esc(f.visibility)}</div>
           </div>
-          <button class="btn small red" data-del-ctx="${sid(f.id)}">Delete</button>
+          <button class="btn small red" data-del-ctx="${esc(f.id)}">Delete</button>
         </div>
       `,
           )

@@ -31,7 +31,7 @@ from typing import ClassVar
 from dotenv.main import load_dotenv
 
 APP_ROOT = Path(__file__).resolve().parent
-ENV_FILE = Path(os.getenv("MAXWELL_ENV_FILE", APP_ROOT / ".env"))
+ENV_FILE = Path(os.getenv("MAXWELL_ENV_FILE") or APP_ROOT / ".env")
 # .env is the SOURCE OF TRUTH — always override whatever PM2/the shell
 # injected. PM2 caches the env from first start and `--update-env` does
 # NOT re-read the .env file, so without override=True every restart kept
@@ -516,7 +516,7 @@ class Config:
     # host daemon, so in-container paths like /app must be rewritten.
     MAXWELL_HOST_BIND = os.getenv("MAXWELL_HOST_BIND", "").strip()
 
-    MAXWELL_SITE_DIR = os.getenv("MAXWELL_SITE_DIR", "public/bot")
+    MAXWELL_SITE_DIR = os.getenv("MAXWELL_SITE_DIR") or "public/bot"
     MAXWELL_PUBLIC_BASE_URL = os.getenv(
         "MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com"
     )

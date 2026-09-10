@@ -439,7 +439,11 @@ async def run_rem_once(
         )
         raw_audit = _message_content(response).strip()
         parsed = _extract_rem_json(raw_audit)
-        if not raw_audit or parsed is None:
+        if (
+            not raw_audit
+            or parsed is None
+            or not isinstance(parsed.get("actions", {}), dict)
+        ):
             # Invalid/empty output must not consume the slice — retry next tick.
             await store.patch_state(
                 {

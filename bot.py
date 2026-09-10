@@ -30,6 +30,7 @@ import aiohttp
 import discord
 from discord.ext import commands
 from discord.utils import MISSING
+from process_utils import communicate_process
 
 try:
     if os.environ.get("ENABLE_VC", "true").strip().lower() in {
@@ -699,10 +700,8 @@ async def _synthesize_local_tts_wav(text: str, output_path: str) -> str | None:
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        _stdout, stderr = await communicate_process(proc, timeout=30)
     except asyncio.TimeoutError as _exc:
-        proc.kill()
-        await proc.wait()
         logger.warning("Local espeak TTS timed out")
         return None
     if proc.returncode != 0 or not os.path.exists(raw_path):
@@ -729,10 +728,8 @@ async def _synthesize_local_tts_wav(text: str, output_path: str) -> str | None:
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        _stdout, stderr = await asyncio.wait_for(convert.communicate(), timeout=30)
+        _stdout, stderr = await communicate_process(convert, timeout=30)
     except asyncio.TimeoutError as _exc:
-        convert.kill()
-        await convert.wait()
         logger.warning("Local espeak ffmpeg conversion timed out")
         return None
     finally:
@@ -800,12 +797,10 @@ async def _synthesize_tts_wav(
                     stderr=asyncio.subprocess.PIPE,
                 )
                 try:
-                    _stdout, _stderr = await asyncio.wait_for(
-                        proc.communicate(), timeout=30
+                    _stdout, _stderr = await communicate_process(
+                        proc, timeout=30
                     )
                 except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
                     raise RuntimeError("Fish TTS ffmpeg conversion timed out") from None
                 finally:
                     with contextlib.suppress(OSError):
@@ -914,10 +909,8 @@ async def _synthesize_tts_wav(
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            _stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+            _stdout, _stderr = await communicate_process(proc, timeout=30)
         except asyncio.TimeoutError as _exc:
-            proc.kill()
-            await proc.wait()
             raise RuntimeError("TTS ffmpeg conversion timed out") from None
         if proc.returncode != 0 or not os.path.exists(output_path):
             raise RuntimeError("Failed to synthesize TTS audio")
@@ -2023,6 +2016,23 @@ class TelegramMessageAdapter:
     def typing(self):
         return _NoopTyping()
 
+    async def _sent_message(self, response, endpoint: str):
+        data = await response.json()
+        result = data.get("result") if isinstance(data, dict) else None
+        if not isinstance(result, dict) or not data.get("ok") or not result.get("message_id"):
+            raise RuntimeError(f"Telegram {endpoint} did not confirm message delivery")
+        user = result.get("from") or {}
+        sent = TelegramMessageAdapter(
+            self.session,
+            self.url_base,
+            (result.get("chat") or {}).get("id", self.chat_id),
+            result["message_id"],
+            user.get("id"),
+            user.get("first_name", "Telegram Bot"),
+        )
+        sent.content = result.get("text") or result.get("caption") or ""
+        return sent
+
     async def _send_file_bytes(self, blob: bytes, filename: str | None = None):
         filename = filename or "attachment.bin"
         ext = Path(filename).suffix.lower()
@@ -2070,6 +2080,7 @@ class TelegramMessageAdapter:
                 raise RuntimeError(
                     f"Telegram {endpoint} failed: {resp.status} - {text[:300]}"
                 )
+            return await self._sent_message(resp, endpoint)
 
     async def reply(self, content: str | None = None, file=None, **kwargs):
         if file is not None:
@@ -2083,8 +2094,7 @@ class TelegramMessageAdapter:
                     # the loop (other chats, heartbeats) until it finishes.
                     src = Path(str(path))
                     blob = await asyncio.to_thread(src.read_bytes)
-                    await self._send_file_bytes(blob, src.name)
-                    return
+                    return await self._send_file_bytes(blob, src.name)
                 raise RuntimeError(
                     "Telegram adapter cannot send file: missing file payload"
                 )
@@ -2097,8 +2107,8 @@ class TelegramMessageAdapter:
                 raise RuntimeError("Telegram adapter expected bytes-like file payload")
             if not filename and hasattr(file_obj, "name"):
                 filename = Path(str(file_obj.name)).name
-            await self._send_file_bytes(bytes(blob), filename)
-            return
+            return await self._send_file_bytes(bytes(blob), filename)
+        sent = None
         if content:
             for chunk in _telegram_html_chunks(str(content)):
                 payload = {"chat_id": self.chat_id, "text": chunk, "parse_mode": "HTML"}
@@ -2116,17 +2126,31 @@ class TelegramMessageAdapter:
                         raise RuntimeError(
                             f"Telegram sendMessage failed: {resp.status} - {text[:300]}"
                         )
-        return
+                    sent = await self._sent_message(resp, "sendMessage")
+        return sent
 
     async def send(self, content: str | None = None, file=None, **kwargs):
         return await self.reply(content=content, file=file, **kwargs)
+
+    async def delete(self):
+        async with self.session.post(
+            f"{self.url_base}/deleteMessage",
+            json={"chat_id": self.chat_id, "message_id": self.id},
+        ) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise RuntimeError(
+                    f"Telegram deleteMessage failed: {response.status} - {text[:300]}"
+                )
+            data = await response.json()
+            if not isinstance(data, dict) or not data.get("ok"):
+                raise RuntimeError("Telegram deleteMessage did not confirm deletion")
 
     async def send_voice_file(self, path: str):
         # Read off-thread; see reply() above.
         src = Path(path)
         blob = await asyncio.to_thread(src.read_bytes)
-        await self._send_file_bytes(blob, src.name)
-        return
+        return await self._send_file_bytes(blob, src.name)
 
 
 def _looks_like_text(blob: bytes) -> bool:
@@ -5901,10 +5925,13 @@ class MaxwellBot(commands.Bot):
             with contextlib.suppress(Exception):
                 coro.close()
             return
-        self._detached_tasks.add(task)
+        detached = getattr(self, "_detached_tasks", None)
+        if detached is None:
+            detached = self._detached_tasks = set()
+        detached.add(task)
 
         def _on_done(t: asyncio.Task) -> None:
-            self._detached_tasks.discard(t)
+            detached.discard(t)
             if not t.cancelled():
                 exc = t.exception()
                 if exc:
@@ -6175,10 +6202,7 @@ class MaxwellBot(commands.Bot):
         if callable(spawn):
             spawn(pm.dispatch_event(event, *args, **kwargs))
         else:
-            try:
-                asyncio.create_task(pm.dispatch_event(event, *args, **kwargs))
-            except RuntimeError:
-                pass
+            MaxwellBot._spawn_detached(self, pm.dispatch_event(event, *args, **kwargs))
 
     async def _watermark_save_loop(self):
         """Persist read positions periodically.
@@ -7306,9 +7330,6 @@ class MaxwellBot(commands.Bot):
             return "solo_restriction"
 
         payloads = iter_message_payloads(message)
-        has_content = any(
-            str(getattr(src, "content", "") or "").strip() for src in payloads
-        )
         has_attachment = any(getattr(src, "attachments", None) for src in payloads)
         has_embed = any(getattr(src, "embeds", None) for src in payloads)
         has_sticker = any(getattr(src, "stickers", None) for src in payloads)
@@ -8461,6 +8482,7 @@ class MaxwellBot(commands.Bot):
                             "Error: Only bot admins can reload plugins."
                         )
                         return
+                    await pm.teardown()
                     res = pm.reload_plugins()
                     await message.channel.send(res)
                 else:
@@ -12667,12 +12689,10 @@ class MaxwellBot(commands.Bot):
                     *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
                 )
                 try:
-                    _stdout, stderr = await asyncio.wait_for(
-                        proc.communicate(), timeout=60
+                    _stdout, stderr = await communicate_process(
+                        proc, timeout=60
                     )
                 except asyncio.TimeoutError as _exc:
-                    proc.kill()
-                    await proc.wait()
                     logger.warning(f"Video normalization timed out for {filename}")
                     return None
                 if proc.returncode != 0 or not output_path.exists():
@@ -12736,12 +12756,10 @@ class MaxwellBot(commands.Bot):
                         stderr=asyncio.subprocess.PIPE,
                     )
                     try:
-                        _stdout, stderr = await asyncio.wait_for(
-                            proc.communicate(), timeout=30
+                        _stdout, stderr = await communicate_process(
+                            proc, timeout=30
                         )
                     except asyncio.TimeoutError as _exc:
-                        proc.kill()
-                        await proc.wait()
                         logger.warning(
                             f"Video frame extraction timed out for {filename}"
                         )
@@ -12793,12 +12811,10 @@ class MaxwellBot(commands.Bot):
                         stderr=asyncio.subprocess.PIPE,
                     )
                     try:
-                        _stdout, stderr = await asyncio.wait_for(
-                            proc.communicate(), timeout=30
+                        _stdout, stderr = await communicate_process(
+                            proc, timeout=30
                         )
                     except asyncio.TimeoutError as _exc:
-                        proc.kill()
-                        await proc.wait()
                         logger.info(f"Video audio extraction timed out for {filename}")
                         stderr = b"timeout"
                     if (
@@ -12863,12 +12879,10 @@ class MaxwellBot(commands.Bot):
                     *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
                 )
                 try:
-                    _stdout, stderr = await asyncio.wait_for(
-                        proc.communicate(), timeout=30
+                    _stdout, stderr = await communicate_process(
+                        proc, timeout=30
                     )
                 except asyncio.TimeoutError as _exc:
-                    proc.kill()
-                    await proc.wait()
                     logger.warning(f"GIF normalization timed out for {filename}")
                     return None
                 if proc.returncode != 0 or not output_path.exists():
@@ -15597,7 +15611,7 @@ class MaxwellBot(commands.Bot):
                         result_text[:200].replace("\n", " "),
                     )
                     head = result_text.lstrip().upper()
-                    if head.startswith("ERROR") or head.startswith("COULD NOT"):
+                    if head.startswith(("ERROR", "COULD NOT")):
                         self._tool_breaker.record_failure(name)
                     else:
                         self._tool_breaker.record_success(name)
@@ -15843,51 +15857,14 @@ class MaxwellBot(commands.Bot):
                     await progress.update(
                         name, tool_reasoning, snippet=artifact_snippet
                     )
-            # Stash the progress on the bot so the tool can call
-            # notify_streaming() if it's about to post its own output
-            # (shell, send_file, etc). Cleared in the finally below so a
-            # later tool in the batch doesn't accidentally signal on the
-            # wrong tool's behalf.
-            #
-            # Keyed by CHANNEL ID, not a single bot attribute. Under load
-            # many channels run tool batches concurrently and the old
-            # single-attribute design let channel B's progress get
-            # stomped on by channel A's run_one. _signal_streaming() in
-            # the Tool base helper would then call notify_streaming() on
-            # the wrong progress — channel A's batch would silently
-            # delete its message because channel B's tool streamed
-            # output. The user reported this as "messages getting
-            # deleted mid-tool under load".
-            chan_key = str(getattr(message.channel, "id", id(message)))
-            per_chan = getattr(self, "_current_progress_by_channel", None)
-            # ``per_chan`` is None in unit tests that fake the bot with
-            # ``SimpleNamespace``; under load in production it's always
-            # present. Falling back to a temporary dict keeps the
-            # set/restore logic working in both paths.
-            if per_chan is None:
-                per_chan = {}
-                self._current_progress_by_channel = per_chan
-            prev_progress = per_chan.get(chan_key)
-            per_chan[chan_key] = progress
-            try:
-                line = await MaxwellBot._execute_tool_by_name(
-                    self,
-                    message,
-                    name,
-                    params,
-                    disabled=disabled,
-                    compatible=compatible,
-                )
-            finally:
-                # Restore the prior value (not blindly pop — a nested
-                # run_one inside the same channel would otherwise wipe
-                # the outer progress). If no one was there before,
-                # remove the key so the dict doesn't grow without bound
-                # when channels churn.
-                if prev_progress is None:
-                    per_chan.pop(chan_key, None)
-                else:
-                    per_chan[chan_key] = prev_progress
+            line = await MaxwellBot._execute_tool_by_name(
+                self,
+                message,
+                name,
+                params,
+                disabled=disabled,
+                compatible=compatible,
+            )
             result_by_id[call["id"]] = line
             # A memory-write failure must NOT abort the tool batch: asyncio.gather
             # re-raises, which used to trigger the broad `except Exception:
@@ -15933,6 +15910,7 @@ class MaxwellBot(commands.Bot):
                         # a tool error (NOT a "Sorry" abort).
                         name = call.get("name", "unknown")
                         err_line = f"Tool {name}: Error - {type(res).__name__}: {res}"
+                        result_by_id[call["id"]] = err_line
                         with contextlib.suppress(Exception):
                             await MaxwellBot._remember_tool_call(
                                 self,
@@ -16063,12 +16041,24 @@ class MaxwellBot(commands.Bot):
         # is cancelled — no orphan "working on it…" lines.
         # Skip start() if we're reusing an existing progress that's already
         # been posted (from the generation phase).
-        if progress is not None and existing_progress is None:
-            with contextlib.suppress(Exception):
-                await progress.start()
+        # Parallel siblings share one progress owner. Restoring it per tool
+        # lets an early finisher hide it from tools that are still running.
+        chan_key = str(getattr(message.channel, "id", id(message)))
+        per_chan = getattr(self, "_current_progress_by_channel", None)
+        if per_chan is None:
+            per_chan = self._current_progress_by_channel = {}
+        prev_progress = per_chan.get(chan_key)
+        per_chan[chan_key] = progress
         try:
+            if progress is not None and existing_progress is None:
+                with contextlib.suppress(Exception):
+                    await progress.start()
             await run_tools_once()
         finally:
+            if prev_progress is None:
+                per_chan.pop(chan_key, None)
+            else:
+                per_chan[chan_key] = prev_progress
             if progress is not None:
                 with contextlib.suppress(Exception):
                     await progress.stop()
@@ -18555,12 +18545,11 @@ class MaxwellBot(commands.Bot):
                                             stderr=asyncio.subprocess.PIPE,
                                         )
                                         try:
-                                            await asyncio.wait_for(
-                                                proc.communicate(), timeout=30
+                                            await communicate_process(
+                                                proc, timeout=30
                                             )
-                                        except asyncio.TimeoutError as _exc:
-                                            proc.kill()
-                                            await proc.wait()
+                                        except asyncio.TimeoutError:
+                                            pass
                                         if (
                                             proc.returncode == 0
                                             and output_path.exists()

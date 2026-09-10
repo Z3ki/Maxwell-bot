@@ -74,7 +74,7 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
-if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+if [ -r /dev/tty ] && [ -w /dev/tty ] && ( : <> /dev/tty ) 2>/dev/null; then
   TTY=/dev/tty
 elif [ "$NONINTERACTIVE" != "1" ]; then
   NONINTERACTIVE=1
@@ -188,19 +188,8 @@ compose_file_for_host() {
 rewrite_localhost_for_bridge() {
   [ "$(uname -s 2>/dev/null || printf unknown)" = "Linux" ] && return 0
   [ -f .env ] || return 0
-  python3 - "$PWD/.env" <<'PY' || true
-import pathlib, re, sys
-path = pathlib.Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
-updated = re.sub(
-    r"(localhost|127\.0\.0\.1)",
-    "host.docker.internal",
-    text,
-)
-if updated != text:
-    path.write_text(updated, encoding="utf-8")
-PY
-  warn "Non-Linux Docker: rewrote localhost/127.0.0.1 in .env to host.docker.internal so the container can reach host services."
+  python3 scripts/rewrite_bridge_env.py .env
+  warn "Non-Linux Docker: local service addresses now use host.docker.internal; the API listens inside the container on 0.0.0.0 (published on host loopback only)."
 }
 
 install_docker() {
@@ -544,7 +533,6 @@ main() {
   banner_and_confirm
   install_docker
   clone_or_update
-  copy_env_if_needed
   configure_env
   write_host_bind
   write_run_script

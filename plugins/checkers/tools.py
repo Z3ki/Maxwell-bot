@@ -80,6 +80,8 @@ class CheckersStartTool(Tool):
         if user_color not in {"red", "black"}:
             return "Error: user_color must be `red` or `black`."
         channel_id = str(message.channel.id)
+        if get_game(channel_id) is not None:
+            return "Error: a Checkers match is already active here. Finish or resign it first."
         user_name = getattr(message.author, "display_name", "User")
         user_id = getattr(message.author, "id", None)
         game = CheckersGame(
@@ -96,17 +98,22 @@ class CheckersStartTool(Tool):
         )
         png_bytes = game.render_board_png()
         file = discord.File(io.BytesIO(png_bytes), filename="checkers_board.png")
-        await message.channel.send(
-            f"🔴 **Checkers match started!** {game.red_player} (Red) vs "
-            f"{game.black_player} (Black).\n"
-            f"{opening + ' ' if opening else ''}"
-            f"It is {game.turn.capitalize()}'s turn. Use "
-            "`checkers_move(move='c3-d4')` or notation like `c3-d4`.",
-            file=file,
-        )
         set_game(channel_id, game)
-        legal_moves = game.get_legal_moves("red")
-        return f"Checkers game started. Legal moves for Red: {len(legal_moves)} options available."
+        try:
+            await message.channel.send(
+                f"🔴 **Checkers match started!** {game.red_player} (Red) vs "
+                f"{game.black_player} (Black).\n"
+                f"{opening + ' ' if opening else ''}"
+                f"It is {game.turn.capitalize()}'s turn. Use "
+                "`checkers_move(move='c3-d4')` or notation like `c3-d4`.",
+                file=file,
+            )
+        except BaseException:
+            if get_game(channel_id) is game:
+                remove_game(channel_id)
+            raise
+        legal_moves = game.get_legal_moves()
+        return f"Checkers game started. Legal moves for {game.turn.capitalize()}: {len(legal_moves)} options available."
 
 
 class CheckersMoveTool(Tool):

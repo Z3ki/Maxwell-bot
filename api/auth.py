@@ -87,7 +87,15 @@ def _load_bot_admins():
 def _discord_token_authed(request) -> bool:
     token = request.headers.get("X-Discord-Token", "")
     info = _DISCORD_TOKENS.get(token)
-    return bool(info and info.get("expires", 0) >= time.time())
+    if not info:
+        return False
+    if (
+        info.get("expires", 0) < time.time()
+        or str(info.get("user_id", "")) not in _load_bot_admins()
+    ):
+        _DISCORD_TOKENS.pop(token, None)
+        return False
+    return True
 
 
 def _json_response(data, status=200):

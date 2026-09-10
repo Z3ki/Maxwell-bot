@@ -25,6 +25,7 @@ logging.basicConfig(level=logging.INFO)
 
 _API_MAX_CONCURRENT = int(os.getenv("MAXWELL_API_MAX_CONCURRENT", "64"))
 _API_CONCURRENCY_SEM = asyncio.Semaphore(max(8, _API_MAX_CONCURRENT))
+_SITE_PROXY_CONCURRENCY_SEM = asyncio.Semaphore(max(8, _API_MAX_CONCURRENT))
 _API_REQUEST_TIMEOUT = float(os.getenv("MAXWELL_API_REQUEST_TIMEOUT", "30"))
 _API_GLOBAL_RPS = float(os.getenv("MAXWELL_API_GLOBAL_RPS", "120"))
 _API_GLOBAL_BURST = int(os.getenv("MAXWELL_API_GLOBAL_BURST", "240"))
@@ -141,7 +142,6 @@ from api.config import (  # noqa: E402
     CORS_ORIGIN,
     DISCORD_CLIENT_ID,
     DISCORD_CLIENT_SECRET,
-    DISCORD_TOKEN_TTL,
     MAX_AUTONOMY_GOALS,
     MAX_COMMANDS,
     MAX_PROMPT_CHARS,
@@ -151,6 +151,8 @@ import site_server  # noqa: E402
 
 from api.auth import (  # noqa: E402
     _DISCORD_TOKENS,
+    _discord_token_authed,
+    _set_discord_token,
     _auth_middleware_unless_login,
     _get_client_ip,
     _has_admin_auth,
@@ -1139,10 +1141,10 @@ async def site_proxy(request):
     port = await asyncio.to_thread(site_server.port_for, DATA_DIR, slug)
     if not port:
         return _site_json({"error": "this site has no backend server running"}, 404)
-    tail = request.match_info.get("path", "") or ""
-    target = f"http://127.0.0.1:{port}/{tail.lstrip('/')}"
-    if request.query_string:
-        target += "?" + request.query_string
+    tail = request.rel_url.raw_path.split("/", 4)
+    target = f"http://127.0.0.1:{port}/" + (tail[4] if len(tail) > 4 else "")
+    if request.rel_url.raw_query_string:
+        target += "?" + request.rel_url.raw_query_string
 
     # WebSocket upgrade: hand off to the socket pump and never come back here.
     if (
@@ -1169,9 +1171,23 @@ async def site_proxy(request):
             {"error": f"upload too large (max {SITE_UPLOAD_MAX // (1024 * 1024)}MB)"},
             413,
         )
-    # The body is streamed rather than buffered, so an upload is bounded by the
-    # route's client_max_size instead of this process's memory.
-    body = request.content if request.can_read_body else None
+    upload_too_large = False
+
+    async def bounded_body():
+        nonlocal upload_too_large
+        total = 0
+        async for chunk in request.content.iter_chunked(65536):
+            total += len(chunk)
+            if total > SITE_UPLOAD_MAX:
+                upload_too_large = True
+                raise web.HTTPRequestEntityTooLarge(
+                    max_size=SITE_UPLOAD_MAX, actual_size=total
+                )
+            yield chunk
+
+    # aiohttp's client_max_size is only enforced by Request.read(), not by
+    # consuming request.content directly. Count bytes even without Content-Length.
+    body = bounded_body() if request.can_read_body else None
 
     # No total timeout: an SSE stream or a slow download is a legitimate long
     # response. sock_read still kills a backend that stops sending mid-body.
@@ -1190,10 +1206,15 @@ async def site_proxy(request):
     except asyncio.TimeoutError:
         await session.close()
         return _site_json({"error": "the site backend timed out"}, 504)
-    except (aiohttp.ClientError, OSError) as e:
+    except (aiohttp.ClientError, OSError, web.HTTPRequestEntityTooLarge) as e:
         await session.close()
+        if upload_too_large:
+            return _site_json({"error": "upload too large"}, 413)
         logger.warning("site backend %s unreachable: %s", slug, e)
         return _site_json({"error": "the site backend is not responding"}, 502)
+    except BaseException:
+        await session.close()
+        raise
 
     try:
         # Stream the response through chunk by chunk. Buffering it whole would
@@ -2163,10 +2184,18 @@ _DISCORD_STATES: dict[str, float] = {}
 
 
 def _discord_redirect_base(request) -> str:
-    # Prefer fixed public base so Host-header open redirects cannot steal tokens.
-    fixed = (
-        os.getenv("MAXWELL_PUBLIC_BASE_URL") or os.getenv("DISCORD_REDIRECT_BASE") or ""
-    ).rstrip("/")
+    # Keep bearer tokens on the dashboard origin, never on generated sites.
+    fixed = os.getenv("DISCORD_REDIRECT_BASE", "").strip().rstrip("/")
+    if fixed:
+        return fixed
+    callback = os.getenv("DISCORD_REDIRECT_URI", "").strip()
+    if callback:
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(callback)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}"
+    fixed = os.getenv("MAXWELL_PUBLIC_BASE_URL", "").strip().rstrip("/")
     if fixed:
         return fixed
     return f"{request.scheme}://{request.host}"
@@ -2287,12 +2316,11 @@ async def discord_auth_callback(request):
     import secrets as _secrets
 
     bearer = _secrets.token_urlsafe(48)
-    _DISCORD_TOKENS[bearer] = {
+    _set_discord_token(bearer, {
         "user_id": user_id,
         "username": username,
         "avatar_url": avatar_url,
-        "expires": time.time() + DISCORD_TOKEN_TTL,
-    }
+    })
     base = _discord_redirect_base(request)
     # Redirect back to the admin page with the token in the hash fragment so
     # the SPA can pick it up without it hitting server logs as a query param.
@@ -2304,9 +2332,9 @@ async def discord_auth_verify(request):
     # logs, browser history, and Referer headers. The dashboard always sends
     # the X-Discord-Token header.
     token = request.headers.get("X-Discord-Token", "")
-    info = _DISCORD_TOKENS.get(token)
-    if not info or info.get("expires", 0) < time.time():
+    if not _discord_token_authed(request):
         return _json_response({"ok": False}, 401)
+    info = _DISCORD_TOKENS[token]
     return _json_response(
         {
             "ok": True,
@@ -2492,13 +2520,13 @@ async def _reliability_middleware(request, handler):
                 {"error": "slow down"}, status=429, headers={"Retry-After": "2"}
             )
     try:
-        async with _API_CONCURRENCY_SEM:
-            # Site backends (WebSockets, SSE, slow downloads) have their own
-            # connect/read timeouts. The 30s admin-API cap would kill a live
-            # multiplayer socket — production logs showed GET /bot/*/api/ws
-            # timing out and leaking ClientSessions.
-            if request.path.startswith("/bot/"):
+        # Public long-lived sockets must not occupy the admin API's capacity.
+        if request.path.startswith("/bot/"):
+            if _SITE_PROXY_CONCURRENCY_SEM.locked():
+                return _site_json({"error": "too many site connections"}, 503)
+            async with _SITE_PROXY_CONCURRENCY_SEM:
                 return await handler(request)
+        async with _API_CONCURRENCY_SEM:
             return await asyncio.wait_for(
                 handler(request), timeout=_API_REQUEST_TIMEOUT
             )
@@ -2509,6 +2537,8 @@ async def _reliability_middleware(request, handler):
         raise
     except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
         logger.info("client hung up %s %s", request.method, request.path)
+        raise
+    except web.HTTPException:
         raise
     except Exception as e:
         logger.exception(

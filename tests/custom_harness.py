@@ -4,15 +4,11 @@ with the live provider.
 """
 
 import asyncio
-import os
 import sys
-import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
 
 sys.path.insert(0, "/root/maxwell")
 
-import bot_tools
 from bot import MaxwellBot
 
 

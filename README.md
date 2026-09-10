@@ -430,8 +430,7 @@ database, and secrets.
 It is still a container running model-written code with outbound network
 access, so it is exactly as trusted as `ENABLE_SHELL` — treat it that way.
 
-Routing needs one line in your reverse proxy, **before** the static `/bot/*`
-rule (see `examples/`):
+Route generated sites on a separate origin from the dashboard, following the [Caddy example](examples/Caddyfile.example) and [origin configuration](docs/INSTALL.md). Put the backend route **before** the static `/bot/*` rule:
 
 ```
 handle /bot/*/api/* {
@@ -767,15 +766,16 @@ These are independent of normal bot replies, so you can keep the bot responsive 
 This is a **rolling release** project.
 
 - `main` is always the current release.
-- `git push origin main` + `pm2 restart maxwell-bot maxwell-api` is the deployment.
+- On the deployment host, `git pull --ff-only && ./install.sh --local` updates the Docker stack.
 - No semantic version numbers, no release tags, no version branches.
 - Features land continuously.
 
-If you're running via PM2 (recommended), a push to main followed by a restart gives you the latest rolling update immediately.
+Docker Compose is the supported runtime. Existing PM2 installs should follow the [migration instructions](docs/INSTALL.md#upgrading-from-a-host--venv--pm2-install).
 
-Before you push, run the checks:
+For local development, use Python 3.11 or newer (the Docker image uses 3.12). `requirements.txt` selects a Python-compatible NumPy version. Install the test dependencies, then run the checks:
 
 ```bash
+python3 -m pip install -r requirements.txt -r requirements-dev.txt
 python3 -m pytest -q     # test suite
 python3 doctor.py        # config/feature sanity
 ```

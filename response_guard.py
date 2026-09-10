@@ -5,7 +5,7 @@ import re
 from collections import Counter
 from typing import Iterable
 
-_CODE_FENCE = re.compile(r"(```[\s\S]*?```|~~~[\s\S]*?~~~)")
+_CODE_FENCE = re.compile(r"(```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$))")
 _WORD = r"[\w\u00C0-\u024F]+(?:['\u2019][\w\u00C0-\u024F]+)?"
 _WORD_RE = re.compile(_WORD)
 _SEPARATORS = r"(?:\s+|[ \t]*[,;:\u2014-][ \t]*|[ \t]*\n[ \t]*)"

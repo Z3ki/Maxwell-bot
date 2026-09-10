@@ -23,6 +23,7 @@ Env config (see config.py):
 from __future__ import annotations
 
 import asyncio
+from html import escape
 import json
 import logging
 import secrets
@@ -79,27 +80,26 @@ class _BaseSolver:
         get_result: Callable[[], Awaitable[dict[str, Any]]],
         timeout: int | None = None,
     ) -> dict[str, Any]:
-        deadline = asyncio.get_event_loop().time() + (timeout or self.timeout)
-        while True:
-            data = await get_result()
-            status = data.get("status")
-            # CapSolver uses "ready"/"success"; 2captcha JSON uses status=1
-            # with the token in "request". Integer 1 never matched the string
-            # set, so 2captcha polls timed out even after a valid solve.
-            if status in (1, "1", "ready", "success", "completed"):
-                return data
-            request = str(data.get("request") or "")
-            if status in (0, "0") and request == "CAPCHA_NOT_READY":
-                pass
-            elif status in ("failed", "error") or (
-                status in (0, "0") and request and request != "CAPCHA_NOT_READY"
-            ):
-                raise CaptchaSolveError(f"{self.service}: task failed: {data}")
-            if asyncio.get_event_loop().time() > deadline:
-                raise CaptchaSolveError(
-                    f"{self.service}: timed out after {timeout or self.timeout}s"
-                )
-            await asyncio.sleep(3)
+        duration = self.timeout if timeout is None else timeout
+        try:
+            async with asyncio.timeout(duration):
+                while True:
+                    data = await get_result()
+                    if not isinstance(data, dict):
+                        raise CaptchaSolveError(f"{self.service}: invalid task response")
+                    status = data.get("status")
+                    if status in (1, "1", "ready", "success", "completed"):
+                        return data
+                    request = str(data.get("request") or "")
+                    if status in ("failed", "error") or (
+                        status in (0, "0") and request and request != "CAPCHA_NOT_READY"
+                    ):
+                        raise CaptchaSolveError(f"{self.service}: task failed: {data}")
+                    await asyncio.sleep(3)
+        except asyncio.TimeoutError as exc:
+            raise CaptchaSolveError(
+                f"{self.service}: timed out after {duration}s"
+            ) from exc
 
     async def solve(
         self,
@@ -289,6 +289,7 @@ class HumanCaptchaServer:
         self._app.router.add_get("/captcha/{cid}", self._handle_page)
         self._app.router.add_post("/captcha/{cid}/solve", self._handle_solve)
         self._runner: web.AppRunner | None = None
+        self._lifecycle_lock = asyncio.Lock()
         self._challenges: dict[str, dict[str, Any]] = {}
 
     @property
@@ -296,11 +297,18 @@ class HumanCaptchaServer:
         return self._runner is not None
 
     async def start(self) -> None:
-        if self._runner is None:
-            self._runner = web.AppRunner(self._app, access_log=None)
-            await self._runner.setup()
-            site = web.TCPSite(self._runner, self.host, self.port)
-            await site.start()
+        async with self._lifecycle_lock:
+            if self._runner is not None:
+                return
+            runner = web.AppRunner(self._app, access_log=None)
+            try:
+                await runner.setup()
+                site = web.TCPSite(runner, self.host, self.port)
+                await site.start()
+            except BaseException:
+                await runner.cleanup()
+                raise
+            self._runner = runner
             logger.info(
                 "Human captcha server listening on http://%s:%s/captcha/<id>",
                 self.host,
@@ -308,9 +316,10 @@ class HumanCaptchaServer:
             )
 
     async def stop(self) -> None:
-        if self._runner is not None:
-            await self._runner.cleanup()
-            self._runner = None
+        async with self._lifecycle_lock:
+            if self._runner is not None:
+                await self._runner.cleanup()
+                self._runner = None
 
     async def create_challenge(self, exception: Any) -> str:
         """Register a pending challenge; returns the public solve URL."""
@@ -360,7 +369,7 @@ class HumanCaptchaServer:
             # Only hCaptcha is hosted. Discord reCAPTCHA cannot be solved by
             # this widget; serving hCaptcha for it wastes the human-solve window.
             return web.Response(
-                text=f"<h1>Unsupported captcha service: {service}</h1>",
+                text=f"<h1>Unsupported captcha service: {escape(str(service))}</h1>",
                 content_type="text/html",
                 status=501,
             )
@@ -376,8 +385,8 @@ class HumanCaptchaServer:
             body = await request.json()
         except (aiohttp.ContentTypeError, json.JSONDecodeError):
             body = {}
-        token = (body or {}).get("token") or ""
-        if not token:
+        token = body.get("token") if isinstance(body, dict) else None
+        if not isinstance(token, str) or not token.strip():
             return web.json_response(
                 {"ok": False, "error": "missing token"}, status=400
             )
@@ -390,8 +399,9 @@ class HumanCaptchaServer:
 
 def _build_solve_page(cid: str, sitekey: str, rqdata: str, invisible: bool) -> str:
     """Render the hCaptcha solve page (hCaptcha enterprise, rqdata-aware)."""
-    rqdata_js = json.dumps(rqdata) if rqdata else "null"
-    sitekey_js = json.dumps(sitekey)
+    rqdata_js = json.dumps(rqdata).replace("<", "\\u003c") if rqdata else "null"
+    sitekey_js = json.dumps(sitekey).replace("<", "\\u003c")
+    cid_js = json.dumps(cid).replace("<", "\\u003c")
     extra = ""
     if invisible:
         extra = (
@@ -427,7 +437,7 @@ def _build_solve_page(cid: str, sitekey: str, rqdata: str, invisible: bool) -> s
   var SITEKEY = {sitekey_js};
   var RQDATA = {rqdata_js};
   var INVISIBLE = {json.dumps(bool(invisible))};
-  var CID = {json.dumps(cid)};
+  var CID = {cid_js};
   var widgetId = null;
 
   function setStatus(msg, cls) {{

@@ -34,7 +34,7 @@ class FakeThread:
 
     async def send(self, text):
         self.sent.append(text)
-        return None
+        return
 
 
 class FakeChannel:
@@ -45,7 +45,7 @@ class FakeChannel:
 
     async def send(self, text):
         self.sent.append(text)
-        return None
+        return
 
 
 class FakeGuild:
@@ -64,7 +64,7 @@ class FakeMessage:
     async def reply(self, text, **kwargs):
         self.replies.append((text, kwargs))
         self.channel.sent.append(text)
-        return None
+        return
 
     async def create_thread(self, name=None, auto_archive_duration=None):
         return self.channel.thread

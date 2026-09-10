@@ -17,7 +17,7 @@ import re
 import shlex
 import shutil
 import socket
-import ssl
+from mail_transport import connect_imap, mail_ssl_context
 import sys
 import tempfile
 import time
@@ -38,6 +38,7 @@ from discord import Activity, File, Message, Status
 from tools import Tool
 from captcha_solver import CaptchaSolveError
 from control_defaults import parse_bool
+from process_utils import communicate_process
 from identity import identity_values, process_name
 import site_backend
 import site_server
@@ -45,7 +46,6 @@ import site_test
 from utils import (  # single source of truth, fd-safe
     FileLock,
     _atomic_json_write_sync,
-    _safe_int,
     docker_bind_path,
     is_direct_image_url,
     is_gif_page_url,
@@ -1306,13 +1306,12 @@ def _format_channel_line(channel, *, include_topic: bool = True) -> str:
         limit = getattr(channel, "user_limit", 0) or 0
         bits.append(f"users={len(present)}" + (f"/{limit}" if limit else ""))
         if present:
-            names = []
-            for member in present[:6]:
-                names.append(
-                    getattr(member, "display_name", None)
-                    or getattr(member, "name", None)
-                    or str(getattr(member, "id", "?"))
-                )
+            names = [
+                getattr(member, "display_name", None)
+                or getattr(member, "name", None)
+                or str(getattr(member, "id", "?"))
+                for member in present[:6]
+            ]
             extra = f" +{len(present) - 6}" if len(present) > 6 else ""
             bits.append("in=" + ", ".join(names) + extra)
         bitrate = getattr(channel, "bitrate", None)
@@ -1798,7 +1797,7 @@ def _blob_looks_like_html(blob: bytes, content_type: str = "", url: str = "") ->
     if path.endswith((".html", ".htm", ".xhtml")):
         return True
     head = (blob or b"")[:256].lstrip().lower()
-    return head.startswith(b"<!doctype html") or head.startswith(b"<html")
+    return head.startswith((b"<!doctype html", b"<html"))
 
 
 def _title_from_html(body: str) -> str:
@@ -5519,12 +5518,12 @@ def _site_api_path_warnings(slug: str, body: str | None, extra_files: list[dict]
                 f"{label}: hardcoded WebSocket URL — build it from "
                 f"location.origin.replace('http', 'ws') + '/bot/{slug}/api/ws'"
             )
-        for match in _BOT_API_SLUG_RE.finditer(text):
-            if match.group(1) != slug:
-                found.append(
-                    f"{label}: calls /bot/{match.group(1)}/api/... but this site "
-                    f"is {slug} — use relative 'api/...' instead"
-                )
+        found.extend(
+            f"{label}: calls /bot/{match.group(1)}/api/... but this site "
+            f"is {slug} — use relative 'api/...' instead"
+            for match in _BOT_API_SLUG_RE.finditer(text)
+            if match.group(1) != slug
+        )
     return found[:12]
 
 
@@ -7495,6 +7494,8 @@ class SendMessageTool(Tool):
             )
             target_dest = str(raw_dest or "").strip()
             dest_id = _parse_snowflake(target_dest) if target_dest else None
+            if target_dest and not dest_id:
+                return "Error: invalid destination ID"
             cross_chat = bool(
                 dest_id and not _destination_is_current_chat(message, dest_id)
             )
@@ -7508,33 +7509,31 @@ class SendMessageTool(Tool):
                     "Error: sending to another channel or DM is restricted "
                     "to admins. Reply in this chat instead."
                 )
-            if cross_chat and self.bot:
-                dest_id = _safe_int(target_dest)
-                if dest_id:
-                    # Check if it's a channel first
-                    ch = self.bot.get_channel(dest_id)
-                    if not ch and hasattr(self.bot, "fetch_channel"):
+            if cross_chat:
+                if self.bot is None:
+                    return "Error: cannot resolve the requested destination"
+                ch = self.bot.get_channel(dest_id)
+                if not ch and hasattr(self.bot, "fetch_channel"):
+                    try:
+                        ch = await self.bot.fetch_channel(dest_id)
+                    except Exception:
+                        ch = None
+                if not ch:
+                    usr = self.bot.get_user(dest_id)
+                    if not usr and hasattr(self.bot, "fetch_user"):
                         try:
-                            ch = await self.bot.fetch_channel(dest_id)
+                            usr = await self.bot.fetch_user(dest_id)
+                        except Exception:
+                            usr = None
+                    if usr:
+                        try:
+                            ch = usr.dm_channel or await usr.create_dm()
                         except Exception:
                             ch = None
-                    # If not channel, check if it's a user for DM
-                    if not ch:
-                        usr = self.bot.get_user(dest_id)
-                        if not usr and hasattr(self.bot, "fetch_user"):
-                            try:
-                                usr = await self.bot.fetch_user(dest_id)
-                            except Exception:
-                                usr = None
-                        if usr:
-                            try:
-                                ch = usr.dm_channel or await usr.create_dm()
-                            except Exception:
-                                ch = None
-                    if ch:
-                        target_channel = ch
-                        if target_channel != getattr(message, "channel", None):
-                            reply = False
+                if ch is None or not callable(getattr(ch, "send", None)):
+                    return "Error: cannot resolve a sendable channel or DM for the requested destination"
+                target_channel = ch
+                reply = False
 
             guild = getattr(target_channel, "guild", None)
             stickers = []
@@ -7964,7 +7963,7 @@ class SendFileTool(Tool):
                 stderr=asyncio.subprocess.PIPE,
             )
             try:
-                _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+                _stdout, stderr = await communicate_process(proc, timeout=15)
             except asyncio.TimeoutError:
                 with contextlib.suppress(ProcessLookupError):
                     proc.kill()
@@ -9898,10 +9897,8 @@ class YouTubeTool(Tool):
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            stdout, stderr = await communicate_process(proc, timeout=timeout)
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
             return 124, "", f"timed out after {timeout}s"
         return (
             proc.returncode or 0,
@@ -10744,10 +10741,8 @@ class TtsTool(Tool):
                 stderr=asyncio.subprocess.PIPE,
             )
             try:
-                _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+                _stdout, stderr = await communicate_process(proc, timeout=30)
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
                 logger.warning("TTS OGG conversion timed out")
                 return source
             if proc.returncode == 0 and os.path.exists(voice_filename):
@@ -10771,10 +10766,8 @@ class TtsTool(Tool):
                 stderr=asyncio.subprocess.PIPE,
             )
             try:
-                stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+                stdout, _stderr = await communicate_process(proc, timeout=15)
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
                 return 1.0
             if proc.returncode != 0:
                 return 1.0
@@ -10802,10 +10795,8 @@ class TtsTool(Tool):
                 stderr=asyncio.subprocess.PIPE,
             )
             try:
-                stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+                stdout, _stderr = await communicate_process(proc, timeout=30)
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
                 return base64.b64encode(bytes([128] * 256)).decode("ascii")
             if proc.returncode != 0 or len(stdout) < 2:
                 return base64.b64encode(bytes([128] * 256)).decode("ascii")
@@ -11318,7 +11309,7 @@ def _smtp_send_sync(
         # STARTTLS or nothing. The local MTA requires it (smtpd_tls_auth_only=yes);
         # if we ever point at a remote server without TLS, that server's not
         # one we should be talking to.
-        s.starttls()
+        s.starttls(context=mail_ssl_context(host))
         s.ehlo()
         s.login(user, password)
         refused = s.sendmail(from_addr, all_rcpts, msg.as_string())
@@ -11333,24 +11324,8 @@ def _smtp_send_sync(
 
 
 def _imap_connect_sync(host: str, port: int, user: str, password: str):
-    """Open IMAPS, return the connection. Caller must close it.
-
-    Use the public Mailbox API instead of poking the raw IMAP4 object; the
-    high-level API handles quoting/escaping and gives a sane exception
-    hierarchy (imaplib.IMAP4.error) on auth or protocol failures.
-    """
-    import imaplib
-
-    # The local Dovecot uses a self-signed snakeoil cert. We don't want
-    # to make every email read fail with CERTIFICATE_VERIFY_FAILED, so
-    # we build a context that doesn't verify. If you swap to a real cert
-    # later, remove this and let the default validation apply.
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    M = imaplib.IMAP4_SSL(host, port, ssl_context=ctx)
-    M.login(user, password)
-    return M
+    """Open IMAPS; callers must log out when finished."""
+    return connect_imap(host, port, user, password)
 
 
 def _imap_list_recent_sync(
@@ -11365,7 +11340,9 @@ def _imap_list_recent_sync(
     """List recent messages in INBOX. Returns a multi-line string for the model."""
     M = _imap_connect_sync(host, port, user, password)
     try:
-        M.select("INBOX")
+        selected, _ = M.select("INBOX", readonly=True)
+        if selected != "OK":
+            return "Error: could not select INBOX"
         # Build the IMAP search criteria. We use SINCE for date bounding
         # because it's the most universally supported. The cutoff is
         # today - days_back, which Dovecot's IMAP server computes from
@@ -11674,13 +11651,10 @@ def _imap_get_message_sync(
         return "Error: message_id must be a numeric IMAP id"
     M = _imap_connect_sync(host, port, user, password)
     try:
-        M.select("INBOX")
-        # UID first — that is what the list/search tools and the inbox notices
-        # hand out. Fall back to a sequence-number fetch so ids the model
-        # cached from an older run still resolve instead of hard-failing.
-        typ, data = M.uid("FETCH", seq, "(RFC822)")
-        if typ != "OK" or not data or not data[0]:
-            typ, data = M.fetch(seq, "(RFC822)")
+        selected, _ = M.select("INBOX", readonly=True)
+        if selected != "OK":
+            return "Error: could not select INBOX"
+        typ, data = M.uid("FETCH", seq, "(BODY.PEEK[])")
         if typ != "OK" or not data or not data[0]:
             return f"Error: IMAP fetch failed for message {message_id}"
         # Response shape varies by server: Dovecot collapses into a single
@@ -11779,7 +11753,9 @@ def _imap_search_sync(
         return "Error: query contains invalid IMAP characters or is empty"
     M = _imap_connect_sync(host, port, user, password)
     try:
-        M.select("INBOX")
+        selected, _ = M.select("INBOX", readonly=True)
+        if selected != "OK":
+            return "Error: could not select INBOX"
         typ, data = M.uid("SEARCH", None, f'TEXT "{safe}"')
         if typ != "OK" or not data or not data[0]:
             return f"No messages matched: {query!r}"

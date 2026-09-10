@@ -102,9 +102,13 @@ class InboxStore:
         async with self._lock:
             return await self._load_unlocked()
 
-    async def _load_unlocked(self) -> list[dict]:
-        data = await asyncio.to_thread(_load_json_safe, self.path, dict)
+    async def _load_unlocked(self, *, for_update: bool = False) -> list[dict]:
+        data = await asyncio.to_thread(_load_json_safe, self.path, lambda: None)
+        if data is None and not self.path.exists():
+            return []
         items = data.get("items", []) if isinstance(data, dict) else []
+        if for_update and (not isinstance(data, dict) or not isinstance(items, list)):
+            raise ValueError("inbox.json is corrupt; refusing to overwrite it")
         return items if isinstance(items, list) else []
 
     async def _save_unlocked(self, items: list[dict]) -> None:
@@ -219,7 +223,7 @@ class InboxStore:
         iid = str(item.get("id") or f"inb_{uuid.uuid4().hex[:8]}")
         now = _utcnow_iso()
         async with self._lock:
-            items = await self._load_unlocked()
+            items = await self._load_unlocked(for_update=True)
             existing = None
             for row in items:
                 if isinstance(row, dict) and str(row.get("id") or "") == iid:
@@ -271,7 +275,7 @@ class InboxStore:
             raise ValueError("insert_if_absent needs an explicit id")
         now = _utcnow_iso()
         async with self._lock:
-            items = await self._load_unlocked()
+            items = await self._load_unlocked(for_update=True)
             for row in items:
                 if isinstance(row, dict) and str(row.get("id") or "") == iid:
                     return None
@@ -306,7 +310,7 @@ class InboxStore:
     async def mark(self, item_id: str, state: str, *, note: str = "") -> dict | None:
         iid = str(item_id or "").strip()
         async with self._lock:
-            items = await self._load_unlocked()
+            items = await self._load_unlocked(for_update=True)
             found = None
             for row in items:
                 if isinstance(row, dict) and str(row.get("id") or "") == iid:

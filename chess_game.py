@@ -787,6 +787,8 @@ class ChessGame:
             "max_depth": self.max_depth,
             "jitter": self.jitter,
             "fen": self.board.fen(),
+            "initial_fen": self.board.root().fen(),
+            "moves_uci": [move.uci() for move in self.board.move_stack],
             "history_san": self.history_san,
         }
 
@@ -803,16 +805,35 @@ class ChessGame:
             jitter=float(data.get("jitter", 0.0)),
         )
         fen = data.get("fen", "")
-        game.history = list(data.get("history_san", []) or [])
-        if fen:
+        history = list(data.get("history_san", []) or [])
+        replay = chess.Board(data.get("initial_fen") or chess.STARTING_FEN)
+        replay_history = []
+        try:
+            if "moves_uci" in data:
+                for uci in data["moves_uci"]:
+                    move = replay.parse_uci(uci)
+                    if move not in replay.legal_moves:
+                        raise ValueError("illegal stored move")
+                    replay_history.append(replay.san(move))
+                    replay.push(move)
+            else:
+                for san in history:
+                    move = replay.parse_san(san)
+                    if move not in replay.legal_moves:
+                        raise ValueError("illegal stored move")
+                    replay_history.append(replay.san(move))
+                    replay.push(move)
+            if fen and replay.fen() != chess.Board(fen).fen():
+                raise ValueError("stored move history does not match FEN")
+        except (TypeError, ValueError):
+            if not fen:
+                raise
+            # Legacy saves may contain a custom position with no replayable root.
             game.board.set_fen(fen)
+            game.history = history
         else:
-            # No FEN but a move list: replay it.
-            for san in data.get("history_san", []) or []:
-                try:
-                    game.board.push_san(san)
-                except Exception:
-                    break
+            game.board = replay
+            game.history = replay_history
         return game
 
     # -- moves ------------------------------------------------------------- #
@@ -834,14 +855,20 @@ class ChessGame:
                 return uci
             raise ValueError(f"{text} is not a legal move right now")
         try:
-            return self.board.parse_san(text)
+            move = self.board.parse_san(text)
+            if move not in self.board.legal_moves:
+                raise ValueError("null moves are not legal")
+            return move
         except Exception as e:
             # Fall through to the sloppy-SAN retry below.
             logger.debug("SAN parse failed for %r: %s", text, e)
         # Uppercase the rank/file pairs to help sloppy SAN.
         upper = text.upper()
         try:
-            return self.board.parse_san(upper)
+            move = self.board.parse_san(upper)
+            if move not in self.board.legal_moves:
+                raise ValueError("null moves are not legal")
+            return move
         except Exception as exc:
             raise ValueError(
                 f"'{move_text}' is not a legal move. Legal moves: "
@@ -850,6 +877,8 @@ class ChessGame:
 
     def apply_move(self, move: chess.Move) -> str:
         """Push a legal move and return its SAN."""
+        if move not in self.board.legal_moves:
+            raise ValueError(f"{move} is not a legal move right now")
         san = self.board.san(move)
         self.board.push(move)
         self.history.append(san)
@@ -886,8 +915,10 @@ class ChessManager:
                 raw = json.load(fh)
         except (OSError, ValueError):
             raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
         loaded: dict[str, ChessGame] = {}
-        for channel_id, data in (raw or {}).items():
+        for channel_id, data in raw.items():
             try:
                 game = ChessGame.from_dict(data)
                 if not game.is_over:
@@ -899,7 +930,7 @@ class ChessManager:
     def _save(self) -> None:
         payload = {chan: game.to_dict() for chan, game in self._games.items()}
         try:
-            os.makedirs(os.path.dirname(self._store), exist_ok=True)
+            os.makedirs(os.path.dirname(os.path.abspath(self._store)), exist_ok=True)
             tmp = self._store + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, ensure_ascii=False, indent=2)

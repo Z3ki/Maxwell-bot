@@ -102,6 +102,7 @@ class UserRestGate:
             else max(1, int(max_inflight))
         )
         self._sema: asyncio.Semaphore | None = None
+        self._admission_lock = asyncio.Lock()
         self._next_slot = 0.0
         self._global_until = 0.0
 
@@ -121,6 +122,7 @@ class UserRestGate:
 
     def reset(self) -> None:
         self._sema = None
+        self._admission_lock = asyncio.Lock()
         self._next_slot = 0.0
         self._global_until = 0.0
 
@@ -129,19 +131,21 @@ class UserRestGate:
         sema = self._sema_obj()
         await sema.acquire()
         try:
-            now = time.monotonic()
-            wait_until = max(self._global_until, self._next_slot)
-            delay = wait_until - now
-            if delay > 0:
-                if self._global_until > now and delay >= 0.2:
-                    logger.warning(
-                        "User Discord REST queued %.1fs (global rate limit)",
-                        delay,
-                    )
-                await asyncio.sleep(delay)
+            async with self._admission_lock:
+                while True:
+                    now = time.monotonic()
+                    delay = max(self._global_until, self._next_slot) - now
+                    if delay <= 0:
+                        break
+                    if self._global_until > now and delay >= 0.2:
+                        logger.warning(
+                            "User Discord REST queued %.1fs (global rate limit)",
+                            delay,
+                        )
+                    await asyncio.sleep(delay)
+                self._next_slot = time.monotonic() + self.min_interval
             yield
         finally:
-            self._next_slot = time.monotonic() + self.min_interval
             sema.release()
 
 
@@ -545,35 +549,42 @@ async def _aiohttp_bot_request(http: Any, route: Any, *, files=None, form=None, 
     kwargs.pop("proxy_auth", None)
     kwargs.pop("interface", None)
 
-    formdata = None
-    if form or files:
-        formdata = aiohttp.FormData()
-        if json_payload is not None:
-            import json as _json
-
-            formdata.add_field("payload_json", _json.dumps(json_payload))
-            json_payload = None
-        elif data is not None and not isinstance(data, (bytes, bytearray)):
-            formdata.add_field("payload_json", data)
-            data = None
-        for part in form or []:
-            name = part.get("name") or "file"
-            part_data = part.get("data")
-            formdata.add_field(
-                name,
-                part_data,
-                filename=part.get("filename"),
-                content_type=part.get("content_type"),
-            )
-        for idx, file_obj in enumerate(files or []):
-            fp = getattr(file_obj, "fp", file_obj)
-            filename = getattr(file_obj, "filename", None) or f"file{idx}"
-            formdata.add_field(f"files[{idx}]", fp, filename=filename)
-
-    body = formdata if formdata is not None else data
     last_error: Exception | None = None
     for attempt in range(5):
         try:
+            formdata = None
+            if form or files:
+                formdata = aiohttp.FormData()
+                for file_obj in files or []:
+                    reset = getattr(file_obj, "reset", None)
+                    if callable(reset):
+                        reset(seek=attempt)
+                names = {part.get("name") for part in form or []}
+                if "payload_json" not in names:
+                    if json_payload is not None:
+                        import json as _json
+
+                        formdata.add_field("payload_json", _json.dumps(json_payload))
+                    elif data is not None and not isinstance(data, (bytes, bytearray)):
+                        formdata.add_field("payload_json", data)
+                for part in form or []:
+                    formdata.add_field(
+                        part.get("name") or "file",
+                        part.get("data"),
+                        filename=part.get("filename"),
+                        content_type=part.get("content_type"),
+                    )
+                # discord.py supplies file streams in form and keeps files for
+                # rewinding. Do not upload those attachments a second time.
+                for idx, file_obj in enumerate(files or []):
+                    field_name = f"files[{idx}]"
+                    if field_name not in names:
+                        formdata.add_field(
+                            field_name,
+                            getattr(file_obj, "fp", file_obj),
+                            filename=getattr(file_obj, "filename", None) or f"file{idx}",
+                        )
+            body = formdata if formdata is not None else data
             async with session.request(
                 method,
                 url,

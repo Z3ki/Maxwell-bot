@@ -181,10 +181,7 @@ class BackgroundJobManager:
             directory = os.path.dirname(self.data_path)
             if directory:
                 os.makedirs(directory, exist_ok=True)
-            payload = {
-                jid: {k: v for k, v in asdict(job).items()}
-                for jid, job in self._jobs.items()
-            }
+            payload = {jid: asdict(job) for jid, job in self._jobs.items()}
             tmp = f"{self.data_path}.tmp"
             with open(tmp, "w", encoding="utf-8") as handle:
                 json.dump({"jobs": payload}, handle)
@@ -317,7 +314,24 @@ class BackgroundJobManager:
         return self._runtime.get(_norm_jid(job_id), {})
 
     def track_task(self, job_id: str, task: asyncio.Task) -> None:
-        self._tasks[_norm_jid(job_id)] = task
+        jid = _norm_jid(job_id)
+        self._tasks[jid] = task
+
+        def finished(done: asyncio.Task) -> None:
+            job = self.get(jid)
+            if done.cancelled():
+                if job is not None and job.status in ("queued", "running"):
+                    self.mark(jid, status="cancelled", progress="cancelled on request")
+            else:
+                error = done.exception()
+                if error is not None and job is not None and job.status in ("queued", "running"):
+                    self.mark(jid, status="error", progress=str(error)[:500])
+            if self._tasks.get(jid) is done:
+                self.cleanup_runtime(jid)
+
+        # Covers cancellation before the coroutine starts and failures during
+        # setup, before the worker's own try/finally can run.
+        task.add_done_callback(finished)
 
     def mark(self, job_id: str, **fields: Any) -> BackgroundJob | None:
         job = self.get(job_id)

@@ -282,6 +282,13 @@ def _normalize_ltm_line(content: str) -> str:
     return " ".join(str(content).split())[:MAX_MEMORY_CHARS]
 
 
+def _shared_context_hash(scope: str, content: str) -> str:
+    import hashlib
+
+    normalized = _strip_for_embedding(content)
+    return hashlib.sha256(f"shared:{scope}\x00{normalized}".encode("utf-8")).hexdigest()
+
+
 def _strip_reasoning_text(content: str) -> str:
     import re
 
@@ -807,6 +814,16 @@ class RAGMemoryManager:
         # share channel_id='' cannot INSERT OR REPLACE each other away.
         with contextlib.suppress(Exception):
             self._db.execute("DROP INDEX IF EXISTS idx_unique_content")
+        # Shared facts deduplicate within a scope, not across different people
+        # or rooms. Upgrade old unsalted hashes before duplicate cleanup.
+        for row in self._db.execute(
+            "SELECT id, scope, content, content_hash FROM vectors WHERE kind='shared_context'"
+        ).fetchall():
+            digest = _shared_context_hash(row["scope"], row["content"])
+            if digest != row["content_hash"]:
+                self._db.execute(
+                    "UPDATE vectors SET content_hash=? WHERE id=?", (digest, row["id"])
+                )
         # Duplicate hashed rows block CREATE UNIQUE INDEX (and used to crash
         # the hash backfill). Keep the oldest row per (kind, channel, hash).
         with contextlib.suppress(Exception):
@@ -1053,8 +1070,8 @@ class RAGMemoryManager:
                     }
                 )
                 self._db.execute(
-                    "INSERT OR IGNORE INTO vectors (id, kind, channel_id, author, author_id, content, embedding, metadata, scope, importance, timestamp, created_at) VALUES (?, 'shared_context', '', '', '', ?, NULL, ?, ?, ?, ?, ?)",
-                    (cid, content, metadata, scope, importance, ts, time.time()),
+                    "INSERT OR IGNORE INTO vectors (id, kind, channel_id, author, author_id, content, content_hash, embedding, metadata, scope, importance, timestamp, created_at) VALUES (?, 'shared_context', '', '', '', ?, ?, NULL, ?, ?, ?, ?, ?)",
+                    (cid, content, _shared_context_hash(scope, content), metadata, scope, importance, ts, time.time()),
                 )
                 migrated += 1
             if migrated:
@@ -1325,17 +1342,16 @@ class RAGMemoryManager:
             vec = await self._embed(text)
             if vec is not None:
                 blob = _embedding_to_blob(vec)
-                import hashlib as _hashlib
+                import hashlib
 
-                ch = _hashlib.sha256(_strip_for_embedding(text).encode("utf-8")).hexdigest()
-                self._db.execute(
-                    "UPDATE vectors SET embedding=? WHERE id=? AND "
-                    "(content_hash=? OR "
-                    "(content_hash='' AND content=?) OR "
-                    "(content_hash IS NULL AND content=?))",
-                    (blob, row_id, ch, str(text or "")[:8000], str(text or "")[:8000]),
+                digest = hashlib.sha256(_strip_for_embedding(text).encode("utf-8")).hexdigest()
+                # Scoped hashes differ from the text hash. Message rows may
+                # retain only a prefix, but their hash covers the full input.
+                cursor = self._db.execute(
+                    "UPDATE vectors SET embedding=? WHERE id=? AND (content=? OR content_hash=?)",
+                    (blob, row_id, str(text or ""), digest),
                 )
-                return True
+                return cursor.rowcount > 0
             return False
         except (GeneratorExit, asyncio.CancelledError):
             raise
@@ -1366,24 +1382,18 @@ class RAGMemoryManager:
         """
         try:
             total_embedded = 0
-            # Rows that failed to embed stay embedding IS NULL, so a naive
-            # `while True` re-SELECTs the same batch forever when ollama is
-            # down or keeps rejecting a row. Track what we've already tried
-            # and stop when a pass makes no forward progress.
-            attempted: set[str] = set()
+            # Rows that fail remain NULL. Walk by rowid so each is attempted
+            # once without starving later rows behind a failed first batch.
+            last_rowid = 0
             while True:
-                rows = [
-                    r
-                    for r in self._db.execute(
-                        "SELECT id, content FROM vectors WHERE embedding IS NULL "
-                        "LIMIT ?",
-                        (batch_size * 4,),
-                    ).fetchall()
-                    if r["id"] not in attempted
-                ][:batch_size]
+                rows = self._db.execute(
+                    "SELECT rowid AS pending_rowid, id, content FROM vectors "
+                    "WHERE embedding IS NULL AND rowid > ? ORDER BY rowid LIMIT ?",
+                    (last_rowid, max(1, batch_size)),
+                ).fetchall()
                 if not rows:
                     break
-                attempted.update(r["id"] for r in rows)
+                last_rowid = rows[-1]["pending_rowid"]
 
                 # Long rows need sentence-boundary chunking + mean-pooling,
                 # which the batch API can't express (one vector per input).
@@ -1435,11 +1445,11 @@ class RAGMemoryManager:
                                         vec = np.array(embeddings[i], dtype=np.float32)
                                         if len(vec) == EMBED_DIM:
                                             blob = _embedding_to_blob(vec)
-                                            self._db.execute(
-                                                "UPDATE vectors SET embedding=? WHERE id=?",
-                                                (blob, row["id"]),
+                                            cursor = self._db.execute(
+                                                "UPDATE vectors SET embedding=? WHERE id=? AND content=?",
+                                                (blob, row["id"], row["content"]),
                                             )
-                                            total_embedded += 1
+                                            total_embedded += cursor.rowcount
                     if fallback_rows:
                         for row in fallback_rows:
                             if await self._embed_and_store(row["id"], row["content"]):
@@ -2165,11 +2175,24 @@ class RAGMemoryManager:
 
         if include_shared_context:
             for row in self._db.execute(
-                "SELECT id, content, importance, timestamp FROM vectors "
+                "SELECT id, content, importance, timestamp, metadata FROM vectors "
                 "WHERE kind='shared_context' AND scope IN (?, ?) "
                 "ORDER BY importance DESC, created_at DESC LIMIT ?",
                 (f"user:{uid}", f"dm:{uid}", top_k * 2),
             ).fetchall():
+                try:
+                    meta = json.loads(row["metadata"] or "{}")
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(meta, dict):
+                    continue
+                # Entity profiles travel across rooms and have no requester
+                # authorization. Restricted facts belong in the scoped tier.
+                if str(meta.get("visibility") or "shared").strip().lower() not in {"shared", "public_hint"}:
+                    continue
+                expires = _parse_iso(str(meta.get("expires_at") or ""))
+                if expires is not None and expires < _utcnow():
+                    continue
                 picked.setdefault(
                     str(row["id"]),
                     {
@@ -2202,7 +2225,7 @@ class RAGMemoryManager:
             kept, used = [], 0
             for entry in results:
                 cost = len(str(entry.get("content") or ""))
-                if kept and used + cost > budget_i:
+                if used + cost > budget_i:
                     break
                 kept.append(entry)
                 used += cost
@@ -2318,10 +2341,7 @@ class RAGMemoryManager:
                 if k not in ("id", "content", "scope", "importance", "timestamp")
             }
         )
-        import hashlib as _hashlib
-
-        norm = _strip_for_embedding(content)
-        ch = _hashlib.sha256(norm.encode("utf-8")).hexdigest()
+        ch = _shared_context_hash(scope, content)
         self._db.execute(
             "INSERT OR REPLACE INTO vectors (id, kind, channel_id, guild_id, author, "
             "author_id, source, content, content_hash, embedding, metadata, scope, "
@@ -2379,21 +2399,27 @@ class RAGMemoryManager:
         # update_shared_context returned False for a visibility-only edit,
         # making the bot report "Context fact not found." for an existing
         # fact. Merge them into the existing metadata payload.
-        for meta_key in ("visibility", "tags", "expires_at"):
-            if meta_key in updates:
-                row = self._db.execute(
-                    "SELECT metadata FROM vectors WHERE id=? AND kind='shared_context'",
-                    (str(context_id),),
-                ).fetchone()
-                if row is None:
-                    return False
-                try:
-                    meta = json.loads(row["metadata"] or "{}")
-                except Exception:
-                    meta = {}
-                meta[meta_key] = updates[meta_key]
-                sets.append("metadata=?")
-                params.append(json.dumps(meta))
+        metadata_updates = {
+            key: updates[key]
+            for key in ("visibility", "tags", "expires_at")
+            if key in updates
+        }
+        if metadata_updates:
+            row = self._db.execute(
+                "SELECT metadata FROM vectors WHERE id=? AND kind='shared_context'",
+                (str(context_id),),
+            ).fetchone()
+            if row is None:
+                return False
+            try:
+                meta = json.loads(row["metadata"] or "{}")
+            except (ValueError, TypeError):
+                meta = {}
+            if not isinstance(meta, dict):
+                meta = {}
+            meta.update(metadata_updates)
+            sets.append("metadata=?")
+            params.append(json.dumps(meta))
         if not sets:
             return False
         # Only force a re-embed when content actually changed. Nulling the
@@ -2401,7 +2427,19 @@ class RAGMemoryManager:
         # entry from rag_search (which filters embedding IS NOT NULL) without
         # any re-embed to restore it — the fact vanishes from retrieval.
         if "content" in updates:
-            sets.append("embedding=NULL")  # force re-embed if content changed
+            sets.append("embedding=NULL")
+        if "content" in updates or "scope" in updates:
+            row = self._db.execute(
+                "SELECT scope, content FROM vectors WHERE id=? AND kind='shared_context'",
+                (str(context_id),),
+            ).fetchone()
+            if row is None:
+                return False
+            sets.append("content_hash=?")
+            params.append(_shared_context_hash(
+                str(updates.get("scope", row["scope"])),
+                str(updates.get("content", row["content"]) or ""),
+            ))
         params.append(str(context_id))
         cursor = self._db.execute(
             f"UPDATE vectors SET {', '.join(sets)} WHERE id=? AND kind='shared_context'",
@@ -2504,9 +2542,13 @@ class RAGMemoryManager:
             vis = str(entry.get("visibility") or "shared").strip().lower()
             if vis == "admin_only" and not is_admin:
                 continue
-            if vis == "private":
+            if vis == "private" and not is_admin:
                 source_uid = str(entry.get("source_user_id") or "")
-                if not is_admin and source_uid and source_uid != str(user_id):
+                if not source_uid:
+                    scope_kind, _, scope_id = str(entry.get("scope") or "").partition(":")
+                    if scope_kind in {"user", "dm"}:
+                        source_uid = scope_id
+                if not source_uid or source_uid != str(user_id):
                     continue
             expires = str(entry.get("expires_at") or "").strip()
             if expires:
@@ -2525,16 +2567,15 @@ class RAGMemoryManager:
                 budget_i = max(0, int(budget))
             except (TypeError, ValueError):
                 budget_i = 0
-            if budget_i:
-                kept = []
-                used = 0
-                for entry in result:
-                    piece = str(entry.get("content") or "")
-                    if kept and used + len(piece) > budget_i:
-                        break
-                    kept.append(entry)
-                    used += len(piece)
-                result = kept
+            kept = []
+            used = 0
+            for entry in result:
+                piece = str(entry.get("content") or "")
+                if used + len(piece) > budget_i:
+                    break
+                kept.append(entry)
+                used += len(piece)
+            result = kept
         return result
 
     # ─── Tier 3: feedback + summarization ────────────────────────────

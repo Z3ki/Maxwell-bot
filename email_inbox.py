@@ -28,7 +28,6 @@ import contextlib
 import imaplib
 import logging
 import re
-import ssl
 from email import policy
 from email.header import decode_header, make_header
 from email.parser import BytesParser
@@ -137,26 +136,19 @@ class MailPollState:
     async def save(self, last_uid: int) -> None:
         if last_uid <= self.last_uid:
             return
-        self.last_uid = int(last_uid)
-        self._loaded = True
+        last_uid = int(last_uid)
         await asyncio.to_thread(
-            _atomic_json_write_sync, self.path, {"last_uid": self.last_uid}
+            _atomic_json_write_sync, self.path, {"last_uid": last_uid}
         )
+        self.last_uid = last_uid
+        self._loaded = True
 
 
 def _connect(host: str, port: int, user: str, password: str) -> imaplib.IMAP4_SSL:
-    """IMAPS to the local Dovecot, whose cert is the self-signed snakeoil.
+    """Open IMAPS with certificate verification for remote mail servers."""
+    from mail_transport import connect_imap
 
-    Same trust posture as the email tools in bot_tools: verification is off
-    because the target is 127.0.0.1. Point this at a remote host and you want
-    a real cert and this context replaced.
-    """
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    conn = imaplib.IMAP4_SSL(host, port, ssl_context=ctx)
-    conn.login(user, password)
-    return conn
+    return connect_imap(host, port, user, password)
 
 
 def _parse_fetch_response(response: Any) -> tuple[bytes, bytes]:
@@ -193,7 +185,9 @@ def _fetch_new_sync(
     """
     conn = _connect(host, port, user, password)
     try:
-        conn.select("INBOX")
+        typ, _ = conn.select("INBOX", readonly=True)
+        if typ != "OK":
+            raise RuntimeError("Mail poll could not select INBOX")
         # UID SEARCH is the only stable identifier — sequence numbers shift
         # whenever anything is expunged. The UID range trims the scan to what
         # arrived since the last tick; UNSEEN keeps mail he already read in a
@@ -218,7 +212,8 @@ def _fetch_new_sync(
             typ, response = conn.uid("FETCH", raw_uid, _FETCH_SPEC)
             if typ != "OK" or not response:
                 logger.debug("Mail poll: fetch failed for uid %s", uid)
-                continue
+                # A later UID would advance the watermark past this failure.
+                break
             header_bytes, body_bytes = _parse_fetch_response(response)
             parser = BytesParser(policy=policy.default)
             try:

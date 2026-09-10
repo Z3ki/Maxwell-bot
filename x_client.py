@@ -446,7 +446,10 @@ def collect_tweets(node: Any, *, source: str = "", limit: int = MAX_LIMIT) -> li
             return
         typename = str(item.get("__typename") or "")
         looks_like_tweet = typename in {"Tweet", "TweetWithVisibilityResults"} or (
-            "rest_id" in item and isinstance(item.get("legacy"), dict)
+            not typename
+            and "rest_id" in item
+            and isinstance(item.get("legacy"), dict)
+            and any(key in item["legacy"] for key in ("full_text", "text"))
         )
         if looks_like_tweet:
             tweet = normalize_tweet(item, source=source)
@@ -1240,11 +1243,26 @@ class PostBudget:
     async def _load(self) -> None:
         if self._loaded:
             return
-        data = await asyncio.to_thread(_load_json_safe, self.path, dict)
-        stamps = data.get("posts") if isinstance(data, dict) else []
-        self._stamps = [
-            float(s) for s in (stamps or []) if isinstance(s, (int, float))
-        ]
+        def load_stamps() -> list[float]:
+            try:
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                return []
+            if not isinstance(data, dict) or not isinstance(data.get("posts"), list):
+                raise ValueError("Invalid X post budget history")  # noqa: TRY004
+            stamps = data["posts"]
+            if any(
+                isinstance(s, bool) or not isinstance(s, (int, float))
+                or not math.isfinite(s) or s < 0
+                for s in stamps
+            ):
+                raise ValueError("Invalid X post budget timestamp")
+            return [float(s) for s in stamps]
+
+        try:
+            self._stamps = await asyncio.to_thread(load_stamps)
+        except (OSError, ValueError) as exc:
+            raise XError("Cannot read X post budget history; posting blocked") from exc
         self._loaded = True
 
     def _recent(self, now: float) -> list[float]:
@@ -1268,8 +1286,9 @@ class PostBudget:
         Read-only — for `,x status`. A post takes its slot with `reserve`,
         which is the same question asked while holding the lock.
         """
-        await self._load()
-        return self._blocked(now if now is not None else time.time())
+        async with self._lock:
+            await self._load()
+            return self._blocked(now if now is not None else time.time())
 
     async def reserve(self, *, now: float | None = None) -> tuple[str, float]:
         """Take a slot before posting. Returns (problem, stamp).
@@ -1331,11 +1350,11 @@ class XClient:
         self.cfg = dict(cfg or {})
         self.data_dir = Path(data_dir)
         self.timeout = max(5.0, float(self.cfg.get("timeout") or 20.0))
-        self.cache_seconds = max(0.0, float(self.cfg.get("cache_seconds") or 60.0))
+        self.cache_seconds = max(0.0, float(self.cfg.get("cache_seconds", 60.0)))
         self.max_chars = max(1, int(self.cfg.get("max_chars") or 280))
         self.post_enabled = bool(self.cfg.get("post_enabled", True))
         self.budget = PostBudget(
-            self.data_dir, per_hour=int(self.cfg.get("posts_per_hour") or 8)
+            self.data_dir, per_hour=int(self.cfg.get("posts_per_hour", 8))
         )
         self.user_ids: dict[str, str] = {}
         self._cache: dict[str, tuple[float, list[Tweet]]] = {}
@@ -1604,14 +1623,7 @@ class XClient:
                 "no way to write to X: set X_AUTH_TOKEN + X_CT0 (cookies from "
                 "a logged-in x.com tab) or X_API_BASE_URL for your own gateway"
             )
-        last: Exception | None = None
-        for backend in writers:
-            try:
-                return await backend.write(action, **params)
-            except XError as exc:
-                last = exc
-                continue
-        raise XError(str(last or f"{action} failed"))
+        return await writers[0].write(action, **params)
 
 
 # ---------------------------------------------------------------------------

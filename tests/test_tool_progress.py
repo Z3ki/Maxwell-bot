@@ -238,9 +238,7 @@ def test_notify_streaming_marks_for_deletion():
 
 
 def test_telegram_does_not_try_to_edit():
-    """Telegram adapter in this codebase has no editMessage; we just post
-    one ack message and stop() drops the reference (we don't try to delete
-    by message_id since the adapter doesn't expose a clean fetch)."""
+    """Telegram progress skips edits but deletes its returned message handle."""
     msg = FakeMessage(platform="telegram")
     prog = tool_progress.ToolProgress(msg)
     asyncio.run(prog.start())
@@ -251,9 +249,9 @@ def test_telegram_does_not_try_to_edit():
     prog._last_edit = 0
     asyncio.run(prog.update("shell", "any reasoning"))
     assert len(msg.channel.edited) == edits_before
-    # stop() should NOT try to fetch+delete (no id exposed)
+    # Delete the returned message directly; no fetch by ID is needed.
     asyncio.run(prog.stop())
-    assert msg.channel.deleted == []
+    assert msg.channel.deleted == msg.channel.sent
 
 
 def test_start_is_idempotent():

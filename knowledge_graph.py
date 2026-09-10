@@ -273,7 +273,7 @@ class KnowledgeGraph:
         nid = str(node_id or "").strip()[:160]
         if not nid:
             return ""
-        payload = json.dumps(props or {}, ensure_ascii=False)[:4000]
+        payload = json.dumps(props or {}, ensure_ascii=False)
         self._db.execute(
             """
             INSERT INTO graph_nodes (id, kind, name, props, updated_at)
@@ -293,7 +293,7 @@ class KnowledgeGraph:
         relation = str(rel or "").strip().upper()
         if not src_id or not dst_id or relation not in ALLOWED_RELS:
             return
-        payload = json.dumps(props or {}, ensure_ascii=False)[:2000]
+        payload = json.dumps(props or {}, ensure_ascii=False)
         self._db.execute(
             """
             INSERT INTO graph_edges (src, rel, dst, props, updated_at)

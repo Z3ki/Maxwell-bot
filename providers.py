@@ -1452,6 +1452,14 @@ class ProviderEmptyResponseError(RuntimeError):
     user_message = "The model returned an empty response after retries. Please try again in a moment."
 
 
+class _CompletionMessage(dict):
+    """Assistant payload with usage kept outside its wire-format keys."""
+
+    def __init__(self, message: dict, usage: dict):
+        super().__init__(message)
+        self.usage = dict(usage)
+
+
 class ProviderResult(str):
     """A ``str`` subclass carrying per-call ``tool_calls`` / ``usage``.
 
@@ -2237,6 +2245,9 @@ class OllamaProvider:
                     messages,
                     images=images,
                     media=media,
+                    on_tool_call_name=on_tool_call_name,
+                    on_token=on_token,
+                    custom_tool_calls=custom_tool_calls,
                     timeout=timeout,
                     prefer_fallback=prefer_fallback,
                     request_id=request_id,
@@ -2247,11 +2258,9 @@ class OllamaProvider:
 
         tool_calls = message.get("tool_calls") or []
         tool_calls = tool_calls if isinstance(tool_calls, list) else []
-        # Capture usage synchronously right after the await returns, before any
-        # further await can let a concurrent call overwrite shared state. This
-        # value is attached to the returned ProviderResult so the caller never
-        # has to read the racy shared ``self._last_usage``.
-        usage = dict(self._last_usage) if self._last_usage else {}
+        # Response cleanup may yield after generation, so shared _last_usage
+        # can already belong to another request by the time this await returns.
+        usage = dict(getattr(message, "usage", self._last_usage) or {})
         # Keep the shared stash for backward-compat callers / tests, but callers
         # should prefer the ProviderResult attributes (race-free).
         self._last_tool_calls = tool_calls
@@ -2331,8 +2340,13 @@ class OllamaProvider:
 
         if payload_media:
             target = None
-            for msg in chat_messages:
-                content = msg.get("content", "")
+            for msg in reversed(chat_messages):
+                content = msg.get("content") or ""
+                if isinstance(content, list):
+                    content = "\n".join(
+                        str(part.get("text") or "") for part in content
+                        if isinstance(part, dict) and part.get("type") == "text"
+                    )
                 if msg["role"] == "user" and (
                     "[User attached image" in content
                     or "[User attached media" in content
@@ -2349,7 +2363,11 @@ class OllamaProvider:
                         target = msg
                         break
             if target is not None:
-                parts = [{"type": "text", "text": target.get("content", "")}]
+                existing_content = target.get("content") or ""
+                parts = (
+                    list(existing_content) if isinstance(existing_content, list)
+                    else [{"type": "text", "text": existing_content}]
+                )
                 attached = 0
                 for m in payload_media:
                     mime = m["mime_type"]
@@ -2391,7 +2409,11 @@ class OllamaProvider:
         session = await self._get_session()
         last_error = None
         last_usage_error = None
-        has_media = bool(payload_media)
+        has_media = any(
+            isinstance(part, dict) and part.get("type") in {"image_url", "input_audio", "video_url"}
+            for msg in chat_messages
+            for part in (msg.get("content") if isinstance(msg.get("content"), list) else [])
+        )
         # Endpoints that rejected this call's media (text-only models 400 on
         # image_url; OpenRouter 404s on input audio). Steer retries away so a
         # GIF never dies on DeepSeek then Ling.
@@ -2797,6 +2819,7 @@ class OllamaProvider:
                             )
                             if attempt >= max_attempts:
                                 max_attempts = attempt + 1
+                            recovery_endpoint = endpoint
                             continue
                         required_temp = _required_temperature(resp.status, error_text)
                         if (
@@ -2816,6 +2839,7 @@ class OllamaProvider:
                             self._endpoint_temperatures[endpoint.name] = required_temp
                             if attempt >= max_attempts:
                                 max_attempts = attempt + 1
+                            recovery_endpoint = endpoint
                             continue
                         # Anything else non-2xx used to die right here with no
                         # failover, so a 404 "model unavailable for free" on the
@@ -3107,7 +3131,7 @@ class OllamaProvider:
                         len(message.get("tool_calls") or []),
                         self._last_usage.get("total_tokens", 0),
                     )
-                    return message
+                    return _CompletionMessage(message, usage)
             except asyncio.TimeoutError:
                 logger.warning(
                     "Provider timing timeout request_id=%s endpoint=%s elapsed_ms=%.1f timeout=%s",

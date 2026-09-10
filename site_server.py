@@ -108,17 +108,20 @@ def registry_path(data_dir) -> Path:
 
 
 # ── registry ──────────────────────────────────────────────────────────────
-def _read_registry(data_dir) -> dict[str, dict]:
+def _read_registry(data_dir, *, for_write: bool = False) -> dict[str, dict]:
     try:
         raw = json.loads(registry_path(data_dir).read_text(encoding="utf-8"))
-    except (
-        FileNotFoundError,
-        json.JSONDecodeError,
-        OSError,
-        UnicodeError,
-        ValueError,
-    ):
+    except FileNotFoundError:
         return {}
+    except (json.JSONDecodeError, OSError, UnicodeError, ValueError) as exc:
+        if for_write:
+            raise SiteServerError("refusing to overwrite unreadable site registry") from exc
+        return {}
+    if for_write and (
+        not isinstance(raw, dict)
+        or any(not SLUG_RE.fullmatch(str(k)) or not isinstance(v, dict) for k, v in raw.items())
+    ):
+        raise SiteServerError("refusing to overwrite malformed site registry")
     return (
         {
             str(k): v
@@ -138,7 +141,7 @@ def _write_entry(data_dir, slug: str, entry: dict | None) -> None:
     slug = _check_slug(slug)
     path = registry_path(data_dir)
     with FileLock(path, timeout=15.0):
-        reg = _read_registry(data_dir)
+        reg = _read_registry(data_dir, for_write=True)
         if entry is None:
             reg.pop(slug, None)
         else:
@@ -753,8 +756,8 @@ async def _start_unlocked(
         raise SiteServerError(
             "no app.py for this site — write the server first (it must listen on 0.0.0.0:$PORT)"
         )
+    previous = _read_registry(data_dir, for_write=True).get(slug) or {}
     await _ensure_image()
-    previous = get_entry(data_dir, slug) or {}
     if env is None:
         previous_env = previous.get("env")
         env = (

@@ -4,6 +4,8 @@ discord.py-self>=2.0.0     # Discord transport (self-bot)
 aiohttp>=3.14.0            # LLM provider + admin API HTTP
 aiofiles>=24.1.0           # async file IO
 python-dotenv>=1.0.0       # .env loading
-numpy>=2.5.1               # RAG vector math (cosine search)
+# NumPy 2.4+ requires Python 3.12; retain Python 3.11 development support.
+numpy>=2.3.5,<2.4; python_version < "3.12"
+numpy>=2.5.1; python_version >= "3.12"  # RAG vector math (cosine search)
 python-chess>=1.999        # chess_* tools: board state, legal moves, engine
 pillow>=10.0.0             # chess board PNG rendering (also used by HD image)

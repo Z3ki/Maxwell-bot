@@ -245,11 +245,10 @@ def test_send_message_explicit_channel_id():
         assert "__MESSAGE_SENT__" in res2
         assert bot.channels[123456789].sent == ["hello target channel", "hello again"]
 
-        # Test invalid channel_id
+        # An explicit invalid destination must not leak content into this chat.
         res3 = await tool.execute(origin_msg, content="nope", channel_id="invalid_id")
-        assert "__MESSAGE_SENT__" in res3
-        # When channel not found, fallback sends to origin_msg channel
-        assert origin_msg.replies == ["nope"]
+        assert res3.startswith("Error:")
+        assert origin_msg.replies == []
 
         # Test replying when target message is a SimpleNamespace without .reply
         from types import SimpleNamespace

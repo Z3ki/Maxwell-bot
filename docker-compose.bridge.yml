@@ -44,5 +44,5 @@ services:
       # Same host path Caddy serves. See docker-compose.yml.
       - ${MAXWELL_SITE_DIR:-./public/bot}:${MAXWELL_SITE_DIR:-/app/public/bot}
     ports:
-      - "8765:8765"
+      - "127.0.0.1:${MAXWELL_API_PORT:-8765}:${MAXWELL_API_PORT:-8765}"
     stop_grace_period: 20s

@@ -158,7 +158,7 @@ class BudgetPlan:
 def _coerce_int(value, default: int) -> int:
     try:
         return int(float(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -246,9 +246,12 @@ def allocate(
             # tier still in play rather than dropping it.
             for name in unsettled:
                 shares[name] = provisional[name]
-            shares[unsettled[0]] += max(
-                0, pool - sum(provisional[name] for name in unsettled)
-            )
+            remainder = max(0, pool - sum(provisional.values()))
+            for name in unsettled:
+                room = max(0, ceilings[name] - shares[name]) if ceilings[name] else remainder
+                extra = min(remainder, room)
+                shares[name] += extra
+                remainder -= extra
             break
 
         name, amount = settled

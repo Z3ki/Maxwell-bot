@@ -636,6 +636,8 @@ AUTONOMY_DISABLED_TOOLS = (
 def _truncate_keep_tail(text: str, budget: int) -> str:
     """Keep newest lines when context gets too fat. Front truncation betrayed us."""
     budget = max(0, _safe_int(budget, 0))
+    if not budget:
+        return ""
     if len(text) <= budget:
         return text
     prefix = "[older context truncated] ...\n"
@@ -790,12 +792,18 @@ class AutonomyStore(JsonStateStore):
     MAX_GOALS = 50  # cap to prevent unbounded growth
     MAX_GOAL_DESC_CHARS = 2000
 
+    async def _load_goals_for_update(self) -> list[dict]:
+        data = await asyncio.to_thread(_load_json_safe, self.goals_file, lambda: None)
+        if data is None and not self.goals_file.exists():
+            return []
+        goals = data.get("goals", []) if isinstance(data, dict) else None
+        if not isinstance(goals, list) or any(not isinstance(g, dict) for g in goals):
+            raise ValueError("autonomy_goals.json is corrupt; refusing to overwrite it")
+        return goals
+
     async def add_goal(self, description: str) -> dict:
         async with self._lock:
-            data = await asyncio.to_thread(_load_json_safe, self.goals_file, dict)
-            goals = data.get("goals", []) if isinstance(data, dict) else []
-            if not isinstance(goals, list):
-                goals = []
+            goals = await self._load_goals_for_update()
             if len(goals) >= self.MAX_GOALS:
                 logger.warning(
                     f"Goal limit reached ({self.MAX_GOALS}), rejecting new goal"
@@ -826,10 +834,7 @@ class AutonomyStore(JsonStateStore):
 
     async def remove_goal(self, goal_id: str) -> bool:
         async with self._lock:
-            data = await asyncio.to_thread(_load_json_safe, self.goals_file, dict)
-            goals = data.get("goals", []) if isinstance(data, dict) else []
-            if not isinstance(goals, list):
-                goals = []
+            goals = await self._load_goals_for_update()
             before = len(goals)
             goals = [g for g in goals if g.get("id") != goal_id]
             if len(goals) == before:
@@ -847,10 +852,7 @@ class AutonomyStore(JsonStateStore):
         they don't linger at last_acted_on=null forever.
         """
         async with self._lock:
-            data = await asyncio.to_thread(_load_json_safe, self.goals_file, dict)
-            goals = data.get("goals", []) if isinstance(data, dict) else []
-            if not isinstance(goals, list):
-                goals = []
+            goals = await self._load_goals_for_update()
             for g in goals:
                 if g.get("id") == goal_id:
                     g["active"] = False

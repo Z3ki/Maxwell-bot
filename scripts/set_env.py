@@ -19,11 +19,10 @@ def _format_value(value: str) -> str:
     """
     needs_quotes = (
         not value
-        or value.startswith(" ")
+        or value.startswith((" ", "#"))
         or value.endswith(" ")
         or "\t" in value
         or " #" in value
-        or value.startswith("#")
         or '"' in value
         or "'" in value
         or "\\" in value
@@ -41,7 +40,7 @@ def set_env(path: str | Path, key: str, value: str) -> None:
     Newlines are rejected because dotenv entries are one logical line in this project.
     """
 
-    if not _KEY_RE.match(key):
+    if not _KEY_RE.fullmatch(key):
         raise ValueError(f"invalid environment key: {key!r}")
     if "\n" in value or "\r" in value:
         raise ValueError(f"environment value for {key} must be one line")
@@ -50,9 +49,11 @@ def set_env(path: str | Path, key: str, value: str) -> None:
     text = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
     formatted_val = _format_value(value)
     line = f"{key}={formatted_val}"
-    pattern = re.compile(rf"^(?:export\s+)?{re.escape(key)}=.*$", re.MULTILINE)
-    # Use lambda replacement to prevent \1, \g<name> backreference expansion errors
-    new_text, count = pattern.subn(lambda m: line, text, count=1)
+    pattern = re.compile(
+        rf"^[ \t]*(?:export[ \t]+)?{re.escape(key)}[ \t]*=.*$", re.MULTILINE
+    )
+    # Every duplicate must change: dotenv uses the last assignment.
+    new_text, count = pattern.subn(lambda m: line, text)
     if count == 0:
         if new_text and not new_text.endswith("\n"):
             new_text += "\n"

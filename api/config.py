@@ -33,7 +33,7 @@ CORS_ORIGIN = os.getenv(
 API_HOST = os.getenv("MAXWELL_API_HOST", "127.0.0.1")
 API_PORT = max(1, min(_int_env_safe("MAXWELL_API_PORT", 8765), 65535))
 BASE_SITE_DIR = Path(
-    os.getenv("MAXWELL_SITE_DIR", APP_ROOT / "public" / "bot")
+    os.getenv("MAXWELL_SITE_DIR") or APP_ROOT / "public" / "bot"
 ).resolve()
 
 ADMIN_USER = os.getenv("MAXWELL_ADMIN_USER", "").strip()

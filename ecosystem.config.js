@@ -12,8 +12,10 @@
 
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 
 const appRoot = process.env.MAXWELL_APP_ROOT || __dirname;
+const logRoot = path.join(process.env.PM2_HOME || path.join(os.homedir(), ".pm2"), "logs");
 
 // Ollama is only managed here when this machine actually has it. A fresh
 // install that talks to a hosted endpoint would otherwise get a crash-looping
@@ -59,19 +61,12 @@ const apps = [
 		},
 		log_date_format: "YYYY-MM-DD HH:mm:ss Z",
 		merge_logs: true,
-		error_file: "/root/.pm2/logs/maxwell-bot-error.log",
-		out_file: "/root/.pm2/logs/maxwell-bot-out.log",
+		error_file: path.join(logRoot, "maxwell-bot-error.log"),
+		out_file: path.join(logRoot, "maxwell-bot-out.log"),
 		log_type: "json",
 	},
 	{
-		// Ollama serves the embedding model (qwen3-embedding) and the
-		// autonomy/background-agent model (AUTONOMY_BASE_URL points at
-		// localhost:11434). It runs here rather than under systemd because
-		// the packaged unit runs as user `ollama` with HOME=/usr/share/ollama,
-		// whose model store is empty — the 2.3G of pulled models live in
-		// /root/.ollama and /root is 0700. pm2 runs as root, so it sees them.
-		// The systemd unit is stopped and disabled; don't re-enable it
-		// without moving the model store first.
+		// Ollama is optional and uses the invoking user's model store.
 		name: "ollama",
 		script: "ollama",
 		args: "serve",
@@ -84,7 +79,7 @@ const apps = [
 		kill_signal: "SIGTERM",
 		env: {
 			// The model store lives under the invoking user's HOME.
-			HOME: process.env.HOME || "/root",
+			HOME: os.homedir(),
 			OLLAMA_ORIGINS: "*",
 		},
 		log_date_format: "YYYY-MM-DD HH:mm:ss Z",
@@ -114,8 +109,8 @@ const apps = [
 		},
 		log_date_format: "YYYY-MM-DD HH:mm:ss Z",
 		merge_logs: true,
-		error_file: "/root/.pm2/logs/maxwell-api-error.log",
-		out_file: "/root/.pm2/logs/maxwell-api-out.log",
+		error_file: path.join(logRoot, "maxwell-api-error.log"),
+		out_file: path.join(logRoot, "maxwell-api-out.log"),
 		log_type: "json",
 	},
 ];

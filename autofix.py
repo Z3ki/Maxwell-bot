@@ -16,6 +16,7 @@ Constraints, all enforced in code:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -55,12 +56,13 @@ AUTOFIXABLE_TYPES = (
 )
 
 _SECRET_KEY_RE = re.compile(
-    r"(?i)^(api[_-]?key|token|password|secret|authorization|cookie|session|"
+    r"(?i)^(?:[a-z0-9]+[_-])*(api[_-]?key|token|password|secret|authorization|cookie|session|"
     r"passwd|private[_-]?key|access[_-]?token|refresh[_-]?token|bearer)$"
 )
 _SECRET_VALUE_RE = re.compile(
     r"(?i)\b(?:sk-[A-Za-z0-9_\-]{8,}|Bearer\s+[A-Za-z0-9._\-]{8,}"
-    r"|(?:api[_-]?key|token|password|secret)\s*[=:]\s*\S+)"
+    r"|(?:[a-z0-9]+[_-])*(?:api[_-]?key|token|password|secret)[\"']?\s*[=:]\s*"
+    r"(?:\"[^\"]*\"|'[^']*'|\S+))"
 )
 
 _BLOCKED_PATH_PARTS = (
@@ -99,6 +101,14 @@ def is_under_pytest() -> bool:
     return bool(os.environ.get("PYTEST_CURRENT_TEST"))
 
 
+def redact_diagnostics(text: str) -> str:
+    """Keep configured credentials out of model prompts and public crash reports."""
+    for key, value in os.environ.items():
+        if _SECRET_KEY_RE.match(key) and len(value) >= 8:
+            text = text.replace(value, "[redacted]")
+    return _SECRET_VALUE_RE.sub("[redacted]", text)
+
+
 def sanitize_tool_args(value: Any, *, _depth: int = 0) -> Any:
     """Drop secrets and trim bulky bodies before they hit a prompt or a PR."""
     if _depth > 6:
@@ -115,7 +125,7 @@ def sanitize_tool_args(value: Any, *, _depth: int = 0) -> Any:
     if isinstance(value, (list, tuple)):
         return [sanitize_tool_args(v, _depth=_depth + 1) for v in list(value)[:20]]
     if isinstance(value, str):
-        text = _SECRET_VALUE_RE.sub("[redacted]", value)
+        text = redact_diagnostics(value)
         limit = 200 if _depth == 0 else 400
         if len(text) > limit:
             return text[:limit] + f"…[{len(value)} chars]"
@@ -180,8 +190,14 @@ def allowed_relpath(rel: str, *, repo: Path = REPO_ROOT) -> Path | None:
         return None
     candidate = (repo / raw).resolve()
     try:
-        candidate.relative_to(repo.resolve())
+        resolved_rel = candidate.relative_to(repo.resolve())
     except ValueError:
+        return None
+    if resolved_rel.as_posix().lower().startswith(".env"):
+        return None
+    if any(part in _BLOCKED_PATH_PARTS for part in resolved_rel.parts):
+        return None
+    if not candidate.name.endswith(_ALLOWED_SUFFIXES):
         return None
     return candidate
 
@@ -264,8 +280,10 @@ def apply_patch(patch: dict[str, Any], *, root: Path) -> list[str]:
             raise ValueError(f"{rel} exceeds {MAX_FILE_CHARS} chars")
         # New files are for tests reproducing the bug. Refuse overwriting
         # existing production modules so a sloppy patch cannot blank bot.py.
-        if dest.exists() and not rel.startswith("tests/"):
+        if dest.exists():
             raise ValueError(f"refusing to overwrite existing {rel}")
+        if dest.relative_to(root.resolve()).parts[0] != "tests":
+            raise ValueError(f"new files must be under tests/: {rel}")
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(content, encoding="utf-8")
         total += len(content)
@@ -423,7 +441,7 @@ def build_prompt(
     )
     return [
         {"role": "system", "content": system},
-        {"role": "user", "content": user},
+        {"role": "user", "content": redact_diagnostics(user)},
     ]
 
 
@@ -514,29 +532,51 @@ async def _generate_patch(bot: Any, messages: list[dict[str, str]]) -> str:
     return str(response or "")
 
 
-async def _run_pytest(worktree: Path, rel_tests: list[str]) -> str | None:
+async def _run_pytest(worktree: Path, rel_tests: list[str]) -> str:
+    from bot_tools import _run_docker_cmd
+    from utils import docker_bind_path
+
     tests = [p for p in rel_tests if p.startswith("tests/") and p.endswith(".py")]
     if not tests:
-        return None
-    proc = await asyncio.create_subprocess_exec(
-        "python3",
-        "-m",
-        "pytest",
-        *tests,
-        "-q",
-        "--tb=short",
-        cwd=str(worktree),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
+        raise RuntimeError("autofix requires a regression test before publishing")
+    if any(allowed_relpath(p, repo=worktree) is None for p in tests):
+        raise RuntimeError("autofix test path is not allowed")
+    image = os.getenv("MAXWELL_AUTOFIX_TEST_IMAGE", "").strip() or "maxwell:local"
+    import uuid
+
+    name = f"maxwell-autofix-test-{uuid.uuid4().hex}"
+    # Test imports execute model-written code. Copy only the worktree into an
+    # ephemeral, unprivileged container, never the live checkout or its secrets.
+    runner = (
+        "import os, shutil, sys; "
+        "shutil.copytree('/source', '/tmp/work', "
+        "ignore=shutil.ignore_patterns('.git', '.env*', '.venv', 'data', 'logs')); "
+        "os.chdir('/tmp/work'); "
+        "os.execv(sys.executable, [sys.executable, '-m', 'pytest', *sys.argv[1:]])"
     )
     try:
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
+        (stdout, stderr), code = await _run_docker_cmd(
+            "run", "--rm", "--pull=never", "--name", name,
+            "--network", "none", "--read-only", "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges:true", "--user", "65534:65534",
+            "--pids-limit", "128", "--memory", "1g", "--cpus", "1",
+            "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m,mode=1777",
+            "--mount", f"type=bind,src={docker_bind_path(worktree)},dst=/source,readonly",
+            "-e", "HOME=/tmp", "-e", "DATA_DIR=/tmp/data",
+            "-e", "MAXWELL_ENV_FILE=/dev/null", "-e", "MAXWELL_AUTOFIX=false",
+            "-e", "PYTHONDONTWRITEBYTECODE=1",
+            "--entrypoint", "python3", image, "-c", runner,
+            *tests, "-q", "--tb=short", "-o", "cache_dir=/tmp/pytest-cache",
+            timeout=120, output_limit=64_000,
+        )
     except asyncio.TimeoutError:
-        proc.kill()
-        raise RuntimeError("autofix unit test timed out") from None
-    output = (stdout or b"").decode("utf-8", errors="replace")
-    if proc.returncode != 0:
-        raise RuntimeError(f"autofix unit test failed:\n{output[-2000:]}")
+        raise RuntimeError("autofix isolated unit test timed out") from None
+    finally:
+        with contextlib.suppress(Exception):
+            await _run_docker_cmd("rm", "-f", name, timeout=15, output_limit=4096)
+    output = (stdout + stderr).decode("utf-8", errors="replace")
+    if code != 0:
+        raise RuntimeError(f"autofix isolated unit test failed:\n{output[-2000:]}")
     return output[-500:]
 
 
@@ -650,7 +690,7 @@ def _pr_body(
     ]
     if test_output:
         parts.extend(["", "### pytest", "```", test_output, "```"])
-    return "\n".join(parts).strip() + "\n"
+    return redact_diagnostics("\n".join(parts).strip() + "\n")
 
 
 async def run_autofix(
@@ -665,8 +705,8 @@ async def run_autofix(
     token = _IN_AUTOFIX.set(True)
     worktree: Path | None = None
     branch = branch_name(type(exc).__name__)
-    live_branch = current_branch(REPO_ROOT)
     try:
+        live_branch = current_branch(REPO_ROOT)
         now = time.time()
         state = _load_state(bot)
         fingerprints = dict(state.get("fingerprints") or {})

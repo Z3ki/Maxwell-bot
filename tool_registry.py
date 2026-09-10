@@ -122,7 +122,9 @@ def _summarize_params(params: dict[str, Any]) -> dict[str, Any]:
             out[k] = f"[{len(v)} items]"
         else:
             out[k] = v
-    return out
+    from autofix import sanitize_tool_args
+
+    return sanitize_tool_args(out)
 
 
 def extract_reasoning(params: dict[str, Any]) -> tuple[str, dict[str, Any]]:

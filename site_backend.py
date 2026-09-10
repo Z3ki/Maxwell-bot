@@ -83,20 +83,29 @@ def _reject_json_constant(value: str):
     raise ValueError(f"non-finite JSON constant {value!r}")
 
 
-def _read(path: Path) -> dict[str, Any]:
+def _read(path: Path, *, for_write: bool = False) -> dict[str, Any]:
     try:
         raw = json.loads(
             path.read_text(encoding="utf-8"),
             parse_constant=_reject_json_constant,
         )
-    except (
-        FileNotFoundError,
-        json.JSONDecodeError,
-        OSError,
-        UnicodeError,
-        ValueError,
-    ):
+    except FileNotFoundError:
         return _blank()
+    except (json.JSONDecodeError, OSError, UnicodeError, ValueError) as exc:
+        if for_write:
+            raise SiteBackendError("refusing to overwrite unreadable site store", 409) from exc
+        return _blank()
+    if for_write and (
+        not isinstance(raw, dict)
+        or not isinstance(raw.get("kv"), dict)
+        or not isinstance(raw.get("collections"), dict)
+        or any(
+            not isinstance(items, list)
+            or any(not isinstance(item, dict) for item in items)
+            for items in raw["collections"].values()
+        )
+    ):
+        raise SiteBackendError("refusing to overwrite malformed site store", 409)
     if not isinstance(raw, dict):
         return _blank()
     kv = raw.get("kv")
@@ -154,7 +163,7 @@ def kv_set(data_dir, slug: str, key: str, value: Any) -> dict[str, Any]:
         raise SiteBackendError(f"value too large (max {MAX_VALUE_BYTES} bytes)")
     path = store_path(data_dir, slug)
     with FileLock(path, timeout=10.0):
-        store = _read(path)
+        store = _read(path, for_write=True)
         if key not in store["kv"] and len(store["kv"]) >= MAX_KEYS:
             raise SiteBackendError(f"too many keys (max {MAX_KEYS})")
         store["kv"][key] = value
@@ -166,7 +175,7 @@ def kv_delete(data_dir, slug: str, key: str) -> bool:
     key = _check_name(key, "key")
     path = store_path(data_dir, slug)
     with FileLock(path, timeout=10.0):
-        store = _read(path)
+        store = _read(path, for_write=True)
         existed = key in store["kv"]
         store["kv"].pop(key, None)
         _commit(path, store)
@@ -184,7 +193,7 @@ def kv_bump(data_dir, slug: str, key: str, by: float = 1) -> float:
         raise SiteBackendError("`by` must be a finite number")
     path = store_path(data_dir, slug)
     with FileLock(path, timeout=10.0):
-        store = _read(path)
+        store = _read(path, for_write=True)
         try:
             current = float(store["kv"].get(key) or 0)
         except (TypeError, ValueError):
@@ -235,7 +244,7 @@ def items_add(data_dir, slug: str, name: str, data: Any) -> dict:
         raise SiteBackendError(f"item too large (max {MAX_VALUE_BYTES} bytes)")
     path = store_path(data_dir, slug)
     with FileLock(path, timeout=10.0):
-        store = _read(path)
+        store = _read(path, for_write=True)
         cols = store["collections"]
         if name not in cols and len(cols) >= MAX_COLLECTIONS:
             raise SiteBackendError(f"too many collections (max {MAX_COLLECTIONS})")
@@ -262,7 +271,7 @@ def items_delete(
     name = _check_name(name, "collection")
     path = store_path(data_dir, slug)
     with FileLock(path, timeout=10.0):
-        store = _read(path)
+        store = _read(path, for_write=True)
         bucket = store["collections"].get(name) or []
         before = len(bucket)
         if all_items:

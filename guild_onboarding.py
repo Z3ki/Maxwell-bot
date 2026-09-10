@@ -180,15 +180,15 @@ def fallback_choice(prompts: list[dict]) -> dict[str, list[str]]:
 
 
 def parse_choice_json(text: str, prompts: list[dict]) -> dict[str, list[str]]:
-    """Pull ``{"picks": [{"prompt_id", "option_ids"}]}`` out of a model reply.
+    """Parse model picks; return {} for an unusable reply."""
+    return _parse_choice_json(text, prompts) or {}
 
-    Tolerates prose around the JSON and a bare list instead of the
-    wrapper object. Returns {} when nothing parses, so callers can fall
-    back rather than submit garbage.
-    """
+
+def _parse_choice_json(text: str, prompts: list[dict]) -> dict[str, list[str]] | None:
+    """Return None for invalid replies, distinct from declining optional picks."""
     raw = (text or "").strip()
     if not raw:
-        return {}
+        return None
     # Strip ```json fences before hunting for the object.
     raw = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", raw).strip()
     payload: Any = None
@@ -201,13 +201,15 @@ def parse_choice_json(text: str, prompts: list[dict]) -> dict[str, list[str]]:
         except (ValueError, TypeError):
             continue
     if payload is None:
-        return {}
+        return None
     if isinstance(payload, dict):
-        picks = payload.get("picks") or payload.get("responses") or []
+        picks = payload.get("picks", payload.get("responses"))
     elif isinstance(payload, list):
         picks = payload
     else:
-        return {}
+        return None
+    if not isinstance(picks, list):
+        return None
     choice: dict[str, list[str]] = {}
     for entry in picks:
         if not isinstance(entry, dict):
@@ -216,18 +218,22 @@ def parse_choice_json(text: str, prompts: list[dict]) -> dict[str, list[str]]:
         oids = entry.get("option_ids") or entry.get("options") or []
         if isinstance(oids, (str, int)):
             oids = [oids]
+        if not isinstance(oids, list):
+            continue
         if pid:
             choice[pid] = [str(o) for o in oids]
     return clamp_choice(choice, prompts)
 
 
 def _first_json_blob(text: str) -> str:
-    """Longest brace/bracket-balanced blob in the text, or ''."""
-    for opener, closer in (("{", "}"), ("[", "]")):
-        start = text.find(opener)
-        end = text.rfind(closer)
-        if start != -1 and end > start:
-            return text[start : end + 1]
+    """First valid JSON object/list embedded in prose, respecting strings."""
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"[\[{]", text):
+        try:
+            _value, end = decoder.raw_decode(text, match.start())
+        except ValueError:
+            continue
+        return text[match.start():end]
     return ""
 
 
@@ -378,18 +384,25 @@ async def run_onboarding(
     except Exception as e:
         result["summary"] = f"onboarding unavailable: {type(e).__name__}: {e}"
         return result
-    if not (data or {}).get("enabled", True):
+    if not isinstance(data, dict):
+        result["summary"] = "onboarding unavailable: invalid response payload"
+        return result
+    if not data.get("enabled", True):
         result["summary"] = "no onboarding (disabled for this server)"
         return result
-    prompts = normalize_prompts(data, include_post_join=include_post_join)
+    try:
+        prompts = normalize_prompts(data, include_post_join=include_post_join)
+        answered = answered_option_ids(data)
+    except (TypeError, ValueError, AttributeError):
+        result["summary"] = "onboarding unavailable: invalid prompts or responses"
+        return result
     result["prompts"] = prompts
     if not prompts:
         result["summary"] = "no onboarding prompts to answer"
         return result
-    answered = answered_option_ids(data)
     result["already_selected"] = sorted(answered)
 
-    choice: dict[str, list[str]] = {}
+    choice: dict[str, list[str]] | None = None
     if ask_llm is not None:
         try:
             reply = await ask_llm(
@@ -402,8 +415,8 @@ async def run_onboarding(
                     bot_name=bot_name,
                 )
             )
-            choice = parse_choice_json(reply, prompts)
-            if choice:
+            choice = _parse_choice_json(reply, prompts)
+            if choice is not None:
                 result["picked_by"] = "model"
             else:
                 logger.warning(
@@ -413,7 +426,7 @@ async def run_onboarding(
                 )
         except Exception as e:
             logger.warning("onboarding picker failed for %s: %s", guild_name, e)
-    if not choice:
+    if choice is None:
         choice = fallback_choice(prompts)
         result["picked_by"] = "fallback"
     result["choice"] = choice

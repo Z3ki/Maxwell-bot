@@ -13,8 +13,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_ROOT = Path(os.getenv("MAXWELL_APP_ROOT", ROOT))
-ENV_FILE = Path(os.getenv("MAXWELL_ENV_FILE", APP_ROOT / ".env"))
+APP_ROOT = Path(os.getenv("MAXWELL_APP_ROOT") or ROOT)
+ENV_FILE = Path(os.getenv("MAXWELL_ENV_FILE") or APP_ROOT / ".env")
 
 # .env is the source of truth — same contract as config.py. PM2 caches env
 # from first start and never re-reads .env, so we load it here with

@@ -189,6 +189,7 @@ class ToolProgress:
         self._current_tool: str = ""
         self._tool_streaming = False
         self._edits_made: int = 0
+        self._edits_disabled = False
         self._deferred_task: asyncio.Task | None = None
         # Rolling buffer of streaming text (the last thing the model said).
         # We just append + cap. render() slices the tail.
@@ -219,7 +220,12 @@ class ToolProgress:
         if self._platform != "discord":
             try:
                 self._posted = True
-                await self._post_reply("working on it…")
+                posted = await self._post_reply("working on it…")
+                if self._stopped:
+                    if posted is not None:
+                        await self._bg_delete(posted)
+                else:
+                    self._posted = posted
             except Exception as e:  # noqa: BLE001
                 logger.debug("Telegram progress post failed: %s", e)
                 self._posted = None
@@ -421,7 +427,7 @@ class ToolProgress:
 
     async def _flush(self, content: str) -> None:
         async with self._lock:
-            if self._stopped or not self._posted:
+            if self._stopped or not self._posted or self._edits_disabled:
                 return
             now = time.monotonic()
             first_flush = self._edits_made == 0 or not self._first_tick_done
@@ -456,7 +462,7 @@ class ToolProgress:
                     )
                     return
                 logger.debug("Progress edit failed (%s) — disabling further edits", e)
-                self._posted = None
+                self._edits_disabled = True
 
     def _render(self) -> str:
         """Render the progress line. Up to two lines:
@@ -593,7 +599,7 @@ class ToolProgress:
             self._deferred_task = None
         if not self._posted:
             return
-        if self._platform != "discord":
+        if self._posted is True:
             self._posted = None
             return
         posted = self._posted
@@ -658,7 +664,8 @@ class ToolProgress:
         instead of the whole reply.
         """
         try:
-            await posted.edit(content=content)
+            async with self._lock:
+                await posted.edit(content=content)
             return
         except Exception as e:  # noqa: BLE001
             logger.warning(

@@ -34,6 +34,7 @@ import shutil
 import signal
 import socket
 import time
+import tempfile
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -159,10 +160,20 @@ def page_url(site_base: str, slug: str, path: str | None = None) -> str:
     Raises ValueError if the path would leave the site.
     """
     slug = str(slug or "").strip().strip("/")
-    if not slug:
-        raise ValueError("name is required")
+    if not re.fullmatch(r"[a-z0-9-]{2,30}", slug):
+        raise ValueError("bad site name")
     root = f"{str(site_base).rstrip('/')}/{slug}/"
     raw = str(path or "").strip()
+    decoded_path = urlparse(raw).path
+    for _ in range(8):
+        if ".." in decoded_path.replace("\\", "/").split("/"):
+            raise ValueError("bad path")
+        decoded = unquote(decoded_path)
+        if decoded == decoded_path:
+            break
+        decoded_path = decoded
+    else:
+        raise ValueError("path is encoded too many times")
     if not raw or raw in {".", "/", "./"}:
         return root
     allowed = urlparse(root)
@@ -580,9 +591,7 @@ def _new_profile_dir() -> str:
     """
     root = profile_root()
     os.makedirs(root, exist_ok=True)
-    path = os.path.join(root, f"probe-{os.getpid()}-{int(time.time() * 1000)}")
-    os.makedirs(path, exist_ok=True)
-    return path
+    return tempfile.mkdtemp(prefix=f"probe-{os.getpid()}-", dir=root)
 
 
 # Injected before navigation. Obscura does not emit Runtime.consoleAPICalled

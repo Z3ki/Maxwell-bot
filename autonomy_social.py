@@ -32,6 +32,7 @@ without a Discord connection.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable, Sequence
@@ -124,10 +125,11 @@ class FloorSettings:
 
         def _num(key: str, default: float) -> float:
             try:
-                val = float(control.get(key, default) or default)
-            except (TypeError, ValueError):
+                raw = control.get(key, default)
+                val = float(default if raw is None or raw == "" else raw)
+            except (TypeError, ValueError, OverflowError):
                 return float(default)
-            return val if val >= 0 else float(default)
+            return val if math.isfinite(val) and val >= 0 else float(default)
 
         cooldown = _num("autonomy_floor_cooldown_seconds", cls.cooldown_seconds)
         legacy = _num("autonomy_recent_reply_block_seconds", 0.0)

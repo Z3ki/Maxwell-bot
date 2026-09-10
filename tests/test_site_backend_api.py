@@ -8,6 +8,7 @@ enforced, and the rest of the admin API still locked.
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -56,6 +57,10 @@ class FakeRequest:
         self.can_read_body = body is not None
         self.content = _FakeContent(body)
         self.match_info = match or {}
+        self.rel_url = SimpleNamespace(
+            raw_path=f"/bot/{self.match_info.get('slug', '')}/api/{self.match_info.get('path', '')}",
+            raw_query_string=self.query_string,
+        )
         self.headers = {}
         self.remote = "203.0.113.9"
         self.method = method
@@ -173,9 +178,7 @@ def test_items_list_unknown_cursor_is_empty(data_dir):
 
 
 def test_items_list_after_returns_next_page_not_newest(data_dir):
-    ids = []
-    for n in range(5):
-        ids.append(site_backend.items_add(data_dir, "guest", "paged", n)["id"])
+    ids = [site_backend.items_add(data_dir, "guest", "paged", n)["id"] for n in range(5)]
     page = site_backend.items_list(data_dir, "guest", "paged", limit=2, after=ids[0])
     assert [i["data"] for i in page] == [1, 2]
     newest = site_backend.items_list(data_dir, "guest", "paged", limit=2)
