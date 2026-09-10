@@ -1884,9 +1884,22 @@ class OllamaProvider:
 
     def _headers(self, endpoint: ProviderEndpoint = None) -> dict[str, str]:
         api_key = self.api_key if endpoint is None else endpoint.api_key
-        if not api_key:
-            return {}
-        return {"Authorization": f"Bearer {api_key}"}
+        headers: dict[str, str] = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        # OpenCode Go 400s chat completions without x-opencode-session
+        # (MissingSessionID, enforced 2026-09-06). A stable per-install id
+        # is enough; catalog GET /models does not require it.
+        base = (self.base_url if endpoint is None else endpoint.base_url) or ""
+        if "opencode.ai" in base.lower():
+            session = (
+                os.getenv("OPENCODE_SESSION")
+                or os.getenv("OLLAMA_OPENCODE_SESSION")
+                or "maxwell"
+            ).strip()
+            if session:
+                headers["x-opencode-session"] = session
+        return headers
 
     def _endpoint_named(self, name: str) -> ProviderEndpoint | None:
         for ep in self._endpoints:

@@ -168,6 +168,25 @@ def test_request_id_correlates_actual_fallback_without_changing_payload(caplog):
     assert all("request_id" not in payload for payload in session.payloads)
 
 
+def test_opencode_go_headers_include_session_id(monkeypatch):
+    monkeypatch.setenv("OPENCODE_SESSION", "maxwell-discord")
+    provider = OllamaProvider(
+        "https://opencode.ai/zen/go/v1",
+        "deepseek-flash",
+        10,
+        0.5,
+        api_key="sk-test",
+        fallback_base_url="http://127.0.0.1:8317/v1",
+        fallback_model="grok",
+        fallback_api_key="ignored",
+    )
+    go = provider._headers(provider._endpoints[0])
+    assert go["Authorization"] == "Bearer sk-test"
+    assert go["x-opencode-session"] == "maxwell-discord"
+    local = provider._headers(provider._endpoints[1])
+    assert "x-opencode-session" not in local
+
+
 def test_request_id_survives_tool_protocol_fallback(monkeypatch):
     provider = OllamaProvider("http://example.test", "model", 10, 0.5)
     calls = []
