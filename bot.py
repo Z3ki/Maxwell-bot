@@ -2472,9 +2472,9 @@ TOOL_PROTOCOL = (
     "put the goal, decisions so far, and what to do next. Use thread_control to add "
     "context, rename, archive, or list. Do not open a questionnaire thread; brief "
     "thread-you and work there.\n"
-    "LONG TASKS GO TO BACKGROUND: if a job takes many tool calls (full site build, deep research), "
+    "LONG TASKS GO TO BACKGROUND: if a job takes many tool calls (site, research, images, code, anything long), "
     "call spawn_background(goal=...) FIRST, then send_message ONE short ack line naming the job id "
-    "and end the turn. Never start a long build inline when you could spawn it.\n"
+    "and end the turn. Never start a long job inline when you could spawn it.\n"
     "chess: you play your own moves. chess_move returns legal moves annotated with tactical "
     "value — read it, pick strongest, pass as move=. Nothing plays for you. Play to win.\n"
     "Sites, games, code, search, plugins and chat are open to everyone. "
@@ -7961,7 +7961,7 @@ class MaxwellBot(commands.Bot):
                 # the live turn ends at once and the job pings back when done.
                 _goal = (args or "").strip()
                 if not _goal:
-                    await message.channel.send("usage: `,bg <what to build/do>`")
+                    await message.channel.send("usage: `,bg <what to do>`")
                 else:
                     try:
                         _job = self.bg_jobs.create(

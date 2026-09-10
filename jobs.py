@@ -1,6 +1,6 @@
-"""Background sub-agent jobs for long tasks (sites, builds, research).
+"""Background sub-agent jobs for long tasks (sites, research, images, code).
 
-The problem: a site build holds the channel's ``ReplyQueue`` turn (and one
+The problem: a long job holds the channel's ``ReplyQueue`` turn (and one
 of only two global LLM slots) for minutes, so everyone else in the room
 queues behind it and the bot looks channel-locked.
 
@@ -9,7 +9,7 @@ The live turn ends immediately with a one-line ack naming the job id, and
 the real work runs detached in :func:`run_background_job` with EXTENDED
 budgets (more thinking, more output, longer timeout than a live turn).
 When the job finishes it mentions the requester in the origin channel with
-the result data. Progress lands in a ``build: <goal>`` thread.
+the result data. Progress lands in a ``job: <goal>`` thread.
 
 Additive by design: this module never monkey-patches the bot. It reuses the
 bot's own seams (``_generate_response``, ``_build_openai_tools``,
@@ -374,10 +374,11 @@ class SpawnBackgroundTool(Tool):
 
     def get_description(self):
         return (
-            "BACKGROUND job for a long task (site, research, multi-step). "
-            "Returns a job id; then send_message one short ack with that id. "
-            "Detached, bigger budgets, replies when done. Params: goal (required), "
-            "context (optional spec). Then send_message: ONE short ack with the job id — nothing else."
+            "BACKGROUND job for any long task (site, research, images, code, "
+            "multi-step). Returns a job id; then send_message one short ack with "
+            "that id. Detached, bigger budgets, replies when done. Params: goal "
+            "(required), context (optional spec). Then send_message: ONE short "
+            "ack with the job id — nothing else."
         )
 
     async def execute(self, message: Any, goal: str | None = None, context: str | None = None, **kwargs: Any) -> str:
@@ -391,7 +392,7 @@ class SpawnBackgroundTool(Tool):
         if not raw_goal:
             raw_goal = str(getattr(message, "content", "") or "").strip()[:500]
         if not raw_goal:
-            return "ERROR: no goal given. Pass goal='...' describing what to build."
+            return "ERROR: no goal given. Pass goal='...' describing what to do."
         author = getattr(message, "author", None)
         channel = getattr(message, "channel", None)
         guild = getattr(message, "guild", None)
@@ -445,11 +446,16 @@ _PROGRESS_MARKERS = (
     "backend server live",
     "deployed",
     "restarted",
+    "generated ",
+    "saved ",
+    "downloaded",
+    "hosted ",
+    "search results",
 )
 
 
 def _looks_like_progress(tool_results: Any) -> bool:
-    """Did this step change a site file? Shell greps and reads don't count."""
+    """Did this step produce real work? Greps and re-reads don't count."""
     blob = " ".join(str(r or "") for r in list(tool_results or [])[:4]).lower()
     return any(marker in blob for marker in _PROGRESS_MARKERS)
 
@@ -479,8 +485,32 @@ _VAGUE_FINAL_RE = re.compile(
 )
 
 
+def _worker_system_body(job_id: str, goal: str, context: str = "") -> str:
+    """Instructions for a detached worker — tool choice follows the goal."""
+    extra = f"Context: {context}\n" if str(context or "").strip() else ""
+    return (
+        f"BACKGROUND job `{job_id}`. Channel already acked — don't narrate. "
+        "No channel posts (no send_message). Only your FINAL line is delivered.\n"
+        f"Goal: {goal}\n"
+        f"{extra}"
+        "Work:\n"
+        "1. Pick tools that match the goal. Sites: create_site / edit_site / host_file "
+        "(site_server only if a backend is needed). Research: web_search / fetch_url. "
+        "Images: hd_image / image_generator. Code/files: shell / host_file. "
+        "Do not force a website unless the goal is a site.\n"
+        "2. If this IS a site: static HTML/CSS/JS is fine. Relative API paths "
+        "(`api/notes`, never `/api/...`) only when a backend is needed. Patch live "
+        "files via tools. One route = one definition; don't remount the same path.\n"
+        "3. Do the whole job. No placeholders.\n"
+        "Last message: one concrete result line, not 'done' or 'finished'. "
+        "If you produced a real URL: `Built <title>: <url> — <one line>` with the "
+        "title and URL from tools. Otherwise the answer or artifact (path, summary, "
+        "image, findings) — never invent a URL. On failure: `FAILED: <reason>`."
+    )
+
+
 def _delivery_line(final_text: Any, job_id: str) -> str:
-    """ONE short line + single URL. No ping, no wall — details live in the thread."""
+    """ONE short result line. Append a URL only when the worker produced one."""
     first = ""
     for line in str(final_text or "").splitlines():
         line = line.strip()
@@ -534,8 +564,9 @@ async def _llm_delivery_line(bot: Any, final_text: Any, job_id: str, job_goal: s
         raw = str(final_text or "").strip()[:2000] or fallback
         goal = re.sub(r"\s+", " ", str(job_goal or "")).strip()[:200]
         prompt = (
-            "One Discord line, <200 chars. Keep the real title and URL; "
-            "no placeholders, extra links, job-id prefix, or thread talk.\n"
+            "One Discord line, <200 chars. Keep the real result. Include a URL "
+            "only if the result has one; never invent a link. No placeholders, "
+            "extra links, job-id prefix, or thread talk.\n"
             f"Result: {raw}"
             + (f"\nGoal: {goal}" if goal else "")
         )
@@ -641,13 +672,13 @@ async def run_background_job(bot: Any, job_id: str) -> None:
     try:
         if hasattr(orig_message, "create_thread"):
             thread = await orig_message.create_thread(
-                name=f"build: {_short(job.goal, 40)}", auto_archive_duration=60
+                name=f"job: {_short(job.goal, 40)}", auto_archive_duration=60
             )
         elif hasattr(channel, "create_thread"):
             import discord  # local import: no hard dep at module load
 
             thread = await channel.create_thread(
-                name=f"build: {_short(job.goal, 40)}",
+                name=f"job: {_short(job.goal, 40)}",
                 auto_archive_duration=60,
                 type=discord.ChannelType.public_thread,
                 message=orig_message,
@@ -723,19 +754,7 @@ async def run_background_job(bot: Any, job_id: str) -> None:
             "role": "system",
             "content": (
                 f"{base_personality}\n\n"
-                f"BACKGROUND job `{job.id}`. Channel already acked — don't narrate. "
-                "No channel posts (no send_message). Only your FINAL line is delivered.\n"
-                f"Goal: {job.goal}\n"
-                + (f"Context: {job.context}\n" if job.context else "")
-                + "Work:\n"
-                "1. Tools first (create_site / edit_site / host_file; site_server only if the goal needs a backend; shell only if no tool fits).\n"
-                "2. Sites may be static HTML/CSS/JS. Use site_server and relative API paths "
-                "(`api/notes`, never `/api/...`) only when the goal needs a backend.\n"
-                "3. Patch live files via tools. No shadow copies under the workspace root.\n"
-                "4. One route = one definition; don't remount the same path.\n"
-                "Last message MUST be `Built <title>: <url> — <one line>` with the real "
-                "title+URL from tools — never a placeholder, 'done', or 'finished'. "
-                "On failure: `FAILED: <reason>`.\n\n"
+                f"{_worker_system_body(job.id, job.goal, job.context)}\n\n"
                 f"{tool_prompt}"
             ).strip(),
         },
@@ -854,15 +873,15 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                     {
                         "role": "user",
                         "content": (
-                            "No site file changed in 15 steps. Stop grepping/re-reading. "
-                            "Next: edit_site write (site_server only if this goal needs a backend). "
-                            "Then the single-line summary."
+                            "No real progress in 15 steps. Stop grepping/re-reading. "
+                            "Finish the goal with the matching tools, then one concrete "
+                            "result line (include a URL only if you produced one)."
                         ),
                     }
                 )
                 await _post_thread(
                     thread,
-                    f"step {step + 1}: nudge — no file change in 15 steps, forcing converge.",
+                    f"step {step + 1}: nudge — no progress in 15 steps, forcing converge.",
                 )
             await _post_thread(
                 thread,
@@ -911,7 +930,7 @@ async def run_background_job(bot: Any, job_id: str) -> None:
         manager.mark(job.id, progress="delivering")
 
         # Deliver: LLM-written reply to the ORIGINAL message (ping on).
-        # Full result already lives in the build thread; the channel gets one line.
+        # Full result already lives in the job thread; the channel gets one line.
         try:
             body = await _llm_delivery_line(bot, final_text, job.id, job.goal)
         except Exception:

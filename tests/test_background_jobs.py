@@ -398,6 +398,8 @@ def test_looks_like_progress_markers():
     assert _looks_like_progress(["Patched app.py and restarted → https://x/"])
     assert _looks_like_progress(["Site created: https://x/"])
     assert _looks_like_progress(["Backend server live: https://x/"])
+    assert _looks_like_progress(["Generated image saved to data/exports/foo.png"])
+    assert _looks_like_progress(["Search results (8): ..."])
     assert not _looks_like_progress(["Total lines: 491 Part 1 len: 12380"])
     assert not _looks_like_progress(["Length of index.html: 23706"])
     assert not _looks_like_progress([])
@@ -423,6 +425,26 @@ def test_delivery_line_vague_final_falls_back_to_thread():
     good = _delivery_line("Built BODYCAM // ZERO HOUR: https://maxwell.z3ki.dev/bot/bodycam-zero-hour/ — hyper-realistic bodycam", "abc123")
     assert "https://maxwell.z3ki.dev/bot/bodycam-zero-hour/" in good
     assert good.count("http") == 1
+    research = _delivery_line(
+        "France's capital is Paris; metro population is about 13 million.", "abc123"
+    )
+    assert "Paris" in research
+    assert "http" not in research
+
+
+def test_worker_prompt_matches_tools_to_the_goal():
+    from jobs import _worker_system_body
+
+    text = _worker_system_body("deadbeef", "summarize the latest SpaceX launch")
+    low = text.lower()
+    assert "pick tools that match the goal" in low
+    assert "do not force a website unless the goal is a site" in low
+    assert "web_search" in low
+    assert "never invent a url" in low
+    assert "last message must be `built <title>: <url>" not in low
+    site = _worker_system_body("cafe", "portfolio site with guestbook")
+    assert "create_site" in site
+    assert "Built <title>: <url>" in site
 
 
 def test_resolve_job_model_precedence(monkeypatch):

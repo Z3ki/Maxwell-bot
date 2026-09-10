@@ -546,7 +546,7 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     "spawn_background": _obj(
         {
             "goal": _str(
-                "What the background job should build/do (e.g. 'portfolio site with guestbook backend'). Required."
+                "What the background job should do (site, research, images, code, or any long task). Required."
             ),
             "context": _str(
                 "Extra spec for the job: requirements, style, constraints. Optional."

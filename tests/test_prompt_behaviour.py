@@ -41,6 +41,14 @@ def test_full_protocol_discourages_needless_questions():
     assert "only ask a question when you genuinely cannot proceed" in text
 
 
+def test_full_protocol_sends_any_long_task_to_background():
+    text = TOOL_PROTOCOL.lower()
+    assert "spawn_background" in text
+    assert "research" in text
+    assert "anything long" in text
+    assert "full site build, deep research" not in text
+
+
 def test_protocol_uses_create_thread_not_guided_goal():
     text = TOOL_PROTOCOL.lower()
     assert "create_thread" in text
