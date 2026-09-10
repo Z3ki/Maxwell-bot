@@ -48,7 +48,9 @@ DISCORD_ALLOWED_USER_IDS = {
     if uid.strip()
 }
 
-REM_ENABLED_DEFAULT = _parse_bool(os.getenv("REM_ENABLED"), False)
+REM_ENABLED_DEFAULT = _parse_bool(
+    os.getenv("REM_ENABLED"), _parse_bool(os.getenv("ENABLE_REM"), False)
+)
 REM_INTERVAL_DEFAULT = _int_env_safe("REM_INTERVAL_SECONDS", 600)
 REM_RUN_HISTORY_DEFAULT = _int_env_safe("REM_RUN_HISTORY", 50)
 

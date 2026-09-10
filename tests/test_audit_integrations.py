@@ -169,9 +169,8 @@ def test_captcha_poll_enforces_timeout_during_request():
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("module_name", ["setup_dns", "setup_dns_legacy"])
-def test_dns_spf_update_preserves_unrelated_txt_records(monkeypatch, module_name):
-    module = importlib.import_module(f"email_integration.{module_name}")
+def test_dns_spf_update_preserves_unrelated_txt_records(monkeypatch):
+    module = importlib.import_module("email_integration.setup_dns")
     writes = []
     records = [
         {
@@ -190,12 +189,14 @@ def test_dns_spf_update_preserves_unrelated_txt_records(monkeypatch, module_name
 
     def request(token, method, path, body=None):
         if method == "GET":
+            if "dns_records" not in path:
+                return {"result": {"name": "z3ki.dev"}}
             return {"result": records}
         writes.append((method, path, body))
         return {"success": True}
 
     monkeypatch.setattr(module, "_cf_request", request)
-    assert module.main(["--token", "unused"]) == 0
+    assert module.main(["--token", "unused", "--zone-id", "a" * 32, "--domain", "z3ki.dev"]) == 0
     spf_writes = [
         (path, body)
         for _, path, body in writes

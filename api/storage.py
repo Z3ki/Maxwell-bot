@@ -8,6 +8,7 @@ test_api_rem) both keep working.
 
 import asyncio
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -75,6 +76,14 @@ def _int_env_safe(name: str, default: int) -> int:
         return int(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+def _float_env_safe(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) else default
 
 
 def _safe_int(val, default: int) -> int:

@@ -1,5 +1,46 @@
 # Audit coverage and deployment follow-up
 
+## Installation and runtime follow-up (2026-09-10)
+
+This follow-up inspected installation/reconfiguration, environment loading,
+API startup, tool concurrency, container lifecycle and remaining personal DNS
+defaults. It also ran the existing core regression suite; it does not replace
+the broader audit below or claim every integration is bug-free.
+
+Changes:
+
+- Reconfiguration preserves saved provider, identity, credentials and feature
+  defaults; dotenv values are parsed as data, never sourced as shell code.
+- `--configure-only` prepares an install without Docker or service changes.
+  Image builds finish before an existing host service is stopped.
+- API limits load after `.env`; malformed/non-finite limits use bounded defaults.
+  Direct script startup no longer silently omits the global rate limiter.
+- API REM defaults honor `ENABLE_REM`, matching the bot. The wizard keeps its
+  legacy `REM_ENABLED` alias consistent.
+- Invalid tool concurrency settings cannot construct zero-slot semaphores that
+  wait forever; invalid explicit constructor limits raise clear errors.
+- The container supervises bot and API together, shuts down both on failure,
+  forwards termination and reaps children. Linux uses the bundled Docker CLI
+  instead of assuming a compatible host binary at `/usr/bin/docker`.
+- DNS helpers require an explicit domain/zone, verify that pair before writes,
+  support provider DKIM selectors and preserve existing DMARC policy by default.
+  The legacy entry point shares the implementation. PM2 log filtering uses the
+  configured PM2 home or current user's home.
+- GitHub Actions adds core tests and lint checks on Python 3.11 and 3.12.
+
+Local validation: Python 3.12 clean virtual environment, **1,898 passed / 3
+skipped**, Ruff, dependency consistency and shell/patch checks. Real local
+subprocess tests cover child failure and forced shutdown; installer tests cover
+configuration-only setup and failed builds. The browser, live-provider and Riva
+tests skipped for unavailable dependencies/services. Docker is unavailable in
+this environment, so the complete image build and a live deployment remain
+unverified. No production credentials or live Discord sessions were used.
+
+Rebuild the image to install the new entrypoint. Existing DNS commands must now
+provide `--zone-id` and `--domain` (or their documented environment variables).
+See [INSTALL.md](INSTALL.md) and
+[the legacy DNS helper guide](../email_integration/LEGACY_MAILGUN.md).
+
 ## Scope
 
 This change reviews the core bot and tool dispatcher; providers and external integrations; memory, autonomy, queues and jobs; Discord accounts, threads, plugins and games; the dashboard/API and generated-site stack; configuration, installation and deployment.

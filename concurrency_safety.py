@@ -400,16 +400,29 @@ class ToolConcurrency:
 
     def __init__(self, **limits: int) -> None:
         defaults = {
-            "provider": int(os.getenv("MAXWELL_CONCURRENCY_PROVIDER", "8")),
-            "media": int(os.getenv("MAXWELL_CONCURRENCY_MEDIA", "3")),
-            "tts": int(os.getenv("MAXWELL_CONCURRENCY_TTS", "2")),
-            "shell": int(os.getenv("MAXWELL_CONCURRENCY_SHELL", "2")),
-            "site": int(os.getenv("MAXWELL_CONCURRENCY_SITE", "3")),
-            "web": int(os.getenv("MAXWELL_CONCURRENCY_WEB", "8")),
-            "agent": int(os.getenv("MAXWELL_CONCURRENCY_AGENT", "2")),
-            "default": int(os.getenv("MAXWELL_CONCURRENCY_DEFAULT", "16")),
+            "provider": 8,
+            "media": 3,
+            "tts": 2,
+            "shell": 2,
+            "site": 3,
+            "web": 8,
+            "agent": 2,
+            "default": 16,
         }
-        defaults.update(limits)
+        for name, fallback in defaults.items():
+            try:
+                value = int(os.getenv(f"MAXWELL_CONCURRENCY_{name.upper()}", fallback))
+            except (TypeError, ValueError):
+                value = fallback
+            # A zero-slot semaphore never admits work; negative values crash
+            # construction. Treat invalid environment values like other config.
+            defaults[name] = max(1, value)
+        for name, value in limits.items():
+            if not isinstance(value, int):
+                raise TypeError(f"concurrency limit for {name} must be an integer")
+            if value < 1:
+                raise ValueError(f"concurrency limit for {name} must be positive")
+            defaults[name] = value
         self._limits = dict(defaults)
         self._semaphores = {
             name: asyncio.Semaphore(value) for name, value in defaults.items()

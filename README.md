@@ -12,7 +12,7 @@ The newcomer path is one command:
 curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/install.sh | bash
 ```
 
-Maxwell is a Discord self-bot backed by any OpenAI-compatible LLM. The installer fetches this repository, writes `.env`, and runs Maxwell **inside Docker** so host Python/ffmpeg/package versions cannot fight it. The only host dependency is Docker Engine (and Compose).
+Maxwell is a Discord self-bot backed by any OpenAI-compatible LLM. The installer fetches this repository, writes `.env`, and runs Maxwell **inside Docker** so host Python/ffmpeg/package versions cannot fight it. The installer needs Git, curl, and Python 3 on the host; runtime dependencies are bundled in the Docker image. Docker Engine and Compose are required to run it.
 
 **Self-bot warning:** Maxwell uses `discord.py-self` with a Discord user token. Self-bots may violate Discord's Terms of Service and can put the account at risk. The installer asks you to confirm this before continuing.
 
@@ -27,10 +27,8 @@ Read these first if you are new to the project:
 ```bash
 git clone https://github.com/Z3ki/Maxwell-bot.git maxwell
 cd maxwell
-cp .env.example .env      # fill in DISCORD_TOKEN, OLLAMA_BASE_URL, OLLAMA_MODEL
-# MAXWELL_HOST_BIND must be the host path of this checkout
-# (install.sh sets it; for a manual clone use the absolute path here)
-docker compose up -d --build
+./setup.sh --configure-only  # wizard writes .env and the host bind path
+./run.sh -d --build
 docker compose exec maxwell python3 doctor.py
 ```
 
@@ -47,6 +45,8 @@ docker compose down                            # stop
 ```
 
 The dashboard/API is started in the same container (http://127.0.0.1:8765). The shell sandbox and site backends are sibling containers; `MAXWELL_HOST_BIND` is how they bind-mount this checkout through the host Docker daemon.
+
+`./setup.sh --configure-only --reconfigure` edits setup using your saved values as defaults. For unattended setup, add `--non-interactive` and supply settings through environment variables.
 
 Already on a host venv/PM2 install? `git pull --ff-only && ./install.sh --local` keeps `.env` and `data/`, stops the host bot/API, and starts Docker. Details: [Upgrading from a host install](docs/INSTALL.md#upgrading-from-a-host--venv--pm2-install).
 

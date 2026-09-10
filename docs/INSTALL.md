@@ -18,6 +18,25 @@ It will ask for:
 
 Prompts read from `/dev/tty`, so they work even when the script itself arrives through `curl | bash`. If no TTY exists, set environment variables and run non-interactively.
 
+## Prepare configuration without starting services
+
+From a checkout, run:
+
+```bash
+./setup.sh --configure-only
+# Review .env, then start when ready:
+./run.sh -d --build
+```
+
+This writes `.env` and `run.sh`, including the correct host bind path, without
+installing Docker or starting/stopping services. Python 3 is needed for setup;
+no Python packages need to be installed on the host.
+
+To edit an existing setup, use `./setup.sh --configure-only --reconfigure`.
+Saved provider, identity, credentials and feature choices become the wizard's
+defaults. Explicit exported environment variables take precedence for unattended
+updates. Without `--reconfigure`, an existing `.env` is preserved.
+
 ## Unattended install
 
 ```bash
@@ -38,6 +57,8 @@ To install from a fork or mirror, set `MAXWELL_REPO_URL` (and optionally `MAXWEL
 For sandboxes or CI where Docker must not be installed by the script, add `MAXWELL_SKIP_SYSTEM_DEPS=1`. Use it only after Docker Engine + Compose already work as your user.
 
 ## Requirements
+
+The bootstrap installer needs Git, curl, and Python 3 on the host.
 
 | Requirement | Notes |
 |---|---|
@@ -82,7 +103,7 @@ docker compose exec maxwell python3 doctor.py
 docker compose exec maxwell python3 doctor.py --probe
 ```
 
-The dashboard/API starts in the same container on port 8765.
+The dashboard/API starts in the same container on port 8765. Set `MAXWELL_START_API=0` to run only the bot. A supervisor stops both processes if either exits, allowing Docker to restart the complete service. Shutdown forwards signals to both processes, with a bounded grace period. The bundled Linux Docker CLI is used on every host; a host `/usr/bin/docker` mount is no longer needed.
 
 ## Credentials and provider setup
 
@@ -256,3 +277,21 @@ Ollama, if you installed it on the host, is separate.
 | Discord token invalid | Re-copy the `authorization` header from a logged-in Discord browser session. |
 | `curl | bash` prompts do not appear | Run from an interactive terminal with `/dev/tty`, or use the unattended environment variables. |
 | Dashboard returns 503 | Set `MAXWELL_ADMIN_PASSWORD` in `.env` and `docker compose up -d`. |
+
+## Development checks
+
+Run core tests in a separate virtual environment without starting Maxwell:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m pip check
+ruff check .
+python -m pytest
+```
+
+GitHub Actions runs the same core checks on Python 3.11 and 3.12. Browser,
+Riva voice and live-provider checks skip when their dependencies or endpoint
+are unavailable. External service behavior still needs testing with your own
+configured services.

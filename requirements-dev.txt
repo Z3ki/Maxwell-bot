@@ -1,2 +1,3 @@
 # Dev/test dependencies
 pytest>=8.3.5
+ruff>=0.16.6,<0.17

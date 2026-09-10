@@ -68,8 +68,8 @@ COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod 0555 /entrypoint.sh
 
 # Live checkout is bind-mounted over /app at runtime (see docker-compose.yml).
-# Linux Compose can override this CLI with the host binary. Docker Desktop
-# needs a Linux CLI in the image; its host binary is not runnable here.
+# Use the bundled Linux CLI on every host; host binaries may be absent at
+# /usr/bin/docker or depend on libraries unavailable in this image.
 COPY . /app
 
 ENTRYPOINT ["/entrypoint.sh"]

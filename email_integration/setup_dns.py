@@ -1,54 +1,11 @@
 #!/usr/bin/env python3
-"""Drop the DNS records for maxwell@z3ki.dev in one shot.
+"""Configure Mailgun DNS records for an explicitly selected Cloudflare zone.
 
-What this does (idempotent — safe to re-run):
-
-  1. Enables Cloudflare Email Routing for the zone (z3ki.dev).
-  2. Adds an MX record pointing to the CF Email Routing target so mail for
-     maxwell@z3ki.dev is actually accepted by CF and forwarded onward.
-  3. Adds an SPF TXT record that includes Mailgun's send infrastructure so
-     mail we send from maxwell@z3ki.dev passes SPF checks at the receiver.
-  4. Adds a DMARC TXT record at _dmarc.z3ki.dev with a permissive policy
-     (none) and a reporting address. Tighten this later once you trust the
-     deliverability.
-  5. Adds the DKIM TXT record that Mailgun gives you after you verify
-     domain ownership in their dashboard. Pass it via --dkim "k=rsa; p=..."
-     (the full TXT value), NOT just the public key.
-
-Run order:
-
-  1. Cloudflare dashboard -> My Profile -> API Tokens -> Create Token ->
-     Custom token. Permissions: Zone / DNS / Edit + Zone / Email Routing /
-     Edit. Zone Resources: Include / Specific zone / z3ki.dev. Save the
-     token somewhere safe; it's the one with the real powers (the one you
-     pasted earlier only had read access, hence the auth errors).
-  2. Mailgun dashboard -> Sending -> Domains -> Add z3ki.dev. They hand
-     you a set of DNS records; the only ones this script sets are the
-     Mailgun-specific SPF (we extend the existing v=spf1) and DKIM.
-     Mailgun will check and tick them green on its end.
-  3. Run this script:
-
-       python3 email/setup_dns.py --token cfat_... \\
-           --mailgun-spf "include:mailgun.org" \\
-           --dkim "k=rsa; p=MIGfMA0GCSq..."
-
-     If you skip --mailgun-spf or --dkim, the script logs a warning and
-     continues. You can re-run with the missing piece without breaking
-     anything that's already in place.
-
-  4. Mailgun -> Domain settings -> Verify DNS. If anything's red, fix and
-     re-run this script.
-
-  5. Cloudflare dashboard -> Email -> Email Routing -> Routes. Create a
-     route for maxwell@z3ki.dev -> z3kilol77@gmail.com. CF will email
-     that address a verification link; click it. THIS STEP IS MANUAL on
-     purpose: it's the spam-canary check and you should see the email
-     land before trusting forwarding.
-
-This script DOES NOT create the CF Email Routing rule (the destination
-address). That has to happen in the dashboard or via a separate API call
-after the destination is verified, because CF will email z3kilol77@gmail.com
-and we shouldn't programmatically dismiss that handshake.
+Set CF_API_TOKEN, CF_ZONE_ID and MAXWELL_EMAIL_DOMAIN, or pass --token,
+--zone-id and --domain. This script does not configure the local SMTP/IMAP
+transport. Email Routing is optional (--enable-routing); destinations must
+still be verified in the Cloudflare dashboard. No personal domain or mailbox
+is selected by default. Existing DMARC policy is preserved unless requested.
 """
 
 from __future__ import annotations
@@ -56,17 +13,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.parse
 import urllib.request
 from typing import Any
 
 CF_API = "https://api.cloudflare.com/client/v4"
-ZONE = "da3a6ecd035d0925aad967b4db3fe14d"  # z3ki.dev
-
-# CF Email Routing target hostname. This is the same for every zone on the
-# free plan; do not invent your own.
-CF_EMAIL_ROUTING_TARGET = "route1.mx.cloudflare.net"
 
 
 def _cf_request(
@@ -109,7 +62,7 @@ def _cf_request(
 
 
 def _existing_record(
-    token: str, fqdn: str, rtype: str, *, content_prefix: str = ""
+    token: str, fqdn: str, rtype: str, *, zone_id: str, content_prefix: str = ""
 ) -> dict[str, Any] | None:
     """Look up a record by exact name + type, return first match or None.
 
@@ -120,7 +73,7 @@ def _existing_record(
     page = 1
     while True:
         qs = urllib.parse.urlencode({"type": rtype, "name": name, "page": page})
-        payload = _cf_request(token, "GET", f"/zones/{ZONE}/dns_records?{qs}")
+        payload = _cf_request(token, "GET", f"/zones/{zone_id}/dns_records?{qs}")
         for rec in payload.get("result", []):
             content = str(rec.get("content", "")).strip('" ')
             if (
@@ -137,6 +90,7 @@ def _existing_record(
 def _upsert(
     token: str,
     *,
+    zone_id: str,
     fqdn: str,
     rtype: str,
     content: str,
@@ -151,8 +105,13 @@ def _upsert(
     if rtype in {"A", "AAAA", "CNAME"}:
         body["proxied"] = proxied
     existing = _existing_record(
-        token, name, rtype,
-        content_prefix="v=spf1" if rtype == "TXT" and content.startswith("v=spf1 ") else "",
+        token,
+        name,
+        rtype,
+        zone_id=zone_id,
+        content_prefix="v=spf1"
+        if rtype == "TXT" and content.startswith("v=spf1 ")
+        else "",
     )
     if existing:
         # If the value is already what we want, skip the write. Re-PUTting
@@ -164,138 +123,152 @@ def _upsert(
             print(f"  = {rtype} {name} (unchanged)")
             return
         rec_id = existing["id"]
-        _cf_request(token, "PUT", f"/zones/{ZONE}/dns_records/{rec_id}", body)
+        _cf_request(token, "PUT", f"/zones/{zone_id}/dns_records/{rec_id}", body)
         print(f"  ~ {rtype} {name} (updated)")
         return
-    _cf_request(token, "POST", f"/zones/{ZONE}/dns_records", body)
+    _cf_request(token, "POST", f"/zones/{zone_id}/dns_records", body)
     print(f"  + {rtype} {name} (created)")
 
 
 def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     p.add_argument(
-        "--token",
-        default=os.environ.get("CF_API_TOKEN", ""),
-        help="Cloudflare API token with Zone DNS Edit + Email Routing Edit on z3ki.dev",
+        "--token", default=os.getenv("CF_API_TOKEN", ""), help="Cloudflare API token"
+    )
+    p.add_argument(
+        "--zone-id",
+        default=os.getenv("CF_ZONE_ID", ""),
+        help="Cloudflare zone ID (required)",
+    )
+    p.add_argument(
+        "--domain",
+        default=os.getenv("MAXWELL_EMAIL_DOMAIN", ""),
+        help="Domain belonging to that zone (required)",
     )
     p.add_argument(
         "--mailgun-spf",
         default="include:mailgun.org",
-        help=(
-            "SPF include clause for Mailgun. Default is fine for the US region. "
-            "EU uses include:eu.mailgun.org."
-        ),
+        help="SPF include clause; pass an empty string to skip",
     )
     p.add_argument(
-        "--dkim",
-        default="",
-        help=(
-            "Full DKIM TXT value from Mailgun dashboard (starts with k=rsa;). "
-            "Required if you want the bot to send. Skip for receive-only."
-        ),
+        "--dkim", default="", help="Full DKIM TXT value from your mail provider"
+    )
+    p.add_argument(
+        "--dkim-selector", default="mg", help="DKIM selector supplied by your provider"
     )
     p.add_argument(
         "--dmarc-email",
-        default="z3kilol77@gmail.com",
-        help="Where to send DMARC aggregate reports. Default z3kilol77@gmail.com.",
+        default=os.getenv("MAXWELL_DMARC_EMAIL", ""),
+        help="Reporting address; omitted means leave DMARC unchanged",
+    )
+    p.add_argument(
+        "--replace-dmarc",
+        action="store_true",
+        help="Explicitly replace an existing DMARC policy with p=none",
+    )
+    p.add_argument(
+        "--enable-routing",
+        action="store_true",
+        help="Ask Cloudflare to configure its Email Routing DNS records",
     )
     args = p.parse_args(argv)
-
-    if not args.token:
-        print(
-            "Error: --token (or CF_API_TOKEN env) is required.\n"
-            "Generate one at https://dash.cloudflare.com/profile/api-tokens with\n"
-            "Zone DNS Edit + Email Routing Edit on z3ki.dev.",
-            file=sys.stderr,
+    domain = args.domain.strip().lower().rstrip(".")
+    zone_id = args.zone_id.strip()
+    if not args.token or not zone_id or not domain:
+        p.error(
+            "--token/CF_API_TOKEN, --zone-id/CF_ZONE_ID and --domain/MAXWELL_EMAIL_DOMAIN are required"
         )
-        return 2
+    if not re.fullmatch(r"[a-fA-F0-9]{32}", zone_id):
+        p.error("--zone-id must be a 32-character Cloudflare zone ID")
+    if not re.fullmatch(
+        r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
+        domain,
+    ):
+        p.error(
+            "--domain must be a DNS domain name (use punycode for international domains)"
+        )
+    if not re.fullmatch(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*", args.dkim_selector):
+        p.error("--dkim-selector must be a DNS selector, not a full domain or URL")
+    if args.dmarc_email and not re.fullmatch(
+        r"[^\s@;,]+@[^\s@;,]+\.[^\s@;,]+", args.dmarc_email
+    ):
+        p.error("--dmarc-email must be one email address")
+    clause = args.mailgun_spf.strip()
+    if clause and not re.fullmatch(r"include:[A-Za-z0-9.-]+", clause):
+        p.error("--mailgun-spf must be one include:domain clause, or empty to skip")
+    if args.enable_routing and clause:
+        p.error(
+            "Email Routing locks its SPF record; use --mailgun-spf '' with --enable-routing and configure any combined SPF policy in Cloudflare"
+        )
 
-    # Step 1: enable email routing for the zone. The endpoint is idempotent:
-    # calling it on an already-enabled zone returns success=true with the
-    # current state, no harm done.
-    print("1. Enabling Cloudflare Email Routing for z3ki.dev ...")
-    _cf_request(
-        args.token, "POST", f"/zones/{ZONE}/email/routing/enable", {"enabled": True}
-    )
+    # Verify the ID/name pair before any write, so a pasted zone ID cannot
+    # accidentally direct DNS changes at another domain.
+    zone = _cf_request(args.token, "GET", f"/zones/{zone_id}").get("result", {})
+    if str(zone.get("name", "")).lower().rstrip(".") != domain:
+        p.error("--domain does not match the selected Cloudflare zone")
 
-    # Step 2: MX record. CF gives every zone the same routing target so we
-    # don't need to discover it; route1 is the canonical one.
-    print("2. Setting MX record for z3ki.dev ...")
-    _upsert(
-        args.token,
-        fqdn="z3ki.dev",
-        rtype="MX",
-        content=CF_EMAIL_ROUTING_TARGET,
-        priority=10,
-    )
+    if args.enable_routing:
+        # Cloudflare selects the MX hosts and priorities for this zone.
+        # https://developers.cloudflare.com/api/resources/email_routing/subresources/dns/methods/create/
+        _cf_request(args.token, "POST", f"/zones/{zone_id}/email/routing/dns")
+        print(f"Email Routing DNS configured for {domain}")
 
-    # Step 3: SPF TXT. We extend the existing v=spf1 chain (or create one)
-    # with the Mailgun include. If you also use, say, Google Workspace for
-    # this domain later, add "include:_spf.google.com" to the same list.
-    print("3. Setting SPF TXT record for z3ki.dev ...")
-    spf_target = f"v=spf1 {args.mailgun_spf} -all"
-    existing_spf = _existing_record(args.token, "z3ki.dev", "TXT", content_prefix="v=spf1")
-    if existing_spf and "v=spf1" in existing_spf.get("content", ""):
-        # Already have an SPF chain. Splice the Mailgun include into the
-        # existing record (idempotent splice — if it's already there, noop).
-        current = existing_spf["content"]
-        clause = args.mailgun_spf.strip()
-        # Cloudflare TXT content is normally a single string but the
-        # underlying API stores it as-is; if someone added a multi-string
-        # SPF we would have a different problem. Assume single string here.
-        if clause in current.strip('" ').split():
-            print(f"  = TXT z3ki.dev (SPF already includes {clause})")
+    if clause:
+        existing = _existing_record(
+            args.token, domain, "TXT", zone_id=zone_id, content_prefix="v=spf1"
+        )
+        if existing:
+            current = existing["content"].strip('" ').split()
+            if clause not in current:
+                current.insert(1, clause)
+                _cf_request(
+                    args.token,
+                    "PUT",
+                    f"/zones/{zone_id}/dns_records/{existing['id']}",
+                    {"type": "TXT", "name": domain, "content": " ".join(current)},
+                )
+                print(f"SPF include added for {domain}")
+            else:
+                print(f"SPF unchanged for {domain}")
         else:
-            new_content = current.replace(
-                "v=spf1 ", f"v=spf1 {clause} ", 1
-            )
-            _cf_request(
+            _upsert(
                 args.token,
-                "PUT",
-                f"/zones/{ZONE}/dns_records/{existing_spf['id']}",
-                {"type": "TXT", "name": "z3ki.dev", "content": new_content},
+                zone_id=zone_id,
+                fqdn=domain,
+                rtype="TXT",
+                content=f"v=spf1 {clause} -all",
             )
-            print(f"  ~ TXT z3ki.dev (added {clause} to SPF chain)")
-    else:
-        _upsert(args.token, fqdn="z3ki.dev", rtype="TXT", content=spf_target)
 
-    # Step 4: DMARC. Permissive policy (p=none) with aggregate reports.
-    # Move this to p=quarantine or p=reject once you have 30 days of clean
-    # reports and trust the deliverability.
-    print("4. Setting DMARC TXT record at _dmarc.z3ki.dev ...")
-    dmarc_value = (
-        f"v=DMARC1; p=none; rua=mailto:{args.dmarc_email}; "
-        f"ruf=mailto:{args.dmarc_email}; fo=1; adkim=s; aspf=s"
-    )
-    _upsert(args.token, fqdn="_dmarc.z3ki.dev", rtype="TXT", content=dmarc_value)
+    if args.dmarc_email:
+        name = f"_dmarc.{domain}"
+        existing = _existing_record(args.token, name, "TXT", zone_id=zone_id)
+        if existing and not args.replace_dmarc:
+            print(
+                f"Existing DMARC policy preserved for {domain}; use --replace-dmarc to change it"
+            )
+        else:
+            _upsert(
+                args.token,
+                zone_id=zone_id,
+                fqdn=name,
+                rtype="TXT",
+                content=f"v=DMARC1; p=none; rua=mailto:{args.dmarc_email}",
+            )
 
-    # Step 5: DKIM. Mailgun gives you a single TXT record to drop at
-    # <selector>._domainkey.z3ki.dev. Default selector for Mailgun is
-    # "mg" but they tell you exactly what it is on the dashboard; you can
-    # override with --dkim-host if you use a different provider later.
     if args.dkim:
-        print("5. Setting DKIM TXT record at mg._domainkey.z3ki.dev ...")
         _upsert(
             args.token,
-            fqdn="mg._domainkey.z3ki.dev",
+            zone_id=zone_id,
+            fqdn=f"{args.dkim_selector}._domainkey.{domain}",
             rtype="TXT",
             content=args.dkim,
         )
-    else:
-        print(
-            "5. DKIM skipped (no --dkim value). Mailgun will refuse to send "
-            "until DKIM is in place. Re-run with --dkim to add it."
-        )
 
-    print()
-    print("Done. Next manual steps:")
-    print("  - Cloudflare -> Email -> Email Routing -> Custom Addresses")
-    print("    Add maxwell@z3ki.dev -> z3kilol77@gmail.com (CF will email")
-    print("    z3kilol77@gmail.com a verification link; click it).")
-    print("  - Mailgun -> Sending -> Domains -> z3ki.dev -> DNS records.")
-    print("    Click 'Verify DNS records' and confirm SPF + DKIM are green.")
-    print("  - Then drop the Mailgun API key + Gmail OAuth creds into /root/maxwell/.env")
-    print("    and restart the bot.")
+    print(f"Done. Verify SPF and DKIM for {domain} in your mail provider dashboard.")
+    if args.enable_routing:
+        print(
+            "Verify your destination address and create a routing rule in Cloudflare."
+        )
     return 0
 
 

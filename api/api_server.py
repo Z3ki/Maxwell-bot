@@ -23,20 +23,6 @@ from aiohttp import web
 logger = logging.getLogger("maxwell_api")
 logging.basicConfig(level=logging.INFO)
 
-_API_MAX_CONCURRENT = int(os.getenv("MAXWELL_API_MAX_CONCURRENT", "64"))
-_API_CONCURRENCY_SEM = asyncio.Semaphore(max(8, _API_MAX_CONCURRENT))
-_SITE_PROXY_CONCURRENCY_SEM = asyncio.Semaphore(max(8, _API_MAX_CONCURRENT))
-_API_REQUEST_TIMEOUT = float(os.getenv("MAXWELL_API_REQUEST_TIMEOUT", "30"))
-_API_GLOBAL_RPS = float(os.getenv("MAXWELL_API_GLOBAL_RPS", "120"))
-_API_GLOBAL_BURST = int(os.getenv("MAXWELL_API_GLOBAL_BURST", "240"))
-try:
-    import site_backend as _site_backend_for_api
-
-    _API_GLOBAL_LIMITER = _site_backend_for_api.RateLimiter(
-        rate=_API_GLOBAL_RPS, burst=_API_GLOBAL_BURST
-    )
-except Exception:
-    _API_GLOBAL_LIMITER = None
 _HEALTH_START = time.monotonic()
 
 import sys as _sys  # noqa: E402
@@ -50,6 +36,7 @@ from api.storage import (  # noqa: E402
     _clean_id,
     _commands_path,
     _control_path,
+    _float_env_safe,
     _int_env_safe,
     _llm_traces_path,
     _load,
@@ -59,6 +46,21 @@ from api.storage import (  # noqa: E402
     _safe_list,
     _safe_object,
     atomic_json_write,
+)
+
+# Resolve limits only after storage has loaded .env and the checkout is on
+# sys.path. Direct `python api/api_server.py` must enforce the same limits
+# as importing the API (and must not silently lose its rate limiter).
+import site_backend as _site_backend_for_api  # noqa: E402
+
+_API_MAX_CONCURRENT = max(8, _int_env_safe("MAXWELL_API_MAX_CONCURRENT", 64))
+_API_CONCURRENCY_SEM = asyncio.Semaphore(_API_MAX_CONCURRENT)
+_SITE_PROXY_CONCURRENCY_SEM = asyncio.Semaphore(_API_MAX_CONCURRENT)
+_API_REQUEST_TIMEOUT = max(0.1, _float_env_safe("MAXWELL_API_REQUEST_TIMEOUT", 30.0))
+_API_GLOBAL_RPS = max(0.1, _float_env_safe("MAXWELL_API_GLOBAL_RPS", 120.0))
+_API_GLOBAL_BURST = max(1, _int_env_safe("MAXWELL_API_GLOBAL_BURST", 240))
+_API_GLOBAL_LIMITER = _site_backend_for_api.RateLimiter(
+    rate=_API_GLOBAL_RPS, burst=_API_GLOBAL_BURST
 )
 
 from control_defaults import (  # noqa: E402
@@ -1950,12 +1952,13 @@ async def pm2_logs(request):
         # Drop PM2 headers and log file labels
         lines_raw = text.splitlines()
         clean = []
+        pm2_logs_dir = Path(os.getenv("PM2_HOME") or Path.home() / ".pm2") / "logs"
         for ln in lines_raw:
             if ln.startswith("[TAILING]"):
                 continue
             if " last " in ln and " lines:" in ln:
                 continue
-            if ln.startswith("/root/.pm2/logs/"):
+            if ln.startswith(str(pm2_logs_dir) + os.sep):
                 continue
             clean.append(ln)
         text = "\n".join(clean)

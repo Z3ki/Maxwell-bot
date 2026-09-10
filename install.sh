@@ -29,6 +29,7 @@ REPO_URL="${MAXWELL_REPO_URL:-https://github.com/Z3ki/Maxwell-bot.git}"
 BRANCH="${MAXWELL_BRANCH:-main}"
 RECONFIGURE=0
 LOCAL_MODE=0
+CONFIGURE_ONLY=0
 NONINTERACTIVE="${MAXWELL_NONINTERACTIVE:-0}"
 SKIP_SYSTEM_DEPS="${MAXWELL_SKIP_SYSTEM_DEPS:-0}"
 TTY=""
@@ -43,7 +44,7 @@ Usage:
   bash install.sh [options]
 
 Maxwell runs in Docker so host Python, ffmpeg, and package versions cannot
-fight it. The only host dependency is Docker Engine (and Compose).
+fight it. Setup needs Git, curl, and Python 3; running needs Docker + Compose.
 
 Options:
   --help              Show this help.
@@ -51,6 +52,7 @@ Options:
   --non-interactive   Read all answers from environment variables.
   --dir <path>        Install/update Maxwell in this directory.
   --local             Configure the current checkout instead of cloning.
+  --configure-only    Prepare .env and run.sh without installing or starting Docker.
 
 Useful environment variables:
   MAXWELL_INSTALL_DIR, MAXWELL_REPO_URL, MAXWELL_BRANCH,
@@ -65,6 +67,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --help|-h) usage; exit 0 ;;
     --reconfigure) RECONFIGURE=1 ;;
+    --configure-only) CONFIGURE_ONLY=1 ;;
     --no-extras) warn "--no-extras is ignored; extras ship in the Docker image." ;;
     --non-interactive) NONINTERACTIVE=1 ;;
     --dir) shift; [ "$#" -gt 0 ] || fail "--dir requires a path"; INSTALL_DIR="$1" ;;
@@ -122,7 +125,7 @@ yes_no() {
   default_value=${2:-no}
   env_value=${3:-}
   if [ -n "$env_value" ]; then
-    case "$env_value" in yes|YES|Yes|y|Y|1|true|TRUE|on|ON) printf 'yes'; return 0 ;; no|NO|No|n|N|0|false|FALSE|off|OFF) printf 'no'; return 0 ;; esac
+    case "$env_value" in yes|YES|Yes|y|Y|1|true|TRUE|on|ON) default_value=yes ;; no|NO|No|n|N|0|false|FALSE|off|OFF) default_value=no ;; esac
   fi
   if [ "$NONINTERACTIVE" = "1" ]; then
     printf '%s' "$default_value"
@@ -283,6 +286,30 @@ configure_env() {
     keep=$(yes_no ".env exists. Update it with the wizard?" "yes" "")
     [ "$keep" = "yes" ] || { ok "kept existing .env"; return; }
   fi
+  # Explicit ENABLE_REM is also an override when updating a legacy REM_ENABLED.
+  if printenv ENABLE_REM >/dev/null 2>&1 && ! printenv REM_ENABLED >/dev/null 2>&1; then
+    export REM_ENABLED="$ENABLE_REM"
+  fi
+  # Reconfiguration starts from the saved settings, not fresh-install defaults.
+  # Never source .env: passwords and other values are data, not shell commands.
+  # Explicit exported variables still take precedence for unattended updates.
+  if [ -f .env ]; then
+    defaults_file=$(mktemp)
+    if ! python3 scripts/env_defaults.py .env \
+      DISCORD_TOKEN DISCORD_BOT_TOKEN OLLAMA_BASE_URL OLLAMA_MODEL OLLAMA_API_KEY \
+      BOT_NAME CREATOR_NAME CREATOR_ID MAXWELL_OWNER_IDS COMMAND_PREFIX \
+      MAXWELL_ADMIN_USER MAXWELL_ADMIN_PASSWORD ENABLE_AUTONOMY ENABLE_REM REM_ENABLED ENABLE_SHELL \
+      > "$defaults_file"; then
+      rm -f "$defaults_file"
+      fail "Could not read existing .env; no settings were changed."
+    fi
+    while IFS= read -r -d '' name && IFS= read -r -d '' value; do
+      if ! printenv "$name" >/dev/null 2>&1; then
+        export "$name=$value"
+      fi
+    done < "$defaults_file"
+    rm -f "$defaults_file"
+  fi
   copy_env_if_needed
 
   printf '\n%sStep 1/5: Discord user token%s\n' "$BOLD" "$RESET"
@@ -390,7 +417,7 @@ configure_env() {
   printf '\n%sStep 5/5: Optional background loops%s\n' "$BOLD" "$RESET"
   printf '  Autonomy and REM spend LLM tokens on timers, so the safe default is off.\n'
   autonomy=$(yes_no "Enable autonomy background actions?" "no" "${ENABLE_AUTONOMY:-}")
-  rem=$(yes_no "Enable REM memory consolidation?" "no" "${ENABLE_REM:-}")
+  rem=$(yes_no "Enable REM memory consolidation?" "no" "${REM_ENABLED:-${ENABLE_REM:-}}")
   if [ "$autonomy" = "yes" ]; then
     set_env_value ENABLE_AUTONOMY true
   else
@@ -398,11 +425,13 @@ configure_env() {
   fi
   if [ "$rem" = "yes" ]; then
     set_env_value ENABLE_REM true
+    set_env_value REM_ENABLED true
   else
     set_env_value ENABLE_REM false
+    set_env_value REM_ENABLED false
   fi
 
-  set_env_value ENABLE_SHELL true
+  set_env_value ENABLE_SHELL "${ENABLE_SHELL:-auto}"
 }
 
 write_host_bind() {
@@ -480,9 +509,11 @@ start_stack() {
   if ! resolve_compose; then
     fail "docker compose is not available"
   fi
-  stop_host_maxwell
   export DOCKER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1
-  "${COMPOSE[@]}" -f "$COMPOSE_FILE" up -d --build
+  # Keep the existing host service alive if the image cannot be built.
+  "${COMPOSE[@]}" -f "$COMPOSE_FILE" build
+  stop_host_maxwell
+  "${COMPOSE[@]}" -f "$COMPOSE_FILE" up -d --no-build
   ok "container started"
 }
 
@@ -531,11 +562,17 @@ EOF
 
 main() {
   banner_and_confirm
-  install_docker
+  command -v python3 >/dev/null 2>&1 || fail "python3 is required to prepare .env. Install Python 3, then re-run."
   clone_or_update
   configure_env
   write_host_bind
   write_run_script
+  if [ "$CONFIGURE_ONLY" = "1" ]; then
+    rewrite_localhost_for_bridge
+    ok "Configuration prepared. Edit .env as needed, then run ./run.sh -d --build."
+    return 0
+  fi
+  install_docker
   start_stack
   run_doctor
   final_summary

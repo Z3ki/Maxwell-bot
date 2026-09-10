@@ -19,7 +19,7 @@ from scripts.set_env import set_env
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _run_installer(tmp_path, existing=None):
+def _run_installer(tmp_path, existing=None, *, overrides=None, reconfigure=False):
     shutil.copytree(ROOT / "scripts", tmp_path / "scripts")
     shutil.copyfile(ROOT / ".env.example", tmp_path / ".env.example")
     (tmp_path / "bot.py").touch()
@@ -43,17 +43,31 @@ main "$@"
         k: v
         for k, v in os.environ.items()
         if not k.startswith(
-            ("MAXWELL_", "DISCORD_", "OLLAMA_", "ENABLE_", "CREATOR_", "BOT_")
+            (
+                "MAXWELL_",
+                "DISCORD_",
+                "OLLAMA_",
+                "ENABLE_",
+                "CREATOR_",
+                "BOT_",
+                "REM_",
+                "COMMAND_PREFIX",
+            )
         )
     }
     env.update(
-        DISCORD_TOKEN="test-token",
-        OLLAMA_MODEL="test-model",
-        MAXWELL_OWNER_IDS="123",
-        MAXWELL_ADMIN_PASSWORD="test-password",
+        overrides
+        if overrides is not None
+        else {
+            "DISCORD_TOKEN": "test-token",
+            "OLLAMA_MODEL": "test-model",
+            "MAXWELL_OWNER_IDS": "123",
+            "MAXWELL_ADMIN_PASSWORD": "test-password",
+        }
     )
     result = subprocess.run(
-        ["bash", str(driver), "--local", "--non-interactive"],
+        ["bash", str(driver), "--local", "--non-interactive"]
+        + (["--reconfigure"] if reconfigure else []),
         cwd=tmp_path,
         env=env,
         text=True,

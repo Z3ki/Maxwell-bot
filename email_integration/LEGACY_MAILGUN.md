@@ -27,28 +27,41 @@ the bot read Gmail back over the Gmail REST API.
                                                 <--SMTP--  sender
 ```
 
-## Files
+## Configurable DNS helper
 
-- `setup_dns.py` — DNS drop script (idempotent). Currently hardcoded for
-  the `z3ki.dev` Cloudflare zone; edit the `ZONE` constant at the top
-  to use it for another zone. Re-run with different flags any time.
+`setup_dns.py` and its compatibility entry point `setup_dns_legacy.py` now
+require an explicit domain and zone ID. They have no personal domain, zone,
+reporting mailbox, or host path defaults.
 
-## SPF / DKIM / DMARC notes (still useful)
+```bash
+export CF_API_TOKEN='your-cloudflare-token'
+python3 email_integration/setup_dns.py \
+  --zone-id YOUR_32_CHARACTER_ZONE_ID \
+  --domain example.org \
+  --mailgun-spf include:mailgun.org \
+  --dkim-selector mg \
+  --dkim 'k=rsa; p=YOUR_PROVIDER_PUBLIC_KEY' \
+  --dmarc-email reports@example.org
+```
 
-The `setup_dns.py` script drops three records:
+`CF_ZONE_ID` and `MAXWELL_EMAIL_DOMAIN` are environment alternatives. The token
+needs permission to read the zone and edit its DNS. The helper checks that the
+zone ID belongs to the supplied domain before writing anything.
 
-- `MX <your-domain>` → `route1.mx.cloudflare.net` (priority 10) — for
-  Cloudflare Email Routing.
-- `TXT <your-domain>` SPF chain — extends if one already exists; the
-  script's `--mailgun-spf` flag adds the Mailgun include, but you can
-  substitute any ESP's SPF include (`include:_spf.google.com`,
-  `include:amazonses.com`, etc.).
-- `TXT _dmarc.<your-domain>` DMARC — defaults to `p=none` with
-  reporting to a Gmail address. The DMARC record is independent of the
-  transport.
-- `TXT <selector>._domainkey.<your-domain>` DKIM — for any DKIM
-  signer. With Mailgun the selector is usually `mg`; with OpenDKIM it's
-  whatever you configured in `opendkim.conf`.
+- SPF extends the existing policy without replacing unrelated TXT records.
+- DKIM uses the selector supplied by your provider.
+- DMARC is untouched without `--dmarc-email`. An existing policy is preserved
+  unless you explicitly pass `--replace-dmarc`; replacement creates `p=none`.
+- MX and Email Routing are untouched by default. For routing-only setup, use
+  `--enable-routing --mailgun-spf ''`. Cloudflare's
+  [DNS setup endpoint](https://developers.cloudflare.com/api/resources/email_routing/subresources/dns/methods/create/)
+  selects and locks the necessary MX and SPF records. Configure a combined
+  forwarding/sending SPF policy in Cloudflare rather than trying to overwrite
+  its managed record. Destination verification and forwarding rules remain
+  separate steps in the dashboard.
+
+This helper does not set up Maxwell's current SMTP/IMAP transport; see the
+[current mail guide](README.md).
 
 Without SPF + DKIM, mail you send from a fresh VPS to Gmail/Outlook/
 Yahoo will land in spam or get rejected outright. Google returns
