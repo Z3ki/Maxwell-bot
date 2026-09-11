@@ -757,8 +757,13 @@ class _CtxDM(discord.DMChannel):
 
     def __init__(self, cid, recipient, messages=()):
         self.id = cid
-        self.recipient = recipient
+        self._recipient = recipient
         self._messages = list(messages)
+
+    @property
+    def recipient(self):
+        # Official discord.py exposes recipient as a read-only property.
+        return self._recipient
 
     async def history(self, limit=12):
         for msg in self._messages[:limit]:
