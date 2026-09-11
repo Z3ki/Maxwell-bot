@@ -1397,21 +1397,8 @@ def format_timing_reply_line(rec: dict | None) -> str:
 
 
 def append_timing_to_reply(text: str, rec: dict | None, *, limit: int = 1900) -> str:
-    """Append TTFT/TPS subtext to a user-facing reply, staying within ``limit``."""
-    line = format_timing_reply_line(rec)
-    if not line:
-        return text
-    body = str(text or "")
-    if line in body:
-        return body
-    sep = "\n" + line
-    combined = body + sep
-    if len(combined) <= limit:
-        return combined
-    room = limit - len(sep)
-    if room < 8:
-        return body
-    return body[:room].rstrip() + sep
+    """User-facing replies no longer get a TTFT/TPS footer. ``,debug`` still has it."""
+    return str(text or "")
 
 
 def _format_timing_row(rec: dict, indent: str = "") -> list[str]:

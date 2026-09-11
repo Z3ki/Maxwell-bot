@@ -7543,12 +7543,6 @@ class SendMessageTool(Tool):
                 text, stickers = self.bot._extract_stickers_from_text(text, guild)
 
             chunks = self._chunks(text)
-            provider = getattr(self.bot, "ai_provider", None) if self.bot else None
-            timing = getattr(provider, "_last_timing", None) if provider else None
-            if timing and chunks:
-                from providers import append_timing_to_reply
-
-                chunks[-1] = append_timing_to_reply(chunks[-1], timing)
             if not chunks and stickers:
                 chunks = [""]
             target = None

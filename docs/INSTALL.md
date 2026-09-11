@@ -223,6 +223,8 @@ For reverse proxying, adapt [`examples/Caddyfile.example`](../examples/Caddyfile
 
 Set `MAXWELL_PUBLIC_BASE_URL` to the generated-site origin and `DISCORD_REDIRECT_BASE` to the dashboard origin. If using Discord OAuth, register `https://<dashboard-host>/api/auth/discord/callback` and set `DISCORD_REDIRECT_URI` accordingly. Set `MAXWELL_CORS_ORIGIN` to the dashboard origin if accessing the admin API cross-origin.
 
+To gate who can add the official bot, serve `/install` on the dashboard origin and set Discord Developer Portal → Installation → Install Link to **Custom URL** `https://<dashboard-host>/install`. Visitors must log in with Discord and be in `admins.json` / `MAXWELL_OWNER_IDS` before Maxwell hands them Discord's Add App URL.
+
 Do not serve generated HTML/JavaScript on the dashboard origin. It would share browser storage with dashboard credentials. Existing installations using one origin must migrate their reverse-proxy configuration; updating Python alone does not isolate static sites. After migration, clear credentials from the old origin and rotate any credentials that may have been exposed.
 
 ## Upgrading from a host / venv / PM2 install

@@ -116,6 +116,7 @@ Names and IDs are env-driven. Empty Discord IDs mean no baked-in owner — admin
 | `COMMAND_PREFIX` | `,` | Prefix for this bot's text commands. |
 | `BOT_BIRTHDAY` | `2026-05-21` | ISO date used when the bot talks about its birthday. |
 | `BOT_INVITE_URL` | empty | Official invite the bot may share. |
+| `DISCORD_BOT_PERMISSIONS` | `8` | Permission integer used by `/install` (Custom Install Link). Default Administrator. |
 | `MAXWELL_USAGE_URL` | empty | Provider quota endpoint for the `usage` tool. |
 
 ## Common provider snippets

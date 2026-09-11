@@ -288,10 +288,8 @@ def test_timing_reply_line_and_append():
     rec = {"ttft_ms": 200.0, "tps": 50.0}
     line = format_timing_reply_line(rec)
     assert line == "-# ttft 200ms · 50.0 tps"
-    text = append_timing_to_reply("hello", rec)
-    assert text.startswith("hello")
-    assert "ttft 200ms" in text
-    assert "50.0 tps" in text
+    # User-facing replies stay clean; `,debug` still uses the compact line.
+    assert append_timing_to_reply("hello", rec) == "hello"
     assert append_timing_to_reply("hello", None) == "hello"
     assert append_timing_to_reply("hello", {}) == "hello"
 

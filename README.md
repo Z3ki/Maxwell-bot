@@ -222,6 +222,7 @@ present). Restart to re-detect. `python3 doctor.py` shows the resolved state.
 | `MAXWELL_SITE_DIR` | Where generated sites are written (default: `public/bot`) |
 | `MAXWELL_TRUST_PROXY` | Trust `X-Forwarded-For` from reverse proxy (default `false`) |
 | `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | Discord OAuth on dashboard (optional, both blank = Basic only) |
+| `DISCORD_BOT_PERMISSIONS` | Permission bitfield for the Custom Install Link (default `8` = Administrator) |
 
 ### Email (only used if `ENABLE_EMAIL_TOOLS=true`)
 

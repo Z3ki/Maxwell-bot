@@ -2183,7 +2183,91 @@ async def login_post(request):
 # the authorize URL, then Discord redirects to /api/auth/discord/callback which
 # exchanges the code and issues a bearer token the dashboard stores and sends
 # as `X-Discord-Token` for subsequent API calls.
-_DISCORD_STATES: dict[str, float] = {}
+#
+# The same identify login gates Discord's Custom Install Link at /install:
+# only a Maxwell admin session can fetch the bot-add authorize URL.
+_DISCORD_STATES: dict[str, dict] = {}
+_OAUTH_NEXT_PATHS = frozenset({"/admin", "/admin/", "/install", "/install/"})
+_BOT_INSTALL_SCOPES = frozenset({"bot", "applications.commands"})
+
+
+def _oauth_next_path(raw) -> str:
+    path = str(raw or "").strip()
+    if path not in _OAUTH_NEXT_PATHS:
+        return "/admin/"
+    if path.startswith("/install"):
+        return "/install/"
+    return "/admin/"
+
+
+def _discord_snowflake(raw) -> str:
+    value = str(raw or "").strip()
+    if value.isdigit() and 17 <= len(value) <= 20:
+        return value
+    return ""
+
+
+def _oauth_state_payload(entry) -> dict | None:
+    if isinstance(entry, (int, float)):
+        issued = float(entry)
+        if issued <= 0:
+            return None
+        return {"issued": issued, "next": "/admin/", "guild_id": ""}
+    if not isinstance(entry, dict):
+        return None
+    try:
+        issued = float(entry.get("issued") or 0)
+    except (TypeError, ValueError):
+        return None
+    if issued <= 0:
+        return None
+    return {
+        "issued": issued,
+        "next": _oauth_next_path(entry.get("next")),
+        "guild_id": _discord_snowflake(entry.get("guild_id")),
+    }
+
+
+def _bot_install_permissions() -> str:
+    raw = os.getenv("DISCORD_BOT_PERMISSIONS", "8").strip()
+    if raw.isdigit():
+        return raw
+    return "8"
+
+
+def _bot_install_scopes(context: str) -> str:
+    if context == "user":
+        raw = os.getenv("DISCORD_INSTALL_USER_SCOPES", "applications.commands")
+    else:
+        raw = os.getenv("DISCORD_INSTALL_SCOPES", "bot applications.commands")
+    parts = [
+        part
+        for part in str(raw).replace(",", " ").split()
+        if part in _BOT_INSTALL_SCOPES
+    ]
+    if context == "user":
+        return " ".join(parts) if parts else "applications.commands"
+    return " ".join(parts) if parts else "bot applications.commands"
+
+
+def _bot_install_authorize_url(*, guild_id: str = "", context: str = "guild") -> str:
+    from urllib.parse import urlencode
+
+    params = {
+        "client_id": DISCORD_CLIENT_ID,
+        "scope": _bot_install_scopes(context),
+        "integration_type": "1" if context == "user" else "0",
+    }
+    if context != "user":
+        params["permissions"] = _bot_install_permissions()
+    if guild_id:
+        params["guild_id"] = guild_id
+        params["disable_guild_select"] = "true"
+    return "https://discord.com/oauth2/authorize?" + urlencode(params)
+
+
+def _oauth_error_redirect(base: str, next_path: str, error: str):
+    raise web.HTTPFound(f"{base}{next_path}#error={error}")
 
 
 def _discord_redirect_base(request) -> str:
@@ -2214,7 +2298,10 @@ async def discord_auth_state(request):
     _DISCORD_STATE_MAX = 200
     now = time.time()
     expired = [
-        s for s, issued in _DISCORD_STATES.items() if now - issued > _DISCORD_STATE_TTL
+        s
+        for s, entry in _DISCORD_STATES.items()
+        if not (payload := _oauth_state_payload(entry))
+        or now - payload["issued"] > _DISCORD_STATE_TTL
     ]
     for s in expired:
         _DISCORD_STATES.pop(s, None)
@@ -2223,7 +2310,11 @@ async def discord_auth_state(request):
         _DISCORD_STATES.pop(next(iter(_DISCORD_STATES)), None)
 
     state = _secrets.token_urlsafe(24)
-    _DISCORD_STATES[state] = now
+    _DISCORD_STATES[state] = {
+        "issued": now,
+        "next": _oauth_next_path(request.query.get("next")),
+        "guild_id": _discord_snowflake(request.query.get("guild_id")),
+    }
     redirect = (
         os.getenv("DISCORD_REDIRECT_URI")
         or f"{_discord_redirect_base(request)}/api/auth/discord/callback"
@@ -2254,16 +2345,19 @@ async def discord_auth_state(request):
 async def discord_auth_callback(request):
     code = request.query.get("code")
     state = request.query.get("state")
+    base = _discord_redirect_base(request)
+    payload = _oauth_state_payload(_DISCORD_STATES.pop(state, None)) if state else None
+    next_path = payload["next"] if payload else "/admin/"
+    guild_id = payload["guild_id"] if payload else ""
     if not code or not state:
         return _json_response({"error": "missing code/state"}, 400)
-    issued = _DISCORD_STATES.pop(state, None)
-    if not issued or time.time() - issued > 600:
+    if not payload or time.time() - payload["issued"] > 600:
         return _json_response({"error": "invalid or expired state"}, 400)
     if not DISCORD_CLIENT_ID or not DISCORD_CLIENT_SECRET:
         return _json_response({"error": "discord oauth not configured"}, 503)
     redirect = (
         os.getenv("DISCORD_REDIRECT_URI")
-        or f"{_discord_redirect_base(request)}/api/auth/discord/callback"
+        or f"{base}/api/auth/discord/callback"
     )
     import aiohttp as _aiohttp
 
@@ -2283,17 +2377,17 @@ async def discord_auth_callback(request):
         if token_resp.status != 200:
             body = await token_resp.text()
             logger.warning("discord token exchange failed: %s", body[:300])
-            return _json_response({"error": "discord token exchange failed"}, 502)
+            _oauth_error_redirect(base, next_path, "exchange_failed")
         token_json = await token_resp.json()
         access_token = token_json.get("access_token")
         if not access_token:
-            return _json_response({"error": "no access token from discord"}, 502)
+            _oauth_error_redirect(base, next_path, "exchange_failed")
         me_resp = await sess.get(
             "https://discord.com/api/users/@me",
             headers={"Authorization": f"Bearer {access_token}"},
         )
         if me_resp.status != 200:
-            return _json_response({"error": "failed to fetch discord user"}, 502)
+            _oauth_error_redirect(base, next_path, "exchange_failed")
         me = await me_resp.json()
     user_id = str(me.get("id", ""))
     username = str(me.get("username", "")) + "#" + str(me.get("discriminator", "0"))
@@ -2310,12 +2404,10 @@ async def discord_auth_callback(request):
             "discord oauth denied: admins.json missing/empty and "
             "DISCORD_ALLOWED_USER_IDS unset (fail closed)"
         )
-        return _json_response(
-            {"error": "discord oauth not configured (no allowed user ids)"}, 403
-        )
+        _oauth_error_redirect(base, next_path, "unauthorized")
     if user_id not in allowed:
         logger.warning("discord oauth denied for user %s (%s)", user_id, username)
-        return _json_response({"error": "discord account not authorized"}, 403)
+        _oauth_error_redirect(base, next_path, "unauthorized")
     import secrets as _secrets
 
     bearer = _secrets.token_urlsafe(48)
@@ -2324,10 +2416,32 @@ async def discord_auth_callback(request):
         "username": username,
         "avatar_url": avatar_url,
     })
-    base = _discord_redirect_base(request)
-    # Redirect back to the admin page with the token in the hash fragment so
-    # the SPA can pick it up without it hitting server logs as a query param.
-    raise web.HTTPFound(f"{base}/admin/#discord_token={bearer}")
+    dest = f"{base}{next_path}"
+    if next_path.startswith("/install") and guild_id:
+        dest = f"{dest}?guild_id={guild_id}"
+    # Token stays in the hash fragment so it never hits server logs as a query.
+    raise web.HTTPFound(f"{dest}#discord_token={bearer}")
+
+
+async def install_authorize(request):
+    """Return Discord's Add App URL only to a Maxwell admin session."""
+    if not _has_admin_auth(request):
+        return _json_response({"error": "unauthorized"}, 401)
+    if not DISCORD_CLIENT_ID:
+        return _json_response({"error": "discord oauth not configured"}, 503)
+    context = str(request.query.get("context") or "guild").strip().lower()
+    if context not in {"guild", "user"}:
+        context = "guild"
+    guild_id = _discord_snowflake(request.query.get("guild_id"))
+    return _json_response(
+        {
+            "ok": True,
+            "authorize_url": _bot_install_authorize_url(
+                guild_id=guild_id, context=context
+            ),
+            "context": context,
+        }
+    )
 
 
 async def discord_auth_verify(request):
@@ -2640,6 +2754,7 @@ app.router.add_get("/api/auth/discord/state", discord_auth_state)
 app.router.add_get("/api/auth/discord/callback", discord_auth_callback)
 app.router.add_get("/api/auth/discord/verify", discord_auth_verify)
 app.router.add_post("/api/auth/discord/logout", discord_auth_logout)
+app.router.add_get("/api/install/authorize", install_authorize)
 app.router.add_get("/api/pm2", pm2_status)
 app.router.add_get("/api/pm2/logs", pm2_logs)
 app.router.add_post("/api/pm2/restart", pm2_restart)
