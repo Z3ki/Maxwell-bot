@@ -1,6 +1,6 @@
 # Core runtime — everything Maxwell needs to start and hold a conversation.
 # Nothing in this file is optional; nothing outside it is required.
-discord.py-self>=2.0.0     # Discord transport (self-bot)
+discord.py[voice]>=2.4.0   # Official Discord bot library
 aiohttp>=3.14.0            # LLM provider + admin API HTTP
 aiofiles>=24.1.0           # async file IO
 python-dotenv>=1.0.0       # .env loading

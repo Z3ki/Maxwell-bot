@@ -11,72 +11,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from captcha_solver import (
-    CaptchaSolveError,
-    HumanCaptchaServer,
-    _BaseSolver,
-    _build_solve_page,
-)
 from providers import OllamaProvider
 from utils import JsonStateStore, render_discord_context_text
-from x_client import PostBudget, XClient, XError, collect_tweets
-
-
-def test_x_user_timeline_does_not_treat_profile_as_tweet():
-    payload = {
-        "data": {
-            "user": {
-                "result": {
-                    "__typename": "User",
-                    "rest_id": "99",
-                    "legacy": {"screen_name": "alice"},
-                    "timeline": [
-                        {
-                            "__typename": "Tweet",
-                            "rest_id": "101",
-                            "legacy": {"full_text": "hello"},
-                        }
-                    ],
-                }
-            }
-        }
-    }
-    assert [(t.id, t.text) for t in collect_tweets(payload)] == [("101", "hello")]
-
-
-def test_x_explicit_zero_configuration(tmp_path):
-    client = XClient({"posts_per_hour": 0, "cache_seconds": 0}, data_dir=tmp_path)
-    assert client.budget.per_hour == 0
-    assert client.cache_seconds == 0
-
-
-def test_x_writes_never_fall_through_after_uncertain_failure(tmp_path):
-    client = XClient({}, data_dir=tmp_path)
-    first = SimpleNamespace(
-        can_write=True,
-        configured=lambda: True,
-        write=AsyncMock(side_effect=XError("response lost after posting")),
-    )
-    second = SimpleNamespace(
-        can_write=True,
-        configured=lambda: True,
-        write=AsyncMock(return_value={"id": "duplicate"}),
-    )
-    client.backends = [first, second]
-    with pytest.raises(XError, match="response lost"):
-        asyncio.run(client._write("post", text="hello"))
-    second.write.assert_not_awaited()
-
-
-@pytest.mark.parametrize(
-    "raw", ["{broken", "[]", '{"posts": "bad"}', '{"posts": ["bad"]}']
-)
-def test_x_post_budget_fails_closed_on_corrupt_history(tmp_path, raw):
-    path = tmp_path / "x_post_log.json"
-    path.write_text(raw)
-    with pytest.raises((XError, ValueError)):
-        asyncio.run(PostBudget(tmp_path).reserve())
-    assert path.read_text() == raw
 
 
 @pytest.mark.parametrize("operation", ["patch", "log"])
@@ -128,45 +64,6 @@ def test_provider_tool_fallback_preserves_stream_callbacks(monkeypatch):
     assert kwargs.get("on_token") is token_cb
     assert kwargs.get("on_tool_call_name") is tool_cb
     assert kwargs.get("custom_tool_calls") is True
-
-
-@pytest.mark.parametrize(
-    "body", [["token"], 42, {"token": ["not a string"]}, {"token": "  "}]
-)
-def test_human_captcha_rejects_invalid_token_bodies(body):
-    async def run():
-        server = HumanCaptchaServer()
-        future = asyncio.get_running_loop().create_future()
-        server._challenges["test"] = {"fut": future}
-        request = SimpleNamespace(
-            match_info={"cid": "test"}, json=AsyncMock(return_value=body)
-        )
-        response = await server._handle_solve(request)
-        assert response.status == 400
-        assert not future.done()
-
-    asyncio.run(run())
-
-
-def test_captcha_inline_script_escapes_html_terminators():
-    attack = '</script><script>alert("x")</script>'
-    page = _build_solve_page("test", attack, attack, False)
-    assert attack not in page
-    assert page.count("</script>") == 2
-
-
-def test_captcha_poll_enforces_timeout_during_request():
-    async def run():
-        solver = _BaseSolver("unused", timeout=0.02)
-
-        async def stuck():
-            await asyncio.sleep(1)
-            return {"status": "ready"}
-
-        with pytest.raises(CaptchaSolveError, match="timed out"):
-            await asyncio.wait_for(solver._poll(stuck), timeout=0.2)
-
-    asyncio.run(run())
 
 
 def test_dns_spf_update_preserves_unrelated_txt_records(monkeypatch):
@@ -435,15 +332,4 @@ def test_provider_parameter_repair_retries_same_endpoint(error):
     assert [p["model"] for p in session.payloads] == ["primary", "primary"]
 
 
-def test_captcha_failed_start_does_not_mark_server_running(monkeypatch):
-    from captcha_solver import web
 
-    runner = SimpleNamespace(setup=AsyncMock(), cleanup=AsyncMock())
-    site = SimpleNamespace(start=AsyncMock(side_effect=OSError("port occupied")))
-    monkeypatch.setattr(web, "AppRunner", lambda *a, **k: runner)
-    monkeypatch.setattr(web, "TCPSite", lambda *a, **k: site)
-    server = HumanCaptchaServer()
-    with pytest.raises(OSError, match="port occupied"):
-        asyncio.run(server.start())
-    assert not server.running
-    runner.cleanup.assert_awaited_once()

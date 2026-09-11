@@ -10,7 +10,7 @@ from io import BytesIO
 
 from process_utils import communicate_process
 from bot import MaxwellBot, TelegramMessageAdapter
-from bot_tools import SendMessageTool, YouTubeTool
+from bot_tools import SendMessageTool
 
 
 def _message():
@@ -119,7 +119,7 @@ class _RunningProcess:
         return self.returncode
 
 
-@pytest.mark.parametrize("kind", ["youtube", "gif", "video", "frames", "local_tts"])
+@pytest.mark.parametrize("kind", ["gif", "video", "frames", "local_tts"])
 def test_media_subprocess_is_reaped_on_cancellation(monkeypatch, tmp_path, kind):
     async def run():
         proc = _RunningProcess()
@@ -129,9 +129,7 @@ def test_media_subprocess_is_reaped_on_cancellation(monkeypatch, tmp_path, kind)
         owner = SimpleNamespace(
             _ffmpeg_input_argv=MaxwellBot._ffmpeg_input_argv,
         )
-        if kind == "youtube":
-            operation = YouTubeTool(None)._run_cmd(["test"])
-        elif kind == "gif":
+        if kind == "gif":
             operation = MaxwellBot._normalize_gif(owner, b"gif", "test.gif", 1024)
         elif kind == "video":
             operation = MaxwellBot._normalize_video(owner, b"video", "test.mp4", 1024)

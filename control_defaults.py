@@ -134,29 +134,6 @@ DEFAULT_CONTROL = {
     # notices. Only runs when ENABLE_EMAIL_TOOLS and a mailbox password are
     # set. Floor 30s, ceiling 1h.
     "email_inbox_poll_seconds": 120,
-    # ─── X (Twitter) ────────────────────────────────────────────────────
-    # Reading X is free and always allowed when ENABLE_X is on. These four
-    # govern the half that talks back.
-    #
-    # x_post_enabled is the runtime toggle for every write (post, reply,
-    # quote, like, repost, delete) — off leaves reading intact.
-    "x_post_enabled": True,
-    # Hard ceiling on posts per rolling hour, enforced in x_client against a
-    # persisted log so a restart cannot reset it. The failure mode of a model
-    # with a public megaphone is not one bad post, it is forty.
-    "x_posts_per_hour": 8,
-    # Identical reads inside this window reuse the last answer. The autonomy
-    # tick and a chat turn ask the same question minutes apart and each
-    # uncached repeat spends the same rate-limit budget as a new one.
-    "x_cache_seconds": 60,
-    # How often mentions of X_HANDLE are filed as inbox notices. Needs a
-    # session (or a gateway) — public reads cannot see mentions. Floor 60s.
-    "x_mention_poll_seconds": 300,
-    # Whether the unattended autonomy tick may post. Off by default and
-    # deliberately separate from x_post_enabled: letting him answer someone
-    # in a live conversation is a different decision from letting a timer
-    # publish to a public timeline with nobody watching.
-    "x_autonomy_post": False,
     "reply_to_bots": False,
     # Unused for starting turns. Reactions are stored on the message and
     # shown in context; they never kick off a live reply.
@@ -370,6 +347,12 @@ DEAD_CONTROL_KEYS = frozenset(
         "enable_night_sleep",
         "night_sleep_start_hour",
         "night_sleep_end_hour",
+        # Self-bot / unofficial X / YouTube scraping were removed.
+        "x_post_enabled",
+        "x_posts_per_hour",
+        "x_cache_seconds",
+        "x_mention_poll_seconds",
+        "x_autonomy_post",
     }
 )
 
@@ -395,25 +378,32 @@ KNOWN_TOOLS = [
     "list_channels",
     "list_roles",
     "list_members",
-    "server_setup",
-    "join_server",
     "leave_server",
     "create_category",
     "create_channel",
+    "edit_category",
     "edit_channel",
+    "move_channel",
+    "clone_channel",
+    "sync_channel",
     "delete_channel",
     "kick_member",
     "ban_member",
     "unban_member",
+    "softban_member",
     "list_bans",
     "timeout_member",
+    "list_timeouts",
     "manage_role",
     "purge_messages",
     "pin_message",
     "set_member_nickname",
     "voice_mod",
     "lock_channel",
+    "lockdown",
     "set_channel_permissions",
+    "list_permissions",
+    "manage_invites",
     "edit_server",
     "audit_log",
     "manage_emoji",
@@ -433,7 +423,6 @@ KNOWN_TOOLS = [
     "fetch_url",
     "see_image",
     "see_video",
-    "youtube",
     "send_file",
     "send_message",
     "send_meme",
@@ -453,8 +442,6 @@ KNOWN_TOOLS = [
     "email_read_inbox",
     "email_get_message",
     "email_search",
-    "x_read",
-    "x_post",
     "more_tools",
     "chess_start",
     "chess_move",

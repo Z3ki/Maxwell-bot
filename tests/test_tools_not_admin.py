@@ -1,8 +1,4 @@
-"""Creative and social tools stay open to everyone; join_server does not.
-
-The one exception is deliberate: joining a server parks the account somewhere
-permanent, under moderators nobody here controls, so it is gated on identity.
-"""
+"""Creative and social tools stay open to everyone; leave_server does not."""
 
 import asyncio
 from types import SimpleNamespace
@@ -12,7 +8,6 @@ from control_defaults import DEFAULT_CONTROL
 from bot_tools import (
     BanMemberTool,
     CreateInviteTool,
-    JoinServerTool,
     LeaveServerTool,
     ListAdminServersTool,
     ListServersTool,
@@ -44,11 +39,6 @@ def test_tool_protocol_keeps_creative_tools_open():
     # Personality may use {placeholders} instead of a literal name; the
     # access rule still has to stay in the default text.
     assert "open to everyone" in personality
-
-
-def test_tool_protocol_states_the_join_server_restriction():
-    """The prompt has to agree with the code, or the model promises and fails."""
-    assert "join_server is admin-only" in TOOL_PROTOCOL
 
 
 def test_tool_protocol_states_dm_and_cross_chat_restrictions():
@@ -85,12 +75,6 @@ def test_tool_descriptions_do_not_say_admin_only():
         assert "admin only" not in desc
 
 
-def test_join_server_description_announces_the_restriction():
-    """The model should decline up front rather than call and get refused."""
-    desc = JoinServerTool(SimpleNamespace()).get_description().lower()
-    assert "admins" in desc
-
-
 def test_send_message_description_announces_cross_chat_restriction():
     from bot_tools import SendMessageTool
 
@@ -98,48 +82,6 @@ def test_send_message_description_announces_cross_chat_restriction():
     assert "admin-only" in desc
     assert "channel_id" in desc
     assert "not available from dms" in desc
-
-
-def test_join_server_refuses_a_non_admin():
-    bot = SimpleNamespace(_is_admin=lambda _uid: False)
-    msg = SimpleNamespace(author=SimpleNamespace(id=999))
-    result = asyncio.run(
-        JoinServerTool(bot).execute(msg, invite="https://discord.gg/abcdef")
-    )
-    assert result.startswith("Error:")
-    assert "admin" in result.lower()
-
-
-def test_join_server_refuses_before_touching_the_invite():
-    """A refusal must not fetch the invite — that is an observable side effect."""
-    fetched = []
-
-    async def fetch_invite(code, **_kwargs):
-        fetched.append(code)
-        raise AssertionError("should never be reached for a non-admin")
-
-    bot = SimpleNamespace(_is_admin=lambda _uid: False, fetch_invite=fetch_invite)
-    msg = SimpleNamespace(author=SimpleNamespace(id=999))
-    asyncio.run(JoinServerTool(bot).execute(msg, invite="discord.gg/xyz"))
-    assert fetched == []
-
-
-def test_join_server_lets_an_admin_through_to_the_invite_lookup():
-    seen = []
-
-    async def fetch_invite(code, **_kwargs):
-        seen.append(code)
-        raise RuntimeError("stop here — the gate already passed")
-
-    bot = SimpleNamespace(
-        _is_admin=lambda uid: str(uid) == "42", fetch_invite=fetch_invite
-    )
-    msg = SimpleNamespace(author=SimpleNamespace(id=42))
-    result = asyncio.run(
-        JoinServerTool(bot).execute(msg, invite="https://discord.gg/abcdef")
-    )
-    assert seen == ["abcdef"]
-    assert "restricted to admins" not in result
 
 
 def test_leave_server_refuses_a_non_admin():
@@ -163,14 +105,6 @@ def test_personality_tools_refuse_a_non_admin():
     assert prompt.startswith("Error:")
     assert "admin" in personality.lower()
     assert "admin" in prompt.lower()
-
-
-def test_join_server_survives_a_bot_without_the_admin_helper():
-    """Fail closed rather than raising if _is_admin is missing."""
-    bot = SimpleNamespace()
-    msg = SimpleNamespace(author=SimpleNamespace(id=1))
-    result = asyncio.run(JoinServerTool(bot).execute(msg, invite="discord.gg/xyz"))
-    assert result.startswith("Error:")
 
 
 def test_list_servers_works_for_anyone():

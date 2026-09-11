@@ -26,14 +26,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 WORKDIR /app
 COPY requirements.txt requirements-optional.txt requirements-dev.txt ./
 
-# discord-ext-voice-recv depends on official discord.py, which overwrites
-# the discord.py-self fork. Reinstall the self-bot library last so `import
-# discord` is the user-API wrapper Maxwell actually needs.
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip \
-    && pip install -r requirements.txt -r requirements-optional.txt -r requirements-dev.txt \
-    && pip uninstall -y discord.py \
-    && pip install --force-reinstall --no-deps "discord.py-self>=2.0.0"
+    && pip install -r requirements.txt -r requirements-optional.txt -r requirements-dev.txt
 
 
 FROM python:3.12-slim-bookworm

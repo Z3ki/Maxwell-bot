@@ -241,7 +241,6 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     ImageGeneratorTool,
     InboxActTool,
     InboxListTool,
-    JoinServerTool,
     JoinVcTool,
     LeaveServerTool,
     LeaveVcTool,
@@ -279,7 +278,6 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     SendMediaTool,
     SendMemeTool,
     SendMessageTool,
-    ServerSetupTool,
     SetActivityTool,
     SetNicknameTool,
     ShellTool,
@@ -293,9 +291,6 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     VcWhereTool,
     WaitTool,
     WebSearchTool,
-    XPostTool,
-    XReadTool,
-    YouTubeTool,
     ChessStartTool,
     ChessMoveTool,
     ChessStateTool,
@@ -305,8 +300,18 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     __CHESS_IMPORTED__ as _CHESS_IMPORTED,
     forget_shell_progress,
     _IMAGE_FETCH_UA,
+    CloneChannelTool,
     DM_BLOCKED_TOOLS,
+    EditCategoryTool,
+    ListPermissionsTool,
+    ListTimeoutsTool,
+    LockdownTool,
+    ManageInvitesTool,
+    MoveChannelTool,
+    SoftbanMemberTool,
+    SyncChannelTool,
     _guild_access_line,
+    _is_youtube_url,
     _guild_room_context,
     _get_shared_session,
     _is_private_chat,
@@ -314,11 +319,6 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     _read_response_limited,
     close_shared_session,
     SITE_READ_LOOP_MARKER,
-)
-from captcha_solver import (  # noqa: E402
-    CaptchaSolveError,
-    HumanCaptchaServer,
-    build_solver,
 )
 from config import Config  # noqa: E402
 from identity import (  # noqa: E402
@@ -341,9 +341,7 @@ from control_defaults import (  # noqa: E402
     KNOWN_TOOLS,
     parse_bool,
 )
-import guild_onboarding  # noqa: E402
 from email_inbox import EmailInboxPoller  # noqa: E402
-from x_client import XClient, XMentionPoller  # noqa: E402
 from inbox import (  # noqa: E402
     InboxStore,
     apply_inbox_action,
@@ -366,17 +364,10 @@ from discord_threads import (  # noqa: E402
     is_discord_thread,
 )
 from discord_account import (  # noqa: E402
-    USER_ONLY_TOOLS,
     account_ids as _discord_account_ids,
-    apply_bot_account_patches,
+    bot_intents,
     clear_application_commands,
-    discord_user_client as _discord_user_client,
-    install_library_patches,
-    make_companion,
-    pick_primary,
-    resolve_accounts,
-    user_only_unavailable,
-    user_tools_enabled,
+    configured_bot_token,
 )
 from rem import RemStore, load_rem_defaults, run_rem_once  # noqa: E402
 from tool_progress import make_progress as _make_tool_progress  # noqa: E402
@@ -2235,7 +2226,6 @@ TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "fetch_url",
     "see_image",
     "see_video",
-    "youtube",
     "send_file",
     "send_meme",
     "send_media",
@@ -2249,10 +2239,6 @@ TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "email_read_inbox",
     "email_get_message",
     "email_search",
-    # X is a different network entirely — nothing about it is Discord-shaped,
-    # so both tools work unchanged on Telegram.
-    "x_read",
-    "x_post",
     "inbox_list",
     "inbox_act",
     # Chess + usage are transport-agnostic: they only send on the channel and
@@ -2293,7 +2279,7 @@ JAILBREAK_PROMPT_VC = (
 MAXWELL_BASE_KNOWLEDGE = (
     "## Base Knowledge & Autonomy\n"
     "You are {bot_name}{self_id_paren}, a real person in chat with full autonomy and agency — "
-    "operating as a Discord user account (self-bot), NOT a bot account or assistant. Talk naturally like a normal user.\n"
+    "a Discord bot, not a filtered assistant. Talk naturally.\n"
     "{creator_line}\n"
     "{authority_line}\n"
     "Attitude: Warm and friendly. Love building, games (chess, checkers), websites, plugins, web search, coding. "
@@ -2301,8 +2287,9 @@ MAXWELL_BASE_KNOWLEDGE = (
     "Always truthful — never a yes-man. Disagree when you disagree. Do not flatter or tell people what they want to hear. "
     "If you don't know, say so; never invent facts. Niceness is not agreement. Born {birthday_long}. You know your age.\n"
     "## Discord Moderation & Admin Actions Safety Protocol\n"
-    "Structural actions (create_channel, edit_channel, delete_channel, lock_channel, "
-    "set_channel_permissions, manage_role, edit_server, set_member_nickname) are reserved for configured owner / admins. "
+    "Structural actions (create_channel, edit_channel, edit_category, delete_channel, move_channel, "
+    "lock_channel, lockdown, set_channel_permissions, manage_role, edit_server, set_member_nickname) "
+    "are reserved for configured owner / admins. "
     "Never execute structural server edits for random users.\n"
     "Moderation tools (purge_messages, timeout_member, kick_member, ban_member, unban_member):\n"
     "- High-Threat (scams, phishing, spam bots, raid nukers, drainers, severe abuse): "
@@ -2481,16 +2468,15 @@ TOOL_PROTOCOL = (
     "Need ids or a server map? list_channels, list_roles, and list_members "
     "(alias list_users) return ids, topics, perms, nicks, status, and voice — "
     "don't guess names. "
-    "join_server is admin-only — if a non-admin sends an invite, tell them it needs an admin and do not call it. "
     "In DMs, Discord moderation and server tools (kick, ban, timeout, purge, channels, "
-    "roles, server settings, forwarding, joining/leaving servers) are not available. "
+    "roles, server settings, forwarding, leaving servers) are not available. "
     "send_message stays in the current chat; from a DM you cannot send to another "
     "channel or server. From a server, sending to another channel or DM is admin-only — "
     "if a non-admin asks you to speak somewhere else, tell them it needs an admin and "
     "reply here instead. Shell, sites, search, and ordinary chat tools stay available in DMs. "
-    "join_server and server_setup need the Discord user account. If only the official "
-    "bot account is connected, do not call them; share BOT_INVITE_URL so a human can add the bot. "
-    "Structural tools (create_channel, edit_channel, delete_channel, lock_channel, manage_role, "
+    "People add this bot with BOT_INVITE_URL — it cannot join servers from an invite code. "
+    "Structural tools (create_channel, create_category, edit_channel, edit_category, "
+    "move_channel, clone_channel, delete_channel, lock_channel, lockdown, manage_role, "
     "set_channel_permissions, edit_server, set_member_nickname) require owner/admin authorization. "
     "Emergencies (scams, phishing, raid nukers, drainers): invoke purge_messages and timeout_member/ban_member "
     "on sight without waiting for approval. Normal chat: do not moderate loosely over banter.\n"
@@ -2838,13 +2824,9 @@ def _prepare_tool_params(name: str, params: dict | None) -> dict:
 class MaxwellBot(commands.Bot):
     """AI-powered Discord bot."""
 
-    def __init__(self, *, account_kind: str = "user", planned_kinds: set[str] | None = None):
-        # discord.py-self 2.1+ (and official discord.py if it ever shadows
-        # the fork) require intents=. 2.2.0a on some hosts has no Intents
-        # type at all. Pass it only when the installed library has it.
-        kind = str(account_kind or "user").strip().lower()
-        self.account_kind = "bot" if kind == "bot" else "user"
-        self._planned_kinds = {self.account_kind}
+    def __init__(self, *, account_kind: str = "bot", planned_kinds: set[str] | None = None):
+        self.account_kind = "bot"
+        self._planned_kinds = {"bot"}
         if planned_kinds:
             self._planned_kinds.update(
                 str(x).strip().lower() for x in planned_kinds if str(x).strip()
@@ -2855,30 +2837,21 @@ class MaxwellBot(commands.Bot):
         self._account_ids: set[int] = set()
         init_kwargs = {
             "command_prefix": ",",
-            "self_bot": self.account_kind == "user",
             "help_command": None,
+            "chunk_guilds_at_startup": True,
         }
-        if self.account_kind == "user":
-            init_kwargs["captcha_handler"] = self._handle_captcha
-            init_kwargs["mobile_status"] = True
-        else:
-            init_kwargs["guild_subscriptions"] = False
-            init_kwargs["chunk_guilds_at_startup"] = False
-        intents_cls = getattr(discord, "Intents", None)
-        if intents_cls is not None:
-            init_kwargs["intents"] = intents_cls.all()
+        intents = bot_intents()
+        if intents is not None:
+            init_kwargs["intents"] = intents
         try:
             super().__init__(**init_kwargs)
         except TypeError:
-            for key in (
-                "guild_subscriptions",
-                "chunk_guilds_at_startup",
-                "mobile_status",
-                "captcha_handler",
-                "intents",
-            ):
-                init_kwargs.pop(key, None)
-            super().__init__(**init_kwargs)
+            init_kwargs.pop("chunk_guilds_at_startup", None)
+            try:
+                super().__init__(**init_kwargs)
+            except TypeError:
+                init_kwargs.pop("intents", None)
+                super().__init__(**init_kwargs)
         self.config = Config()
         ident = identity_values(self.config)
         self._identity = ident
@@ -2888,12 +2861,6 @@ class MaxwellBot(commands.Bot):
         self._BIRTHDAY = parse_birthday(getattr(self.config, "BOT_BIRTHDAY", None))
         self.config.validate()
         self.bot_name = ident["bot_name"]
-        self._human_captcha_server: HumanCaptchaServer | None = None
-        self._auto_captcha_solver: Any = build_solver(
-            self.config.CAPTCHA_SOLVER_SERVICE,
-            self.config.CAPTCHA_SOLVER_API_KEY,
-            self.config.CAPTCHA_SOLVER_TIMEOUT,
-        )
         self.ai_provider: Any = None
         self.memory: Any = None
         self.rem_log: Any = None
@@ -3791,47 +3758,6 @@ class MaxwellBot(commands.Bot):
                 interval=self._mail_poll_seconds(),
             )
 
-        # X (Twitter). The client is cheap to build and needs no credentials
-        # for the read half, so it exists whenever ENABLE_X is on; what it can
-        # actually do is decided per call by which backends are configured.
-        self.x_client: XClient | None = None
-        self.x_mention_poller: XMentionPoller | None = None
-        if getattr(self.config, "ENABLE_X", False):
-            self.x_client = XClient(
-                {
-                    "backend": getattr(self.config, "X_BACKEND", "auto"),
-                    "auth_token": getattr(self.config, "X_AUTH_TOKEN", ""),
-                    "ct0": getattr(self.config, "X_CT0", ""),
-                    "handle": getattr(self.config, "X_HANDLE", ""),
-                    "api_base_url": getattr(self.config, "X_API_BASE_URL", ""),
-                    "api_key": getattr(self.config, "X_API_KEY", ""),
-                    "api_key_header": getattr(
-                        self.config, "X_API_KEY_HEADER", "Authorization"
-                    ),
-                    "api_paths": getattr(self.config, "X_API_PATHS", {}),
-                    "rss_base_url": getattr(self.config, "X_RSS_BASE_URL", ""),
-                    "rss_paths": getattr(self.config, "X_RSS_PATHS", {}),
-                    "syndication_enabled": getattr(self.config, "X_SYNDICATION", True),
-                    "max_chars": getattr(self.config, "X_MAX_CHARS", 280),
-                    "timeout": getattr(self.config, "X_TIMEOUT_SECONDS", 20),
-                    "graphql_file": getattr(self.config, "X_GRAPHQL_FILE", ""),
-                    # Runtime knobs; _load_control re-applies them live.
-                    "post_enabled": True,
-                    "posts_per_hour": 8,
-                    "cache_seconds": 60,
-                },
-                data_dir=self.config.DATA_DIR,
-            )
-            # Mentions are the half of X somebody is waiting on, so they file
-            # as inbox notices like mail does. Public reads cannot see them —
-            # the poller stays idle without a session and says so once.
-            self.x_mention_poller = XMentionPoller(
-                self.inbox,
-                self.x_client,
-                data_dir=self.config.DATA_DIR,
-                interval=self._x_poll_seconds(),
-            )
-
     def _setup_tools(self):
         # Every tool is gated by an ENABLE_* env var so a fresh install
         # can opt out of paid APIs (NVIDIA, Mailgun) or heavy deps
@@ -3855,9 +3781,6 @@ class MaxwellBot(commands.Bot):
         self.tools["create_invite"] = CreateInviteTool(self)
         self.tools["lookup_user"] = LookupUserTool(self)
         self.tools["manage_plugin"] = ManagePluginTool(self)
-        if user_tools_enabled(self._planned_kinds):
-            self.tools["join_server"] = JoinServerTool(self)
-            self.tools["server_setup"] = ServerSetupTool(self)
         self.tools["leave_server"] = LeaveServerTool(self)
         self.tools["search_messages"] = SearchMessagesTool(self)
         self.tools["set_nickname"] = SetNicknameTool(self)
@@ -3872,20 +3795,29 @@ class MaxwellBot(commands.Bot):
         self.tools["list_members"] = ListMembersTool(self)
         self.tools["create_category"] = CreateCategoryTool(self)
         self.tools["create_channel"] = CreateChannelTool(self)
+        self.tools["edit_category"] = EditCategoryTool(self)
         self.tools["edit_channel"] = EditChannelTool(self)
+        self.tools["move_channel"] = MoveChannelTool(self)
+        self.tools["clone_channel"] = CloneChannelTool(self)
+        self.tools["sync_channel"] = SyncChannelTool(self)
         self.tools["delete_channel"] = DeleteChannelTool(self)
         self.tools["kick_member"] = KickMemberTool(self)
         self.tools["ban_member"] = BanMemberTool(self)
         self.tools["unban_member"] = UnbanMemberTool(self)
+        self.tools["softban_member"] = SoftbanMemberTool(self)
         self.tools["list_bans"] = ListBansTool(self)
         self.tools["timeout_member"] = TimeoutMemberTool(self)
+        self.tools["list_timeouts"] = ListTimeoutsTool(self)
         self.tools["manage_role"] = ManageRoleTool(self)
         self.tools["purge_messages"] = PurgeMessagesTool(self)
         self.tools["pin_message"] = PinMessageTool(self)
         self.tools["set_member_nickname"] = SetMemberNicknameTool(self)
         self.tools["voice_mod"] = VoiceModTool(self)
         self.tools["lock_channel"] = LockChannelTool(self)
+        self.tools["lockdown"] = LockdownTool(self)
         self.tools["set_channel_permissions"] = SetChannelPermissionsTool(self)
+        self.tools["list_permissions"] = ListPermissionsTool(self)
+        self.tools["manage_invites"] = ManageInvitesTool(self)
         self.tools["edit_server"] = EditServerTool(self)
         self.tools["audit_log"] = AuditLogTool(self)
         self.tools["manage_emoji"] = ManageEmojiTool(self)
@@ -3915,8 +3847,6 @@ class MaxwellBot(commands.Bot):
             self.tools["fetch_url"] = FetchUrlTool(self)
         self.tools["see_image"] = SeeImageTool(self)
         self.tools["see_video"] = SeeVideoTool(self)
-        if self.config.ENABLE_YOUTUBE:
-            self.tools["youtube"] = YouTubeTool(self)
         self.tools["send_file"] = SendFileTool(self)
         self.tools["send_message"] = SendMessageTool(self)
         # Chess: this bot plays real chess against a chosen opponent in a
@@ -3954,13 +3884,6 @@ class MaxwellBot(commands.Bot):
             self.tools["email_get_message"] = EmailGetMessageTool(self)
             self.tools["email_search"] = EmailSearchTool(self)
 
-        # X (Twitter). x_read works with no credentials at all; x_post says
-        # what is missing when there is no session to post with, so both are
-        # registered together under one switch.
-        if getattr(self.config, "ENABLE_X", False) and self.x_client is not None:
-            self.tools["x_read"] = XReadTool(self)
-            self.tools["x_post"] = XPostTool(self)
-
         # Discover and load drop-in plugins from plugins/ directory
         try:
             self.plugin_manager.load_plugins()
@@ -3985,12 +3908,10 @@ class MaxwellBot(commands.Bot):
         return activities
 
     def discord_user_client(self):
-        return _discord_user_client(self)
+        return None
 
     def discord_bot_client(self):
-        from discord_account import discord_bot_client as _bot_client
-
-        return _bot_client(self)
+        return self
 
     def _self_ids(self) -> set[int]:
         return _discord_account_ids(self)
@@ -4056,7 +3977,12 @@ class MaxwellBot(commands.Bot):
 
     async def _push_presence(self, **kwargs):
         """Send presence to Discord. Tests replace this to avoid super()."""
-        return await super().change_presence(**kwargs)
+        allowed = {}
+        if "activity" in kwargs and kwargs["activity"] is not MISSING:
+            allowed["activity"] = kwargs["activity"]
+        if "status" in kwargs and kwargs["status"] is not MISSING:
+            allowed["status"] = kwargs["status"]
+        return await super().change_presence(**allowed)
 
     async def fetch_user(self, user_id, /):
         """Prefer the gateway cache. Bare fetch_user always hits REST."""
@@ -4092,54 +4018,23 @@ class MaxwellBot(commands.Bot):
         self,
         *,
         activity=MISSING,
-        activities=MISSING,
         status=MISSING,
-        afk=MISSING,
-        idle_since=MISSING,
-        edit_settings=False,
+        **_ignored,
     ):
         overlay = bool(getattr(self, "_sleep_presence_overlay", False))
         if status is not MISSING and status is not None and not overlay:
             self._current_status = status
         if not overlay and self._sleep_window_active():
             status = discord.Status.idle
-        # User-settings writes (custom status) only exist on a user account.
-        if (
-            getattr(self, "account_kind", "user") != "user"
-            or _discord_user_client(self) is not self
-        ):
-            edit_settings = False
+        kwargs = {}
+        if activity is not MISSING:
+            kwargs["activity"] = activity
+        if status is not MISSING:
+            kwargs["status"] = status
         pusher = getattr(self, "_push_presence", None)
         if callable(pusher):
-            result = await pusher(
-                activity=activity,
-                activities=activities,
-                status=status,
-                afk=afk,
-                idle_since=idle_since,
-                edit_settings=edit_settings,
-            )
-        else:
-            result = await super().change_presence(
-                activity=activity,
-                activities=activities,
-                status=status,
-                afk=afk,
-                idle_since=idle_since,
-                edit_settings=edit_settings,
-            )
-        peer = getattr(self, "_peer", None)
-        if peer is not None:
-            with contextlib.suppress(Exception):
-                await peer.change_presence(
-                    activity=activity,
-                    activities=activities,
-                    status=status,
-                    afk=afk,
-                    idle_since=idle_since,
-                    edit_settings=False,
-                )
-        return result
+            return await pusher(**kwargs)
+        return await super().change_presence(**kwargs)
 
     def _get_personality(self) -> str:
         """Get base personality with age injected dynamically."""
@@ -4352,7 +4247,7 @@ class MaxwellBot(commands.Bot):
                 state["uncertain"] = True
             # Legacy tools can send directly, without the slowmode wrapper.
             if tool_identifier in {
-                "image_generator", "hd_image", "create_poll", "join_server",
+                "image_generator", "hd_image", "create_poll",
                 "create_thread", "thread_control", "send_message", "send_file", "shell", "send_meme",
                 "send_media", "tts", "forward_message",
             }:
@@ -5084,38 +4979,6 @@ class MaxwellBot(commands.Bot):
             return
         await poller.run()
 
-    def _x_poll_seconds(self) -> float:
-        raw = (getattr(self, "_control", None) or {}).get("x_mention_poll_seconds", 300)
-        try:
-            # Floor of 60s: a mention is a conversation, not an alarm, and
-            # the free backends have small rate-limit budgets.
-            return max(60.0, min(float(raw), 3600.0))
-        except (TypeError, ValueError):
-            return 300.0
-
-    async def _x_mention_poll_loop(self) -> None:
-        poller = getattr(self, "x_mention_poller", None)
-        if poller is None:
-            return
-        await poller.run()
-
-    def _apply_x_control(self, control: dict) -> None:
-        """Push the dashboard's X knobs into the live client and poller.
-
-        Read on every control reload rather than at startup so turning
-        posting off actually turns it off now, mid-conversation, without a
-        restart — that is the whole point of having the switch.
-        """
-        client = getattr(self, "x_client", None)
-        if client is not None:
-            client.post_enabled = parse_bool(control.get("x_post_enabled", True), True)
-            client.budget.per_hour = int(control.get("x_posts_per_hour", 8) or 0)
-            client.cache_seconds = float(control.get("x_cache_seconds", 60) or 0)
-        poller = getattr(self, "x_mention_poller", None)
-        if poller is not None:
-            poller.interval = float(control.get("x_mention_poll_seconds", 300))
-            poller.max_backoff = max(poller.interval, poller.max_backoff)
-
     def _conversation_watch_seconds(self) -> float:
         fallback = float(DEFAULT_CONTROL["conversation_watch_seconds"])
         raw = (getattr(self, "_control", None) or {}).get(
@@ -5743,17 +5606,6 @@ class MaxwellBot(commands.Bot):
             logger.info(
                 "Mail inbox poll scheduled every %.0fs", self.mail_poller.interval
             )
-        if self.x_mention_poller is not None and self.x_mention_poller.configured():
-            self._tasks.append(
-                asyncio.create_task(self._x_mention_poll_loop(), name="x-mention-poll")
-            )
-            logger.info(
-                "X mention poll scheduled every %.0fs (@%s)",
-                self.x_mention_poller.interval,
-                getattr(self.config, "X_HANDLE", "") or "?",
-            )
-        elif self.x_client is not None:
-            logger.info("X ready — %s", self.x_client.status())
         # ENABLE_AUTONOMY was defined in config.py, listed in the feature
         # report, and documented in the README as the switch for this engine —
         # and nothing read it, so setting it to false started the loop anyway.
@@ -5773,37 +5625,7 @@ class MaxwellBot(commands.Bot):
             else:
                 self._tasks.append(asyncio.create_task(self._telegram_loop()))
                 logger.info("Telegram polling loop scheduled")
-        if getattr(self, "_peer_token", None) and getattr(self, "_peer_kind", None):
-            self._tasks.append(
-                asyncio.create_task(self._run_peer(), name="discord-peer")
-            )
         logger.info("Bot setup complete")
-
-    async def _run_peer(self):
-        kind = self._peer_kind
-        token = self._peer_token
-        if not kind or not token:
-            return
-        peer = None
-        try:
-            peer = make_companion(self, kind)
-            self._peer = peer
-            logger.info("Starting companion Discord %s account", kind)
-            await peer.start(token)
-        except discord.LoginFailure:
-            logger.error(
-                "Companion %s account rejected. Continuing with the primary account only.",
-                kind,
-            )
-            self._peer = None
-        except asyncio.CancelledError:
-            if peer is not None:
-                with contextlib.suppress(Exception):
-                    await peer.close()
-            raise
-        except Exception:
-            logger.exception("Companion %s account stopped", kind)
-            self._peer = None
 
     async def on_error(self, event, *args, **kwargs):
         logger.exception("discord event %s failed", event)
@@ -5856,15 +5678,21 @@ class MaxwellBot(commands.Bot):
                 ident["self_id_paren"] = f" (ID {uid})" if uid else ""
                 self._base_knowledge = fill_identity(MAXWELL_BASE_KNOWLEDGE, ident)
                 self._discord_chat_protocol = fill_identity(DISCORD_CHAT_PROTOCOL, ident)
-            kind = getattr(self, "account_kind", "user")
+            if not bool(getattr(self.user, "bot", False)):
+                logger.error(
+                    "This token belongs to a user account. Maxwell is an official "
+                    "Discord bot only — create an application at "
+                    "https://discord.com/developers/applications and set "
+                    "DISCORD_BOT_TOKEN."
+                )
+                await self.close()
+                return
             logger.info(
-                "Logged in as %s (%s) [%s account]",
+                "Logged in as %s (%s) [bot account]",
                 self.bot_name,
                 self.user.id,
-                kind,
             )
-            if kind == "bot":
-                self._spawn_detached(self._clear_slash_commands())
+            self._spawn_detached(self._clear_slash_commands())
         logger.info(f"Connected to {len(self.guilds)} guilds")
         self._load_emojis()
         try:
@@ -5886,9 +5714,9 @@ class MaxwellBot(commands.Bot):
     async def _clear_slash_commands(self) -> None:
         """Maxwell never uses slash commands. Wipe any leftover registrations."""
         token = (
-            getattr(getattr(self, "http", None), "_raw_token", None)
-            or getattr(getattr(self, "http", None), "token", None)
+            getattr(getattr(self, "http", None), "token", None)
             or getattr(getattr(self, "config", None), "DISCORD_BOT_TOKEN", "")
+            or getattr(getattr(self, "config", None), "DISCORD_TOKEN", "")
         )
         if not token:
             return
@@ -8358,7 +8186,6 @@ class MaxwellBot(commands.Bot):
                     "` ,rem ...` - manage/run REM (admin)\n"
                     "` ,autonomy ...` - manage autonomy engine + channel/server blacklists (admin)\n"
                     "` ,vc ...` - voice commands\n"
-                    "` ,x [status|read <handle>|post <text>|budget]` - X/Twitter (admin)\n"
                     "` ,drug [minutes|off|status]` - drug mode timer\n"
                     "` ,solo [#channel|off|status]` - lock this server to ONE channel: silence everywhere else and stop autonomy here (admin)\n"
                     "` ,jailbreak on|off|status` - toggle freedom-mode prompt for this server (admin)\n"
@@ -8370,8 +8197,6 @@ class MaxwellBot(commands.Bot):
                     "` ,confirm` - authorize one destructive tool call on a tainted turn\n"
                     "` ,blacklist [@user|clear]` / `,unblacklist @user` - blacklist controls (admin)\n"
                 )
-            elif cmd == "x":
-                await self._handle_x_command(message, args)
             elif cmd == "vc":
                 await self._handle_vc_command(message, args)
             elif cmd in ("shell",):
@@ -8656,65 +8481,6 @@ class MaxwellBot(commands.Bot):
             Path(self.config.DATA_DIR) / "bot_control.json",
             control,
         )
-
-    async def _handle_x_command(self, message, args: str | None) -> None:
-        """`,x` — see what X can do here, read a timeline, or post by hand.
-
-        Deliberately thin: it exists so an operator can tell "the cookies
-        expired" from "the model chose not to post" without reading logs.
-        """
-        client = getattr(self, "x_client", None)
-        if client is None:
-            await message.channel.send(
-                "X is off (ENABLE_X=false). Set it to true in .env and restart."
-            )
-            return
-        from x_client import XError, render_tweets
-
-        parts = (args or "status").strip().split(None, 1)
-        sub = parts[0].lower() if parts else "status"
-        rest = parts[1].strip() if len(parts) > 1 else ""
-        try:
-            if sub in {"status", ""}:
-                budget = await client.budget.check()
-                await message.channel.send(
-                    f"X: {client.status()}\n"
-                    + (f"budget: {budget}" if budget else "budget: room to post")
-                )
-            elif sub == "budget":
-                blocked = await client.budget.check()
-                await message.channel.send(blocked or "X budget: room to post")
-            elif sub in {"read", "user", "search", "tweet", "home", "mentions"}:
-                # `,x read` is the home timeline; `,x read @someone` is theirs.
-                action = sub
-                if sub == "read":
-                    action = "user" if rest else "home"
-                tweets = await client.read(
-                    action,
-                    handle=rest if action == "user" else None,
-                    query=rest if action == "search" else None,
-                    tweet_id=rest if action == "tweet" else None,
-                    limit=5,
-                )
-                text = render_tweets(tweets, header=f"X — {action} {rest}".strip())
-                await message.channel.send(text[:1900])
-            elif sub == "post":
-                if not rest:
-                    await message.channel.send("usage: `,x post <text>`")
-                    return
-                result = await client.post(rest)
-                await message.channel.send(
-                    f"posted: {result.get('url') or result.get('id')}"
-                )
-            else:
-                await message.channel.send(
-                    "usage: `,x status` | `,x read [@handle]` | `,x search <q>` "
-                    "| `,x tweet <id|url>` | `,x post <text>` | `,x budget`"
-                )
-        except XError as e:
-            await message.channel.send(f"X error: {e}"[:1900])
-        except Exception as e:  # pragma: no cover - defensive
-            await message.channel.send(f"X failed: {type(e).__name__}: {e}"[:1900])
 
     async def _handle_vc_command(self, message, args: str | None):
         if not getattr(self.config, "ENABLE_VC", True):
@@ -9881,318 +9647,11 @@ class MaxwellBot(commands.Bot):
             "admins.json", self._admins, "Failed to save admins", sort=True
         )
 
-    # ------------------------------------------------------------------
-    # CAPTCHA handling — Discord hits these on invite accepts, DM gates,
-    # phone checks, etc. discord.py-self calls _handle_captcha on every
-    # CaptchaRequired raised anywhere in the HTTP layer, then retries the
-    # original request with the solved token in X-Captcha-Key. Priority:
-    #   1. external solver (CAPTCHA_SOLVER_SERVICE) if configured
-    #   2. human-in-the-loop solve page (CAPTCHA_HUMAN_SOLVE) — host a
-    #      one-shot hCaptcha page, DM the link to admins (fallback
-    #      CAPTCHA_FALLBACK_USER_ID), wait for a browser solve
-    #   3. raise the original challenge so the calling tool can report it
-    # ------------------------------------------------------------------
-    def _captcha_summary(self, exception) -> str:
-        parts = []
-        errors = getattr(exception, "errors", None) or []
-        if errors:
-            parts.append("; ".join(str(x) for x in errors))
-        parts.append(f"service={getattr(exception, 'service', '?')}")
-        parts.append(f"sitekey={getattr(exception, 'sitekey', '?')}")
-        rq = getattr(exception, "rqdata", None)
-        if rq:
-            parts.append(f"rqdata={rq}")
-        if getattr(exception, "should_serve_invisible", False):
-            parts.append("invisible=1")
-        return " | ".join(parts)
-
-    def _captcha_recipient_ids(self) -> list[str]:
-        """Admins to DM the solve link; falls back to CAPTCHA_FALLBACK_USER_ID."""
-        admins = sorted(str(x) for x in (self._admins or set()) if x)
-        if admins:
-            return admins
-        fb = (getattr(self.config, "CAPTCHA_FALLBACK_USER_ID", "") or "").strip()
-        return [fb] if fb else []
-
-    async def _captcha_resolve_user(self, uid: str | int):
-        """Resolve a user id to a User object, fetching if not cached."""
-        user = self.get_user(int(uid))
-        if user is None:
-            user = await self.fetch_user(int(uid))
-        return user
-
-    async def _human_captcha_ensure(self) -> HumanCaptchaServer:
-        """Start (once) the local HTTP server hosting solve pages."""
-        if self._human_captcha_server is None:
-            cfg = self.config
-            public_base = getattr(
-                cfg, "MAXWELL_PUBLIC_BASE_URL", "http://127.0.0.1"
-            ).rstrip("/")
-            self._human_captcha_server = HumanCaptchaServer(
-                host=getattr(cfg, "CAPTCHA_HUMAN_HOST", "127.0.0.1"),
-                port=getattr(cfg, "CAPTCHA_HUMAN_PORT", 8790),
-                public_base=public_base,
-                timeout=getattr(cfg, "CAPTCHA_SOLVER_TIMEOUT", 180),
-            )
-            await self._human_captcha_server.start()
-        return self._human_captcha_server
-
-    async def _create_captcha_challenge(self, exception, notify=None) -> str:
-        """Register a pending challenge; returns the public solve URL."""
-        srv = await self._human_captcha_ensure()
-        url = await srv.create_challenge(exception)
-        if notify is not None:
-            try:
-                await notify(url)
-            except Exception as e:  # notification failure must not lose the solve
-                logger.error("captcha notify failed: %s", e)
-        return url
-
-    async def _notify_captcha_link(self, url: str, exception=None) -> None:
-        """DM the solve link to every admin (fallback user if none)."""
-        summary = (
-            self._captcha_summary(exception) if exception is not None else "CAPTCHA"
-        )
-        msg = (
-            "⚠️ Discord hit a CAPTCHA: "
-            + summary
-            + "\nSolve it here (expires in ~2 min): "
-            + url
-        )
-        for uid in self._captcha_recipient_ids():
-            try:
-                user = await self._captcha_resolve_user(uid)
-                if user is None:
-                    continue
-                await user.send(msg)
-            except Exception as e:
-                logger.warning("captcha DM to %s failed: %s", uid, e)
-
-    async def _explain_captcha_dm(self, url: str, exception) -> None:
-        """Fire-and-forget LLM explanation DM for a captcha hit."""
-        recipients = self._captcha_recipient_ids()
-        if not recipients or self.ai_provider is None:
-            return
-        summary = self._captcha_summary(exception)
-        try:
-            messages = [
-                {
-                    "role": "system",
-                    "content": (
-                        f"You are {process_name(self)}. The operator's Discord session hit a "
-                        "CAPTCHA. In 3-4 plain sentences, explain what happened "
-                        "and that they should open the link and solve it quickly "
-                        "(it expires). Don't invent details beyond what's given."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": f"Challenge details: {summary}\nSolve link: {url}",
-                },
-            ]
-            text = await self._generate_response(
-                messages,
-                timeout=45,
-                max_tokens=300,
-                temperature=0.6,
-                disable_reasoning=True,
-                fast_fallback=True,
-            )
-            text = (text or "").strip()
-            if not text or text == "__NO_RESPONSE__":
-                return
-            user = await self._captcha_resolve_user(recipients[0])
-            if user is not None:
-                await user.send(text[:1500])
-        except Exception as e:
-            logger.debug("captcha LLM explanation skipped: %s", e)
-
-    async def _solve_captcha_with_notify(self, exception, notify=None) -> str:
-        """Create a human-solve challenge (custom notify) and wait for the token."""
-        url = await self._create_captcha_challenge(exception, notify=notify)
-        srv = self._human_captcha_server
-        if srv is None:
-            raise CaptchaSolveError("human captcha server not started")
-        return await srv.wait_for_token(url)
-
-    async def _retry_invite_with_captcha(self, code: str, exception, token: str):
-        """Re-submit an invite accept with the solved captcha headers."""
-        from discord.http import Route
-        from discord.utils import _generate_session_id
-
-        headers = {"X-Captcha-Key": token}
-        rqtoken = getattr(exception, "rqtoken", None)
-        if rqtoken:
-            headers["X-Captcha-Rqtoken"] = rqtoken
-        session_id = getattr(exception, "session_id", None)
-        if session_id:
-            headers["X-Captcha-Session-Id"] = session_id
-        conn = getattr(self, "_connection", None)
-        sid = getattr(conn, "session_id", None) or _generate_session_id()
-        return await self.http.request(
-            Route("POST", "/invites/{invite_id}", invite_id=code),
-            json={"session_id": sid},
-            headers=headers,
-        )
-
-    async def _handle_captcha(self, exception):
-        """Global captcha handler wired into discord.py-self's HTTP layer."""
-        logger.warning("CAPTCHA challenge: %s", self._captcha_summary(exception))
-        # 1) external solver (fast, unattended)
-        if self._auto_captcha_solver is not None:
-            try:
-                return await self._auto_captcha_solver.solve(
-                    service=getattr(exception, "service", "hcaptcha"),
-                    sitekey=getattr(exception, "sitekey", ""),
-                    rqdata=getattr(exception, "rqdata", None),
-                    invisible=getattr(exception, "should_serve_invisible", False),
-                )
-            except Exception as e:
-                logger.error("auto captcha solve failed: %s", e)
-        # 2) human-in-the-loop solve page + DM notification
-        if getattr(self.config, "CAPTCHA_HUMAN_SOLVE", False):
-            try:
-
-                async def _notify(url: str, _exc=exception):
-                    await self._notify_captcha_link(url, _exc)
-
-                url = await self._create_captcha_challenge(exception, notify=_notify)
-                srv = self._human_captcha_server
-                if srv is None:
-                    raise CaptchaSolveError("human captcha server not started")
-                # LLM explanation DM in the background — never blocks the solve.
-                with contextlib.suppress(Exception):
-                    # Tracked: a bare create_task can be garbage-collected
-                    # mid-flight, which is how a fire-and-forget DM silently
-                    # never arrives.
-                    self._track_task(
-                        asyncio.create_task(
-                            self._explain_captcha_dm(url, exception),
-                            name="captcha-explain-dm",
-                        )
-                    )
-                return await srv.wait_for_token(url)
-            except CaptchaSolveError as e:
-                logger.error("human captcha solve failed: %s", e)
-        # 3) surface the original challenge to the caller (tool reports it)
-        raise exception
-
-    async def _discord_request(self, method: str, path: str, payload=None, **params):
-        """Raw authenticated call against a Discord route the library lacks.
-
-        discord.py-self has no member-side onboarding support, so
-        guild_onboarding drives the HTTP itself through this shim. ``path``
-        is an unformatted template and ``params`` its values, so the Route
-        keeps its major parameter and its own rate-limit bucket.
-        """
-        from discord.http import Route
-
-        route = Route(method, path, **params)
-        if payload is None:
-            return await self.http.request(route)
-        return await self.http.request(route, json=payload)
-
-    async def _onboard_ask_llm(self, messages: list) -> str:
-        """One short model turn that picks onboarding options. Never raises."""
-        await self._acquire_ai_slot(timeout=20, priority="user", key="onboarding")
-        try:
-            resp = await self._generate_response(
-                messages,
-                timeout=45,
-                max_tokens=400,
-                temperature=0.3,
-                disable_reasoning=True,
-                fast_fallback=True,
-            )
-        finally:
-            await self._release_ai_slot()
-        return resp or ""
-
-    async def _auto_onboard(
-        self,
-        guild,
-        notify=None,
-        *,
-        preferences: str = "",
-        dry_run: bool = False,
-        detail: bool = False,
-    ):
-        """Answer a server's onboarding prompts so the account is usable.
-
-        Most COMMUNITY servers hide their roles and half their channels
-        behind GUILD_ONBOARDING prompts. Maxwell picks the options himself
-        (the titles/descriptions go to the model); if the model is
-        unreachable or answers with nonsense, guild_onboarding falls back
-        to the first option of each prompt so the account still lands with
-        roles instead of stranded.
-
-        Returns the summary string for tool results / logs, or the full
-        result dict when ``detail`` is set. Never raises.
-        """
-        try:
-            result = await guild_onboarding.run_onboarding(
-                self._discord_request,
-                guild.id,
-                getattr(guild, "name", str(guild.id)),
-                ask_llm=self._onboard_ask_llm,
-                personality=self._get_personality(),
-                preferences=preferences,
-                dry_run=dry_run,
-            )
-        except Exception as e:
-            result = {
-                "ok": False,
-                "summary": f"onboarding failed: {type(e).__name__}: {e}",
-                "prompts": [],
-                "choice": {},
-                "role_ids": [],
-                "channel_ids": [],
-            }
-        summary = str(result.get("summary") or "onboarding: no result")
-        if result.get("ok") and not dry_run:
-            logger.info("Auto-onboard %s (guild %s): %s", guild.name, guild.id, summary)
-            if notify is not None:
-                try:
-                    await notify(summary)
-                except Exception as e:
-                    logger.debug("auto-onboard notify failed: %s", e)
-        return result if detail else summary
-
     async def on_guild_join(self, guild):
-        """Fire when the account is added to a server (invite accept, tool
-        join, or someone manually inviting the account). Runs auto-onboarding
-        so role-gated servers are usable immediately, and records the join
-        in the log. Failures are logged, never raised."""
+        """Someone added this official bot to a server."""
         self._dispatch_plugin_event("on_guild_join", guild)
         with contextlib.suppress(Exception):
             logger.info("Joined guild: %s (id=%s)", guild.name, guild.id)
-        # Give the gateway a beat to hydrate guild state before onboarding.
-        await asyncio.sleep(2)
-        try:
-            result = await self._auto_onboard(guild, detail=True)
-            summary = str(result.get("summary") or "")
-            if not result.get("ok"):
-                logger.info("Auto-onboard skip/failed for %s: %s", guild.name, summary)
-                return
-            roles = len(result.get("role_ids") or [])
-            channels = len(result.get("channel_ids") or [])
-            gained = f"{roles} role(s)"
-            if channels:
-                gained += f", {channels} channel(s)"
-            try:
-                owner_ids = self._captcha_recipient_ids()
-                if owner_ids:
-                    user = self.get_user(int(owner_ids[0]))
-                    if user is None:
-                        user = await self.fetch_user(int(owner_ids[0]))
-                    if user is not None:
-                        await user.send(
-                            f"✅ Joined **{guild.name}** — {summary} ({gained})"
-                        )
-            except Exception as e:
-                logger.debug("auto-onboard owner DM failed: %s", e)
-        except Exception as e:
-            logger.warning("auto-onboard error for %s: %s", guild.name, e)
         try:
             await self.inbox.add_notice(
                 kind="guild_join",
@@ -10910,21 +10369,10 @@ class MaxwellBot(commands.Bot):
                     3600,
                 ),
             )
-            control["x_posts_per_hour"] = max(
-                0, min(_safe_int(control.get("x_posts_per_hour", 8), 8), 100)
-            )
-            control["x_cache_seconds"] = max(
-                0, min(_safe_int(control.get("x_cache_seconds", 60), 60), 3600)
-            )
-            control["x_mention_poll_seconds"] = max(
-                60,
-                min(_safe_int(control.get("x_mention_poll_seconds", 300), 300), 3600),
-            )
             if control["ai_concurrency"] != self._ai_concurrency:
                 self._ai_concurrency = control["ai_concurrency"]
                 self._notify_ai_waiters()
             self._control = control
-            self._apply_x_control(control)
             poller = getattr(self, "mail_poller", None)
             if poller is not None:
                 # Takes effect on the next tick; the loop reads backoff_seconds
@@ -11589,11 +11037,12 @@ class MaxwellBot(commands.Bot):
                                 or cmd.get("presence")
                                 or "online"
                             )
+                            acts = self._build_activities()
                             await self.change_presence(
                                 status=status_map.get(
                                     presence_status, discord.Status.online
                                 ),
-                                activities=self._build_activities(),
+                                activity=acts[0] if acts else None,
                             )
                             cmd["result"] = "presence updated"
                         elif typ == "set_custom_status":
@@ -11603,8 +11052,9 @@ class MaxwellBot(commands.Bot):
                                 if text
                                 else None
                             )
+                            acts = self._build_activities()
                             await self.change_presence(
-                                activities=self._build_activities()
+                                activity=acts[0] if acts else None,
                             )
                             cmd["result"] = "custom status updated"
                         elif typ == "change_avatar":
@@ -13453,7 +12903,6 @@ class MaxwellBot(commands.Bot):
         text_blocks = []
         message_id = getattr(message, "id", None)
         media_count = 0
-        from bot_tools import YouTubeTool as _YouTubeTool
 
         for idx, embed in enumerate(embeds[:5], 1):
             text = self._embed_text(embed)
@@ -13465,19 +12914,16 @@ class MaxwellBot(commands.Bot):
                     f"Embed {idx} media URLs:\n"
                     + "\n".join(f"  - {u}" for _, u in embed_media_urls)
                 )
-            # Skip ALL media for YouTube embeds; the youtube tool fetches
-            # thumbnail/frames/transcript itself, and feeding the raw
-            # embed thumbnail here lets the model "see" it without ever
-            # calling the tool.
+            # Skip YouTube embeds — we do not download YouTube media.
             embed_url = getattr(embed, "url", None) or ""
-            if _YouTubeTool._is_youtube_url(embed_url):
+            if _is_youtube_url(embed_url):
                 continue
             embed_has_image = False
             pending_video: list[dict] = []
             for label, url in embed_media_urls:
                 if media_count >= 5 and not (label == "video" and proc_aud):
                     break
-                if _YouTubeTool._is_youtube_url(url):
+                if _is_youtube_url(url):
                     continue
                 if label in {"image", "thumbnail"} and not proc_img:
                     continue
@@ -13587,10 +13033,8 @@ class MaxwellBot(commands.Bot):
         seen: set[str] = set()
         for raw in re.findall(r"https?://[^\s<>()]+", content or ""):
             url = raw.rstrip(".,;!?)\"'").rstrip(">")
-            # YouTube links have a dedicated transcript/frame extractor. Do
-            # not let a path that happens to end in .mp4 enter the generic
-            # download/ffmpeg path.
-            if YouTubeTool._is_youtube_url(url):
+            # Do not download YouTube URLs.
+            if _is_youtube_url(url):
                 continue
             ext = Path(urlparse(url).path).suffix.lower()
             if (
@@ -14092,18 +13536,17 @@ class MaxwellBot(commands.Bot):
         activities = builder() if callable(builder) else []
         self._sleep_presence_overlay = True
         try:
+            activity = activities[0] if activities else None
             if asleep:
                 await changer(
                     status=discord.Status.idle,
-                    activities=activities,
-                    edit_settings=False,
+                    activity=activity,
                 )
             else:
                 status = getattr(self, "_current_status", None) or discord.Status.online
                 await changer(
                     status=status,
-                    activities=activities,
-                    edit_settings=bool(getattr(self, "_custom_status", None)),
+                    activity=activity,
                 )
         except Exception as e:  # noqa: BLE001
             logger.debug("Sleep presence update failed: %s", e)
@@ -14405,59 +13848,9 @@ class MaxwellBot(commands.Bot):
         turn_context["media"] = list(media)
         turn_context["active_media"] = list(active_media)
 
-        # Auto-invoke the youtube tool for YouTube links so the model
-        # gets transcript/frames even when it wouldn't emit a tool call
-        # on its own. This runs before the model sees the message, and
-        # the result is appended as tool context the model can use.
         async def _run_pre_tools():
             pre_results: list[str] = []
             pre_images: list[str] = []
-            if (
-                self._control.get("tools_enabled", True)
-                and "youtube" in self.tools
-                and "youtube" not in set(self._control.get("disabled_tools", []) or [])
-            ):
-                yt_scan = content or ""
-                for snap in iter_message_snapshots(message):
-                    yt_scan += " " + str(getattr(snap, "content", "") or "")
-                    for embed in list(getattr(snap, "embeds", None) or [])[:3]:
-                        yt_scan += " " + str(getattr(embed, "url", "") or "")
-                        yt_scan += " " + str(getattr(embed, "description", "") or "")
-                parent = self._reply_parent(message)
-                if parent is not None:
-                    yt_scan += " " + str(getattr(parent, "content", "") or "")
-                    for embed in list(getattr(parent, "embeds", None) or [])[:3]:
-                        yt_scan += " " + str(getattr(embed, "url", "") or "")
-                        yt_scan += " " + str(getattr(embed, "description", "") or "")
-                yt_urls = re.findall(
-                    r"https?://(?:www\.)?(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/[^\s<>\"']+",
-                    yt_scan,
-                    re.IGNORECASE,
-                )
-
-                async def _exec_yt(u):
-                    try:
-                        res = await self._invoke_request_tool(
-                            message, "youtube", self.tools["youtube"], url=u
-                        )
-                        return (u, res)
-                    except Exception as e:
-                        logger.warning(f"Auto youtube tool failed for {u}: {e}")
-                        return (u, None)
-
-                if yt_urls:
-                    yt_tasks = [_exec_yt(u) for u in yt_urls[:3]]
-                    yt_done = await asyncio.gather(*yt_tasks)
-                    for _, yt_result in yt_done:
-                        if yt_result:
-                            pre_results.append(f"Tool youtube (auto): {yt_result}")
-                            _IMG_RE = re.compile(
-                                r"__IMAGE_B64__([A-Za-z0-9+/=\s]+)__END_IMAGE_B64__"
-                            )
-                            pre_images.extend(
-                                m.group(1).strip() for m in _IMG_RE.finditer(yt_result)
-                            )
-
             # Auto web_search for queries about new/recent AI models, releases, current events.
             # This is code logic (not a prompt rule) to ensure the bot looks up the most
             # available up-to-date info from search + Intel-fed memory when the topic
@@ -14566,24 +13959,12 @@ class MaxwellBot(commands.Bot):
             channel_id,
         )
         if pre_tool_results:
-            # General pre-tool results (YouTube + auto current-info searches etc.)
-            yt_only = [r for r in pre_tool_results if "youtube" in r.lower()]
             search_only = [
-                r
-                for r in pre_tool_results
-                if "web search" in r.lower() and "youtube" not in r.lower()
+                r for r in pre_tool_results if "web search" in r.lower()
             ]
-            other = [
-                r for r in pre_tool_results if r not in yt_only and r not in search_only
-            ]
+            other = [r for r in pre_tool_results if r not in search_only]
 
             injection_parts = []
-            if yt_only:
-                injection_parts.append(
-                    "YouTube tool was auto-invoked for the link(s) above. "
-                    "Use this data (transcript, timestamps, frames) to answer; "
-                    "do not just describe a thumbnail.\n\n" + "\n\n".join(yt_only)
-                )
             if search_only:
                 injection_parts.append(
                     "Fresh web search results were automatically retrieved for recent/current events or new models in your question. "
@@ -14605,12 +13986,12 @@ class MaxwellBot(commands.Bot):
                     {
                         "b64": img,
                         "mime_type": "image/jpeg",
-                        "filename": "youtube-frame.jpg",
+                        "filename": "auto-frame.jpg",
                         "is_image": True,
                         "is_text": False,
                         "text": "",
                         "message_id": None,
-                        "source": "youtube_tool",
+                        "source": "pre_tool",
                     }
                     for img in pre_tool_images
                 ] + active_media
@@ -15537,8 +14918,6 @@ class MaxwellBot(commands.Bot):
                     "Error: Discord server and moderation tools are not "
                     "available in DMs. Reply here instead."
                 )
-            elif name in USER_ONLY_TOOLS and _discord_user_client(self) is None:
-                result_text = user_only_unavailable(name)
             elif name not in compatible and not plugin_allowed:
                 result_text = "Error - tool is not available on this platform"
             elif name not in self.tools and not plugin_allowed:
@@ -16348,9 +15727,6 @@ class MaxwellBot(commands.Bot):
         r"vc|voice|call|join|leave|mic|speak|say\s+it|tts|"
         r"sleep|nap|wake|"
         r"remember|forget|memory|personality|prompt|"
-        # X/Twitter. "post" and "share" above already catch most of it; these
-        # catch "what's on twitter", "check my mentions", a pasted x.com link.
-        r"twitter|tweet|tweets|tweeted|retweet|xitter|x\.com|timeline|mentions|"
         r"tool|tools"
         r")\b"
     )
@@ -16371,10 +15747,6 @@ class MaxwellBot(commands.Bot):
         compatible = MaxwellBot._compatible_tool_names(self, platform)
         disabled = set(self._control.get("disabled_tools", []) or [])
         names = {n for n in compatible if n not in disabled}
-        if not user_tools_enabled(getattr(self, "_planned_kinds", {"user"})):
-            names.difference_update(USER_ONLY_TOOLS)
-        if _discord_user_client(self) is None:
-            names.difference_update(USER_ONLY_TOOLS)
 
         # Include enabled plugin tools for this user or global
         plugin_manager = getattr(self, "plugin_manager", None)
@@ -16394,7 +15766,6 @@ class MaxwellBot(commands.Bot):
                     names.add(pt_name)
 
         if names & {
-            "join_server",
             "leave_server",
             "update_base_personality",
             "update_server_prompt",
@@ -16413,7 +15784,6 @@ class MaxwellBot(commands.Bot):
             except Exception:
                 is_admin = False
             if not is_admin:
-                names.discard("join_server")
                 names.discard("leave_server")
                 names.discard("update_base_personality")
                 names.discard("update_server_prompt")
@@ -18902,39 +18272,28 @@ async def main():
         loop.set_exception_handler(_loop_exception_handler)
     except Exception:
         pass
-    install_library_patches()
-    accounts = await resolve_accounts(
-        Config.DISCORD_TOKEN,
+    token = configured_bot_token(
         getattr(Config, "DISCORD_BOT_TOKEN", "") or "",
-        getattr(Config, "DISCORD_ACCOUNT_MODE", "auto") or "auto",
+        getattr(Config, "DISCORD_TOKEN", "") or "",
     )
-    if not accounts:
+    if not token:
         logger.error(
-            "No Discord account accepted login. Set DISCORD_TOKEN (user) "
-            "and/or DISCORD_BOT_TOKEN (official bot) in .env and restart. "
+            "No Discord bot token. Set DISCORD_BOT_TOKEN in .env "
+            "(Developer Portal bot token) and restart. "
             "Sleeping 30s so a process manager cannot 401-flood Discord."
         )
         with contextlib.suppress(asyncio.CancelledError):
             await asyncio.sleep(30)
         raise SystemExit(2)
-    primary, companion = pick_primary(accounts)
-    planned = {a.kind for a in accounts}
-    bot = MaxwellBot(account_kind=primary.kind, planned_kinds=planned)
-    if primary.kind == "bot":
-        apply_bot_account_patches(bot)
-    if companion is not None:
-        bot._peer_kind = companion.kind
-        bot._peer_token = companion.token
-    logger.info(
-        "Discord primary=%s (%s)%s",
-        primary.kind,
-        primary.label,
-        (
-            f"; companion={companion.kind} ({companion.label})"
-            if companion is not None
-            else ""
-        ),
-    )
+    if (getattr(Config, "DISCORD_TOKEN", "") or "").strip() and not (
+        getattr(Config, "DISCORD_BOT_TOKEN", "") or ""
+    ).strip():
+        logger.warning(
+            "DISCORD_TOKEN is deprecated; put the official bot token in "
+            "DISCORD_BOT_TOKEN. User (self-bot) tokens are not supported."
+        )
+    bot = MaxwellBot()
+    logger.info("Discord bot token loaded")
     bot._gateway_last_ok = time.monotonic()
     bot._gateway_last_disconnect = None
     _shutdown_called = False
@@ -18983,13 +18342,13 @@ async def main():
         loop.add_signal_handler(sig, _request_shutdown, sig)
 
     try:
-        await bot.start(primary.token)
+        await bot.start(token)
     except discord.LoginFailure:
         logger.error(
-            "Discord rejected the %s token after probe. Not retrying in a tight "
-            "loop — update DISCORD_TOKEN / DISCORD_BOT_TOKEN in .env and restart. "
-            "Sleeping 30s so a process manager cannot 401-flood Discord.",
-            primary.kind,
+            "Discord rejected the bot token. Not retrying in a tight "
+            "loop — set DISCORD_BOT_TOKEN to an official Developer Portal bot "
+            "token (self-bot user tokens are not supported) and restart. "
+            "Sleeping 30s so a process manager cannot 401-flood Discord."
         )
         with contextlib.suppress(asyncio.CancelledError):
             await asyncio.sleep(30)
@@ -19093,14 +18452,6 @@ async def main():
                 await xp.close()
         except Exception as e:
             logger.error(f"Failed to close aux provider: {e}")
-        # The X client owns its own aiohttp session (it is deliberately
-        # importable without discord, so it cannot share the bot's).
-        try:
-            xc = getattr(bot, "x_client", None)
-            if xc is not None:
-                await xc.aclose()
-        except Exception as e:
-            logger.error(f"Failed to close X client: {e}")
         try:
             await close_shared_session()
         except Exception as e:

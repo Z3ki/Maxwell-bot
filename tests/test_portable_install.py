@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_reconfigure_preserves_saved_provider_identity_and_disabled_shell(tmp_path):
     saved = {
-        "DISCORD_TOKEN": "saved-token",
+        "DISCORD_BOT_TOKEN": "saved-token",
         "OLLAMA_BASE_URL": "https://provider.example/v1",
         "OLLAMA_MODEL": "my-model",
         "OLLAMA_API_KEY": 'key with "quotes" and # symbols',
@@ -71,7 +71,7 @@ def test_configure_only_needs_no_docker_and_does_not_start_services(tmp_path):
         os.environ,
         PATH=str(bindir) + os.pathsep + os.environ["PATH"],
         DOCKER_CALLED=str(marker),
-        DISCORD_TOKEN="test-token",
+        DISCORD_BOT_TOKEN="test-token",
         OLLAMA_MODEL="test-model",
     )
     result = subprocess.run(

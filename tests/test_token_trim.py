@@ -30,7 +30,6 @@ def _live_bot(extra_tools=None):
             "send_media",
             "wait",
             "typing",
-            "youtube",
             "web_search",
             "fetch_url",
             "create_site",
@@ -129,7 +128,7 @@ def test_tool_prompt_lists_full_catalog_on_chat_turn():
         bot, "discord", message=_msg("wyd"), content="wyd"
     )
     full = MaxwellBot._tool_system_prompt(bot, "discord")
-    assert "youtube" in chat
+    assert "web_search" in chat
     assert "shell" in chat
     assert "hd_image" in chat
     assert chat == full
@@ -137,18 +136,18 @@ def test_tool_prompt_lists_full_catalog_on_chat_turn():
 
 def test_disabled_tools_still_hidden():
     bot = _live_bot()
-    bot._control["disabled_tools"] = ["shell", "youtube"]
+    bot._control["disabled_tools"] = ["shell", "inbox_list"]
     content = "run a shell command"
     names = _tool_names(bot, _msg(content), content)
     assert "shell" not in names
-    assert "youtube" not in names
+    assert "inbox_list" not in names
     assert "send_message" in names
     prompt = MaxwellBot._tool_system_prompt(
         bot, "discord", message=_msg(content), content=content
     )
     catalog = prompt.split("## Tool contract")[0]
     assert "shell" not in catalog
-    assert "youtube" not in catalog
+    assert "inbox_list" not in catalog
 
 
 def test_dms_hide_mod_tools_and_keep_shell_and_site():
@@ -158,7 +157,6 @@ def test_dms_hide_mod_tools_and_keep_shell_and_site():
             "ban_member": FakeTool(),
             "purge_messages": FakeTool(),
             "forward_message": FakeTool(),
-            "join_server": FakeTool(),
             "create_channel": FakeTool(),
             "site_server": FakeTool(),
         }
@@ -168,7 +166,6 @@ def test_dms_hide_mod_tools_and_keep_shell_and_site():
     assert "ban_member" not in names
     assert "purge_messages" not in names
     assert "forward_message" not in names
-    assert "join_server" not in names
     assert "create_channel" not in names
     assert "shell" in names
     assert "create_site" in names

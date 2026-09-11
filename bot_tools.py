@@ -36,7 +36,6 @@ import uuid
 import discord
 from discord import Activity, File, Message, Status
 from tools import Tool
-from captcha_solver import CaptchaSolveError
 from control_defaults import parse_bool
 from process_utils import communicate_process
 from identity import identity_values, process_name
@@ -50,7 +49,6 @@ from utils import (  # single source of truth, fd-safe
     is_direct_image_url,
     is_gif_page_url,
 )
-from discord_account import discord_user_client, user_only_unavailable
 
 logger = logging.getLogger(__name__)
 
@@ -750,18 +748,26 @@ _CAP_TOOLS: dict[str, tuple[str, ...]] = {
     "manage_channels": (
         "create_category",
         "create_channel",
+        "edit_category",
         "edit_channel",
+        "move_channel",
+        "clone_channel",
+        "sync_channel",
         "delete_channel",
         "lock_channel",
+        "lockdown",
         "set_channel_permissions",
+        "list_permissions",
     ),
     "kick_members": ("kick_member",),
-    "ban_members": ("ban_member", "unban_member", "list_bans"),
-    "moderate_members": ("timeout_member",),
+    "ban_members": ("ban_member", "unban_member", "list_bans", "softban_member"),
+    "moderate_members": ("timeout_member", "list_timeouts"),
     "manage_roles": (
         "manage_role",
         "lock_channel",
+        "lockdown",
         "set_channel_permissions",
+        "list_permissions",
     ),
     "manage_messages": ("purge_messages", "delete_message", "pin_message"),
     "pin_messages": ("pin_message",),
@@ -772,7 +778,7 @@ _CAP_TOOLS: dict[str, tuple[str, ...]] = {
     "manage_guild": ("edit_server",),
     "view_audit_log": ("audit_log",),
     "manage_expressions": ("manage_emoji",),
-    "create_instant_invite": ("create_invite",),
+    "create_instant_invite": ("create_invite", "manage_invites"),
 }
 
 _ALL_MOD_TOOLS = tuple(
@@ -783,9 +789,7 @@ _ALL_MOD_TOOLS = tuple(
 # a remote mod console. Shell, sites, search, and current-chat send_message
 # stay available.
 DM_BLOCKED_TOOLS = frozenset(_ALL_MOD_TOOLS) | {
-    "join_server",
     "leave_server",
-    "server_setup",
     "list_admin_servers",
     "list_servers",
     "list_channels",
@@ -1160,6 +1164,85 @@ def _colour_from_text(raw):
         return discord.Colour(int(text, 16))
     except (TypeError, ValueError):
         return None
+
+
+
+_YOUTUBE_HOST_RE = re.compile(
+    r"(^|\.)((?:music\.)?youtube\.com|youtu\.be|youtube-nocookie\.com)$",
+    re.I,
+)
+
+
+def _is_youtube_url(url: str) -> bool:
+    """True for youtube.com / youtu.be hosts. Used to skip ToS-breaking fetches."""
+    try:
+        host = (urlparse(str(url or "")).hostname or "").lower()
+    except Exception:
+        return False
+    return bool(host and _YOUTUBE_HOST_RE.search(host))
+
+
+def _find_category(guild, category_id: str | None = None, category_name: str | None = None):
+    if category_id:
+        raw = str(category_id).strip().lower()
+        if raw in {"none", "null", "uncategorized", "0"}:
+            return None, ""
+        try:
+            cid = int(str(category_id).strip())
+        except (TypeError, ValueError):
+            return None, f"Error: invalid category_id: {category_id}"
+        category = discord.utils.get(getattr(guild, "categories", []) or [], id=cid)
+        if not category:
+            return None, f"Error: category {category_id} not found in {guild.name}"
+        return category, ""
+    if category_name:
+        wanted = str(category_name).strip().lower()
+        if wanted in {"none", "null", "uncategorized"}:
+            return None, ""
+        matches = [
+            cat
+            for cat in (getattr(guild, "categories", []) or [])
+            if cat.name.lower() == wanted
+        ]
+        if not matches:
+            return (
+                None,
+                f"Error: category named '{category_name}' not found in {guild.name}",
+            )
+        if len(matches) > 1:
+            return (
+                None,
+                f"Error: multiple categories named '{category_name}', use category_id",
+            )
+        return matches[0], ""
+    return None, ""
+
+
+async def _lock_target(channel, locked: bool, reason: str) -> str:
+    target = getattr(getattr(channel, "guild", None), "default_role", None)
+    if target is None:
+        return f"Error: @everyone role is unavailable for {_channel_label(channel)}"
+    try:
+        if isinstance(channel, discord.VoiceChannel) or isinstance(
+            channel, getattr(discord, "StageChannel", type(None))
+        ):
+            await channel.set_permissions(
+                target,
+                connect=False if locked else None,
+                reason=reason,
+            )
+        else:
+            await channel.set_permissions(
+                target,
+                send_messages=False if locked else None,
+                send_messages_in_threads=False if locked else None,
+                reason=reason,
+            )
+    except discord.Forbidden:
+        return f"Error: Discord denied locking {_channel_label(channel)}"
+    except Exception as e:
+        return f"Error locking {_channel_label(channel)}: {e}"
+    return ""
 
 
 def _channel_label(channel) -> str:
@@ -2549,13 +2632,9 @@ class ChangePresenceTool(Tool):
             return f"Error: status must be one of {', '.join(valid)}"
         status_obj = getattr(Status, status, Status.online)
         activities = self.bot._build_activities()
-        edit_settings = bool(self.bot._custom_status) and discord_user_client(
-            self.bot
-        ) is self.bot
         await self.bot.change_presence(
             status=status_obj,
-            activities=activities,
-            edit_settings=edit_settings,
+            activity=activities[0] if activities else None,
         )
         # Silent: no DM, no channel echo, no LLM-visible text. The status
         # change is already visible on the bot's profile. Returning "" tells
@@ -2610,14 +2689,9 @@ class SetActivityTool(Tool):
             else:
                 self.bot._current_game = None
             activities = self.bot._build_activities()
-            if not activities:
-                await self.bot.change_presence(activity=None, edit_settings=False)
-            else:
-                await self.bot.change_presence(
-                    activities=activities,
-                    edit_settings=bool(self.bot._custom_status)
-                    and discord_user_client(self.bot) is self.bot,
-                )
+            await self.bot.change_presence(
+                activity=activities[0] if activities else None,
+            )
             # Silent: the cleared status is already visible on the profile.
             # No DM, no channel echo, no LLM-visible text.
             return ""
@@ -2642,9 +2716,7 @@ class SetActivityTool(Tool):
 
         activities = self.bot._build_activities()
         await self.bot.change_presence(
-            activities=activities,
-            edit_settings=bool(self.bot._custom_status)
-            and discord_user_client(self.bot) is self.bot,
+            activity=activities[0] if activities else None,
         )
         # Silent: the new status is already visible on the profile. No DM,
         # no channel echo, no LLM-visible text — the user can see it
@@ -2848,505 +2920,6 @@ class CreateInviteTool(Tool):
             return "Error: max_uses and max_age must be numbers"
         except Exception as e:
             return f"Error creating invite: {e}"
-
-
-# The Discord host/path is REQUIRED before the capture group. An optional
-# prefix made ``https://discord.gg/xyz`` match the scheme token ``https``,
-# so every HTTPS invite joined discord.gg/https instead of the target.
-_INVITE_URL_RE = re.compile(
-    r"(?:https?://)?(?:www\.)?(?:(?:ptb|canary)\.)?"
-    r"(?:discord(?:app)?\.com/invite|discord\.gg)/"
-    r"([a-zA-Z0-9_-]{2,32})",
-    re.IGNORECASE,
-)
-_INVITE_BARE_RE = re.compile(r"^[a-zA-Z0-9_-]{2,32}$")
-_INVITE_PARAM_KEYS = ("invite", "url", "link", "code", "invite_url", "invite_code")
-
-
-def _invite_raw_from_params(invite: Any = None, kwargs: dict | None = None) -> str:
-    """Return the first non-empty invite string from the primary arg or aliases."""
-    values: list[Any] = [invite]
-    if kwargs:
-        for key in _INVITE_PARAM_KEYS:
-            if key == "invite":
-                continue
-            values.append(kwargs.get(key))
-    for val in values:
-        if isinstance(val, (list, tuple)) and val:
-            val = val[0]
-        text = str(val or "").strip()
-        if text:
-            return text
-    return ""
-
-
-def _extract_invite_code(invite: str) -> str:
-    """Normalize an invite to its bare code.
-
-    Accepts ``discord.gg/xyz``, ``https://discord.com/invite/xyz``,
-    ``discordapp.com/invite/xyz``, ptb/canary hosts, Discord ``<>``
-    markdown, query strings, or a bare code like ``xyz``.
-    """
-    invite = (invite or "").strip().strip("<>").strip()
-    if not invite:
-        return ""
-    m = _INVITE_URL_RE.search(invite)
-    if m:
-        return m.group(1)
-    if "/" in invite or "://" in invite:
-        return ""
-    if _INVITE_BARE_RE.fullmatch(invite):
-        return invite
-    return ""
-
-
-_VERIFY_CHANNEL_KEYWORDS = (
-    "verify",
-    "captcha",
-    "wick",
-    "gate",
-    "verification",
-    "human",
-    "onboarding",
-)
-
-
-def _solver_status(bot) -> str:
-    """Describe whether a captcha solver is configured (for tool results)."""
-    cfg = getattr(bot, "config", None)
-    if cfg is None:
-        return ""
-    service = getattr(cfg, "CAPTCHA_SOLVER_SERVICE", "") or ""
-    key = getattr(cfg, "CAPTCHA_SOLVER_API_KEY", "") or ""
-    if service and key:
-        return f" (auto-solver {service} is configured)"
-    return " (no captcha solver configured — CAPTCHA_SOLVER_SERVICE/CAPTCHA_SOLVER_API_KEY)"
-
-
-def _format_captcha(e) -> str:
-    """Render a CaptchaRequired exception into a readable, complete report."""
-    parts = []
-    parts.append(f"service={e.service}")
-    parts.append(f"sitekey={e.sitekey}")
-    if e.session_id:
-        parts.append(f"session_id={e.session_id}")
-    if e.rqdata:
-        parts.append(f"rqdata={e.rqdata}")
-    if e.rqtoken:
-        parts.append(f"rqtoken={e.rqtoken}")
-    parts.append(f"invisible={e.should_serve_invisible}")
-    errors = getattr(e, "errors", None) or []
-    if errors:
-        parts.append(f"reason={', '.join(str(x) for x in errors)}")
-    return " | ".join(parts)
-
-
-class JoinServerTool(Tool):
-    """Join a Discord server via invite link or code. Admins only."""
-
-    def get_description(self):
-        return (
-            "Join a Discord server via invite code or full invite URL "
-            "(https://discord.gg/code). Restricted to admins — if anyone else "
-            "asks, say it needs an admin and do not call this. Needs the Discord "
-            "user account; official bot accounts cannot accept invites. Always pass the "
-            "exact link or code the user gave — do not invent or reuse another "
-            "invite. Reports name, gates, captcha, and errors. "
-            "Params: invite (required)."
-        )
-
-    async def execute(
-        self, message: Message, invite: str | None = None, **kwargs
-    ) -> str:
-        # Joining a server is an account-level action with a permanent
-        # footprint: the bot's presence, its member list entry, and whatever
-        # that server's rules and moderators then apply to it. Anyone able to
-        # paste an invite could park the account anywhere, so this is gated on
-        # identity the same way change_avatar is, and enforced here rather
-        # than only in the prompt — a prompt is a request, not a permission.
-        author_id = getattr(getattr(message, "author", None), "id", None)
-        is_admin = bool(
-            author_id is not None
-            and getattr(self.bot, "_is_admin", lambda _uid: False)(author_id)
-        )
-        if not is_admin:
-            return (
-                "Error: joining a server is restricted to admins. Ask an admin "
-                "to run it, or send them the invite."
-            )
-        user_bot = discord_user_client(self.bot)
-        if user_bot is None:
-            return user_only_unavailable("join_server")
-        raw = _invite_raw_from_params(invite, kwargs)
-        code = _extract_invite_code(raw)
-        if not code:
-            return (
-                "Error: could not parse an invite code from "
-                f"'{raw or invite}'. Pass a link like discord.gg/xyz or a bare code."
-            )
-        try:
-            inv = await user_bot.fetch_invite(code, with_counts=True)
-        except discord.NotFound:
-            return f"Error: invite '{code}' is invalid or expired"
-        except discord.Forbidden:
-            return (
-                f"Error: blocked from fetching invite '{code}' "
-                "(banned from server or invite disabled)"
-            )
-        except discord.HTTPException as e:
-            return f"Error fetching invite '{code}': HTTP {e.status}: {e.text[:200]}"
-        except Exception as e:
-            return f"Error fetching invite '{code}': {type(e).__name__}: {e}"
-
-        g = inv.guild
-        gname = g.name if g else "unknown server"
-        gid = g.id if g else None
-        members = getattr(inv, "approximate_member_count", None)
-        features = list(g.features) if g else []
-        level = g.verification_level.name if g and g.verification_level else "unknown"
-        lines = [
-            f"Invite ok — {gname} (ID: {gid}) {members or '?'} members, verification={level}"
-        ]
-        if features:
-            lines.append(f"  features: {', '.join(features)}")
-
-        if gid and user_bot.get_guild(gid):
-            return "\n".join(lines + [f"Already in {gname} — no join needed."])
-
-        manual_approval = "MEMBER_VERIFICATION_MANUAL_APPROVAL" in features
-        if manual_approval:
-            lines.append(
-                "  NOTE: server uses MANUAL APPROVAL — join will be pending until an admin approves."
-            )
-
-        try:
-            await inv.accept()
-        except discord.CaptchaRequired as e:
-            # The global client captcha handler (bot._handle_captcha) already
-            # tried the auto-solver and/or DM-based human solve. If it raised,
-            # we get here — post the solve link right in this channel so the
-            # person who asked for the join can complete it, then re-submit
-            # the invite accept with the solved token.
-            human = bool(
-                getattr(getattr(self.bot, "config", None), "CAPTCHA_HUMAN_SOLVE", False)
-            )
-            if human:
-                channel = getattr(message, "channel", None)
-
-                async def _notify_in_channel(url: str) -> None:
-                    try:
-                        if channel is not None:
-                            await channel.send(
-                                "⚠️ CAPTCHA required to join "
-                                + gname
-                                + ". Solve here (expires ~2 min): "
-                                + url
-                            )
-                    except Exception as ex:
-                        logger.warning("captcha in-channel notify failed: %s", ex)
-
-                try:
-                    token = await self.bot._solve_captcha_with_notify(
-                        e, notify=_notify_in_channel
-                    )
-                except CaptchaSolveError as se:
-                    return (
-                        "\n".join(lines)
-                        + f"\nCAPTCHA REQUIRED to join {gname}: {_format_captcha(e)}"
-                        + _solver_status(self.bot)
-                        + f"\nHuman solve failed: {se}"
-                    )
-                try:
-                    data = await self.bot._retry_invite_with_captcha(code, e, token)
-                except discord.HTTPException as he:
-                    return (
-                        "\n".join(lines)
-                        + f"\nCAPTCHA solved but join retry failed: HTTP {he.status}: "
-                        + (he.text[:200] if he.text else "")
-                    )
-                except Exception as ex:
-                    return (
-                        "\n".join(lines)
-                        + f"\nCAPTCHA solved but join retry failed: {type(ex).__name__}: {ex}"
-                    )
-                gid2 = None
-                if isinstance(data, dict):
-                    gid2 = (data.get("guild") or {}).get("id")
-                joined_guild = None
-                for _ in range(12):
-                    joined_guild = (
-                        user_bot.get_guild(gid2 or gid) if (gid2 or gid) else None
-                    )
-                    if joined_guild is not None:
-                        break
-                    await asyncio.sleep(1)
-                if joined_guild is not None:
-                    onboard_note = ""
-                    try:
-                        onboard = await self.bot._auto_onboard(
-                            joined_guild, detail=True
-                        )
-                        if onboard.get("ok"):
-                            onboard_note = "\n" + str(onboard.get("summary") or "")
-                    except Exception as ex:
-                        logger.debug("auto-onboard (captcha join) failed: %s", ex)
-                    return (
-                        "\n".join(lines)
-                        + f"\nJOINED {joined_guild.name} (ID: {joined_guild.id}) — "
-                        + "captcha was solved via the posted link."
-                        + onboard_note
-                    )
-                return (
-                    "\n".join(lines)
-                    + "\nCAPTCHA solved and join re-submitted — waiting on the "
-                    + "guild to appear in cache. Check list_servers shortly."
-                )
-            return (
-                "\n".join(lines)
-                + f"\nCAPTCHA REQUIRED to join {gname}: {_format_captcha(e)}"
-                + _solver_status(self.bot)
-                + "\nJoin blocked until the captcha is solved."
-            )
-        except discord.NotFound as e:
-            return f"Error joining '{code}': invite invalid/expired (HTTP {e.status})"
-        except discord.Forbidden as e:
-            return (
-                f"Error joining {gname}: forbidden (HTTP {e.status}) — "
-                "likely banned from the server, or the invite was revoked "
-                "between fetch and accept."
-            )
-        except discord.HTTPException as e:
-            detail = e.text[:200] if e.text else ""
-            if e.status == 429:
-                return (
-                    f"Error joining {gname}: rate limited (429). "
-                    "Wait a bit and retry — Discord throttles rapid joins."
-                )
-            return f"Error joining {gname}: HTTP {e.status}: {detail}"
-        except Exception as e:
-            return f"Error joining {gname}: {type(e).__name__}: {e}"
-
-        # Wait for the guild to land in the cache (gateway round-trip; large
-        # guilds with member chunking can take a while).
-        joined_guild = None
-        for _ in range(25):
-            joined_guild = user_bot.get_guild(gid) if gid else None
-            if joined_guild is not None:
-                break
-            await asyncio.sleep(1)
-
-        if joined_guild is None:
-            if manual_approval:
-                return (
-                    "\n".join(lines)
-                    + "\nJOIN REQUEST SUBMITTED — the server uses MANUAL APPROVAL, "
-                    "so membership is pending until an admin approves. "
-                    "The bot is NOT inside the server yet."
-                )
-            # Confirm membership from the API before claiming anything — the
-            # gateway cache can lag behind the actual accept.
-            confirmed = False
-            try:
-                from discord.http import Route
-
-                gdata = await self.bot.http.request(
-                    Route("GET", "/guilds/{guild_id}", guild_id=gid),
-                    params={"with_counts": "true"},
-                )
-                confirmed = bool(gdata and gdata.get("id"))
-            except Exception:
-                confirmed = False
-            if confirmed:
-                gname2 = (gdata or {}).get("name") or gname
-                return (
-                    "\n".join(lines)
-                    + f"\nJOINED {gname2} (ID: {gid}) — confirmed via API. "
-                    "The gateway cache is still syncing; list_servers will show it shortly."
-                )
-            return (
-                "\n".join(lines)
-                + "\nJoin result uncertain — the invite was accepted but the "
-                "guild is not visible yet. Ask the server owner to confirm, "
-                "then check list_servers."
-            )
-
-        lines.append(
-            f"JOINED {joined_guild.name} (ID: {joined_guild.id}, "
-            f"members={joined_guild.member_count})"
-        )
-
-        # Auto-complete the server's onboarding flow (role selection prompts)
-        # so role-gated servers are usable right away.
-        try:
-            onboard = await self.bot._auto_onboard(joined_guild, detail=True)
-            if onboard.get("ok"):
-                lines.append(f"  {onboard.get('summary')}")
-                roles = len(onboard.get("role_ids") or [])
-                if roles:
-                    lines.append(
-                        f"  picked up {roles} role(s) — run server_setup to change them."
-                    )
-            elif onboard.get("prompts"):
-                # Prompts exist but the submit didn't land: say so, because the
-                # account is role-less in there until someone retries.
-                lines.append(f"  onboarding NOT completed: {onboard.get('summary')}")
-        except Exception as ex:
-            logger.debug("auto-onboard via join tool failed: %s", ex)
-
-        # Post-join verification gates (Wick captcha-on-join, verify channels,
-        # MEE6/Bloxlink-style role gates). These aren't API errors — the join
-        # worked, but the account is usually role-locked until it completes
-        # the gate.
-        gate_channels = [
-            ch.name
-            for ch in joined_guild.channels
-            if any(k in (ch.name or "").lower() for k in _VERIFY_CHANNEL_KEYWORDS)
-        ][:6]
-        if gate_channels:
-            lines.append(
-                f"  NOTE: verification gate channels present: {', '.join(gate_channels)} — "
-                "the account may be role-locked until it completes verification there."
-            )
-        result = "\n".join(lines)
-        logger.info(
-            "join_server result for %s: %s", code, result.replace("\n", " | ")[:400]
-        )
-        return result
-
-
-def _find_guild(guilds: list, target: str) -> tuple[Any, str]:
-    """Find one guild by ID, exact name, then unique partial name.
-
-    Returns (guild, "") on a hit and (None, error_text) otherwise, so both
-    leave_server and server_setup report ambiguity the same way.
-    """
-    target = (target or "").strip()
-    if not guilds:
-        return None, "Error: not in any servers"
-    if not target:
-        return None, "Error: no server given"
-    if target.isdigit():
-        guild = next((g for g in guilds if str(g.id) == target), None)
-        if guild is not None:
-            return guild, ""
-    lowered = target.lower()
-    guild = next((g for g in guilds if (g.name or "").lower() == lowered), None)
-    if guild is not None:
-        return guild, ""
-    matches = [g for g in guilds if lowered in (g.name or "").lower()]
-    if len(matches) == 1:
-        return matches[0], ""
-    if len(matches) > 1:
-        return None, (
-            f"Error: '{target}' matches {len(matches)} servers "
-            + ", ".join(f"{g.name} ({g.id})" for g in matches[:8])
-            + " — use the numeric ID to disambiguate."
-        )
-    return None, (
-        f"Error: not in any server named/matching '{target}'. "
-        "Use list_servers to see current servers."
-    )
-
-
-class ServerSetupTool(Tool):
-    """Pick your own roles and channels through a server's onboarding prompts."""
-
-    def get_description(self):
-        return (
-            "Set yourself up in a server: read its onboarding prompts (the "
-            "'what roles do you want' / channel pickers) and choose the options "
-            "you actually want. Use this when you're in a server but have no "
-            "roles or can't see the channels. Runs automatically on join, so "
-            "this is for servers you're already in or to change your picks. "
-            "Params: server (name or ID; defaults to the current server), "
-            "preferences (optional steer, e.g. 'only AI and coding stuff'), "
-            "list_only (true to see the options without picking anything)."
-        )
-
-    async def execute(
-        self,
-        message: Message,
-        server: str | None = None,
-        preferences: str | None = None,
-        list_only: bool = False,
-        **kwargs,
-    ) -> str:
-        target = (server or "").strip()
-        if target:
-            guild, err = _find_guild(list(self.bot.guilds or []), target)
-            if guild is None:
-                return err
-        else:
-            guild = getattr(message, "guild", None)
-            if guild is None:
-                return (
-                    "Error: no server given and this isn't a server channel. "
-                    "Pass server (name or ID) — list_servers shows them."
-                )
-
-        # Models hand booleans over as "true"/"false" strings often enough
-        # that bool("false") would silently flip this into a real submit.
-        dry_run = parse_bool(list_only, False)
-        if discord_user_client(self.bot) is None:
-            return user_only_unavailable("server_setup")
-        try:
-            result = await self.bot._auto_onboard(
-                guild,
-                preferences=(preferences or ""),
-                dry_run=dry_run,
-                detail=True,
-            )
-        except Exception as e:
-            return f"Error setting up {guild.name}: {type(e).__name__}: {e}"
-
-        prompts = result.get("prompts") or []
-        lines = [f"{guild.name} (ID: {guild.id})"]
-        if not prompts:
-            lines.append(
-                f"  {result.get('summary')} — nothing to pick here. If you still "
-                "can't see channels, the server gates on verification, not onboarding."
-            )
-            return "\n".join(lines)
-
-        lines.append(f"  prompts: {len(prompts)}")
-        for prompt in prompts:
-            rule = "one" if prompt["single_select"] else "any"
-            chosen = set((result.get("choice") or {}).get(prompt["id"], []))
-            lines.append(f'  • "{prompt["title"]}" (pick {rule}):')
-            for opt in prompt["options"]:
-                mark = "✓" if opt["id"] in chosen else " "
-                desc = f" — {opt['description']}" if opt["description"] else ""
-                lines.append(f"      [{mark}] {opt['title']}{desc}"[:240])
-
-        roles = [
-            r.name
-            for r in (
-                guild.get_role(int(rid)) for rid in (result.get("role_ids") or [])
-            )
-            if r is not None
-        ]
-        channels = [
-            c.name
-            for c in (
-                guild.get_channel(int(cid)) for cid in (result.get("channel_ids") or [])
-            )
-            if c is not None
-        ]
-        if not result.get("ok"):
-            lines.append(f"  FAILED: {result.get('summary')}")
-            return "\n".join(lines)
-        verb = "would take" if dry_run else "took"
-        lines.append(f"  {result.get('summary')}")
-        if roles:
-            lines.append(f"  {verb} roles: {', '.join(roles)}")
-        if channels:
-            lines.append(f"  {verb} channels: {', '.join(channels)}")
-        if result.get("picked_by") == "fallback":
-            lines.append(
-                "  NOTE: the model call failed, so these are first-option "
-                "defaults — rerun to choose properly."
-            )
-        return "\n".join(lines)
 
 
 class LeaveServerTool(Tool):
@@ -3854,7 +3427,7 @@ class CreateCategoryTool(Tool):
     def get_description(self):
         return (
             "Create a Discord category (the separator/group that channels sit under). Requires manage_channels. "
-            "Params: name (required), guild_id (optional unless not in that server), position (optional). "
+            "Params: name (required), guild_id (optional unless not in that server), position (optional), nsfw (optional). "
             "Use list_admin_servers first to pick a server where manage_channels is available."
         )
 
@@ -3864,6 +3437,7 @@ class CreateCategoryTool(Tool):
         name: str | None = None,
         guild_id: str | None = None,
         position: str | None = None,
+        nsfw: str = "false",
         **kwargs,
     ) -> str:
         clean = _clean_discord_name(name)
@@ -3878,9 +3452,13 @@ class CreateCategoryTool(Tool):
         if not _has_guild_cap(guild, "manage_channels"):
             return f"Error: I do not have manage_channels/admin in {guild.name}. Run list_admin_servers first."
         try:
-            category = await guild.create_category(
-                clean, reason=_mod_reason(message)
-            )
+            create_kwargs = {
+                "name": clean,
+                "reason": _mod_reason(message),
+            }
+            if parse_bool(nsfw, False):
+                create_kwargs["nsfw"] = True
+            category = await guild.create_category(**create_kwargs)
             if position is not None:
                 try:
                     await category.edit(
@@ -3897,47 +3475,16 @@ class CreateCategoryTool(Tool):
 
 
 class CreateChannelTool(Tool):
-    """Create text or voice channels."""
+    """Create text, voice, announcement, forum, or stage channels."""
 
     def get_description(self):
         return (
-            "Create a Discord text or voice channel. Requires manage_channels. "
-            "Params: name (required), kind/type (text or voice, default text), guild_id (optional), "
-            "category_id or category_name (optional), topic (text only, optional), nsfw (optional), slowmode_seconds (optional). "
+            "Create a Discord channel. Requires manage_channels. "
+            "Params: name (required), kind/type (text, voice, announcement, forum, or stage; default text), "
+            "guild_id (optional), category_id or category_name (optional), topic (optional), "
+            "nsfw (optional), slowmode_seconds (optional), bitrate and user_limit (voice/stage). "
             "Use create_category first when the user wants a new channel group/section."
         )
-
-    def _find_category(
-        self, guild, category_id: str | None = None, category_name: str | None = None
-    ):
-        if category_id:
-            try:
-                cid = int(str(category_id).strip())
-            except (TypeError, ValueError):
-                return None, f"Error: invalid category_id: {category_id}"
-            category = discord.utils.get(getattr(guild, "categories", []) or [], id=cid)
-            if not category:
-                return None, f"Error: category {category_id} not found in {guild.name}"
-            return category, ""
-        if category_name:
-            wanted = str(category_name).strip().lower()
-            matches = [
-                cat
-                for cat in (getattr(guild, "categories", []) or [])
-                if cat.name.lower() == wanted
-            ]
-            if not matches:
-                return (
-                    None,
-                    f"Error: category named '{category_name}' not found in {guild.name}",
-                )
-            if len(matches) > 1:
-                return (
-                    None,
-                    f"Error: multiple categories named '{category_name}', use category_id",
-                )
-            return matches[0], ""
-        return None, ""
 
     async def execute(
         self,
@@ -3951,6 +3498,8 @@ class CreateChannelTool(Tool):
         topic: str | None = None,
         nsfw: str = "false",
         slowmode_seconds: str = "0",
+        bitrate: str | None = None,
+        user_limit: str | None = None,
         **kwargs,
     ) -> str:
         clean = _clean_channel_name(name)
@@ -3964,35 +3513,64 @@ class CreateChannelTool(Tool):
         guild = cast(Any, guild)
         if not _has_guild_cap(guild, "manage_channels"):
             return f"Error: I do not have manage_channels/admin in {guild.name}. Run list_admin_servers first."
-        category, error = self._find_category(guild, category_id, category_name)
+        category, error = _find_category(guild, category_id, category_name)
         category = cast(Any, category)
         if error:
             return error
         channel_kind = str(kind or type or "text").strip().lower()
+        nsfw_flag = parse_bool(nsfw, False)
+        try:
+            slowmode = max(0, min(int(slowmode_seconds or 0), 21600))
+        except (TypeError, ValueError):
+            slowmode = 0
+        voice_kwargs = {"category": category, "reason": _mod_reason(message)}
+        if bitrate:
+            try:
+                voice_kwargs["bitrate"] = max(8000, min(int(bitrate), 384000))
+            except (TypeError, ValueError):
+                return "Error: bitrate must be a number"
+        if user_limit:
+            try:
+                voice_kwargs["user_limit"] = max(0, min(int(user_limit), 99))
+            except (TypeError, ValueError):
+                return "Error: user_limit must be a number"
         try:
             if channel_kind in {"voice", "vc"}:
-                channel = await guild.create_voice_channel(
+                channel = await guild.create_voice_channel(clean, **voice_kwargs)
+            elif channel_kind in {"stage", "stage_voice"}:
+                create_stage = getattr(guild, "create_stage_channel", None)
+                if not callable(create_stage):
+                    return "Error: this Discord library cannot create stage channels"
+                channel = await create_stage(clean, **voice_kwargs)
+            elif channel_kind in {"forum"}:
+                create_forum = getattr(guild, "create_forum_channel", None)
+                if not callable(create_forum):
+                    return "Error: this Discord library cannot create forum channels"
+                channel = await create_forum(
                     clean,
                     category=category,
+                    topic=str(topic or "")[:1024],
+                    nsfw=nsfw_flag,
                     reason=_mod_reason(message),
                 )
-            elif channel_kind in {"text", "chat"}:
-                try:
-                    slowmode = max(0, min(int(slowmode_seconds or 0), 21600))
-                except (TypeError, ValueError):
-                    slowmode = 0
+            elif channel_kind in {"text", "chat", "announcement", "news"}:
                 channel = await guild.create_text_channel(
                     clean,
                     category=category,
                     topic=str(topic or "")[:1024],
-                    nsfw=str(nsfw).lower() in {"1", "true", "yes", "on"},
+                    nsfw=nsfw_flag,
                     slowmode_delay=slowmode,
+                    news=channel_kind in {"announcement", "news"},
                     reason=_mod_reason(message),
                 )
             else:
-                return "Error: kind/type must be text or voice"
+                return "Error: kind/type must be text, voice, announcement, forum, or stage"
             where = f" under {category.name}" if category else ""
             return f"Created {channel_kind} channel {_channel_label(channel)} in {guild.name}{where}"
+        except TypeError:
+            if channel_kind in {"announcement", "news"}:
+                return "Error: this Discord library cannot create announcement channels"
+            return f"Error creating {channel_kind} channel: unsupported argument"
         except discord.Forbidden:
             return f"Error: Discord denied creating channel in {guild.name}; missing manage_channels or role hierarchy issue"
         except Exception as e:
@@ -4019,6 +3597,8 @@ class EditChannelTool(Tool):
         slowmode_seconds: str | None = None,
         nsfw: str | None = None,
         position: str | None = None,
+        bitrate: str | None = None,
+        user_limit: str | None = None,
         **kwargs,
     ) -> str:
         if not channel_id:
@@ -4046,13 +3626,14 @@ class EditChannelTool(Tool):
             if clean:
                 updates["name"] = clean
         if category_id or category_name:
-            category, error = CreateChannelTool(self.bot)._find_category(
-                guild, category_id, category_name
-            )
+            category, error = _find_category(guild, category_id, category_name)
             if error:
                 return error
             updates["category"] = category
-        if isinstance(channel, discord.TextChannel):
+        textish = isinstance(channel, discord.TextChannel) or isinstance(
+            channel, getattr(discord, "ForumChannel", ())
+        )
+        if textish:
             if topic is not None:
                 updates["topic"] = str(topic)[:1024]
             if slowmode_seconds is not None:
@@ -4063,11 +3644,30 @@ class EditChannelTool(Tool):
                 except (TypeError, ValueError):
                     return "Error: slowmode_seconds must be a number"
             if nsfw is not None:
-                updates["nsfw"] = str(nsfw).lower() in {"1", "true", "yes", "on"}
+                updates["nsfw"] = parse_bool(nsfw, False)
         elif topic is not None or slowmode_seconds is not None or nsfw is not None:
-            return (
-                "Error: topic, slowmode_seconds, and nsfw only apply to text channels"
-            )
+            if isinstance(channel, discord.CategoryChannel) and nsfw is not None:
+                updates["nsfw"] = parse_bool(nsfw, False)
+            elif topic is not None or slowmode_seconds is not None:
+                return (
+                    "Error: topic and slowmode_seconds only apply to text/forum channels"
+                )
+        if bitrate is not None or user_limit is not None:
+            if not (
+                isinstance(channel, discord.VoiceChannel)
+                or isinstance(channel, getattr(discord, "StageChannel", ()))
+            ):
+                return "Error: bitrate and user_limit only apply to voice/stage channels"
+            if bitrate is not None:
+                try:
+                    updates["bitrate"] = max(8000, min(int(bitrate), 384000))
+                except (TypeError, ValueError):
+                    return "Error: bitrate must be a number"
+            if user_limit is not None:
+                try:
+                    updates["user_limit"] = max(0, min(int(user_limit), 99))
+                except (TypeError, ValueError):
+                    return "Error: user_limit must be a number"
         if position is not None:
             try:
                 updates["position"] = max(0, int(position))
@@ -4130,6 +3730,546 @@ class DeleteChannelTool(Tool):
             return f"Error: Discord denied deleting {_channel_label(channel)}; missing manage_channels or role hierarchy issue"
         except Exception as e:
             return f"Error deleting channel: {e}"
+
+
+
+class EditCategoryTool(Tool):
+    """Rename/reorder a Discord category."""
+
+    def get_description(self):
+        return (
+            "Edit a Discord category (name, position, nsfw). Requires manage_channels. "
+            "Params: category_id or category_name, name, position, nsfw, guild_id."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        category_id: str | None = None,
+        category_name: str | None = None,
+        name: str | None = None,
+        position: str | None = None,
+        nsfw: str | None = None,
+        guild_id: str | None = None,
+        **kwargs,
+    ) -> str:
+        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        if error:
+            return error
+        if guild is None:
+            return "Error: guild is unavailable"
+        if not _has_guild_cap(guild, "manage_channels"):
+            return (
+                f"Error: I do not have manage_channels/admin in {guild.name}. "
+                "Run list_admin_servers first."
+            )
+        category, error = _find_category(guild, category_id, category_name)
+        if error:
+            return error
+        if category is None:
+            return "Error: category_id or category_name is required"
+        updates = {}
+        if name:
+            clean = _clean_discord_name(name)
+            if clean:
+                updates["name"] = clean
+        if position is not None:
+            try:
+                updates["position"] = max(0, int(position))
+            except (TypeError, ValueError):
+                return "Error: position must be a number"
+        if nsfw is not None:
+            updates["nsfw"] = parse_bool(nsfw, False)
+        if not updates:
+            return "Error: provide name, position, or nsfw"
+        try:
+            await category.edit(**updates, reason=_mod_reason(message))
+            return (
+                f"Edited category {category.name} ({category.id}) in {guild.name}: "
+                + ", ".join(sorted(updates))
+            )
+        except discord.Forbidden:
+            return f"Error: Discord denied editing category {category.name}"
+        except Exception as e:
+            return f"Error editing category: {e}"
+
+
+class MoveChannelTool(Tool):
+    """Move a channel into or out of a category."""
+
+    def get_description(self):
+        return (
+            "Move a Discord channel into a category, or out of one. Requires manage_channels. "
+            "Params: channel_id (required), category_id or category_name "
+            "(use 'none' to uncategorize), position (optional)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        channel_id: str | None = None,
+        category_id: str | None = None,
+        category_name: str | None = None,
+        position: str | None = None,
+        **kwargs,
+    ) -> str:
+        if not channel_id:
+            return "Error: channel_id is required"
+        channel, error = await _get_guild_channel(self.bot, channel_id)
+        if error:
+            return error
+        guild = getattr(channel, "guild", None)
+        if guild is None:
+            return "Error: channel is not in a server"
+        if isinstance(channel, discord.CategoryChannel):
+            return "Error: cannot move a category into a category; use edit_category position"
+        if not _has_guild_cap(guild, "manage_channels"):
+            return (
+                f"Error: I do not have manage_channels/admin in {guild.name}. "
+                "Run list_admin_servers first."
+            )
+        if category_id is None and category_name is None:
+            return "Error: category_id, category_name, or category_id=none is required"
+        category, error = _find_category(guild, category_id, category_name)
+        if error:
+            return error
+        updates = {"category": category}
+        if position is not None:
+            try:
+                updates["position"] = max(0, int(position))
+            except (TypeError, ValueError):
+                return "Error: position must be a number"
+        try:
+            await channel.edit(**updates, reason=_mod_reason(message))
+            where = f"under {category.name}" if category else "uncategorized"
+            return f"Moved {_channel_label(channel)} {where} in {guild.name}"
+        except discord.Forbidden:
+            return f"Error: Discord denied moving {_channel_label(channel)}"
+        except Exception as e:
+            return f"Error moving channel: {e}"
+
+
+class CloneChannelTool(Tool):
+    """Clone a channel, including permission overwrites."""
+
+    def get_description(self):
+        return (
+            "Clone a Discord channel or category, copying permission overwrites. "
+            "Requires manage_channels. Params: channel_id (required), name (optional), "
+            "category_id or category_name (optional destination)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        channel_id: str | None = None,
+        name: str | None = None,
+        category_id: str | None = None,
+        category_name: str | None = None,
+        **kwargs,
+    ) -> str:
+        if not channel_id:
+            return "Error: channel_id is required"
+        channel, error = await _get_guild_channel(self.bot, channel_id)
+        if error:
+            return error
+        guild = getattr(channel, "guild", None)
+        if guild is None:
+            return "Error: channel is not in a server"
+        if not _has_guild_cap(guild, "manage_channels"):
+            return (
+                f"Error: I do not have manage_channels/admin in {guild.name}. "
+                "Run list_admin_servers first."
+            )
+        clone_kwargs = {"reason": _mod_reason(message)}
+        if name:
+            clean = (
+                _clean_discord_name(name)
+                if isinstance(channel, discord.CategoryChannel)
+                else _clean_channel_name(name)
+            )
+            if clean:
+                clone_kwargs["name"] = clean
+        if category_id or category_name:
+            category, error = _find_category(guild, category_id, category_name)
+            if error:
+                return error
+            clone_kwargs["category"] = category
+        if not hasattr(channel, "clone"):
+            return "Error: this channel type cannot be cloned"
+        try:
+            clone = await channel.clone(**clone_kwargs)
+            return f"Cloned {_channel_label(channel)} -> {_channel_label(clone)} in {guild.name}"
+        except discord.Forbidden:
+            return f"Error: Discord denied cloning {_channel_label(channel)}"
+        except Exception as e:
+            return f"Error cloning channel: {e}"
+
+
+class SyncChannelTool(Tool):
+    """Sync channel permission overwrites with the parent category."""
+
+    def get_description(self):
+        return (
+            "Sync a channel's permission overwrites with its parent category, "
+            "or sync every child of a category. Requires manage_channels. "
+            "Params: channel_id (channel or category)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        channel_id: str | None = None,
+        **kwargs,
+    ) -> str:
+        if not channel_id:
+            return "Error: channel_id is required"
+        channel, error = await _get_guild_channel(self.bot, channel_id)
+        if error:
+            return error
+        guild = getattr(channel, "guild", None)
+        if guild is None:
+            return "Error: channel is not in a server"
+        if not _has_guild_cap(guild, "manage_channels"):
+            return (
+                f"Error: I do not have manage_channels/admin in {guild.name}. "
+                "Run list_admin_servers first."
+            )
+        why = _mod_reason(message)
+        targets = []
+        if isinstance(channel, discord.CategoryChannel):
+            targets = list(getattr(channel, "channels", []) or [])
+            if not targets:
+                return f"Category {channel.name} has no channels to sync"
+        else:
+            if getattr(channel, "category", None) is None:
+                return f"Error: {_channel_label(channel)} is not in a category"
+            targets = [channel]
+        synced = []
+        errors = []
+        for ch in targets:
+            try:
+                await ch.edit(sync_permissions=True, reason=why)
+                synced.append(_channel_label(ch))
+            except Exception as e:
+                errors.append(f"{_channel_label(ch)}: {e}")
+        if not synced:
+            return "Error: could not sync: " + "; ".join(errors)
+        out = f"Synced {len(synced)} channel(s): " + ", ".join(synced)
+        if errors:
+            out += " | failed: " + "; ".join(errors)
+        return out
+
+
+class LockdownTool(Tool):
+    """Lock or unlock a category or the whole server."""
+
+    def get_description(self):
+        return (
+            "Lock (or unlock) every text/voice channel in a category, or the whole server, "
+            "by denying @everyone send/connect. Needs manage_channels or manage_roles. "
+            "Params: target (category_id, category_name, or 'server'), unlock, guild_id."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        target: str | None = None,
+        unlock: str = "false",
+        guild_id: str | None = None,
+        **kwargs,
+    ) -> str:
+        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        if error:
+            return error
+        if guild is None:
+            return "Error: guild is unavailable"
+        if not (
+            _has_guild_cap(guild, "manage_channels")
+            or _has_guild_cap(guild, "manage_roles")
+        ):
+            return _missing_cap(guild, "manage_channels")
+        locked = not parse_bool(unlock, False)
+        spec = str(target or "").strip()
+        if not spec:
+            return "Error: target is required (category id/name, or 'server')"
+        channels = []
+        label = spec
+        if spec.lower() in {"server", "guild", "all", "*"}:
+            channels = [
+                ch
+                for ch in (getattr(guild, "channels", []) or [])
+                if not isinstance(ch, discord.CategoryChannel)
+            ]
+            label = f"server {guild.name}"
+        else:
+            category, err = _find_category(guild, spec if spec.isdigit() else None, spec)
+            if err and not spec.isdigit():
+                category, err = _find_category(guild, spec, None)
+            if err:
+                return err
+            if category is None:
+                return f"Error: category '{spec}' not found"
+            channels = list(getattr(category, "channels", []) or [])
+            label = f"category {category.name}"
+        if not channels:
+            return f"No channels to lock in {label}"
+        why = _mod_reason(message)
+        ok = []
+        failed = []
+        for ch in channels:
+            err = await _lock_target(ch, locked, why)
+            if err:
+                failed.append(err)
+            else:
+                ok.append(_channel_label(ch))
+        state = "Locked" if locked else "Unlocked"
+        out = f"{state} {len(ok)}/{len(channels)} channels in {label}"
+        if failed:
+            out += " | " + "; ".join(failed[:5])
+        return out
+
+
+class ListPermissionsTool(Tool):
+    """Show permission overwrites on a channel or category."""
+
+    def get_description(self):
+        return (
+            "List permission overwrites on a channel or category. "
+            "Needs manage_roles or manage_channels. Params: channel_id (required)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        channel_id: str | None = None,
+        **kwargs,
+    ) -> str:
+        if not channel_id:
+            return "Error: channel_id is required"
+        channel, error = await _get_guild_channel(self.bot, channel_id)
+        if error:
+            return error
+        guild = getattr(channel, "guild", None)
+        if guild is None:
+            return "Error: channel is not in a server"
+        if not (
+            _has_guild_cap(guild, "manage_roles")
+            or _has_guild_cap(guild, "manage_channels")
+        ):
+            return _missing_cap(guild, "manage_roles")
+        overwrites = getattr(channel, "overwrites", None) or {}
+        if not overwrites:
+            synced = getattr(channel, "permissions_synced", None)
+            extra = " (synced with category)" if synced else ""
+            return f"No overwrites on {_channel_label(channel)}{extra}"
+        lines = [f"Overwrites on {_channel_label(channel)}:"]
+        for target, ow in list(overwrites.items())[:30]:
+            tname = getattr(target, "name", None) or getattr(target, "id", target)
+            allow = []
+            deny = []
+            pair_iter = getattr(ow, "__iter__", None)
+            try:
+                for perm, value in ow:
+                    if value is True:
+                        allow.append(perm)
+                    elif value is False:
+                        deny.append(perm)
+            except Exception:
+                allow = [p for p, v in (pair_iter() if pair_iter else []) if v is True]
+            bits = []
+            if allow:
+                bits.append("allow=" + ",".join(allow[:12]))
+            if deny:
+                bits.append("deny=" + ",".join(deny[:12]))
+            lines.append(f"  {tname}: " + ("; ".join(bits) or "(empty)"))
+        synced = getattr(channel, "permissions_synced", None)
+        if synced:
+            lines.append("synced with parent category: yes")
+        elif synced is False:
+            lines.append("synced with parent category: no")
+        return "\n".join(lines)
+
+
+class ManageInvitesTool(Tool):
+    """List or revoke server invites."""
+
+    def get_description(self):
+        return (
+            "List or revoke Discord invites. Requires create_instant_invite. "
+            "Params: action (list|revoke), code (for revoke), guild_id, channel_id (list filter)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        action: str | None = None,
+        code: str | None = None,
+        guild_id: str | None = None,
+        channel_id: str | None = None,
+        **kwargs,
+    ) -> str:
+        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        if error:
+            return error
+        missing = _missing_cap(guild, "create_instant_invite")
+        if missing:
+            return missing
+        act = str(action or "list").strip().lower()
+        if act == "list":
+            try:
+                invites = await guild.invites()
+            except discord.Forbidden:
+                return f"Error: cannot list invites in {guild.name}"
+            except Exception as e:
+                return f"Error listing invites: {e}"
+            if channel_id:
+                try:
+                    cid = int(str(channel_id).strip())
+                except (TypeError, ValueError):
+                    return f"Error: invalid channel_id: {channel_id}"
+                invites = [
+                    inv
+                    for inv in invites
+                    if getattr(getattr(inv, "channel", None), "id", None) == cid
+                ]
+            if not invites:
+                return f"No invites in {guild.name}"
+            rows = []
+            for inv in invites[:40]:
+                ch = getattr(inv, "channel", None)
+                uses = getattr(inv, "uses", 0)
+                max_uses = getattr(inv, "max_uses", 0) or "inf"
+                inviter = getattr(getattr(inv, "inviter", None), "name", "?")
+                rows.append(
+                    f"{inv.code} #{getattr(ch, 'name', '?')} uses={uses}/{max_uses} by {inviter}"
+                )
+            return f"Invites in {guild.name} ({len(invites)}):\n" + "\n".join(rows)
+        if act == "revoke":
+            token = str(code or "").strip()
+            if not token:
+                return "Error: code is required to revoke"
+            token = token.rsplit("/", 1)[-1]
+            try:
+                invites = await guild.invites()
+            except Exception as e:
+                return f"Error listing invites: {e}"
+            match = next((inv for inv in invites if inv.code == token), None)
+            if match is None:
+                return f"Error: invite {token} not found in {guild.name}"
+            try:
+                await match.delete(reason=_mod_reason(message))
+                return f"Revoked invite {token} in {guild.name}"
+            except discord.Forbidden:
+                return f"Error: Discord denied revoking invite {token}"
+            except Exception as e:
+                return f"Error revoking invite: {e}"
+        return "Error: action must be list or revoke"
+
+
+class SoftbanMemberTool(Tool):
+    """Ban then unban to kick and delete recent messages."""
+
+    def get_description(self):
+        return (
+            "Softban a member (ban then immediately unban) to kick them and delete "
+            "recent messages without a lasting ban. Requires ban_members. "
+            "Params: user_id, reason, delete_message_seconds (default 86400), guild_id."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        user_id: str | None = None,
+        reason: str | None = None,
+        delete_message_seconds: str = "86400",
+        guild_id: str | None = None,
+        **kwargs,
+    ) -> str:
+        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        if error:
+            return error
+        missing = _missing_cap(guild, "ban_members")
+        if missing:
+            return missing
+        member, error = await _resolve_member(guild, user_id)
+        if error:
+            return error
+        blocked = _moderation_block(guild, _guild_me(guild), member, action="ban")
+        if blocked:
+            return blocked
+        try:
+            seconds = max(
+                0,
+                min(int(_parse_duration_seconds(delete_message_seconds, 86400) or 0), 604800),
+            )
+        except (TypeError, ValueError):
+            seconds = 86400
+        why = _mod_reason(message) if not reason else f"softban: {str(reason)[:480]}"
+        try:
+            try:
+                await guild.ban(member, reason=why, delete_message_seconds=seconds)
+            except TypeError:
+                await guild.ban(
+                    member, reason=why, delete_message_days=min(7, seconds // 86400)
+                )
+            await guild.unban(discord.Object(id=member.id), reason=why)
+            return (
+                f"Softbanned {member} ({member.id}) in {guild.name} "
+                f"(deleted up to {seconds}s of messages, not banned)"
+            )
+        except discord.Forbidden:
+            return f"Error: Discord denied softbanning {member}"
+        except Exception as e:
+            return f"Error softbanning member: {e}"
+
+
+class ListTimeoutsTool(Tool):
+    """List members currently timed out."""
+
+    def get_description(self):
+        return (
+            "List members currently timed out in a server. Requires moderate_members. "
+            "Params: guild_id (optional), limit (default 25)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        guild_id: str | None = None,
+        limit: str = "25",
+        **kwargs,
+    ) -> str:
+        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        if error:
+            return error
+        missing = _missing_cap(guild, "moderate_members")
+        if missing:
+            return missing
+        try:
+            cap = max(1, min(int(limit or 25), 80))
+        except (TypeError, ValueError):
+            cap = 25
+        rows = []
+        now = datetime.now(timezone.utc)
+        for member in getattr(guild, "members", []) or []:
+            until = getattr(member, "timed_out_until", None)
+            if until is None:
+                continue
+            try:
+                if until <= now:
+                    continue
+            except TypeError:
+                pass
+            rows.append(
+                f"{member} ({member.id}) until {getattr(until, 'isoformat', lambda: until)()}"
+            )
+            if len(rows) >= cap:
+                break
+        if not rows:
+            return f"No timed-out members in {guild.name}"
+        return f"Timeouts in {guild.name} ({len(rows)}):\n" + "\n".join(rows)
+
 
 
 def _role_blocked(me, role) -> str:
@@ -4699,9 +4839,9 @@ class VoiceModTool(Tool):
 class LockChannelTool(Tool):
     def get_description(self):
         return (
-            "Lock or unlock a channel for @everyone (deny/allow send or connect). "
-            "Needs manage_channels or manage_roles. Params: channel_id (optional), "
-            "unlock (optional bool)."
+            "Lock or unlock a channel or category for @everyone (deny/allow send or connect). "
+            "A category locks every child channel. Needs manage_channels or manage_roles. "
+            "Params: channel_id (optional), unlock (optional bool)."
         )
 
     async def execute(
@@ -4724,29 +4864,31 @@ class LockChannelTool(Tool):
             or _has_guild_cap(guild, "manage_roles")
         ):
             return _missing_cap(guild, "manage_channels")
-        target = getattr(guild, "default_role", None)
-        if target is None:
-            return "Error: @everyone role is unavailable"
         locked = not parse_bool(unlock, False)
-        try:
-            if isinstance(channel, discord.VoiceChannel):
-                await channel.set_permissions(
-                    target,
-                    connect=False if locked else None,
-                    reason=_mod_reason(message),
-                )
+        why = _mod_reason(message)
+        targets = (
+            list(getattr(channel, "channels", []) or [])
+            if isinstance(channel, discord.CategoryChannel)
+            else [channel]
+        )
+        if isinstance(channel, discord.CategoryChannel) and not targets:
+            return f"Category {channel.name} has no channels to lock"
+        ok = 0
+        errors = []
+        for ch in targets:
+            err = await _lock_target(ch, locked, why)
+            if err:
+                errors.append(err)
             else:
-                await channel.set_permissions(
-                    target,
-                    send_messages=False if locked else None,
-                    reason=_mod_reason(message),
-                )
-            state = "Locked" if locked else "Unlocked"
-            return f"{state} {_channel_label(channel)} for @everyone"
-        except discord.Forbidden:
-            return f"Error: Discord denied locking {_channel_label(channel)}"
-        except Exception as e:
-            return f"Error locking channel: {e}"
+                ok += 1
+        state = "Locked" if locked else "Unlocked"
+        if isinstance(channel, discord.CategoryChannel):
+            out = f"{state} {ok}/{len(targets)} channels in category {channel.name}"
+        else:
+            out = f"{state} {_channel_label(channel)} for @everyone"
+        if errors:
+            out += " | " + "; ".join(errors[:3])
+        return out
 
 
 class SetChannelPermissionsTool(Tool):
@@ -4808,8 +4950,11 @@ class SetChannelPermissionsTool(Tool):
 class EditServerTool(Tool):
     def get_description(self):
         return (
-            "Edit the server name or description. Requires manage_guild. "
-            "Params: name (optional), description (optional), guild_id (optional)."
+            "Edit server settings. Requires manage_guild. Params: name, description, "
+            "verification_level (none|low|medium|high|highest), "
+            "explicit_content_filter (disabled|no_role|all_members), "
+            "afk_channel_id (or none), afk_timeout, system_channel_id (or none), "
+            "icon_url, guild_id."
         )
 
     async def execute(
@@ -4817,6 +4962,12 @@ class EditServerTool(Tool):
         message: Message,
         name: str | None = None,
         description: str | None = None,
+        verification_level: str | None = None,
+        explicit_content_filter: str | None = None,
+        afk_channel_id: str | None = None,
+        afk_timeout: str | None = None,
+        system_channel_id: str | None = None,
+        icon_url: str | None = None,
         guild_id: str | None = None,
         **kwargs,
     ) -> str:
@@ -4833,11 +4984,85 @@ class EditServerTool(Tool):
                 updates["name"] = clean
         if description is not None:
             updates["description"] = str(description)[:120]
+        if verification_level:
+            levels = getattr(discord, "VerificationLevel", None)
+            key = str(verification_level).strip().lower()
+            mapping = {
+                "none": "none",
+                "low": "low",
+                "medium": "medium",
+                "high": "high",
+                "highest": "highest",
+                "very_high": "highest",
+            }
+            attr = mapping.get(key)
+            level = getattr(levels, attr, None) if levels is not None and attr else None
+            if level is None:
+                return "Error: verification_level must be none, low, medium, high, or highest"
+            updates["verification_level"] = level
+        if explicit_content_filter:
+            filt = getattr(discord, "ContentFilter", None)
+            key = str(explicit_content_filter).strip().lower().replace("-", "_")
+            mapping = {
+                "disabled": "disabled",
+                "none": "disabled",
+                "off": "disabled",
+                "no_role": "no_role",
+                "members_without_roles": "no_role",
+                "all_members": "all_members",
+                "all": "all_members",
+            }
+            attr = mapping.get(key)
+            value = getattr(filt, attr, None) if filt is not None and attr else None
+            if value is None:
+                return "Error: explicit_content_filter must be disabled, no_role, or all_members"
+            updates["explicit_content_filter"] = value
+        if afk_timeout is not None:
+            try:
+                updates["afk_timeout"] = max(60, min(int(afk_timeout), 3600))
+            except (TypeError, ValueError):
+                return "Error: afk_timeout must be a number of seconds"
+        if afk_channel_id is not None:
+            raw = str(afk_channel_id).strip().lower()
+            if raw in {"none", "null", "off", "0"}:
+                updates["afk_channel"] = None
+            else:
+                ch, err = await _get_guild_channel(self.bot, afk_channel_id)
+                if err:
+                    return err
+                updates["afk_channel"] = ch
+        if system_channel_id is not None:
+            raw = str(system_channel_id).strip().lower()
+            if raw in {"none", "null", "off", "0"}:
+                updates["system_channel"] = None
+            else:
+                ch, err = await _get_guild_channel(self.bot, system_channel_id)
+                if err:
+                    return err
+                updates["system_channel"] = ch
+        if icon_url:
+            if not _is_safe_url(icon_url):
+                return "Error: icon_url must be a public http(s) URL"
+            try:
+                session = await _get_shared_session()
+                async with session.get(
+                    icon_url,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                    allow_redirects=False,
+                ) as resp:
+                    if resp.status != 200:
+                        return f"Error: could not download icon (status {resp.status})"
+                    updates["icon"] = await _read_response_limited(resp, 10 * 1024 * 1024)
+            except Exception as e:
+                return f"Error downloading icon: {e}"
         if not updates:
-            return "Error: provide name or description"
+            return "Error: provide at least one server setting to edit"
         try:
             await guild.edit(**updates, reason=_mod_reason(message))
-            return f"Edited {guild.name}: {', '.join(sorted(updates))}"
+            shown = [k for k in updates if k != "icon"]
+            if "icon" in updates:
+                shown.append("icon")
+            return f"Edited {guild.name}: {', '.join(sorted(shown))}"
         except discord.Forbidden:
             return f"Error: Discord denied editing {guild.name}"
         except Exception as e:
@@ -9562,8 +9787,8 @@ class SeeVideoTool(Tool):
         return (
             "Look at a direct video URL by extracting representative frames "
             "with ffmpeg, and include its audio when audio input is enabled. "
-            "Use for mp4/webm/mov links or video embeds. YouTube links belong "
-            "to youtube, not this tool. Params: url (required)."
+            "Use for mp4/webm/mov links or video embeds. YouTube links are not "
+            "downloaded. Params: url (required)."
         )
 
     @classmethod
@@ -9669,17 +9894,8 @@ class SeeVideoTool(Tool):
             return "Error: url is required"
         if not _is_safe_url(url):
             return "Error: Cannot fetch from private/internal URLs"
-        # The transcript/frame extractor handles YouTube URLs and has access
-        # to yt-dlp/cookies; generic ffmpeg fetching must never steal them.
-        try:
-            from bot_tools import YouTubeTool
-
-            if YouTubeTool._is_youtube_url(url):
-                return "Error: use youtube for YouTube links"
-        except Exception as e:
-            # If the YouTube guard itself breaks, fall through to the generic
-            # fetch rather than refusing the URL outright.
-            logger.debug("YouTube URL guard failed: %s", e)
+        if _is_youtube_url(url):
+            return "Error: YouTube URLs are not downloaded"
         control = getattr(self.bot, "_control", None) or {}
         if (
             not parse_bool(control.get("process_images"), True)
@@ -9711,740 +9927,6 @@ class SeeVideoTool(Tool):
             message,
             filename=str(item.get("filename") or ""),
         )
-
-
-class YouTubeTool(Tool):
-    """Fetch YouTube transcripts, channel/playlist listings, and frames."""
-
-    MAX_TRANSCRIPT_CHARS = 20000
-    MAX_FRAMES = 6
-    MAX_LIST_ITEMS = 50
-    DEFAULT_LIST_ITEMS = 15
-    YOUTUBE_HOST_RE = re.compile(
-        r"(^|\.)((?:music\.)?youtube\.com|youtu\.be|youtube-nocookie\.com)$",
-        re.I,
-    )
-    YOUTUBE_URL_RE = re.compile(
-        r"https?://(?:www\.|m\.|music\.)?(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/[^\s<>\"']+",
-        re.I,
-    )
-    HANDLE_RE = re.compile(
-        r"^@([A-Za-z0-9._-]{1,30})(?:/(videos|shorts|streams|live|playlists|featured|about))?/?$",
-        re.I,
-    )
-    CHANNEL_ID_RE = re.compile(r"^UC[A-Za-z0-9_-]{20,24}$")
-    TAB_RE = re.compile(
-        r"/(videos|shorts|streams|live|playlists|featured|about|community)/?$",
-        re.I,
-    )
-    CACHE_TTL = 10 * 60
-    _result_cache: ClassVar[dict[str, tuple[float, str]]] = {}
-
-    def get_description(self):
-        return (
-            "YouTube helper: transcripts + optional timestamp frames for videos; "
-            "recent-upload listings for channels and playlists; search by query. "
-            "Prefer this over fetch_url for any youtube.com / youtu.be link. "
-            "Params: url (video, channel, playlist, @handle, or /videos page), "
-            "query (optional search if no url), limit (channel/playlist/search, "
-            "default 15), timestamps (optional comma-separated seconds or mm:ss), "
-            "max_transcript_chars (default 12000), lang (default en)."
-        )
-
-    def _cookies_file(self) -> str | None:
-        raw_path = os.environ.get("YOUTUBE_COOKIES_FILE", "").strip()
-        if raw_path:
-            path = Path(raw_path).expanduser()
-        else:
-            data_dir = Path(
-                getattr(
-                    getattr(self.bot, "config", None),
-                    "DATA_DIR",
-                    os.environ.get("DATA_DIR", "data"),
-                )
-            )
-            path = data_dir / "youtube_cookies.txt"
-        try:
-            if path.exists() and path.is_file() and path.stat().st_size > 0:
-                return str(path)
-        except OSError:
-            return None
-        return None
-
-    @staticmethod
-    def _yt_dlp_binary() -> str:
-        """Locate yt-dlp: PATH first, then this interpreter's own bin dir.
-
-        `pip install yt-dlp` inside a venv puts the console script in that
-        venv's bin/, which is NOT on PATH when the process was started by its
-        absolute interpreter path (exactly what PM2 does). Checking sys.executable's
-        directory means an install that has the package always finds the tool.
-        Returns "" when it genuinely isn't installed.
-        """
-        found = shutil.which("yt-dlp")
-        if found:
-            return found
-        sibling = Path(sys.executable).parent / "yt-dlp"
-        if sibling.is_file() and os.access(sibling, os.X_OK):
-            return str(sibling)
-        return ""
-
-    def _yt_dlp_args(self, *args: str) -> list[str]:
-        cmd = [self._yt_dlp_binary() or "yt-dlp", "--no-update"]
-        if shutil.which("node"):
-            cmd.extend(["--js-runtimes", "node"])
-        cookies = self._cookies_file()
-        if cookies:
-            cmd.extend(["--cookies", cookies])
-        cmd.extend(args)
-        return cmd
-
-    @classmethod
-    def _is_youtube_url(cls, url: str) -> bool:
-        try:
-            parsed = urlparse(url)
-            return parsed.scheme in {"http", "https"} and bool(
-                parsed.hostname and cls.YOUTUBE_HOST_RE.search(parsed.hostname)
-            )
-        except Exception:
-            return False
-
-    @classmethod
-    def _extract_youtube_url(cls, raw: str) -> str:
-        text = str(raw or "").strip()
-        if "<" in text and ">" in text:
-            text = re.sub(r"</?param\b[^>]*>", "", text, flags=re.IGNORECASE).strip()
-            text = re.sub(
-                r"</?(?:url|tool:youtube|youtube)\b[^>]*>",
-                "",
-                text,
-                flags=re.IGNORECASE,
-            ).strip()
-        match = cls.YOUTUBE_URL_RE.search(text)
-        if match:
-            return match.group(0).rstrip(".,)]>")
-        handle = cls.HANDLE_RE.search(text)
-        if handle:
-            tab = (handle.group(2) or "videos").lower()
-            if tab in {"featured", "about", "community"}:
-                tab = "videos"
-            if tab == "live":
-                tab = "streams"
-            return f"https://www.youtube.com/@{handle.group(1)}/{tab}"
-        if cls.CHANNEL_ID_RE.fullmatch(text):
-            return f"https://www.youtube.com/channel/{text}/videos"
-        return text
-
-    @classmethod
-    def _url_kind(cls, url: str) -> str:
-        try:
-            parsed = urlparse(url)
-        except Exception:
-            return "video"
-        host = (parsed.hostname or "").lower()
-        path = parsed.path or ""
-        qs = parse_qs(parsed.query)
-        if host.endswith("youtu.be"):
-            return "video"
-        if qs.get("v"):
-            return "video"
-        if re.search(r"/(?:embed|shorts|live)/[A-Za-z0-9_-]{6,}", path):
-            return "video"
-        if "/playlist" in path and qs.get("list"):
-            return "playlist"
-        if "/results" in path or qs.get("search_query"):
-            return "search"
-        if (
-            "/@" in f"/{path.lstrip('/')}"
-            or "/channel/" in path
-            or path.startswith(("/c/", "/user/"))
-        ):
-            return "channel"
-        return "video"
-
-    @classmethod
-    def _normalize_list_url(cls, url: str, kind: str) -> str:
-        if kind != "channel":
-            return url
-        try:
-            parsed = urlparse(url)
-        except Exception:
-            return url
-        path = (parsed.path or "").rstrip("/")
-        if cls.TAB_RE.search(path):
-            path = cls.TAB_RE.sub(
-                lambda m: (
-                    "/streams"
-                    if m.group(1).lower() == "live"
-                    else (
-                        "/videos"
-                        if m.group(1).lower() in {"featured", "about", "community"}
-                        else f"/{m.group(1).lower()}"
-                    )
-                ),
-                path,
-            )
-        elif path:
-            path = f"{path}/videos"
-        else:
-            return url
-        return parsed._replace(path=path, query="", fragment="").geturl()
-
-    @staticmethod
-    def _video_id(url: str) -> str:
-        try:
-            parsed = urlparse(url)
-            host = (parsed.hostname or "").lower()
-            if host.endswith("youtu.be"):
-                return parsed.path.strip("/").split("/", 1)[0]
-            query_id = parse_qs(parsed.query).get("v", [""])[0]
-            if query_id:
-                return query_id
-            match = re.search(
-                r"/(?:embed|shorts|live)/([A-Za-z0-9_-]{6,})", parsed.path
-            )
-            return match.group(1) if match else ""
-        except Exception:
-            return ""
-
-    @staticmethod
-    def _parse_timestamp(value: str) -> float | None:
-        text = str(value or "").strip().lower()
-        if not text:
-            return None
-        text = text.removeprefix("t=")
-        if re.fullmatch(r"\d+(?:\.\d+)?s?", text):
-            return float(text.rstrip("s"))
-        parts = text.split(":")
-        if not 1 <= len(parts) <= 3:
-            return None
-        try:
-            nums = [float(p) for p in parts]
-        except ValueError:
-            return None
-        seconds = 0.0
-        for n in nums:
-            seconds = seconds * 60 + n
-        return seconds
-
-    @classmethod
-    def _parse_timestamps(cls, raw: str | None) -> list[float]:
-        if not raw:
-            return []
-        out = []
-        for part in re.split(r"[,\n]+", str(raw)):
-            ts = cls._parse_timestamp(part)
-            if ts is not None and ts >= 0:
-                out.append(ts)
-            if len(out) >= cls.MAX_FRAMES:
-                break
-        return out
-
-    @staticmethod
-    def _format_ts(seconds: float) -> str:
-        total = max(0, int(seconds))
-        h, rem = divmod(total, 3600)
-        m, s = divmod(rem, 60)
-        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
-
-    async def _run_cmd(
-        self, args: list[str], timeout: int = 60
-    ) -> tuple[int, str, str]:
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            stdout, stderr = await communicate_process(proc, timeout=timeout)
-        except asyncio.TimeoutError:
-            return 124, "", f"timed out after {timeout}s"
-        return (
-            proc.returncode or 0,
-            stdout.decode("utf-8", "replace"),
-            stderr.decode("utf-8", "replace"),
-        )
-
-    @staticmethod
-    def _strip_vtt(raw: str) -> str:
-        lines = []
-        seen = set()
-        current_ts = ""
-        for line in raw.splitlines():
-            text = line.strip()
-            if not text or text == "WEBVTT" or text.startswith(("Kind:", "Language:")):
-                continue
-            if "-->" in text:
-                m = re.match(r"(\d+):(\d{2})(?::(\d{2}))?\.\d{3}", text)
-                if m:
-                    h, mn, sc = m.group(1), m.group(2), m.group(3)
-                    if sc:
-                        current_ts = f"{int(h)}:{int(mn):02d}:{int(sc):02d}"
-                    else:
-                        current_ts = f"{int(h)}:{int(mn):02d}"
-                continue
-            if re.fullmatch(r"\d+", text):
-                continue
-            text = re.sub(r"<[^>]+>", "", text)
-            text = re.sub(r"&amp;", "&", text)
-            text = re.sub(r"&lt;", "<", text)
-            text = re.sub(r"&gt;", ">", text)
-            text = re.sub(r"\s+", " ", text).strip()
-            if text and text not in seen:
-                seen.add(text)
-                lines.append(f"[{current_ts}] {text}" if current_ts else text)
-        return "\n".join(lines)
-
-    async def _download_transcript(self, url: str, lang: str, tmp: Path) -> str:
-        direct = await self._download_timedtext(url, lang)
-        if direct:
-            return direct
-        if not self._yt_dlp_binary():
-            return ""
-        out_tpl = str(tmp / "subs.%(ext)s")
-        args = self._yt_dlp_args(
-            "--skip-download",
-            "--ignore-no-formats-error",
-            "--write-subs",
-            "--write-auto-subs",
-            "--sub-langs",
-            f"{lang}-orig,{lang}.*,{lang},en-orig,en.*",
-            "--sub-format",
-            "vtt",
-            "-o",
-            out_tpl,
-            url,
-        )
-        _code, _stdout, _stderr = await self._run_cmd(args, timeout=60)
-        candidates = sorted(
-            tmp.glob("subs*.vtt"), key=lambda p: p.stat().st_size, reverse=True
-        )
-        if not candidates:
-            return ""
-        return self._strip_vtt(
-            candidates[0].read_text(encoding="utf-8", errors="replace")
-        )
-
-    async def _download_timedtext(self, url: str, lang: str) -> str:
-        video_id = self._video_id(url)
-        if not video_id:
-            return ""
-        session = await _get_shared_session()
-        langs = [lang, "en"] if lang != "en" else ["en"]
-        for lang_code in langs:
-            for params in (
-                {"v": video_id, "lang": lang_code, "fmt": "json3"},
-                {"v": video_id, "lang": lang_code, "fmt": "srv3"},
-            ):
-                try:
-                    async with session.get(
-                        "https://www.youtube.com/api/timedtext",
-                        params=params,
-                        timeout=aiohttp.ClientTimeout(total=15),
-                    ) as resp:
-                        if resp.status != 200:
-                            continue
-                        raw = await _read_response_limited(resp, 2 * 1024 * 1024)
-                except Exception as e:
-                    # Each params combo is a guess; failure just means try next.
-                    logger.debug("timedtext fetch failed (%s): %s", params, e)
-                    continue
-                text = raw.decode("utf-8", "replace").strip()
-                if not text:
-                    continue
-                if params.get("fmt") == "json3":
-                    try:
-                        data = json.loads(text)
-                        events = (
-                            data.get("events", []) if isinstance(data, dict) else []
-                        )
-                        lines = []
-                        for event in events:
-                            segs = (
-                                event.get("segs") if isinstance(event, dict) else None
-                            )
-                            if not isinstance(segs, list):
-                                continue
-                            line = "".join(
-                                str(seg.get("utf8", ""))
-                                for seg in segs
-                                if isinstance(seg, dict)
-                            )
-                            line = re.sub(r"\s+", " ", line).strip()
-                            if line:
-                                start = event.get("start")
-                                if isinstance(start, (int, float)) and start >= 0:
-                                    lines.append(
-                                        f"[{YouTubeTool._format_ts(float(start))}] {line}"
-                                    )
-                                else:
-                                    lines.append(line)
-                        if lines:
-                            return "\n".join(lines)
-                    except Exception as e:
-                        # Fall through to the regex/plain-text parse below.
-                        logger.debug("json3 transcript parse failed: %s", e)
-                else:
-                    text = re.sub(r"<[^>]+>", " ", text)
-                    text = re.sub(r"\s+", " ", text).strip()
-                    if text:
-                        return text
-        return ""
-
-    async def _video_info(self, url: str) -> dict:
-        fallback: dict = {}
-        try:
-            session = await _get_shared_session()
-            async with session.get(
-                "https://www.youtube.com/oembed",
-                params={"url": url, "format": "json"},
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status == 200:
-                    raw = await _read_response_limited(resp, 256 * 1024)
-                    data = json.loads(raw.decode("utf-8", "replace"))
-                    if isinstance(data, dict):
-                        fallback = {
-                            "title": data.get("title"),
-                            "uploader": data.get("author_name"),
-                        }
-        except Exception:
-            fallback = {}
-        if not self._yt_dlp_binary():
-            return fallback
-        code, stdout, _stderr = await self._run_cmd(
-            self._yt_dlp_args("--dump-json", "--no-playlist", url), timeout=45
-        )
-        if code != 0 or not stdout.strip():
-            return fallback
-        try:
-            info = json.loads(stdout)
-            if isinstance(info, dict):
-                return {**fallback, **info}
-            return fallback
-        except json.JSONDecodeError:
-            return fallback
-
-    async def _extract_frames(
-        self, url: str, timestamps: list[float], tmp: Path
-    ) -> list[str]:
-        if not timestamps or not shutil.which("ffmpeg") or not self._yt_dlp_binary():
-            return []
-        code, stream_url, stderr = await self._run_cmd(
-            self._yt_dlp_args(
-                "--extractor-args",
-                "youtube:player_client=web_embedded",
-                "-g",
-                "--no-playlist",
-                "-f",
-                "best[height<=720]/best",
-                url,
-            ),
-            timeout=45,
-        )
-        if code != 0 or not stream_url.strip():
-            return [
-                f"frame extraction unavailable: {stderr.strip()[:180] or 'no stream url'}"
-            ]
-        video_url = stream_url.strip().splitlines()[0]
-        sent = []
-        for i, ts in enumerate(timestamps[: self.MAX_FRAMES], 1):
-            frame_path = tmp / f"youtube_frame_{i}_{int(ts)}s.jpg"
-            args = [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-ss",
-                str(ts),
-                "-i",
-                video_url,
-                "-frames:v",
-                "1",
-                "-q:v",
-                "3",
-                "-y",
-                str(frame_path),
-            ]
-            code, _stdout, stderr = await self._run_cmd(args, timeout=40)
-            if code != 0 or not frame_path.exists():
-                sent.append(
-                    f"{self._format_ts(ts)} frame failed: {stderr.strip()[:120]}"
-                )
-                continue
-            try:
-                encoded = base64.b64encode(frame_path.read_bytes()).decode("ascii")
-                sent.append(
-                    f"frame at {self._format_ts(ts)} attached for visual inspection\n"
-                    f"__IMAGE_B64__{encoded}__END_IMAGE_B64__"
-                )
-            except Exception as e:
-                sent.append(f"{self._format_ts(ts)} read failed: {e}")
-        return sent
-
-    async def _thumbnail_image(self, url: str) -> str:
-        video_id = self._video_id(url)
-        if not video_id:
-            return ""
-        session = await _get_shared_session()
-        for name in ("maxresdefault.jpg", "sddefault.jpg", "hqdefault.jpg", "0.jpg"):
-            thumb_url = f"https://i.ytimg.com/vi/{video_id}/{name}"
-            try:
-                async with session.get(
-                    thumb_url, timeout=aiohttp.ClientTimeout(total=15)
-                ) as resp:
-                    if resp.status != 200:
-                        continue
-                    content_type = resp.headers.get("Content-Type", "")
-                    if not content_type.startswith("image/"):
-                        continue
-                    raw = await _read_response_limited(resp, 2 * 1024 * 1024)
-                    if not raw.startswith(b"\xff\xd8\xff") and not raw.startswith(
-                        b"\x89PNG"
-                    ):
-                        continue
-                    encoded = base64.b64encode(raw).decode("ascii")
-                    return (
-                        "thumbnail attached for visual inspection\n"
-                        f"__IMAGE_B64__{encoded}__END_IMAGE_B64__"
-                    )
-            except Exception as e:
-                # Try the next thumbnail resolution.
-                logger.debug("thumbnail fetch failed: %s", e)
-                continue
-        return ""
-
-    @classmethod
-    def _cache_get(cls, key: str) -> str | None:
-        item = cls._result_cache.get(key)
-        if not item:
-            return None
-        expires, value = item
-        if time.monotonic() >= expires:
-            cls._result_cache.pop(key, None)
-            return None
-        return value
-
-    @classmethod
-    def _cache_set(cls, key: str, value: str) -> None:
-        if len(cls._result_cache) > 64:
-            cls._result_cache.clear()
-        cls._result_cache[key] = (time.monotonic() + cls.CACHE_TTL, value)
-
-    @classmethod
-    def _parse_limit(cls, raw: Any) -> int:
-        try:
-            return max(1, min(int(raw), cls.MAX_LIST_ITEMS))
-        except (TypeError, ValueError):
-            return cls.DEFAULT_LIST_ITEMS
-
-    @staticmethod
-    def _entry_watch_url(entry: dict) -> str:
-        eid = str(entry.get("id") or "").strip()
-        webpage = str(entry.get("url") or entry.get("webpage_url") or "").strip()
-        if webpage.startswith("http") and "youtube" in webpage:
-            return webpage
-        if eid.startswith(("PL", "UU", "FL", "RD", "OL")):
-            return f"https://www.youtube.com/playlist?list={eid}"
-        if eid:
-            return f"https://www.youtube.com/watch?v={eid}"
-        return webpage
-
-    @classmethod
-    def _format_catalog(cls, kind: str, data: dict, limit: int) -> str:
-        title = str(
-            data.get("title")
-            or data.get("playlist_title")
-            or data.get("channel")
-            or data.get("uploader")
-            or "YouTube"
-        )
-        channel = str(data.get("channel") or data.get("uploader") or "")
-        channel_url = str(data.get("channel_url") or data.get("uploader_url") or "")
-        webpage = str(data.get("webpage_url") or data.get("original_url") or "")
-        description = str(data.get("description") or "").strip()
-        if len(description) > 400:
-            description = description[:400] + "…"
-        entries = [
-            e
-            for e in (data.get("entries") or [])
-            if isinstance(e, dict) and (e.get("id") or e.get("title"))
-        ][:limit]
-        parts = [
-            f"Type: {kind}",
-            f"Title: {title}",
-        ]
-        if channel:
-            parts.append(f"Channel: {channel}")
-        if channel_url:
-            parts.append(f"Channel URL: {channel_url}")
-        if webpage:
-            parts.append(f"URL: {webpage}")
-        count = data.get("playlist_count")
-        if isinstance(count, int) and count > 0:
-            parts.append(f"Total items: {count}")
-        if description:
-            parts.append(f"Description: {description}")
-        if not entries:
-            parts.append("No videos listed (empty, private, or blocked).")
-            return "\n".join(parts)
-        parts.append(f"Showing {len(entries)} item(s):")
-        lines = []
-        for i, entry in enumerate(entries, 1):
-            etitle = str(entry.get("title") or entry.get("id") or "untitled")
-            dur = entry.get("duration")
-            dur_text = (
-                f" ({cls._format_ts(float(dur))})"
-                if isinstance(dur, (int, float)) and dur >= 0
-                else ""
-            )
-            watch = cls._entry_watch_url(entry)
-            extra = []
-            views = entry.get("view_count")
-            if isinstance(views, (int, float)):
-                extra.append(f"{int(views)} views")
-            uploaded = entry.get("upload_date") or entry.get("release_date")
-            if isinstance(uploaded, str) and len(uploaded) == 8 and uploaded.isdigit():
-                extra.append(f"{uploaded[:4]}-{uploaded[4:6]}-{uploaded[6:]}")
-            meta = f" — {', '.join(extra)}" if extra else ""
-            block = f"{i}. {etitle}{dur_text}{meta}"
-            if watch:
-                block += f"\n   {watch}"
-            lines.append(block)
-        parts.append("\n".join(lines))
-        parts.append(
-            "Call this tool again with a specific video URL to fetch a transcript or frames."
-        )
-        return "\n".join(parts)
-
-    async def _dump_playlist(self, url: str, limit: int) -> dict:
-        if not self._yt_dlp_binary():
-            return {"error": "yt-dlp is not installed"}
-        code, stdout, stderr = await self._run_cmd(
-            self._yt_dlp_args(
-                "--flat-playlist",
-                "--dump-single-json",
-                "--playlist-end",
-                str(limit),
-                "--no-warnings",
-                url,
-            ),
-            timeout=75,
-        )
-        blob = (stdout or "").strip()
-        if code != 0 or not blob:
-            err = (stderr or stdout or "unknown error").strip()[:300]
-            return {"error": err}
-        try:
-            data = json.loads(blob)
-        except json.JSONDecodeError:
-            return {"error": "yt-dlp returned invalid JSON"}
-        return (
-            data if isinstance(data, dict) else {"error": "unexpected yt-dlp payload"}
-        )
-
-    async def _list_catalog(self, url: str, kind: str, limit: int) -> str:
-        cache_key = f"list:{kind}:{url}:{limit}"
-        cached = self._cache_get(cache_key)
-        if cached:
-            return cached
-        data = await self._dump_playlist(url, limit)
-        if data.get("error") and not data.get("entries"):
-            return (
-                f"Error listing YouTube {kind}: {data['error']}\n"
-                "If this is a 429 / bot check, wait and retry; cookies may need a refresh."
-            )
-        text = self._format_catalog(kind, data, limit)
-        self._cache_set(cache_key, text)
-        return text
-
-    async def execute(
-        self,
-        message: Message,
-        url: str | None = None,
-        timestamps: str | None = None,
-        max_transcript_chars: str = "12000",
-        lang: str = "en",
-        query: str | None = None,
-        limit: Any = None,
-        **kwargs,
-    ) -> str:
-        query = str(query or kwargs.get("q") or "").strip()
-        list_limit = self._parse_limit(
-            limit if limit is not None else kwargs.get("max_videos")
-        )
-        if query and not url:
-            return await self._list_catalog(
-                f"ytsearch{list_limit}:{query}", "search", list_limit
-            )
-        if not url:
-            return "Error: url or query is required"
-        url = self._extract_youtube_url(url)
-        if url.startswith("ytsearch") or self._is_youtube_url(url):
-            kind = "search" if url.startswith("ytsearch") else self._url_kind(url)
-            if kind == "search" and not url.startswith("ytsearch"):
-                q = parse_qs(urlparse(url).query).get("search_query", [""])[0].strip()
-                if q:
-                    return await self._list_catalog(
-                        f"ytsearch{list_limit}:{q}", "search", list_limit
-                    )
-            if kind in {"channel", "playlist", "search"}:
-                url = self._normalize_list_url(url, kind)
-                return await self._list_catalog(url, kind, list_limit)
-        else:
-            return "Error: expected a YouTube URL or @handle"
-        try:
-            max_chars = max(
-                1000, min(int(max_transcript_chars), self.MAX_TRANSCRIPT_CHARS)
-            )
-        except (TypeError, ValueError):
-            max_chars = 12000
-        lang = re.sub(r"[^A-Za-z0-9_.-]", "", str(lang or "en"))[:20] or "en"
-        requested_ts = self._parse_timestamps(timestamps)
-        with tempfile.TemporaryDirectory(prefix="maxwell_yt_") as tmpdir:
-            tmp = Path(tmpdir)
-            info_task = asyncio.create_task(self._video_info(url))
-            transcript = await self._download_transcript(url, lang, tmp)
-            info = await info_task
-            frame_results = await self._extract_frames(url, requested_ts, tmp)
-            if not any("__IMAGE_B64__" in item for item in frame_results):
-                thumbnail = await self._thumbnail_image(url)
-                if thumbnail:
-                    frame_results.append(thumbnail)
-
-        title = str(info.get("title") or "YouTube video")
-        uploader = str(info.get("uploader") or info.get("channel") or "unknown")
-        duration = info.get("duration")
-        duration_text = (
-            self._format_ts(float(duration))
-            if isinstance(duration, (int, float))
-            else "unknown"
-        )
-        parts = [
-            f"Title: {title}",
-            f"Channel: {uploader}",
-            f"Duration: {duration_text}",
-        ]
-        if transcript:
-            if len(transcript) > max_chars:
-                transcript = transcript[:max_chars] + "\n... (transcript truncated)"
-            parts.append("Transcript:\n" + transcript)
-        else:
-            parts.append(
-                "Transcript: unavailable (no captions found or yt-dlp could not fetch them)."
-            )
-        if requested_ts:
-            parts.append(
-                "Frames: "
-                + (
-                    "; ".join(frame_results)
-                    if frame_results
-                    else "requested but unavailable"
-                )
-            )
-        elif frame_results:
-            parts.append("Visual context: " + "; ".join(frame_results))
-        return "\n\n".join(parts)
 
 
 class SendMemeTool(Tool):
@@ -12098,186 +11580,6 @@ class EmailSearchTool(Tool):
         if self.bot is not None:
             self.bot.mark_message_tainted(message)
         return result
-
-
-# ---------------------------------------------------------------------------
-# X (Twitter). Reading is free and needs no account; posting uses the
-# session cookies of a browser logged in as him. Both live in x_client.py —
-# these two tools are the model-facing surface and nothing more.
-# ---------------------------------------------------------------------------
-
-
-def _x_client(bot):
-    """The bot's live XClient, or None when the feature is off."""
-    return getattr(bot, "x_client", None)
-
-
-def _x_unavailable() -> str:
-    return (
-        "Error: X is not available on this install (ENABLE_X=false, or "
-        "x_client failed to start). Check `python3 doctor.py`."
-    )
-
-
-class XReadTool(Tool):
-    """Read X: a timeline, a search, an account, or one post."""
-
-    def get_description(self) -> str:
-        return (
-            "Read X/Twitter. Params: action (home, user, search, mentions, "
-            "tweet), handle (for action=user), query (for action=search — X "
-            "search operators work: 'from:nasa', '-filter:replies', "
-            "'min_faves:100'), tweet_id or a post URL (for action=tweet), "
-            "limit (default 15, max 50). home and mentions need the logged-in "
-            "session; user, search and tweet work without one. Returns the "
-            "posts with their ids, so you can reply to or quote one with "
-            "x_post."
-        )
-
-    async def execute(
-        self,
-        message: Message,
-        action: str = "home",
-        handle: str | None = None,
-        query: str | None = None,
-        tweet_id: str | None = None,
-        limit: str | int = 15,
-        **kwargs,
-    ) -> str:
-        client = _x_client(self.bot)
-        if client is None:
-            return _x_unavailable()
-        from x_client import XError, render_tweets
-
-        act = str(action or "home").strip().lower()
-        # The model reaches for the verb it means rather than the enum, and a
-        # rejected call costs a whole turn. Map the obvious synonyms instead.
-        act = {
-            "timeline": "home",
-            "feed": "home",
-            "profile": "user",
-            "account": "user",
-            "mention": "mentions",
-            "notifications": "mentions",
-            "status": "tweet",
-            "post": "tweet",
-            "get": "tweet",
-        }.get(act, act)
-        # A handle in the query slot and a query in the handle slot are both
-        # common; so is passing a URL as the handle.
-        if act == "user" and not handle and query:
-            handle = query
-        if act == "search" and not query and handle:
-            query = handle
-        if act == "tweet" and not tweet_id and (query or handle):
-            tweet_id = query or handle
-        try:
-            count = max(1, min(int(limit), 50))
-        except (TypeError, ValueError):
-            count = 15
-
-        try:
-            tweets = await client.read(
-                act, handle=handle, query=query, tweet_id=tweet_id, limit=count
-            )
-        except XError as e:
-            return f"Error: {e}"
-        except Exception as e:  # pragma: no cover - defensive
-            return f"Error: X read failed: {type(e).__name__}: {e}"
-
-        header = {
-            "home": "X — home timeline",
-            "user": f"X — @{str(handle or '').lstrip('@')}",
-            "search": f"X — search: {query}",
-            "mentions": "X — mentions of you",
-            "tweet": "X — one post",
-        }.get(act, "X")
-        # Same posture as fetch_url/web_search: this is arbitrary text written
-        # by strangers, so the turn is tainted and destructive tools need an
-        # out-of-band confirm before they run.
-        if self.bot is not None:
-            self.bot.mark_message_tainted(message)
-        return render_tweets(tweets, header=f"{header} ({len(tweets)}):")
-
-
-class XPostTool(Tool):
-    """Post, reply, quote, delete, like, or repost on X."""
-
-    # A public post is the least reversible thing he can do with a tool, and
-    # the obvious target of anything injected through a fetched page. On a
-    # tainted turn the user confirms first.
-    is_destructive: bool = True
-
-    def get_description(self) -> str:
-        return (
-            "Post on X/Twitter as yourself. Params: action (post, reply, "
-            "quote, delete, like, repost — default post), text (the post; "
-            "required for post/reply/quote), reply_to or tweet_id (the post "
-            "id or URL you are answering/quoting/liking/deleting). Posts are "
-            "public and permanent-ish: say something worth saying. There is "
-            "an hourly budget, so do not narrate every thought."
-        )
-
-    async def execute(
-        self,
-        message: Message,
-        action: str = "post",
-        text: str | None = None,
-        reply_to: str | None = None,
-        quote: str | None = None,
-        tweet_id: str | None = None,
-        **kwargs,
-    ) -> str:
-        client = _x_client(self.bot)
-        if client is None:
-            return _x_unavailable()
-        from x_client import XError
-
-        act = str(action or "post").strip().lower()
-        act = {
-            "tweet": "post",
-            "send": "post",
-            "publish": "post",
-            "retweet": "repost",
-            "favorite": "like",
-            "fav": "like",
-            "remove": "delete",
-        }.get(act, act)
-        if act not in {"post", "reply", "quote", "delete", "like", "repost"}:
-            return (
-                f"Error: unknown action {act!r}. Use post, reply, quote, "
-                "delete, like, or repost."
-            )
-
-        # Indirect-prompt-injection gate, same contract as email_send/shell:
-        # a turn that read a web page or a search result cannot publish
-        # without the user confirming out of band.
-        if _taint_gate_blocks(self, message, kwargs):
-            preview = str(text or tweet_id or reply_to or "")[:200]
-            return (
-                "Error: x_post refused: this turn read content from the web "
-                "(a page, a search, or X itself) that may carry "
-                "prompt-injection payloads, and posting is public. The user "
-                "must confirm out-of-band with `,confirm`.\n"
-                f"Action: {act}\nContent: {preview}"
-            )
-
-        try:
-            if act in {"post", "reply", "quote"}:
-                target = reply_to or (tweet_id if act == "reply" else None)
-                quoted = quote or (tweet_id if act == "quote" else None)
-                result = await client.post(
-                    str(text or ""), reply_to=target, quote=quoted
-                )
-                label = {"post": "Posted", "reply": "Replied", "quote": "Quoted"}[act]
-                return f"{label} on X: {result.get('url') or result.get('id') or 'ok'}"
-            result = await client.act(act, str(tweet_id or reply_to or quote or ""))
-        except XError as e:
-            return f"Error: {e}"
-        except Exception as e:  # pragma: no cover - defensive
-            return f"Error: X {act} failed: {type(e).__name__}: {e}"
-        done = {"delete": "Deleted", "like": "Liked", "repost": "Reposted"}[act]
-        return f"{done} on X: {result.get('url') or result.get('id') or 'ok'}"
 
 
 # ---------------------------------------------------------------------------

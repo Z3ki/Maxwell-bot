@@ -22,7 +22,8 @@ def test_change_presence_does_not_write_user_settings_by_default():
     bot._current_status = None
 
     asyncio.run(bot.change_presence(status=None))
-    assert seen.get("edit_settings") is False
+    assert "edit_settings" not in seen
+    assert seen.get("status") is None
 
 
 def test_autonomy_history_defaults_stay_small():

@@ -4,7 +4,6 @@ import asyncio
 from types import SimpleNamespace
 
 from bot import TelegramMessageAdapter, strip_tool_payload_leaks
-from captcha_solver import _BaseSolver, CaptchaSolveError
 from rem import RemStore
 from tool_schemas import TOOL_PARAMETERS, build_openai_tools
 
@@ -50,39 +49,6 @@ def test_wait_and_personality_schemas_are_declared():
     assert "wait" in names
     wait = next(t for t in tools if t["function"]["name"] == "wait")
     assert "seconds" in wait["function"]["parameters"]["properties"]
-
-
-def test_2captcha_ready_status_is_accepted():
-    async def run():
-        solver = _BaseSolver("key")
-
-        async def get_result():
-            return {"status": 1, "request": "token-abc"}
-
-        data = await solver._poll(get_result, timeout=1)
-        assert data["request"] == "token-abc"
-
-    asyncio.run(run())
-
-
-def test_2captcha_not_ready_then_error():
-    async def run():
-        solver = _BaseSolver("key")
-        n = {"i": 0}
-
-        async def get_result():
-            n["i"] += 1
-            if n["i"] == 1:
-                return {"status": 0, "request": "CAPCHA_NOT_READY"}
-            return {"status": 0, "request": "ERROR_CAPTCHA_UNSOLVABLE"}
-
-        try:
-            await solver._poll(get_result, timeout=5)
-            raise AssertionError("expected failure")
-        except CaptchaSolveError:
-            pass
-
-    asyncio.run(run())
 
 
 def test_rem_patch_state_does_not_wipe_corrupt_file(tmp_path):

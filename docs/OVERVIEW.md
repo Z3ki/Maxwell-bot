@@ -1,8 +1,8 @@
 # Maxwell overview
 
-Maxwell is a Discord self-bot powered by any OpenAI-compatible chat API. It can read Discord text plus images, audio, video, files, and embeds, then answer with an LLM that can call tools such as web search, URL fetch, YouTube extraction, image generation, chess, memory, shell-in-Docker, and site generation.
+Maxwell is an official Discord bot powered by any OpenAI-compatible chat API. It can read Discord text plus images, audio, video, files, and embeds, then answer with an LLM that can call tools such as web search, URL fetch, image generation, chess, memory, shell-in-Docker, site generation, and guild moderation/structure tools.
 
-> **Discord Terms of Service warning:** Maxwell uses `discord.py-self` with a user account token. Self-bots may violate Discord's Terms of Service and can put the account at risk. Use a dedicated account only if you accept that risk.
+Maxwell logs in with an official bot token from the Discord Developer Portal. Enable Message Content, Server Members, and Presence privileged intents.
 
 ## How the pieces fit
 
@@ -38,7 +38,7 @@ OpenAI-compatible LLM       ├── rag_memory.py + SQLite memory
 | `doctor.py` | Installation/configuration report; `--probe` calls the configured endpoints. |
 | `ecosystem.config.js` | PM2 process definitions for the bot, API, and optional Ollama process. |
 | `requirements.txt` | Core Python packages required to start Maxwell. |
-| `requirements-optional.txt` | Optional packages for web search, YouTube, voice, and TTS features. |
+| `requirements-optional.txt` | Optional packages for web search, voice, and TTS features. |
 
 ## Feature flags
 

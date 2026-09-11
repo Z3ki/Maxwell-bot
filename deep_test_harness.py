@@ -51,7 +51,6 @@ import tool_registry  # noqa: E402
 import bot_tools  # noqa: E402
 import chess_game  # noqa: E402
 import site_backend  # noqa: E402
-import x_client  # noqa: E402
 import inbox  # noqa: E402
 import email_inbox  # noqa: E402
 import response_guard  # noqa: E402
@@ -593,62 +592,6 @@ class DeepTestHarness:
         self.run_sync_test("Site backend datastore (KV, atomic counter, items list)", test_site_backend_kv_and_items)
 
     # =========================================================================
-    # SUITE 9: X (Twitter) Client & Rate Limiting
-    # =========================================================================
-    async def test_suite_x_client(self):
-        self.current_suite = "X (Twitter) Client"
-        print(f"\n\033[1;34m=== SUITE 9: {self.current_suite} ===\033[0m")
-
-        temp_dir = self.make_temp_dir()
-
-        async def test_x_post_budget_limiting():
-            budget = x_client.PostBudget(data_dir=temp_dir, per_hour=2)
-            assert await budget.check() == ""
-            
-            # Reserve slot 1
-            err1, stamp1 = await budget.reserve()
-            assert err1 == ""
-            assert stamp1 > 0
-
-            # Reserve slot 2
-            err2, stamp2 = await budget.reserve()
-            assert err2 == ""
-
-            # Reserve slot 3 (over limit -> blocked)
-            err3, stamp3 = await budget.reserve()
-            assert "X post budget spent" in err3
-
-            # Release slot 2
-            await budget.release(stamp2)
-            err_retry, _ = await budget.reserve()
-            assert err_retry == ""
-            return "X rolling hour PostBudget accurately limits and persists posts"
-
-        def test_x_tweet_rendering_and_rss():
-            t1 = x_client.Tweet(
-                id="123456",
-                text="Hello from Maxwell AI!",
-                author="maxwell_ai",
-                author_name="Maxwell",
-                created_at="2026-08-28T12:00:00Z",
-                likes=10,
-                reposts=2,
-            )
-            rendered = x_client.render_tweets([t1], header="Latest Posts")
-            assert "Hello from Maxwell AI!" in rendered
-            assert "@maxwell_ai" in rendered
-            assert "Latest Posts" in rendered
-
-            # Syndication token math
-            token = x_client.syndication_token("123456789")
-            assert isinstance(token, str)
-            assert len(token) > 0
-            return "Tweet formatting & syndication tokens verified"
-
-        await self.run_async_test("X PostBudget rolling hour rate limiting", test_x_post_budget_limiting)
-        self.run_sync_test("Tweet formatting & syndication tokens", test_x_tweet_rendering_and_rss)
-
-    # =========================================================================
     # SUITE 10: Email & Inbox Processing
     # =========================================================================
     async def test_suite_email_inbox(self):
@@ -784,7 +727,6 @@ class DeepTestHarness:
             assert "scrub_repetitions" in defaults
             assert "autonomy_blocked_channels" in defaults
             assert "autonomy_blocked_servers" in defaults
-            assert "x_posts_per_hour" in defaults
             return f"{len(defaults)} canonical default control keys verified"
 
         self.run_sync_test("Control state sanitization, typing & clamping", test_control_sanitization_and_clamping)
@@ -846,7 +788,6 @@ class DeepTestHarness:
         self.test_suite_autonomy()
         self.test_suite_chess()
         self.test_suite_sites()
-        await self.test_suite_x_client()
         await self.test_suite_email_inbox()
         self.test_suite_security_guards()
         self.test_suite_api()

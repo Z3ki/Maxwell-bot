@@ -8,19 +8,11 @@
 # --- web search (ENABLE_WEB_SEARCH) ------------------------------------------
 ddgs>=9.14.0
 
-# --- YouTube tool (ENABLE_YOUTUBE) -------------------------------------------
-# Also needs `node` or `deno` on PATH for YouTube's JS challenge.
-yt-dlp>=2026.7.4
-yt-dlp-ejs>=0.8.0
-
 # --- voice channels (ENABLE_VC) ----------------------------------------------
 # Also needs system libopus + libsodium, and ffmpeg for playback.
 # PyNaCl is constrained to <1.6 to maintain compatibility with discord.py[voice]
 PyNaCl>=1.5.0,<1.6
 davey>=0.1.6
-# Pulls official discord.py as a dependency. That package owns the same
-# `discord` import as discord.py-self; install discord.py-self *after* this
-# (the Docker image does) or Maxwell will boot the bot-account library.
 discord-ext-voice-recv==0.5.2a179
 # VC speech-to-text goes through NVIDIA Riva (bot.py: _transcribe_riva_wav_sync),
 # and TTS_ENGINE=riva uses the same client. Needs NVIDIA_API_KEY.

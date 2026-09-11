@@ -113,7 +113,7 @@ def test_enable_rem_alias_turns_rem_on():
 
 
 MINIMUM_ENV = {
-    "DISCORD_TOKEN": "test-token",
+    "DISCORD_BOT_TOKEN": "test-token",
     "OLLAMA_BASE_URL": "http://localhost:11434",
     "OLLAMA_MODEL": "test-model",
 }
@@ -129,9 +129,9 @@ def test_minimum_install_only_needs_token_and_model():
     )
 
 
-def test_validate_accepts_bot_token_without_user_token():
-    env = {k: v for k, v in MINIMUM_ENV.items() if k != "DISCORD_TOKEN"}
-    env["DISCORD_BOT_TOKEN"] = "bot-token"
+def test_validate_accepts_legacy_discord_token_alias():
+    env = {k: v for k, v in MINIMUM_ENV.items() if k != "DISCORD_BOT_TOKEN"}
+    env["DISCORD_TOKEN"] = "legacy-bot-token"
     assert (
         _run(
             "from config import Config; Config.validate(); print('valid')", env
@@ -143,7 +143,7 @@ def test_validate_accepts_bot_token_without_user_token():
 @pytest.mark.parametrize(
     "missing,expected",
     [
-        ("DISCORD_TOKEN", "DISCORD_TOKEN"),
+        ("DISCORD_BOT_TOKEN", "DISCORD_BOT_TOKEN"),
         ("OLLAMA_MODEL", "OLLAMA_MODEL"),
     ],
 )

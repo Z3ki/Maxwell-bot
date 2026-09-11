@@ -6,11 +6,11 @@
 curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/install.sh | bash
 ```
 
-The installer explains that Maxwell is a Discord self-bot, warns that self-bots may violate Discord's Terms of Service, clones/updates the repo (`MAXWELL_REPO_URL`, defaulting to the upstream GitHub URL), writes `.env`, and runs Maxwell **in Docker**. Host Python, ffmpeg, and pip packages are not used at runtime.
+The installer clones/updates the repo (`MAXWELL_REPO_URL`, defaulting to the upstream GitHub URL), writes `.env`, and runs Maxwell **in Docker**. Host Python, ffmpeg, and pip packages are not used at runtime.
 
 It will ask for:
 
-1. Discord user token, and optionally an official bot token (`DISCORD_BOT_TOKEN`) used if the user token is rejected or to cover extra servers as the same Maxwell.
+1. Official Discord bot token (`DISCORD_BOT_TOKEN`) from the Developer Portal. Enable Message Content, Server Members, and Presence intents.
 2. LLM provider, model, and optional API key.
 3. Discord owner user ID(s).
 4. Dashboard/admin password.
@@ -42,7 +42,6 @@ updates. Without `--reconfigure`, an existing `.env` is preserved.
 ```bash
 MAXWELL_NONINTERACTIVE=1 \
 MAXWELL_INSTALL_DIR="$HOME/maxwell" \
-DISCORD_TOKEN="your-discord-user-token" \
 DISCORD_BOT_TOKEN="your-discord-bot-token" \
 OLLAMA_BASE_URL="https://openrouter.ai/api/v1" \
 OLLAMA_MODEL="moonshotai/kimi-k2.6:free" \
@@ -80,9 +79,7 @@ chmod 600 .env
 Edit `.env` and set at least:
 
 ```ini
-DISCORD_TOKEN=your-discord-user-token
-# Optional official bot token — fallback, or dual-account as one Maxwell
-# DISCORD_BOT_TOKEN=your-discord-bot-token
+DISCORD_BOT_TOKEN=your-discord-bot-token
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=qwen3:8b
 MAXWELL_HOST_BIND=/absolute/path/to/this/checkout
@@ -107,16 +104,9 @@ The dashboard/API starts in the same container on port 8765. Set `MAXWELL_START_
 
 ## Credentials and provider setup
 
-### Discord user token
+### Discord bot token
 
-Maxwell needs a Discord **user** token because it is a self-bot. This may violate Discord ToS.
-
-Common ways to find it in a browser session:
-
-1. Open Discord in a browser.
-2. Open Developer Tools.
-3. Network tab: click any request to `discord.com/api`, then copy the `authorization` request header.
-4. Or Application/Storage: inspect Discord local storage for the token.
+Create an application at `https://discord.com/developers/applications`, add a Bot, and copy the bot token into `DISCORD_BOT_TOKEN`. Enable the privileged intents **Message Content**, **Server Members**, and **Presence**. Invite the bot to your servers with the permissions it needs (Manage Channels, Kick/Ban, Moderate Members, etc. for mod tools).
 
 Never paste this token into chat, logs, or git.
 
@@ -189,7 +179,7 @@ The Docker image already includes the optional Python packages and system tools 
 | Feature | What it needs besides the image |
 |---|---|
 | Web search | nothing extra |
-| YouTube | nothing extra (Node is in the image) |
+
 | Video input | nothing extra (ffmpeg is in the image) |
 | Voice channels | a reachable Discord voice UDP path; host networking on Linux |
 | TTS | nothing extra for espeak/gTTS |

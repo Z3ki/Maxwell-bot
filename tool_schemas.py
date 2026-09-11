@@ -109,30 +109,6 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "max_age": _int("Max age in seconds"),
         }
     ),
-    "join_server": _obj(
-        {
-            "invite": _str(
-                "The exact invite the user provided: a full URL "
-                "(https://discord.gg/xyz, https://discord.com/invite/xyz) "
-                "or the bare code. Never substitute a different invite."
-            )
-        },
-        ["invite"],
-    ),
-    "server_setup": _obj(
-        {
-            "server": _str(
-                "Server name or numeric ID. Omit to set up the current server."
-            ),
-            "preferences": _str(
-                "Optional steer for which options to take, e.g. "
-                "'only AI and coding stuff, no ping roles'"
-            ),
-            "list_only": _bool(
-                "True to list the available roles/channels without picking any"
-            ),
-        }
-    ),
     "leave_server": _obj(
         {"server": _str("Server name or numeric ID to leave")},
         ["server"],
@@ -210,18 +186,36 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         {
             "name": _str("Category name"),
             "position": _int("Optional position"),
+            "nsfw": _bool("Whether the category is marked NSFW"),
+            "guild_id": _str("Optional server ID"),
         },
         ["name"],
     ),
     "create_channel": _obj(
         {
             "name": _str("Channel name"),
-            "type": _str("text or voice"),
-            "kind": _str("Alias for type: text or voice"),
+            "type": _str("text | voice | announcement | forum | stage"),
+            "kind": _str("Alias for type"),
             "category_id": _str("Optional parent category ID"),
+            "category_name": _str("Optional parent category name"),
             "topic": _str("Optional channel topic"),
+            "nsfw": _bool("NSFW flag"),
+            "slowmode_seconds": _int("Slowmode delay in seconds"),
+            "bitrate": _int("Voice/stage bitrate"),
+            "user_limit": _int("Voice/stage user limit (0 = unlimited)"),
+            "guild_id": _str("Optional server ID"),
         },
         ["name"],
+    ),
+    "edit_category": _obj(
+        {
+            "category_id": _str("Category ID"),
+            "category_name": _str("Category name if id is omitted"),
+            "name": _str("New category name"),
+            "position": _int("New position"),
+            "nsfw": _bool("NSFW flag"),
+            "guild_id": _str("Optional server ID"),
+        }
     ),
     "edit_channel": _obj(
         {
@@ -233,6 +227,34 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "slowmode_seconds": _int("Slowmode delay in seconds (0 to disable)"),
             "nsfw": _bool("Whether the channel is NSFW"),
             "position": _int("New position"),
+            "bitrate": _int("Voice/stage bitrate"),
+            "user_limit": _int("Voice/stage user limit"),
+        },
+        ["channel_id"],
+    ),
+    "move_channel": _obj(
+        {
+            "channel_id": _str("Channel ID to move"),
+            "category_id": _str("Destination category ID, or 'none' to uncategorize"),
+            "category_name": _str("Destination category name"),
+            "position": _int("Optional position inside the category"),
+        },
+        ["channel_id"],
+    ),
+    "clone_channel": _obj(
+        {
+            "channel_id": _str("Channel or category to clone"),
+            "name": _str("Optional name for the clone"),
+            "category_id": _str("Optional category to put the clone in"),
+            "category_name": _str("Optional category name"),
+        },
+        ["channel_id"],
+    ),
+    "sync_channel": _obj(
+        {
+            "channel_id": _str(
+                "Channel ID to sync with its parent category, or a category ID to sync every child"
+            )
         },
         ["channel_id"],
     ),
@@ -270,6 +292,17 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         },
         ["user_id"],
     ),
+    "softban_member": _obj(
+        {
+            "user_id": _str("User ID or @mention to softban"),
+            "reason": _str("Optional audit-log reason"),
+            "delete_message_seconds": _str(
+                "Optional 0-604800 seconds of messages to delete"
+            ),
+            "guild_id": _str("Optional server ID"),
+        },
+        ["user_id"],
+    ),
     "list_bans": _obj(
         {
             "guild_id": _str("Optional server ID"),
@@ -284,6 +317,12 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "guild_id": _str("Optional server ID"),
         },
         ["user_id", "duration"],
+    ),
+    "list_timeouts": _obj(
+        {
+            "guild_id": _str("Optional server ID"),
+            "limit": _int("Max members to list (default 25)"),
+        }
     ),
     "manage_role": _obj(
         {
@@ -334,23 +373,53 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     ),
     "lock_channel": _obj(
         {
-            "channel_id": _str("Optional channel ID (defaults to current)"),
+            "channel_id": _str("Optional channel or category ID (defaults to current)"),
             "unlock": _bool("True to unlock"),
+        }
+    ),
+    "lockdown": _obj(
+        {
+            "target": _str(
+                "category_id, category_name, or 'server' to lock every text/voice channel"
+            ),
+            "unlock": _bool("True to unlock"),
+            "guild_id": _str("Optional server ID"),
         }
     ),
     "set_channel_permissions": _obj(
         {
-            "channel_id": _str("Channel ID"),
+            "channel_id": _str("Channel or category ID"),
             "target": _str("Role ID, user ID, or everyone"),
             "allow": _str("Comma pairs like send_messages=false,view_channel=true"),
             "reset": _bool("True to clear that overwrite"),
         },
         ["channel_id", "target"],
     ),
+    "list_permissions": _obj(
+        {
+            "channel_id": _str("Channel or category ID"),
+        },
+        ["channel_id"],
+    ),
+    "manage_invites": _obj(
+        {
+            "action": _str("list | revoke"),
+            "code": _str("Invite code to revoke"),
+            "guild_id": _str("Optional server ID"),
+            "channel_id": _str("Optional channel filter for list"),
+        },
+        ["action"],
+    ),
     "edit_server": _obj(
         {
             "name": _str("New server name"),
             "description": _str("New server description"),
+            "verification_level": _str("none | low | medium | high | highest"),
+            "explicit_content_filter": _str("disabled | no_role | all_members"),
+            "afk_channel_id": _str("AFK voice channel ID, or none"),
+            "afk_timeout": _int("AFK timeout in seconds"),
+            "system_channel_id": _str("System channel ID, or none"),
+            "icon_url": _str("Public image URL for the server icon"),
             "guild_id": _str("Optional server ID"),
         }
     ),
@@ -649,25 +718,10 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         {
             "url": _str(
                 "Direct mp4/webm/mov video URL to inspect with ffmpeg-derived "
-                "frames; use youtube for YouTube links"
+                "frames. YouTube links are not downloaded."
             )
         },
         ["url"],
-    ),
-    "youtube": _obj(
-        {
-            "url": _str(
-                "YouTube video, channel, playlist, or search URL. "
-                "Handles like @name also work."
-            ),
-            "query": _str("Optional YouTube search if url is omitted"),
-            "limit": _int(
-                "Optional max videos for channel/playlist/search (default 15)"
-            ),
-            "timestamps": _str("Optional comma-separated timestamps for frames"),
-            "max_transcript_chars": _int("Optional transcript length cap"),
-            "lang": _str("Optional caption language (default en)"),
-        },
     ),
     "send_meme": _obj({"subreddit": _str("Optional subreddit name (e.g. me_irl)")}),
     "send_media": _obj(
@@ -771,38 +825,6 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         },
         ["query"],
     ),
-    # X (Twitter). One read tool and one write tool — the action enum keeps
-    # the catalog from growing six near-identical entries.
-    "x_read": _obj(
-        {
-            "action": _str(
-                "home (your feed), user (someone's posts), search, mentions "
-                "(people talking to you), or tweet (one post by id/URL)",
-                enum=["home", "user", "search", "mentions", "tweet"],
-            ),
-            "handle": _str("Account for action=user, with or without the @"),
-            "query": _str(
-                "Search text for action=search. X operators work: from:nasa, "
-                "-filter:replies, min_faves:100, lang:en"
-            ),
-            "tweet_id": _str("Post id or full x.com URL, for action=tweet"),
-            "limit": _int("How many posts (default 15, max 50)"),
-        },
-        ["action"],
-    ),
-    "x_post": _obj(
-        {
-            "action": _str(
-                "post (new), reply, quote, delete, like, or repost",
-                enum=["post", "reply", "quote", "delete", "like", "repost"],
-            ),
-            "text": _str("The post itself, for post/reply/quote"),
-            "reply_to": _str("Post id or URL being replied to"),
-            "quote": _str("Post id or URL being quoted"),
-            "tweet_id": _str("Post id or URL for delete/like/repost"),
-        },
-        ["action"],
-    ),
     # ---- Chess (Maxwell plays real chess himself against a chosen opponent) --
     "chess_start": _obj(
         {
@@ -866,9 +888,7 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "manage_plugin",
         "search_messages",
         "create_invite",
-        "join_server",
         "leave_server",
-        "server_setup",
         "create_poll",
         "forward_message",
         "edit_message",
@@ -893,25 +913,33 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "fetch_url",
         "see_image",
         "see_video",
-        "youtube",
         "shell",
         "list_admin_servers",
         "create_category",
         "create_channel",
+        "edit_category",
         "edit_channel",
+        "move_channel",
+        "clone_channel",
+        "sync_channel",
         "delete_channel",
         "kick_member",
         "ban_member",
         "unban_member",
+        "softban_member",
         "list_bans",
         "timeout_member",
+        "list_timeouts",
         "manage_role",
         "purge_messages",
         "pin_message",
         "set_member_nickname",
         "voice_mod",
         "lock_channel",
+        "lockdown",
         "set_channel_permissions",
+        "list_permissions",
+        "manage_invites",
         "edit_server",
         "audit_log",
         "manage_emoji",
@@ -924,10 +952,6 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "email_read_inbox",
         "email_get_message",
         "email_search",
-        "x_read",
-        # x_post gets a turn back so he can say what he posted (and see the
-        # link) instead of describing a post he has not confirmed landed.
-        "x_post",
         "inbox_list",
         "inbox_act",
         "join_vc",

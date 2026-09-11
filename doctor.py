@@ -51,7 +51,7 @@ def check_python() -> None:
 def check_core_packages() -> None:
     head("Core packages")
     required = {
-        "discord": "discord.py-self",
+        "discord": "discord.py",
         "aiohttp": "aiohttp",
         "aiofiles": "aiofiles",
         "dotenv": "python-dotenv",
@@ -80,26 +80,21 @@ def check_env_file() -> None:
 def check_required_settings(cfg) -> None:
     if cfg is None:
         return
-    if cfg.DISCORD_TOKEN:
-        line("ok", "DISCORD_TOKEN set")
+    if getattr(cfg, "DISCORD_BOT_TOKEN", "") or getattr(cfg, "DISCORD_TOKEN", ""):
+        line("ok", "DISCORD_BOT_TOKEN set", "official Discord bot")
+        if getattr(cfg, "DISCORD_TOKEN", "") and not getattr(cfg, "DISCORD_BOT_TOKEN", ""):
+            line(
+                "warn",
+                "DISCORD_TOKEN is deprecated",
+                "move the bot token to DISCORD_BOT_TOKEN; user tokens are not supported",
+            )
     else:
         line(
-            "warn" if getattr(cfg, "DISCORD_BOT_TOKEN", "") else "bad",
-            "DISCORD_TOKEN missing",
-            "user-account self-bot token; optional if DISCORD_BOT_TOKEN is set",
+            "bad",
+            "DISCORD_BOT_TOKEN missing",
+            "official bot token from the Discord Developer Portal",
         )
-        if not getattr(cfg, "DISCORD_BOT_TOKEN", ""):
-            problems.append("set DISCORD_TOKEN and/or DISCORD_BOT_TOKEN in .env")
-    if getattr(cfg, "DISCORD_BOT_TOKEN", ""):
-        line("ok", "DISCORD_BOT_TOKEN set", "official bot fallback / dual-account")
-    else:
-        line(
-            "warn",
-            "DISCORD_BOT_TOKEN unset",
-            "set this so a rejected user token falls back to an official bot account",
-        )
-    mode = getattr(cfg, "DISCORD_ACCOUNT_MODE", "auto") or "auto"
-    line("ok", "DISCORD_ACCOUNT_MODE", mode)
+        problems.append("set DISCORD_BOT_TOKEN in .env")
     if cfg.OLLAMA_BASE_URL and cfg.OLLAMA_MODEL:
         line("ok", "model endpoint", f"{cfg.OLLAMA_MODEL} @ {cfg.OLLAMA_BASE_URL}")
     else:
@@ -150,8 +145,6 @@ def check_system_tools() -> None:
     tools = [
         ("ffmpeg", "video frames, TTS playback, audio conversion"),
         ("espeak-ng", "offline TTS voice"),
-        ("yt-dlp", "the youtube tool"),
-        ("node", "yt-dlp's YouTube JS challenge solver"),
     ]
     for binary, purpose in tools:
         # Stay usable even when config cannot import a missing core package.
@@ -281,38 +274,6 @@ def check_docker(cfg) -> None:
         )
 
 
-def check_x(cfg) -> None:
-    """What X can actually do here — reading, posting, or neither.
-
-    ENABLE_X being on says almost nothing on its own: the read half works
-    with no credentials, so the only real question is whether there is a
-    session to post with. Answer it here rather than at the first failed
-    x_post in a channel.
-    """
-    if cfg is None or not getattr(cfg, "ENABLE_X", False):
-        return
-    head("X (Twitter)")
-    handle = getattr(cfg, "X_HANDLE", "")
-    if getattr(cfg, "X_AUTH_TOKEN", "") and getattr(cfg, "X_CT0", ""):
-        line("ok", "session cookies set", f"posts as @{handle}" if handle else "X_HANDLE unset")
-    elif getattr(cfg, "X_API_BASE_URL", ""):
-        line("ok", "gateway configured", getattr(cfg, "X_API_BASE_URL", ""))
-    else:
-        line(
-            "warn",
-            "read-only",
-            "no X_AUTH_TOKEN/X_CT0 and no X_API_BASE_URL — x_post cannot post",
-        )
-    sources = ["syndication (no account)"] if getattr(cfg, "X_SYNDICATION", True) else []
-    if getattr(cfg, "X_RSS_BASE_URL", ""):
-        sources.append(f"rss ({cfg.X_RSS_BASE_URL})")
-    if sources:
-        line("ok", "public reads", ", ".join(sources))
-    else:
-        line("warn", "no credential-free read source", "set X_RSS_BASE_URL or X_SYNDICATION=true")
-    if not handle:
-        line("warn", "X_HANDLE unset", "mentions cannot be polled without it")
-
 
 def check_features(cfg) -> None:
     if cfg is None:
@@ -408,7 +369,6 @@ def main() -> int:
     check_required_settings(cfg)
     check_system_tools()
     check_docker(cfg)
-    check_x(cfg)
     check_features(cfg)
     if args.probe:
         probe(cfg)

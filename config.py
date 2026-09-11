@@ -183,16 +183,12 @@ def _feature_env(
 
 
 class Config:
-    DISCORD_TOKEN = (os.getenv("DISCORD_TOKEN") or "").strip()
-    # Official bot application token (Developer Portal). Optional. Used when
-    # the user token is rejected, or together with it so both connections
-    # share one Maxwell brain.
+    # Official bot token from the Discord Developer Portal. Required.
+    # DISCORD_TOKEN is a deprecated alias so older .env files that already
+    # stored a bot token under that name keep working. User (self-bot)
+    # tokens are not supported.
     DISCORD_BOT_TOKEN = (os.getenv("DISCORD_BOT_TOKEN") or "").strip()
-    # auto = try user then bot, run every token that works.
-    # user = only DISCORD_TOKEN. bot = only DISCORD_BOT_TOKEN.
-    DISCORD_ACCOUNT_MODE = (
-        os.getenv("DISCORD_ACCOUNT_MODE") or "auto"
-    ).strip().lower() or "auto"
+    DISCORD_TOKEN = (os.getenv("DISCORD_TOKEN") or "").strip()
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
     TELEGRAM_WEBHOOK_URL = os.getenv("TELEGRAM_WEBHOOK_URL", "").strip()
     TELEGRAM_WEBHOOK_PORT = _int_env(
@@ -274,10 +270,6 @@ class Config:
     ENABLE_VIDEO_INPUT = _feature_env(
         "ENABLE_VIDEO_INPUT", lambda: _has_binary("ffmpeg"), needs="ffmpeg"
     )
-    # The tool shells out to the yt-dlp binary, so the binary is what counts.
-    ENABLE_YOUTUBE = _feature_env(
-        "ENABLE_YOUTUBE", lambda: _has_binary("yt-dlp"), needs="the yt-dlp binary"
-    )
     ENABLE_WEB_SEARCH = _feature_env(
         "ENABLE_WEB_SEARCH", lambda: _has_module("ddgs"), needs="the ddgs package"
     )
@@ -328,16 +320,6 @@ class Config:
         on_text="auto: MAXWELL_EMAIL_PASSWORD is set",
         off_text="auto: off, no MAXWELL_EMAIL_PASSWORD",
     )
-
-    # X (Twitter). Reading is free and needs no account at all — X's own
-    # embed backend and any Nitter/RSSHub instance serve public profiles,
-    # posts and searches — so `auto` is on. Posting needs the session
-    # cookies below; without them the read half still works and x_post says
-    # what is missing.
-    # No detector: there is no dependency to find. Public reads need no
-    # credentials at all, so `auto` means on and posting simply stays
-    # unavailable until X_AUTH_TOKEN/X_CT0 are set.
-    ENABLE_X = _feature_env("ENABLE_X")
 
     # Host access. Kept on by default for parity with older installs, but
     # this is THE security-relevant switch: `shell` runs commands as the bot
@@ -418,32 +400,6 @@ class Config:
     # ~12% of stream time vs ~88% for native. OFF by default to keep native
     # behavior; turn on with MAXWELL_CUSTOM_TOOL_CALLS=true in .env.
     CUSTOM_TOOL_CALLS = _bool_env("MAXWELL_CUSTOM_TOOL_CALLS", False)
-
-    # Discord join-captcha handling. Discord sometimes challenges an invite
-    # accept (or other API action) with an hCaptcha — surfaced by the library
-    # as discord.CaptchaRequired. When CAPTCHA_SOLVER_SERVICE+API_KEY are set,
-    # the bot solves the challenge via the external service and auto-retries.
-    # When unset, the challenge details are surfaced in the tool result so the
-    # user sees exactly why the join failed. Supported services: capsolver,
-    # 2captcha.
-    CAPTCHA_SOLVER_SERVICE = os.getenv("CAPTCHA_SOLVER_SERVICE", "").strip().lower()
-    CAPTCHA_SOLVER_API_KEY = os.getenv("CAPTCHA_SOLVER_API_KEY", "").strip()
-    CAPTCHA_SOLVER_TIMEOUT = _int_env(
-        "CAPTCHA_SOLVER_TIMEOUT", 180, min_value=10, max_value=600
-    )
-
-    # Human-in-the-loop captcha solving. When CAPTCHA_SOLVER_SERVICE is unset
-    # (or fails), the bot hosts a one-shot hCaptcha solve page and DMs the
-    # link to the owner (any CAPTCHA hit: joins, DM gates, phone checks).
-    # The token is bound to Discord's sitekey+rqdata, not the solver, so
-    # anyone who opens the link can complete it. CAPTCHA_FALLBACK_USER_ID is
-    # DM'd when no admin is resolvable.
-    CAPTCHA_HUMAN_SOLVE = _bool_env("CAPTCHA_HUMAN_SOLVE", True)
-    CAPTCHA_HUMAN_HOST = os.getenv("CAPTCHA_HUMAN_HOST", "127.0.0.1").strip()
-    CAPTCHA_HUMAN_PORT = _int_env(
-        "CAPTCHA_HUMAN_PORT", 8790, min_value=1, max_value=65535
-    )
-    CAPTCHA_FALLBACK_USER_ID = os.getenv("CAPTCHA_FALLBACK_USER_ID", "").strip()
 
     # image_generator runs on Pollinations. SDXL-Lightning is fast (~1-2s) and
     # high quality; the old default (flux) was both slower and less consistent.
@@ -552,28 +508,6 @@ class Config:
     # MAILER-DAEMON bounce means something he sent did not arrive, and a
     # heuristic cannot tell those apart. The mail itself is untouched — it
     # stays on the server and the email_* tools still read it.
-    # -------------------------------------------------------------------------
-    # X (Twitter). Two cookies out of a logged-in browser tab are the whole
-    # of the write credential; everything else has a working default.
-    # X_BACKEND pins the backend order ("cookies", "api", "rss",
-    # "syndication", or a comma-separated subset); auto tries them in that
-    # order and takes the first that answers.
-    # -------------------------------------------------------------------------
-    X_BACKEND = os.getenv("X_BACKEND", "auto").strip() or "auto"
-    X_AUTH_TOKEN = os.getenv("X_AUTH_TOKEN", "").strip()
-    X_CT0 = os.getenv("X_CT0", "").strip()
-    X_HANDLE = os.getenv("X_HANDLE", "").strip().lstrip("@")
-    X_API_BASE_URL = os.getenv("X_API_BASE_URL", "").strip().rstrip("/")
-    X_API_KEY = os.getenv("X_API_KEY", "").strip()
-    X_API_KEY_HEADER = os.getenv("X_API_KEY_HEADER", "Authorization").strip()
-    X_API_PATHS = _json_env("X_API_PATHS")
-    X_RSS_BASE_URL = os.getenv("X_RSS_BASE_URL", "").strip().rstrip("/")
-    X_RSS_PATHS = _json_env("X_RSS_PATHS")
-    X_SYNDICATION = _bool_env("X_SYNDICATION", True)
-    X_MAX_CHARS = _int_env("X_MAX_CHARS", 280, min_value=1, max_value=25000)
-    X_TIMEOUT_SECONDS = _int_env("X_TIMEOUT_SECONDS", 20, min_value=5, max_value=120)
-    X_GRAPHQL_FILE = os.getenv("X_GRAPHQL_FILE", "").strip()
-
     MAXWELL_EMAIL_IGNORE_SENDERS = os.getenv(
         "MAXWELL_EMAIL_IGNORE_SENDERS", ""
     ).strip()
@@ -601,11 +535,9 @@ class Config:
         ("ENABLE_VC", "voice channels (live listening)"),
         ("ENABLE_WEB_SEARCH", "web search"),
         ("ENABLE_FETCH_URL", "fetch_url"),
-        ("ENABLE_YOUTUBE", "YouTube"),
         ("ENABLE_CREATE_SITE", "site generation"),
         ("ENABLE_AVATAR", "avatar changes"),
         ("ENABLE_EMAIL_TOOLS", "email tools"),
-        ("ENABLE_X", "X (Twitter)"),
         ("ENABLE_SHELL", "shell (docker sandbox)"),
         ("ENABLE_RAG", "RAG vector memory"),
         ("ENABLE_TELEGRAM", "Telegram transport"),
@@ -630,12 +562,11 @@ class Config:
         # The only two hard requirements. Anything else has a default or
         # degrades to "feature off", which is the whole point of the
         # ENABLE_*=auto design.
-        if cls.DISCORD_ACCOUNT_MODE not in {"auto", "user", "bot"}:
-            cls.DISCORD_ACCOUNT_MODE = "auto"
-        if not cls.DISCORD_TOKEN and not cls.DISCORD_BOT_TOKEN:
+        if not cls.DISCORD_BOT_TOKEN and not cls.DISCORD_TOKEN:
             raise ValueError(
-                "DISCORD_TOKEN and/or DISCORD_BOT_TOKEN is required. "
-                "Run ./setup.sh, or set them in .env, then start the bot again."
+                "DISCORD_BOT_TOKEN is required (official Discord bot token from "
+                "the Developer Portal). Run ./setup.sh, or set it in .env, then "
+                "start the bot again. Self-bot user tokens are not supported."
             )
         if not cls.OLLAMA_BASE_URL:
             raise ValueError(

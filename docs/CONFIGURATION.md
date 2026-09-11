@@ -6,9 +6,8 @@ The installer writes `.env` from `.env.example` and updates only the keys it ask
 
 | Variable | Required? | Purpose |
 |---|---:|---|
-| `DISCORD_TOKEN` | One of the two tokens | Discord **user** token for the self-bot account. Treat it like a password. |
-| `DISCORD_BOT_TOKEN` | One of the two tokens | Official bot token from the Developer Portal. Used if the user token is rejected, or together with it so both connections act as one Maxwell. User-only tools (`join_server`, `server_setup`) stay on the user account. Enable Message Content Intent on the bot application. |
-| `DISCORD_ACCOUNT_MODE` | No (`auto`) | `auto` tries both tokens. `user` / `bot` force a single account. |
+| `DISCORD_BOT_TOKEN` | Yes | Official bot token from the Developer Portal. Enable Message Content, Server Members, and Presence intents. |
+| `DISCORD_TOKEN` | Deprecated alias | Accepted only if `DISCORD_BOT_TOKEN` is empty. User tokens are not supported. |
 | `OLLAMA_BASE_URL` | Yes | OpenAI-compatible base URL. A bare host such as `http://localhost:11434` gets `/v1` appended by the provider code. |
 | `OLLAMA_MODEL` | Yes | Chat model name served by that endpoint. |
 | `OLLAMA_API_KEY` | Sometimes | ****** for hosted providers such as OpenRouter or OpenAI; blank is normal for local Ollama/LM Studio. |

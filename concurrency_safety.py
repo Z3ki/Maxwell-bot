@@ -369,7 +369,6 @@ _TOOL_CLASS_HINTS: tuple[tuple[str, str], ...] = (
     ("search", "web"),
     ("browse", "web"),
     ("url", "web"),
-    ("youtube", "web"),
 )
 
 

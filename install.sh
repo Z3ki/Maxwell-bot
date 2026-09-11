@@ -57,7 +57,7 @@ Options:
 Useful environment variables:
   MAXWELL_INSTALL_DIR, MAXWELL_REPO_URL, MAXWELL_BRANCH,
   MAXWELL_NONINTERACTIVE=1, MAXWELL_SKIP_SYSTEM_DEPS=1,
-  DISCORD_TOKEN, DISCORD_BOT_TOKEN, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_API_KEY,
+  DISCORD_BOT_TOKEN, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_API_KEY,
   MAXWELL_OWNER_IDS, MAXWELL_ADMIN_PASSWORD,
   BOT_NAME, CREATOR_NAME, CREATOR_ID, COMMAND_PREFIX
 EOF
@@ -82,7 +82,7 @@ if [ -r /dev/tty ] && [ -w /dev/tty ] && ( : <> /dev/tty ) 2>/dev/null; then
 elif [ "$NONINTERACTIVE" != "1" ]; then
   NONINTERACTIVE=1
   warn "No controlling TTY is available; switching to non-interactive mode."
-  warn "Set DISCORD_TOKEN, OLLAMA_MODEL, and other MAXWELL_* variables, then re-run with --reconfigure if needed."
+  warn "Set DISCORD_BOT_TOKEN, OLLAMA_MODEL, and other MAXWELL_* variables, then re-run with --reconfigure if needed."
 fi
 
 prompt() {
@@ -296,7 +296,7 @@ configure_env() {
   if [ -f .env ]; then
     defaults_file=$(mktemp)
     if ! python3 scripts/env_defaults.py .env \
-      DISCORD_TOKEN DISCORD_BOT_TOKEN OLLAMA_BASE_URL OLLAMA_MODEL OLLAMA_API_KEY \
+      DISCORD_BOT_TOKEN DISCORD_TOKEN OLLAMA_BASE_URL OLLAMA_MODEL OLLAMA_API_KEY \
       BOT_NAME CREATOR_NAME CREATOR_ID MAXWELL_OWNER_IDS COMMAND_PREFIX \
       MAXWELL_ADMIN_USER MAXWELL_ADMIN_PASSWORD ENABLE_AUTONOMY ENABLE_REM REM_ENABLED ENABLE_SHELL \
       > "$defaults_file"; then
@@ -312,12 +312,12 @@ configure_env() {
   fi
   copy_env_if_needed
 
-  printf '\n%sStep 1/5: Discord user token%s\n' "$BOLD" "$RESET"
-  printf '  This is a self-bot user token. In a browser, open Discord, DevTools, Network, select a discord.com/api request, and copy the authorization header. You can also inspect Application/Local Storage. This may violate Discord ToS.\n'
-  token=$(prompt_secret "Discord user token (blank to skip)" "${DISCORD_TOKEN:-}")
-  if [ -n "$token" ]; then set_env_value DISCORD_TOKEN "$token"; ok "Discord user token saved"; else warn "DISCORD_TOKEN left blank; set DISCORD_BOT_TOKEN or edit .env before starting."; fi
-  bot_token=$(prompt_secret "Official Discord bot token (blank to skip; used if the user token fails)" "${DISCORD_BOT_TOKEN:-}")
-  if [ -n "$bot_token" ]; then set_env_value DISCORD_BOT_TOKEN "$bot_token"; ok "Discord bot token saved"; else warn "DISCORD_BOT_TOKEN left blank; Maxwell cannot fall back if the user token is rejected."; fi
+  printf '\n%sStep 1/5: Discord bot token%s\n' "$BOLD" "$RESET"
+  printf '  Create an application at https://discord.com/developers/applications, add a Bot, copy the bot token.\n'
+  printf '  Enable Privileged Gateway Intents: Message Content, Server Members, Presence.\n'
+  printf '  Invite the bot with applications.commands omitted is fine; Maxwell uses prefix commands, not slash commands.\n'
+  bot_token=$(prompt_secret "Discord bot token" "${DISCORD_BOT_TOKEN:-${DISCORD_TOKEN:-}}")
+  if [ -n "$bot_token" ]; then set_env_value DISCORD_BOT_TOKEN "$bot_token"; ok "Discord bot token saved"; else warn "DISCORD_BOT_TOKEN left blank; set it in .env before starting."; fi
 
   printf '\n%sStep 2/5: LLM provider%s\n' "$BOLD" "$RESET"
   base_default="${OLLAMA_BASE_URL:-http://localhost:11434}"
@@ -530,14 +530,8 @@ run_doctor() {
 
 banner_and_confirm() {
   printf '%sMaxwell installer%s\n' "$BOLD" "$RESET"
-  printf 'Maxwell is a Discord self-bot backed by any OpenAI-compatible LLM. This installer fetches the app, writes .env, and runs Maxwell in Docker.\n\n'
-  printf '%sWarning:%s Maxwell uses discord.py-self/self_bot=True. Self-bots may violate Discord Terms of Service and can put your account at risk.\n' "$YELLOW" "$RESET"
-  if [ "$NONINTERACTIVE" != "1" ]; then
-    answer=$(prompt "Type I UNDERSTAND to continue" "")
-    [ "$answer" = "I UNDERSTAND" ] || fail "confirmation not received"
-  else
-    warn "Non-interactive mode: continuing after printing the self-bot ToS warning."
-  fi
+  printf 'Maxwell is an official Discord bot backed by any OpenAI-compatible LLM. This installer fetches the app, writes .env, and runs Maxwell in Docker.\n\n'
+  printf 'You need a bot token from https://discord.com/developers/applications (not a user token).\n'
 }
 
 final_summary() {

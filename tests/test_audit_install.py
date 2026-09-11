@@ -59,7 +59,7 @@ main "$@"
         overrides
         if overrides is not None
         else {
-            "DISCORD_TOKEN": "test-token",
+            "DISCORD_BOT_TOKEN": "test-token",
             "OLLAMA_MODEL": "test-model",
             "MAXWELL_OWNER_IDS": "123",
             "MAXWELL_ADMIN_PASSWORD": "test-password",
@@ -94,7 +94,7 @@ def test_installer_detects_missing_controlling_terminal():
 
 def test_first_install_runs_configuration_wizard(tmp_path):
     values = _run_installer(tmp_path)
-    assert values["DISCORD_TOKEN"] == "test-token"
+    assert values["DISCORD_BOT_TOKEN"] == "test-token"
     assert values["OLLAMA_MODEL"] == "test-model"
     assert values["MAXWELL_ADMIN_PASSWORD"] == "test-password"
     assert values["MAXWELL_OWNER_IDS"] == "123"

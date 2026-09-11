@@ -595,7 +595,7 @@ _DM_HISTORY_TIMEOUT = 20
 # drive turned every quiet interval into web_search + update_memory on random
 # engine trivia. Extra denials: AUTONOMY_DISABLED_TOOLS=shell,delete_channel
 # Dashboard tools_enabled / disabled_tools still apply on top of this.
-AUTONOMY_RESEARCH_TOOLS = frozenset({"web_search", "fetch_url", "youtube"})
+AUTONOMY_RESEARCH_TOOLS = frozenset({"web_search", "fetch_url"})
 # Unattended ticks must not kick/ban/timeout/purge or reshape a server.
 AUTONOMY_DESTRUCTIVE_TOOLS = frozenset(
     {
@@ -1302,12 +1302,6 @@ class AutonomyEngine:
         if name in AUTONOMY_DISABLED_TOOLS:
             return False
         control = getattr(self.bot, "_control", None) or {}
-        if name == "x_post" and not control.get("x_autonomy_post", False):
-            # Reading X unattended is research; posting to a public timeline
-            # unattended is a different decision, and it gets its own switch
-            # rather than riding on x_post_enabled (which is about whether he
-            # can post at all, including when someone asked him to).
-            return False
         if not control.get("tools_enabled", True):
             return False
         return name not in set(control.get("disabled_tools", []) or [])
@@ -1984,20 +1978,6 @@ class AutonomyEngine:
         else:
             sections.append("=== CHANNEL ACTIVITY ===\n(no accessible channels)")
 
-        # Auto-invoke the youtube tool for YouTube links seen in recent
-        # channel activity, so the planner has transcript/frames context —
-        # same capability as the normal reply path. Mirrors bot.py's
-        # pre_tool_results injection.
-        yt_context = await self._gather_youtube_context(ch_lines)
-        if yt_context:
-            sections.append(
-                _truncate(
-                    "=== YOUTUBE CONTEXT (auto-fetched for links above) ===\n"
-                    + yt_context,
-                    CTX_BUDGET_CHANNEL_ACTIVITY,
-                )
-            )
-
         # 5. The same short-term channel memory normal Maxwell sees.
         # This is the glue that stops autonomy from acting like some weird second
         # intern who skimmed the logs but missed the actual relationship history.
@@ -2460,60 +2440,6 @@ class AutonomyEngine:
 
         full = "\n\n".join(sections)
         return full
-
-    async def _gather_youtube_context(self, ch_lines: list[str]) -> str:
-        """Auto-invoke the youtube tool for YouTube links in recent channel
-        activity, mirroring the normal reply path. Returns transcript/frame
-        text the planner can use directly."""
-        control = getattr(self.bot, "_control", None) or {}
-        if not control.get("tools_enabled", True):
-            return ""
-        if "youtube" in set(control.get("disabled_tools", []) or []):
-            return ""
-        yt_tool = self.bot.tools.get("youtube")
-        if yt_tool is None:
-            return ""
-        yt_re = re.compile(
-            r"https?://(?:www\.)?(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/[^\s<>\"']+",
-            re.IGNORECASE,
-        )
-        urls: list[str] = []
-        for line in ch_lines:
-            for m in yt_re.finditer(line):
-                url = m.group(0).rstrip(".,)]")
-                if url not in urls:
-                    urls.append(url)
-        if not urls:
-            return ""
-        blocks: list[str] = []
-        for url in urls[:3]:
-            try:
-                # SyntheticMessage lets the youtube tool resolve a channel if
-                # it needs one (it generally doesn't for transcript fetch).
-                syn = SyntheticMessage(
-                    channel=None,
-                    author=SimpleNamespace(
-                        id="autonomy",
-                        display_name=getattr(self.bot.user, "display_name", "Maxwell"),
-                        name=getattr(self.bot.user, "name", "Maxwell"),
-                        bot=True,
-                    ),
-                    guild=None,
-                    content=url,
-                )
-                result = await yt_tool.execute(syn, url=url)
-                if result:
-                    # Strip frame image blobs — autonomy is text-only planning.
-                    result = re.sub(
-                        r"__IMAGE_B64__.*?__END_IMAGE_B64__",
-                        "[frame available]",
-                        result,
-                        flags=re.DOTALL,
-                    )
-                    blocks.append(f"URL {url}:\n{result[:1500]}")
-            except Exception as e:
-                logger.warning(f"Autonomy youtube auto-invoke failed for {url}: {e}")
-        return "\n\n".join(blocks)
 
     async def _check_post_engagement(self) -> str:
         """Check if recent autonomous posts got reactions or replies."""
