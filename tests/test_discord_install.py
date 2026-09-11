@@ -39,7 +39,7 @@ def test_discord_snowflake():
 def test_bot_install_authorize_url(monkeypatch):
     monkeypatch.setattr(api, "DISCORD_CLIENT_ID", "1472755214623703190")
     monkeypatch.setenv("DISCORD_BOT_PERMISSIONS", "8")
-    url = api._bot_install_authorize_url(guild_id="123456789012345678", context="guild")
+    url = api._bot_install_authorize_url(guild_id="123456789012345678")
     parsed = urlsplit(url)
     assert parsed.scheme == "https"
     assert parsed.netloc == "discord.com"
@@ -50,10 +50,6 @@ def test_bot_install_authorize_url(monkeypatch):
     assert q["integration_type"] == ["0"]
     assert q["guild_id"] == ["123456789012345678"]
     assert "bot" in q["scope"][0]
-    user = api._bot_install_authorize_url(context="user")
-    uq = parse_qs(urlsplit(user).query)
-    assert uq["integration_type"] == ["1"]
-    assert "bot" not in uq["scope"][0]
 
 
 def test_install_authorize_requires_admin(monkeypatch):
@@ -78,6 +74,21 @@ def test_install_authorize_returns_url_for_admin(monkeypatch):
     assert data["ok"] is True
     assert data["authorize_url"].startswith("https://discord.com/oauth2/authorize?")
     assert "123456789012345678" in data["authorize_url"]
+    assert data["context"] == "guild"
+    assert parse_qs(urlsplit(data["authorize_url"]).query)["integration_type"] == ["0"]
+
+
+def test_install_authorize_rejects_user_install(monkeypatch):
+    monkeypatch.setattr(api, "DISCORD_CLIENT_ID", "1472755214623703190")
+    monkeypatch.setattr(api, "_has_admin_auth", lambda request: True)
+    request = SimpleNamespace(
+        query=_query(context="user"),
+        headers={"X-Discord-Token": "session"},
+    )
+    resp = asyncio.run(api.install_authorize(request))
+    assert resp.status == 400
+    data = json.loads(resp.body)
+    assert "server" in data["error"]
 
 
 def test_oauth_state_stores_install_next():
@@ -230,3 +241,5 @@ def test_install_page_exists():
     assert "/api/install/authorize" in html
     assert "next=/install/" in html or 'next: "/install/"' in html
     assert "Only Maxwell admins" in html
+    assert "Add to my apps" not in html
+    assert 'context: "guild"' in html or "context: 'guild'" in html

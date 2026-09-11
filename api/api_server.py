@@ -2235,31 +2235,25 @@ def _bot_install_permissions() -> str:
     return "8"
 
 
-def _bot_install_scopes(context: str) -> str:
-    if context == "user":
-        raw = os.getenv("DISCORD_INSTALL_USER_SCOPES", "applications.commands")
-    else:
-        raw = os.getenv("DISCORD_INSTALL_SCOPES", "bot applications.commands")
+def _bot_install_scopes() -> str:
+    raw = os.getenv("DISCORD_INSTALL_SCOPES", "bot applications.commands")
     parts = [
         part
         for part in str(raw).replace(",", " ").split()
         if part in _BOT_INSTALL_SCOPES
     ]
-    if context == "user":
-        return " ".join(parts) if parts else "applications.commands"
     return " ".join(parts) if parts else "bot applications.commands"
 
 
-def _bot_install_authorize_url(*, guild_id: str = "", context: str = "guild") -> str:
+def _bot_install_authorize_url(*, guild_id: str = "") -> str:
     from urllib.parse import urlencode
 
     params = {
         "client_id": DISCORD_CLIENT_ID,
-        "scope": _bot_install_scopes(context),
-        "integration_type": "1" if context == "user" else "0",
+        "scope": _bot_install_scopes(),
+        "permissions": _bot_install_permissions(),
+        "integration_type": "0",
     }
-    if context != "user":
-        params["permissions"] = _bot_install_permissions()
     if guild_id:
         params["guild_id"] = guild_id
         params["disable_guild_select"] = "true"
@@ -2430,16 +2424,14 @@ async def install_authorize(request):
     if not DISCORD_CLIENT_ID:
         return _json_response({"error": "discord oauth not configured"}, 503)
     context = str(request.query.get("context") or "guild").strip().lower()
-    if context not in {"guild", "user"}:
-        context = "guild"
+    if context and context != "guild":
+        return _json_response({"error": "only server installs are allowed"}, 400)
     guild_id = _discord_snowflake(request.query.get("guild_id"))
     return _json_response(
         {
             "ok": True,
-            "authorize_url": _bot_install_authorize_url(
-                guild_id=guild_id, context=context
-            ),
-            "context": context,
+            "authorize_url": _bot_install_authorize_url(guild_id=guild_id),
+            "context": "guild",
         }
     )
 

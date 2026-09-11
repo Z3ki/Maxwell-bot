@@ -97,9 +97,6 @@
         <button id="addGuild" class="btn primary hidden" type="button">
           Add to a server
         </button>
-        <button id="addUser" class="btn hidden" type="button">
-          Add to my apps
-        </button>
       </div>
     </div>
     <script>
@@ -133,8 +130,8 @@
           throw new Error(d.error || "Discord login not configured");
         window.location = url;
       }
-      async function authorize(context) {
-        const q = new URLSearchParams({ context });
+      async function authorize() {
+        const q = new URLSearchParams({ context: "guild" });
         if (guildId) q.set("guild_id", guildId);
         const r = await fetch("/api/install/authorize?" + q.toString(), {
           headers: headers(),
@@ -150,10 +147,9 @@
       function ready(user) {
         $("discordLogin").classList.add("hidden");
         $("addGuild").classList.remove("hidden");
-        $("addUser").classList.remove("hidden");
         const name = (user && user.username) || "admin";
         copyEl.textContent =
-          "Signed in as " + name + ". Add Maxwell to a server or your apps.";
+          "Signed in as " + name + ". Add Maxwell to a Discord server.";
       }
       async function verify(t) {
         token = t;
@@ -174,15 +170,7 @@
       $("addGuild").onclick = async () => {
         showError("");
         try {
-          await authorize("guild");
-        } catch (e) {
-          showError(e.message);
-        }
-      };
-      $("addUser").onclick = async () => {
-        showError("");
-        try {
-          await authorize("user");
+          await authorize();
         } catch (e) {
           showError(e.message);
         }
