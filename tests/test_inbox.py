@@ -1,4 +1,4 @@
-"""Inbox store, friend-request actions, and VC presence tools."""
+"""Inbox notice handling and VC presence tools."""
 
 import asyncio
 from types import SimpleNamespace
@@ -13,29 +13,24 @@ from bot_tools import (
     _find_member_voice,
     _is_voice_channel,
 )
-from inbox import InboxStore, apply_inbox_action, friend_item_id, needs_decision
+from inbox import InboxStore, apply_inbox_action, needs_decision
 from tool_schemas import TOOL_PARAMETERS
 
 
-class IncomingRel:
-    def __init__(self, uid, name="Ada"):
-        self.type = SimpleNamespace(name="incoming_request")
-        self.user = SimpleNamespace(id=uid, display_name=name, name=name)
-        self.accepted = False
-        self.deleted = False
-
-    async def accept(self, confirm_stranger_request=False):
-        self.accepted = True
-        self.confirm = confirm_stranger_request
-
-    async def delete(self):
-        self.deleted = True
-
-
-class FriendRel:
-    def __init__(self, uid, name="Ada"):
-        self.type = SimpleNamespace(name="friend")
-        self.user = SimpleNamespace(id=uid, display_name=name, name=name)
+def _item(iid, kind, created, state="unread", **extra):
+    row = {
+        "id": iid,
+        "kind": kind,
+        "state": state,
+        "created_at": created,
+        "actor_id": "",
+        "actor_name": "someone",
+        "summary": f"{kind} {iid}",
+        "actions": ["dismiss"],
+        "payload": {},
+    }
+    row.update(extra)
+    return row
 
 
 def test_empty_inbox_omits_planner_section(tmp_path):
@@ -47,119 +42,91 @@ def test_empty_inbox_omits_planner_section(tmp_path):
     asyncio.run(run())
 
 
-def test_upsert_and_planner_budget(tmp_path):
+def test_notice_upsert_and_planner_budget(tmp_path):
     store = InboxStore(str(tmp_path))
 
     async def run():
         await store.upsert(
             {
-                "id": friend_item_id("11"),
-                "kind": "friend_request",
-                "actor_id": "11",
+                "id": "email_11",
+                "kind": "email",
+                "actor_id": "sender@example.test",
                 "actor_name": "Ada",
-                "summary": "Ada sent a friend request",
-                "actions": ["accept", "decline"],
+                "summary": "Ada sent mail",
+                "actions": ["read", "dismiss"],
+                "payload": {"subject": "Hello"},
             }
         )
         text = store.render_planner(await store.load_items())
         assert "=== INBOX" in text
-        assert "friend_11" in text
+        assert "email_11" in text
         assert "Ada" in text
-        assert len(text) <= 500
+        assert len(text) <= 900
 
     asyncio.run(run())
 
 
-def test_ingest_relationship_seed_add_friend_remove(tmp_path):
+def test_apply_inbox_action_read_and_dismiss(tmp_path):
     store = InboxStore(str(tmp_path))
-    incoming = IncomingRel(22, "Bea")
+    bot = SimpleNamespace(inbox=store)
 
     async def run():
-        first = await store.ingest_relationship(incoming, event="seed")
-        second = await store.ingest_relationship(incoming, event="seed")
-        assert first["id"] == "friend_22"
-        assert first["state"] == "unread"
-        assert second["id"] == first["id"]
-
-        bot = SimpleNamespace(relationships=[incoming])
-        added = await store.seed_from_bot(bot)
-        assert added == 1
-
-        await store.ingest_relationship(
-            FriendRel(22, "Bea"), event="update", before=incoming
-        )
-        row = await store.get("friend_22")
-        assert row["state"] == "acted"
-
-        await store.ingest_relationship(incoming, event="add")
-        await store.ingest_relationship(incoming, event="remove")
-        gone = await store.get("friend_22")
-        assert gone["state"] == "dismissed"
-
-    asyncio.run(run())
-
-
-def test_apply_inbox_action_accept_decline_dismiss(tmp_path):
-    store = InboxStore(str(tmp_path))
-    rel = IncomingRel(33, "Cara")
-
-    class Bot:
-        def __init__(self):
-            self.inbox = store
-
-        def get_relationship(self, uid):
-            return rel if int(uid) == 33 else None
-
-    async def run():
-        await store.ingest_relationship(rel, event="add")
-        bot = Bot()
-        accepted = await apply_inbox_action(
-            bot, action="accept", item_id="friend_33"
-        )
-        assert "Accepted" in accepted
-        assert rel.accepted is True
-        assert (await store.get("friend_33"))["state"] == "acted"
-
-        await store.ingest_relationship(rel, event="add")
-        declined = await apply_inbox_action(
-            bot, action="decline", user_id="33"
-        )
-        assert "Declined" in declined
-        assert rel.deleted is True
-
         await store.add_notice(
             kind="guild_join",
             summary="Joined server Test",
             item_id="guild_1",
         )
-        dismissed = await apply_inbox_action(
-            bot, action="dismiss", item_id="guild_1"
-        )
-        assert "Dismissed" in dismissed
-        assert (await store.get("guild_1"))["state"] == "dismissed"
+        read = await apply_inbox_action(bot, action="read", item_id="guild_1")
+        assert read == "Marked guild_1 read"
+        assert (await store.get("guild_1"))["state"] == "read"
 
-        bad = await apply_inbox_action(bot, action="accept", item_id="guild_1")
-        assert bad.startswith("Error:")
+        dismissed = await apply_inbox_action(bot, action="dismiss", item_id="guild_1")
+        assert dismissed == "Dismissed guild_1"
+        assert (await store.get("guild_1"))["state"] == "dismissed"
 
     asyncio.run(run())
 
 
-def test_inbox_tools_list_and_act(tmp_path):
+def test_legacy_friend_actions_fail_clearly(tmp_path):
     store = InboxStore(str(tmp_path))
-    rel = IncomingRel(44, "Dee")
-    bot = SimpleNamespace(inbox=store, get_relationship=lambda uid: rel)
+    bot = SimpleNamespace(inbox=store)
+
+    async def run():
+        out = await apply_inbox_action(bot, action="accept", item_id="friend_1")
+        assert "official bot" in out.lower()
+        assert "cannot accept" in out.lower()
+
+        out = await apply_inbox_action(bot, action="decline", user_id="1")
+        assert "official bot" in out.lower()
+        assert "cannot accept" in out.lower()
+
+    asyncio.run(run())
+
+
+def test_inbox_tools_list_and_read(tmp_path):
+    store = InboxStore(str(tmp_path))
+    bot = SimpleNamespace(inbox=store)
     message = SimpleNamespace()
 
     async def run():
-        await store.ingest_relationship(rel, event="add")
-        listed = await InboxListTool(bot).execute(message)
-        assert "friend_44" in listed
-        acted = await InboxActTool(bot).execute(
-            message, action="accept", item_id="friend_44"
+        await store.add_notice(
+            kind="email",
+            summary="New message",
+            actor_name="Dee",
+            item_id="email_44",
+            actions=["read", "dismiss"],
+            payload={"subject": "Status"},
         )
-        assert "Accepted" in acted
-        empty = await InboxListTool(bot).execute(message)
-        assert "empty" in empty.lower()
+        listed = await InboxListTool(bot).execute(message)
+        assert "email_44" in listed
+
+        acted = await InboxActTool(bot).execute(
+            message, action="read", item_id="email_44"
+        )
+        assert acted == "Marked email_44 read"
+        assert store.render_planner(await store.load_items()) == ""
+        listed = await InboxListTool(bot).execute(message)
+        assert "email_44" in listed
 
     asyncio.run(run())
 
@@ -260,7 +227,8 @@ def test_join_vc_and_where_and_status():
     asyncio.run(run())
 
 
-def test_commands_post_accepts_inbox_act(tmp_path, monkeypatch):
+def test_commands_post_accepts_legacy_inbox_act_queue(tmp_path, monkeypatch):
+    """Old dashboard actions may still be queued, but execution fails safely."""
     import json
 
     import api.api_server as api
@@ -278,7 +246,9 @@ def test_commands_post_accepts_inbox_act(tmp_path, monkeypatch):
     async def run():
         bad = await api.commands_post(Req({"type": "inbox_act", "action": "nope"}))
         assert bad.status == 400
-        missing = await api.commands_post(Req({"type": "inbox_act", "action": "accept"}))
+        missing = await api.commands_post(
+            Req({"type": "inbox_act", "action": "accept"})
+        )
         assert missing.status == 400
         resp = await api.commands_post(
             Req({"type": "inbox_act", "action": "accept", "item_id": "friend_1"})
@@ -310,38 +280,19 @@ def test_new_tools_are_followup_and_have_schemas():
     assert "user_id" in TOOL_PARAMETERS["vc_where"]["properties"]
 
 
-def _item(iid, kind, created, state="unread", **extra):
-    row = {
-        "id": iid,
-        "kind": kind,
-        "state": state,
-        "created_at": created,
-        "actor_id": "",
-        "actor_name": "someone",
-        "summary": f"{kind} {iid}",
-        "actions": ["dismiss"],
-        "payload": {},
-    }
-    row.update(extra)
-    return row
-
-
-def test_a_waiting_person_outranks_a_pile_of_mail(tmp_path):
-    """Mail arrives in bursts; a friend request must not be pushed out."""
-    store = InboxStore(str(tmp_path))
+def test_mail_burst_is_capped():
+    store = InboxStore(".")
     items = [
-        _item(f"email_{n}", "email", f"2026-08-24T10:{n:02d}:00Z") for n in range(20)
+        _item(f"email_{n}", "email", f"2026-08-24T10:{n:02d}:00Z")
+        for n in range(20)
     ]
-    items.append(_item("friend_9", "friend_request", "2026-08-24T09:00:00Z"))
-
     ordered = store.planner_items(items)
-    assert ordered[0]["id"] == "friend_9"
-    # Mail is capped, so it cannot fill the tail on its own.
-    assert sum(1 for i in ordered if i["kind"] == "email") == 6
+    assert len(ordered) == 6
+    assert ordered[0]["id"] == "email_19"
 
 
-def test_newest_first_within_a_kind(tmp_path):
-    store = InboxStore(str(tmp_path))
+def test_newest_first_within_a_kind():
+    store = InboxStore(".")
     ordered = store.planner_items(
         [
             _item("email_1", "email", "2026-08-24T09:00:00Z"),
@@ -349,7 +300,7 @@ def test_newest_first_within_a_kind(tmp_path):
             _item("email_3", "email", "2026-08-24T10:00:00Z"),
         ]
     )
-    assert [i["id"] for i in ordered] == ["email_2", "email_3", "email_1"]
+    assert [item["id"] for item in ordered] == ["email_2", "email_3", "email_1"]
 
 
 def test_marking_read_demotes_without_clearing(tmp_path):
@@ -362,96 +313,51 @@ def test_marking_read_demotes_without_clearing(tmp_path):
             SimpleNamespace(inbox=store), action="read", item_id="email_2"
         ) == "Marked email_2 read"
         ordered = store.planner_items(await store.load_items())
-        # Still there, but the unread one now leads.
-        assert [i["id"] for i in ordered] == ["email_1", "email_2"]
+        assert [item["id"] for item in ordered] == ["email_1", "email_2"]
 
     asyncio.run(run())
 
 
-def test_accept_on_an_email_explains_itself(tmp_path):
-    store = InboxStore(str(tmp_path))
-
-    async def run():
-        await store.upsert(
-            _item("email_1", "email", "2026-08-24T09:00:00Z", actions=["read", "dismiss"])
-        )
-        out = await apply_inbox_action(
-            SimpleNamespace(inbox=store), action="accept", item_id="email_1"
-        )
-        assert "not valid for a email" in out
-        # It names the actions that would have worked.
-        assert "dismiss" in out and "read" in out
-
-    asyncio.run(run())
-
-
-def test_the_tail_stays_inside_its_budget(tmp_path):
-    store = InboxStore(str(tmp_path))
+def test_the_tail_stays_inside_its_budget():
+    store = InboxStore(".")
     items = [
-        _item(f"n_{n}", f"kind{n}", f"2026-08-24T10:{n:02d}:00Z", summary="x" * 300)
+        _item(
+            f"n_{n}",
+            f"kind{n}",
+            f"2026-08-24T10:{n:02d}:00Z",
+            summary="x" * 300,
+        )
         for n in range(40)
     ]
-    text = store.render_planner(items)
-    assert len(text) <= 900
-
-
-# ─── an announced notice stops being announced ──────────────────────────
+    assert len(store.render_planner(items)) <= 900
 
 
 def test_a_read_notice_leaves_the_prompt_tail(tmp_path):
-    """The reported bug: the same email announced three times, reworded.
-
-    Nothing marked a notice as said, and `read` kept it in the tail, so every
-    prompt carried it again and he narrated it again — "update from z3ki…",
-    "z3ki already replied…", "update: z3ki just replied…".
-    """
     store = InboxStore(str(tmp_path))
 
     async def run():
         await store.upsert(_item("email_1", "email", "2026-08-24T09:00:00Z"))
         assert "email_1" in store.render_planner(await store.load_items())
-
         await store.mark("email_1", "read")
         assert store.render_planner(await store.load_items()) == ""
 
     asyncio.run(run())
 
 
-def test_a_read_request_someone_is_waiting_on_stays(tmp_path):
-    # Reading a friend request does not answer it, so it keeps showing.
-    store = InboxStore(str(tmp_path))
-
-    async def run():
-        await store.upsert(
-            _item(
-                "friend_9",
-                "friend_request",
-                "2026-08-24T09:00:00Z",
-                actions=["accept", "decline"],
-            )
-        )
-        await store.mark("friend_9", "read")
-        assert "friend_9" in store.render_planner(await store.load_items())
-
-    asyncio.run(run())
-
-
 def test_the_inbox_tool_still_shows_a_read_notice(tmp_path):
-    # It left the prompt tail, not the inbox. "Show me my inbox" shows it.
     store = InboxStore(str(tmp_path))
 
     async def run():
         await store.upsert(_item("email_1", "email", "2026-08-24T09:00:00Z"))
         await store.mark("email_1", "read")
         items = await store.load_items()
-        assert [i["id"] for i in store.planner_items(items)] == ["email_1"]
+        assert [item["id"] for item in store.planner_items(items)] == ["email_1"]
         assert store.planner_items(items, exclude_announced=True) == []
 
     asyncio.run(run())
 
 
-def test_needs_decision_reads_the_actions(tmp_path):
-    assert needs_decision({"actions": ["accept", "decline"]}) is True
-    assert needs_decision({"actions": ["ACCEPT"]}) is True
+def test_official_bot_inbox_has_no_pending_relationship_decisions():
+    assert needs_decision({"actions": ["accept", "decline"]}) is False
     assert needs_decision({"actions": ["read", "dismiss"]}) is False
     assert needs_decision({}) is False

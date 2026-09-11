@@ -1,97 +1,42 @@
-"""Maxwell's notification inbox.
+"""Maxwell's persistent notification inbox.
 
-Friend requests and other actionable events land here. The planner sees
-unread items only in the volatile context tail — never in the cached
-system prefix.
+The inbox stores notices from supported bot-side integrations. Older releases
+also mirrored Discord user relationship/friend-request events here; official
+Discord bots cannot access those relationships, so that path is intentionally
+gone.
 """
 
 from __future__ import annotations
 
 import asyncio
-import logging
 import uuid
 from pathlib import Path
-from typing import Any
 
-import discord
-
-from utils import (
-    _atomic_json_write_sync,
-    _load_json_safe,
-    _utcnow_iso,
-)
-
-logger = logging.getLogger(__name__)
+from utils import _atomic_json_write_sync, _load_json_safe, _utcnow_iso
 
 INBOX_RING_SIZE = 200
 INBOX_PLANNER_BUDGET = 900
 ACTIONABLE_STATES = frozenset({"unread", "read"})
 
-# Actions that mean a human is waiting on an answer. An item carrying one of
-# these stays in the planner tail after it has been read — reading a friend
-# request does not answer it. Everything else is a *notice*: something to be
-# told once. Mail is the common case, and it used to have no way out of the
-# tail short of an explicit dismiss, so the same message was announced on
-# every turn, reworded each time ("update from z3ki…", "z3ki already
-# replied…", "update: z3ki just replied…").
-DECISION_ACTIONS = frozenset({"accept", "decline"})
-
 
 def needs_decision(item: dict) -> bool:
-    """True when someone is waiting on an answer this item can give."""
-    return bool(
-        DECISION_ACTIONS
-        & {str(a).strip().lower() for a in (item.get("actions") or [])}
-    )
+    """Whether this row still needs an external decision.
 
-# Planner ordering. Something a human is waiting on outranks a notice he can
-# read whenever. Within a kind, newest first — an inbox is a feed, not a log.
-KIND_PRIORITY = {
-    "friend_request": 0,
-    "group_dm": 1,
-    "email": 2,
-    # An @ on X is someone talking to him in public, which is more like mail
-    # than like a friend request: worth telling, not waiting on an answer.
-    "x_mention": 3,
-}
-KIND_PRIORITY_DEFAULT = 4
+    Retained because bot.py uses the hook when marking announced rows. The
+    official-bot inbox currently contains notices only; Discord relationship
+    requests are not available to bot accounts.
+    """
+    return False
 
-# One noisy source must not push the others out of the tail. Mail arrives in
-# bursts; friend requests do not.
-KIND_RENDER_CAP = {"email": 6, "x_mention": 5}
+
+KIND_PRIORITY = {"email": 0}
+KIND_PRIORITY_DEFAULT = 1
+KIND_RENDER_CAP = {"email": 6}
 KIND_RENDER_CAP_DEFAULT = 12
-
-try:
-    from discord.enums import RelationshipType
-except Exception:  # pragma: no cover - discord.py-self always has this
-    RelationshipType = None
-
-
-def _rel_type_name(rel: Any) -> str:
-    typ = getattr(rel, "type", None)
-    return str(getattr(typ, "name", typ) or "")
-
-
-def _is_incoming_request(rel: Any) -> bool:
-    typ = getattr(rel, "type", None)
-    if RelationshipType is not None and typ is RelationshipType.incoming_request:
-        return True
-    return _rel_type_name(rel) == "incoming_request"
-
-
-def _is_friend(rel: Any) -> bool:
-    typ = getattr(rel, "type", None)
-    if RelationshipType is not None and typ is RelationshipType.friend:
-        return True
-    return _rel_type_name(rel) == "friend"
-
-
-def friend_item_id(user_id: str) -> str:
-    return f"friend_{str(user_id).strip()}"
 
 
 class InboxStore:
-    """JSON ring of inbox items. One lock around every read-modify-write."""
+    """JSON ring of inbox items. One lock protects each read-modify-write."""
 
     def __init__(self, data_dir: str):
         self.data_dir = Path(data_dir)
@@ -121,14 +66,13 @@ class InboxStore:
     def actionable(self, items: list[dict] | None = None) -> list[dict]:
         rows = items if items is not None else []
         return [
-            i
-            for i in rows
-            if isinstance(i, dict) and i.get("state") in ACTIONABLE_STATES
+            row
+            for row in rows
+            if isinstance(row, dict) and row.get("state") in ACTIONABLE_STATES
         ]
 
     @staticmethod
     def _planner_sort_key(item: dict) -> tuple:
-        """unread before read, then by kind. Recency is a separate pass."""
         kind = str(item.get("kind") or "notice")
         unread = 0 if item.get("state") == "unread" else 1
         return (unread, KIND_PRIORITY.get(kind, KIND_PRIORITY_DEFAULT))
@@ -136,34 +80,23 @@ class InboxStore:
     def planner_items(
         self, items: list[dict], *, exclude_announced: bool = False
     ) -> list[dict]:
-        """Actionable items in the order the planner should see them.
+        """Return actionable rows in prompt order.
 
-        Sorted by urgency, then capped per kind so a burst of mail can't
-        push a waiting friend request out of the tail.
-
-        ``exclude_announced`` drops notices he has already said out loud —
-        read, and with no decision left to make. Only the prompt tail passes
-        it. `inbox_list` deliberately does not: a read email has not gone
-        anywhere, and "show me my inbox" should show the whole inbox. Without
-        that split a notice had no way out of the prompt short of an explicit
-        dismiss, so the same email was announced on every turn, reworded each
-        time, until somebody cleared it by hand.
+        ``exclude_announced`` removes rows already marked read from the prompt
+        tail while leaving them visible to ``inbox_list``.
         """
-        # Two stable passes: newest first, then urgency. created_at is ISO, so
-        # a plain reverse string sort is chronological.
         rows = [
-            i
-            for i in self.actionable(items)
-            if not exclude_announced
-            or i.get("state") != "read"
-            or needs_decision(i)
+            row
+            for row in self.actionable(items)
+            if not exclude_announced or row.get("state") != "read"
         ]
         pending = sorted(
             rows,
-            key=lambda i: str(i.get("created_at") or ""),
+            key=lambda row: str(row.get("created_at") or ""),
             reverse=True,
         )
         pending.sort(key=self._planner_sort_key)
+
         seen: dict[str, int] = {}
         out: list[dict] = []
         for item in pending:
@@ -178,35 +111,27 @@ class InboxStore:
 
     @staticmethod
     def render_item(item: dict, *, summary_chars: int = 160) -> str:
-        """One inbox line. Mail leads with sender+subject, not an actor id."""
         iid = str(item.get("id") or "")
         kind = str(item.get("kind") or "notice")
-        acts = ",".join(str(a) for a in (item.get("actions") or [])[:4])
+        acts = ",".join(str(action) for action in (item.get("actions") or [])[:4])
         summary = str(item.get("summary") or "")[:summary_chars]
         payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
         actor = str(item.get("actor_name") or "?")
-        aid = str(item.get("actor_id") or "")
-        if kind == "x_mention":
-            # actor_id is the handle; the summary already reads as a sentence.
-            body = summary or f"@{aid}"
-            url = str(payload.get("url") or "")
-            if url:
-                body += f" — {url}"
-        elif kind == "email":
-            # actor_name/actor_id are the sender's display name and address.
-            who = f"{actor} <{aid}>" if aid else actor
+        actor_id = str(item.get("actor_id") or "")
+
+        if kind == "email":
+            who = f"{actor} <{actor_id}>" if actor_id else actor
             subject = str(payload.get("subject") or "").strip() or "(no subject)"
             body = f'{who} — "{subject}"'
             snippet = " ".join(str(payload.get("snippet") or "").split())
             if snippet:
                 body += f": {snippet[:summary_chars]}"
         else:
-            who = f"{actor}({aid})" if aid else actor
+            who = f"{actor}({actor_id})" if actor_id else actor
             body = f"{who}: {summary}"
         return f"- [{iid}] {kind} {body} [{acts}]"
 
     def render_planner(self, items: list[dict]) -> str:
-        """Volatile tail only. Empty → '' so the cached prefix never moves."""
         pending = self.planner_items(items, exclude_announced=True)
         if not pending:
             return ""
@@ -224,11 +149,14 @@ class InboxStore:
         now = _utcnow_iso()
         async with self._lock:
             items = await self._load_unlocked(for_update=True)
-            existing = None
-            for row in items:
-                if isinstance(row, dict) and str(row.get("id") or "") == iid:
-                    existing = row
-                    break
+            existing = next(
+                (
+                    row
+                    for row in items
+                    if isinstance(row, dict) and str(row.get("id") or "") == iid
+                ),
+                None,
+            )
             if existing is None:
                 row = {
                     "id": iid,
@@ -263,22 +191,18 @@ class InboxStore:
             return row
 
     async def insert_if_absent(self, item: dict) -> dict | None:
-        """Create an item only if its id is new. Returns None if it existed.
-
-        The mail poller re-sees the same UID on every tick for as long as the
-        message stays unread. Going through ``upsert`` would reset a dismissed
-        item back to "unread" each time, so a message he deliberately ignored
-        would nag him forever. One insert, then his decision stands.
-        """
+        """Insert a notice once so polling cannot resurrect a dismissed item."""
         iid = str(item.get("id") or "").strip()
         if not iid:
             raise ValueError("insert_if_absent needs an explicit id")
         now = _utcnow_iso()
         async with self._lock:
             items = await self._load_unlocked(for_update=True)
-            for row in items:
-                if isinstance(row, dict) and str(row.get("id") or "") == iid:
-                    return None
+            if any(
+                isinstance(row, dict) and str(row.get("id") or "") == iid
+                for row in items
+            ):
+                return None
             row = {
                 "id": iid,
                 "kind": str(item.get("kind") or "notice"),
@@ -301,8 +225,7 @@ class InboxStore:
         iid = str(item_id or "").strip()
         if not iid:
             return None
-        items = await self.load_items()
-        for row in items:
+        for row in await self.load_items():
             if isinstance(row, dict) and str(row.get("id") or "") == iid:
                 return row
         return None
@@ -327,60 +250,6 @@ class InboxStore:
             if found is not None:
                 await self._save_unlocked(items)
             return found
-
-    async def ingest_relationship(
-        self, relationship: Any, *, event: str, before: Any = None
-    ) -> dict | None:
-        user = getattr(relationship, "user", None)
-        uid = str(getattr(user, "id", "") or "")
-        if not uid:
-            return None
-        name = (
-            getattr(user, "display_name", None)
-            or getattr(user, "name", None)
-            or uid
-        )
-        iid = friend_item_id(uid)
-        if event == "remove":
-            if _is_incoming_request(relationship) or (
-                before is not None and _is_incoming_request(before)
-            ):
-                return await self.mark(iid, "dismissed", note="request withdrawn")
-            return None
-        if _is_friend(relationship) and event in {"update", "add"}:
-            existing = await self.get(iid)
-            if existing and existing.get("state") in ACTIONABLE_STATES:
-                return await self.mark(iid, "acted", note="now friends")
-            return None
-        if not _is_incoming_request(relationship):
-            return None
-        if event == "seed":
-            existing = await self.get(iid)
-            if existing:
-                return existing
-        return await self.upsert(
-            {
-                "id": iid,
-                "kind": "friend_request",
-                "state": "unread",
-                "actor_id": uid,
-                "actor_name": str(name),
-                "summary": f"{name} sent a friend request",
-                "actions": ["accept", "decline"],
-                "payload": {"relationship": _rel_type_name(relationship)},
-            }
-        )
-
-    async def seed_from_bot(self, bot: Any) -> int:
-        """Upsert current incoming requests so offline arrivals aren't lost."""
-        added = 0
-        for rel in getattr(bot, "relationships", None) or []:
-            row = await self.ingest_relationship(rel, event="seed")
-            if row and row.get("state") in ACTIONABLE_STATES:
-                added += 1
-        if added:
-            logger.info("Inbox seeded %s incoming friend request(s)", added)
-        return added
 
     async def add_notice(
         self,
@@ -408,93 +277,47 @@ class InboxStore:
 
 
 async def apply_inbox_action(
-    bot: Any,
+    bot,
     *,
     action: str,
     item_id: str = "",
     user_id: str = "",
 ) -> str:
-    """Accept / decline / dismiss. Shared by the tool and the command queue."""
+    """Read or dismiss a notice.
+
+    Old ``accept``/``decline`` calls get an explicit migration error instead of
+    reaching user-account-only Discord relationship APIs.
+    """
     store = getattr(bot, "inbox", None)
     if store is None:
         return "Error: inbox is not available"
+
     action = str(action or "").strip().lower()
-    if action not in {"accept", "decline", "dismiss", "read"}:
-        return "Error: action must be accept, decline, dismiss, or read"
+    if action in {"accept", "decline"}:
+        return (
+            "Error: Discord friend-request actions were removed when Maxwell "
+            "moved to an official bot account; official bots cannot accept or "
+            "decline user relationships."
+        )
+    if action not in {"dismiss", "read"}:
+        return "Error: action must be dismiss or read"
 
-    item = None
-    if item_id:
-        item = await store.get(item_id)
-    if item is None and user_id:
-        item = await store.get(friend_item_id(user_id))
-    if item is None and user_id:
-        item = {
-            "id": friend_item_id(user_id),
-            "kind": "friend_request",
-            "actor_id": str(user_id),
-            "actions": ["accept", "decline"],
-        }
+    iid = str(item_id or "").strip()
+    if not iid:
+        if str(user_id or "").strip():
+            return (
+                "Error: user_id inbox actions were removed with self-bot friend "
+                "requests; use an inbox item_id."
+            )
+        return "Error: inbox item not found"
 
+    item = await store.get(iid)
     if item is None:
         return "Error: inbox item not found"
 
-    allowed = {str(a).lower() for a in (item.get("actions") or [])}
-    kind = str(item.get("kind") or "")
     if action == "dismiss":
-        await store.mark(str(item.get("id")), "dismissed")
-        return f"Dismissed {item.get('id')}"
-    if action == "read":
-        # Takes a notice out of the prompt tail without deleting it — it is
-        # still in `inbox_list`, and `dismiss` is still what clears one for
-        # good. Deliberately handled before the `allowed` check below: every
-        # item can be read, whatever actions it declares.
-        #
-        # He rarely has to call this. A notice is marked read automatically
-        # once the reply that carried it goes out; this is the manual version,
-        # for something he has decided not to mention at all.
-        await store.mark(str(item.get("id")), "read")
-        return f"Marked {item.get('id')} read"
-    if action not in allowed and kind != "friend_request":
-        # Name what IS valid. "not valid for this item" left the model to
-        # guess, and it usually guessed accept again.
-        valid = ", ".join(sorted(allowed | {"dismiss"})) or "dismiss"
-        return (
-            f"Error: {action} is not valid for a {kind or 'notice'} — "
-            f"{item.get('id')} accepts: {valid}"
-        )
+        await store.mark(iid, "dismissed")
+        return f"Dismissed {iid}"
 
-    uid = str(item.get("actor_id") or user_id or "").strip()
-    if not uid.isdigit():
-        return (
-            f"Error: {item.get('id')} is a {kind or 'notice'}, not a friend "
-            "request — there is no Discord user to accept or decline. Use "
-            "read or dismiss."
-        )
-    rel = None
-    getter = getattr(bot, "get_relationship", None)
-    if callable(getter):
-        rel = getter(int(uid))
-    if rel is None:
-        return f"Error: no relationship with {uid} (they may have cancelled)"
-
-    try:
-        if action == "accept":
-            try:
-                await rel.accept()
-            except discord.HTTPException as exc:
-                text = str(exc).lower()
-                if "stranger" in text or "confirm" in text:
-                    await rel.accept(confirm_stranger_request=True)
-                else:
-                    raise
-            await store.mark(str(item.get("id")), "acted", note="accepted")
-            return f"Accepted friend request from {item.get('actor_name') or uid}"
-        if action == "decline":
-            await rel.delete()
-            await store.mark(str(item.get("id")), "acted", note="declined")
-            return f"Declined friend request from {item.get('actor_name') or uid}"
-    except discord.HTTPException as exc:
-        return f"Error: Discord rejected {action}: {exc}"
-    except Exception as exc:
-        return f"Error: {exc}"
-    return f"Error: unhandled action {action}"
+    await store.mark(iid, "read")
+    return f"Marked {iid} read"
