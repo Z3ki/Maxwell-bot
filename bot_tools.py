@@ -18,7 +18,6 @@ import shlex
 import shutil
 import socket
 from mail_transport import connect_imap, mail_ssl_context
-import sys
 import tempfile
 import time
 import wave
@@ -26,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any, ClassVar, cast
-from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
+from urllib.parse import quote, unquote, urljoin, urlparse
 
 import aiofiles
 import aiohttp
@@ -2922,6 +2921,39 @@ class CreateInviteTool(Tool):
             return f"Error creating invite: {e}"
 
 
+def _find_guild(guilds: list, target: str) -> tuple[Any, str]:
+    """Find one guild by ID, exact name, then unique partial name.
+
+    Returns (guild, "") on a hit and (None, error_text) otherwise.
+    """
+    target = (target or "").strip()
+    if not guilds:
+        return None, "Error: not in any servers"
+    if not target:
+        return None, "Error: no server given"
+    if target.isdigit():
+        guild = next((g for g in guilds if str(g.id) == target), None)
+        if guild is not None:
+            return guild, ""
+    lowered = target.lower()
+    guild = next((g for g in guilds if (g.name or "").lower() == lowered), None)
+    if guild is not None:
+        return guild, ""
+    matches = [g for g in guilds if lowered in (g.name or "").lower()]
+    if len(matches) == 1:
+        return matches[0], ""
+    if len(matches) > 1:
+        return None, (
+            f"Error: '{target}' matches {len(matches)} servers "
+            + ", ".join(f"{g.name} ({g.id})" for g in matches[:8])
+            + " — use the numeric ID to disambiguate."
+        )
+    return None, (
+        f"Error: not in any server named/matching '{target}'. "
+        "Use list_servers to see current servers."
+    )
+
+
 class LeaveServerTool(Tool):
     """Leave a Discord server by name or ID."""
 
@@ -4261,9 +4293,8 @@ class ListTimeoutsTool(Tool):
                     continue
             except TypeError:
                 pass
-            rows.append(
-                f"{member} ({member.id}) until {getattr(until, 'isoformat', lambda: until)()}"
-            )
+            until_s = until.isoformat() if hasattr(until, "isoformat") else str(until)
+            rows.append(f"{member} ({member.id}) until {until_s}")
             if len(rows) >= cap:
                 break
         if not rows:

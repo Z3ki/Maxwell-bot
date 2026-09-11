@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 from discord_account import (
     account_ids,
-    clear_application_commands,
     configured_bot_token,
 )
 from bot import MaxwellBot, TOOL_PROTOCOL

@@ -1,13 +1,11 @@
 """Offline regressions for tool, plugin, transport, and game audit findings."""
 
 import asyncio
-import io
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import chess
-import discord
 import pytest
 
 import autofix
