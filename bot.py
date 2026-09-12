@@ -372,6 +372,7 @@ from discord_account import (  # noqa: E402
     account_ids as _discord_account_ids,
     bot_intents,
     configured_bot_token,
+    ensure_user_install_context,
     sync_application_commands,
 )
 from user_install import (  # noqa: E402
@@ -5778,6 +5779,7 @@ class MaxwellBot(commands.Bot):
             getattr(self, "user", None), "id", None
         )
         try:
+            await ensure_user_install_context(str(token))
             synced = await sync_application_commands(
                 str(token),
                 USER_INSTALL_COMMANDS,

@@ -14,6 +14,25 @@ logger = logging.getLogger(__name__)
 
 BOT_USER_AGENT = "DiscordBot (https://github.com/Z3ki/Maxwell-bot, 1.0)"
 _DISCORD_API = "https://discord.com/api/v10"
+_USER_INSTALL_OAUTH_PARAMS = {
+    "scopes": ["applications.commands"],
+    "permissions": "0",
+}
+
+
+def user_install_integration_config(existing: dict | None) -> dict[str, Any]:
+    """Guild config stays as-is; add USER_INSTALL if Discord does not have it."""
+    config: dict[str, Any] = {}
+    for key, value in (existing or {}).items():
+        config[str(key)] = value
+    if "0" not in config:
+        config["0"] = {}
+    current = config.get("1")
+    params = current.get("oauth2_install_params") if isinstance(current, dict) else None
+    if isinstance(params, dict) and "applications.commands" in (params.get("scopes") or []):
+        return config
+    config["1"] = {"oauth2_install_params": dict(_USER_INSTALL_OAUTH_PARAMS)}
+    return config
 
 
 def _strip_bot_prefix(token: str) -> str:
@@ -94,6 +113,54 @@ def configured_bot_token(bot_token: str | None, legacy_token: str | None) -> str
     if primary:
         return primary
     return _strip_bot_prefix(legacy_token or "")
+
+
+async def ensure_user_install_context(token: str) -> bool:
+    """Enable Discord USER_INSTALL so Add to my apps is not rejected.
+
+    OAuth ``integration_type=1`` fails with "installation type not supported"
+    unless the application has a user-install integration config.
+    """
+    import aiohttp
+
+    token = _strip_bot_prefix(token)
+    headers = {
+        "Authorization": f"Bot {token}",
+        "User-Agent": BOT_USER_AGENT,
+        "Content-Type": "application/json",
+    }
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        async with session.get(f"{_DISCORD_API}/applications/@me") as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                logger.warning(
+                    "Could not read application install contexts: HTTP %s %s",
+                    resp.status,
+                    body[:200],
+                )
+                return False
+            data = await resp.json()
+        existing = data.get("integration_types_config") if isinstance(data, dict) else None
+        desired = user_install_integration_config(
+            existing if isinstance(existing, dict) else None
+        )
+        if existing == desired:
+            return True
+        async with session.patch(
+            f"{_DISCORD_API}/applications/@me",
+            json={"integration_types_config": desired},
+        ) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                logger.warning(
+                    "Failed to enable user-install context: HTTP %s %s",
+                    resp.status,
+                    body[:200],
+                )
+                return False
+            logger.info("Enabled Discord user-install (Add to my apps)")
+            return True
 
 
 async def sync_application_commands(

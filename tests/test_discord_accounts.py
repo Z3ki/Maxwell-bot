@@ -116,6 +116,128 @@ def test_sync_application_commands_puts_payload(monkeypatch):
     ) in calls
 
 
+def test_user_install_integration_config_adds_user_context():
+    from discord_account import user_install_integration_config
+
+    out = user_install_integration_config({"0": {}})
+    assert "0" in out
+    assert out["1"]["oauth2_install_params"]["scopes"] == ["applications.commands"]
+    already = {
+        "0": {},
+        "1": {"oauth2_install_params": {"scopes": ["applications.commands"]}},
+    }
+    assert user_install_integration_config(already)["1"] is already["1"]
+
+
+def test_ensure_user_install_context_patches_when_missing(monkeypatch):
+    calls = []
+
+    class FakeResp:
+        def __init__(self, status, payload):
+            self.status = status
+            self._payload = payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def json(self):
+            return self._payload
+
+        async def text(self):
+            return ""
+
+    class FakeSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        def get(self, url, **kwargs):
+            calls.append(("GET", url))
+            return FakeResp(200, {"id": "99", "integration_types_config": {"0": {}}})
+
+        def patch(self, url, **kwargs):
+            calls.append(("PATCH", url, kwargs.get("json")))
+            return FakeResp(200, kwargs.get("json") or {})
+
+    import discord_account as mod
+    import aiohttp
+
+    monkeypatch.setattr(aiohttp, "ClientSession", FakeSession)
+    assert asyncio.run(mod.ensure_user_install_context("tok")) is True
+    patch = [c for c in calls if c[0] == "PATCH"]
+    assert patch
+    body = patch[0][2]["integration_types_config"]
+    assert "1" in body
+    assert "applications.commands" in body["1"]["oauth2_install_params"]["scopes"]
+
+
+def test_ensure_user_install_context_skips_patch_when_present(monkeypatch):
+    calls = []
+
+    class FakeResp:
+        def __init__(self, status, payload):
+            self.status = status
+            self._payload = payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def json(self):
+            return self._payload
+
+        async def text(self):
+            return ""
+
+    class FakeSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        def get(self, url, **kwargs):
+            calls.append(("GET", url))
+            return FakeResp(
+                200,
+                {
+                    "integration_types_config": {
+                        "0": {},
+                        "1": {
+                            "oauth2_install_params": {
+                                "scopes": ["applications.commands"],
+                                "permissions": "0",
+                            }
+                        },
+                    }
+                },
+            )
+
+        def patch(self, url, **kwargs):
+            calls.append(("PATCH", url, kwargs.get("json")))
+            return FakeResp(200, {})
+
+    import discord_account as mod
+    import aiohttp
+
+    monkeypatch.setattr(aiohttp, "ClientSession", FakeSession)
+    assert asyncio.run(mod.ensure_user_install_context("tok")) is True
+    assert not any(c[0] == "PATCH" for c in calls)
+
+
 def test_configured_bot_token_prefers_bot_token():
     assert configured_bot_token("bot-tok", "legacy") == "bot-tok"
     assert configured_bot_token("", "legacy") == "legacy"
