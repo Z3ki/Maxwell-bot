@@ -2228,11 +2228,17 @@ def _oauth_state_payload(entry) -> dict | None:
     }
 
 
+_ADMINISTRATOR_PERM_BIT = 8
+
+
 def _bot_install_permissions() -> str:
-    raw = os.getenv("DISCORD_BOT_PERMISSIONS", "8").strip()
-    if raw.isdigit():
-        return raw
-    return "8"
+    # Default 0 = Discord's normal add (no extra permissions requested).
+    # Administrator is never requested on the install link even if the env
+    # still has the old default of 8.
+    raw = os.getenv("DISCORD_BOT_PERMISSIONS", "0").strip()
+    if not raw.isdigit():
+        return "0"
+    return str(int(raw) & ~_ADMINISTRATOR_PERM_BIT)
 
 
 def _bot_install_scopes() -> str:

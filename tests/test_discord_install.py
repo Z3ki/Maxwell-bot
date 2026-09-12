@@ -38,7 +38,7 @@ def test_discord_snowflake():
 
 def test_bot_install_authorize_url(monkeypatch):
     monkeypatch.setattr(api, "DISCORD_CLIENT_ID", "1472755214623703190")
-    monkeypatch.setenv("DISCORD_BOT_PERMISSIONS", "8")
+    monkeypatch.setenv("DISCORD_BOT_PERMISSIONS", "2048")
     url = api._bot_install_authorize_url(guild_id="123456789012345678")
     parsed = urlsplit(url)
     assert parsed.scheme == "https"
@@ -46,10 +46,26 @@ def test_bot_install_authorize_url(monkeypatch):
     assert parsed.path == "/oauth2/authorize"
     q = parse_qs(parsed.query)
     assert q["client_id"] == ["1472755214623703190"]
-    assert q["permissions"] == ["8"]
+    assert q["permissions"] == ["2048"]
     assert q["integration_type"] == ["0"]
     assert q["guild_id"] == ["123456789012345678"]
     assert "bot" in q["scope"][0]
+
+
+def test_bot_install_strips_administrator(monkeypatch):
+    monkeypatch.setattr(api, "DISCORD_CLIENT_ID", "1472755214623703190")
+    monkeypatch.setenv("DISCORD_BOT_PERMISSIONS", "8")
+    url = api._bot_install_authorize_url()
+    q = parse_qs(urlsplit(url).query)
+    assert q["permissions"] == ["0"]
+
+
+def test_bot_install_default_is_normal_add(monkeypatch):
+    monkeypatch.setattr(api, "DISCORD_CLIENT_ID", "1472755214623703190")
+    monkeypatch.delenv("DISCORD_BOT_PERMISSIONS", raising=False)
+    url = api._bot_install_authorize_url()
+    q = parse_qs(urlsplit(url).query)
+    assert q["permissions"] == ["0"]
 
 
 def test_install_authorize_requires_admin(monkeypatch):

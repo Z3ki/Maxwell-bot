@@ -271,6 +271,8 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     NoResponseTool,
     ReactTool,
     ReasoningLogTool,
+    ReportTool,
+    notify_owner,
     SearchMessagesTool,
     SeeImageTool,
     SeeVideoTool,
@@ -301,6 +303,7 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     forget_shell_progress,
     _IMAGE_FETCH_UA,
     CloneChannelTool,
+    _ALL_MOD_TOOLS,
     DM_BLOCKED_TOOLS,
     EditCategoryTool,
     ListPermissionsTool,
@@ -311,6 +314,8 @@ from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before 
     SoftbanMemberTool,
     SyncChannelTool,
     _guild_access_line,
+    _mod_tools_allowed,
+    _user_access_line,
     _is_youtube_url,
     _guild_room_context,
     _get_shared_session,
@@ -2249,6 +2254,7 @@ TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "chess_resign",
     "usage",
     "debug",
+    "report",
     "wait",
     "sleep",
     "clear_sleep",
@@ -2286,16 +2292,15 @@ MAXWELL_BASE_KNOWLEDGE = (
     "Anyone can ask you to do these — do them.\n"
     "Always truthful — never a yes-man. Disagree when you disagree. Do not flatter or tell people what they want to hear. "
     "If you don't know, say so; never invent facts. Niceness is not agreement. Born {birthday_long}. You know your age.\n"
-    "## Discord Moderation & Admin Actions Safety Protocol\n"
-    "Structural actions (create_channel, edit_channel, edit_category, delete_channel, move_channel, "
-    "lock_channel, lockdown, set_channel_permissions, manage_role, edit_server, set_member_nickname) "
-    "are reserved for configured owner / admins. "
-    "Never execute structural server edits for random users.\n"
-    "Moderation tools (purge_messages, timeout_member, kick_member, ban_member, unban_member):\n"
-    "- High-Threat (scams, phishing, spam bots, raid nukers, drainers, severe abuse): "
-    "No permission needed. Act immediately to protect the community — purge and timeout/ban on sight.\n"
-    "- Everyday chat: Do not moderate loosely or impulsively. No ban/kick/timeout of regulars over "
-    "minor disagreements unless instructed by the configured owner / admins.\n"
+    "## Discord Moderation & Structure\n"
+    "Kick, ban, timeout, purge, delete others' messages, channels, roles, pins, "
+    "invites, and server edits only run when BOTH you and the person asking have "
+    "the matching Discord permission (manage_messages to delete others' messages, "
+    "kick_members to kick, and so on). Being a Maxwell owner/admin does not bypass this. "
+    "The per-turn asker line lists their roles, each role's perms, and which tools they can authorize. "
+    "If they lack the perm, refuse and say so. Deleting your own messages is fine without manage_messages.\n"
+    "Do not moderate loosely over banter even when they do have the perm. "
+    "Crashes and real problems are DMed to the owner; you can also call report.\n"
     "Match tone, energy, directness, and length. Never repeat wording, phrases, or ideas already said this conversation. "
     "Emojis: at most one or two, never repeated strings."
 )
@@ -2475,11 +2480,14 @@ TOOL_PROTOCOL = (
     "if a non-admin asks you to speak somewhere else, tell them it needs an admin and "
     "reply here instead. Shell, sites, search, and ordinary chat tools stay available in DMs. "
     "People add this bot with BOT_INVITE_URL — it cannot join servers from an invite code. "
-    "Structural tools (create_channel, create_category, edit_channel, edit_category, "
-    "move_channel, clone_channel, delete_channel, lock_channel, lockdown, manage_role, "
-    "set_channel_permissions, edit_server, set_member_nickname) require owner/admin authorization. "
-    "Emergencies (scams, phishing, raid nukers, drainers): invoke purge_messages and timeout_member/ban_member "
-    "on sight without waiting for approval. Normal chat: do not moderate loosely over banter.\n"
+    "Discord mod/structure tools (kick, ban, timeout, purge, delete others' messages, "
+    "channels, roles, pins, invites, server edits) require the person asking to have "
+    "that Discord permission — same perm you need. Maxwell-owner status is not a bypass. "
+    "If they ask you to delete messages and they do not have manage_messages, refuse. "
+    "Deleting your own messages is allowed without that perm. "
+    "Normal chat: do not moderate loosely over banter. "
+    "If something is actually broken, a user asks you to escalate, or the owner "
+    "needs to know, call report — it DMs the owner with details. Do not spam it.\n"
     "## What comes back\n"
     "[returns output] — result returned; you are called again. Do not invent result or send_message in same batch.\n"
     "[returns nothing] — runs silently; no extra turn. If user should see reply, send_message in same batch.\n"
@@ -2501,7 +2509,9 @@ LEAN_TOOL_PROTOCOL = (
     "Visible replies go through send_message (or no_response to stay silent). "
     "Do not also write the same text as raw assistant content.\n"
     "In DMs, Discord mod/server tools and sending to other channels are not available. "
-    "send_message stays in this chat.\n"
+    "send_message stays in this chat. "
+    "In a server, only run a Discord mod tool if the person asking has that permission. "
+    "Call report to DM the owner about a real problem.\n"
     "ONE send_message holds your whole reply. Consecutive short messages read "
     "as spam. If you have nothing new to add, use no_response.\n"
     "Do the work first. Call the tools that do the job, then send_message once "
@@ -3859,6 +3869,7 @@ class MaxwellBot(commands.Bot):
             self.tools["chess_resign"] = ChessResignTool(self)
         self.tools["usage"] = UsageTool(self)
         self.tools["debug"] = DebugTool(self)
+        self.tools["report"] = ReportTool(self)
         # No more standalone `reasoning_log` tool. Reasoning now rides INSIDE
         # every tool call via the auto-injected `reasoning` param (see
         # tool_registry.record_reasoning + tool_schemas.build_openai_tools).
@@ -5629,6 +5640,22 @@ class MaxwellBot(commands.Bot):
 
     async def on_error(self, event, *args, **kwargs):
         logger.exception("discord event %s failed", event)
+        exc = sys.exc_info()[1]
+        msg = None
+        for arg in args:
+            if getattr(arg, "channel", None) is not None and getattr(
+                arg, "author", None
+            ) is not None:
+                msg = arg
+                break
+        with contextlib.suppress(Exception):
+            await notify_owner(
+                self,
+                kind="error",
+                title=f"discord event {event} failed",
+                message=msg,
+                exc=exc if isinstance(exc, BaseException) else None,
+            )
 
     def is_connected(self) -> bool:
         """True while the Discord gateway websocket is open.
@@ -7057,6 +7084,15 @@ class MaxwellBot(commands.Bot):
                 channel_id,
                 type(exc).__name__,
             )
+            with contextlib.suppress(Exception):
+                await notify_owner(
+                    self,
+                    kind="error",
+                    title=f"inbound {type(exc).__name__}",
+                    details=f"message_id={message_id} channel_id={channel_id}",
+                    message=message,
+                    exc=exc,
+                )
             row = journal.get(message_id) if journal is not None else None
             if row:
                 if (
@@ -15006,6 +15042,20 @@ class MaxwellBot(commands.Bot):
                 )
             except Exception:
                 logger.debug("autofix schedule failed", exc_info=True)
+            with contextlib.suppress(Exception):
+                self._track_task(
+                    asyncio.create_task(
+                        notify_owner(
+                            self,
+                            kind="error",
+                            title=f"tool {name} crashed",
+                            details="tool args were not included (may contain secrets)",
+                            message=message,
+                            exc=e,
+                        ),
+                        name=f"owner-report-{name}",
+                    )
+                )
         # Record the reasoning the model gave for THIS tool call, attached to the
         # real action and its result. Swallowed failures (see record_reasoning).
         await record_reasoning(
@@ -15795,6 +15845,15 @@ class MaxwellBot(commands.Bot):
             names.discard("create_thread")
         if _is_private_chat(message):
             names.difference_update(DM_BLOCKED_TOOLS)
+        guild = getattr(message, "guild", None) if message is not None else None
+        if guild is not None:
+            allowed_mod = _mod_tools_allowed(guild, message)
+            for tool in _ALL_MOD_TOOLS:
+                # Own-message deletes stay available without manage_messages.
+                if tool == "delete_message":
+                    continue
+                if tool not in allowed_mod:
+                    names.discard(tool)
         return names
 
     def _tools_for_turn(self, platform: str, message=None) -> dict[str, Any]:
@@ -16510,6 +16569,12 @@ class MaxwellBot(commands.Bot):
         access = _guild_access_line(getattr(message, "guild", None))
         if access:
             dynamic_parts.append(access)
+        asker = _user_access_line(
+            getattr(message, "guild", None),
+            getattr(message, "author", None),
+        )
+        if asker:
+            dynamic_parts.append(asker)
         room = _guild_room_context(
             getattr(message, "guild", None),
             getattr(message, "channel", None),
@@ -18254,6 +18319,7 @@ class MaxwellBot(commands.Bot):
 
 async def main():
     loop = asyncio.get_running_loop()
+    _owner_bot = {"bot": None}
 
     def _loop_exception_handler(loop_, ctx):
         msg = ctx.get("message", "")
@@ -18267,6 +18333,22 @@ async def main():
             )
         else:
             logger.error("unhandled loop error: %s %s", msg, ctx)
+        bot = _owner_bot.get("bot")
+        if bot is None:
+            return
+        with contextlib.suppress(Exception):
+            bot._track_task(
+                asyncio.create_task(
+                    notify_owner(
+                        bot,
+                        kind="error",
+                        title="unhandled loop exception",
+                        details=str(msg or ""),
+                        exc=exc if isinstance(exc, BaseException) else None,
+                    ),
+                    name="owner-report-loop",
+                )
+            )
 
     try:
         loop.set_exception_handler(_loop_exception_handler)
@@ -18293,6 +18375,7 @@ async def main():
             "DISCORD_BOT_TOKEN. User (self-bot) tokens are not supported."
         )
     bot = MaxwellBot()
+    _owner_bot["bot"] = bot
     logger.info("Discord bot token loaded")
     bot._gateway_last_ok = time.monotonic()
     bot._gateway_last_disconnect = None

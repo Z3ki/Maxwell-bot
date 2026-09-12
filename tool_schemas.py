@@ -861,6 +861,14 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     ),
     "usage": _obj({}),
     "debug": _obj({}),
+    "report": _obj(
+        {
+            "what": _str("Short summary of the problem or report"),
+            "details": _str("Optional extra context: who, where, what happened"),
+            "kind": _str("report | error | info (default report)"),
+        },
+        ["what"],
+    ),
 }
 
 
@@ -974,6 +982,7 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "chess_resign",
         "usage",
         "debug",
+        "report",
         # spawn_background hands the job id back so the live turn can ack it
         # by name, then ends (the detached job delivers the real answer later).
         "spawn_background",
@@ -1004,6 +1013,7 @@ CHAT_CORE_TOOL_NAMES: frozenset[str] = frozenset(
         "chess_resign",
         "usage",
         "debug",
+        "report",
     }
 )
 

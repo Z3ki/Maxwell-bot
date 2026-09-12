@@ -77,12 +77,20 @@ def _live_bot(extra_tools=None):
 
 
 def _msg(content, *, mentions=None, watch_followup=False, dm=False):
-    guild = None if dm else SimpleNamespace(id=1)
+    guild = None
+    author = SimpleNamespace(id=2)
+    if not dm:
+        perms = SimpleNamespace(administrator=True)
+        guild = SimpleNamespace(
+            id=1, me=SimpleNamespace(id=1, guild_permissions=perms, roles=[])
+        )
+        author = SimpleNamespace(id=2, guild_permissions=perms, roles=[])
     msg = SimpleNamespace(
         content=content,
         channel=SimpleNamespace(id=99, guild=guild),
         mentions=list(mentions or []),
         guild=guild,
+        author=author,
         reference=None,
     )
     if watch_followup:

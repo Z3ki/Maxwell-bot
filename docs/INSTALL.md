@@ -106,7 +106,7 @@ The dashboard/API starts in the same container on port 8765. Set `MAXWELL_START_
 
 ### Discord bot token
 
-Create an application at `https://discord.com/developers/applications`, add a Bot, and copy the bot token into `DISCORD_BOT_TOKEN`. Enable the privileged intents **Message Content**, **Server Members**, and **Presence**. Invite the bot to your servers with the permissions it needs (Manage Channels, Kick/Ban, Moderate Members, etc. for mod tools).
+Create an application at `https://discord.com/developers/applications`, add a Bot, and copy the bot token into `DISCORD_BOT_TOKEN`. Enable the privileged intents **Message Content**, **Server Members**, and **Presence**. Invite the bot with a normal add (no Administrator). Grant it a role in Server Settings if you want mod tools (Manage Channels, Kick/Ban, Moderate Members, and so on). `/install` never requests Administrator.
 
 Never paste this token into chat, logs, or git.
 

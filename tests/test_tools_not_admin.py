@@ -50,6 +50,10 @@ def test_tool_protocol_states_dm_and_cross_chat_restrictions():
     assert "list_channels" in text
     assert "list_roles" in text
     assert "list_members" in text
+    assert "person asking" in text
+    assert "manage_messages" in text
+    assert "owner/admin authorization" not in text
+    assert "call report" in text
 
 
 def test_tool_descriptions_do_not_say_admin_only():

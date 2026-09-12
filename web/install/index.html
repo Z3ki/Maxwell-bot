@@ -89,6 +89,7 @@
         <h1>Add Maxwell</h1>
         <p id="copy">
           Sign in with Discord. Only Maxwell admins can add this app.
+          The invite is a normal add — it does not request Administrator.
         </p>
         <div id="error" class="err"></div>
         <button id="discordLogin" class="btn primary" type="button">
@@ -149,7 +150,9 @@
         $("addGuild").classList.remove("hidden");
         const name = (user && user.username) || "admin";
         copyEl.textContent =
-          "Signed in as " + name + ". Add Maxwell to a Discord server.";
+          "Signed in as " +
+          name +
+          ". Add Maxwell to a Discord server. This is a normal add — no Administrator permission is requested. Grant Maxwell a role in Server Settings if you want mod tools.";
       }
       async function verify(t) {
         token = t;

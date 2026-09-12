@@ -275,6 +275,15 @@ def test_base_knowledge_forbids_yes_man_energy():
     assert "never invent facts" in text
 
 
+def test_base_knowledge_gates_mod_tools_on_asker_perms():
+    text = MAXWELL_BASE_KNOWLEDGE.lower()
+    assert "person asking" in text
+    assert "manage_messages" in text
+    assert "does not bypass" in text
+    assert "no permission needed" not in text
+    assert "call report" in text
+
+
 # --------------------------------------------------------------------------
 # chess: he plays it himself
 # --------------------------------------------------------------------------

@@ -37,6 +37,10 @@ def _member(*, uid=1, name="Max", position=2, perms=None):
     )
 
 
+def _author(*, uid=5, name="Ada", perms=None):
+    return _member(uid=uid, name=name, position=4, perms=perms)
+
+
 def test_is_youtube_url_rejects_watch_and_short_hosts():
     assert _is_youtube_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
     assert _is_youtube_url("https://youtu.be/dQw4w9WgXcQ")
@@ -98,7 +102,7 @@ def test_create_channel_rejects_unknown_kind():
         id=10, name="Villa", me=me, categories=[], create_text_channel=None
     )
     bot = SimpleNamespace(get_guild=lambda _gid: None)
-    msg = SimpleNamespace(guild=guild, author=SimpleNamespace(id=5))
+    msg = SimpleNamespace(guild=guild, author=_author())
     result = asyncio.run(
         CreateChannelTool(bot).execute(msg, name="general", kind="not-a-type")
     )
@@ -110,7 +114,7 @@ def test_edit_category_requires_a_field():
     cat = SimpleNamespace(id=20, name="chat")
     guild = SimpleNamespace(id=10, name="Villa", me=me, categories=[cat])
     bot = SimpleNamespace(get_guild=lambda _gid: None)
-    msg = SimpleNamespace(guild=guild, author=SimpleNamespace(id=5))
+    msg = SimpleNamespace(guild=guild, author=_author())
     result = asyncio.run(
         EditCategoryTool(bot).execute(msg, category_id="20")
     )
@@ -121,7 +125,7 @@ def test_lockdown_requires_target():
     me = _member()
     guild = SimpleNamespace(id=10, name="Villa", me=me, channels=[])
     bot = SimpleNamespace(get_guild=lambda _gid: None)
-    msg = SimpleNamespace(guild=guild, author=SimpleNamespace(id=5))
+    msg = SimpleNamespace(guild=guild, author=_author())
     result = asyncio.run(LockdownTool(bot).execute(msg))
     assert "target is required" in result
 
@@ -131,7 +135,7 @@ def test_move_channel_requires_channel_id():
     bot = SimpleNamespace(get_guild=lambda _gid: None)
     msg = SimpleNamespace(
         guild=SimpleNamespace(id=10, name="Villa", me=me),
-        author=SimpleNamespace(id=5),
+        author=_author(),
     )
     result = asyncio.run(MoveChannelTool(bot).execute(msg))
     assert "channel_id is required" in result

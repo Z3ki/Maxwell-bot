@@ -450,4 +450,5 @@ KNOWN_TOOLS = [
     "manage_plugin",
     "usage",
     "debug",
+    "report",
 ]

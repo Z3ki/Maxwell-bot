@@ -20,6 +20,7 @@ import socket
 from mail_transport import connect_imap, mail_ssl_context
 import tempfile
 import time
+import traceback
 import wave
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
@@ -740,7 +741,32 @@ _PERM_ALIASES = {
     "manage_emojis": "manage_expressions",
     "manage_emojis_and_stickers": "manage_expressions",
     "manage_expressions": "manage_expressions",
+    "delete_messages": "manage_messages",
 }
+
+# Extra flags shown when listing a user's role permissions. Not used to
+# unlock mod tools — chatting does not make someone a moderator.
+_BASIC_PERM_NAMES = (
+    "view_channel",
+    "send_messages",
+    "send_messages_in_threads",
+    "create_public_threads",
+    "create_private_threads",
+    "read_message_history",
+    "embed_links",
+    "attach_files",
+    "add_reactions",
+    "use_external_emojis",
+    "use_external_stickers",
+    "connect",
+    "speak",
+    "use_voice_activation",
+    "stream",
+    "change_nickname",
+    "use_application_commands",
+    "send_polls",
+    "send_voice_messages",
+)
 
 # Which tools a detected perm actually unlocks. administrator is handled as all.
 _CAP_TOOLS: dict[str, tuple[str, ...]] = {
@@ -810,11 +836,7 @@ def _canon_perm(name: str) -> str:
     return _PERM_ALIASES.get(name, name)
 
 
-def _admin_caps(guild, me=None) -> tuple[set[str], str]:
-    me = me or _guild_me(guild)
-    if not me:
-        return set(), "bot member is not cached"
-    perms = getattr(me, "guild_permissions", None)
+def _perms_to_caps(perms) -> tuple[set[str], str]:
     if not perms:
         return set(), "permissions are not cached"
     caps: set[str] = set()
@@ -828,9 +850,60 @@ def _admin_caps(guild, me=None) -> tuple[set[str], str]:
     return caps, ""
 
 
+def _admin_caps(guild, me=None) -> tuple[set[str], str]:
+    me = me or _guild_me(guild)
+    if not me:
+        return set(), "bot member is not cached"
+    return _perms_to_caps(getattr(me, "guild_permissions", None))
+
+
+def _resolve_requester_member(guild, message):
+    author = getattr(message, "author", None) if message is not None else None
+    if author is None:
+        return None
+    if guild is None:
+        return author
+    author_guild = getattr(author, "guild", None)
+    if author_guild is not None and getattr(author_guild, "id", None) == getattr(
+        guild, "id", None
+    ):
+        return author
+    uid = getattr(author, "id", None)
+    getter = getattr(guild, "get_member", None)
+    if uid is not None and callable(getter):
+        with contextlib.suppress(Exception):
+            member = getter(int(uid) if str(uid).isdigit() else uid)
+            if member is not None:
+                return member
+    return author
+
+
+def _member_channel_perms(member, channel=None):
+    if member is None:
+        return None
+    if channel is not None:
+        permissions_for = getattr(channel, "permissions_for", None)
+        if callable(permissions_for):
+            with contextlib.suppress(Exception):
+                perms = permissions_for(member)
+                if perms is not None:
+                    return perms
+    return getattr(member, "guild_permissions", None)
+
+
+def _member_caps(member, channel=None) -> tuple[set[str], str]:
+    if member is None:
+        return set(), "member is not cached"
+    return _perms_to_caps(_member_channel_perms(member, channel))
+
+
+def _has_cap(caps: set[str], cap: str) -> bool:
+    return "administrator" in caps or cap in caps or _canon_perm(cap) in caps
+
+
 def _has_guild_cap(guild, cap: str) -> bool:
     caps, _reason = _admin_caps(guild)
-    return "administrator" in caps or cap in caps or _canon_perm(cap) in caps
+    return _has_cap(caps, cap)
 
 
 def _tools_for_caps(caps: set[str]) -> list[str]:
@@ -848,13 +921,52 @@ def _tools_for_caps(caps: set[str]) -> list[str]:
     return found
 
 
-def _missing_cap(guild, cap: str) -> str:
-    if _has_guild_cap(guild, cap):
-        return ""
+def _mod_tools_allowed(guild, message) -> set[str]:
+    """Mod tools both the bot and the person asking can actually use."""
+    if guild is None:
+        return set()
+    bot_caps, _ = _admin_caps(guild)
+    user_caps, _ = _member_caps(_resolve_requester_member(guild, message))
+    return set(_tools_for_caps(bot_caps)) & set(_tools_for_caps(user_caps))
+
+
+def _needed_cap_label(cap: str, alt_caps: tuple[str, ...] = ()) -> str:
+    needed = tuple(dict.fromkeys((cap,) + tuple(alt_caps)))
+    return needed[0] if len(needed) == 1 else " or ".join(needed)
+
+
+def _missing_cap(
+    guild,
+    cap: str,
+    message=None,
+    *,
+    alt_caps: tuple[str, ...] = (),
+    channel=None,
+) -> str:
+    """Refuse unless the bot AND the person asking have the Discord perm."""
+    needed = tuple(dict.fromkeys((cap,) + tuple(alt_caps)))
+    shown = _needed_cap_label(cap, alt_caps)
     name = getattr(guild, "name", "this server")
+    bot_caps, _reason = _admin_caps(guild)
+    if not any(_has_cap(bot_caps, c) for c in needed):
+        return (
+            f"Error: I do not have {shown}/admin in {name}. "
+            "Run list_admin_servers to see roles, perms, and which tools I can use."
+        )
+    if message is None:
+        return ""
+    member = _resolve_requester_member(guild, message)
+    user_caps, _ureason = _member_caps(member, channel)
+    if any(_has_cap(user_caps, c) for c in needed):
+        return ""
+    who = (
+        getattr(member, "display_name", None)
+        or getattr(member, "name", None)
+        or "you"
+    )
     return (
-        f"Error: I do not have {cap}/admin in {name}. "
-        "Run list_admin_servers to see roles, perms, and which tools I can use."
+        f"Error: {who} does not have {shown} in {name}. "
+        "I only run that Discord tool if the person asking has the matching permission."
     )
 
 
@@ -964,6 +1076,51 @@ def _guild_access_line(guild) -> str:
     )
 
 
+def _member_role_perm_bits(member, guild, *, limit: int = 16) -> str:
+    roles = _named_roles(member, guild) if member else []
+    if not roles:
+        return "@everyone"
+    bits = []
+    for role in roles[:limit]:
+        granted = _role_elevated_perms(role)
+        extra = f" [{', '.join(granted)}]" if granted else ""
+        bits.append(f"{getattr(role, 'name', 'role')}{extra}")
+    if len(roles) > limit:
+        bits.append(f"+{len(roles) - limit} more")
+    return ", ".join(bits)
+
+
+def _user_access_line(guild, member) -> str:
+    """Per-turn line: the asker's roles, role perms, and which mod tools they can authorize."""
+    if guild is None or member is None:
+        return ""
+    name = str(getattr(guild, "name", None) or "this server").strip() or "this server"
+    gid = getattr(guild, "id", "?")
+    uname = (
+        getattr(member, "display_name", None)
+        or getattr(member, "name", None)
+        or "user"
+    )
+    uid = getattr(member, "id", "?")
+    role_txt = _member_role_perm_bits(member, guild)
+    caps, reason = _member_caps(member)
+    if reason and not caps:
+        perm_txt = f"none ({reason})"
+        tool_txt = "none"
+    elif "administrator" in caps:
+        perm_txt = "administrator"
+        tool_txt = "all guild mod tools"
+    else:
+        perm_txt = ", ".join(sorted(caps)) if caps else "none"
+        tools = _tools_for_caps(caps)
+        tool_txt = ", ".join(tools) if tools else "none"
+    return (
+        f"Asker {uname} ({uid}) Discord access in {name} ({gid}): "
+        f"roles={role_txt} | perms={perm_txt} | "
+        f"tools they can authorize={tool_txt}"
+    )
+
+
 def _guild_access_detail(guild) -> str:
     me = _guild_me(guild)
     caps, reason = _admin_caps(guild, me)
@@ -982,18 +1139,7 @@ def _guild_access_detail(guild) -> str:
     if roles:
         bits = []
         for role in roles[:12]:
-            role_perms = getattr(role, "permissions", None)
-            granted = []
-            if role_perms is not None:
-                if getattr(role_perms, "administrator", False):
-                    granted = ["administrator"]
-                else:
-                    granted = [
-                        _canon_perm(n)
-                        for n in _MOD_PERM_NAMES
-                        if n != "administrator" and getattr(role_perms, n, False)
-                    ]
-                    granted = list(dict.fromkeys(granted))
+            granted = _role_elevated_perms(role)
             extra = (
                 f" grants {', '.join(granted)}"
                 if granted
@@ -1330,18 +1476,84 @@ def _role_color_hex(role) -> str:
     return f"#{n:06X}"
 
 
-def _role_elevated_perms(role) -> list[str]:
-    role_perms = getattr(role, "permissions", None)
-    if role_perms is None:
+def _granted_perm_names(perms, *, elevated_only: bool = False) -> list[str]:
+    if perms is None:
         return []
-    if getattr(role_perms, "administrator", False):
+    if getattr(perms, "administrator", False):
         return ["administrator"]
-    granted = [
-        _canon_perm(n)
-        for n in _MOD_PERM_NAMES
-        if n != "administrator" and getattr(role_perms, n, False)
-    ]
-    return list(dict.fromkeys(granted))
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def _add(name: str) -> None:
+        key = _canon_perm(str(name))
+        if key in seen:
+            return
+        seen.add(key)
+        names.append(key)
+
+    try:
+        items = list(perms)
+    except Exception:
+        items = None
+    if items and isinstance(items[0], tuple) and len(items[0]) == 2:
+        for raw_name, value in items:
+            if not value:
+                continue
+            key = _canon_perm(str(raw_name))
+            if elevated_only and key not in set(_MOD_PERM_NAMES) and key not in _PERM_ALIASES:
+                continue
+            _add(key)
+        return names
+    scan = _MOD_PERM_NAMES if elevated_only else _MOD_PERM_NAMES + _BASIC_PERM_NAMES
+    for name in scan:
+        if name == "administrator":
+            continue
+        if getattr(perms, name, False):
+            _add(name)
+    return names
+
+
+def _role_elevated_perms(role) -> list[str]:
+    return _granted_perm_names(getattr(role, "permissions", None), elevated_only=True)
+
+
+def _role_all_perms(role) -> list[str]:
+    return _granted_perm_names(getattr(role, "permissions", None), elevated_only=False)
+
+
+def _format_member_roles_detail(member, guild=None) -> list[str]:
+    """Every role on a member plus that role's permissions and effective caps."""
+    guild = guild or getattr(member, "guild", None)
+    roles = list(getattr(member, "roles", None) or [])
+    roles.sort(key=lambda role: int(getattr(role, "position", 0) or 0), reverse=True)
+    lines: list[str] = []
+    if not roles:
+        lines.append("Roles: none cached")
+    else:
+        bits = []
+        for role in roles:
+            granted = _role_all_perms(role)
+            extra = (
+                f" grants {', '.join(granted)}"
+                if granted
+                else " (no extra perms)"
+            )
+            bits.append(f"{_role_label(role)}{extra}")
+        lines.append("Roles: " + "; ".join(bits))
+    caps, reason = _member_caps(member)
+    if reason and not caps:
+        lines.append(f"Effective perms: none ({reason})")
+    elif "administrator" in caps:
+        lines.append("Effective perms: administrator")
+    else:
+        lines.append(
+            "Effective perms: " + (", ".join(sorted(caps)) if caps else "none")
+        )
+    tools = _tools_for_caps(caps)
+    lines.append(
+        "Mod tools they can authorize: " + (", ".join(tools) if tools else "none")
+    )
+    return lines
 
 
 def _format_role_line(role) -> str:
@@ -1420,9 +1632,19 @@ def _format_member_line(member) -> str:
         if getattr(r, "name", "") not in {"", "@everyone"}
     ]
     if roles:
-        shown = roles[:6]
-        extra = f" +{len(roles) - 6}" if len(roles) > 6 else ""
+        shown = roles[:24]
+        extra = f" +{len(roles) - 24}" if len(roles) > 24 else ""
         bits.append("roles=" + ", ".join(shown) + extra)
+    caps, _reason = _member_caps(member)
+    if "administrator" in caps:
+        bits.append("perms=administrator")
+    elif caps:
+        shown_caps = sorted(caps)
+        extra = ""
+        if len(shown_caps) > 10:
+            extra = f" +{len(shown_caps) - 10}"
+            shown_caps = shown_caps[:10]
+        bits.append("perms=" + ", ".join(shown_caps) + extra)
     status = getattr(member, "status", None)
     status_name = str(getattr(status, "name", status) or "").lower()
     if status_name and status_name not in {"none", "offline"}:
@@ -2605,7 +2827,9 @@ class DeleteMessageTool(Tool):
             if not mine:
                 if guild is None:
                     return "Error: I can only delete my own messages here"
-                missing = _missing_cap(guild, "manage_messages")
+                missing = _missing_cap(
+                    guild, "manage_messages", message, channel=channel
+                )
                 if missing:
                     return missing
             await msg.delete()
@@ -3003,8 +3227,8 @@ class LookupUserTool(Tool):
         return (
             "Look up a Discord user by ID or mention. Params: user_id "
             "(required, numeric ID or @mention). Returns name, bio / about me, "
-            "creation date, banner, accent color, guild roles/nickname, avatar, "
-            "and whether they are in a voice channel."
+            "creation date, banner, accent color, every guild role with that "
+            "role's permissions, effective perms, avatar, and voice."
         )
 
     async def execute(
@@ -3073,13 +3297,7 @@ class LookupUserTool(Tool):
                         info_lines.append(
                             f"Server Joined: {member.joined_at.strftime('%Y-%m-%d')}"
                         )
-                    roles = [
-                        r.name
-                        for r in getattr(member, "roles", [])
-                        if getattr(r, "name", "") != "@everyone"
-                    ]
-                    if roles:
-                        info_lines.append(f"Roles: {', '.join(roles)}")
+                    info_lines.extend(_format_member_roles_detail(member, guild))
 
             info_lines.append(f"Avatar: {avatar}")
 
@@ -3481,8 +3699,9 @@ class CreateCategoryTool(Tool):
         if guild is None:
             return "Error: guild is unavailable"
         guild = cast(Any, guild)
-        if not _has_guild_cap(guild, "manage_channels"):
-            return f"Error: I do not have manage_channels/admin in {guild.name}. Run list_admin_servers first."
+        missing = _missing_cap(guild, "manage_channels", message)
+        if missing:
+            return missing
         try:
             create_kwargs = {
                 "name": clean,
@@ -3543,8 +3762,9 @@ class CreateChannelTool(Tool):
         if guild is None:
             return "Error: guild is unavailable"
         guild = cast(Any, guild)
-        if not _has_guild_cap(guild, "manage_channels"):
-            return f"Error: I do not have manage_channels/admin in {guild.name}. Run list_admin_servers first."
+        missing = _missing_cap(guild, "manage_channels", message)
+        if missing:
+            return missing
         category, error = _find_category(guild, category_id, category_name)
         category = cast(Any, category)
         if error:
@@ -3646,8 +3866,9 @@ class EditChannelTool(Tool):
         guild = getattr(channel, "guild", None)
         if not guild:
             return "Error: channel is not in a server"
-        if not _has_guild_cap(guild, "manage_channels"):
-            return f"Error: I do not have manage_channels/admin in {guild.name}. Run list_admin_servers first."
+        missing = _missing_cap(guild, "manage_channels", message)
+        if missing:
+            return missing
         updates = {}
         if name:
             clean = (
@@ -3747,8 +3968,9 @@ class DeleteChannelTool(Tool):
         guild = getattr(channel, "guild", None)
         if not guild:
             return "Error: channel is not in a server"
-        if not _has_guild_cap(guild, "manage_channels"):
-            return f"Error: I do not have manage_channels/admin in {guild.name}. Run list_admin_servers first."
+        missing = _missing_cap(guild, "manage_channels", message)
+        if missing:
+            return missing
         actual = getattr(channel, "name", "")
         if str(confirm_name) != actual:
             return f"Error: confirm_name must exactly match '{actual}'"
@@ -3790,11 +4012,9 @@ class EditCategoryTool(Tool):
             return error
         if guild is None:
             return "Error: guild is unavailable"
-        if not _has_guild_cap(guild, "manage_channels"):
-            return (
-                f"Error: I do not have manage_channels/admin in {guild.name}. "
-                "Run list_admin_servers first."
-            )
+        missing = _missing_cap(guild, "manage_channels", message)
+        if missing:
+            return missing
         category, error = _find_category(guild, category_id, category_name)
         if error:
             return error
@@ -3855,11 +4075,9 @@ class MoveChannelTool(Tool):
             return "Error: channel is not in a server"
         if isinstance(channel, discord.CategoryChannel):
             return "Error: cannot move a category into a category; use edit_category position"
-        if not _has_guild_cap(guild, "manage_channels"):
-            return (
-                f"Error: I do not have manage_channels/admin in {guild.name}. "
-                "Run list_admin_servers first."
-            )
+        missing = _missing_cap(guild, "manage_channels", message)
+        if missing:
+            return missing
         if category_id is None and category_name is None:
             return "Error: category_id, category_name, or category_id=none is required"
         category, error = _find_category(guild, category_id, category_name)
@@ -3908,11 +4126,9 @@ class CloneChannelTool(Tool):
         guild = getattr(channel, "guild", None)
         if guild is None:
             return "Error: channel is not in a server"
-        if not _has_guild_cap(guild, "manage_channels"):
-            return (
-                f"Error: I do not have manage_channels/admin in {guild.name}. "
-                "Run list_admin_servers first."
-            )
+        missing = _missing_cap(guild, "manage_channels", message)
+        if missing:
+            return missing
         clone_kwargs = {"reason": _mod_reason(message)}
         if name:
             clean = (
@@ -3962,11 +4178,9 @@ class SyncChannelTool(Tool):
         guild = getattr(channel, "guild", None)
         if guild is None:
             return "Error: channel is not in a server"
-        if not _has_guild_cap(guild, "manage_channels"):
-            return (
-                f"Error: I do not have manage_channels/admin in {guild.name}. "
-                "Run list_admin_servers first."
-            )
+        missing = _missing_cap(guild, "manage_channels", message)
+        if missing:
+            return missing
         why = _mod_reason(message)
         targets = []
         if isinstance(channel, discord.CategoryChannel):
@@ -4016,11 +4230,11 @@ class LockdownTool(Tool):
             return error
         if guild is None:
             return "Error: guild is unavailable"
-        if not (
-            _has_guild_cap(guild, "manage_channels")
-            or _has_guild_cap(guild, "manage_roles")
-        ):
-            return _missing_cap(guild, "manage_channels")
+        missing = _missing_cap(
+            guild, "manage_channels", message, alt_caps=("manage_roles",)
+        )
+        if missing:
+            return missing
         locked = not parse_bool(unlock, False)
         spec = str(target or "").strip()
         if not spec:
@@ -4085,11 +4299,11 @@ class ListPermissionsTool(Tool):
         guild = getattr(channel, "guild", None)
         if guild is None:
             return "Error: channel is not in a server"
-        if not (
-            _has_guild_cap(guild, "manage_roles")
-            or _has_guild_cap(guild, "manage_channels")
-        ):
-            return _missing_cap(guild, "manage_roles")
+        missing = _missing_cap(
+            guild, "manage_roles", message, alt_caps=("manage_channels",)
+        )
+        if missing:
+            return missing
         overwrites = getattr(channel, "overwrites", None) or {}
         if not overwrites:
             synced = getattr(channel, "permissions_synced", None)
@@ -4144,7 +4358,7 @@ class ManageInvitesTool(Tool):
         guild, error = await _resolve_guild(self.bot, message, guild_id)
         if error:
             return error
-        missing = _missing_cap(guild, "create_instant_invite")
+        missing = _missing_cap(guild, "create_instant_invite", message)
         if missing:
             return missing
         act = str(action or "list").strip().lower()
@@ -4221,7 +4435,7 @@ class SoftbanMemberTool(Tool):
         guild, error = await _resolve_guild(self.bot, message, guild_id)
         if error:
             return error
-        missing = _missing_cap(guild, "ban_members")
+        missing = _missing_cap(guild, "ban_members", message)
         if missing:
             return missing
         member, error = await _resolve_member(guild, user_id)
@@ -4275,7 +4489,7 @@ class ListTimeoutsTool(Tool):
         guild, error = await _resolve_guild(self.bot, message, guild_id)
         if error:
             return error
-        missing = _missing_cap(guild, "moderate_members")
+        missing = _missing_cap(guild, "moderate_members", message)
         if missing:
             return missing
         try:
@@ -4330,7 +4544,7 @@ class KickMemberTool(Tool):
         guild, error = await _resolve_guild(self.bot, message, guild_id)
         if error:
             return error
-        missing = _missing_cap(guild, "kick_members")
+        missing = _missing_cap(guild, "kick_members", message)
         if missing:
             return missing
         member, error = await _resolve_member(guild, user_id)
@@ -4370,7 +4584,7 @@ class BanMemberTool(Tool):
         guild, error = await _resolve_guild(self.bot, message, guild_id)
         if error:
             return error
-        missing = _missing_cap(guild, "ban_members")
+        missing = _missing_cap(guild, "ban_members", message)
         if missing:
             return missing
         member, error = await _resolve_member(guild, user_id)
@@ -4429,7 +4643,7 @@ class UnbanMemberTool(Tool):
         guild, error = await _resolve_guild(self.bot, message, guild_id)
         if error:
             return error
-        missing = _missing_cap(guild, "ban_members")
+        missing = _missing_cap(guild, "ban_members", message)
         if missing:
             return missing
         uid = _parse_snowflake(user_id)
@@ -4466,7 +4680,7 @@ class ListBansTool(Tool):
         guild, error = await _resolve_guild(self.bot, message, guild_id)
         if error:
             return error
-        missing = _missing_cap(guild, "ban_members")
+        missing = _missing_cap(guild, "ban_members", message)
         if missing:
             return missing
         try:
@@ -4510,7 +4724,7 @@ class TimeoutMemberTool(Tool):
         guild, error = await _resolve_guild(self.bot, message, guild_id)
         if error:
             return error
-        missing = _missing_cap(guild, "moderate_members")
+        missing = _missing_cap(guild, "moderate_members", message)
         if missing:
             return missing
         member, error = await _resolve_member(guild, user_id)
@@ -4568,7 +4782,7 @@ class ManageRoleTool(Tool):
         guild, error = await _resolve_guild(self.bot, message, guild_id)
         if error:
             return error
-        missing = _missing_cap(guild, "manage_roles")
+        missing = _missing_cap(guild, "manage_roles", message)
         if missing:
             return missing
         me = _guild_me(guild)
@@ -4684,7 +4898,9 @@ class PurgeMessagesTool(Tool):
         guild = getattr(channel, "guild", None)
         if guild is None:
             return "Error: purge only works in servers"
-        missing = _missing_cap(guild, "manage_messages")
+        missing = _missing_cap(
+            guild, "manage_messages", message, channel=channel
+        )
         if missing:
             return missing
         if not hasattr(channel, "purge"):
@@ -4736,11 +4952,15 @@ class PinMessageTool(Tool):
         guild = getattr(channel, "guild", None)
         if guild is None:
             return "Error: pin only works in servers"
-        if not (
-            _has_guild_cap(guild, "pin_messages")
-            or _has_guild_cap(guild, "manage_messages")
-        ):
-            return _missing_cap(guild, "pin_messages")
+        missing = _missing_cap(
+            guild,
+            "pin_messages",
+            message,
+            alt_caps=("manage_messages",),
+            channel=channel,
+        )
+        if missing:
+            return missing
         try:
             msg = await channel.fetch_message(int(str(message_id).strip()))
             if parse_bool(unpin, False):
@@ -4776,7 +4996,7 @@ class SetMemberNicknameTool(Tool):
         guild, error = await _resolve_guild(self.bot, message, guild_id)
         if error:
             return error
-        missing = _missing_cap(guild, "manage_nicknames")
+        missing = _missing_cap(guild, "manage_nicknames", message)
         if missing:
             return missing
         member, error = await _resolve_member(guild, user_id)
@@ -4828,7 +5048,7 @@ class VoiceModTool(Tool):
         }.get(act)
         if not cap:
             return "Error: action must be mute, unmute, deafen, undeafen, move, or disconnect"
-        missing = _missing_cap(guild, cap)
+        missing = _missing_cap(guild, cap, message)
         if missing:
             return missing
         member, error = await _resolve_member(guild, user_id)
@@ -4890,11 +5110,15 @@ class LockChannelTool(Tool):
         guild = getattr(channel, "guild", None)
         if guild is None:
             return "Error: lock only works in servers"
-        if not (
-            _has_guild_cap(guild, "manage_channels")
-            or _has_guild_cap(guild, "manage_roles")
-        ):
-            return _missing_cap(guild, "manage_channels")
+        missing = _missing_cap(
+            guild,
+            "manage_channels",
+            message,
+            alt_caps=("manage_roles",),
+            channel=channel,
+        )
+        if missing:
+            return missing
         locked = not parse_bool(unlock, False)
         why = _mod_reason(message)
         targets = (
@@ -4945,7 +5169,7 @@ class SetChannelPermissionsTool(Tool):
         if error:
             return error
         guild = channel.guild
-        missing = _missing_cap(guild, "manage_roles")
+        missing = _missing_cap(guild, "manage_roles", message)
         if missing:
             return missing
         spec = str(target).strip().lower()
@@ -5005,7 +5229,7 @@ class EditServerTool(Tool):
         guild, error = await _resolve_guild(self.bot, message, guild_id)
         if error:
             return error
-        missing = _missing_cap(guild, "manage_guild")
+        missing = _missing_cap(guild, "manage_guild", message)
         if missing:
             return missing
         updates = {}
@@ -5117,7 +5341,7 @@ class AuditLogTool(Tool):
         guild, error = await _resolve_guild(self.bot, message, guild_id)
         if error:
             return error
-        missing = _missing_cap(guild, "view_audit_log")
+        missing = _missing_cap(guild, "view_audit_log", message)
         if missing:
             return missing
         try:
@@ -5161,7 +5385,7 @@ class ManageEmojiTool(Tool):
         guild, error = await _resolve_guild(self.bot, message, guild_id)
         if error:
             return error
-        missing = _missing_cap(guild, "manage_expressions")
+        missing = _missing_cap(guild, "manage_expressions", message)
         if missing:
             return missing
         act = str(action or "list").strip().lower()
@@ -12710,6 +12934,189 @@ def collect_debug_stats(bot, channel_id: str | None = None) -> str:
     if isinstance(active, dict):
         extra.append(f"in-flight turns {sum(1 for t in active.values() if t and not t.done())}")
     return format_timing_debug(history, daily=daily, extra=extra or None)
+
+
+_OWNER_NOTIFY_MIN_INTERVAL = 45.0
+_OWNER_NOTIFY_FINGERPRINT_TTL = 600.0
+_OWNER_NOTIFY_HOUR_CAP = 12
+
+
+def _report_context_lines(message) -> list[str]:
+    if message is None:
+        return []
+    lines: list[str] = []
+    author = getattr(message, "author", None)
+    if author is not None:
+        who = (
+            getattr(author, "display_name", None)
+            or getattr(author, "name", None)
+            or "?"
+        )
+        lines.append(f"who: {who} ({getattr(author, 'id', '?')})")
+    channel = getattr(message, "channel", None)
+    guild = getattr(message, "guild", None)
+    if channel is not None:
+        ch_name = getattr(channel, "name", None)
+        if not ch_name:
+            ch_name = "DM" if guild is None else str(getattr(channel, "id", "?"))
+        bit = f"where: #{ch_name} ({getattr(channel, 'id', '?')})"
+        if guild is not None:
+            bit += (
+                f" in {getattr(guild, 'name', 'server')} "
+                f"({getattr(guild, 'id', '?')})"
+            )
+        lines.append(bit)
+    mid = getattr(message, "id", None)
+    if mid is not None:
+        lines.append(f"message_id: {mid}")
+    content = str(getattr(message, "content", "") or "").replace("\n", " ").strip()
+    if content:
+        lines.append("said: " + content[:400])
+    return lines
+
+
+def _redact_report_text(text: str) -> str:
+    try:
+        from autofix import redact_diagnostics
+
+        return redact_diagnostics(str(text or ""))
+    except Exception:
+        return str(text or "")
+
+
+async def notify_owner(
+    bot,
+    *,
+    kind: str = "report",
+    title: str,
+    details: str = "",
+    message=None,
+    exc: BaseException | None = None,
+) -> str:
+    """DM the configured owner (CREATOR_ID / first owner) with a report."""
+    if getattr(bot, "_owner_notify_sending", False):
+        return "Error: already sending an owner report"
+    kind = str(kind or "report").strip().lower() or "report"
+    if kind not in {"report", "error", "info"}:
+        kind = "report"
+    title = _redact_report_text(str(title or "").strip())[:240]
+    if not title:
+        return "Error: what/title is required"
+    values = identity_values(getattr(bot, "config", None))
+    uid = str(values.get("creator_id") or "").strip()
+    owner_name = str(values.get("creator_name") or "owner").strip() or "owner"
+    if not uid.isdigit():
+        return "Error: no owner Discord id configured (CREATOR_ID / MAXWELL_OWNER_IDS)"
+    self_id = getattr(getattr(bot, "user", None), "id", None)
+    if self_id is not None and str(self_id) == uid:
+        return "Error: owner id is this bot"
+    now = time.monotonic()
+    times: list[float] = getattr(bot, "_owner_notify_times", None) or []
+    stamps: dict[str, float] = getattr(bot, "_owner_notify_fingerprints", None) or {}
+    bot._owner_notify_times = times
+    bot._owner_notify_fingerprints = stamps
+    times[:] = [t for t in times if now - t < 3600]
+    expired = [k for k, t in stamps.items() if now - t > _OWNER_NOTIFY_FINGERPRINT_TTL]
+    for key in expired:
+        stamps.pop(key, None)
+    fingerprint = "|".join(
+        (
+            kind,
+            title[:80],
+            type(exc).__name__ if exc is not None else "",
+        )
+    )
+    last_same = stamps.get(fingerprint)
+    if last_same is not None and now - last_same < _OWNER_NOTIFY_FINGERPRINT_TTL:
+        return "Owner already got this report recently; not sending a duplicate."
+    if times and now - times[-1] < _OWNER_NOTIFY_MIN_INTERVAL:
+        return "Owner report rate-limited; try again in a minute."
+    if len(times) >= _OWNER_NOTIFY_HOUR_CAP:
+        return "Owner report hourly cap reached; not sending."
+    when = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    lines = [
+        f"**Maxwell {kind}**",
+        title,
+        f"when: {when}",
+    ]
+    lines.extend(_report_context_lines(message))
+    extra = _redact_report_text(str(details or "").strip())
+    if extra:
+        lines.append("details:")
+        lines.append(extra[:1500])
+    if exc is not None:
+        lines.append(f"error: {type(exc).__name__}: {_redact_report_text(str(exc))[:400]}")
+        tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        tb = _redact_report_text(tb).strip()
+        if tb:
+            if len(tb) > 1200:
+                tb = "…" + tb[-1200:]
+            lines.append("```")
+            lines.append(tb)
+            lines.append("```")
+    body = "\n".join(lines).strip()
+    bot._owner_notify_sending = True
+    try:
+        getter = getattr(bot, "get_user", None)
+        user = getter(int(uid)) if callable(getter) else None
+        if user is None:
+            fetch = getattr(bot, "fetch_user", None)
+            if not callable(fetch):
+                return f"Error: cannot resolve owner {uid}"
+            user = await fetch(int(uid))
+        if user is None:
+            return f"Error: owner {uid} not found"
+        dm = getattr(user, "dm_channel", None)
+        if dm is None:
+            create_dm = getattr(user, "create_dm", None)
+            if not callable(create_dm):
+                return "Error: cannot open owner DM"
+            dm = await create_dm()
+        sender = getattr(dm, "send", None)
+        if not callable(sender):
+            return "Error: owner DM cannot send"
+        chunks = SendMessageTool._chunks(body)
+        for chunk in chunks:
+            await sender(chunk)
+        times.append(now)
+        stamps[fingerprint] = now
+        return f"Reported to {owner_name} ({uid})."
+    except discord.Forbidden:
+        return (
+            f"Error: cannot DM owner {uid} — they have DMs closed or blocked this bot"
+        )
+    except Exception as send_exc:
+        return f"Error sending owner DM: {send_exc}"
+    finally:
+        bot._owner_notify_sending = False
+
+
+class ReportTool(Tool):
+    """DM the configured owner with a report or error."""
+
+    def get_description(self):
+        return (
+            "DM the owner with a report. Use when something is actually broken, "
+            "a user asks you to escalate, or the owner needs to know. Do not spam "
+            "it for banter. Params: what (required, short summary), details "
+            "(optional: who/where/what happened), kind (report|error|info, default report)."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        what: str | None = None,
+        details: str | None = None,
+        kind: str = "report",
+        **kwargs,
+    ) -> str:
+        return await notify_owner(
+            self.bot,
+            kind=kind,
+            title=str(what or "").strip(),
+            details=str(details or "").strip(),
+            message=message,
+        )
 
 
 class DebugTool(Tool):
