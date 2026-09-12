@@ -196,11 +196,9 @@ DEFAULT_CONTROL = {
     # hd_image behind more_tools and made photo requests look like a
     # from-scratch generate. Kept so existing control.json files still load.
     "lean_chat_tools": False,
-    # When a new support/ticket-style channel is created in a server Maxwell is
-    # in, post a short opening line so he is present in the room and it enters
-    # his memory / conversation-watch scope. Off and he only observes new
-    # channels without posting anything.
-    "auto_ticket_greeting": True,
+    # Unused for posting: ticket greetings are per-server via `,ticket on`.
+    # Kept so existing control.json files still load.
+    "auto_ticket_greeting": False,
     "disabled_tools": [],
     "ignore_users": [],
     "allowed_channels": [],

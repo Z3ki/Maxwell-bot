@@ -3043,6 +3043,9 @@ class MaxwellBot(commands.Bot):
         # a noisy server even under the env baseline.
         self._progress_servers: set[str] = set()
         self._progress_servers_off: set[str] = set()
+        # Per-server opt-in for the auto line in new ticket/support channels.
+        # Off everywhere until an admin runs `,ticket on` in that server.
+        self._ticket_greeting_servers: set[str] = set()
         self._blacklist: set[str] = set()
         self._shell_whitelist: set[str] = set()
         self._admins: set[str] = configured_admin_ids(self.config)
@@ -5592,6 +5595,7 @@ class MaxwellBot(commands.Bot):
         self._load_auto_channels()
         self._load_jailbreak()
         self._load_progress_servers()
+        self._load_ticket_greeting_servers()
         self._load_blacklist()
         self._load_shell_whitelist()
         self._load_control(force=True)
@@ -7756,6 +7760,7 @@ class MaxwellBot(commands.Bot):
             "wake",
             "jailbreak",
             "progress",
+            "ticket",
             "admin",
             "solo",
             "help",
@@ -7784,6 +7789,7 @@ class MaxwellBot(commands.Bot):
             "autonomy",
             "jailbreak",
             "progress",
+            "ticket",
             "downvote",
             "neg",
             "summarize",
@@ -8212,6 +8218,60 @@ class MaxwellBot(commands.Bot):
                         "server. off by default; opt in for visibility during slow tool "
                         "calls. (admin)"
                     )
+            elif cmd == "ticket":
+                server_id = str(message.guild.id) if message.guild else "DM"
+                arg = (args or "").strip().lower()
+                if arg in {"on", "enable", "yes", "true"}:
+                    if server_id == "DM":
+                        await message.channel.send(
+                            "ticket greetings are server-only — can't toggle them in DMs"
+                        )
+                    elif server_id in self._ticket_greeting_servers:
+                        await message.channel.send(
+                            "ticket greetings are already on for this server"
+                        )
+                    else:
+                        self._ticket_greeting_servers.add(server_id)
+                        self._save_ticket_greeting_servers()
+                        await message.channel.send(
+                            "ticket greetings ON for this server. new ticket/support "
+                            "channels get a short hello from me."
+                        )
+                elif arg in {"off", "disable", "no", "false"}:
+                    if server_id == "DM":
+                        await message.channel.send(
+                            "ticket greetings are off (DMs never get them)"
+                        )
+                    elif server_id not in self._ticket_greeting_servers:
+                        await message.channel.send(
+                            "ticket greetings were already off for this server"
+                        )
+                    else:
+                        self._ticket_greeting_servers.discard(server_id)
+                        self._save_ticket_greeting_servers()
+                        await message.channel.send(
+                            "ticket greetings OFF for this server. new ticket channels "
+                            "stay quiet."
+                        )
+                elif arg in {"status", ""}:
+                    if server_id == "DM":
+                        state = "off (DMs never get ticket greetings)"
+                    else:
+                        state = (
+                            "on"
+                            if self._ticket_greeting_enabled(server_id)
+                            else "off"
+                        )
+                    await message.channel.send(
+                        f"ticket greetings are {state} for this server "
+                        "(off by default; `,ticket on` to greet new ticket channels)"
+                    )
+                else:
+                    await message.channel.send(
+                        "usage: `,ticket on|off|status` — when a new ticket/support "
+                        "channel is created in THIS server, post a short hello. "
+                        "off by default. (admin)"
+                    )
             elif cmd == "admin":
                 if not self._is_admin(message.author.id):
                     await message.channel.send("not authorized")
@@ -8263,6 +8323,7 @@ class MaxwellBot(commands.Bot):
                     "` ,solo [#channel|off|status]` - lock this server to ONE channel: silence everywhere else and stop autonomy here (admin)\n"
                     "` ,jailbreak on|off|status` - toggle freedom-mode prompt for this server (admin)\n"
                     "` ,progress on|off|status` - toggle live 'thinking: …' messages during tool calls, per server (admin)\n"
+                    "` ,ticket on|off|status` - greet new ticket/support channels in this server (admin; off by default)\n"
                     "` ,sleep [minutes|off|status]` - take a 1-60m sleep window; pings get a notice (admin)\n"
                     "` ,wake` - clear active sleep window (admin)\n"
                     "` ,admin [@user|user_id|clear]` - add/remove/list admins (admin). Promoted users can log into the dashboard at /admin via 'Continue with Discord'."
@@ -9601,6 +9662,34 @@ class MaxwellBot(commands.Bot):
         for servers an admin enabled with `,jailbreak on`. DMs never get it."""
         return bool(server_id) and server_id in self._jailbreak_servers
 
+    def _load_ticket_greeting_servers(self, quiet: bool = False):
+        try:
+            ids = self._try_load_str_set("ticket_greeting_servers.json")
+            if ids is not None:
+                self._ticket_greeting_servers = ids
+            if not quiet:
+                logger.info(
+                    "Loaded %s ticket-greeting server(s)",
+                    len(self._ticket_greeting_servers),
+                )
+        except Exception as e:
+            logger.error(f"Failed to load ticket greeting servers: {e}")
+            self._ticket_greeting_servers = set()
+
+    def _save_ticket_greeting_servers(self):
+        self._save_str_set(
+            "ticket_greeting_servers.json",
+            self._ticket_greeting_servers,
+            "Failed to save ticket greeting servers",
+            sort=True,
+        )
+
+    def _ticket_greeting_enabled(self, server_id: str) -> bool:
+        """Auto-hello in new ticket channels. OFF unless `,ticket on` here."""
+        if not server_id or server_id == "DM":
+            return False
+        return server_id in self._ticket_greeting_servers
+
     def _load_progress_servers(self, quiet: bool = False):
         try:
             ids = self._try_load_str_set("progress_servers.json")
@@ -9765,7 +9854,7 @@ class MaxwellBot(commands.Bot):
         opening line so Maxwell is present in the new room and it lands in his
         memory / conversation-watch scope (his own posts go through the normal
         memory path). Fire-and-forget: never raises, never blocks a turn. Gated
-        by the ``auto_ticket_greeting`` control, ``bot_enabled``, and the bot
+        by ``,ticket on`` for this server, ``bot_enabled``, and the bot
         actually having send permission in the channel.
         """
         try:
@@ -9800,8 +9889,8 @@ class MaxwellBot(commands.Bot):
         solo = self._solo_channel_for(guild)
         if solo and str(getattr(channel, "id", "")) != solo:
             return
-        if kind != "ticket" or not self._control.get(
-            "auto_ticket_greeting", channel_watch.default_ticket_greeting()
+        if kind != "ticket" or not self._ticket_greeting_enabled(
+            str(getattr(guild, "id", "") or "")
         ):
             return
         me = getattr(guild, "me", None)

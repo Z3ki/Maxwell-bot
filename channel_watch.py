@@ -105,5 +105,8 @@ def greeting_for(name: str, bot_name: str = "maxwell") -> str:
 
 
 def default_ticket_greeting() -> bool:
-    """Whether auto-greeting new ticket channels is on by default."""
-    return True
+    """Whether auto-greeting new ticket channels is on by default.
+
+    Off unless an admin runs ``,ticket on`` in that server.
+    """
+    return False

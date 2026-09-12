@@ -58,4 +58,18 @@ def test_greeting_is_short_and_on_point():
 
 
 def test_default_ticket_greeting():
-    assert channel_watch.default_ticket_greeting() is True
+    assert channel_watch.default_ticket_greeting() is False
+
+
+def test_ticket_greeting_is_opt_in_per_server():
+    from types import SimpleNamespace
+
+    from bot import MaxwellBot
+
+    bot = SimpleNamespace(_ticket_greeting_servers=set())
+    bot._ticket_greeting_enabled = MaxwellBot._ticket_greeting_enabled.__get__(bot)
+    assert bot._ticket_greeting_enabled("123") is False
+    assert bot._ticket_greeting_enabled("DM") is False
+    bot._ticket_greeting_servers.add("123")
+    assert bot._ticket_greeting_enabled("123") is True
+    assert bot._ticket_greeting_enabled("456") is False

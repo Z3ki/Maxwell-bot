@@ -260,6 +260,7 @@ All commands use the `,` prefix. Admin commands require the user to be in the ad
 | `,context private <id>` | Yes | Mark a shared context fact private |
 | `,context global <id>` | Yes | Promote a fact to global shared context |
 | `,progress on` / `,progress off` / `,progress status` | Yes | Toggle live "thinking: …" tool progress messages, per server (off by default; DMs never get them) |
+| `,ticket on` / `,ticket off` / `,ticket status` | Yes | Greet new ticket/support channels in this server (off by default) |
 | `,rem` | Yes | Show REM status and last audit preview |
 | `,rem now` | Yes | Trigger one REM dream pass immediately |
 | `,rem on` / `,rem off` | Yes | Enable or disable REM for this process |
