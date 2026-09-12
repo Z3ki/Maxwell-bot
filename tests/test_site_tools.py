@@ -411,6 +411,22 @@ def test_site_guards_work_on_slotted_discord_messages(bot):
     assert "<h1>hi</h1>" in out
 
 
+def test_site_read_loop_guard_ignores_recycled_object_ids():
+    from bot_tools import _SITE_TURN_STATE, site_read_loop_guard
+
+    class Holder:
+        pass
+
+    msg = Holder()
+    _SITE_TURN_STATE[id(msg)] = {
+        "idle": 99,
+        "test_counts": {},
+        "read_cache": {"a"},
+        "_obj": object(),
+    }
+    assert site_read_loop_guard(msg, key="a", label="a", action="read") is None
+
+
 def test_api_path_warnings_flag_absolute_fetch():
     from bot_tools import _site_api_path_warnings
 
