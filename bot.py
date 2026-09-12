@@ -379,6 +379,7 @@ from user_install import (  # noqa: E402
     USER_INSTALL_COMMANDS,
     handle_user_install_interaction,
     is_user_install_message,
+    merge_user_install_history,
 )
 from rem import RemStore, load_rem_defaults, run_rem_once  # noqa: E402
 from tool_progress import make_progress as _make_tool_progress  # noqa: E402
@@ -16620,6 +16621,9 @@ class MaxwellBot(commands.Bot):
         )
         if room:
             dynamic_parts.append(room)
+        install_note = getattr(message, "user_install_note", None)
+        if install_note:
+            dynamic_parts.append(str(install_note))
         dynamic_parts.append(
             f"User: {message.author.display_name} ({message.author.id}, {user_kind}) | {local_now.strftime('%a %b %d %I:%M %p')} AST | Channel: #{channel_name} ({channel_id}, {channel_kind})"
         )
@@ -17060,6 +17064,9 @@ class MaxwellBot(commands.Bot):
         # the whole (much larger) transcript uncacheable.
         messages = [{"role": "system", "content": "\n\n".join(system_parts)}]
         memory = await self.memory.get_channel_memory(channel_id)
+        memory = merge_user_install_history(
+            memory, getattr(message, "user_install_history", None)
+        )
         if memory:
             # 2026-07-19: Discord chat does not need a 200k-char dump. Keep
             # the running thread, not every shell log from an hour ago.

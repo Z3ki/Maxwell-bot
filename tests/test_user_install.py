@@ -9,12 +9,17 @@ from bot import MaxwellBot
 from user_install import (
     USER_INSTALL_COMMAND_NAME,
     USER_INSTALL_COMMANDS,
+    USER_INSTALL_MESSAGE_ASK,
     USER_INSTALL_MESSAGE_CAP,
+    USER_INSTALL_MESSAGE_SUMMARIZE,
     UserInstallMessageAdapter,
+    build_user_install_turn,
     handle_user_install_interaction,
     is_user_install_command,
     is_user_install_message,
+    merge_user_install_history,
     parse_user_install_command,
+    snapshot_channel_history,
 )
 
 
@@ -80,11 +85,13 @@ def _interaction(*, user_id=1, prompt="hello", name="maxwell", image=None):
 
 
 def test_command_payload_is_user_install_only():
-    assert len(USER_INSTALL_COMMANDS) == 1
-    cmd = USER_INSTALL_COMMANDS[0]
-    assert cmd["name"] == USER_INSTALL_COMMAND_NAME
-    assert cmd["integration_types"] == [1]
-    assert cmd["contexts"] == [0, 1, 2]
+    assert len(USER_INSTALL_COMMANDS) == 4
+    kinds = {(c["name"], c["type"]) for c in USER_INSTALL_COMMANDS}
+    assert (USER_INSTALL_COMMAND_NAME, 1) in kinds
+    assert (USER_INSTALL_MESSAGE_ASK, 3) in kinds
+    assert (USER_INSTALL_MESSAGE_SUMMARIZE, 3) in kinds
+    assert (USER_INSTALL_MESSAGE_ASK, 2) in kinds
+    assert all(c["integration_types"] == [1] for c in USER_INSTALL_COMMANDS)
 
 
 def test_parse_prompt_and_image():
@@ -97,7 +104,122 @@ def test_parse_prompt_and_image():
 
 def test_is_user_install_command_filters_name():
     assert is_user_install_command(_interaction())
+    assert is_user_install_command(_interaction(name=USER_INSTALL_MESSAGE_ASK))
     assert not is_user_install_command(_interaction(name="help"))
+
+
+def test_message_command_uses_target_as_reply_parent():
+    interaction = _interaction(name=USER_INSTALL_MESSAGE_ASK, prompt="unused")
+    interaction.data = {
+        "name": USER_INSTALL_MESSAGE_ASK,
+        "type": 3,
+        "target_id": "88",
+        "resolved": {
+            "messages": {
+                "88": {
+                    "id": "88",
+                    "content": "look at this bug",
+                    "author": {
+                        "id": "7",
+                        "username": "alice",
+                        "global_name": "Alice",
+                    },
+                    "attachments": [
+                        {
+                            "id": "a1",
+                            "filename": "shot.png",
+                            "url": "https://cdn.discordapp.com/shot.png",
+                            "content_type": "image/png",
+                            "size": 4,
+                        }
+                    ],
+                    "embeds": [{"title": "trace", "description": "boom"}],
+                }
+            }
+        },
+    }
+    turn = build_user_install_turn(interaction)
+    assert turn is not None
+    assert turn["prompt"] == "Respond to this message."
+    parent = turn["reference"].resolved
+    assert parent.content.startswith("look at this bug")
+    assert "boom" in parent.content
+    assert parent.attachments[0].filename == "shot.png"
+
+
+def test_summarize_and_user_command_prompts():
+    msg = _interaction(name=USER_INSTALL_MESSAGE_SUMMARIZE)
+    msg.data = {
+        "name": USER_INSTALL_MESSAGE_SUMMARIZE,
+        "type": 3,
+        "target_id": "1",
+        "resolved": {
+            "messages": {
+                "1": {
+                    "id": "1",
+                    "content": "long post",
+                    "author": {"id": "2", "username": "bob"},
+                }
+            }
+        },
+    }
+    assert build_user_install_turn(msg)["prompt"] == "Summarize this message."
+    user_cmd = _interaction(name=USER_INSTALL_MESSAGE_ASK)
+    user_cmd.data = {
+        "name": USER_INSTALL_MESSAGE_ASK,
+        "type": 2,
+        "target_id": "9",
+        "resolved": {
+            "users": {
+                "9": {
+                    "id": "9",
+                    "username": "carol",
+                    "global_name": "Carol",
+                }
+            }
+        },
+    }
+    turn = build_user_install_turn(user_cmd)
+    assert "Carol" in turn["prompt"]
+    assert turn["mentions"][0].id == 9
+
+
+def test_merge_user_install_history_prefers_unseen_snapshot():
+    memory = [{"message_id": "1", "content": "stored"}]
+    extra = [
+        {"message_id": "1", "content": "dup"},
+        {"message_id": "2", "content": "live"},
+    ]
+    merged = merge_user_install_history(memory, extra)
+    assert [row["message_id"] for row in merged] == ["2", "1"]
+    assert merge_user_install_history([], extra) == extra
+
+
+def test_snapshot_channel_history_reads_async_history():
+    class Chan:
+        def __init__(self):
+            self.id = 555
+
+        def history(self, *, limit=25):
+            async def gen():
+                # Discord history() is newest-first.
+                for i in (2, 1, 0):
+                    yield SimpleNamespace(
+                        id=i,
+                        content=f"line {i}",
+                        author=SimpleNamespace(
+                            id=3, display_name="n", name="n", bot=False
+                        ),
+                        attachments=[],
+                        created_at=None,
+                    )
+
+            return gen()
+
+    interaction = _interaction()
+    interaction.channel = Chan()
+    rows = asyncio.run(snapshot_channel_history(None, interaction))
+    assert [row["content"] for row in rows] == ["line 0", "line 1", "line 2"]
 
 
 def test_adapter_send_caps_at_six():

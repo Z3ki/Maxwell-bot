@@ -108,7 +108,7 @@ def test_sync_application_commands_puts_payload(monkeypatch):
     synced = asyncio.run(
         mod.sync_application_commands("tok", USER_INSTALL_COMMANDS)
     )
-    assert synced["global"] == 1
+    assert synced["global"] == len(USER_INSTALL_COMMANDS)
     assert (
         "PUT",
         "https://discord.com/api/v10/applications/99/commands",
