@@ -82,6 +82,16 @@ def test_ordinary_replies_are_not_labeled_system():
     assert "[system:" not in render_discord_context_text(msg)
 
 
+def test_string_created_at_is_rendered():
+    msg = _ctx_message(
+        content="look",
+        created_at="2026-09-12T14:19:38.123000+00:00",
+    )
+    text = render_discord_context_text(msg)
+    assert "[at 2026-09-12 14:19:38 UTC]" in text
+    assert "look" in text
+
+
 def test_clip_and_voice_attachments_are_annotated():
     clip = SimpleNamespace(
         filename="clip.mp4",

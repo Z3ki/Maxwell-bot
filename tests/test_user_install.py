@@ -145,6 +145,17 @@ def test_message_command_uses_target_as_reply_parent():
     assert parent.content.startswith("look at this bug")
     assert "boom" in parent.content
     assert parent.attachments[0].filename == "shot.png"
+    from datetime import datetime
+
+    from utils import render_discord_context_text
+
+    interaction.data["resolved"]["messages"]["88"]["timestamp"] = (
+        "2026-09-12T14:19:38.123000+00:00"
+    )
+    parent = build_user_install_turn(interaction)["reference"].resolved
+    assert isinstance(parent.created_at, datetime)
+    rendered = render_discord_context_text(parent, parent.content)
+    assert "2026-09-12 14:19:38 UTC" in rendered
 
 
 def test_summarize_and_user_command_prompts():

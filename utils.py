@@ -1181,7 +1181,7 @@ def render_discord_context_text(
 
     # Timestamp of the message itself — the model needs to know WHEN each
     # message happened (recency, "yesterday vs now", dead conversations).
-    created = getattr(message, "created_at", None)
+    created = _coerce_utc_datetime(getattr(message, "created_at", None))
     if created is not None:
         ts = created.strftime("%Y-%m-%d %H:%M:%S UTC")
         text = f"[at {ts}] {text}" if text else f"[at {ts}]"

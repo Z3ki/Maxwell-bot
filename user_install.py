@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
+from utils import _coerce_utc_datetime
+
 logger = logging.getLogger(__name__)
 
 USER_INSTALL_COMMAND_NAME = "maxwell"
@@ -229,6 +231,10 @@ def _user_from_resolved(raw: Any) -> Any:
     )
 
 
+def _parse_discord_timestamp(value: Any) -> datetime:
+    return _coerce_utc_datetime(value) or datetime.now(timezone.utc)
+
+
 def _embed_text(embed: Any) -> str:
     if not isinstance(embed, dict):
         title = str(getattr(embed, "title", "") or "")
@@ -278,7 +284,7 @@ def _message_from_resolved(raw: Any, interaction: Any) -> Any:
         pinned=bool(raw.get("pinned")),
         tts=bool(raw.get("tts")),
         type=SimpleNamespace(name="default"),
-        created_at=raw.get("timestamp"),
+        created_at=_parse_discord_timestamp(raw.get("timestamp")),
         jump_url="",
         bot=False,
     )
