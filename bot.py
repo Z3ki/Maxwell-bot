@@ -371,8 +371,13 @@ from discord_threads import (  # noqa: E402
 from discord_account import (  # noqa: E402
     account_ids as _discord_account_ids,
     bot_intents,
-    clear_application_commands,
     configured_bot_token,
+    sync_application_commands,
+)
+from user_install import (  # noqa: E402
+    USER_INSTALL_COMMANDS,
+    handle_user_install_interaction,
+    is_user_install_message,
 )
 from rem import RemStore, load_rem_defaults, run_rem_once  # noqa: E402
 from tool_progress import make_progress as _make_tool_progress  # noqa: E402
@@ -4431,6 +4436,10 @@ class MaxwellBot(commands.Bot):
         if not control.get("bot_enabled", True):
             return "bot_disabled"
         author = message.author
+        if is_user_install_message(message):
+            if not self._is_admin(author.id):
+                return "user_install_not_admin"
+            return ""
         if (
             str(author.id) in (getattr(self, "_blacklist", None) or set())
             or str(author.id) in set(control.get("ignore_users", []) or [])
@@ -4545,7 +4554,9 @@ class MaxwellBot(commands.Bot):
         return self._soft_addressed(message)
 
     def _directly_addressed(self, message) -> bool:
-        """Hard ping: DM, @Maxwell, or a Discord reply to Maxwell."""
+        """Hard ping: DM, @Maxwell, a Discord reply to Maxwell, or /maxwell."""
+        if is_user_install_message(message):
+            return True
         getter = getattr(self, "_self_ids", None)
         self_ids = getter() if callable(getter) else set()
         uid = getattr(getattr(self, "user", None), "id", None)
@@ -5719,7 +5730,7 @@ class MaxwellBot(commands.Bot):
                 self.bot_name,
                 self.user.id,
             )
-            self._spawn_detached(self._clear_slash_commands())
+            self._spawn_detached(self._sync_slash_commands())
         logger.info(f"Connected to {len(self.guilds)} guilds")
         self._load_emojis()
         try:
@@ -5738,8 +5749,19 @@ class MaxwellBot(commands.Bot):
         self._spawn_detached(self._recover_missed_messages())
         self._dispatch_plugin_event("on_ready")
 
-    async def _clear_slash_commands(self) -> None:
-        """Maxwell never uses slash commands. Wipe any leftover registrations."""
+    async def on_interaction(self, interaction):
+        self._dispatch_plugin_event("on_interaction", interaction)
+        try:
+            if await handle_user_install_interaction(self, interaction):
+                return
+        except Exception:
+            logger.exception("user-install interaction failed")
+        parent = getattr(super(), "on_interaction", None)
+        if parent is not None:
+            await parent(interaction)
+
+    async def _sync_slash_commands(self) -> None:
+        """Register the admin-only user-install /maxwell command globally."""
         token = (
             getattr(getattr(self, "http", None), "token", None)
             or getattr(getattr(self, "config", None), "DISCORD_BOT_TOKEN", "")
@@ -5756,21 +5778,20 @@ class MaxwellBot(commands.Bot):
             getattr(self, "user", None), "id", None
         )
         try:
-            removed = await clear_application_commands(
+            synced = await sync_application_commands(
                 str(token),
+                USER_INSTALL_COMMANDS,
                 application_id=app_id,
                 guild_ids=guild_ids,
             )
         except Exception:
-            logger.exception("Failed to clear slash commands")
+            logger.exception("Failed to sync slash commands")
             return
-        total = int(removed.get("global", 0)) + int(removed.get("guild", 0))
-        if total:
-            logger.info(
-                "Removed leftover slash commands: global=%s guild=%s",
-                removed.get("global", 0),
-                removed.get("guild", 0),
-            )
+        logger.info(
+            "Slash commands synced: global=%s guild_cleared=%s",
+            synced.get("global", 0),
+            synced.get("guild", 0),
+        )
 
     def _spawn_detached(self, coro) -> None:
         """Fire-and-forget with a strong reference so it cannot be GC'd."""
@@ -7168,7 +7189,8 @@ class MaxwellBot(commands.Bot):
             return "dm_replies_disabled"
 
         if (
-            message.content
+            not is_user_install_message(message)
+            and message.content
             and message.content.startswith(self.command_prefix)
             and not message.author.bot
         ):
@@ -7181,17 +7203,19 @@ class MaxwellBot(commands.Bot):
 
         channel_id = str(message.channel.id)
         now = asyncio.get_running_loop().time()
-        if now < self._stop_until.get(channel_id, 0):
-            return "stop_active"
-        if channel_id in set(self._control.get("blocked_channels", []) or []):
-            return "blocked_channel"
-        allowed = set(self._control.get("allowed_channels", []) or [])
-        if allowed and channel_id not in allowed:
-            return "channel_not_allowed"
-        # ,solo: this server is locked to one channel. Commands already
-        # returned above, so an admin can still run `,solo off` from anywhere.
-        if self._solo_blocks(message):
-            return "solo_restriction"
+        user_install = is_user_install_message(message)
+        if not user_install:
+            if now < self._stop_until.get(channel_id, 0):
+                return "stop_active"
+            if channel_id in set(self._control.get("blocked_channels", []) or []):
+                return "blocked_channel"
+            allowed = set(self._control.get("allowed_channels", []) or [])
+            if allowed and channel_id not in allowed:
+                return "channel_not_allowed"
+            # ,solo: this server is locked to one channel. Commands already
+            # returned above, so an admin can still run `,solo off` from anywhere.
+            if self._solo_blocks(message):
+                return "solo_restriction"
 
         payloads = iter_message_payloads(message)
         has_attachment = any(getattr(src, "attachments", None) for src in payloads)
@@ -7409,6 +7433,16 @@ class MaxwellBot(commands.Bot):
                     f"Cooldown skip reply for user {message.author.id} in {channel_id} (still stored to memory)"
                 )
                 return "cooldown"
+
+        if is_user_install_message(message):
+            if not self._is_admin(message.author.id):
+                return "user_install_not_admin"
+            self._dispatch_reply(
+                message,
+                self._content_without_self_mention(message.content),
+                directed=True,
+            )
+            return
 
         if isinstance(message.channel, discord.DMChannel):
             if not self._dm_replies_allowed(message):

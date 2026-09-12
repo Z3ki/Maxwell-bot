@@ -106,7 +106,7 @@ The dashboard/API starts in the same container on port 8765. Set `MAXWELL_START_
 
 ### Discord bot token
 
-Create an application at `https://discord.com/developers/applications`, add a Bot, and copy the bot token into `DISCORD_BOT_TOKEN`. Enable the privileged intents **Message Content**, **Server Members**, and **Presence**. Invite the bot with a normal add (no Administrator). Grant it a role in Server Settings if you want mod tools (Manage Channels, Kick/Ban, Moderate Members, and so on). `/install` never requests Administrator.
+Create an application at `https://discord.com/developers/applications`, add a Bot, and copy the bot token into `DISCORD_BOT_TOKEN`. Enable the privileged intents **Message Content**, **Server Members**, and **Presence**. On **Installation**, enable **Guild Install** and **User Install**. Invite the bot with a normal add (no Administrator). Grant it a role in Server Settings if you want mod tools (Manage Channels, Kick/Ban, Moderate Members, and so on). `/install` never requests Administrator. Maxwell admins can also **Add to my apps** for a personal `/maxwell` command; that path is command-only and does not join the server.
 
 Never paste this token into chat, logs, or git.
 
@@ -213,7 +213,7 @@ For reverse proxying, adapt [`examples/Caddyfile.example`](../examples/Caddyfile
 
 Set `MAXWELL_PUBLIC_BASE_URL` to the generated-site origin and `DISCORD_REDIRECT_BASE` to the dashboard origin. If using Discord OAuth, register `https://<dashboard-host>/api/auth/discord/callback` and set `DISCORD_REDIRECT_URI` accordingly. Set `MAXWELL_CORS_ORIGIN` to the dashboard origin if accessing the admin API cross-origin.
 
-To gate who can add the official bot, serve `/install` on the dashboard origin and set Discord Developer Portal → Installation → Install Link to **Custom URL** `https://<dashboard-host>/install`. Visitors must log in with Discord and be in `admins.json` / `MAXWELL_OWNER_IDS` before Maxwell hands them Discord's Add App URL.
+To gate who can add the official bot, serve `/install` on the dashboard origin and set Discord Developer Portal → Installation → Install Link to **Custom URL** `https://<dashboard-host>/install`. Visitors must log in with Discord and be in `admins.json` / `MAXWELL_OWNER_IDS` before Maxwell hands them Discord's Add App URL. After login, admins can **Add to a server** (guild bot) or **Add to my apps** (user-install `/maxwell`). User-install still requires the same admin list, and `/maxwell` refuses anyone who is not an admin. Enable **User Install** under Installation Contexts or Discord will reject the user-install URL.
 
 Do not serve generated HTML/JavaScript on the dashboard origin. It would share browser storage with dashboard credentials. Existing installations using one origin must migrate their reverse-proxy configuration; updating Python alone does not isolate static sites. After migration, clear credentials from the old origin and rotate any credentials that may have been exposed.
 

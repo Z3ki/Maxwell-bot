@@ -2251,9 +2251,16 @@ def _bot_install_scopes() -> str:
     return " ".join(parts) if parts else "bot applications.commands"
 
 
-def _bot_install_authorize_url(*, guild_id: str = "") -> str:
+def _bot_install_authorize_url(*, guild_id: str = "", context: str = "guild") -> str:
     from urllib.parse import urlencode
 
+    if context == "user":
+        params = {
+            "client_id": DISCORD_CLIENT_ID,
+            "scope": "applications.commands",
+            "integration_type": "1",
+        }
+        return "https://discord.com/oauth2/authorize?" + urlencode(params)
     params = {
         "client_id": DISCORD_CLIENT_ID,
         "scope": _bot_install_scopes(),
@@ -2430,9 +2437,17 @@ async def install_authorize(request):
     if not DISCORD_CLIENT_ID:
         return _json_response({"error": "discord oauth not configured"}, 503)
     context = str(request.query.get("context") or "guild").strip().lower()
-    if context and context != "guild":
-        return _json_response({"error": "only server installs are allowed"}, 400)
+    if context not in {"guild", "user"}:
+        return _json_response({"error": "context must be guild or user"}, 400)
     guild_id = _discord_snowflake(request.query.get("guild_id"))
+    if context == "user":
+        return _json_response(
+            {
+                "ok": True,
+                "authorize_url": _bot_install_authorize_url(context="user"),
+                "context": "user",
+            }
+        )
     return _json_response(
         {
             "ok": True,

@@ -96,22 +96,19 @@ def configured_bot_token(bot_token: str | None, legacy_token: str | None) -> str
     return _strip_bot_prefix(legacy_token or "")
 
 
-async def clear_application_commands(
+async def sync_application_commands(
     token: str,
+    commands: list[dict[str, Any]] | None = None,
     *,
     application_id: str | int | None = None,
     guild_ids: Iterable[int] | None = None,
 ) -> dict[str, int]:
-    """Overwrite registered slash/app commands with an empty list.
-
-    Leftover commands (from another bot on the same application) stay on
-    Discord until something PUTs a new set. Maxwell does not use slash
-    commands, so startup wipes them.
-    """
+    """PUT the global application-command set; wipe leftover guild commands."""
     import aiohttp
 
     token = _strip_bot_prefix(token)
-    removed = {"global": 0, "guild": 0}
+    payload = list(commands or [])
+    result = {"global": 0, "guild": 0}
     headers = {
         "Authorization": f"Bot {token}",
         "User-Agent": BOT_USER_AGENT,
@@ -125,23 +122,21 @@ async def clear_application_commands(
                 data = await resp.json() if resp.status == 200 else {}
                 app_id = str((data or {}).get("id") or "")
         if not app_id:
-            logger.warning("Could not resolve application id; slash commands not cleared")
-            return removed
-        async with session.get(f"{_DISCORD_API}/applications/{app_id}/commands") as resp:
-            current = await resp.json() if resp.status == 200 else []
-        removed["global"] = len(current) if isinstance(current, list) else 0
+            logger.warning("Could not resolve application id; slash commands not synced")
+            return result
         async with session.put(
-            f"{_DISCORD_API}/applications/{app_id}/commands", json=[]
+            f"{_DISCORD_API}/applications/{app_id}/commands", json=payload
         ) as resp:
             if resp.status not in {200, 201}:
                 body = await resp.text()
                 logger.warning(
-                    "Failed to clear global slash commands: HTTP %s %s",
+                    "Failed to sync global slash commands: HTTP %s %s",
                     resp.status,
                     body[:200],
                 )
             else:
-                logger.info("Cleared %s global slash command(s)", removed["global"])
+                result["global"] = len(payload)
+                logger.info("Synced %s global slash command(s)", result["global"])
         for gid in guild_ids or ():
             async with session.get(
                 f"{_DISCORD_API}/applications/{app_id}/guilds/{gid}/commands"
@@ -153,5 +148,20 @@ async def clear_application_commands(
                 json=[],
             ) as resp:
                 if resp.status in {200, 201}:
-                    removed["guild"] += n
-    return removed
+                    result["guild"] += n
+    return result
+
+
+async def clear_application_commands(
+    token: str,
+    *,
+    application_id: str | int | None = None,
+    guild_ids: Iterable[int] | None = None,
+) -> dict[str, int]:
+    """Overwrite registered slash/app commands with an empty list."""
+    return await sync_application_commands(
+        token,
+        [],
+        application_id=application_id,
+        guild_ids=guild_ids,
+    )

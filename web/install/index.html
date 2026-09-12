@@ -88,8 +88,8 @@
       <div class="card">
         <h1>Add Maxwell</h1>
         <p id="copy">
-          Sign in with Discord. Only Maxwell admins can add this app.
-          The invite is a normal add — it does not request Administrator.
+          Sign in with Discord. Only Maxwell admins can add this app —
+          to a server or to their own account.
         </p>
         <div id="error" class="err"></div>
         <button id="discordLogin" class="btn primary" type="button">
@@ -97,6 +97,9 @@
         </button>
         <button id="addGuild" class="btn primary hidden" type="button">
           Add to a server
+        </button>
+        <button id="addUser" class="btn hidden" type="button">
+          Add to my apps
         </button>
       </div>
     </div>
@@ -131,9 +134,9 @@
           throw new Error(d.error || "Discord login not configured");
         window.location = url;
       }
-      async function authorize() {
-        const q = new URLSearchParams({ context: "guild" });
-        if (guildId) q.set("guild_id", guildId);
+      async function authorize(context) {
+        const q = new URLSearchParams({ context: context || "guild" });
+        if (context !== "user" && guildId) q.set("guild_id", guildId);
         const r = await fetch("/api/install/authorize?" + q.toString(), {
           headers: headers(),
         });
@@ -148,11 +151,12 @@
       function ready(user) {
         $("discordLogin").classList.add("hidden");
         $("addGuild").classList.remove("hidden");
+        $("addUser").classList.remove("hidden");
         const name = (user && user.username) || "admin";
         copyEl.textContent =
           "Signed in as " +
           name +
-          ". Add Maxwell to a Discord server. This is a normal add — no Administrator permission is requested. Grant Maxwell a role in Server Settings if you want mod tools.";
+          ". Add to a server is the normal bot member (no Administrator). Add to my apps is personal /maxwell in any server or DM — still admin-only. Enable User Install on the Discord Installation page or that button will fail.";
       }
       async function verify(t) {
         token = t;
@@ -173,7 +177,15 @@
       $("addGuild").onclick = async () => {
         showError("");
         try {
-          await authorize();
+          await authorize("guild");
+        } catch (e) {
+          showError(e.message);
+        }
+      };
+      $("addUser").onclick = async () => {
+        showError("");
+        try {
+          await authorize("user");
         } catch (e) {
           showError(e.message);
         }

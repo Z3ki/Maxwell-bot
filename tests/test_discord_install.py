@@ -94,7 +94,7 @@ def test_install_authorize_returns_url_for_admin(monkeypatch):
     assert parse_qs(urlsplit(data["authorize_url"]).query)["integration_type"] == ["0"]
 
 
-def test_install_authorize_rejects_user_install(monkeypatch):
+def test_install_authorize_allows_user_install_for_admin(monkeypatch):
     monkeypatch.setattr(api, "DISCORD_CLIENT_ID", "1472755214623703190")
     monkeypatch.setattr(api, "_has_admin_auth", lambda request: True)
     request = SimpleNamespace(
@@ -102,9 +102,25 @@ def test_install_authorize_rejects_user_install(monkeypatch):
         headers={"X-Discord-Token": "session"},
     )
     resp = asyncio.run(api.install_authorize(request))
-    assert resp.status == 400
+    assert resp.status == 200
     data = json.loads(resp.body)
-    assert "server" in data["error"]
+    assert data["ok"] is True
+    assert data["context"] == "user"
+    q = parse_qs(urlsplit(data["authorize_url"]).query)
+    assert q["integration_type"] == ["1"]
+    assert q["scope"] == ["applications.commands"]
+    assert "permissions" not in q
+
+
+def test_install_authorize_rejects_unknown_context(monkeypatch):
+    monkeypatch.setattr(api, "DISCORD_CLIENT_ID", "1472755214623703190")
+    monkeypatch.setattr(api, "_has_admin_auth", lambda request: True)
+    request = SimpleNamespace(
+        query=_query(context="everyone"),
+        headers={"X-Discord-Token": "session"},
+    )
+    resp = asyncio.run(api.install_authorize(request))
+    assert resp.status == 400
 
 
 def test_oauth_state_stores_install_next():
@@ -257,5 +273,6 @@ def test_install_page_exists():
     assert "/api/install/authorize" in html
     assert "next=/install/" in html or 'next: "/install/"' in html
     assert "Only Maxwell admins" in html
-    assert "Add to my apps" not in html
-    assert 'context: "guild"' in html or "context: 'guild'" in html
+    assert "Add to my apps" in html
+    assert 'authorize("user")' in html or "authorize('user')" in html
+    assert 'authorize("guild")' in html or "authorize('guild')" in html

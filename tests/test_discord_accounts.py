@@ -59,8 +59,61 @@ def test_clear_application_commands_puts_empty_list(monkeypatch):
 
     monkeypatch.setattr(aiohttp, "ClientSession", FakeSession)
     removed = asyncio.run(mod.clear_application_commands("tok"))
-    assert removed["global"] == 2
+    assert removed["global"] == 0
     assert ("PUT", "https://discord.com/api/v10/applications/99/commands", []) in calls
+
+
+def test_sync_application_commands_puts_payload(monkeypatch):
+    calls = []
+
+    class FakeResp:
+        def __init__(self, status, payload):
+            self.status = status
+            self._payload = payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def json(self):
+            return self._payload
+
+        async def text(self):
+            return ""
+
+    class FakeSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        def get(self, url, **kwargs):
+            return FakeResp(200, {"id": "99"} if url.endswith("/@me") else [])
+
+        def put(self, url, **kwargs):
+            calls.append(("PUT", url, kwargs.get("json")))
+            return FakeResp(200, kwargs.get("json") or [])
+
+    import discord_account as mod
+    import aiohttp
+    from user_install import USER_INSTALL_COMMANDS
+
+    monkeypatch.setattr(aiohttp, "ClientSession", FakeSession)
+    synced = asyncio.run(
+        mod.sync_application_commands("tok", USER_INSTALL_COMMANDS)
+    )
+    assert synced["global"] == 1
+    assert (
+        "PUT",
+        "https://discord.com/api/v10/applications/99/commands",
+        USER_INSTALL_COMMANDS,
+    ) in calls
 
 
 def test_configured_bot_token_prefers_bot_token():

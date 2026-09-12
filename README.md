@@ -203,7 +203,7 @@ present). Restart to re-detect. `python3 doctor.py` shows the resolved state.
 | `MAXWELL_SITE_DIR` | Where generated sites are written (default: `public/bot`) |
 | `MAXWELL_TRUST_PROXY` | Trust `X-Forwarded-For` from reverse proxy (default `false`) |
 | `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | Discord OAuth on dashboard (optional, both blank = Basic only) |
-| `DISCORD_BOT_PERMISSIONS` | Permission bitfield for the Custom Install Link (default `0` = normal add, no extra permissions; Administrator is never requested) |
+| `DISCORD_BOT_PERMISSIONS` | Permission bitfield for the Custom Install Link **Add to a server** flow (default `0` = normal add, no extra permissions; Administrator is never requested). **Add to my apps** is admin-only user-install (`/maxwell`) and does not request bot permissions. |
 
 ### Email (only used if `ENABLE_EMAIL_TOOLS=true`)
 
