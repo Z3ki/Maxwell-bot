@@ -4526,6 +4526,258 @@ def _role_blocked(me, role) -> str:
     return ""
 
 
+def _role_is_everyone(role, guild) -> bool:
+    if role is None:
+        return False
+    checker = getattr(role, "is_default", None)
+    if callable(checker):
+        with contextlib.suppress(Exception):
+            if bool(checker()):
+                return True
+    rid = getattr(role, "id", None)
+    gid = getattr(guild, "id", None) if guild is not None else None
+    return rid is not None and gid is not None and rid == gid
+
+
+def _same_role(left, right) -> bool:
+    if left is None or right is None:
+        return False
+    if left is right:
+        return True
+    lid, rid = getattr(left, "id", None), getattr(right, "id", None)
+    return lid is not None and lid == rid
+
+
+def _role_ref(role) -> str:
+    name = getattr(role, "name", None) or "role"
+    return f"{name} ({getattr(role, 'id', '?')})"
+
+
+def _parse_role_placement(position=None, above=None, below=None):
+    """Return (kind, value, error). kind is position|above|below or None."""
+    pos_text = None if position is None else str(position).strip()
+    if pos_text == "":
+        pos_text = None
+    above_text = str(above or "").strip() or None
+    below_text = str(below or "").strip() or None
+    specified = [
+        name
+        for name, present in (
+            ("position", pos_text is not None),
+            ("above", above_text is not None),
+            ("below", below_text is not None),
+        )
+        if present
+    ]
+    if len(specified) > 1:
+        return None, None, "Error: use only one of position, above, or below"
+    if not specified:
+        return None, None, ""
+    if pos_text is not None:
+        if isinstance(position, bool) or not re.fullmatch(r"-?\d+", pos_text):
+            return None, None, "Error: position must be a whole number"
+        return "position", int(pos_text), ""
+    if above_text is not None:
+        return "above", above_text, ""
+    return "below", below_text, ""
+
+
+def _plan_role_move(
+    guild,
+    me,
+    moving,
+    *,
+    position=None,
+    above=None,
+    below=None,
+):
+    """Compute new positions for roles below the bot's top role.
+
+    Returns (changes, summary, error). ``changes`` is a list of
+    ``(role, new_position)`` covering every role in the movable band so the
+    Discord payload stays collision-free. Higher position = higher in
+    Server Settings > Roles.
+    """
+    kind, value, err = _parse_role_placement(position, above, below)
+    if err:
+        return [], "", err
+    if kind is None:
+        return [], "", (
+            "Error: provide position, above, or below to reorder a role"
+        )
+    if _role_is_everyone(moving, guild):
+        return [], "", "Error: the @everyone role cannot be moved"
+    ceiling = _member_top_position(me)
+    moving_pos = int(getattr(moving, "position", 0) or 0)
+    if moving_pos >= ceiling:
+        blocked = _role_blocked(me, moving)
+        return [], "", blocked or (
+            "Error: role is equal/higher than my top role (hierarchy)"
+        )
+    ordered = sorted(
+        getattr(guild, "roles", None) or [],
+        key=lambda role: (
+            int(getattr(role, "position", 0) or 0),
+            int(getattr(role, "id", 0) or 0),
+        ),
+    )
+    movable = [
+        role
+        for role in ordered
+        if not _role_is_everyone(role, guild)
+        and int(getattr(role, "position", 0) or 0) < ceiling
+    ]
+    if not any(_same_role(role, moving) for role in movable):
+        return [], "", (
+            f"Error: {_role_ref(moving)} is outside the range I can reorder "
+            "(must sit below my top role)"
+        )
+    rest = [role for role in movable if not _same_role(role, moving)]
+    insert_at = 0
+    relation = ""
+    if kind == "position":
+        pos = int(value)
+        if pos < 1:
+            return [], "", (
+                "Error: position must be at least 1 (@everyone is always 0)"
+            )
+        if pos >= ceiling:
+            return [], "", (
+                f"Error: position {pos} is equal/higher than my top role "
+                f"(pos {ceiling}); I can only move roles to 1-{max(1, ceiling - 1)}"
+            )
+        max_pos = len(rest) + 1
+        if pos > max_pos:
+            return [], "", (
+                f"Error: position {pos} is above the highest I can assign "
+                f"({max_pos})"
+            )
+        insert_at = pos - 1
+        relation = f"to position {pos}"
+    else:
+        target, find_err = _find_role(guild, value)
+        if find_err:
+            return [], "", find_err
+        if _same_role(target, moving):
+            return [], "", (
+                "Error: a role cannot be placed above or below itself"
+            )
+        target_pos = int(getattr(target, "position", 0) or 0)
+        if kind == "above":
+            if _role_is_everyone(target, guild):
+                insert_at = 0
+                relation = "immediately above @everyone"
+            elif target_pos >= ceiling:
+                return [], "", (
+                    f"Error: {_role_ref(target)} is equal/higher than my top "
+                    "role; I cannot place a role above it"
+                )
+            else:
+                idx = next(
+                    (
+                        i
+                        for i, item in enumerate(rest)
+                        if _same_role(item, target)
+                    ),
+                    None,
+                )
+                if idx is None:
+                    return [], "", (
+                        f"Error: {_role_ref(target)} is not in the range I "
+                        "can reorder around"
+                    )
+                insert_at = idx + 1
+                relation = f"immediately above {_role_ref(target)}"
+        elif _role_is_everyone(target, guild):
+            return [], "", "Error: nothing can sit below @everyone"
+        elif target_pos >= ceiling:
+            if target_pos == ceiling:
+                insert_at = len(rest)
+                relation = f"immediately below {_role_ref(target)}"
+            else:
+                return [], "", (
+                    f"Error: {_role_ref(target)} is above my top role; "
+                    "I cannot place a role immediately below it"
+                )
+        else:
+            idx = next(
+                (
+                    i
+                    for i, item in enumerate(rest)
+                    if _same_role(item, target)
+                ),
+                None,
+            )
+            if idx is None:
+                return [], "", (
+                    f"Error: {_role_ref(target)} is not in the range I "
+                    "can reorder around"
+                )
+            insert_at = idx
+            relation = f"immediately below {_role_ref(target)}"
+    new_order = rest[:insert_at] + [moving] + rest[insert_at:]
+    changes = [(item, pos) for pos, item in enumerate(new_order, start=1)]
+    changed = [
+        (role, pos)
+        for role, pos in changes
+        if int(getattr(role, "position", 0) or 0) != pos
+    ]
+    new_pos = insert_at + 1
+    guild_name = getattr(guild, "name", None) or "this server"
+    if not changed:
+        summary = (
+            f"{_role_ref(moving)} is already {relation} in {guild_name}"
+        )
+        return [], summary, ""
+    summary = (
+        f"Moved {_role_ref(moving)} {relation} in {guild_name} "
+        f"(now pos {new_pos}; higher number is higher in "
+        "Server Settings > Roles)"
+    )
+    return changes, summary, ""
+
+
+async def _move_role_hierarchy(
+    guild,
+    me,
+    role,
+    *,
+    position=None,
+    above=None,
+    below=None,
+    reason: str = "",
+) -> str:
+    changes, summary, err = _plan_role_move(
+        guild,
+        me,
+        role,
+        position=position,
+        above=above,
+        below=below,
+    )
+    if err:
+        return err
+    if not changes:
+        return summary
+    mover = getattr(guild, "edit_role_positions", None)
+    if not callable(mover):
+        return "Error: this Discord library cannot reorder role positions"
+    payload = {
+        discord.Object(id=int(item.id)): int(pos)
+        for item, pos in changes
+    }
+    try:
+        await mover(payload, reason=reason)
+    except discord.Forbidden:
+        return (
+            f"Error: Discord denied reordering {_role_ref(role)} "
+            "(manage_roles or hierarchy)"
+        )
+    except Exception as e:
+        return f"Error reordering role: {e}"
+    return summary
+
+
 class KickMemberTool(Tool):
     def get_description(self):
         return (
@@ -4758,10 +5010,16 @@ class TimeoutMemberTool(Tool):
 class ManageRoleTool(Tool):
     def get_description(self):
         return (
-            "Create/edit/delete roles or add/remove them on members. Requires manage_roles. "
-            "Params: action (list|create|edit|delete|add|remove), guild_id (optional), "
-            "name, role_id, user_id, color (hex), hoist, mentionable, permissions "
-            "(comma perm names), confirm_name (required to delete)."
+            "Create/edit/delete roles, reorder role hierarchy, or add/remove them on "
+            "members. Requires manage_roles. Params: action "
+            "(list|create|edit|delete|add|remove|move), guild_id (optional), name, "
+            "role_id, user_id, color (hex), hoist, mentionable, permissions "
+            "(comma perm names), confirm_name (required to delete), position "
+            "(absolute hierarchy index; higher = higher in Server Settings > Roles), "
+            "above (role name/id to place this role immediately above), below "
+            "(role name/id to place this role immediately below). "
+            "Use action=move with above=/below=/position= instead of asking anyone "
+            "to drag roles in Server Settings."
         )
 
     async def execute(
@@ -4777,6 +5035,9 @@ class ManageRoleTool(Tool):
         mentionable: str | None = None,
         permissions: str | None = None,
         confirm_name: str | None = None,
+        position: str | None = None,
+        above: str | None = None,
+        below: str | None = None,
         **kwargs,
     ) -> str:
         guild, error = await _resolve_guild(self.bot, message, guild_id)
@@ -4818,11 +5079,30 @@ class ManageRoleTool(Tool):
         blocked = _role_blocked(me, role)
         if blocked and act != "list":
             return blocked
+        kind, _value, place_err = None, None, ""
+        if act in {"move", "reorder", "edit"}:
+            kind, _value, place_err = _parse_role_placement(
+                position, above, below
+            )
+            if place_err:
+                return place_err
+        placement = kind is not None
+        if act in {"move", "reorder"}:
+            return await _move_role_hierarchy(
+                guild,
+                me,
+                role,
+                position=position,
+                above=above,
+                below=below,
+                reason=why,
+            )
         if act == "edit":
             updates = {}
             if name:
                 clean = _clean_discord_name(name)
-                if clean:
+                current = str(getattr(role, "name", "") or "")
+                if clean and (role_id or clean != current):
                     updates["name"] = clean
             colour = _colour_from_text(color)
             if colour is not None:
@@ -4834,15 +5114,36 @@ class ManageRoleTool(Tool):
                 updates["hoist"] = parse_bool(hoist, False)
             if mentionable is not None:
                 updates["mentionable"] = parse_bool(mentionable, False)
-            if not updates:
-                return "Error: provide a field to edit"
-            try:
-                await role.edit(**updates, reason=why)
-                return f"Edited role {_role_label(role)}: {', '.join(sorted(updates))}"
-            except discord.Forbidden:
-                return f"Error: Discord denied editing {role.name}"
-            except Exception as e:
-                return f"Error editing role: {e}"
+            if not updates and not placement:
+                return (
+                    "Error: provide a field to edit (name, color, hoist, "
+                    "mentionable, permissions, position, above, or below)"
+                )
+            notes = []
+            if updates:
+                try:
+                    await role.edit(**updates, reason=why)
+                    notes.append(
+                        f"Edited role {_role_label(role)}: "
+                        + ", ".join(sorted(updates))
+                    )
+                except discord.Forbidden:
+                    return f"Error: Discord denied editing {role.name}"
+                except Exception as e:
+                    return f"Error editing role: {e}"
+            if placement:
+                notes.append(
+                    await _move_role_hierarchy(
+                        guild,
+                        me,
+                        role,
+                        position=position,
+                        above=above,
+                        below=below,
+                        reason=why,
+                    )
+                )
+            return "\n".join(notes)
         if act == "delete":
             actual = getattr(role, "name", "")
             if str(confirm_name or "") != actual:
@@ -4872,7 +5173,9 @@ class ManageRoleTool(Tool):
                 return f"Error: Discord denied changing roles on {member}"
             except Exception as e:
                 return f"Error changing roles: {e}"
-        return "Error: action must be list, create, edit, delete, add, or remove"
+        return (
+            "Error: action must be list, create, edit, delete, add, remove, or move"
+        )
 
 
 class PurgeMessagesTool(Tool):

@@ -326,7 +326,7 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     ),
     "manage_role": _obj(
         {
-            "action": _str("list | create | edit | delete | add | remove"),
+            "action": _str("list | create | edit | delete | add | remove | move"),
             "guild_id": _str("Optional server ID"),
             "name": _str("Role name (create/edit/lookup)"),
             "role_id": _str("Role ID"),
@@ -336,6 +336,17 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "mentionable": _bool("Allow @role mentions"),
             "permissions": _str("Comma-separated Discord permission names"),
             "confirm_name": _str("Exact role name required to delete"),
+            "position": _int(
+                "Absolute hierarchy position for move/edit. Higher number is "
+                "higher in Server Settings > Roles. @everyone is always 0."
+            ),
+            "above": _str(
+                "Role name or id to place this role immediately above "
+                "(move/edit). Example: name=Early Supporter, above=Q-Members"
+            ),
+            "below": _str(
+                "Role name or id to place this role immediately below (move/edit)"
+            ),
         },
         ["action"],
     ),
