@@ -1,0 +1,8 @@
+{
+  "name": "maxwell_extras",
+  "version": "1.0.0",
+  "description": "Opt-in power tools: rich Discord UI, persistent reminders, explicit cross-server memory recall, URL media inspection, and LLM-only generated-image handoff.",
+  "enabled_globally": true,
+  "allowed_users": [],
+  "denied_users": []
+}
