@@ -4,6 +4,7 @@ from .audit_chunk_tail import install_audit_chunk_tail
 from .audit_progress_fix import install_progress_audit_fix
 from .audit_ui import install_tool_audit
 from .interaction_progress import install_interaction_progress
+from .owner_control import install_owner_control
 from .plugin_runtime import install_plugin_runtime_guards
 from .rich_interactions import install_rich_interactions
 from .style_freedom import install_style_freedom
@@ -59,6 +60,10 @@ def setup(bot, ctx):
     # use or >10s latency promotes it to a stable "working on it…" status and
     # sends the eventual answer as a separate follow-up.
     install_interaction_progress(bot)
+
+    # Register the owner panel after the generic interaction-progress wrapper so
+    # /owner is intercepted before it starts an AI turn or a slow-response timer.
+    install_owner_control(bot)
 
     # Tool-call turns should not double-post "here's/done/fixed" prose after a
     # file, media, poll, TTS, or rich message already delivered the real result.
