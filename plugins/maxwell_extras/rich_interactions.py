@@ -279,7 +279,7 @@ def _upgrade_plugin_ui_api(bot: Any) -> None:
         def add_view(self: PluginContext, view: Any, *, message_id: int | None = None) -> Any:
             register = getattr(self.bot, "add_view", None)
             if not callable(register):
-                raise RuntimeError("bot client does not support persistent views")
+                raise TypeError("bot client does not support persistent views")
             register(view, message_id=message_id)
             self._manager._maxwell_plugin_views.setdefault(self.name, set()).add(view)
             return view
@@ -289,7 +289,7 @@ def _upgrade_plugin_ui_api(bot: Any) -> None:
         def add_dynamic_items(self: PluginContext, *items: Any) -> None:
             register = getattr(self.bot, "add_dynamic_items", None)
             if not callable(register):
-                raise RuntimeError("installed discord.py does not support dynamic items")
+                raise TypeError("installed discord.py does not support dynamic items")
             register(*items)
             self._manager._maxwell_dynamic_items.setdefault(self.name, set()).update(items)
         PluginContext.add_dynamic_items = add_dynamic_items  # type: ignore[attr-defined]
