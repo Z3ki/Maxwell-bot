@@ -5,6 +5,7 @@ from .audit_ui import install_tool_audit
 from .interaction_progress import install_interaction_progress
 from .plugin_runtime import install_plugin_runtime_guards
 from .rich_interactions import install_rich_interactions
+from .style_freedom import install_style_freedom
 from .user_install_features import (
     install_user_install_features,
     install_user_install_tool_disclosure,
@@ -37,6 +38,10 @@ def setup(bot, ctx):
     # Strengthen every plugin, not just this one: bounded event/job callbacks,
     # runtime health counters, and tracked background tasks cancelled on reload.
     install_plugin_runtime_guards(bot)
+
+    # Keep Maxwell's conversational style free even when an older personality
+    # string is already persisted in bot_control.json.
+    install_style_freedom(bot)
 
     # Image tools remain the same implementations/providers, but their outgoing
     # generated files are intercepted and returned to the model instead of posted.
