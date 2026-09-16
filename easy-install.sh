@@ -48,7 +48,11 @@ yes_no() {
   if [ -z "$TTY" ]; then [ "$default" = yes ] && return 0 || return 1; fi
   while :; do
     answer=$(prompt "$label (yes/no)" "$default")
-    case "${answer,,}" in yes|y) return 0 ;; no|n) return 1 ;; *) warn "Please answer yes or no." ;; esac
+    case "$answer" in
+      yes|YES|Yes|y|Y) return 0 ;;
+      no|NO|No|n|N) return 1 ;;
+      *) warn "Please answer yes or no." ;;
+    esac
   done
 }
 
