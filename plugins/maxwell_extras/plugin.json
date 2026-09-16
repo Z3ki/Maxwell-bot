@@ -1,7 +1,7 @@
 {
   "name": "maxwell_extras",
-  "version": "1.2.1",
-  "description": "Power tools: rich Discord UI with stateful callback and Premium buttons, persistent reminders, cross-server recall, URL media inspection, generated-image handoff, verified tool-call disclosure, managed plugin interaction/views, conversational style freedom, and human-approved live plugin development.",
+  "version": "1.2.2",
+  "description": "Power tools: rich Discord UI with stateful callback and Premium buttons, persistent reminders, cross-server recall, URL media inspection, generated-image handoff, verified tool-call disclosure on the final response chunk, managed plugin interaction/views, conversational style freedom, and human-approved live plugin development.",
   "enabled_globally": true,
   "allowed_users": [],
   "denied_users": []

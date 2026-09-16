@@ -1,5 +1,6 @@
 """Discord extras plugin: rich messages, reminders, media inspection, plugin IDE, and audit UI."""
 
+from .audit_chunk_tail import install_audit_chunk_tail
 from .audit_progress_fix import install_progress_audit_fix
 from .audit_ui import install_tool_audit
 from .interaction_progress import install_interaction_progress
@@ -50,6 +51,7 @@ def setup(bot, ctx):
     # Record tools that actually executed and attach a persistent disclosure
     # button to normal Discord and personal-app follow-up replies.
     install_tool_audit(bot, ctx)
+    install_audit_chunk_tail(bot)
     install_user_install_tool_disclosure(bot)
     install_progress_audit_fix(bot)
 
