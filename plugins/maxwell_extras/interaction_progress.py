@@ -1,7 +1,7 @@
 """Discord user-install progress behavior for slow/tool-backed commands.
 
 Fast commands keep Discord's deferred interaction as the answer. If a command
-runs a tool or is still unanswered after five seconds, the deferred interaction
+runs a tool or is still unanswered after ten seconds, the deferred interaction
 is changed to a stable ``working on it…`` status and the eventual answer is
 sent as a separate follow-up message.
 """
@@ -16,7 +16,7 @@ from typing import Any
 
 from user_install import UserInstallSession, is_user_install_command, is_user_install_message
 
-_SLOW_AFTER_SECONDS = 5.0
+_SLOW_AFTER_SECONDS = 10.0
 _STATUS_TEXT = "working on it…"
 _STATE_TTL_SECONDS = 15 * 60.0
 _STATES: dict[str, "_InteractionProgressState"] = {}
@@ -177,28 +177,39 @@ def _patch_session() -> None:
             await _mark_working(state)
 
         # A fast, text-only response should replace Discord's deferred
-        # interaction instead of creating a second message.
-        if (
-            not state.escalated
-            and not state.completed
-            and file is None
-            and int(getattr(self, "_sent", 0) or 0) == 0
-        ):
-            text = None if content is None else str(content)
-            if text == "":
-                text = None
-            try:
-                sent = await _edit_original(self.interaction, text or "\u200b")
-            except Exception:
-                sent = None
-            if sent is not None:
-                state.completed = True
-                _cancel_timer(state)
-                self._sent = 1
-                self._last = sent
-                return sent
-            # If Discord won't let us edit the deferred original, make the
-            # state explicit and fall back to a normal follow-up.
+        # interaction instead of creating a second message. Use the same lock
+        # as the slow timer so "working on it…" can never overwrite a final
+        # answer that is being committed at the timeout boundary.
+        promote_after_fast_attempt = False
+        if file is None and int(getattr(self, "_sent", 0) or 0) == 0:
+            async with state.lock:
+                if not state.escalated and not state.completed:
+                    # Re-check the cutoff while holding the lock. This closes
+                    # the gap between the earlier elapsed check and this edit.
+                    if time.monotonic() - state.started >= _SLOW_AFTER_SECONDS:
+                        promote_after_fast_attempt = True
+                    else:
+                        text = None if content is None else str(content)
+                        if text == "":
+                            text = None
+                        try:
+                            sent = await _edit_original(
+                                self.interaction, text or "\u200b"
+                            )
+                        except Exception:
+                            sent = None
+                        if sent is not None:
+                            state.completed = True
+                            _cancel_timer(state)
+                            self._sent = 1
+                            self._last = sent
+                            return sent
+                        promote_after_fast_attempt = True
+
+        # If the cutoff arrived while the fast path was being considered, or
+        # Discord rejected the original-response edit, promote after releasing
+        # the lock and send the answer as a follow-up.
+        if promote_after_fast_attempt:
             await _mark_working(state)
 
         # Files cannot be attached with the lightweight original-response
@@ -262,7 +273,7 @@ def _patch_tool_progress() -> None:
 
 
 def install_interaction_progress(bot: Any) -> None:
-    """Install the 5-second/tool escalation behavior once for this bot."""
+    """Install the 10-second/tool escalation behavior once for this bot."""
     if getattr(bot, "_maxwell_interaction_progress_installed", False):
         return
 
