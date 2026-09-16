@@ -8990,11 +8990,9 @@ class HostFileTool(Tool):
 # Patterns blocked in shell commands (defense-in-depth even in full-access mode).
 # These mainly prevent accidental or malicious attempts to run nested privileged containers,
 # mount host paths from inside commands, or access the Docker socket.
-# Note: the outer shell sandbox itself now runs with full network + full host FS access (/host).
-# Blocklist is best-effort: it's the outer wall, not the only wall. The inner
-# wall is taint tracking + the docker sandbox capabilities (no-new-privileges,
-# cap-drop ALL, no host net by default). Anything that tries to escape the
-# blocklist gets caught by the next layer.
+# The sandbox process is root with full capabilities. Isolation is the bind
+# mount (only shelldocker/ unless MAXWELL_SHELL_FULL_HOST) plus taint tracking
+# and this blocklist — not dropped capabilities.
 def _shell_exports_dir() -> str:
     """Canonical dir where shell-produced files are staged for re-attach.
 
@@ -9132,6 +9130,8 @@ class ShellTool(Tool):
     CONTAINER_NAME = "maxwell-shell"
     IMAGE_NAME = "maxwell-shell"
     DOCKERFILE_DIR = os.path.join(os.path.dirname(__file__), "docker")
+    # Bump when docker-run flags change so an old sandbox is replaced.
+    _SANDBOX_INIT = "2"
 
     # Output / command-length caps. Read from env so the operator can tune
     # without a code change. 0 = unlimited (use with care; see below).
@@ -9246,15 +9246,15 @@ class ShellTool(Tool):
         )
         if self._full_host_access():
             return (
-                "Run bash -lc in the maxwell-shell container (FULL ACCESS: host "
-                "net, /host, root). Params: command (required), files (optional "
-                "paths to attach). "
+                "Run bash -lc in the maxwell-shell container as root (FULL ACCESS: "
+                "host net, /host, all capabilities). Params: command (required), "
+                "files (optional paths to attach). "
                 f"{how} Container persists across calls. {limits_note}"
             )
         return (
-            "Run bash -lc in the maxwell-shell sandbox (workdir /home/maxwell). "
-            "Params: command (required), files (optional paths under /home/maxwell "
-            "to attach to the channel). "
+            "Run bash -lc as root with full capabilities in the maxwell-shell "
+            "sandbox (workdir /home/maxwell). Params: command (required), files "
+            "(optional paths under /home/maxwell to attach to the channel). "
             f"{how} Container persists across calls. Max 10 MB per file. {limits_note}"
         )
 
@@ -9281,9 +9281,13 @@ class ShellTool(Tool):
                 running = (parts[0] if parts else "").lower() == "true"
                 mode = parts[1] if len(parts) > 1 else ""
                 init = parts[2] if len(parts) > 2 else ""
-                if running and mode == desired_mode and init == "1":
+                if running and mode == desired_mode and init == self._SANDBOX_INIT:
                     return
-                if not running and mode == desired_mode and init == "1":
+                if (
+                    not running
+                    and mode == desired_mode
+                    and init == self._SANDBOX_INIT
+                ):
                     (_stdout, stderr), start_code = await self._run_docker(
                         "start", self.CONTAINER_NAME, timeout=15
                     )
@@ -9333,16 +9337,30 @@ class ShellTool(Tool):
         shell_host = docker_bind_path(
             os.path.join(os.path.dirname(__file__), "shelldocker")
         )
+        run_args = self._sandbox_run_args(
+            full_host=self._full_host_access(), shell_host=shell_host
+        )
+        (_stdout, stderr), run_code = await self._run_docker(*run_args, timeout=30)
+        if run_code != 0:
+            raise RuntimeError(
+                stderr.decode(errors="replace").strip() or "docker run failed"
+            )
+
+    def _sandbox_run_args(self, *, full_host: bool, shell_host: str) -> list[str]:
+        """docker run argv for the persistent sandbox. Root, full capabilities."""
+        mode = "full" if full_host else "isolated"
         run_args = [
             "run",
             "-d",
             "--init",
             "--name",
             self.CONTAINER_NAME,
+            "--user",
+            "0",
             "--label",
-            f"maxwell.shell.mode={desired_mode}",
+            f"maxwell.shell.mode={mode}",
             "--label",
-            "maxwell.shell.init=1",
+            f"maxwell.shell.init={self._SANDBOX_INIT}",
             "--memory",
             "4g",
             "--memory-swap",
@@ -9358,48 +9376,15 @@ class ShellTool(Tool):
             "-v",
             f"{shell_host}:/home/maxwell:rw",
         ]
-        if self._full_host_access():
+        if full_host:
             # Explicit opt-in: host network + full host FS (documented RCE for admins).
-            run_args.extend(
-                [
-                    "--network",
-                    "host",
-                    "-v",
-                    "/:/host:rw",
-                ]
-            )
+            run_args.extend(["--network", "host", "-v", "/:/host:rw"])
         else:
-            # Default: isolated sandbox (no docker.sock, no host root, no host net).
-            run_args.extend(
-                [
-                    "--network",
-                    "bridge",
-                    "--security-opt",
-                    "no-new-privileges:true",
-                    "--cap-drop",
-                    "ALL",
-                    "--cap-add",
-                    "CHOWN",
-                    "--cap-add",
-                    "SETUID",
-                    "--cap-add",
-                    "SETGID",
-                    "--cap-add",
-                    "DAC_OVERRIDE",
-                    "--cap-add",
-                    "FOWNER",
-                    "--cap-add",
-                    "NET_RAW",
-                    "--cap-add",
-                    "NET_BIND_SERVICE",
-                ]
-            )
+            # Isolated from the host FS/net, but root with every capability
+            # inside the sandbox so apt/chown/bind/raw-sockets just work.
+            run_args.extend(["--network", "bridge"])
         run_args.append(self.IMAGE_NAME)
-        (_stdout, stderr), run_code = await self._run_docker(*run_args, timeout=30)
-        if run_code != 0:
-            raise RuntimeError(
-                stderr.decode(errors="replace").strip() or "docker run failed"
-            )
+        return run_args
 
     @staticmethod
     def _command_arg(command: str | None = None, **kwargs) -> str | None:

@@ -103,6 +103,27 @@ def state_dir(data_dir, slug: str) -> Path:
     return Path(data_dir) / "site_servers" / _check_slug(slug) / "_data"
 
 
+SITE_UID = 10001
+SITE_GID = 10001
+
+
+def prepare_state_dir(data_dir, slug: str) -> Path:
+    """Make the container's /data writable.
+
+    Maxwell often runs with cap_drop=ALL, so chown(10001) is EPERM. chmod
+    still works because we own the directory. Sticky + world-writable so
+    both root (docker --user 0) and the image's site user can persist
+    /data/app.db. The host parent ``data/`` is 0700.
+    """
+    path = state_dir(data_dir, slug)
+    path.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        os.chown(path, SITE_UID, SITE_GID)
+    with contextlib.suppress(OSError):
+        os.chmod(path, 0o1777)
+    return path
+
+
 def registry_path(data_dir) -> Path:
     return Path(data_dir) / "site_servers.json"
 
@@ -451,7 +472,7 @@ def write_code(data_dir, slug: str, files: dict[str, str]) -> list[str]:
     """Replace the server's source. Returns the paths written."""
     target = code_dir(data_dir, slug)
     target.mkdir(parents=True, exist_ok=True)
-    state_dir(data_dir, slug).mkdir(parents=True, exist_ok=True)
+    prepare_state_dir(data_dir, slug)
     if not isinstance(files, dict) or not files:
         raise SiteServerError("no server files given")
     checked: dict[str, str] = {}
@@ -524,9 +545,7 @@ def write_code(data_dir, slug: str, files: dict[str, str]) -> list[str]:
             shutil.rmtree(backup, ignore_errors=True)
 
     written = sorted(checked)
-    # /data is written by uid 10001 inside the container.
-    with contextlib.suppress(OSError):
-        os.chown(state_dir(data_dir, slug), 10001, 10001)
+    prepare_state_dir(data_dir, slug)
     return sorted(written)
 
 
@@ -556,7 +575,7 @@ def merge_code(data_dir, slug: str, files: dict[str, str]) -> list[str]:
 
     target = code_dir(data_dir, slug)
     target.mkdir(parents=True, exist_ok=True)
-    state_dir(data_dir, slug).mkdir(parents=True, exist_ok=True)
+    prepare_state_dir(data_dir, slug)
     if "app.py" not in checked and not (target / "app.py").is_file():
         raise SiteServerError("the entry file must be called app.py")
 
@@ -584,8 +603,7 @@ def merge_code(data_dir, slug: str, files: dict[str, str]) -> list[str]:
             with contextlib.suppress(OSError):
                 tmp.unlink()
             raise SiteServerError(f"could not write {rel}: {exc}") from exc
-    with contextlib.suppress(OSError):
-        os.chown(state_dir(data_dir, slug), 10001, 10001)
+    prepare_state_dir(data_dir, slug)
     return sorted(checked)
 
 
@@ -799,11 +817,15 @@ async def _start_unlocked(
         "--ulimit", "nofile=512:1024",
         "--security-opt", "no-new-privileges:true",
         "--cap-drop", "ALL",
+        "--cap-add", "DAC_OVERRIDE",
+        "--cap-add", "CHOWN",
+        "--cap-add", "FOWNER",
+        "--user", "0",
         "--read-only",
         "--tmpfs", "/tmp:rw,noexec,nosuid,size=32m",
         "-p", f"127.0.0.1:{port}:{CONTAINER_PORT}",
         "-v", f"{docker_bind_path(source.resolve())}:/app:ro",
-        "-v", f"{docker_bind_path(state_dir(data_dir, slug).resolve())}:/data:rw",
+        "-v", f"{docker_bind_path(prepare_state_dir(data_dir, slug).resolve())}:/data:rw",
         "-e", f"PORT={CONTAINER_PORT}",
         "-e", f"SITE_SLUG={slug}",
         "-e", f"SITE_BASE_PATH=/bot/{slug}/api",

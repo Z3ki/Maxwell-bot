@@ -171,6 +171,29 @@ PY"""
         assert tool._validate_command("x" * 5000) is None
         assert tool._validate_command("x" * 200_000) is None
 
+    def test_isolated_sandbox_is_root_with_full_capabilities(self):
+        tool = ShellTool(None)  # type: ignore[arg-type]
+        args = tool._sandbox_run_args(
+            full_host=False, shell_host="/tmp/shelldocker"
+        )
+        assert args[args.index("--user") + 1] == "0"
+        assert "--cap-drop" not in args
+        assert "no-new-privileges:true" not in args
+        assert args[args.index("--network") + 1] == "bridge"
+        assert "/tmp/shelldocker:/home/maxwell:rw" in args
+        assert "/:/host:rw" not in args
+        assert f"maxwell.shell.init={tool._SANDBOX_INIT}" in args
+
+    def test_full_host_sandbox_mounts_host_root(self):
+        tool = ShellTool(None)  # type: ignore[arg-type]
+        args = tool._sandbox_run_args(
+            full_host=True, shell_host="/tmp/shelldocker"
+        )
+        assert args[args.index("--user") + 1] == "0"
+        assert "--cap-drop" not in args
+        assert args[args.index("--network") + 1] == "host"
+        assert "/:/host:rw" in args
+
     def test_rejects_curl_pipe_to_shell(self):
         # The classic "fetch and execute" pattern is a top prompt-injection
         # payload. The blocklist must catch it even with extra flags and

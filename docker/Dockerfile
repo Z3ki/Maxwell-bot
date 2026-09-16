@@ -2,10 +2,10 @@
 # Shell-tool sandbox (image name: maxwell-shell).
 # The bot itself is docker/maxwell.Dockerfile, started via docker-compose.yml.
 #
-# Isolated runs (the default) drop all caps, set no-new-privileges, cap
-# memory/CPU/pids, and bind-mount only shelldocker/. This image stays small
-# and has no sudo binary. Root is the default user so `apt-get` inside the
-# sandbox still works under the remaining capabilities.
+# Isolated runs (the default) cap memory/CPU/pids and bind-mount only
+# shelldocker/. The process is root with full capabilities — isolation is
+# the mount and the network, not cap-drop. This image stays small and has
+# no sudo binary.
 
 FROM debian:bookworm-slim
 
@@ -36,8 +36,8 @@ RUN useradd -m -s /bin/bash -u 1000 maxwell \
     && chown maxwell:maxwell /home/maxwell
 
 WORKDIR /home/maxwell
-# Root so package installs in the sandbox still work; Compose/run flags
-# (cap-drop ALL, no-new-privileges) are the isolation wall.
+# Root with full capabilities inside the sandbox. Isolation is the bind
+# mount (shelldocker/ only unless MAXWELL_SHELL_FULL_HOST) and bridge net.
 USER root
 
 CMD ["sleep", "infinity"]

@@ -80,6 +80,21 @@ def test_code_lives_outside_the_web_root(data_dir):
     assert "public" not in str(written) and "www" not in str(written)
 
 
+def test_state_dir_is_writable_when_chown_is_denied(data_dir, monkeypatch):
+    import os
+    import stat as statmod
+
+    def boom(*_a, **_k):
+        raise PermissionError("[Errno 1] Operation not permitted")
+
+    monkeypatch.setattr(os, "chown", boom)
+    path = site_server.prepare_state_dir(data_dir, "demo")
+    probe = path / "test.txt"
+    probe.write_text("ok")
+    assert probe.read_text() == "ok"
+    assert statmod.S_IMODE(path.stat().st_mode) == 0o1777
+
+
 def test_rewriting_replaces_source_but_keeps_the_database(data_dir):
     site_server.write_code(data_dir, "demo", {"app.py": "v1", "old.py": "gone"})
     db = site_server.state_dir(data_dir, "demo") / "app.db"

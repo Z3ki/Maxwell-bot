@@ -74,3 +74,9 @@ def test_runtime_flags_disable_swap():
     assert '"--memory-swap"' in tools
     site = (ROOT / "site_server.py").read_text()
     assert '"--memory-swap", MEMORY' in site
+
+
+def test_site_backend_runs_as_root():
+    site = (ROOT / "site_server.py").read_text()
+    assert '"--user", "0"' in site
+    assert '"--cap-add", "DAC_OVERRIDE"' in site
