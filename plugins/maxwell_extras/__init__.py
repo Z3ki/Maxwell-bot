@@ -1,5 +1,7 @@
-"""Discord extras plugin: rich messages, reminders, media inspection, and explicit recall."""
+"""Discord extras plugin: rich messages, reminders, media inspection, audit UI, and live plugin development."""
 
+from .audit_ui import install_tool_audit
+from .developer import PluginWorkbenchTool
 from .tools import (
     InspectMediaUrlTool,
     RecallCrossServerMemoryTool,
@@ -23,9 +25,15 @@ def setup(bot, ctx):
     # generated files are intercepted and returned to the model instead of posted.
     patch_image_generators(bot)
 
+    # Record tools that actually executed and attach a persistent disclosure
+    # button to normal Discord replies. Auto web-searches are tagged separately.
+    install_tool_audit(bot, ctx)
+
+    workbench = PluginWorkbenchTool(bot, ctx)
     return [
         ReminderTool(bot, store),
         SendRichMessageTool(bot),
         RecallCrossServerMemoryTool(bot),
         InspectMediaUrlTool(bot),
+        workbench,
     ]

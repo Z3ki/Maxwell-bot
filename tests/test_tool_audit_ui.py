@@ -1,0 +1,99 @@
+import asyncio
+from pathlib import Path
+from types import SimpleNamespace
+
+from plugins.maxwell_extras.audit_ui import install_tool_audit
+
+
+class _Ctx:
+    def __init__(self, data):
+        self.data = Path(data)
+
+    def store_path(self, name):
+        return self.data / name
+
+
+class _Sent:
+    def __init__(self, mid):
+        self.id = mid
+        self.view = None
+
+    async def edit(self, **kwargs):
+        if "view" in kwargs:
+            self.view = kwargs["view"]
+        return self
+
+
+class _Web:
+    async def execute(self, message, query=None, **kwargs):
+        return f"results for {query}"
+
+
+def test_audit_records_manual_and_auto_web_search_and_attaches_button(tmp_path):
+    bot = SimpleNamespace()
+    bot.tools = {"web_search": _Web()}
+
+    async def execute_tool(message, name, params, *, disabled, compatible):
+        if name == "web_search":
+            return await bot.tools["web_search"].execute(message, query=params.get("query"))
+        return "ok"
+
+    async def send(channel, content=None, *, reply_to=None, file=None, **kwargs):
+        return _Sent(900)
+
+    bot._execute_tool_by_name = execute_tool
+    bot._send_with_slowmode = send
+    install_tool_audit(bot, _Ctx(tmp_path))
+    message = SimpleNamespace(id=100, channel=SimpleNamespace(id=5))
+
+    async def run():
+        await bot._execute_tool_by_name(
+            message,
+            "web_search",
+            {"query": "manual query"},
+            disabled=set(),
+            compatible={"web_search"},
+        )
+        await bot.tools["web_search"].execute(message, query="auto query")
+        sent = await bot._send_with_slowmode(
+            message.channel, "answer", reply_to=message
+        )
+        row = await bot._maxwell_tool_audit_store.get_response("900")
+        assert row is not None
+        calls = row["calls"]
+        assert [c["name"] for c in calls] == ["web_search", "web_search"]
+        assert [c["source"] for c in calls] == ["model", "auto"]
+        assert sent.view is not None
+        assert sent.view.children[0].label == "Tools · 2"
+
+    asyncio.run(run())
+
+
+def test_audit_records_non_web_dispatch(tmp_path):
+    bot = SimpleNamespace(tools={})
+
+    async def execute_tool(message, name, params, *, disabled, compatible):
+        return "Tool shell: done"
+
+    async def send(channel, content=None, *, reply_to=None, file=None, **kwargs):
+        return _Sent(901)
+
+    bot._execute_tool_by_name = execute_tool
+    bot._send_with_slowmode = send
+    install_tool_audit(bot, _Ctx(tmp_path))
+    message = SimpleNamespace(id=101, channel=SimpleNamespace(id=5))
+
+    async def run():
+        await bot._execute_tool_by_name(
+            message,
+            "shell",
+            {"command": "echo ok"},
+            disabled=set(),
+            compatible={"shell"},
+        )
+        await bot._send_with_slowmode(message.channel, "answer", reply_to=message)
+        row = await bot._maxwell_tool_audit_store.get_response("901")
+        assert row["calls"][0]["name"] == "shell"
+        assert row["calls"][0]["source"] == "model"
+
+    asyncio.run(run())
