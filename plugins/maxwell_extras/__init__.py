@@ -56,7 +56,7 @@ def setup(bot, ctx):
     install_progress_audit_fix(bot)
 
     # Discord app commands keep fast answers in the deferred interaction. Tool
-    # use or >5s latency promotes it to a stable "working on it…" status and
+    # use or >10s latency promotes it to a stable "working on it…" status and
     # sends the eventual answer as a separate follow-up.
     install_interaction_progress(bot)
 
