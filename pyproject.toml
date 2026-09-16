@@ -63,6 +63,10 @@ ignore = [
 "tests/**" = ["RUF012", "RUF015", "SIM115", "F811"]
 # Deliberate re-exports so callers can import from one place.
 "tools.py" = ["F401"]
+# These two authoring helpers favor explicitness because their comprehensions
+# and loop-built history rows are easier to audit than the micro-optimized form.
+"plugins/maxwell_extras/user_install_features.py" = ["C416"]
+"plugins/maxwell_extras/workbench_v2.py" = ["PERF401"]
 
 [tool.ruff.lint.flake8-bugbear]
 # discord.py and aiohttp decorators legitimately take call-expression defaults.
