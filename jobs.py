@@ -1,20 +1,9 @@
 """Background sub-agent jobs for long tasks (sites, research, images, code).
 
-The problem: a long job holds the channel's ``ReplyQueue`` turn (and one
-of only two global LLM slots) for minutes, so everyone else in the room
-queues behind it and the bot looks channel-locked.
-
-The fix: the model calls ``spawn_background`` (or a user runs ``,bg``).
-The live turn ends immediately with a one-line ack naming the job id, and
-the real work runs detached in :func:`run_background_job` with EXTENDED
-budgets (more thinking, more output, longer timeout than a live turn).
-When the job finishes it mentions the requester in the origin channel with
-the result data. Progress lands in a ``job: <goal>`` thread.
-
-Additive by design: this module never monkey-patches the bot. It reuses the
-bot's own seams (``_generate_response``, ``_build_openai_tools``,
-``_dispatch_tool_calls``, ``_acquire_ai_slot``) and posts via
-``channel.send`` directly, never through ``ReplyQueue``.
+Long work runs outside the live ReplyQueue turn so one expensive task does not
+lock a Discord room. Workers get larger time/output budgets, but their prompt
+history is deliberately bounded: a long job should spend tokens on the next
+useful action, not on repeatedly re-reading its own transcript.
 """
 
 from __future__ import annotations
@@ -36,12 +25,8 @@ from utils import _safe_int, _spawn_background
 
 logger = logging.getLogger(__name__)
 
-# A job id is short on purpose: the model has to quote it in its ack line.
 JOB_ID_BYTES = 4
 
-# Extended-budget defaults for background jobs. Live turns stay tight;
-# jobs get the big headroom. Env-overridable, control-overridable
-# (bg_max_tokens / bg_timeout_seconds / bg_max_iters).
 BG_MAX_TOKENS_DEFAULT_FLOOR = 32768
 BG_MAX_TOKENS_HARD_CAP = 131072
 BG_TIMEOUT_DEFAULT = 7200
@@ -49,17 +34,28 @@ BG_TIMEOUT_HARD_CAP = 14400
 BG_ITERS_DEFAULT = 100
 BG_ITERS_HARD_CAP = 200
 
-# How many jobs may run at once, and per user. Queued extras are refused
-# with a "busy" message rather than piling up behind each other.
+# Input-context guardrails are separate from output-token budgets. A generous
+# output ceiling is useful for site/code tool arguments; retaining every old
+# tool result is not. Keep enough recent work for continuity and summarize the
+# rest into a small ledger.
+BG_CONTEXT_CHARS_DEFAULT = 48000
+BG_CONTEXT_CHARS_HARD_CAP = 120000
+BG_CONTEXT_CHARS_MIN = 8000
+BG_CONTEXT_KEEP_RECENT = 12
+BG_CONTEXT_DIGEST_CHARS = 6000
+
+# Circuit breakers. One bad tool call should be recoverable; a loop that keeps
+# doing the exact same thing or throwing the same dispatch class is not useful.
+BG_DISPATCH_ERROR_LIMIT = 3
+BG_REPEAT_NUDGE_AT = 3
+BG_REPEAT_ABORT_AT = 5
+BG_STALL_NUDGE_STEPS = 10
+BG_STALL_ABORT_STEPS = 30
+
 BG_MAX_JOBS_DEFAULT = 2
 BG_MAX_PER_USER_DEFAULT = 1
 
-# Job tools never include this: a background turn that spawns another
-# background turn is recursion, not progress.
 _NO_RECURSE_TOOL = "spawn_background"
-# Worker catalog hides: the spawner (no recursion) and send_message (the worker
-# must NEVER post to a channel — its final answer is delivered automatically as
-# one reply line; a worker send_message is how double-deliveries happened).
 _WORKER_HIDDEN_TOOLS = frozenset({_NO_RECURSE_TOOL, "send_message"})
 
 
@@ -76,11 +72,7 @@ BG_MODEL_DEFAULT = "gemini-3.8-flash-high"
 
 
 def resolve_job_model(control: Any) -> str:
-    """LLM model for background workers. Precedence: control bg_model > env BG_MODEL > default.
-
-    Live turns stay on the cheap low model; workers get the high model so big
-    builds reason properly. Blank/whitespace falls back down the chain.
-    """
+    """LLM model for workers: control bg_model > env BG_MODEL > default."""
     control = control or {}
     raw = str(control.get("bg_model", "") or "").strip()
     if not raw:
@@ -89,11 +81,7 @@ def resolve_job_model(control: Any) -> str:
 
 
 def resolve_job_budgets(control: Any, config: Any) -> dict[str, int]:
-    """Extended thinking/output/timeout budgets for background jobs.
-
-    Precedence per key: control override > env > default. Every value is
-    clamped to its hard cap so a typo cannot book a 24h call.
-    """
+    """Extended output/timeout/iteration budgets with hard safety caps."""
     control = control or {}
     live_max_tokens = (
         _safe_int(getattr(config, "OLLAMA_MAX_TOKENS", 16384) or 16384, 16384)
@@ -103,11 +91,10 @@ def resolve_job_budgets(control: Any, config: Any) -> dict[str, int]:
     default_tokens = max(live_max_tokens * 2, BG_MAX_TOKENS_DEFAULT_FLOOR)
 
     def _pick(control_key: str, env_key: str, default: int, cap: int) -> int:
-        raw = (control or {}).get(control_key, None)
+        raw = control.get(control_key, None)
         if raw is None:
             raw = os.getenv(env_key, "")
         text = str(raw or "").strip()
-        # 0/blank = unset → fall back to env, then to the default.
         if text in ("", "0"):
             text = str(os.getenv(env_key, "") or "").strip()
         if text in ("", "0"):
@@ -124,12 +111,33 @@ def resolve_job_budgets(control: Any, config: Any) -> dict[str, int]:
             "bg_max_tokens", "BG_MAX_TOKENS", default_tokens, BG_MAX_TOKENS_HARD_CAP
         ),
         "timeout_seconds": _pick(
-            "bg_timeout_seconds", "BG_TIMEOUT_SECONDS", BG_TIMEOUT_DEFAULT, BG_TIMEOUT_HARD_CAP
+            "bg_timeout_seconds",
+            "BG_TIMEOUT_SECONDS",
+            BG_TIMEOUT_DEFAULT,
+            BG_TIMEOUT_HARD_CAP,
         ),
         "max_iters": _pick(
             "bg_max_iters", "BG_MAX_ITERS", BG_ITERS_DEFAULT, BG_ITERS_HARD_CAP
         ),
     }
+
+
+def resolve_job_context_chars(control: Any = None) -> int:
+    """Maximum approximate characters retained in a worker request history.
+
+    ``bg_context_chars`` is accepted for forward-compatible control payloads;
+    deployments can use ``BG_CONTEXT_CHARS`` today without requiring a control
+    schema migration.
+    """
+    control = control or {}
+    raw = control.get("bg_context_chars", None)
+    if raw in (None, "", 0, "0"):
+        raw = os.getenv("BG_CONTEXT_CHARS", "")
+    try:
+        value = int(str(raw).strip()) if str(raw or "").strip() else BG_CONTEXT_CHARS_DEFAULT
+    except (TypeError, ValueError):
+        value = BG_CONTEXT_CHARS_DEFAULT
+    return max(BG_CONTEXT_CHARS_MIN, min(value, BG_CONTEXT_CHARS_HARD_CAP))
 
 
 def _short(text: Any, limit: int = 50) -> str:
@@ -140,6 +148,156 @@ def _norm_jid(job_id: Any) -> str:
     return str(job_id or "").strip().lower()
 
 
+def _message_text(message: Any) -> str:
+    if not isinstance(message, dict):
+        return str(message or "")
+    content = message.get("content", "")
+    if isinstance(content, str):
+        text = content
+    else:
+        try:
+            text = json.dumps(content, ensure_ascii=False, default=str)
+        except Exception:
+            text = str(content or "")
+    # Tool-call metadata can dwarf an empty assistant content field, so count it
+    # too when deciding whether to compact.
+    for key in ("tool_calls", "function_call"):
+        if message.get(key):
+            try:
+                text += "\n" + json.dumps(
+                    message.get(key), ensure_ascii=False, default=str, sort_keys=True
+                )
+            except Exception:
+                text += "\n" + str(message.get(key))
+    return text
+
+
+def _message_chars(message: Any) -> int:
+    return len(_message_text(message)) + 32
+
+
+def _history_digest(messages: list[dict[str, Any]], limit: int = BG_CONTEXT_DIGEST_CHARS) -> str:
+    """Compact old worker history into a deterministic, non-LLM work ledger."""
+    if not messages:
+        return ""
+    lines: list[str] = []
+    # Newer dropped work is more useful. Walk backwards, then restore order.
+    for message in reversed(messages[-32:]):
+        role = str(message.get("role") or "event")
+        text = re.sub(r"\s+", " ", _message_text(message)).strip()
+        if not text:
+            continue
+        lines.append(f"{role}: {text[:260]}")
+        if sum(len(x) + 1 for x in lines) >= limit:
+            break
+    lines.reverse()
+    return "\n".join(lines)[-limit:]
+
+
+def _safe_tail_start(messages: list[dict[str, Any]], start: int) -> int:
+    """Never start a retained tail on a native ``tool`` result.
+
+    OpenAI-style providers require that tool results follow the assistant
+    message that declared their tool_call_id. Back up to that assistant entry
+    when compaction would otherwise split the pair.
+    """
+    start = max(2, min(start, len(messages)))
+    while start > 2 and start < len(messages):
+        role = str((messages[start] or {}).get("role") or "")
+        if role != "tool":
+            break
+        start -= 1
+    return start
+
+
+def _compact_worker_messages(
+    messages: list[dict[str, Any]],
+    *,
+    max_chars: int = BG_CONTEXT_CHARS_DEFAULT,
+    keep_recent: int = BG_CONTEXT_KEEP_RECENT,
+) -> list[dict[str, Any]]:
+    """Bound worker prompt growth while preserving system/goal and recent work."""
+    max_chars = max(BG_CONTEXT_CHARS_MIN, int(max_chars or BG_CONTEXT_CHARS_DEFAULT))
+    if len(messages) <= 2 or sum(_message_chars(m) for m in messages) <= max_chars:
+        return messages
+
+    anchors = list(messages[:2])
+    recent_start = max(2, len(messages) - max(2, int(keep_recent)))
+    recent_start = _safe_tail_start(messages, recent_start)
+    tail = list(messages[recent_start:])
+
+    # If the recent tail alone is too large, progressively drop whole oldest
+    # entries, still respecting tool-result pairing.
+    anchor_chars = sum(_message_chars(m) for m in anchors)
+    tail_budget = max(BG_CONTEXT_CHARS_MIN // 2, max_chars - anchor_chars - 1200)
+    while len(tail) > 2 and sum(_message_chars(m) for m in tail) > tail_budget:
+        drop = 1
+        # Dropping an assistant tool-call declaration but leaving its tool result
+        # is invalid, so drop the result(s) with it as one transaction.
+        if tail[0].get("role") == "assistant" and tail[0].get("tool_calls"):
+            drop = 1
+            while drop < len(tail) and tail[drop].get("role") == "tool":
+                drop += 1
+        elif tail[0].get("role") == "tool":
+            drop = 1
+            while drop < len(tail) and tail[drop].get("role") == "tool":
+                drop += 1
+        tail = tail[drop:]
+
+    dropped_end = len(messages) - len(tail)
+    dropped = list(messages[2:dropped_end])
+    digest = _history_digest(dropped)
+    compacted = anchors
+    if digest:
+        compacted.append(
+            {
+                "role": "user",
+                "content": (
+                    "=== COMPACTED PRIOR WORK ===\n"
+                    "Older tool chatter was compressed to save context. Treat this "
+                    "as a work ledger; do not redo completed work unless verification "
+                    "is necessary.\n" + digest
+                ),
+            }
+        )
+    compacted.extend(tail)
+
+    # Last-resort trim of the digest if unusually large anchor/tool metadata
+    # still pushes us past the requested bound.
+    total = sum(_message_chars(m) for m in compacted)
+    if total > max_chars and len(compacted) > 2 and compacted[2].get("content", "").startswith(
+        "=== COMPACTED PRIOR WORK ==="
+    ):
+        over = total - max_chars
+        content = str(compacted[2].get("content") or "")
+        floor = 400
+        compacted[2]["content"] = content[min(max(0, over), max(0, len(content) - floor)) :]
+    return compacted
+
+
+def _call_signature(call: Any) -> str:
+    """Stable signature for detecting an exact repeated tool call."""
+    if not isinstance(call, dict):
+        return re.sub(r"\s+", " ", str(call or "")).strip()[:1000]
+    fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+    name = str(call.get("name") or fn.get("name") or "")
+    args = call.get("arguments", fn.get("arguments", {}))
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except Exception:
+            args = re.sub(r"\s+", " ", args).strip()
+    try:
+        arg_text = json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        arg_text = str(args)
+    return f"{name}:{arg_text}"[:2000]
+
+
+def _batch_signature(calls: list[Any]) -> str:
+    return "|".join(_call_signature(c) for c in calls)[:6000]
+
+
 @dataclass
 class BackgroundJob:
     id: str
@@ -148,7 +306,7 @@ class BackgroundJob:
     user_id: str
     goal: str
     context: str = ""
-    status: str = "queued"  # queued | running | done | error | cancelled
+    status: str = "queued"
     progress: str = ""
     result: str = ""
     thread_id: str = ""
@@ -157,8 +315,7 @@ class BackgroundJob:
 
 
 class BackgroundJobManager:
-    """Track detached jobs. Discord objects live only in _runtime (memory);
-    _jobs (metadata) is what gets persisted."""
+    """Track detached jobs; Discord runtime objects remain memory-only."""
 
     def __init__(
         self,
@@ -168,14 +325,29 @@ class BackgroundJobManager:
         max_per_user: int | None = None,
     ) -> None:
         self.data_path = data_path
-        self.max_jobs = max(1, int(max_jobs if max_jobs is not None else os.getenv("MAXWELL_BG_JOBS", BG_MAX_JOBS_DEFAULT) or BG_MAX_JOBS_DEFAULT))
-        self.max_per_user = max(1, int(max_per_user if max_per_user is not None else os.getenv("MAXWELL_BG_PER_USER", BG_MAX_PER_USER_DEFAULT) or BG_MAX_PER_USER_DEFAULT))
+        self.max_jobs = max(
+            1,
+            int(
+                max_jobs
+                if max_jobs is not None
+                else os.getenv("MAXWELL_BG_JOBS", BG_MAX_JOBS_DEFAULT)
+                or BG_MAX_JOBS_DEFAULT
+            ),
+        )
+        self.max_per_user = max(
+            1,
+            int(
+                max_per_user
+                if max_per_user is not None
+                else os.getenv("MAXWELL_BG_PER_USER", BG_MAX_PER_USER_DEFAULT)
+                or BG_MAX_PER_USER_DEFAULT
+            ),
+        )
         self._jobs: dict[str, BackgroundJob] = {}
         self._runtime: dict[str, dict[str, Any]] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self.load()
 
-    # ---- persistence ----------------------------------------------------
     def _save(self) -> None:
         try:
             directory = os.path.dirname(self.data_path)
@@ -186,7 +358,7 @@ class BackgroundJobManager:
             with open(tmp, "w", encoding="utf-8") as handle:
                 json.dump({"jobs": payload}, handle)
             os.replace(tmp, self.data_path)
-        except Exception as exc:  # best effort; a job must never die on a write
+        except Exception as exc:
             logger.warning("background jobs save failed: %s", exc)
 
     def load(self) -> None:
@@ -224,20 +396,17 @@ class BackgroundJobManager:
                 )
             except (TypeError, ValueError):
                 continue
-            # A restart kills in-flight work; say so instead of lying.
             if job.status in ("queued", "running"):
                 job.status = "cancelled"
                 job.progress = "bot restarted while this job was running"
                 job.finished_at = time.time()
             self._jobs[job.id] = job
-        # History, not archive: keep the recent slice.
         if len(self._jobs) > 50:
             ordered = sorted(self._jobs.values(), key=lambda j: j.created_at)
             for stale in ordered[:-50]:
                 self._jobs.pop(stale.id, None)
                 self.cleanup_runtime(stale.id)
 
-    # ---- lifecycle ------------------------------------------------------
     def active_count(self) -> int:
         return sum(1 for j in self._jobs.values() if j.status in ("queued", "running"))
 
@@ -283,7 +452,9 @@ class BackgroundJobManager:
     def get(self, job_id: str) -> BackgroundJob | None:
         return self._jobs.get(_norm_jid(job_id))
 
-    def list_text(self, limit: int = 10, *, guild_id: Any = None, user_id: Any = None) -> str:
+    def list_text(
+        self, limit: int = 10, *, guild_id: Any = None, user_id: Any = None
+    ) -> str:
         if not self._jobs:
             return "no background jobs yet."
         gid = str(guild_id or "").strip()
@@ -298,8 +469,14 @@ class BackgroundJobManager:
         ordered = sorted(jobs, key=lambda j: j.created_at, reverse=True)[: max(1, limit)]
         lines = []
         for job in ordered:
-            age = time.strftime("%H:%M", time.localtime(job.created_at)) if job.created_at else "??:??"
-            lines.append(f"`{job.id}` [{job.status}] <@{job.user_id}> {_short(job.goal, 60)} ({age})")
+            age = (
+                time.strftime("%H:%M", time.localtime(job.created_at))
+                if job.created_at
+                else "??:??"
+            )
+            lines.append(
+                f"`{job.id}` [{job.status}] <@{job.user_id}> {_short(job.goal, 60)} ({age})"
+            )
         return "\n".join(lines)
 
     def cleanup_runtime(self, job_id: str) -> None:
@@ -324,13 +501,14 @@ class BackgroundJobManager:
                     self.mark(jid, status="cancelled", progress="cancelled on request")
             else:
                 error = done.exception()
-                if error is not None and job is not None and job.status in ("queued", "running"):
+                if error is not None and job is not None and job.status in (
+                    "queued",
+                    "running",
+                ):
                     self.mark(jid, status="error", progress=str(error)[:500])
             if self._tasks.get(jid) is done:
                 self.cleanup_runtime(jid)
 
-        # Covers cancellation before the coroutine starts and failures during
-        # setup, before the worker's own try/finally can run.
         task.add_done_callback(finished)
 
     def mark(self, job_id: str, **fields: Any) -> BackgroundJob | None:
@@ -345,7 +523,9 @@ class BackgroundJobManager:
         self._save()
         return job
 
-    def cancel(self, job_id: str, *, requester_id: Any = None, is_admin: bool = False) -> tuple[bool, str]:
+    def cancel(
+        self, job_id: str, *, requester_id: Any = None, is_admin: bool = False
+    ) -> tuple[bool, str]:
         job = self.get(job_id)
         if job is None:
             return False, "no such job."
@@ -374,21 +554,33 @@ class SpawnBackgroundTool(Tool):
 
     def get_description(self):
         return (
-            "BACKGROUND job for any long task (site, research, images, code, "
-            "multi-step). Returns a job id; then send_message one short ack with "
-            "that id. Detached, bigger budgets, replies when done. Params: goal "
-            "(required), context (optional spec). Then send_message: ONE short "
-            "ack with the job id — nothing else."
+            "BACKGROUND job for any long/multi-step task (site, research, images, code). "
+            "Pass a self-contained goal with the deliverable and important constraints; "
+            "use context only for essential facts not already in the goal. Do NOT paste "
+            "the chat transcript or redundant history. Returns a job id; then send_message "
+            "one short ack naming that id and end the turn. Detached, bigger budgets, "
+            "replies when done. Params: goal (required), context (optional concise spec)."
         )
 
-    async def execute(self, message: Any, goal: str | None = None, context: str | None = None, **kwargs: Any) -> str:
+    async def execute(
+        self,
+        message: Any,
+        goal: str | None = None,
+        context: str | None = None,
+        **kwargs: Any,
+    ) -> str:
         if getattr(message, "_bg_job", False):
-            return "ALREADY INSIDE a background job — do the work inline with normal tools, do not spawn again."
+            return (
+                "ALREADY INSIDE a background job — do the work inline with normal tools, "
+                "do not spawn again."
+            )
         bot = getattr(self, "bot", None)
         manager = getattr(bot, "bg_jobs", None) if bot is not None else None
         if manager is None:
             return "ERROR: background jobs are not enabled on this bot. Do the work inline."
-        raw_goal = str(goal or kwargs.get("text") or kwargs.get("prompt") or "").strip()
+        raw_goal = str(
+            goal or kwargs.get("text") or kwargs.get("prompt") or ""
+        ).strip()
         if not raw_goal:
             raw_goal = str(getattr(message, "content", "") or "").strip()[:500]
         if not raw_goal:
@@ -412,7 +604,10 @@ class SpawnBackgroundTool(Tool):
                     "Reply NOW with send_message: ONE short ack, nothing else."
                 )
             if text.startswith("ALL_BUSY:"):
-                return f"COULD NOT START ({text[len('ALL_BUSY:'):].strip()}). Do the work inline."
+                return (
+                    f"COULD NOT START ({text[len('ALL_BUSY:'):].strip()}). "
+                    "Do the work inline."
+                )
             return f"COULD NOT START: {text} Do the work inline."
         manager.attach_runtime(job.id, message=message, channel=channel)
         try:
@@ -451,11 +646,13 @@ _PROGRESS_MARKERS = (
     "downloaded",
     "hosted ",
     "search results",
+    "created ",
+    "updated ",
+    "deleted ",
 )
 
 
 def _looks_like_progress(tool_results: Any) -> bool:
-    """Did this step produce real work? Greps and re-reads don't count."""
     blob = " ".join(str(r or "") for r in list(tool_results or [])[:4]).lower()
     return any(marker in blob for marker in _PROGRESS_MARKERS)
 
@@ -474,7 +671,6 @@ _URL_RE = re.compile(r"https?://[^\s)>\]]+")
 
 
 def _first_url(text: Any) -> str:
-    """First URL in the text, or '' — delivery carries ONE link, never a list."""
     match = _URL_RE.search(str(text or ""))
     return match.group(0).rstrip(".,;:") if match else ""
 
@@ -486,31 +682,39 @@ _VAGUE_FINAL_RE = re.compile(
 
 
 def _worker_system_body(job_id: str, goal: str, context: str = "") -> str:
-    """Instructions for a detached worker — tool choice follows the goal."""
+    """Instructions for a detached worker, optimized for convergence."""
     extra = f"Context: {context}\n" if str(context or "").strip() else ""
     return (
         f"BACKGROUND job `{job_id}`. Channel already acked — don't narrate. "
         "No channel posts (no send_message). Only your FINAL line is delivered.\n"
         f"Goal: {goal}\n"
         f"{extra}"
-        "Work:\n"
-        "1. Pick tools that match the goal. Sites: create_site / edit_site / host_file "
+        "Execution rules:\n"
+        "1. Treat the goal + concise context as the complete brief. Plan silently, then use "
+        "the smallest sufficient tool sequence. Do not ask the user to repeat information.\n"
+        "2. Advance after each result. Do not repeat a successful search, fetch, grep, or file "
+        "read unless the underlying state changed or verification is genuinely required. Batch "
+        "independent work when a tool supports it.\n"
+        "3. Verify externally visible or destructive work once at the end; do not repeatedly "
+        "re-verify unchanged state. If a tool fails, correct the call once, then choose an "
+        "alternative or fail concretely instead of looping.\n"
+        "4. Pick tools that match the goal. Sites: create_site / edit_site / host_file "
         "(site_server only if a backend is needed). Research: web_search / fetch_url. "
-        "Images: hd_image / image_generator. Code/files: shell / host_file. "
-        "Do not force a website unless the goal is a site.\n"
-        "2. If this IS a site: static HTML/CSS/JS is fine. Relative API paths "
-        "(`api/notes`, never `/api/...`) only when a backend is needed. Patch live "
-        "files via tools. One route = one definition; don't remount the same path.\n"
-        "3. Do the whole job. No placeholders.\n"
-        "Last message: one concrete result line, not 'done' or 'finished'. "
-        "If you produced a real URL: `Built <title>: <url> — <one line>` with the "
-        "title and URL from tools. Otherwise the answer or artifact (path, summary, "
-        "image, findings) — never invent a URL. On failure: `FAILED: <reason>`."
+        "Images: hd_image / image_generator. Code/files: shell / host_file. Do not force "
+        "a website unless the goal is a site.\n"
+        "5. If this IS a site: static HTML/CSS/JS is fine. Relative API paths "
+        "(`api/notes`, never `/api/...`) only when a backend is needed. Patch live files via "
+        "tools. One route = one definition; don't remount the same path.\n"
+        "6. Do the whole job. No placeholders. Finishing is the job; once acceptance criteria "
+        "are met, stop using tools and return the result.\n"
+        "Last message: one concrete result line, not 'done' or 'finished'. If you produced a "
+        "real URL: `Built <title>: <url> — <one line>` with the title and URL from tools. "
+        "Otherwise give the answer/artifact (path, summary, image, findings). Never invent a "
+        "URL. On failure: `FAILED: <specific reason>`."
     )
 
 
 def _delivery_line(final_text: Any, job_id: str) -> str:
-    """ONE short result line. Append a URL only when the worker produced one."""
     first = ""
     for line in str(final_text or "").splitlines():
         line = line.strip()
@@ -520,8 +724,6 @@ def _delivery_line(final_text: Any, job_id: str) -> str:
     summary = re.sub(r"\s+", " ", first)[:200] or "done — details in the thread"
     url = _first_url(final_text)
     if not url and (_VAGUE_FINAL_RE.match(summary) or len(summary) < 15):
-        # Worker ended vague ("I'm all done!") — say nothing useful over
-        # parroting it; the thread holds the real result.
         return f"job `{job_id}` done — details in the thread."
     head = f"job `{job_id}` done — {summary}"
     if url and url not in head:
@@ -530,7 +732,6 @@ def _delivery_line(final_text: Any, job_id: str) -> str:
 
 
 async def _reply_short(target_message: Any, channel: Any, text: str) -> None:
-    """Reply to the ORIGINAL message with mention ping. Fall back to plain channel send."""
     text = str(text or "")[:1900]
     if not text.strip():
         return
@@ -548,14 +749,9 @@ async def _reply_short(target_message: Any, channel: Any, text: str) -> None:
         await channel.send(text)
 
 
-async def _llm_delivery_line(bot: Any, final_text: Any, job_id: str, job_goal: str = "") -> str:
-    """LLM-rewritten delivery line for the ORIGINAL-message reply (ping on).
-
-    Takes the worker's raw final text and asks the model for one short,
-    natural chat line carrying the result + single URL. Falls back to the
-    templated `_delivery_line` when the LLM is unavailable or returns junk,
-    so delivery never fails silently.
-    """
+async def _llm_delivery_line(
+    bot: Any, final_text: Any, job_id: str, job_goal: str = ""
+) -> str:
     fallback = _delivery_line(final_text, job_id)
     try:
         generate = getattr(bot, "_generate_response", None)
@@ -564,25 +760,22 @@ async def _llm_delivery_line(bot: Any, final_text: Any, job_id: str, job_goal: s
         raw = str(final_text or "").strip()[:2000] or fallback
         goal = re.sub(r"\s+", " ", str(job_goal or "")).strip()[:200]
         prompt = (
-            "One Discord line, <200 chars. Keep the real result. Include a URL "
-            "only if the result has one; never invent a link. No placeholders, "
-            "extra links, job-id prefix, or thread talk.\n"
-            f"Result: {raw}"
-            + (f"\nGoal: {goal}" if goal else "")
+            "One Discord line, <200 chars. Keep the real result. Include a URL only if the "
+            "result has one; never invent a link. No placeholders, extra links, job-id prefix, "
+            "or thread talk.\n"
+            f"Result: {raw}" + (f"\nGoal: {goal}" if goal else "")
         )
         try:
-            await bot._acquire_ai_slot(timeout=30.0, priority="background", key=f"delivery-{job_id}")
+            await bot._acquire_ai_slot(
+                timeout=30.0, priority="background", key=f"delivery-{job_id}"
+            )
             slot_held = True
         except Exception:
             slot_held = False
         name = "Bot"
         with contextlib.suppress(Exception):
             name = (
-                str(
-                    process_name(bot)
-                    or getattr(bot, "bot_name", None)
-                    or "Bot"
-                ).strip()
+                str(process_name(bot) or getattr(bot, "bot_name", None) or "Bot").strip()
                 or "Bot"
             )
         try:
@@ -600,7 +793,6 @@ async def _llm_delivery_line(bot: Any, final_text: Any, job_id: str, job_goal: s
                 with contextlib.suppress(Exception):
                     await bot._release_ai_slot()
         text = str(resp or "").strip()
-        # Single line, single URL — never a wall.
         first = ""
         for line in text.splitlines():
             line = line.strip()
@@ -628,11 +820,7 @@ async def _post_thread(thread: Any, text: str) -> None:
 
 
 async def run_background_job(bot: Any, job_id: str) -> None:
-    """Detached worker: full tool loop on extended budgets, then deliver.
-
-    Never raises: every failure mode ends with the job marked and (when
-    possible) a friendly message to the requester.
-    """
+    """Detached worker with bounded context, circuit breakers, and final delivery."""
     manager = getattr(bot, "bg_jobs", None)
     job = manager.get(job_id) if manager is not None else None
     if job is None:
@@ -652,21 +840,24 @@ async def run_background_job(bot: Any, job_id: str) -> None:
 
     async def _fail(text: str) -> None:
         manager.mark(job.id, status="error", progress=text[:500])
-        await _reply_short(orig_message, channel, f"job `{job.id}` failed — {text[:300]}")
+        await _reply_short(
+            orig_message, channel, f"job `{job.id}` failed — {text[:300]}"
+        )
 
     if orig_message is None or channel is None:
         await _fail("lost the origin channel (restart or deleted channel).")
         return
 
-    budgets = resolve_job_budgets(getattr(bot, "_control", {}) or {}, getattr(bot, "config", None))
-    job_model = resolve_job_model(getattr(bot, "_control", {}) or {})
+    control = getattr(bot, "_control", {}) or {}
+    budgets = resolve_job_budgets(control, getattr(bot, "config", None))
+    context_chars = resolve_job_context_chars(control)
+    job_model = resolve_job_model(control)
     max_tokens = int(budgets["max_tokens"])
     timeout = int(budgets["timeout_seconds"])
     max_iters = int(budgets["max_iters"])
 
     manager.mark(job.id, status="running", progress="starting")
 
-    # Progress thread: keeps the origin channel clean while work runs.
     thread = None
     thread_err = ""
     try:
@@ -675,7 +866,7 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                 name=f"job: {_short(job.goal, 40)}", auto_archive_duration=60
             )
         elif hasattr(channel, "create_thread"):
-            import discord  # local import: no hard dep at module load
+            import discord
 
             thread = await channel.create_thread(
                 name=f"job: {_short(job.goal, 40)}",
@@ -704,17 +895,22 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                     source="spawn_background",
                 )
             except Exception:
-                logger.debug("could not store background-job thread brief", exc_info=True)
+                logger.debug(
+                    "could not store background-job thread brief", exc_info=True
+                )
         await _post_thread(
             thread,
             f"Job `{job.id}` running — `{_short(job.goal, 120)}`\n"
-            f"Budgets: {max_tokens} tokens/call, {timeout}s timeout, {max_iters} steps. Progress lands here.",
+            f"Budgets: {max_tokens} output tokens/call, {context_chars} history chars, "
+            f"{timeout}s timeout, {max_iters} steps. Progress lands here.",
         )
     else:
-        logger.info("background job %s: no thread (%s)", job.id, thread_err or "DMs have no threads")
+        logger.info(
+            "background job %s: no thread (%s)",
+            job.id,
+            thread_err or "DMs have no threads",
+        )
 
-    # Flag the origin message so a nested spawn_background refuses (recursion
-    # guard) and the job's own tools execute against the right message.
     try:
         orig_message._bg_job = True
     except Exception:
@@ -739,13 +935,16 @@ async def run_background_job(bot: Any, job_id: str) -> None:
         else:
             from identity import fill_identity
 
-            raw = str((getattr(bot, "_control", {}) or {}).get("base_personality") or "")
+            raw = str(control.get("base_personality") or "")
             base_personality = fill_identity(raw) if raw else ""
     except Exception:
         pass
     tool_prompt = ""
     try:
-        tool_prompt = str(bot._tool_system_prompt(platform, message=orig_message, content=job.goal) or "")
+        tool_prompt = str(
+            bot._tool_system_prompt(platform, message=orig_message, content=job.goal)
+            or ""
+        )
     except Exception as exc:
         logger.debug("background job %s tool prompt failed: %s", job.id, exc)
 
@@ -766,11 +965,12 @@ async def run_background_job(bot: Any, job_id: str) -> None:
 
     openai_tools: list[dict[str, Any]] = []
     try:
-        openai_tools = list(bot._build_openai_tools(platform, message=orig_message, content=job.goal) or [])
+        openai_tools = list(
+            bot._build_openai_tools(platform, message=orig_message, content=job.goal)
+            or []
+        )
     except Exception as exc:
         logger.warning("background job %s tool catalog failed: %s", job.id, exc)
-    # No recursion (the job IS the worker) and no channel posts (delivery is
-    # automatic — a worker send_message double-delivers to the channel).
     openai_tools = _worker_tools(openai_tools)
     try:
         _custom, provider_tools = bot._select_tool_protocol(openai_tools)
@@ -781,25 +981,42 @@ async def run_background_job(bot: Any, job_id: str) -> None:
     succeeded = False
     finished_cleanly = False
     last_progress_step = 0
+    consecutive_dispatch_errors = 0
+    last_batch_signature = ""
+    repeated_batch_count = 0
+    repeat_nudged = False
     deadline = time.monotonic() + float(timeout)
+
     try:
         for step in range(max(1, max_iters)):
+            messages = _compact_worker_messages(messages, max_chars=context_chars)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                manager.mark(job.id, progress=f"time budget ({timeout}s) hit at step {step}")
-                final_text = final_text or "I ran out of time budget — partial work is in the thread."
+                manager.mark(
+                    job.id, progress=f"time budget ({timeout}s) hit at step {step}"
+                )
+                final_text = final_text or (
+                    "I ran out of time budget — partial work is in the thread."
+                )
                 succeeded = False
                 break
 
             try:
                 await bot._acquire_ai_slot(
-                    timeout=float(min(remaining, 600)), priority="background", key=job.channel_id
+                    timeout=float(min(remaining, 600)),
+                    priority="background",
+                    key=job.channel_id,
                 )
             except Exception as exc:
                 if step == 0:
                     await _fail(f"still waiting on an LLM slot after 10m ({exc}).")
                     return
-                logger.warning("background job %s slot wait failed at step %s: %s", job.id, step, exc)
+                logger.warning(
+                    "background job %s slot wait failed at step %s: %s",
+                    job.id,
+                    step,
+                    exc,
+                )
                 succeeded = False
                 break
 
@@ -814,16 +1031,21 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                 )
                 succeeded = True
             except Exception as exc:
-                logger.warning("background job %s generation failed at step %s: %s", job.id, step, exc)
-                # A later-step failure is not a successful finish. The first
-                # successful LLM call used to leave succeeded=True, so a
-                # mid-run provider drop was marked done with partial text.
+                logger.warning(
+                    "background job %s generation failed at step %s: %s",
+                    job.id,
+                    step,
+                    exc,
+                )
                 succeeded = False
-                final_text = final_text or f"generation failed ({type(exc).__name__}); partial work is in the thread."
+                final_text = final_text or (
+                    f"generation failed ({type(exc).__name__}); partial work is in the thread."
+                )
                 break
             finally:
                 with contextlib.suppress(Exception):
                     await bot._release_ai_slot()
+
             try:
                 calls = list(bot._native_calls_from(response) or [])
             except Exception:
@@ -838,85 +1060,170 @@ async def run_background_job(bot: Any, job_id: str) -> None:
             if not calls:
                 try:
                     cleaned = await bot._dispatch_tool_calls(orig_message, response or "")
-                    final_text = cleaned[0] if isinstance(cleaned, (list, tuple)) else str(cleaned or "")
+                    final_text = (
+                        cleaned[0]
+                        if isinstance(cleaned, (list, tuple))
+                        else str(cleaned or "")
+                    )
                 except Exception:
                     final_text = str(response or "")
                 final_text = str(final_text or "").strip()
                 finished_cleanly = True
                 break
+
+            batch_signature = _batch_signature(calls)
+            if batch_signature and batch_signature == last_batch_signature:
+                repeated_batch_count += 1
+            else:
+                last_batch_signature = batch_signature
+                repeated_batch_count = 1
+                repeat_nudged = False
+            if repeated_batch_count >= BG_REPEAT_ABORT_AT:
+                final_text = (
+                    "repeated the same tool call without converging; stopped to avoid a loop."
+                )
+                succeeded = False
+                await _post_thread(
+                    thread,
+                    f"step {step + 1}: stopped — identical tool batch repeated "
+                    f"{repeated_batch_count} times.",
+                )
+                break
+            if repeated_batch_count >= BG_REPEAT_NUDGE_AT and not repeat_nudged:
+                repeat_nudged = True
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "You are repeating the exact same tool call. Do not call it again "
+                            "with identical arguments. Use the result you already have, change "
+                            "the approach, or finish with a concrete result."
+                        ),
+                    }
+                )
+
             names = [_call_name(c) for c in calls]
             try:
                 dispatched = await bot._dispatch_tool_calls(
                     orig_message, response, native_tool_calls=calls
                 )
+                consecutive_dispatch_errors = 0
                 if isinstance(dispatched, (list, tuple)):
                     resp_text = str(dispatched[0] or "")
-                    tool_results = list(dispatched[1] or []) if len(dispatched) > 1 else []
+                    tool_results = (
+                        list(dispatched[1] or []) if len(dispatched) > 1 else []
+                    )
                 else:
                     resp_text, tool_results = str(dispatched or ""), []
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning("background job %s dispatch failed at step %s: %s", job.id, step, exc)
-                succeeded = True  # the turn itself worked; one tool errored
+                consecutive_dispatch_errors += 1
+                logger.warning(
+                    "background job %s dispatch failed at step %s (%s/%s): %s",
+                    job.id,
+                    step,
+                    consecutive_dispatch_errors,
+                    BG_DISPATCH_ERROR_LIMIT,
+                    exc,
+                )
+                if consecutive_dispatch_errors >= BG_DISPATCH_ERROR_LIMIT:
+                    final_text = (
+                        f"tool dispatch failed {consecutive_dispatch_errors} times in a row "
+                        f"({type(exc).__name__})."
+                    )
+                    succeeded = False
+                    break
                 messages.append({"role": "assistant", "content": str(response or "")})
-                messages.append({"role": "user", "content": f"=== TOOL RESULTS ===\ntool error: {exc}"})
-                continue
-            manager.mark(job.id, progress=f"step {step + 1}: {', '.join([n for n in names if n][:4]) or 'thinking'}")
-            if _looks_like_progress(tool_results):
-                last_progress_step = step
-            elif step - last_progress_step >= 15:
-                # Stuck loop: shell greps and re-reads, no file changing.
-                # Nudge hard toward converge instead of burning 100 steps.
-                last_progress_step = step
                 messages.append(
                     {
                         "role": "user",
                         "content": (
-                            "No real progress in 15 steps. Stop grepping/re-reading. "
-                            "Finish the goal with the matching tools, then one concrete "
-                            "result line (include a URL only if you produced one)."
+                            "=== TOOL RESULTS ===\n"
+                            f"tool error: {type(exc).__name__}: {str(exc)[:500]}\n"
+                            "Correct the call once or choose a different tool; do not repeat "
+                            "the same failing call."
                         ),
                     }
                 )
-                await _post_thread(
-                    thread,
-                    f"step {step + 1}: nudge — no progress in 15 steps, forcing converge.",
-                )
+                messages = _compact_worker_messages(messages, max_chars=context_chars)
+                continue
+
+            manager.mark(
+                job.id,
+                progress=(
+                    f"step {step + 1}: "
+                    f"{', '.join([n for n in names if n][:4]) or 'thinking'}"
+                ),
+            )
+            if _looks_like_progress(tool_results):
+                last_progress_step = step
+            else:
+                stalled_for = step - last_progress_step
+                if stalled_for >= BG_STALL_ABORT_STEPS:
+                    final_text = (
+                        f"no material progress for {stalled_for} steps; stopped to avoid "
+                        "burning the remaining budget."
+                    )
+                    succeeded = False
+                    await _post_thread(
+                        thread,
+                        f"step {step + 1}: stopped — no material progress for "
+                        f"{stalled_for} steps.",
+                    )
+                    break
+                if stalled_for >= BG_STALL_NUDGE_STEPS:
+                    last_progress_step = step
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "No material progress recently. Stop grepping/re-reading and "
+                                "stop broadening scope. Use what you already know to finish the "
+                                "goal with the smallest remaining tool sequence, then return one "
+                                "concrete result line."
+                            ),
+                        }
+                    )
+                    await _post_thread(
+                        thread,
+                        f"step {step + 1}: nudge — no material progress, forcing converge.",
+                    )
+
             await _post_thread(
                 thread,
-                f"step {step + 1} `{', '.join([n for n in names if n][:4]) or '…'}` — {_summarize_tool_results(tool_results)}",
+                f"step {step + 1} `{', '.join([n for n in names if n][:4]) or '…'}` — "
+                f"{_summarize_tool_results(tool_results)}",
             )
-            # An ending-only batch (e.g. the model wrapped up via send_message)
-            # is the finished answer — do not loop for more.
+
             named = {n for n in names if n}
             if named and named <= set(TURN_ENDING_TOOL_NAMES) and resp_text.strip():
                 final_text = resp_text.strip()
                 finished_cleanly = True
                 break
+
             try:
-                followups = list(getattr(bot, "_last_native_followup_messages", None) or [])
+                followups = list(
+                    getattr(bot, "_last_native_followup_messages", None) or []
+                )
             except Exception:
                 followups = []
             if followups:
                 messages.extend(followups)
             else:
                 messages.append({"role": "assistant", "content": str(response or "")})
-                # Cap what flows back into the worker loop: full tool outputs
-                # accumulate across steps (100+ messages, 40k+ tokens/call) and
-                # the worker starts re-verifying trivia instead of converging.
-                # Full detail already lives in the thread posts.
-                clipped = "\n".join(str(r or "")[:2000] for r in tool_results)[:8000]
+                clipped = "\n".join(str(r or "")[:1600] for r in tool_results[:4])[:6000]
                 messages.append(
                     {"role": "user", "content": "=== TOOL RESULTS ===\n" + clipped}
                 )
+            messages = _compact_worker_messages(messages, max_chars=context_chars)
+
             if not tool_results:
                 final_text = resp_text.strip()
                 break
             final_text = resp_text.strip()
 
         if not succeeded or not finished_cleanly:
-            # Timeout, slot-wait abort, or max-iters without a final answer.
             await _fail(final_text or "the model never returned a finished answer.")
             await _post_thread(thread, "Failed before producing a final answer.")
             return
@@ -928,9 +1235,6 @@ async def run_background_job(bot: Any, job_id: str) -> None:
             return
 
         manager.mark(job.id, progress="delivering")
-
-        # Deliver: LLM-written reply to the ORIGINAL message (ping on).
-        # Full result already lives in the job thread; the channel gets one line.
         try:
             body = await _llm_delivery_line(bot, final_text, job.id, job.goal)
         except Exception:
@@ -939,7 +1243,10 @@ async def run_background_job(bot: Any, job_id: str) -> None:
             await _reply_short(orig_message, channel, body)
         except Exception as exc:
             logger.warning("background job %s delivery failed: %s", job.id, exc)
-            await _post_thread(thread, f"Done, but I could not post to the channel ({exc}):\n{body[:1500]}")
+            await _post_thread(
+                thread,
+                f"Done, but I could not post to the channel ({exc}):\n{body[:1500]}",
+            )
         manager.mark(job.id, status="done", result=final_text[:8000], progress="done")
         await _post_thread(thread, f"Finished.\n{str(final_text or '')[:1500]}")
     except asyncio.CancelledError:
