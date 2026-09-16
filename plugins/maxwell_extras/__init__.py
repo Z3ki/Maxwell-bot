@@ -4,6 +4,7 @@ from .audit_progress_fix import install_progress_audit_fix
 from .audit_ui import install_tool_audit
 from .interaction_progress import install_interaction_progress
 from .plugin_runtime import install_plugin_runtime_guards
+from .rich_interactions import install_rich_interactions
 from .user_install_features import (
     install_user_install_features,
     install_user_install_tool_disclosure,
@@ -51,10 +52,16 @@ def setup(bot, ctx):
     # sends the eventual answer as a separate follow-up.
     install_interaction_progress(bot)
 
+    # Rich messages now support stateful callback buttons. The action registry
+    # is persistent, clicks are routed through on_interaction back into Maxwell,
+    # and the same layer exposes managed persistent views/dynamic items to plugins.
+    rich_tool = SendRichMessageTool(bot)
+    install_rich_interactions(bot, ctx, rich_tool)
+
     workbench = PluginWorkbenchTool(bot, ctx)
     return [
         ReminderTool(bot, store),
-        SendRichMessageTool(bot),
+        rich_tool,
         RecallCrossServerMemoryTool(bot),
         InspectMediaUrlTool(bot),
         workbench,
