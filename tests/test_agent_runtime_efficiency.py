@@ -56,6 +56,7 @@ def test_context_compaction_keeps_goal_recent_tail_and_bounded_size():
     assert compacted[0] == messages[0]
     assert compacted[1] == messages[1]
     assert compacted[-1] == messages[-1]
+    assert compacted[2]["content"].startswith("=== COMPACTED PRIOR WORK ===")
     assert "assistant:" in compacted[2]["content"]
     assert "result 25" in compacted[2]["content"]
     assert sum(_message_chars(m) for m in compacted) <= 9000

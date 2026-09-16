@@ -43,6 +43,12 @@ BG_CONTEXT_CHARS_HARD_CAP = 120000
 BG_CONTEXT_CHARS_MIN = 8000
 BG_CONTEXT_KEEP_RECENT = 12
 BG_CONTEXT_DIGEST_CHARS = 6000
+_COMPACTED_LEDGER_PREFIX = (
+    "=== COMPACTED PRIOR WORK ===\n"
+    "Older tool chatter was compressed to save context. Treat this "
+    "as a work ledger; do not redo completed work unless verification "
+    "is necessary.\n"
+)
 
 # Circuit breakers. One bad tool call should be recoverable; a loop that keeps
 # doing the exact same thing or throwing the same dispatch class is not useful.
@@ -246,33 +252,55 @@ def _compact_worker_messages(
 
     dropped_end = len(messages) - len(tail)
     dropped = list(messages[2:dropped_end])
-    digest = _history_digest(dropped)
+    remaining = max_chars - anchor_chars - sum(_message_chars(m) for m in tail)
+    digest_limit = min(
+        BG_CONTEXT_DIGEST_CHARS,
+        max(0, remaining - len(_COMPACTED_LEDGER_PREFIX) - 32),
+    )
+    digest = _history_digest(dropped, limit=digest_limit) if digest_limit else ""
     compacted = anchors
     if digest:
         compacted.append(
             {
                 "role": "user",
-                "content": (
-                    "=== COMPACTED PRIOR WORK ===\n"
-                    "Older tool chatter was compressed to save context. Treat this "
-                    "as a work ledger; do not redo completed work unless verification "
-                    "is necessary.\n" + digest
-                ),
+                "content": _COMPACTED_LEDGER_PREFIX + digest,
             }
         )
     compacted.extend(tail)
 
     # Last-resort trim of the digest if unusually large anchor/tool metadata
-    # still pushes us past the requested bound.
+    # still pushes us past the requested bound. Keep the ledger header; drop
+    # the oldest digest body so the model still knows this is compacted work.
     total = sum(_message_chars(m) for m in compacted)
-    if total > max_chars and len(compacted) > 2 and compacted[2].get("content", "").startswith(
-        "=== COMPACTED PRIOR WORK ==="
+    if (
+        total > max_chars
+        and len(compacted) > 2
+        and str(compacted[2].get("content") or "").startswith(
+            "=== COMPACTED PRIOR WORK ==="
+        )
     ):
-        over = total - max_chars
-        content = str(compacted[2].get("content") or "")
-        floor = 400
-        compacted[2]["content"] = content[min(max(0, over), max(0, len(content) - floor)) :]
+        compacted[2]["content"] = _trim_compacted_ledger(
+            str(compacted[2].get("content") or ""),
+            total - max_chars,
+        )
     return compacted
+
+
+def _trim_compacted_ledger(content: str, over: int) -> str:
+    """Drop oldest digest text without slicing off the COMPACTED PRIOR WORK header."""
+    prefix = _COMPACTED_LEDGER_PREFIX
+    if content.startswith(prefix):
+        body = content[len(prefix) :]
+    else:
+        nl = content.find("\n")
+        prefix = content[: nl + 1] if nl >= 0 else "=== COMPACTED PRIOR WORK ===\n"
+        body = content[len(prefix) :]
+    drop = min(max(0, int(over)), max(0, len(body) - 200))
+    body = body[drop:]
+    nl = body.find("\n")
+    if 0 <= nl < 120:
+        body = body[nl + 1 :]
+    return prefix + body
 
 
 def _call_signature(call: Any) -> str:
