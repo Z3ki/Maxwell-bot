@@ -81,7 +81,7 @@ OWNER_COMMAND = {
 
 def _options(interaction: Any) -> dict[str, Any]:
     data = ui._interaction_data(interaction)
-    return {name: value for name, value in ui._option_pairs(data.get("options"))}
+    return dict(ui._option_pairs(data.get("options")))
 
 
 def _is_owner(bot: Any, user_id: Any) -> bool:
@@ -370,7 +370,7 @@ def _coerce_value(key: str, raw: Any) -> Any:
         except json.JSONDecodeError as exc:
             raise ValueError("this control requires valid JSON") from exc
         if not isinstance(parsed, type(default)):
-            raise ValueError(f"this control requires a JSON {type(default).__name__}")
+            raise TypeError(f"this control requires a JSON {type(default).__name__}")
         return parsed
     return text
 
@@ -408,7 +408,7 @@ async def _set_control(bot: Any, key: str, raw_value: Any) -> tuple[Any, Any]:
 async def _reload_control(bot: Any) -> None:
     loader = getattr(bot, "_load_control", None)
     if not callable(loader):
-        raise RuntimeError("live control loader is unavailable")
+        raise TypeError("live control loader is unavailable")
     try:
         loader(force=True)
     except TypeError:
@@ -510,7 +510,7 @@ async def handle_owner_interaction(bot: Any, interaction: Any) -> bool:
 
         try:
             before, after = await _set_control(bot, key, value)
-        except (ValueError, RuntimeError) as exc:
+        except (TypeError, ValueError, RuntimeError) as exc:
             await _send(interaction, content=f"Could not update `{key}`: {exc}")
         else:
             await _send(
