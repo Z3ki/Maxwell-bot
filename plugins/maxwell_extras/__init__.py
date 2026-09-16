@@ -1,5 +1,6 @@
 """Discord extras plugin: rich messages, reminders, media inspection, audit UI, and live plugin development."""
 
+from .audit_progress_fix import install_progress_audit_fix
 from .audit_ui import install_tool_audit
 from .developer import PluginWorkbenchTool
 from .tools import (
@@ -28,6 +29,7 @@ def setup(bot, ctx):
     # Record tools that actually executed and attach a persistent disclosure
     # button to normal Discord replies. Auto web-searches are tagged separately.
     install_tool_audit(bot, ctx)
+    install_progress_audit_fix(bot)
 
     workbench = PluginWorkbenchTool(bot, ctx)
     return [
