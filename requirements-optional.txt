@@ -6,7 +6,7 @@
 #   pip install ddgs                           # or just the one you want
 
 # --- web search (ENABLE_WEB_SEARCH) ------------------------------------------
-ddgs>=9.14.0
+ddgs>=9.16.0
 
 # --- voice channels (ENABLE_VC) ----------------------------------------------
 # Also needs system libopus + libsodium, and ffmpeg for playback.

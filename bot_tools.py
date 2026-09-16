@@ -7819,6 +7819,18 @@ _WEB_REPLY_CTX_RE = re.compile(r"\[Latest message replies to[^\]]*\]", re.IGNORE
 
 _WEB_SNIPPET_CHARS = 400
 
+# ddgs `auto` currently fans out through Brave/Google, which 429/captcha in
+# this environment. Prefer engines that still return hits, then fall through.
+_WEB_SEARCH_BACKENDS = (
+    "duckduckgo",
+    "bing",
+    "startpage",
+    "mojeek",
+    "yahoo",
+    "wikipedia",
+)
+_WEB_SEARCH_BUDGET_SEC = 28.0
+
 
 def _sanitize_web_query(query: str | None) -> str:
     """Drop Discord reply-context glue so searches stay on the user's words."""
@@ -7852,17 +7864,83 @@ def _format_web_hits(hits: list[dict[str, str]]) -> str:
     return "\n\n".join(lines)
 
 
+def _web_search_backends(engine: str | None) -> list[str]:
+    """Resolve ddgs backends. Explicit engine is tried first, then fallbacks."""
+    requested = str(engine or "").strip()
+    if not requested or requested.lower() in {"auto", "default"}:
+        return list(_WEB_SEARCH_BACKENDS)
+    if not re.fullmatch(r"[a-z0-9_.,-]+", requested, flags=re.I):
+        return list(_WEB_SEARCH_BACKENDS)
+    backends = [b.strip().lower() for b in requested.split(",") if b.strip()]
+    for fallback in _WEB_SEARCH_BACKENDS:
+        if fallback not in backends:
+            backends.append(fallback)
+    return backends or list(_WEB_SEARCH_BACKENDS)
+
+
+async def _web_search_collect(
+    ddgs_cls: Any, query: str, limit: int, backends: list[str]
+) -> tuple[list[dict[str, str]], list[str]]:
+    """Query backends in order until we have `limit` unique hits or time runs out."""
+    loop = asyncio.get_running_loop()
+    seen: set[str] = set()
+    hits: list[dict[str, str]] = []
+    errors: list[str] = []
+    deadline = time.monotonic() + _WEB_SEARCH_BUDGET_SEC
+    for backend in backends:
+        if len(hits) >= limit:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining < 3:
+            break
+        want = max(1, limit - len(hits))
+        timeout = min(18.0, remaining)
+
+        def _run(b=backend, n=want, wait=timeout):
+            return list(
+                ddgs_cls(timeout=min(20, max(5, int(wait)))).text(
+                    query, max_results=n, backend=b
+                )
+            )
+
+        try:
+            raw = await asyncio.wait_for(
+                loop.run_in_executor(None, _run),
+                timeout=timeout,
+            )
+        except Exception as exc:
+            err = str(exc).strip() or type(exc).__name__
+            if re.search(r"no results", err, re.I):
+                continue
+            errors.append(f"{backend}: {err}")
+            logger.info("web_search backend %s failed: %s", backend, err)
+            continue
+        for row in raw or []:
+            hit = _normalize_web_hit(row)
+            if not (hit["href"] or hit["body"]):
+                continue
+            key = hit["href"] or hit["title"]
+            if key in seen:
+                continue
+            seen.add(key)
+            hits.append(hit)
+            if len(hits) >= limit:
+                break
+    return hits, errors
+
+
 class WebSearchTool(Tool):
-    """Search the web using DuckDuckGo"""
+    """Search the web using DuckDuckGo / ddgs metasearch."""
 
     def get_description(self):
         return (
-            "Search the live web. Default to this when you are unsure, the "
-            "topic changes (news, scores, prices, versions, people), or they "
-            "asked you to check — do not guess from memory. Skip only pure "
-            "banter with nothing to look up. After a hit, fetch_url the page "
-            "if you need more than the snippet. Params: query (required), "
-            "max_results (optional, default 5, max 10)."
+            "Search the live web. Nothing is looked up automatically — you "
+            "must call this. Use it when you are unsure, the topic is current "
+            "(news, scores, prices, versions, people), or they asked you to "
+            "check. Do not guess from memory. Skip only pure banter with "
+            "nothing to look up. After a hit, fetch_url the page if you need "
+            "more than the snippet. Params: query (required), max_results "
+            "(optional, default 5, max 10)."
         )
 
     async def execute(
@@ -7894,9 +7972,7 @@ class WebSearchTool(Tool):
         except (ValueError, TypeError):
             limit = 5
 
-        backend = str(engine or "auto").strip() or "auto"
-        if not re.fullmatch(r"[a-z0-9_.,-]+", backend, flags=re.I):
-            backend = "auto"
+        backends = _web_search_backends(engine)
 
         # Web search returns untrusted content. Mark the current turn as
         # tainted so the subsequent destructive shell tool prompts
@@ -7906,25 +7982,22 @@ class WebSearchTool(Tool):
             self.bot.mark_message_tainted(message)
 
         try:
-            loop = asyncio.get_running_loop()
-            # Bound the search: DDGS uses sync requests internally with a
-            # short per-engine wait, so a hung backend would still occupy a
-            # default-executor thread. Outer wait_for is the hard cap.
-            results = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: list(
-                        ddgs_cls(timeout=20).text(
-                            query, max_results=limit, backend=backend
-                        )
-                    ),
-                ),
-                timeout=30,
+            hits, errors = await _web_search_collect(
+                ddgs_cls, query, limit, backends
             )
-
-            hits = [_normalize_web_hit(r) for r in (results or [])]
-            hits = [h for h in hits if h["href"] or h["body"]]
             if not hits:
+                if errors and all(
+                    re.search(r"429|rate.?limit|captcha|sorry", e, re.I)
+                    for e in errors
+                ):
+                    logger.warning(
+                        "Web search rate-limited across backends for query=%r",
+                        query,
+                    )
+                    return (
+                        "Error searching: search engines rate-limited this "
+                        "query. Retry with a simpler query."
+                    )
                 return f"No results found for '{query}'"
 
             # ─── persist to RAG (operator feature 2026-08-09) ───
@@ -7960,13 +8033,13 @@ class WebSearchTool(Tool):
 
             return _format_web_hits(hits)
         except Exception as e:
-            logger.error(f"Web search error: {e}")
             err = str(e).strip() or type(e).__name__
             # ddgs raises DDGSException("No results found.") instead of
             # returning []. Treat that as empty, not a tool failure — otherwise
             # the circuit breaker opens and the model learns search is broken.
             if re.search(r"no results", err, re.I):
                 return f"No results found for '{query}'"
+            logger.error(f"Web search error: {e}")
             return f"Error searching: {e}"
 
 

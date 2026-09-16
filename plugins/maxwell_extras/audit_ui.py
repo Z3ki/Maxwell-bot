@@ -3,7 +3,7 @@
 Records tools that actually executed for an inbound turn and attaches a small
 button to Maxwell's final Discord reply. Clicking it opens an ephemeral embed
 with the real tool names, sanitized arguments, result status, and whether a web
-search was automatic or model-requested. This gives users a concrete way to
+search was model-requested. This gives users a concrete way to
 separate "Maxwell searched" from an unsourced/hallucinated answer.
 """
 
@@ -26,7 +26,7 @@ from autofix import redact_diagnostics, sanitize_tool_args
 _MAX_TRACE_RESPONSES = 500
 _MAX_CALLS_PER_TURN = 40
 _MAX_RESULT_PREVIEW = 700
-_WEB_SOURCE: ContextVar[str] = ContextVar("maxwell_web_source", default="auto")
+_WEB_SOURCE: ContextVar[str] = ContextVar("maxwell_web_source", default="direct")
 _MESSAGE_BOTS: dict[str, Any] = {}
 _PROGRESS_PATCHED = False
 
@@ -280,8 +280,8 @@ def install_tool_audit(bot: Any, ctx: Any) -> ToolAuditStore:
             bot._execute_tool_by_name = MethodType(execute_wrapper, bot)
             bot._maxwell_tool_audit_execute_wrapped = True
 
-    # web_search can also run as a code-level freshness pre-tool, bypassing the
-    # dispatcher. Wrap the actual tool instance so those searches are recorded too.
+    # Direct web_search.execute() bypasses the dispatcher (tests, plugins).
+    # Wrap the tool instance so those searches are recorded too.
     web_tool = (getattr(bot, "tools", None) or {}).get("web_search")
     if web_tool is not None and not getattr(web_tool, "_maxwell_tool_audit_wrapped", False):
         original_web_execute = getattr(web_tool, "execute", None)

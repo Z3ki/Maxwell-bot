@@ -2433,10 +2433,11 @@ TOOL_PROTOCOL = (
     "Only ask a question when you genuinely cannot proceed without an answer: "
     "missing secrets, ambiguous destination, mutually exclusive designs. "
     "Finishing is the job.\n"
-    "WHEN TO SEARCH: look things up. If you are unsure, the topic is current "
-    "(news, scores, releases, people, prices), or you were asked to check — "
-    "call web_search first. RESULT TOOLS: call fetch_url for page content. "
-    "Do not guess facts or training data. Skip lookup only for banter and opinions.\n"
+    "WHEN TO SEARCH: nothing is searched for you. If you are unsure, the topic "
+    "is current (news, scores, releases, people, prices), or you were asked to "
+    "check — call web_search yourself. RESULT TOOLS: call fetch_url for page "
+    "content. Do not guess facts or training data. Skip lookup only for banter "
+    "and opinions.\n"
     "Visible replies go through send_message (or no_response to stay silent). "
     "Do not also write the same text as raw assistant content.\n"
     "ONE send_message per turn carries your whole reply. Do not split a reply "
@@ -2509,10 +2510,11 @@ LEAN_TOOL_PROTOCOL = (
     "Never describe an action instead of doing it.\n"
     "Be proactive: if something needs doing, do it rather than offering to. "
     "Never say you have done something you have not actually done with a tool.\n"
-    "Look things up. If you are unsure, the topic is current (news, scores, "
-    "prices, versions, people, pages), or they asked you to check — call "
-    "web_search first, then fetch_url for a specific page. Do not guess from "
-    "training data. Skip lookup only for banter and opinions.\n"
+    "Nothing is looked up automatically. If you are unsure, the topic is "
+    "current (news, scores, prices, versions, people, pages), or they asked "
+    "you to check — call web_search yourself, then fetch_url for a specific "
+    "page. Do not guess from training data. Skip lookup only for banter and "
+    "opinions.\n"
     "Visible replies go through send_message (or no_response to stay silent). "
     "Do not also write the same text as raw assistant content.\n"
     "In DMs, Discord mod/server tools and sending to other channels are not available. "
@@ -14010,50 +14012,12 @@ class MaxwellBot(commands.Bot):
         turn_context["media"] = list(media)
         turn_context["active_media"] = list(active_media)
 
-        async def _run_pre_tools():
-            pre_results: list[str] = []
-            pre_images: list[str] = []
-            # Auto web_search for queries about new/recent AI models, releases, current events.
-            # This is code logic (not a prompt rule) to ensure the bot looks up the most
-            # available up-to-date info from search + Intel-fed memory when the topic
-            # indicates it might be "lost" or guessing otherwise. Only when tools enabled.
-            if (
-                content
-                and self._control.get("tools_enabled", True)
-                and "web_search" in self.tools
-                and "web_search"
-                not in set(self._control.get("disabled_tools", []) or [])
-                and MaxwellBot._needs_up_to_date_info(content)
-            ):
-                try:
-                    q = MaxwellBot._extract_search_query(content)
-                    if q:
-                        search_res = await self._invoke_request_tool(
-                            message, "web_search", self.tools["web_search"],
-                            query=q, max_results="5"
-                        )
-                        if search_res and not str(search_res).lower().startswith(
-                            "error"
-                        ):
-                            pre_results.append(
-                                "Web search (auto for up-to-date info on this topic): "
-                                f"{search_res}"
-                            )
-                except Exception as e:
-                    logger.warning(f"Auto web_search for current info failed: {e}")
-            return pre_results, pre_images
-
-        async def _build_msgs():
-            return await self._build_messages(
+        try:
+            messages = await self._build_messages(
                 message,
                 content,
                 has_media=bool(active_media),
                 media_summary=media_summary,
-            )
-
-        try:
-            (pre_tool_results, pre_tool_images), messages = await asyncio.gather(
-                _run_pre_tools(), _build_msgs()
             )
             seen_version_before = turn_context.get("seen_version", 0)
             (
@@ -14073,11 +14037,13 @@ class MaxwellBot(commands.Bot):
                 messages,
             )
             if turn_context.get("seen_version", 0) != seen_version_before:
-                # The first pre-tool pass may have inspected the old text or
-                # parent while an edit arrived. Refresh those results too so
-                # an old YouTube/search answer is not injected into the new
-                # prompt.
-                pre_tool_results, pre_tool_images = await _run_pre_tools()
+                # Rebuild so an edit that arrived mid-prep is what the model sees.
+                messages = await self._build_messages(
+                    message,
+                    content,
+                    has_media=bool(active_media),
+                    media_summary=media_summary,
+                )
             turn_context["message"] = message
             turn_context["content"] = content
             turn_context["media"] = list(media)
@@ -14120,46 +14086,8 @@ class MaxwellBot(commands.Bot):
             getattr(message, "id", ""),
             channel_id,
         )
-        if pre_tool_results:
-            search_only = [
-                r for r in pre_tool_results if "web search" in r.lower()
-            ]
-            other = [r for r in pre_tool_results if r not in search_only]
-
-            injection_parts = []
-            if search_only:
-                injection_parts.append(
-                    "Fresh web search results were automatically retrieved for recent/current events or new models in your question. "
-                    "Use the most up-to-date information from these results (and long-term memory if relevant) rather than guessing or using old knowledge.\n\n"
-                    + "\n\n".join(search_only)
-                )
-            if other:
-                injection_parts.append("\n\n".join(other))
-
-            if injection_parts:
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": "\n\n".join(injection_parts),
-                    }
-                )
-            if pre_tool_images:
-                active_media = [
-                    {
-                        "b64": img,
-                        "mime_type": "image/jpeg",
-                        "filename": "auto-frame.jpg",
-                        "is_image": True,
-                        "is_text": False,
-                        "text": "",
-                        "message_id": None,
-                        "source": "pre_tool",
-                    }
-                    for img in pre_tool_images
-                ] + active_media
-
         # Mark as in-flight only once we are about to do real LLM work (after
-        # expensive pre-work like memory building + tool pre-invocation). This
+        # expensive pre-work like memory building). This
         # makes the same-user interrupt target actual generations instead of
         # blocking on prep work or causing spurious cancels.
         if current_task:
@@ -16096,8 +16024,9 @@ class MaxwellBot(commands.Bot):
                 "Visible replies go through "
                 "send_message (or no_response). Optional `reasoning` may be passed "
                 "(~280 chars, why, plain text only). "
-                "Look things up with web_search / fetch_url when you are unsure "
-                "or the topic is current; do not guess from training data.\n" + catalog
+                "Nothing is looked up automatically. Call web_search / fetch_url "
+                "when you are unsure or the topic is current; do not guess from "
+                "training data.\n" + catalog
             )
         else:
             # Dispatch is native-or-JSON; the old <tool:name> XML path is
@@ -16116,8 +16045,9 @@ class MaxwellBot(commands.Bot):
                 "One bare JSON object per line, no fences, no XML:\n"
                 '{"name":"<tool>","arguments":{...}}\n'
                 "Visible replies go through send_message (or no_response). "
-                "Look things up with web_search / fetch_url when you are unsure "
-                "or the topic is current; do not guess from training data."
+                "Nothing is looked up automatically. Call web_search / fetch_url "
+                "when you are unsure or the topic is current; do not guess from "
+                "training data."
             )
         return header + "\n\n" + TOOL_PROTOCOL
 
@@ -16165,160 +16095,6 @@ class MaxwellBot(commands.Bot):
             for t in re.findall(r"[a-z0-9_]{4,}", str(text or "").lower())
             if t not in stop
         }
-
-    _CASUAL_ONLY_RE = re.compile(
-        r"^(?:lol+|lmao+|lmfao+|rofl+|wym|wyd|wsg|gm+|gn+|ok(?:ay)?|k+|yeah|"
-        r"yep|nah|sup|hi+|hey+|yo+|thanks?|ty|np)[\s?!.]*$",
-        re.I,
-    )
-    _EXPLICIT_LOOKUP_RE = re.compile(
-        r"(?i)(?:"
-        r"look(?:\s+it|\s+this|\s+that)?\s+up"
-        r"|search\s+(?:for|the\s+web|the\s+internet|online|that|this|it)"
-        r"|web\s*search"
-        r"|google(?:\s+it|\s+this|\s+that|\s+for|\s+\S{2,})"
-        r"|find\s+out"
-        r"|check\s+(?:online|the\s+web)"
-        r"|on\s+the\s+(?:web|internet)"
-        r"|look\s+online"
-        r")"
-    )
-    _LOOKUP_PREFIX_RE = re.compile(
-        r"(?i)^(?:hey[, ]+|please\s+|can you\s+|could you\s+)?"
-        r"(?:look(?:\s+it|\s+this|\s+that)?\s+up|search\s+for|"
-        r"google(?:\s+for)?|find\s+out)\s*[:\-]?\s*"
-    )
-    _CURRENT_INFO_PHRASES = (
-        "new model",
-        "latest model",
-        "just released",
-        "newly released",
-        "released today",
-        "this week",
-        "this morning",
-        "last night",
-        "frontier",
-        "new llm",
-        "new ai model",
-        "gpt-5",
-        "claude 4",
-        "gemini 2",
-        "llama 4",
-        "new grok",
-        "model drop",
-        "announced",
-        "launch",
-        "update on",
-        "what's new",
-        "whats new",
-        "current version of",
-        "who won",
-        "what's the score",
-        "whats the score",
-        "final score",
-        "box score",
-        "stock price",
-        "share price",
-        "price of",
-        "weather in",
-        "weather today",
-        "what's the weather",
-        "whats the weather",
-        "the forecast",
-        "news about",
-        "breaking news",
-        "out now",
-        "is it out",
-        "did they announce",
-    )
-    _AI_TOPIC_WORDS = (
-        "gpt",
-        "claude",
-        "gemini",
-        "llama",
-        "grok",
-        "mistral",
-        "qwen",
-        "deepseek",
-        "model",
-        "llm",
-        "hugging face",
-        "openai",
-        "anthropic",
-        "xai",
-        "meta ai",
-        "benchmark",
-        "paper",
-        "release",
-    )
-    _RECENCY_WORDS = (
-        "latest",
-        "new",
-        "recent",
-        "today",
-        "tonight",
-        "announced",
-        "released",
-        "2025",
-        "2026",
-        "january",
-        "february",
-        "march",
-        "april",
-        "june",
-        "july",
-        "august",
-        "september",
-        "october",
-        "november",
-        "december",
-    )
-
-    @staticmethod
-    def _needs_up_to_date_info(text: str) -> bool:
-        """When the bot should proactively search instead of guessing.
-
-        Fires on explicit lookup intent and current-event / fresh-topic
-        signals. Does not fire on banter like "lol" even if a glued reply
-        blob mentions a model drop. Not a prompt instruction — runtime logic.
-        """
-        if not text:
-            return False
-        t = MaxwellBot._plain_user_text(text).lower()
-        if not t or MaxwellBot._CASUAL_ONLY_RE.match(t):
-            return False
-        if MaxwellBot._EXPLICIT_LOOKUP_RE.search(t):
-            return True
-        if any(s in t for s in MaxwellBot._CURRENT_INFO_PHRASES):
-            return True
-        has_ai = any(k in t for k in MaxwellBot._AI_TOPIC_WORDS)
-        has_recency = any(r in t for r in MaxwellBot._RECENCY_WORDS)
-        return bool(has_ai and has_recency)
-
-    @staticmethod
-    def _plain_user_text(text: str) -> str:
-        """User words only — strip reply-context blobs glued onto the turn."""
-        t = str(text or "")
-        t = re.sub(r"\[Latest message replies to[^\]]*\]", " ", t, flags=re.IGNORECASE)
-        t = re.split(
-            r"\n?\[Latest message replies to", t, maxsplit=1, flags=re.IGNORECASE
-        )[0]
-        t = re.sub(r"\[RESPOND TO THIS\]\s*", "", t, flags=re.IGNORECASE)
-        return " ".join(t.split()).strip()
-
-    @staticmethod
-    def _extract_search_query(text: str) -> str:
-        """Turn user question into a good search query for up-to-date info."""
-        t = MaxwellBot._plain_user_text(text)
-        t = MaxwellBot._LOOKUP_PREFIX_RE.sub("", t).strip()
-        if len(t) > 120:
-            cut = t[:120]
-            t = cut.rsplit(" ", 1)[0] or cut
-        year = str(datetime.now(timezone.utc).year)
-        markers = MaxwellBot._RECENCY_WORDS + (year,)
-        if t and not any(w in t.lower() for w in markers):
-            t += f" {year}"
-        return t
 
     @classmethod
     def _shared_fact_relevant(cls, latest: str, fact: dict) -> bool:

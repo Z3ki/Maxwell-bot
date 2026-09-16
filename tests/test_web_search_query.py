@@ -8,6 +8,7 @@ from bot_tools import (
     _format_web_hits,
     _normalize_web_hit,
     _sanitize_web_query,
+    _web_search_backends,
 )
 from tool_schemas import RESULT_TOOL_NAMES, build_openai_tools
 
@@ -19,55 +20,9 @@ GLUED = (
 )
 
 
-def test_plain_user_text_strips_reply_glue():
-    assert "Maxwell" not in MaxwellBot._plain_user_text(GLUED)
-    assert "ollama cloud" in MaxwellBot._plain_user_text(GLUED).lower()
-
-
-def test_extract_search_query_does_not_include_reply_blob():
-    q = MaxwellBot._extract_search_query(GLUED)
-    assert "Latest message replies" not in q
-    assert "1382894657624866889" not in q
-    assert "ollama" in q.lower()
-
-
-def test_extract_search_query_strips_lookup_prefix():
-    q = MaxwellBot._extract_search_query("look this up: mat dickie")
-    assert "look this up" not in q.lower()
-    assert "mat dickie" in q.lower()
-
-
-def test_needs_up_to_date_ignores_glued_maxwell_reply():
-    casual = (
-        "lol\n[Latest message replies to you/Maxwell(1): glm 5.3 just released "
-        "new model today]"
-    )
-    assert MaxwellBot._needs_up_to_date_info(casual) is False
-
-
-def test_needs_up_to_date_skips_banter():
-    for line in ("lol", "lmao", "wyd", "gm", "yeah", "how's it going"):
-        assert MaxwellBot._needs_up_to_date_info(line) is False, line
-
-
-def test_needs_up_to_date_explicit_lookup():
-    assert MaxwellBot._needs_up_to_date_info("look this up") is True
-    assert MaxwellBot._needs_up_to_date_info("search for ollama cloud pricing") is True
-    assert MaxwellBot._needs_up_to_date_info("google that") is True
-    assert MaxwellBot._needs_up_to_date_info("can you find out who that is") is True
-
-
-def test_needs_up_to_date_current_events():
-    assert MaxwellBot._needs_up_to_date_info("who won last night") is True
-    assert MaxwellBot._needs_up_to_date_info("what's the weather in nyc") is True
-    assert MaxwellBot._needs_up_to_date_info("what's the latest grok model") is True
-    assert MaxwellBot._needs_up_to_date_info("new model drop today") is True
-
-
-def test_needs_up_to_date_stable_trivia_is_not_auto_search():
-    # The model should still *choose* to search; auto-search is only a backup
-    # for current/lookup turns, not every factoid.
-    assert MaxwellBot._needs_up_to_date_info("what is the capital of france") is False
+def test_no_forced_auto_web_search_helpers():
+    assert not hasattr(MaxwellBot, "_needs_up_to_date_info")
+    assert not hasattr(MaxwellBot, "_extract_search_query")
 
 
 def test_sanitize_web_query_truncates_unclosed_bracket():
@@ -82,6 +37,7 @@ def test_web_search_description_encourages_lookup():
     assert "only if" not in desc
     assert "casual conversation" not in desc
     assert "unsure" in desc or "guess" in desc
+    assert "automatically" in desc
     stamped = build_openai_tools({"web_search": WebSearchTool(SimpleNamespace())})[0][
         "function"
     ]["description"].lower()
@@ -102,6 +58,7 @@ def test_tool_protocol_says_look_things_up():
     assert "fetch_url" in blob
     assert "guess" in blob
     assert "training data" in blob
+    assert "nothing is searched for you" in blob
 
 
 def test_native_tool_prompt_includes_lookup_contract():
@@ -120,7 +77,7 @@ def test_native_tool_prompt_includes_lookup_contract():
     bot._compatible_tool_names = MaxwellBot._compatible_tool_names.__get__(bot)
     prompt = MaxwellBot._tool_system_prompt(bot, "discord")
     assert "XML text tags only" not in prompt
-    assert "Look things up" in prompt
+    assert "nothing is looked up automatically" in prompt.lower()
     assert "web_search" in prompt
     assert "training data" in prompt
     assert TOOL_PROTOCOL in prompt
@@ -188,6 +145,42 @@ def test_web_search_empty_ddgs_exception_is_not_an_error(monkeypatch):
     result = asyncio.run(tool.execute(SimpleNamespace(guild=None), query="xyzzy"))
     assert result.startswith("No results found")
     assert not result.lower().startswith("error")
+
+
+def test_web_search_default_backends_skip_brave_google():
+    backends = _web_search_backends(None)
+    assert backends[0] == "duckduckgo"
+    assert "brave" not in backends
+    assert "google" not in backends
+    hinted = _web_search_backends("brave")
+    assert hinted[0] == "brave"
+    assert "duckduckgo" in hinted
+
+
+def test_web_search_falls_back_when_primary_backend_fails(monkeypatch):
+    calls = []
+
+    class FakeDDGS:
+        def __init__(self, *a, **k):
+            pass
+
+        def text(self, query, **k):
+            backend = k.get("backend")
+            calls.append(backend)
+            if backend == "duckduckgo":
+                raise RuntimeError("429 Too Many Requests")
+            if backend == "bing":
+                return [{"title": "B", "href": "https://ex.com/b", "body": "ok"}]
+            return []
+
+    monkeypatch.setattr("bot_tools._DDGS", FakeDDGS)
+    monkeypatch.setattr("bot_tools._DDGS_AVAILABLE", True)
+    tool = WebSearchTool(_search_bot())
+    result = asyncio.run(tool.execute(SimpleNamespace(guild=None), query="mat dickie"))
+    assert not result.lower().startswith("error")
+    assert "https://ex.com/b" in result
+    assert calls[0] == "duckduckgo"
+    assert "bing" in calls
 
 
 def test_web_search_taints_the_turn(monkeypatch):

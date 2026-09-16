@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import tempfile
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -810,9 +811,13 @@ def _render_message_annotations(
 
     parts.extend(_component_annotations(message))
 
-    inter = getattr(message, "interaction", None) or getattr(
-        message, "interaction_metadata", None
-    )
+    inter = getattr(message, "interaction_metadata", None)
+    if inter is None:
+        # discord.py still exposes .interaction, but reading it warns on every
+        # history message. Prefer metadata; fall back silently for old objects.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            inter = getattr(message, "interaction", None)
     if inter is not None:
         try:
             name = getattr(inter, "name", None) or ""

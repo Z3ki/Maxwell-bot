@@ -29,7 +29,7 @@ class _Web:
         return f"results for {query}"
 
 
-def test_audit_records_manual_and_auto_web_search_and_attaches_button(tmp_path):
+def test_audit_records_dispatcher_and_direct_web_search_and_attaches_button(tmp_path):
     bot = SimpleNamespace()
     bot.tools = {"web_search": _Web()}
 
@@ -54,7 +54,7 @@ def test_audit_records_manual_and_auto_web_search_and_attaches_button(tmp_path):
             disabled=set(),
             compatible={"web_search"},
         )
-        await bot.tools["web_search"].execute(message, query="auto query")
+        await bot.tools["web_search"].execute(message, query="direct query")
         sent = await bot._send_with_slowmode(
             message.channel, "answer", reply_to=message
         )
@@ -62,7 +62,7 @@ def test_audit_records_manual_and_auto_web_search_and_attaches_button(tmp_path):
         assert row is not None
         calls = row["calls"]
         assert [c["name"] for c in calls] == ["web_search", "web_search"]
-        assert [c["source"] for c in calls] == ["model", "auto"]
+        assert [c["source"] for c in calls] == ["model", "direct"]
         assert sent.view is not None
         assert sent.view.children[0].label == "Tools · 2"
 

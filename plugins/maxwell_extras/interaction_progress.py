@@ -314,7 +314,7 @@ def install_interaction_progress(bot: Any) -> None:
         execute_wrapper._maxwell_interaction_progress_wrapped = True  # type: ignore[attr-defined]
         bot._execute_tool_by_name = MethodType(execute_wrapper, bot)
 
-    # Automatic freshness web searches bypass _execute_tool_by_name.
+    # Direct web_search.execute() bypasses _execute_tool_by_name.
     web_tool = (getattr(bot, "tools", None) or {}).get("web_search")
     web_execute = getattr(web_tool, "execute", None) if web_tool is not None else None
     if callable(web_execute) and not getattr(
