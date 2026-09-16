@@ -9,6 +9,7 @@ from .user_install_features import (
     install_user_install_features,
     install_user_install_tool_disclosure,
 )
+from .visible_output_guard import install_visible_output_guard
 from .workbench_v2 import PluginWorkbenchTool
 from .tools import (
     InspectMediaUrlTool,
@@ -51,6 +52,10 @@ def setup(bot, ctx):
     # use or >5s latency promotes it to a stable "working on it…" status and
     # sends the eventual answer as a separate follow-up.
     install_interaction_progress(bot)
+
+    # Tool-call turns should not double-post "here's/done/fixed" prose after a
+    # file, media, poll, TTS, or rich message already delivered the real result.
+    install_visible_output_guard(bot)
 
     # Rich messages now support stateful callback buttons. The action registry
     # is persistent, clicks are routed through on_interaction back into Maxwell,
