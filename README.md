@@ -1,727 +1,260 @@
 # Maxwell
 
-Maxwell is an official Discord bot backed by any OpenAI-compatible API. It reads text, images, audio, video, file attachments, and Discord embeds, then responds using an LLM with tool-calling support. It includes a web dashboard, admin API, and temporary site generation.
+Maxwell is a Discord AI bot with multimodal chat, tool calling, memory, a web dashboard, background jobs, moderation/admin tools, image generation, web tools, site generation, and more. It can use Ollama, OpenRouter, OpenAI, LM Studio, or basically any OpenAI-compatible API.
 
-Maxwell uses `discord.py` with a bot token from the Discord Developer Portal. Enable the Message Content, Server Members, and Presence privileged intents on the application.
+## Install — easy way
 
-## Quick start
+Run this:
 
-The newcomer path is one command:
+```bash
+curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/easy-install.sh | bash
+```
+
+The easy installer asks for only three things:
+
+1. Your Discord bot token.
+2. The AI provider/model you want Maxwell to use.
+3. Your Discord user ID if you want owner/admin access.
+
+It generates the dashboard password, writes a small `.env`, keeps the advanced defaults out of your face, and then hands off to the normal Docker installer.
+
+> **good luck installing this shit!**
+
+### Before you run it
+
+Create a bot at the Discord Developer Portal and enable these privileged gateway intents:
+
+- Message Content
+- Server Members
+- Presence
+
+The setup machine needs Git, curl, and Python 3. Maxwell itself runs in Docker. The normal installer can install Docker on supported Linux systems; on macOS/Windows, install Docker Desktop if needed.
+
+## Better environment variable names
+
+The simple install uses provider-neutral names instead of pretending every AI provider is Ollama:
+
+| Variable | What it means |
+|---|---|
+| `AI_API_URL` | Base URL for the AI API |
+| `AI_MODEL` | Main chat model name |
+| `AI_API_KEY` | API key, blank for local providers that do not require one |
+| `DISCORD_BOT_TOKEN` | Discord bot token |
+| `MAXWELL_OWNER_IDS` | Comma-separated Discord IDs allowed to use owner/admin controls |
+| `MAXWELL_ADMIN_USER` | Dashboard username |
+| `MAXWELL_ADMIN_PASSWORD` | Dashboard password |
+
+Example:
+
+```env
+DISCORD_BOT_TOKEN=your-discord-bot-token
+
+AI_API_URL=https://openrouter.ai/api/v1
+AI_MODEL=moonshotai/kimi-k2.6:free
+AI_API_KEY=your-api-key
+
+MAXWELL_OWNER_IDS=123456789012345678
+MAXWELL_ADMIN_USER=admin
+MAXWELL_ADMIN_PASSWORD=change-me
+```
+
+Maxwell still keeps compatibility aliases for the older `OLLAMA_*` names internally, so existing installs do not have to break just because the public config got cleaned up.
+
+### Existing install? Rename the old variables safely
+
+From your Maxwell checkout:
+
+```bash
+python3 scripts/migrate_ai_env.py .env
+```
+
+That converts the main provider settings to:
+
+```env
+AI_API_URL=...
+AI_MODEL=...
+AI_API_KEY=...
+```
+
+and leaves compatibility aliases behind for old code/tooling.
+
+## Provider examples
+
+### Local Ollama
+
+```env
+AI_API_URL=http://localhost:11434
+AI_MODEL=qwen3:8b
+AI_API_KEY=
+```
+
+The easy installer can offer to install Ollama on Linux if it is missing.
+
+### OpenRouter
+
+```env
+AI_API_URL=https://openrouter.ai/api/v1
+AI_MODEL=moonshotai/kimi-k2.6:free
+AI_API_KEY=your-openrouter-key
+```
+
+### OpenAI
+
+```env
+AI_API_URL=https://api.openai.com/v1
+AI_MODEL=gpt-4.1-mini
+AI_API_KEY=your-openai-key
+```
+
+### LM Studio
+
+```env
+AI_API_URL=http://localhost:1234/v1
+AI_MODEL=local-model
+AI_API_KEY=
+```
+
+Use whatever model name LM Studio is actually serving.
+
+## Running Maxwell
+
+The default install location is `~/maxwell`.
+
+```bash
+cd ~/maxwell
+./run.sh -d
+```
+
+Useful commands:
+
+```bash
+# Follow logs
+docker compose logs -f maxwell
+
+# Check config/dependencies
+docker compose exec maxwell python3 doctor.py
+
+# Stop Maxwell
+docker compose down
+
+# Start/update containers again
+./run.sh -d --build
+```
+
+The dashboard/API is available locally at:
+
+```text
+http://127.0.0.1:8765
+```
+
+## Reconfigure or update
+
+Edit the friendly config directly:
+
+```bash
+nano ~/maxwell/.env
+```
+
+Then restart:
+
+```bash
+cd ~/maxwell
+./run.sh -d
+```
+
+Update Maxwell:
+
+```bash
+cd ~/maxwell
+git pull --ff-only
+bash install.sh
+```
+
+The installer preserves `.env` and `data/`.
+
+## Advanced install
+
+If you want the full configuration wizard instead of the three-step setup:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/install.sh | bash
 ```
 
-Maxwell is an official Discord bot backed by any OpenAI-compatible LLM. The installer fetches this repository, writes `.env`, and runs Maxwell **inside Docker** so host Python/ffmpeg/package versions cannot fight it. The installer needs Git, curl, and Python 3 on the host; runtime dependencies are bundled in the Docker image. Docker Engine and Compose are required to run it.
-
-Read these first if you are new to the project:
-
-- [High-level overview](docs/OVERVIEW.md)
-- [Complete installation guide](docs/INSTALL.md)
-- [Configuration quick reference](docs/CONFIGURATION.md)
-
-### Manual path in brief
+Manual Docker setup:
 
 ```bash
 git clone https://github.com/Z3ki/Maxwell-bot.git maxwell
 cd maxwell
-./setup.sh --configure-only  # wizard writes .env and the host bind path
-./run.sh -d --build
-docker compose exec maxwell python3 doctor.py
+cp .env.simple.example .env
+nano .env
+bash install.sh
 ```
 
-`python3 doctor.py --probe` (inside the container) also calls your model and embedding endpoints, so you find out the URL, key, or model is wrong before the bot does.
+The giant `.env.example` is still available for every advanced option.
 
-### Running after install
+## Main features
+
+- Discord text, images, audio, video, attachments, embeds, and message context.
+- OpenAI-compatible AI provider support instead of being locked to one vendor.
+- Tool calling for web/search, files, media, Discord management, moderation, polls, sites, image generation, shell sandboxing, coding/background jobs, and more.
+- Owner/admin controls and a browser dashboard.
+- RAG/vector memory plus optional REM-style background memory consolidation.
+- Autonomy/background actions with runtime controls.
+- Generated static sites and optional backend containers.
+- Telegram as an optional second transport.
+- Docker-first runtime so host Python/package versions do not fight the bot.
+
+## Project layout
+
+```text
+bot.py                  Main Discord bot
+bot_tools.py            Tool implementations
+providers.py            OpenAI-compatible provider wrapper
+config.py               Environment-backed config
+rag_memory.py           Vector/RAG memory
+jobs.py                 Background jobs
+control_defaults.py     Runtime control defaults
+api/api_server.py       Dashboard/admin API
+web/                    Dashboard frontend
+doctor.py               Install/config checker
+easy-install.sh         Three-step installer
+install.sh              Full installer
+.env.simple.example     Small human-friendly config
+.env.example            Full advanced config
+docker-compose.yml      Linux Docker runtime
+```
+
+## More documentation
+
+- [Installation details](docs/INSTALL.md)
+- [Configuration reference](docs/CONFIGURATION.md)
+- [Architecture overview](docs/OVERVIEW.md)
+
+## Security notes
+
+Keep `.env` private. It may contain Discord tokens, API keys, and dashboard credentials. Do not commit it.
+
+Owner/admin access should be restricted with `MAXWELL_OWNER_IDS`. Review optional features before exposing the dashboard or giving a model access to powerful tools on a public server.
+
+## Troubleshooting
+
+Run:
 
 ```bash
 cd ~/maxwell
-./run.sh -d                                    # docker compose up -d
-docker compose logs -f maxwell                 # bot + dashboard logs
-docker compose exec maxwell python3 doctor.py  # install check
-docker compose down                            # stop
+docker compose exec maxwell python3 doctor.py
 ```
 
-The dashboard/API is started in the same container (http://127.0.0.1:8765). The shell sandbox and site backends are sibling containers; `MAXWELL_HOST_BIND` is how they bind-mount this checkout through the host Docker daemon.
-
-`./setup.sh --configure-only --reconfigure` edits setup using your saved values as defaults. For unattended setup, add `--non-interactive` and supply settings through environment variables.
-
-Already on a host venv/PM2 install? `git pull --ff-only && ./install.sh --local` keeps `.env` and `data/`, stops the host bot/API, and starts Docker. Details: [Upgrading from a host install](docs/INSTALL.md#upgrading-from-a-host--venv--pm2-install).
-
-## Features
-
-- Multimodal input: images, audio, video, text files, and Discord embeds are forwarded to the model with normalized video, extracted frames, and extracted audio.
-- Visual memory: recent images persist across messages per channel (configurable depth).
-- Tool system: image generation (Pollinations, NVIDIA NIM, GPT-compatible), web search, URL fetch, arbitrary file sending, meme/media sending, shell execution, a native coding sub-agent, polls, invites, guild moderation and structure (`create_category`, `create_channel` for text/voice/announcement/forum/stage, `edit_category`, `move_channel`, `clone_channel`, `sync_channel`, `lockdown`, kick/ban/timeout/softban, roles, permissions), site generation, avatar/presence/nickname changes, message editing/forwarding/deletion, live tool-call progress messages, real chess (`chess_start`/`chess_move`/`chess_state`/`chess_resign`), API usage reporting (`usage`), and more.
-- Full-message context: every message in context carries its timestamp plus structured annotations for polls, app-command invocations, system/welcome events, embeds (title/description/fields/images), direct media URLs, and attachment names — including messages that never pinged Maxwell (they still reach context via memory/history).
-- Autonomy: periodic self-directed checks where Maxwell reviews context/goals and decides whether to act without running a decider on every few messages.
-- Per-server custom prompts, RAG vector memory, and scoped cross-context facts across DMs, servers, groups, and channels.
-- RAG vector memory: messages, long-term facts, and shared context entries are embedded through any OpenAI-compatible or Ollama embeddings endpoint and stored in a SQLite vector database. Semantic search retrieves the most relevant memories for each conversation — global across all channels and servers. With no embedder reachable the bot logs one line and falls back to recent-history context.
-- Opt-in REM "dreaming" pass that periodically consolidates recent visible traffic into long-term memory.
-- Web dashboard/admin API protected by HTTP Basic auth.
-- Site building: `create_site` publishes a whole directory (index plus any CSS/JS/subpages/data files) byte-for-byte under a configurable public URL; `host_file` fetches a URL or takes a local file and hosts it at a stable `/bot/_files/<slug>/` link Discord can embed; `edit_site` patches a published site in place; `delete_site` takes it down. Static HTML/CSS/JS is the default. `backend=true` is optional (same-origin key/list datastore). A containerized app via `site_server` is a separate opt-in — not every site gets FastAPI or a backend.
-- Lean chat turns: ordinary conversation ships a small conversational tool set instead of the whole catalog (~83% fewer tool tokens per message). Anything that asks for an action gets everything, and `more_tools` reopens the catalog mid-turn. Turn it off with `lean_chat_tools` in the dashboard.
-
-## Project Structure
-
-```
-bot.py              Main bot entry point
-bot_tools.py        Tool implementations
-discord_threads.py  Discord thread create/control + stored briefs
-docker-compose.yml  Supported runtime (Maxwell in Docker)
-providers.py        OpenAI-compatible provider wrapper
-config.py           Environment-backed configuration (incl. feature detection)
-rag_memory.py       RAG vector memory (SQLite + numpy + embeddings API)
-context_budget.py   Splits the prompt's memory chars across the memory tiers
-site_backend.py     Per-site datastore behind /api/site/<slug>/ (generated sites)
-site_server.py      Per-site backend containers behind /bot/<slug>/api/
-site_test.py        Headless Chromium probe: console, network, screenshot
-doctor.py           Install check: what works, what doesn't, why
-install.sh          One-line bootstrap installer
-setup.sh            Local setup wrapper around install.sh --local
-api/api_server.py   Dashboard and admin API server
-web/                Static dashboard files (index.html, admin/)
-examples/           Caddyfile and PM2 config examples
-docker/             Shell sandbox Dockerfile (docker/site-runtime/ for site backends)
-shelldocker/        Bind-mounted working directory for the shell container
-control_defaults.py Canonical DEFAULT_CONTROL — bot and API both import it
-autonomy_social.py  Conversational turn-taking (the autonomy floor)
-watch_policy.py     Conversation-watch + extraction scoring
-ecosystem.config.js PM2 process config
-```
-
-## Environment Variables
-
-See `.env.example` for the full template with comments — it is ordered so the
-required values are the first thing in the file. The ones that matter:
-
-### Required
-
-| Variable | Description |
-|---|---|
-| `DISCORD_BOT_TOKEN` | Official bot token from the Discord Developer Portal |
-| `OLLAMA_BASE_URL` | Any OpenAI-compatible API base URL. A bare host gets `/v1` appended. |
-| `OLLAMA_MODEL` | Model name your endpoint serves. No default — an unset value fails at startup with a clear message instead of a 404 later. |
-
-### Strongly recommended
-
-| Variable | Description |
-|---|---|
-| `OLLAMA_API_KEY` | Bearer token, if your endpoint needs one (falls back to `OPENAI_COMPAT_API_KEY`) |
-| `MAXWELL_OWNER_IDS` | Comma-separated Discord user IDs allowed to run admin commands. Empty = every admin command is denied; there is no baked-in owner. |
-| `MAXWELL_ADMIN_USER` / `MAXWELL_ADMIN_PASSWORD` | Dashboard / API Basic auth. Empty password = 503 on every request. |
-
-### Identity
-
-Display name, owner, invite, and command prefix are env-driven. Leave IDs blank on a fresh install — nothing assumes a specific person.
-
-| Variable | Description |
-|---|---|
-| `BOT_NAME` | Spoken / prompt name (default `Maxwell`). Live Discord nick still wins in chat. |
-| `CREATOR_NAME` / `CREATOR_ID` | Optional human owner label and Discord user ID. Blank = no named creator. |
-| `MAXWELL_OWNER_IDS` | Operators who may run admin commands (same as above). Empty = nobody. |
-| `BOT_INVITE_URL` | Official invite the bot may share when asked where to find it. |
-| `MAXWELL_USAGE_URL` | Optional provider quota endpoint for the `usage` tool. Blank = tool has nowhere to query. |
-
-### LLM provider
-
-| Variable | Description |
-|---|---|
-| `OLLAMA_REM_MODEL` | REM dreamer model (defaults to `OLLAMA_MODEL`) |
-| `OLLAMA_MAX_TOKENS` | Max output tokens per completion (default: `8192`) |
-| `OLLAMA_TEMPERATURE` | Sampling temperature (default: `0.7`) |
-| `OLLAMA_FALLBACK_*` | Optional secondary endpoint, rotates with primary |
-| `OLLAMA_VISION_*` | Optional vision/omni model for image/video turns (blank base/key inherit primary) |
-| `OLLAMA_RETRY_ATTEMPTS` | Total attempts per request (default: `3`) |
-| `OLLAMA_EMPTY_RESPONSE_RETRIES` | Extra recovery attempts after an HTTP 200 with no text/tool call; rotates endpoints and retries with non-streaming JSON (default: `2`) |
-| `AUTONOMY_BASE_URL` / `AUTONOMY_API_KEY` / `AUTONOMY_MODEL` | Override the autonomy engine endpoint; blank = use main |
-| `AUX_BASE_URL` / `AUX_API_KEY` / `AUX_MODEL` | Background context agents; blank = fall back to autonomy, then main |
-
-### Optional features
-
-`true` / `false` / `auto`, default `auto` (on only if the dependency is
-present). Restart to re-detect. `python3 doctor.py` shows the resolved state.
-
-| Variable | Controls | `auto` needs |
-|---|---|---|
-| `ENABLE_IMAGE_INPUT` | Forwarding images to the LLM; the hard switch, `false` wins over the dashboard's `process_images` | — |
-| `ENABLE_VIDEO_INPUT` | Video frame extraction for `video/*` attachments | `ffmpeg` |
-| `ENABLE_AUDIO_INPUT` | Forwarding audio to "omni" audio-capable models | opt-in (`false` by default) |
-| `ENABLE_IMAGE_GEN` | `image_generator` (NVIDIA Flux) + `hd_image` (Gemini, generate **and** edit) | — |
-| `ENABLE_TTS` | The `tts` tool | espeak-ng, gTTS, or a Fish/NVIDIA key |
-| `ENABLE_TTS_VC` | TTS playback into voice channels | `ffmpeg` + a TTS engine |
-| `ENABLE_VC` | `voice_recv` import + `,vc` commands | `discord-ext-voice-recv` + PyNaCl |
-| `ENABLE_WEB_SEARCH` | `web_search` tool | the `ddgs` package |
-| `ENABLE_FETCH_URL` | `fetch_url` tool | — |
-| `ENABLE_CREATE_SITE` | `create_site` / `edit_site` / `delete_site` / `list_sites` / `host_file` / `site_server` / `site_test` tools | — |
-| `ENABLE_AVATAR` | `change_avatar` tool | — |
-| `ENABLE_EMAIL_TOOLS` | The four `email_*` tools | `MAXWELL_EMAIL_PASSWORD` set |
-| `ENABLE_SHELL` | `shell` tool (host access — only enable if you trust the model) | — |
-| `ENABLE_RAG` | RAG vector memory; `false` makes no embedding calls at all | — |
-| `ENABLE_TELEGRAM` | Auto-start Telegram polling/webhook when `TELEGRAM_TOKEN` is set | — |
-| `ENABLE_AUTONOMY` | Autonomy engine; `false` never starts the loop (the dashboard's `autonomy_enabled` is the runtime toggle) | opt-in in `.env.example` |
-| `ENABLE_REM` | Background REM dreaming pass (alias of `REM_ENABLED`) | opt-in (`false` by default) |
-
-### RAG embeddings (only used if `ENABLE_RAG` is on)
-
-| Variable | Description |
-|---|---|
-| `MAXWELL_EMBED_BASE_URL` | Embeddings endpoint (default `http://localhost:11434`). A bare host uses Ollama's `/api/embed`; a `/v1` base uses OpenAI's `/v1/embeddings`. Both response shapes are parsed. |
-| `MAXWELL_EMBED_MODEL` | Embedding model (default `qwen3-embedding:0.6b`) |
-| `MAXWELL_EMBED_API_KEY` | Bearer token for hosted embedding endpoints |
-| `MAXWELL_EMBED_DIM` | Vector dimension, must match the model (default `1024`) |
-
-### TTS engine (only used if `ENABLE_TTS=true`)
-
-| Variable | Description |
-|---|---|
-| `TTS_ENGINE` | `local` (espeak, no key) / `riva` (NVIDIA, paid) / `gtts` / `auto` |
-| `TTS_RIVA_*` | Riva TTS function ID, voice, language |
-| `ASR_RIVA_FUNCTION_ID` | NVIDIA Riva ASR (Parakeet) function ID for live VC transcription |
-| `ASR_RIVA_LANGUAGE` | ASR language code (default `en-US`) |
-| `NVIDIA_API_KEY` | Required for Riva TTS/ASR and for `image_generator` |
-
-### Image generation
-
-| Variable | Description |
-|---|---|
-| `NVIDIA_API_KEY` | NVIDIA NIM key for `image_generator` (Flux) |
-| `NVIDIA_IMAGE_URL` | NVIDIA NIM endpoint |
-| `GEMINI_IMAGE_BASE_URL` / `GEMINI_IMAGE_API_KEY` | Endpoint for `hd_image`. Blank inherits `OLLAMA_BASE_URL` / `OLLAMA_API_KEY` |
-| `GEMINI_IMAGE_MODEL` | Image model for `hd_image` (default `gemini-3.1-flash-image`) |
-| `GEMINI_IMAGE_MAX_INPUT_EDGE` | Longest edge an input image is downscaled to before upload (default `1024`) |
-| `GEMINI_IMAGE_TIMEOUT` | Per-request timeout in seconds (default `300`) |
-| `GPT_IMAGE_URL` / `GPT_IMAGE_API_KEY` | Unused. The old GPT-Image-2 host dropped its image models; kept so existing `.env` files still load |
-
-### Admin API / dashboard
-
-| Variable | Description |
-|---|---|
-| `MAXWELL_API_HOST` / `MAXWELL_API_PORT` | API bind address (default: `127.0.0.1:8765`) |
-| `MAXWELL_PUBLIC_BASE_URL` | Public URL where generated sites are served |
-| `MAXWELL_CORS_ORIGIN` | Allowed CORS origin |
-| `MAXWELL_SITE_DIR` | Where generated sites are written (default: `public/bot`) |
-| `MAXWELL_TRUST_PROXY` | Trust `X-Forwarded-For` from reverse proxy (default `false`) |
-| `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | Discord OAuth on dashboard (optional, both blank = Basic only) |
-| `DISCORD_BOT_PERMISSIONS` | Permission bitfield for the Custom Install Link **Add to a server** flow (default `0` = normal add, no extra permissions; Administrator is never requested). **Add to my apps** is admin-only user-install (`/maxwell`, right-click Ask Maxwell / Summarize) and does not request bot permissions. |
-
-### Email (only used if `ENABLE_EMAIL_TOOLS=true`)
-
-| Variable | Description |
-|---|---|
-| `MAXWELL_SMTP_HOST` / `MAXWELL_SMTP_PORT` | Postfix for outbound (default `127.0.0.1:25`) |
-| `MAXWELL_IMAP_HOST` / `MAXWELL_IMAP_PORT` | Dovecot for inbound (default `127.0.0.1:993`) |
-| `MAXWELL_EMAIL_USER` / `MAXWELL_EMAIL_PASSWORD` | SASL credentials |
-| `MAXWELL_EMAIL_FROM` / `MAXWELL_EMAIL_FROM_NAME` | `From:` header |
-| `MAXWELL_EMAIL_IGNORE_SENDERS` | Senders never filed as inbox notices — comma-separated addresses, or leading-dot domains (`.google.com`). Empty by default |
-
-### Temporary Free Model
-
-For a temporary free OpenRouter fallback, the current recommended model is Moonshot AI Kimi K2.6:
-
-- Model page: `https://openrouter.ai/moonshotai/kimi-k2.6:free`
-- `OLLAMA_FALLBACK_BASE_URL=https://openrouter.ai/api/v1`
-- `OLLAMA_FALLBACK_MODEL=moonshotai/kimi-k2.6:free`
-- `OLLAMA_FALLBACK_DISABLE_REASONING=true`
-
-It is useful as a free temporary fallback, but check OpenRouter for current availability, modality support, and rate limits.
-
-## Commands
-
-All commands use the `,` prefix. Admin commands require the user to be in the admin list.
-
-| Command | Admin | Description |
-|---|---|---|
-| `,stop` | No | Cancel the active AI request in this channel (` ,stop job <id>` cancels a background job) |
-| `,debug` | Yes | Last LLM call TTFT, TPS, tokens in/out, and recent averages |
-| `,bg <goal>` | No | Start a background sub-agent job: instant ack, channel stays free, pings you when done |
-| `,jobs` | No | List background jobs |
-| `,job cancel <id>` | No | Cancel your background job (or anyone's, if admin) |
-| `,prompt [text]` | Yes | View or set a custom server prompt |
-| `,clearprompt` | Yes | Clear the custom server prompt |
-| `,clearmem` | Yes | Clear channel memory and all cached state |
-| `,autonomy` | Yes | Show autonomy status + current channel/server blacklists |
-| `,autonomy tick` | Yes | Trigger one autonomy check immediately |
-| `,autonomy on` / `,autonomy off` | Yes | Enable or disable autonomy |
-| `,autonomy log` | Yes | Show recent autonomy actions |
-| `,autonomy interval <seconds>` | Yes | Set autonomy check interval |
-| `,autonomy blacklist channel|server <id>` | Yes | Add to autonomy blacklist (channels or servers/guilds) |
-| `,autonomy unblacklist channel|server <id>` | Yes | Remove from autonomy blacklist |
-| `,drug [minutes]` | No | Temporary "fried" personality override |
-| `,drug off` | No | Turn off drug mode |
-| `,solo` / `,solo #channel` / `,solo off` | Yes | Lock this server to ONE channel: Maxwell answers there and is silent in every other channel, and autonomy stops starting things here. Per-server — other servers are untouched. |
-| `,jailbreak on` / `,jailbreak off` | Yes | Toggle freedom-mode prompt for this server (Discord only; Telegram always on) |
-| `,blacklist [user]` | Yes | Add/view/clear blacklisted users |
-| `,unblacklist [user]` | Yes | Remove a user from the blacklist |
-| `,context` | Yes | Show relevant scoped cross-context facts |
-| `,context all` | Yes | Show recent shared context facts |
-| `,context add [scope] <fact>` | Yes | Manually add a scoped context fact |
-| `,context forget <id>` | Yes | Delete a shared context fact |
-| `,context private <id>` | Yes | Mark a shared context fact private |
-| `,context global <id>` | Yes | Promote a fact to global shared context |
-| `,progress on` / `,progress off` / `,progress status` | Yes | Toggle live "thinking: …" tool progress messages, per server (off by default; DMs never get them) |
-| `,ticket on` / `,ticket off` / `,ticket status` | Yes | Greet new ticket/support channels in this server (off by default) |
-| `,rem` | Yes | Show REM status and last audit preview |
-| `,rem now` | Yes | Trigger one REM dream pass immediately |
-| `,rem on` / `,rem off` | Yes | Enable or disable REM for this process |
-| `,rem audit [N]` | Yes | Show recent REM run audits |
-| `,rem fix` | Yes | Restore REM prompt/interval/max-turn defaults |
-| `,x` / `,x status` | Yes | What X can do here: backends, posting, hourly budget |
-| `,x read [@handle]` | Yes | Home timeline, or that account's posts |
-| `,x search <query>` / `,x tweet <id\|url>` | Yes | One search or one post |
-| `,x post <text>` | Yes | Post to X by hand (spends the hourly budget) |
-| `,vc join` | No | Join your current VC and start live listening |
-| `,vc leave` | No | Stop listening and disconnect from VC |
-| `,vc listen` | No | Start live VC listening while staying connected |
-| `,vc unlisten` | No | Stop live VC listening while staying connected |
-| `,vc status` | No | Show VC connection/listening and voice settings |
-| `,vc say <text>` | No | Speak text in VC with TTS |
-
-Live VC replies require `discord-ext-voice-recv`, `PyNaCl`, `ffmpeg`, and an audio-capable OpenAI-compatible provider.
-
-## Sites
-
-`create_site` is static by default: a directory of files under a public URL.
-Backends are optional. Pass `backend=true` only when the page needs a
-same-origin datastore. Use `site_server` only when it needs to run code.
-Neither FastAPI nor a container is created unless you ask.
-
-`create_site` writes a directory, not a single file. `body` is index.html;
-`url` fetches an existing HTML file (Discord attachment, raw GitHub, any
-public link) and publishes it instead of pasting the page into the tool call;
-`files` is anything else — `{"style.css": "...", "app.js": "...",
-"about/index.html": "..."}` — and it is all served exactly as written, with no
-injected wrapper, house style, or meta tags. (Set `site_inject_csp` if your
-host serves generated pages without a CSP of its own.)
-
-`host_file` is the one-shot version: curl a URL, point at a local path, or
-pass inline content, and it lands at
-`<MAXWELL_PUBLIC_BASE_URL>/bot/_files/<slug>/`. HTML is served as `index.html`
-so Discord can unfurl the link. Use `create_site` when you want an editable
-named site; use `host_file` when you just need a stable public URL.
-
-`edit_site` changes a live site at the same URL: `list` its files, `read` one
-back, `write` a new one (or several via `files={...}`), `replace` an exact
-string inside one (`all=true` for every occurrence), `delete` a file, `rename`
-the title, or `extend` its lifetime. `delete_site` removes the whole thing.
-Sites expire after `site_ttl_hours` (24 by default, `0` disables expiry);
-`permanent=true` opts one site out.
-
-`action=read` returns small files whole. Larger ones come back as a numbered
-window — pass `start_line` to page. Re-reading the same file in one turn is
-refused, so a frontend/backend ping-pong cannot hang the bot. Patch with
-`replace` or `write` instead of dumping the whole page back into context.
-
-`site_test` loads the published URL in headless Chromium and returns JS
-console errors, uncaught exceptions, failed network requests, broken linked
-assets, HTTP status, and a screenshot (so the model can see the page). If
-Chromium is missing it still checks the HTML and linked files over HTTP.
-Call it once after a publish or edit — `fetch_url` only sees source, not
-runtime. Fix with `edit_site` / `site_server`, then test once more. Repeating
-`site_test` on the same URL without changing a file is refused.
-
-Maxwell can now edit **any** site (ownership check removed for `edit_site`/`site_server`/`site_test` so he can fix a site even if you didn't create it), and `create_site`/`site_server` is enforced for neural/synced builds. To spin a focused conversation off the parent channel, Maxwell calls `create_thread` with a **required** `context` brief — that brief is injected into every turn in the thread so thread-Maxwell is not starting cold. `thread_control` adds more context, renames, archives, or lists those threads. There is no guided-goal questionnaire.
-
-### Site backends
-
-Optional. A site created with `backend=true` gets a datastore on the same origin, so
-page JavaScript can talk to it with a plain `fetch` — no key, no CORS:
-
-| Route | What it does |
-|---|---|
-| `GET /api/site/<slug>/kv` | every named value (`?key=NAME` for one) |
-| `PUT /api/site/<slug>/kv` | `{"key": ..., "value": ...}` |
-| `POST /api/site/<slug>/kv/bump` | `{"key": ..., "by": 1}` — atomic counter |
-| `DELETE /api/site/<slug>/kv?key=NAME` | drop a value |
-| `GET /api/site/<slug>/items/NAME` | list entries (`?limit=`, `?after=ID`) |
-| `POST /api/site/<slug>/items/NAME` | append an entry |
-| `DELETE /api/site/<slug>/items/NAME?id=ID` | remove one (`?all=1` for all) |
-
-These routes are **public by design** — a visitor's browser is the client, so
-they carry no admin credentials and are the only unauthenticated part of the
-API. Everything is bounded: 64KB per value, 1000 entries per list (oldest drop
-off), 1MB per site, and a per-IP token bucket on writes. Anyone with the URL
-can post, so don't put secrets in a site store and expect junk in open forms.
-Data lives in `data/site_data/<slug>.json` and dies with the site.
-
-### Real backend servers
-
-Also optional — `create_site` does not start a Python/FastAPI process for
-every page. `backend=true` is only a datastore: it remembers things, but it
-cannot run code, keep a secret, or enforce a rule. When a site needs an actual
-server —
-a hidden API key, real auth, computation, a database it queries — `site_server`
-gives it one:
-
-```
-site_server(name="mysite", action="write",
-            files={"app.py": "...flask app..."},
-            env={"WEATHER_KEY": "..."})
-```
-
-That writes the source, launches a container, and the site's routes are live at
-`/bot/mysite/api/...` — a route the app defines as `/notes` answers at
-`/bot/mysite/api/notes`. Other actions: `start`, `stop`, `restart`, `status`,
-`logs` (the app's own stdout/stderr, which is how it debugs itself), `read`,
-`env`, `delete`. `write` merges files so a helper is not deleted when you
-change `app.py`; `deploy` is the full snapshot (missing files disappear).
-`site_test` then loads the public page and shows console errors plus a
-screenshot.
-
-The contract the app is held to:
-
-| | |
-|---|---|
-| Entry | `app.py`, listening on `0.0.0.0:$PORT` |
-| Installed | Python 3.12 + flask, waitress, fastapi, uvicorn, websockets, sqlalchemy, bcrypt, pyjwt, itsdangerous, requests, httpx, jinja2, pillow, stdlib |
-| Anything else | `packages=["redis==5.0.1"]` builds a per-site image |
-| WebSockets | Supported end to end — use **fastapi + uvicorn**, since waitress cannot do sockets. SSE and streaming responses work too. |
-| Writable | `/data` only, and only `/data` survives a restart — the database goes at `/data/app.db` |
-| Secrets | `env={...}`, stored outside the site directory, never served, never echoed back, read via `os.environ` |
-| Outbound | Allowed — this is where a key-carrying API call belongs |
-| Limits | 256MB, half a core, 128 pids, 32MB uploads, no capabilities, read-only root, unprivileged uid |
-
-So a site can have real user accounts (bcrypt + JWT), a database it queries,
-and live multiplayer over WebSockets — the browser opens
-`new WebSocket(location.origin.replace("http", "ws") + "/bot/<slug>/api/ws")`
-and lands on the site's own server.
-
-How it is contained: code lives in `data/site_servers/<slug>/`, **outside the
-web root**, so source and secrets are never static files. Each site gets its own
-container from `maxwell-site-runtime` (`docker/site-runtime/`) with `--cap-drop
-ALL`, `--read-only`, no docker socket, no host filesystem, and its port
-published on `127.0.0.1` only — the sole public path is the proxy, which takes
-its destination from the registry, never from the request. `--restart
-unless-stopped` brings backends back after a reboot; the bot reconciles the
-registry on boot. Deleting or expiring a site destroys its container, code,
-database, and secrets.
-
-It is still a container running model-written code with outbound network
-access, so it is exactly as trusted as `ENABLE_SHELL` — treat it that way.
-
-Route generated sites on a separate origin from the dashboard, following the [Caddy example](examples/Caddyfile.example) and [origin configuration](docs/INSTALL.md). Put the backend route **before** the static `/bot/*` rule:
-
-```
-handle /bot/*/api/* {
-        reverse_proxy 127.0.0.1:8765
-}
-```
-
-
-## Chess
-
-Maxwell plays real chess against whoever starts a game. One game per channel,
-and only the player who started it may move — that player is the one Maxwell
-focuses on there. The chess tools own the board state, render the position as
-a PNG (white at the bottom, last move and check highlighted), post that image
-to the channel so the player sees it, and return the board as text + FEN +
-legal moves plus the image as base64 so Maxwell sees it on the next turn.
-
-| Tool | What it does |
-|---|---|
-| `chess_start` | Start a game against the invoking player. `bot_side=white\|black\|auto` (default white); `depth` 1-4 (default 3). If Maxwell is white it opens automatically. |
-| `chess_move` | Play a move in SAN (`e4`, `Nf3`, `O-O`) or UCI (`e2e4`). Player's move is relayed; Maxwell's own move is a legal choice or, if omitted on its turn, picked by a small alpha-beta engine. `respond=true` (default) makes Maxwell reply right after a player move. |
-| `chess_state` | Re-sync: current board, FEN, legal moves, whose move — no board change, no post. |
-| `chess_resign` | End the game (`side=maxwell` or `side=player`). |
-
-Maxwell's engine is a depth-limited negamax with material + piece-square
-evaluation and a small opening book, so it plays a sane opening instead of
-1.a3. Games persist in `data/chess_games.json` (gitignored) and survive a
-restart. Deps: `python-chess` + `pillow` (already in `requirements.txt`).
-
-## Usage
-
-The `usage` tool queries `MAXWELL_USAGE_URL` when that is set — whatever
-quota/usage HTTP endpoint your provider documents — using `OLLAMA_API_KEY`
-(falling back to `OPENAI_COMPAT_API_KEY`). It returns remaining percentage and
-reset times. Leave the URL blank if your provider has no such endpoint.
-
-## Memory and RAG
-
-Maxwell uses a **RAG (Retrieval-Augmented Generation) vector memory system** backed by SQLite and numpy. All channel messages, long-term facts, and shared context entries are stored as vectors in `data/maxwell_rag.db`, embedded through whatever endpoint `MAXWELL_EMBED_BASE_URL` points at — a local Ollama running `qwen3-embedding:0.6b` by default, or any OpenAI-compatible `/v1/embeddings` service.
-
-RAG is optional. With no embedder reachable, the bot logs one line, stops calling the endpoint for a cooldown, and keeps working on recent-history context; `ENABLE_RAG=false` skips embedding entirely.
-
-**How it works:**
-- Every message stored in the bot is embedded (1024-dim float32 vector) and saved to the SQLite vector store.
-- When the bot is pinged, the user's message is embedded and cosine-similarity search retrieves the most relevant memories across **all channels, servers, LTM, and shared context** — not just the current channel's recent history.
-- Per-query latency: ~150ms (query embedding) + ~1ms (cosine search) = negligible compared to LLM generation time.
-- New messages are embedded in the background (non-blocking).
-- On startup, any vectors without embeddings are batch-embedded in the background.
-- The old `memory.py` (flat JSON) and `context_cleanup.py` (LLM janitor) have been removed. The RAG system handles dedup, pruning, and retrieval automatically.
-
-**Embedding model setup** (the free local default):
-```bash
-ollama pull qwen3-embedding:0.6b
-```
-
-Or point it somewhere else, e.g. OpenAI:
-```ini
-MAXWELL_EMBED_BASE_URL=https://api.openai.com/v1
-MAXWELL_EMBED_MODEL=text-embedding-3-small
-MAXWELL_EMBED_API_KEY=sk-...
-MAXWELL_EMBED_DIM=1536
-```
-
-Changing the model or dimension invalidates existing vectors: delete
-`data/maxwell_rag.db` (or accept that old rows stop matching) when you switch.
-
-The SQLite database lives at `data/maxwell_rag.db` (gitignored). Channel memory, LTM, shared context, and per-user entity facts are all in one `vectors` table distinguished by `kind` (`message`, `ltm`, `shared_context`, `entity`), alongside a `user_entities` table holding identity.
-
-A second layer in the same database is a small **knowledge graph** (`graph_nodes` / `graph_edges`): site routes parsed from Python AST, frontend `/api/` calls, and optional ownership triples from the existing context extractor. Vector search still handles conversational recall; the graph answers "what routes does this site expose" without another embed or a full file re-read. Toggle: `knowledge_graph_enabled`.
-
-### Global user memory
-
-A Discord user id is already global — the same person in two servers and a DM
-is one id — but nothing used that, so the bot could learn your name in one
-server and meet you as a stranger in the next. It now keeps a row per user id,
-independent of guild: the names they have gone by, where they have been seen,
-and durable facts about them. All of it is read back regardless of which server
-or DM the current message arrived in, and it renders as its own prompt block
-("About this person"). Facts arrive from the context extractor's `user:`- and
-`dm:`-scoped output; admin-only ones are deliberately not mirrored, since
-material that should not follow someone between servers is exactly what this
-tier would carry. The dashboard's Memory tab lists the roster under **People**,
-and `GET /api/rag/entities` serves it.
-
-Controls: `entity_memory_enabled`, `entity_memory_max_items`,
-`entity_memory_from_extract`.
-
-### Per-tier context budget
-
-The prompt is assembled from several memory tiers — the channel transcript,
-recalled long-term facts, the entity profile, cross-context facts, and cached
-web results. Each used to be capped by an *item count*, which is a bad proxy
-for size: fifty one-line facts and fifty paragraph-long ones differ by two
-orders of magnitude. The combined size swung wildly, and the transcript — which
-is assembled last and sits in the middle of the message list where the
-whole-prompt trim cannot reach it — absorbed every overshoot.
-
-`context_budget.py` now divides the available characters across the tiers by
-weight before any of them render, and each is trimmed to fit its share. A tier
-that comes in under budget hands the remainder to the tiers after it, and
-whatever the lookup tiers leave over goes to the transcript — so the tier that
-carries the actual conversation is the one that benefits from a quiet turn,
-rather than the one that pays for a noisy one. Weights are
-`context_tier_recent_weight` and friends (default 70/12/8/7/3); a weight of 0
-switches a tier off and redistributes its share.
-
-REM adds a separate visible-only ring at `data/rem_events.json` and, when enabled, periodically reviews events since the previous run.
-
-The REM pass is not a live chat response and never posts to Discord. Current code sends a bounded short-term slice plus a long-term memory snapshot to the configured OpenAI-compatible provider and stores an audit row in `data/rem_runs.json`. It does **not** currently run memory-edit tools despite the name; treat it as review/audit unless that loop gets rebuilt.
-
-REM is opt-in: it is off unless you set `ENABLE_REM=true` (or `REM_ENABLED=true`) in `.env`. Configure `REM_INTERVAL_SECONDS`, `REM_EVENT_BUFFER_MAX`, `REM_RUN_HISTORY`, and `OLLAMA_REM_MODEL` in `.env`. Admins can use `,rem*` commands or the dashboard REM card.
-
-### Inbox notices
-
-An inbox item is either a *notice* (mail, a group-DM add — something to be
-told) or a *request* someone is waiting on (a friend request). Requests keep
-showing in the prompt until they are accepted or declined; notices drop out of
-it once he has actually said them out loud, which happens automatically after
-the reply that mentioned them is delivered. He can also do it by hand with
-`inbox_action action=read`, which works on any item whatever actions it
-declares — for something he has decided not to mention at all.
-
-Before that, `read` only reordered an item, so a notice had no way out of the
-prompt short of an explicit `dismiss` — the same email was announced on every
-turn, reworded each time. Leaving the prompt is not leaving the inbox:
-`inbox_list` still shows read notices, and `dismiss` is still what clears one
-for good.
-
-**Mail from his own address is never filed.** A self-copy — a server-side
-`always_bcc`, a self-BCC, a list that reflects the post back — arrives in INBOX
-like anything else, and was announced as though a stranger had written in, so
-he narrated his own outbox. Both the mailbox login and `MAXWELL_EMAIL_FROM`
-count as his.
-
-For machine mail there is `MAXWELL_EMAIL_IGNORE_SENDERS`: a comma-separated
-list of addresses, or leading-dot domains (`.google.com`) covering a domain and
-its subdomains. It is **empty by default**, deliberately — which machine mail
-matters is your call. A DMARC aggregate report is pure telemetry, but a
-`MAILER-DAEMON` bounce means something he sent did not arrive, and nothing can
-tell those apart by shape. Ignoring a sender only skips the inbox row; the mail
-stays on the server and the `email_*` tools still read it.
-
-### Repetition
-
-Two different problems that read as one complaint ("it keeps saying jajajaja").
-
-Inside a single reply, a laugh run, a doubled word, a sentence said twice or a
-phrase repeated is collapsed before the message is sent. `response_guard.py`
-has done this since it was written — it just was not wired to anything, so
-every run reached the channel intact. Fenced code is never touched, and a reply
-that has fallen into a full echo loop is truncated at the first repeat rather
-than posted whole. Control: `scrub_repetitions`.
-
-Across replies, the same phrase opening six messages running is a pattern no
-single message is wrong for, so nothing downstream can catch it — and the model
-does not notice it in its own transcript, because it reads its last reply as
-evidence of what it sounds like and does it again. When several of his recent
-messages open the same way (laugh runs of different lengths count as one habit)
-the prompt says so, naming the phrase: general advice like "vary your language"
-changes nothing, "you have opened 4 of your last 8 messages with jajaja" does.
-Control: `self_repetition_note_enabled`.
-
-## Autonomy
-
-Autonomy is separate from the removed `,auto` auto-reply mode. It wakes on `autonomy_interval_seconds`, gathers recent conversations, DMs, goals, memory, and available channels, then asks the LLM for a JSON action plan. Supported actions are channel posts, DMs, tool calls, memory updates, goal creation, or doing nothing.
-
-### The four stages
-
-One tick is **observe → plan → policy gate → execute**.
-
-| Stage | Method | What it does |
-| --- | --- | --- |
-| Observe | `observe()` | Reads the world into the planner's context, bounded so one hung fetch cannot freeze the loop. |
-| Plan | `plan(context)` | Asks the model for a validated action list. |
-| Policy gate | `policy_gate(actions)` | Rules on each action — tool allowlist, one-post-per-room, turn-taking — without side effects. |
-| Execute | `run_allowed(verdicts)` | Runs what survived. |
-
-Those stages always existed, but only two of them had names: the gate was a
-block of `continue` statements inside `execute`, so a denied action and a
-failed action produced the same shape of result and nothing could report "the
-plan was fine, policy stopped it". Denials now carry a code (`floor`,
-`duplicate_post`, `tool_blocked`) and are counted separately from errors in the
-tick summary. `execute(actions)` still gates-then-runs in one call for the many
-callers that want plan-in, results-out.
-
-The gate deliberately runs at execution time rather than at plan time: the plan
-is seconds stale by the time it lands — someone starts typing, the live bot
-answers the same question — and a gate that read the room at plan time would be
-deciding about a room that no longer exists.
-
-### Turn-taking
-
-Autonomy runs on a timer; conversation runs on turns. Reconciling the two is `autonomy_social.py`, and it is the reason Maxwell no longer walks into a conversation he is already in.
-
-Before anything sends, the engine reads each room and returns a verdict on whether the floor is his:
-
-| State | Meaning | Speak? |
-| --- | --- | --- |
-| `REPLYING` | the main reply path is generating here right now | no |
-| `HOLDING` | he spoke last and nobody has answered yet | no |
-| `HANDLED` | the live reply already covered the newest ping | no |
-| `COOLDOWN` | he spoke here inside the quiet window | no |
-| `BUSY` | other people are mid-exchange and not talking to him | no |
-| `ADDRESSED` | someone is waiting on him and nothing has answered | yes |
-| `OPEN` | ordinary room, nobody mid-thought | yes |
-| `IDLE` | quiet for a while | yes |
-
-The verdict is used twice on purpose: it is rendered into the planner prompt as a `CONVERSATION FLOOR` section so the model can choose freely among the rooms that are actually his, and it is re-checked against live state immediately before the send, because the plan is seconds stale by then and rooms move.
-
-**This gates speaking only.** Research, memory writes, goal work, and reflection are never blocked by it — the point is to constrain timing, not initiative. Restraint that can be computed lives in code; the prompt is left free.
-
-The same gate honours an open sleep window. The live reply path has always refused to answer while `,sleep` is set, telling people "max is sleeping, back in Xm" — but nothing checked it on the autonomy side, so the tick would post into a channel or DM someone while that notice was still standing. It is speech-only there too: asleep, he still thinks, remembers and plans.
-
-| Control | Default | Meaning |
-| --- | --- | --- |
-| `autonomy_floor_enabled` | `true` | Enforce turn-taking. Off = planner still sees the read, `execute()` stops acting on it. Debugging only. |
-| `autonomy_floor_cooldown_seconds` | `90` | Quiet window after his own last line before an unprompted new one. Being addressed bypasses it. |
-| `autonomy_floor_hold_release_seconds` | `1800` | How long he keeps holding the floor after speaking into silence. |
-| `autonomy_floor_mid_flow_seconds` / `_messages` | `45` / `3` | What counts as other people mid-exchange. |
-| `autonomy_floor_idle_seconds` | `600` | Silence after which a room reads as idle rather than active. |
-
-`autonomy_recent_reply_block_seconds` is the older single-purpose knob for the same idea. It still works and is honored as a minimum for the cooldown, so an existing tuned value is never silently shortened.
-
-Manage these in the dashboard under **Autonomy → Turn-taking**.
-
-Note that these windows are conversational, not mechanical: they are deliberately independent of `autonomy_interval_seconds`, because how long it is polite to wait before speaking again is a property of the room rather than of how often Maxwell wakes up.
-
-Autonomy respects two dedicated blacklists (in addition to the general `blocked_channels`/`allowed_channels`):
-
-- `autonomy_blocked_channels`: list of channel IDs autonomy will never post to or run tools against.
-- `autonomy_blocked_servers`: list of guild/server IDs autonomy will ignore entirely.
-
-These are independent of normal bot replies, so you can keep the bot responsive on mention while preventing autonomous actions in busy or low-value servers/channels. Manage via dashboard **Controls** tab (new Autonomy Blacklists card), raw `bot_control.json`, or chat commands:
-
-`,autonomy` — show status + current blacklists  
-`,autonomy blacklist channel 123456789012345678`  
-`,autonomy blacklist server 123456789012345678`  
-`,autonomy unblacklist channel ...` (or server)
-
-## Development & Releases
-
-This is a **rolling release** project.
-
-- `main` is always the current release.
-- On the deployment host, `git pull --ff-only && ./install.sh --local` updates the Docker stack.
-- No semantic version numbers, no release tags, no version branches.
-- Features land continuously.
-
-Docker Compose is the supported runtime. Existing PM2 installs should follow the [migration instructions](docs/INSTALL.md#upgrading-from-a-host--venv--pm2-install).
-
-For local development, use Python 3.11 or newer (the Docker image uses 3.12). `requirements.txt` selects a Python-compatible NumPy version. Install the test dependencies, then run the checks:
+For a deeper provider check:
 
 ```bash
-python3 -m pip install -r requirements.txt -r requirements-dev.txt
-python3 -m pytest -q     # test suite
-python3 doctor.py        # config/feature sanity
+docker compose exec maxwell python3 doctor.py --probe
 ```
 
-> Removed along the way: four never-wired "safety primitive" modules
-> (`approval.py`, `attention.py`, `event_dispatch.py`, `memory_controls.py`,
-> plus `docs/ARCHITECTURE_SAFETY.md` and their test file) — they had tests and
-> a design doc and nothing ever imported them, while the gates that actually
-> run live elsewhere: `Tool.is_destructive` + the taint check in `bot.py` for
-> destructive tools, `autonomy_social.py` / `watch_policy.py` for unsolicited
-> speech, and `rag_memory.py` for memory. Also removed: the Intel engine (commit `d455e4b`; the `,intel`
-> commands and the `intel_enabled` / `intel_interval_seconds` control keys
-> are stripped from `bot_control.json` at load), `memory.py`,
-> `context_cleanup.py` (its `context_cleanup_*` control keys are stripped the
-> same way; the `/api/context_cleanup/*` routes stay as no-op stubs so
-> external callers do not 404), and the OpenCode sub-agent backend. RAG
-> vector memory handles memory upkeep, and multi-step work uses the `shell`
-> sandbox. The `autonomy` engine still writes fresh facts into
-> long-term memory on its own cadence.
+And inspect logs with:
 
-## Dashboard / API
+```bash
+docker compose logs -f maxwell
+```
 
-The API server (`api/api_server.py`) serves a dashboard and admin interface.
-
-- All API/data requests require HTTP Basic auth with `MAXWELL_ADMIN_USER` / `MAXWELL_ADMIN_PASSWORD`, except `OPTIONS` preflight and `POST /api/login`.
-- `POST /api/login` is exempt from middleware; credentials are validated by the handler and rate-limited.
-- The admin HTML can be served publicly, but it will not load data or mutate anything until credentials are supplied.
-
-Control state moves over three routes. `GET /api/control` returns the live
-control set — the persisted `data/bot_control.json` merged over
-`DEFAULT_CONTROL` and run through the same sanitizer a write goes through, so
-every key comes back even if nobody has ever set it. `PUT /api/control` takes a
-partial object, ignores keys that are not in `DEFAULT_CONTROL`, clamps each
-value to its documented range, and echoes the sanitized result; the dashboard
-re-renders from that echo, so anything the server adjusted is visible
-immediately. `DELETE /api/control` resets everything to defaults.
-
-`control_defaults.py` is the single source of truth for those keys — the bot and
-the API both import it, and the dashboard's Controls panel renders one input per
-key with ranges that mirror the server-side clamp. A key added there with no
-input in the panel is listed in that panel's "Not surfaced" card rather than
-quietly going missing.
-
-Read-only routes worth knowing: `GET /api/rag/memory` is aggregate vector
-counters, `GET /api/rag/ltm` is the long-term-memory rows, and `GET
-/api/rag/entities` is the global per-user roster (`?user_id=` for one person
-with their facts).
-
-The dashboard loads every panel's data independently (`Promise.allSettled`), so
-one failing endpoint degrades that panel and names itself in the header instead
-of blanking the page.
-
-Static files (`web/index.html`, `web/admin/index.html`) should be copied to a web root. Reverse proxy `/api/*` and `/data/*` to `MAXWELL_API_HOST:MAXWELL_API_PORT`. See `examples/Caddyfile.example`.
-
-## Security
-
-- Never commit `.env`, `data/`, logs, PM2 dumps, or generated sites.
-- Set real values for `MAXWELL_ADMIN_USER` and `MAXWELL_ADMIN_PASSWORD`. The API does not persist or bootstrap credentials.
-- Generated bot sites serve arbitrary HTML. Host them on a separate origin from admin pages to prevent credential theft via XSS.
-- The shell tool runs `bash -lc` inside the `maxwell-shell` Docker container (`docker/Dockerfile`), not on the host. By default that container is isolated: bridge network, `--cap-drop ALL` (plus a small add-back set), `no-new-privileges`, 4 GB RAM with swap disabled, 2 CPU / 1024 pids, no docker socket, and no host filesystem — only `shelldocker/` is bind-mounted as its working directory at `/home/maxwell`. Setting `MAXWELL_SHELL_FULL_HOST=true` deliberately drops that wall: host network plus `/:/host:rw`, which is documented root-equivalent access for admins. The tool is on by default; set `ENABLE_SHELL=false` to withhold that access entirely. The bot logs a warning at startup whenever shell is enabled.
-- Running `shell` needs a working Docker daemon the bot user can reach. On Linux, compose bind-mounts the host `docker` CLI plus `docker.sock:ro` — there is no second client inside the image. Without a daemon the tool reports the failure rather than silently falling back to the host. `python3 doctor.py` tells you which side you are on.
-- The Maxwell Compose service itself drops all capabilities, sets `no-new-privileges`, caps memory/CPU/pids, uses a private `/tmp`, and rotates container logs.
-- `DISABLE_TAINT_GATE=false` (the default) makes `shell` require an out-of-band `,confirm` on any turn that read fetched web content — the second line of defence against indirect prompt injection. Only disable it on a single-user install you fully trust.
-
-## License
-
-MIT. See `LICENSE`.
-
-## Why am I doing this?
-
-Just for fun idk you will see ALOT of ai slop and very specific stuff just made for my code and model so some things like audio recognition and video is for gemini and my website stuff and ect will not work for you sooo uhh yeah (your problem not mine if you have things that will help everyone like universal model selector for like adding models that have video support or dont ect please do a pull request thanks!)
+If the easy installer is not enough, use the full guide in [`docs/INSTALL.md`](docs/INSTALL.md).
