@@ -13,8 +13,18 @@ def test_maxwell_slash_reply_uses_embed_shape():
     interaction = SimpleNamespace(data={"name": "maxwell", "type": 1})
     assert maxwell_embed_output._is_maxwell_slash(interaction)
 
-    embed = maxwell_embed_output._reply_embed("hello")
+    bot = SimpleNamespace(
+        user=SimpleNamespace(
+            display_name="Maxwell el gato",
+            display_avatar=SimpleNamespace(url="https://example.com/maxwell.png"),
+        )
+    )
+    embed = maxwell_embed_output._reply_embed("hello", bot)
     assert embed.description == "hello"
+    assert embed.colour.value == 0x5865F2
+    assert embed.author.name == "Maxwell el gato"
+    assert str(embed.author.icon_url) == "https://example.com/maxwell.png"
+    assert embed.footer.text == "Personal app • /maxwell"
 
 
 def test_context_action_is_not_treated_as_maxwell_slash():
