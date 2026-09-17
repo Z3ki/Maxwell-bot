@@ -74,14 +74,15 @@ def setup(bot, ctx):
     install_user_install_tool_disclosure(bot)
     install_progress_audit_fix(bot)
 
-    # /maxwell answers are rendered as Discord embeds rather than plain webhook
-    # text. Context-menu actions keep their current output style.
-    install_maxwell_embed_output(bot)
-
     # Discord app commands keep fast answers in the deferred interaction. Tool
     # use or >10s latency promotes it to a stable "working on it…" status and
     # sends the eventual answer as a separate follow-up.
     install_interaction_progress(bot)
+
+    # /maxwell must wrap the progress layer, not sit underneath it. Fast answers
+    # are edited into Discord's deferred original response by interaction_progress;
+    # converting text to an embed first keeps those fast replies rich too.
+    install_maxwell_embed_output(bot)
 
     # Register the owner panel after the generic interaction-progress wrapper so
     # /owner is intercepted before it starts an AI turn or a slow-response timer.
