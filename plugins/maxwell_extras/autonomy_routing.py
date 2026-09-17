@@ -110,7 +110,9 @@ def _reply_channel(engine: Any, reply_message_id: Any) -> str | None:
     return cid or None
 
 
-def _reply_matches_route(engine: Any, action: dict[str, Any], cid: str) -> tuple[bool, str]:
+def _reply_matches_route(
+    engine: Any, action: dict[str, Any], cid: str
+) -> tuple[bool, str]:
     reply_id = action.get("reply_to_message_id")
     if not reply_id:
         return True, ""
@@ -132,7 +134,6 @@ def install_autonomy_routing_guards(bot: Any) -> None:
         _INSTALLED = True
         return
 
-    original_candidates = AutonomyEngine._auto_channel_candidates
     original_gate = AutonomyEngine.policy_gate
     original_post = AutonomyEngine._exec_post_channel
     original_tool = AutonomyEngine._exec_run_tool
@@ -140,7 +141,9 @@ def install_autonomy_routing_guards(bot: Any) -> None:
     def stable_candidates(self: Any) -> list[str]:
         # Numeric sorting avoids lexical surprises such as 100 before 20 and
         # filters blocked channels before they ever become planner targets.
-        candidates = {_digits(x) for x in (getattr(self.bot, "_auto_channels", None) or set())}
+        candidates = {
+            _digits(x) for x in (getattr(self.bot, "_auto_channels", None) or set())
+        }
         candidates.discard("")
         allowed = []
         for cid in sorted(candidates, key=lambda value: int(value)):
