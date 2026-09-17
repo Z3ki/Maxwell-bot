@@ -86,16 +86,24 @@ def _cancel_timer(state: _InteractionProgressState) -> None:
     state.timer = None
 
 
-async def _edit_original(interaction: Any, content: str) -> Any | None:
+async def _edit_original(
+    interaction: Any,
+    content: str | None,
+    **payload: Any,
+) -> Any | None:
+    """Edit the deferred response without flattening rich Discord payloads."""
+
+    edit_payload = dict(payload)
+    edit_payload["content"] = content
     edit = getattr(interaction, "edit_original_response", None)
     if callable(edit):
-        return await edit(content=content)
+        return await edit(**edit_payload)
     original = getattr(interaction, "original_response", None)
     if callable(original):
         message = await original()
         message_edit = getattr(message, "edit", None)
         if callable(message_edit):
-            updated = await message_edit(content=content)
+            updated = await message_edit(**edit_payload)
             return updated or message
     return None
 
@@ -176,12 +184,31 @@ def _patch_session() -> None:
         ):
             await _mark_working(state)
 
-        # A fast, text-only response should replace Discord's deferred
-        # interaction instead of creating a second message. Use the same lock
-        # as the slow timer so "working on it…" can never overwrite a final
-        # answer that is being committed at the timeout boundary.
+        # Keep the rich payload when the final fast answer edits Discord's
+        # deferred original response. This matters for /maxwell, whose text is
+        # intentionally converted to an embed by the outer transport wrapper.
+        fast_payload: dict[str, Any] = {}
+        if kwargs.get("embed") is not None:
+            fast_payload["embed"] = kwargs["embed"]
+        elif kwargs.get("embeds"):
+            fast_payload["embeds"] = kwargs["embeds"]
+        for key in ("view", "allowed_mentions", "suppress_embeds"):
+            if key in kwargs and kwargs[key] is not None:
+                fast_payload[key] = kwargs[key]
+
+        extra_files = kwargs.get("files")
+        has_file_payload = file is not None or bool(extra_files)
+        has_followup_only_payload = kwargs.get("poll") is not None
+
+        # A fast response should replace Discord's deferred interaction instead
+        # of creating a second message. Use the same lock as the slow timer so
+        # "working on it…" can never overwrite a final answer at the boundary.
         promote_after_fast_attempt = False
-        if file is None and int(getattr(self, "_sent", 0) or 0) == 0:
+        if (
+            not has_file_payload
+            and not has_followup_only_payload
+            and int(getattr(self, "_sent", 0) or 0) == 0
+        ):
             async with state.lock:
                 if not state.escalated and not state.completed:
                     # Re-check the cutoff while holding the lock. This closes
@@ -192,9 +219,14 @@ def _patch_session() -> None:
                         text = None if content is None else str(content)
                         if text == "":
                             text = None
+                        visible_content = text
+                        if visible_content is None and not fast_payload:
+                            visible_content = "\u200b"
                         try:
                             sent = await _edit_original(
-                                self.interaction, text or "\u200b"
+                                self.interaction,
+                                visible_content,
+                                **fast_payload,
                             )
                         except Exception:
                             sent = None
@@ -212,9 +244,13 @@ def _patch_session() -> None:
         if promote_after_fast_attempt:
             await _mark_working(state)
 
-        # Files cannot be attached with the lightweight original-response
-        # edit path used here. Promote to status + follow-up instead.
-        if file is not None and not state.escalated and not state.completed:
+        # Files/polls cannot use the lightweight original-response edit path.
+        # Promote to status + follow-up instead.
+        if (
+            (has_file_payload or has_followup_only_payload)
+            and not state.escalated
+            and not state.completed
+        ):
             await _mark_working(state)
 
         return await original_send(self, content=content, file=file, **kwargs)
@@ -291,6 +327,7 @@ def install_interaction_progress(bot: Any) -> None:
         if callable(original_handler) and not getattr(
             original_handler, "_maxwell_interaction_progress_wrapped", False
         ):
+
             async def handler_wrapper(bot_obj: Any, interaction: Any) -> bool:
                 if is_user_install_command(interaction):
                     _begin(interaction)
@@ -303,6 +340,7 @@ def install_interaction_progress(bot: Any) -> None:
     if callable(original_execute) and not getattr(
         original_execute, "_maxwell_interaction_progress_wrapped", False
     ):
+
         async def execute_wrapper(self_obj: Any, *args: Any, **kwargs: Any) -> Any:
             message = args[0] if args else kwargs.get("message")
             if message is not None and is_user_install_message(message):
@@ -320,7 +358,10 @@ def install_interaction_progress(bot: Any) -> None:
     if callable(web_execute) and not getattr(
         web_execute, "_maxwell_interaction_progress_wrapped", False
     ):
-        async def web_wrapper(self_tool: Any, message: Any, *args: Any, **kwargs: Any) -> Any:
+
+        async def web_wrapper(
+            self_tool: Any, message: Any, *args: Any, **kwargs: Any
+        ) -> Any:
             if is_user_install_message(message):
                 state = _state_for_message(message)
                 if state is not None:
