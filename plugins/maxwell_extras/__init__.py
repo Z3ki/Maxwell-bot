@@ -11,6 +11,7 @@ from .owner_control import install_owner_control
 from .plugin_runtime import install_plugin_runtime_guards
 from .rich_interactions import install_rich_interactions
 from .style_freedom import install_style_freedom
+from .taint_gate_cleanup import install_taint_gate_cleanup
 from .user_install_features import (
     install_user_install_features,
     install_user_install_tool_disclosure,
@@ -43,6 +44,11 @@ def setup(bot, ctx):
     # Maxwell is official-bot-only. Strip the leftover profile-bio behavior that
     # came from the old self-bot/user-account implementation.
     install_official_bot_cleanup(bot)
+
+    # Keep the indirect-prompt-injection protection while removing the old
+    # manual `,confirm` command/token flow. Tainted destructive calls now fail
+    # closed and require a fresh user message instead.
+    install_taint_gate_cleanup(bot)
 
     # Strengthen every plugin, not just this one: bounded event/job callbacks,
     # runtime health counters, and tracked background tasks cancelled on reload.
