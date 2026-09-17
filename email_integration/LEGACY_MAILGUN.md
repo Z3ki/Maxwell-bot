@@ -29,9 +29,10 @@ the bot read Gmail back over the Gmail REST API.
 
 ## Configurable DNS helper
 
-`setup_dns.py` and its compatibility entry point `setup_dns_legacy.py` now
-require an explicit domain and zone ID. They have no personal domain, zone,
-reporting mailbox, or host path defaults.
+`setup_dns.py` requires an explicit domain and zone ID. The old
+`setup_dns_legacy.py` compatibility wrapper was removed; there is now one
+supported DNS entry point. The helper has no personal domain, zone, reporting
+mailbox, or host path defaults.
 
 ```bash
 export CF_API_TOKEN='your-cloudflare-token'
