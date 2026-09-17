@@ -9,12 +9,9 @@ from discord import Message
 class Tool(ABC):
     """Base class for bot tools"""
 
-    # Tools flagged destructive require user confirmation when the current
-    # message context is "tainted" (e.g. just received content from
-    # fetch_url / web_search). This is the second line of defense against
-    # indirect prompt injection: even if a malicious page tricks the model
-    # into proposing a shell command, the user has to click Confirm before
-    # it runs. Default off for harmless read tools.
+    # Destructive tools are blocked when the current turn is "tainted" by
+    # fetched/web content. A fresh user message starts a clean turn; there is
+    # no manual confirmation command. Default off for harmless read tools.
     is_destructive: bool = False
 
     def __init__(self, bot):
