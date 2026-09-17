@@ -3,7 +3,10 @@
 from .audit_chunk_tail import install_audit_chunk_tail
 from .audit_progress_fix import install_progress_audit_fix
 from .audit_ui import install_tool_audit
+from .autonomy_routing import install_autonomy_routing_guards
 from .interaction_progress import install_interaction_progress
+from .maxwell_embed_output import install_maxwell_embed_output
+from .official_bot_cleanup import install_official_bot_cleanup
 from .owner_control import install_owner_control
 from .plugin_runtime import install_plugin_runtime_guards
 from .rich_interactions import install_rich_interactions
@@ -37,9 +40,18 @@ def setup(bot, ctx):
     # Discord, and teach its webhook transport to preserve embeds/views/files.
     install_user_install_features(bot)
 
+    # Maxwell is official-bot-only. Strip the leftover profile-bio behavior that
+    # came from the old self-bot/user-account implementation.
+    install_official_bot_cleanup(bot)
+
     # Strengthen every plugin, not just this one: bounded event/job callbacks,
     # runtime health counters, and tracked background tasks cancelled on reload.
     install_plugin_runtime_guards(bot)
+
+    # Keep autonomy observation broad but make speech/tool routing fail closed:
+    # only configured auto channels are valid guild targets, reply ids must stay
+    # in their source room, and visible tools never guess a fallback channel.
+    install_autonomy_routing_guards(bot)
 
     # Keep Maxwell's conversational style free even when an older personality
     # string is already persisted in bot_control.json.
@@ -55,6 +67,10 @@ def setup(bot, ctx):
     install_audit_chunk_tail(bot)
     install_user_install_tool_disclosure(bot)
     install_progress_audit_fix(bot)
+
+    # /maxwell answers are rendered as Discord embeds rather than plain webhook
+    # text. Context-menu actions keep their current output style.
+    install_maxwell_embed_output(bot)
 
     # Discord app commands keep fast answers in the deferred interaction. Tool
     # use or >10s latency promotes it to a stable "working on it…" status and
