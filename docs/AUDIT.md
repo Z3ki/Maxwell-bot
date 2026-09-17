@@ -1,86 +1,107 @@
 # Audit coverage and deployment follow-up
 
-## Installation and runtime follow-up (2026-09-10)
+> **Status:** this is a dated audit record, not a live test dashboard. It summarizes the major September 2026 reliability/security audit and the follow-up work that landed around it. Exact historical pass counts, source line numbers, and deployment assumptions should not be treated as current. For live setup behavior use [INSTALL.md](INSTALL.md), [CONFIGURATION.md](CONFIGURATION.md), and [OVERVIEW.md](OVERVIEW.md).
 
-This follow-up inspected installation/reconfiguration, environment loading,
-API startup, tool concurrency, container lifecycle and remaining personal DNS
-defaults. It also ran the existing core regression suite; it does not replace
-the broader audit below or claim every integration is bug-free.
+## Current post-audit state
 
-Changes:
+Since the original audit snapshot, Maxwell has continued to change. Current `main` now includes, among other things:
 
-- Reconfiguration preserves saved provider, identity, credentials and feature
-  defaults; dotenv values are parsed as data, never sourced as shell code.
-- `--configure-only` prepares an install without Docker or service changes.
-  Image builds finish before an existing host service is stopped.
-- API limits load after `.env`; malformed/non-finite limits use bounded defaults.
-  Direct script startup no longer silently omits the global rate limiter.
-- API REM defaults honor `ENABLE_REM`, matching the bot. The wizard keeps its
-  legacy `REM_ENABLED` alias consistent.
-- Invalid tool concurrency settings cannot construct zero-slot semaphores that
-  wait forever; invalid explicit constructor limits raise clear errors.
-- The container supervises bot and API together, shuts down both on failure,
-  forwards termination and reaps children. Linux uses the bundled Docker CLI
-  instead of assuming a compatible host binary at `/usr/bin/docker`.
-- DNS helpers require an explicit domain/zone, verify that pair before writes,
-  support provider DKIM selectors and preserve existing DMARC policy by default.
-  The legacy entry point shares the implementation. PM2 log filtering uses the
-  configured PM2 home or current user's home.
-- GitHub Actions adds core tests and lint checks on Python 3.11 and 3.12.
+- The friendly easy-install provider names `AI_API_URL`, `AI_MODEL`, and `AI_API_KEY`, with `OLLAMA_*` retained as compatibility/advanced names.
+- Owner-only `/owner` runtime status/control support with redacted data export and validated persisted edits.
+- Discord `/maxwell` rich embed output plus slow/tool-backed interaction progress that promotes to a stable `working on it…` state after about 10 seconds and sends the final response separately.
+- Provider-native OpenAI-style `tool_calls` as the preferred tool path when supported.
+- Fail-closed destructive-tool handling for turns tainted by fetched/web content; the old manual-confirmation override flow was removed.
+- A single supported Cloudflare DNS helper entry point that requires an explicit domain/zone rather than personal hard-coded defaults.
 
-Local validation: Python 3.12 clean virtual environment, **1,898 passed / 3
-skipped**, Ruff, dependency consistency and shell/patch checks. Real local
-subprocess tests cover child failure and forced shutdown; installer tests cover
-configuration-only setup and failed builds. The browser, live-provider and Riva
-tests skipped for unavailable dependencies/services. Docker is unavailable in
-this environment, so the complete image build and a live deployment remain
-unverified. No production credentials or live Discord sessions were used.
+The current implementation and tests are authoritative for those features.
 
-Rebuild the image to install the new entrypoint. Existing DNS commands must now
-provide `--zone-id` and `--domain` (or their documented environment variables).
-See [INSTALL.md](INSTALL.md) and
-[the legacy DNS helper guide](../email_integration/LEGACY_MAILGUN.md).
+## September 2026 audit scope
 
-## Scope
+The audit covered the core bot and tool dispatcher; provider integrations; memory/RAG, autonomy and jobs; Discord accounts/threads/plugins; dashboard/API; generated-site runtime; configuration; installation; and deployment boundaries.
 
-This change reviews the core bot and tool dispatcher; providers and external integrations; memory, autonomy, queues and jobs; Discord accounts, threads, plugins and games; the dashboard/API and generated-site stack; configuration, installation and deployment.
+The review combined source inspection, regression tests, failing-before/passing-after tests, and targeted local integration checks. It was not a claim that every external integration or production deployment path had been exercised.
 
-The review combines source inspection, existing regression suites, new failing-before/passing-after regressions, and targeted local integration checks. It is not exhaustive execution coverage or a guarantee that the repository is bug-free.
+## Repairs covered by the audit
 
-## Repairs
+### Authorization and secrets
 
-- **Authorization and secrets:** enforce thread visibility and private-memory boundaries, revoke dashboard sessions when admin access is removed, redact nested diagnostics, prevent explicit message destinations from silently falling back to the originating chat, and verify remote mail TLS certificates.
-- **Generated-code isolation:** require autofix regressions and run them in constrained, unprivileged, network-disabled Docker containers without host credentials or a Docker socket. Preserve original worktrees as read-only inputs and remove containers after failure, timeout or cancellation.
-- **Persistence:** preserve corrupt JSON stores instead of overwriting them, protect shared state updates with file locks, retain valid graph JSON and chess move history, fix scoped-memory deduplication and metadata updates, and guard against stale embedding writes.
-- **Lifecycle and concurrency:** repair queued-work shutdown, job/task cleanup, plugin reload and scheduling, Discord REST admission, multipart retry bodies, parallel progress ownership, Telegram delivery receipts/cleanup, and cancelled media subprocesses.
-- **Integrations:** correct provider usage attribution, media routing, fallback callbacks and repaired-request retries; respect X posting limits and avoid ambiguous write fallbacks; bound CAPTCHA polling and validate payloads; preserve unrelated DNS TXT records; avoid losing mail after failed fetches.
-- **Web/API:** preserve OAuth redirects, separate public stream capacity from admin requests, bound chunked uploads, preserve encoded proxy URLs, restrict probe path traversal, create unique browser profiles, and repair dashboard logout polling and context deletion identifiers.
-- **Installation:** restore fresh-install configuration, support the declared Python versions, preserve dotenv values when adapting Docker Desktop addresses, repair health checks and dependency diagnostics, include a Linux Docker CLI and pytest in the runtime image, and use user-relative PM2 log paths.
+- Strengthened thread/private-memory boundaries.
+- Revoked dashboard sessions when admin access is removed.
+- Redacted nested diagnostics and sensitive usage fields.
+- Prevented explicit message destinations from silently falling back to the originating chat.
+- Required certificate validation for remote mail transport while retaining explicit local exceptions.
 
-Regression coverage is in `tests/test_audit_*.py`, with additional updates to existing regression tests. Memory test harnesses now shut down their event loops through `asyncio.run` rather than abandoning background work.
+### Generated-code isolation
 
-## Local validation
+Autofix-generated regression tests were moved into a constrained local Docker test image with no network, no host credentials, no Docker socket, an unprivileged user, and resource limits. Autofix is expected to fail closed if the configured isolation image is unavailable.
 
-- Full pytest suites on Python 3.11 with core dependencies and Python 3.12 with all optional dependencies.
-- Ruff, Python compilation, shell/JavaScript syntax and patch-whitespace checks.
-- Caddy configuration validation and Compose configuration checks.
-- A real Docker autofix test verified non-root execution, absent host credentials/socket, a read-only source mount and disabled network access.
-- A Docker build smoke test verified the bundled Docker CLI runs on the Python runtime base image.
+### Persistence and shared state
 
-The real provider progress test requires `OLLAMA_BASE_URL` and was not run against a live provider. External Discord, Telegram, X, OAuth, CAPTCHA, Cloudflare and mail calls were mocked. Installing optional voice dependencies allowed the Riva unit test to run, but this does not validate a live voice session. The complete production Docker image and a production rollout were not exercised.
+- Corrupt JSON stores are preserved/backed up instead of silently overwritten in audited paths.
+- Shared writes use locking/atomic helpers where repaired.
+- Graph/chess/memory state received targeted durability fixes.
+- Scoped-memory deduplication/metadata and embedding-write races received regressions.
 
-## Deployment actions
+This does not mean every multi-process state path is a full transaction system; see remaining risks below.
 
-1. Rebuild the Maxwell image to obtain the bundled Docker CLI and pytest. Autofix fails closed if its configured local test image is unavailable.
-2. Apply the split-origin [Caddy example](../examples/Caddyfile.example): generated pages must not share browser storage with the dashboard. Set `MAXWELL_PUBLIC_BASE_URL` to the generated-site origin and `DISCORD_REDIRECT_BASE`/`DISCORD_REDIRECT_URI` to the dashboard origin. Configure DNS and TLS for both hosts. Clear old-origin credentials and rotate any that may have been exposed.
-3. Remote mail servers must present valid certificates. For private certificate authorities, configure `SSL_CERT_FILE`. Loopback and the Docker host gateway retain the existing local self-signed-certificate exception.
-4. In Compose, leave `MAXWELL_SITE_DIR` blank for the default or use an absolute host path. Explicit relative values are not supported by the current bind-mount layout.
+### Lifecycle and concurrency
+
+The audit repaired multiple queue/shutdown/task-cleanup problems, plugin reload/scheduling edge cases, Discord REST admission, multipart retries, progress ownership, Telegram receipt/cleanup paths, and cancelled media subprocesses.
+
+The supported container now supervises bot/API processes together and forwards shutdown through the container lifecycle.
+
+### Integrations
+
+Targeted fixes covered provider usage attribution, media routing, fallback callbacks, repaired-request retries, X posting bounds, CAPTCHA polling, DNS TXT preservation, and mail-fetch persistence behavior.
+
+### Web/API
+
+Targeted repairs covered OAuth redirects, stream/admin capacity separation, chunked upload bounds, proxy URL preservation, probe path validation, browser profile separation, dashboard logout polling, and context-deletion identifiers.
+
+### Installation/deployment
+
+The audit repaired fresh-install configuration, Python/dependency compatibility, Docker Desktop address rewriting, health/dependency checks, Docker CLI availability inside the runtime image, and user-relative legacy PM2 paths.
+
+Docker is now the supported runtime; old host/PM2 material is migration/compatibility surface rather than the recommended deployment.
+
+## Deployment requirements that remain important
+
+1. Rebuild the Maxwell image after runtime/dependency/entrypoint changes.
+2. Keep generated pages on a separate origin from the dashboard/admin UI. Use [`../examples/Caddyfile.example`](../examples/Caddyfile.example) as the reference split-origin configuration.
+3. Set `MAXWELL_PUBLIC_BASE_URL` to the generated-site origin and the Discord OAuth redirect/base to the dashboard origin.
+4. Protect `.env`, `data/`, logs, credentials, and dashboard state.
+5. Treat the Maxwell container as host-root trusted because it can control the host Docker daemon through `docker.sock`.
+6. When `MAXWELL_SITE_DIR` is outside the checkout, use an absolute host path so the Compose bind mount is unambiguous.
 
 ## Remaining risks and unverified edge cases
 
-- Browser probes still execute generated pages with their page-directed network requests. Initial URL/path validation is not a browser network sandbox. Isolate this service from sensitive internal networks before accepting untrusted pages.
-- IMAP UIDVALIDITY changes after mailbox recreation are not tracked. The watermark corrections cover failed fetches and failed persistence, not mailbox replacement.
-- Cross-process JSON read-modify-write locking is not uniform across every bot/API writer. The repaired shared store operations are locked, but this is not a complete transaction model for all JSON files.
-- Private thread visibility fails closed when membership/cache information is unavailable. Compatibility with live Discord permission/cache behavior still needs operational validation.
+These are deployment/architecture caveats, not claims that an exploit or outage is currently present:
 
-These limitations are not claimed as fixed by this change. See [SECURITY.md](../SECURITY.md) for the service's Docker-daemon trust boundary.
+- Browser probes execute generated pages and may follow page-directed network requests. Initial URL/path validation is not a browser network sandbox.
+- Mailbox replacement/UIDVALIDITY changes remain a specialized recovery case beyond ordinary fetch/persistence retries.
+- Not every cross-process JSON read-modify-write path is a database transaction. Audited shared stores have targeted locking/atomicity fixes, but the repository is not uniformly transactional.
+- Private-thread visibility intentionally fails closed when membership/cache information cannot establish access; live Discord cache/permission behavior still deserves operational validation.
+- External actions such as Discord sends cannot guarantee exactly-once effects across a crash that occurs after the external side effect but before local confirmation.
+- OpenAI-compatible providers differ in streaming/tool-call behavior; mocked unit tests cannot substitute for testing the actual configured endpoint/model.
+
+See [../SECURITY.md](../SECURITY.md) for security boundaries.
+
+## Validation guidance
+
+Do not reuse the old hard-coded historical pass count as proof about the current commit. For the current checkout, run the checks that CI/runtime actually use:
+
+```bash
+python -m pip check
+ruff check .
+python -m pytest
+```
+
+For an installed Docker instance:
+
+```bash
+docker compose exec maxwell python3 doctor.py
+docker compose exec maxwell python3 doctor.py --probe
+docker compose logs -f maxwell
+```
+
+External Discord, provider, voice, browser, DNS, mail, OAuth, X, Telegram, and other integrations require the corresponding real service/configuration to be considered live-validated.

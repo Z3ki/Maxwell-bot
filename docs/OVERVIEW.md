@@ -1,64 +1,153 @@
-# Maxwell overview
+# Maxwell architecture overview
 
-Maxwell is an official Discord bot powered by any OpenAI-compatible chat API. It can read Discord text plus images, audio, video, files, and embeds, then answer with an LLM that can call tools such as web search, URL fetch, image generation, chess, memory, shell-in-Docker, site generation, and guild moderation/structure tools.
+Maxwell is an official Discord bot powered by an OpenAI-compatible chat API. It accepts Discord text plus images, audio, video, files, embeds, replies, and app-command/context-menu requests, then runs a tool-capable model loop with memory, background jobs, and owner/admin controls.
 
-Maxwell logs in with an official bot token from the Discord Developer Portal. Enable Message Content, Server Members, and Presence privileged intents.
+Maxwell expects an official bot token from the Discord Developer Portal. Enable the privileged gateway intents **Message Content**, **Server Members**, and **Presence**.
 
-## How the pieces fit
+## High-level flow
 
 ```text
-Discord account/session
+Discord bot / app commands
         │
         ▼
-     bot.py ────────────────┐
-        │                   │
-        ▼                   ▼
-   providers.py       bot_tools.py / tool_registry.py
-        │                   │
-        ▼                   ├── docker/ bot image + shell sandbox
-OpenAI-compatible LLM       ├── rag_memory.py + SQLite memory
-(Ollama, OpenRouter,        ├── autonomy.py / rem.py background loops
- OpenAI, LM Studio, etc.)   └── api/api_server.py + web/ dashboard
+      bot.py ───────────────────────────┐
+        │                               │
+        ▼                               ▼
+   providers.py                  tool registry / bot_tools.py
+        │                               │
+        ▼                               ├─ Discord/media/web/site tools
+OpenAI-compatible chat API              ├─ Docker shell/site siblings
+(primary/fallback/vision)               ├─ background jobs
+                                        └─ plugin-provided behavior
+        │
+        ├─ rag_memory.py (SQLite/vector memory)
+        ├─ knowledge_graph.py
+        ├─ autonomy.py / rem.py
+        └─ api/api_server.py + web/ dashboard
 ```
 
 ## Main modules
 
-| Path | What it does |
+| Path | Current role |
 |---|---|
-| `bot.py` | Discord client, message ingestion, multimodal handling, tool-call loop, chat commands. |
-| `config.py` | Loads `.env`, validates core settings, resolves optional feature flags. |
-| `providers.py` | OpenAI-compatible chat/streaming provider client and base URL normalization. |
-| `bot_tools.py`, `tool_registry.py`, `tool_schemas.py`, `tools.py` | Tool implementations, registration, and LLM schemas. |
-| `rag_memory.py` | SQLite-backed semantic memory using an OpenAI-compatible embeddings endpoint. |
-| `autonomy.py`, `rem.py` | Optional timed background reasoning and REM memory consolidation. |
-| `api/api_server.py`, `web/` | Local admin API and dashboard. |
-| `docker/` | Bot image (`maxwell.Dockerfile`), shell sandbox, and site-runtime images. |
-| `docker-compose.yml` | Linux Compose file (host network). `docker-compose.bridge.yml` is the Docker Desktop variant. |
-| `discord_threads.py` | Discord thread create/control tools and the brief injected into thread turns. |
-| `doctor.py` | Installation/configuration report; `--probe` calls the configured endpoints. |
-| `ecosystem.config.js` | PM2 process definitions for the bot, API, and optional Ollama process. |
-| `requirements.txt` | Core Python packages required to start Maxwell. |
-| `requirements-optional.txt` | Optional packages for web search, voice, and TTS features. |
+| `bot.py` | Discord client, message ingestion, context assembly, live model/tool loop, command handling, delivery/reliability integration. |
+| `providers.py` | OpenAI-compatible provider client, endpoint normalization, streaming, retries/fallbacks, native tool-call handling. |
+| `bot_tools.py` | Main tool implementations. |
+| `tool_registry.py`, `tool_schemas.py`, `tools.py` | Tool registration, schemas/normalization, base tool behavior. |
+| `rag_memory.py` | `RAGMemoryManager`: SQLite-backed/vector-backed memory for channel messages, long-term facts, and scoped context. |
+| `knowledge_graph.py` | Entity/relationship knowledge memory. |
+| `context_budget.py` | Prompt/context budget helpers. |
+| `autonomy.py` | Optional self-directed background action engine. |
+| `rem.py` | Optional REM-style background memory consolidation. |
+| `jobs.py` | Background jobs and long-running work. |
+| `message_pipeline.py` | Message-processing pipeline helpers. |
+| `user_install.py` | Discord user-install/app-command and context-menu support. |
+| `plugin_manager.py` | Plugin discovery/loading/runtime. |
+| `plugins/maxwell_extras/` | Owner control panel, app-command progress, rich `/maxwell` output, runtime guards, style/runtime enhancements. |
+| `api/api_server.py`, `api/state.py`, `api/storage.py` | Dashboard/admin API, sanitized controls, persisted admin state. |
+| `web/` | Dashboard/install frontend. |
+| `site_server.py`, `site_backend.py` | Generated-site serving/backend runtime integration. |
+| `doctor.py` | Configuration/dependency report; `--probe` checks configured endpoints. |
+| `docker/`, `docker-compose*.yml` | Supported Docker runtime and sibling-container images. |
+
+Historical host/PM2 files may remain for compatibility/migration, but Docker is the supported deployment model.
+
+## Tool calling
+
+`native_tool_calls` is enabled by default in current runtime controls. When the provider supports OpenAI-style tool calls, Maxwell uses the provider's structured `tool_calls`. A compatibility path remains for models/endpoints that do not produce native calls correctly.
+
+Tool schemas are normalized in `tool_schemas.py`, and the main runtime dispatches calls through the registered tool layer. Long-running/background jobs use the same tool/runtime concepts with their own budgets and scheduling.
+
+Tools marked destructive are fail-closed when the current turn has been tainted by fetched/web content. A new user turn starts clean; there is no manual confirmation command to override a tainted destructive action.
+
+## Memory
+
+The old architecture description that said Maxwell had no vector/RAG memory is obsolete.
+
+Current memory includes:
+
+- `RAGMemoryManager` in `rag_memory.py`, backed by SQLite and an OpenAI-compatible embedding endpoint.
+- Channel/message memory and long-term fact storage.
+- Scoped shared/cross-context memory with visibility controls.
+- Entity/relationship memory through `knowledge_graph.py`.
+- Optional REM-style consolidation.
+- Prompt/context budgeting before data is injected into a model turn.
+
+RAG availability is controlled through configuration/feature switches. Embedding failures should not be confused with the primary chat provider; `doctor.py --probe` reports the configured provider/embedding probes.
+
+## Discord app surfaces
+
+Maxwell supports the normal bot conversation path plus Discord app-command/user-install surfaces.
+
+- `/maxwell` is the personal app-command surface when user install is enabled.
+- `/owner` is an owner-only status/control panel.
+- Message/user context-menu actions are registered through the user-install layer.
+
+The `maxwell_extras` plugin adds the current `/maxwell` presentation behavior: textual slash-command replies use embeds. Fast responses stay in the original deferred interaction. A tool-backed or >10-second request leaves a stable `working on it…` status and sends the final answer as a follow-up.
+
+## Owner controls
+
+Owner/admin identity comes from configured admin IDs such as `MAXWELL_OWNER_IDS` / `CREATOR_ID` and persisted admin state.
+
+`/owner` can show redacted runtime/control data and make validated persistent updates to `DATA_DIR/bot_control.json`. The dashboard works with the same sanitized runtime-control model.
+
+## Runtime controls
+
+Defaults live in `control_defaults.py`; persisted overrides live in `DATA_DIR/bot_control.json`.
+
+Important groups include:
+
+- Replies/triggers and direct-response policy.
+- AI/tool concurrency and timeouts.
+- Native tool calls and per-tool disable lists.
+- Memory/RAG/context budgets.
+- Autonomy/REM/background behavior.
+- Night/fallback routing.
+- Autofix and developer/runtime switches.
+
+`api.state._sanitize_control` is the authority for accepted persisted values/ranges.
+
+## Inbound reliability
+
+Maxwell journals directed inbound request lifecycle state in `DATA_DIR/inbound_requests.sqlite3`. This supports recovery/diagnosis without storing another full copy of private message content.
+
+A request can move through receipt, queue/deferred, running, failure, and delivery states. Maxwell avoids automatic replay after an external side effect may already have happened, because exactly-once delivery cannot be guaranteed across an uncertain crash boundary.
+
+## Docker runtime
+
+The supported deployment is Docker:
+
+- Linux uses `docker-compose.yml` and host networking.
+- Docker Desktop uses `docker-compose.bridge.yml` and `host.docker.internal` rewriting for host-local services.
+- The Maxwell container supervises bot/API processes together.
+- Shell sandboxes and generated-site backends run as sibling containers.
+
+The main service has access to the host Docker daemon. Treat that as a host-root trust boundary even with dropped Linux capabilities and `no-new-privileges`; see [../SECURITY.md](../SECURITY.md).
 
 ## Feature flags
 
-Most optional features are controlled by `ENABLE_*` variables in `.env`. They are tri-state:
+Most optional features use `ENABLE_*` switches with `auto|true|false` semantics:
 
-- `auto` (or unset): enable the feature only when its dependency is present.
-- `true`: force the feature on.
-- `false`: force the feature off.
+- `auto`: enable when dependencies/config make the feature usable.
+- `true`: force it on.
+- `false`: keep it off.
 
-This lets a basic install work with only the core dependencies. For example, `ENABLE_WEB_SEARCH=auto` turns on only when `ddgs` is installed, `ENABLE_VIDEO_INPUT=auto` needs `ffmpeg`, and `ENABLE_VC=auto` needs the voice Python packages plus system audio libraries. `ENABLE_REM` and `ENABLE_AUTONOMY` default to `false` because they spend model tokens on a timer.
-
-`ENABLE_SHELL=true` is the default. The supported install runs Maxwell in Docker with docker.sock mounted, so the shell sandbox is a sibling container.
+Simple installs keep token-spending background loops such as autonomy/REM off by default. `doctor.py` reports resolved feature states.
 
 ## Checking an install
 
-Run:
+Supported Docker install:
+
+```bash
+docker compose exec maxwell python3 doctor.py
+docker compose exec maxwell python3 doctor.py --probe
+```
+
+Local development checkout:
 
 ```bash
 python3 doctor.py
 python3 doctor.py --probe
 ```
 
-`doctor.py` reports Python, core packages, required `.env` values, optional system tools, Docker reachability, X/Twitter status, and resolved feature flags. `--probe` additionally calls the chat `/models` endpoint and the embedding endpoint when RAG is enabled. In the supported install, run it with `docker compose exec maxwell python3 doctor.py`.
+Use [INSTALL.md](INSTALL.md) for deployment and [CONFIGURATION.md](CONFIGURATION.md) for settings/runtime controls.
