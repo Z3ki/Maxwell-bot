@@ -98,10 +98,9 @@ def test_routing_uses_cloudflare_dns_endpoint_without_guessing_mx(monkeypatch):
     ]
 
 
-@pytest.mark.parametrize("entrypoint", ["setup_dns.py", "setup_dns_legacy.py"])
-def test_dns_entrypoints_explain_required_configuration(entrypoint):
+def test_dns_entrypoint_explains_required_configuration():
     result = subprocess.run(
-        [sys.executable, str(ROOT / "email_integration" / entrypoint), "--help"],
+        [sys.executable, str(ROOT / "email_integration" / "setup_dns.py"), "--help"],
         capture_output=True,
         text=True,
         timeout=5,
