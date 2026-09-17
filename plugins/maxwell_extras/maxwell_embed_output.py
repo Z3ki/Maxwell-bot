@@ -15,6 +15,8 @@ import user_install as ui
 
 _INSTALLED = False
 _ORIGINAL_SEND = None
+_EMBED_COLOR = 0x5865F2
+_EMBED_FOOTER = "Personal app • /maxwell"
 
 
 def _is_maxwell_slash(interaction: Any) -> bool:
@@ -29,14 +31,39 @@ def _is_maxwell_slash(interaction: Any) -> bool:
     return name == ui.USER_INSTALL_COMMAND_NAME and command_type == 1
 
 
-def _reply_embed(text: str) -> discord.Embed:
+def _bot_identity(bot: Any) -> tuple[str, str | None]:
+    user = getattr(bot, "user", None)
+    name = (
+        getattr(user, "display_name", None)
+        or getattr(user, "global_name", None)
+        or getattr(user, "name", None)
+        or "Maxwell"
+    )
+    avatar = getattr(user, "display_avatar", None)
+    avatar_url = getattr(avatar, "url", None)
+    if avatar_url is None:
+        avatar = getattr(user, "avatar", None)
+        avatar_url = getattr(avatar, "url", None)
+    return str(name), str(avatar_url) if avatar_url else None
+
+
+def _reply_embed(text: str, bot: Any = None) -> discord.Embed:
+    """Build the automatic branded card used by textual /maxwell answers."""
+
     # UserInstallSession already chunks normal replies below Discord's message
     # limit, so one chunk comfortably fits an embed description (4096 chars).
-    return discord.Embed(description=text[:4096])
+    embed = discord.Embed(description=text[:4096], color=_EMBED_COLOR)
+    name, avatar_url = _bot_identity(bot)
+    if avatar_url:
+        embed.set_author(name=name, icon_url=avatar_url)
+    else:
+        embed.set_author(name=name)
+    embed.set_footer(text=_EMBED_FOOTER)
+    return embed
 
 
 def install_maxwell_embed_output(bot: Any) -> None:
-    """Render textual /maxwell follow-ups as Discord embeds instead of content.
+    """Render textual /maxwell follow-ups as branded Discord embeds.
 
     This wrapper intentionally re-checks the live transport on every install.
     Other personal-app features can wrap UserInstallSession.send during plugin
@@ -45,7 +72,6 @@ def install_maxwell_embed_output(bot: Any) -> None:
     deferred original response.
     """
 
-    del bot
     global _INSTALLED, _ORIGINAL_SEND
 
     current = ui.UserInstallSession.send
@@ -67,7 +93,7 @@ def install_maxwell_embed_output(bot: Any) -> None:
             and _is_maxwell_slash(getattr(self, "interaction", None))
             and not has_explicit_embed
         ):
-            kwargs["embed"] = _reply_embed(text)
+            kwargs["embed"] = _reply_embed(text, bot)
             content = None
         return await current(self, content=content, file=file, **kwargs)
 
