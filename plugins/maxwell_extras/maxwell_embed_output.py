@@ -32,17 +32,21 @@ def _is_maxwell_slash(interaction: Any) -> bool:
 def _reply_embed(text: str) -> discord.Embed:
     # UserInstallSession already chunks normal replies below Discord's message
     # limit, so one chunk comfortably fits an embed description (4096 chars).
-    embed = discord.Embed(description=text[:4096])
-    return embed
+    return discord.Embed(description=text[:4096])
 
 
 def install_maxwell_embed_output(bot: Any) -> None:
-    """Render textual /maxwell follow-ups as Discord embeds instead of content."""
+    """Render textual /maxwell follow-ups as Discord embeds instead of content.
+
+    This wrapper intentionally re-checks the live transport on every install.
+    Other personal-app features can wrap UserInstallSession.send during plugin
+    reloads; if that happens, this layer must become outermost again so even the
+    interaction-progress fast path receives an embed before it edits Discord's
+    deferred original response.
+    """
 
     del bot
     global _INSTALLED, _ORIGINAL_SEND
-    if _INSTALLED:
-        return
 
     current = ui.UserInstallSession.send
     if getattr(current, "_maxwell_embed_output", False):
