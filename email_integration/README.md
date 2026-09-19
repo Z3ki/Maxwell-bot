@@ -1,71 +1,28 @@
-# Email tools (local Postfix + Dovecot)
+# Email tools: SMTP + IMAP
 
-The four email tools in `bot_tools.py` — `email_send`, `email_read_inbox`,
-`email_get_message`, `email_search` — talk to a **local Postfix + Dovecot
-mail server** on `127.0.0.1` by default. They do **not** use Mailgun, Gmail,
-or any other third-party service. There is nothing to sign up for.
+Maxwell's current email tools use standard SMTP and IMAP settings. The default examples target a local Postfix + Dovecot deployment, but the bot only cares about the configured host/port/account values.
 
-This file is the install guide. The legacy Mailgun/Gmail flow and the
-`setup_dns.py` Cloudflare script in this directory are **archived** —
-see [`LEGACY_MAILGUN.md`](LEGACY_MAILGUN.md) if you want the old design
-back. They are not wired into the bot.
+The main tools are:
 
-## How it works
+- `email_send`
+- `email_read_inbox`
+- `email_get_message`
+- `email_search`
 
-```
-   bot.py  --SMTP/25-->  Postfix   --SMTP/25-->  recipient MX
-   bot.py  <--IMAPS/993--  Dovecot  <--delivered--  Postfix local
-```
+They do not require Mailgun or Gmail.
 
-- **Outbound**: bot connects to `127.0.0.1:25`, `STARTTLS`, `SASL PLAIN`,
-  `MAIL FROM`/`RCPT TO`/`DATA`. Postfix handles all DNS, queueing, retry.
-  We never talk to recipient MXes directly.
-- **Inbound**: bot connects to `127.0.0.1:993` (IMAPS), `SELECT INBOX`,
-  `FETCH`. Postfix's `virtual(5)` transport delivers local mail to
-  `/var/mail/vmail/<your-domain>/<mailbox>/Maildir`; Dovecot serves it
-  over IMAP.
+## How the default local setup works
 
-The blocking I/O (`smtplib`, `imaplib`) runs through `asyncio.to_thread`
-so the bot's event loop isn't held up by a 30-second SMTP timeout.
-
-## What you need to install
-
-A local Postfix + Dovecot with virtual mailboxes. Any setup that exposes
-SMTP on port 25 and IMAPS on port 993 will work — the bot only cares
-about the host/port/user/password. The defaults match a typical
-`postfix` + `dovecot-core` + `dovecot-imapd` install on Debian/Ubuntu.
-
-Quick-and-dirty Debian/Ubuntu install (NOT a hardened setup — read the
-Postfix/Dovecot docs before exposing this to the internet):
-
-```bash
-sudo apt install postfix dovecot-core dovecot-imapd dovecot-lmtpd
-# pick "Internet Site" or "Local only" during the postfix install
+```text
+Maxwell --SMTP--> Postfix ----> recipient mail server
+Maxwell <--IMAP-- Dovecot <---- local mailbox delivery
 ```
 
-Then:
+Blocking SMTP/IMAP operations are moved off the asyncio event loop so mail server timeouts do not freeze the Discord bot.
 
-1. Configure Postfix for virtual mailboxes under `/var/mail/vmail/<domain>/`.
-   Add your domain to `virtual_mailbox_domains`, set `virtual_mailbox_maps`
-   to a file mapping `user@domain` → `vmail/domain/user/`, and turn on
-   SASL auth via Dovecot.
-2. Configure Dovecot with the same `vmail` UID/GID, IMAPS on 993, and a
-   self-signed cert (or a real one). Set `auth_mechanisms = plain login`
-   and point `auth-passwd-file` at `/etc/dovecot/users` with one line
-   per mailbox: `user@domain:{PLAIN}password:5000:5000::/var/mail/vmail/domain/user::user@domain`.
-3. Make sure port 25 is open outbound — many VPS providers (Contabo,
-   Hetzner, etc.) block it by default. If your provider blocks port 25,
-   you'll need a smart-host relay.
-4. Set the SPF and DKIM TXT records for your domain in DNS. Without
-   them, mail you send to Gmail/Outlook/Yahoo will land in spam or get
-   rejected outright (Google returns 550 5.7.26 "your email has been
-   blocked because the sender is unauthenticated" when neither is
-   present). The `LEGACY_MAILGUN.md` file has DKIM setup notes you can
-   adapt for any DKIM signer (OpenDKIM, Rspamd, etc.).
+## Bot configuration
 
-## Bot config
-
-Put the following in `.env`:
+Example `.env` values:
 
 ```ini
 ENABLE_EMAIL_TOOLS=true
@@ -74,36 +31,81 @@ MAXWELL_SMTP_HOST=127.0.0.1
 MAXWELL_SMTP_PORT=25
 MAXWELL_IMAP_HOST=127.0.0.1
 MAXWELL_IMAP_PORT=993
-MAXWELL_EMAIL_USER=bot@yourdomain.example
-MAXWELL_EMAIL_PASSWORD=replace-with-dovecot-password
-MAXWELL_EMAIL_FROM=bot@yourdomain.example
+MAXWELL_EMAIL_USER=bot@example.org
+MAXWELL_EMAIL_PASSWORD=replace-with-mailbox-password
+MAXWELL_EMAIL_FROM=bot@example.org
 MAXWELL_EMAIL_FROM_NAME=Maxwell
 ```
 
-If `MAXWELL_EMAIL_PASSWORD` is empty, the four email tools return
-"local mail is not configured" at call time without crashing the bot.
+The exact advanced defaults and feature detection are documented in `../.env.example` and `config.py`.
 
-## To disable entirely
+If the required mailbox credentials/configuration are absent, the email tools should fail as unconfigured rather than crashing the bot. To remove the tools entirely from model access, set:
 
-Set `ENABLE_EMAIL_TOOLS=false` in `.env` and the four tools are not
-registered with the model. No Postfix/Dovecot required.
+```ini
+ENABLE_EMAIL_TOOLS=false
+```
 
-## What this is NOT
+## Local Postfix + Dovecot example
 
-- Not a full mail server. There's no POP/IMAP for arbitrary clients
-  (Thunderbird, Apple Mail) out of the box. You can add it by
-  configuring Dovecot to publish the same mailbox over POP3, but that's
-  outside this README.
-- Not encrypted at rest. Mail sits in `Maildir` on disk unencrypted; if
-  you need E2E, use PGP inline (not implemented).
-- Not migrated from existing mail. If `bot@yourdomain.example` was on
-  another provider, forward from there into your local mailbox.
+A common self-hosted setup is Postfix for SMTP delivery and Dovecot for IMAP access. On Debian/Ubuntu the base packages are typically:
 
-## Files
+```bash
+sudo apt install postfix dovecot-core dovecot-imapd dovecot-lmtpd
+```
 
-- `LEGACY_MAILGUN.md` — the old Mailgun + Gmail + Cloudflare design.
-  Archived. The bot doesn't use any of it; keep it only as a reference
-  for DKIM/SPF setup notes.
-- `setup_dns.py` — the legacy Cloudflare DNS script. Also archived.
-  Hardcoded for the `z3ki.dev` zone and not generic.
-- This README — the current install guide.
+That package command is only a starting point. Before exposing mail service to the internet, configure authentication, mailbox ownership/permissions, TLS, relay restrictions, spam/abuse controls, and DNS according to the Postfix/Dovecot documentation and your hosting provider.
+
+Many VPS providers restrict outbound port 25. If direct delivery is blocked, use an authenticated smart-host/relay instead of assuming direct SMTP delivery will work.
+
+## DNS: SPF, DKIM, DMARC
+
+Production outbound mail should have correct SPF/DKIM/DMARC alignment for the domain you send from. The exact records depend on the delivery/signing provider.
+
+`setup_dns.py` in this directory is a **current, configurable Cloudflare DNS helper** for Mailgun-style/provider DNS records. It is not hardcoded to a personal domain or zone.
+
+It requires an explicit Cloudflare API token, zone ID, and domain, supplied with arguments or the documented environment variables. It validates that the selected zone matches the supplied domain before writing records. Existing DMARC policy is preserved unless replacement is explicitly requested.
+
+Example shape:
+
+```bash
+export CF_API_TOKEN='your-cloudflare-token'
+python3 email_integration/setup_dns.py \
+  --zone-id YOUR_ZONE_ID \
+  --domain example.org \
+  --mailgun-spf include:mailgun.org \
+  --dkim-selector mg \
+  --dkim 'k=rsa; p=YOUR_PROVIDER_PUBLIC_KEY'
+```
+
+Use `python3 email_integration/setup_dns.py --help` for the current option list.
+
+Important: this DNS helper does **not** configure Maxwell's SMTP/IMAP transport, Postfix, Dovecot, or mailbox credentials. It only manages the DNS records its command options describe.
+
+## Cloudflare Email Routing
+
+The DNS helper can optionally request Cloudflare Email Routing setup when explicitly enabled. Destination verification and routing rules still require the corresponding Cloudflare configuration; DNS setup alone does not create a working mailbox for Maxwell.
+
+## Legacy Mailgun/Gmail design
+
+[`LEGACY_MAILGUN.md`](LEGACY_MAILGUN.md) documents the older Maxwell mail flow that sent through Mailgun and read forwarded mail through Gmail. That transport is archived and is not the current bot path.
+
+The legacy document remains useful for historical/provider-specific DNS context, but do not copy its old transport assumptions into the current SMTP/IMAP setup.
+
+## TLS and certificates
+
+Remote mail servers should present certificates that validate normally. For a private CA, configure the runtime trust store appropriately (for example through the supported certificate environment configuration).
+
+Do not disable certificate verification globally to make a remote mail server work.
+
+## Operational checklist
+
+Before relying on email tools:
+
+1. Confirm SMTP connectivity/authentication from the Maxwell runtime.
+2. Confirm IMAP connectivity/authentication and mailbox visibility.
+3. Confirm the sender domain's SPF/DKIM/DMARC setup.
+4. Confirm your provider permits outbound delivery or configure a relay.
+5. Test delivery to multiple providers and inspect bounces/spam placement.
+6. Keep mailbox credentials out of Git and logs.
+
+Mail delivery reputation and recipient-provider policy are external to Maxwell; successful SMTP submission does not guarantee inbox placement.

@@ -1,164 +1,167 @@
-# Maxwell configuration quick reference
+# Maxwell configuration reference
 
-The installer writes `.env` from `.env.example` and updates only the keys it asks about. Keep `.env` private; it is ignored by git.
+Maxwell has two configuration layers:
 
-## Values set by the wizard
+1. `.env` for provider endpoints, credentials, identity, paths, feature availability, and startup behavior.
+2. Runtime controls in `DATA_DIR/bot_control.json`, editable through the dashboard and owner-only controls.
+
+Keep `.env` and `data/` private.
+
+## Primary AI settings
+
+The easy installer and `.env.simple.example` use provider-neutral names:
+
+| Variable | Purpose |
+|---|---|
+| `AI_API_URL` | Primary OpenAI-compatible API base URL |
+| `AI_MODEL` | Primary chat model |
+| `AI_API_KEY` | Primary API key; blank is normal for local endpoints that do not require one |
+
+The simple template maps them to compatibility aliases:
+
+```ini
+OLLAMA_BASE_URL=${AI_API_URL}
+OLLAMA_MODEL=${AI_MODEL}
+OLLAMA_API_KEY=${AI_API_KEY}
+```
+
+The full `.env.example` and full installer still use the historical `OLLAMA_*` namespace for the primary provider and its advanced settings. Those names are compatibility names; Maxwell is not Ollama-only.
+
+For an older install:
+
+```bash
+python3 scripts/migrate_ai_env.py .env
+```
+
+Do not set conflicting values in both namespaces.
+
+## Core environment values
 
 | Variable | Required? | Purpose |
 |---|---:|---|
-| `DISCORD_BOT_TOKEN` | Yes | Official bot token from the Developer Portal. Enable Message Content, Server Members, and Presence intents. |
-| `DISCORD_TOKEN` | Deprecated alias | Accepted only if `DISCORD_BOT_TOKEN` is empty. User tokens are not supported. |
-| `OLLAMA_BASE_URL` | Yes | OpenAI-compatible base URL. A bare host such as `http://localhost:11434` gets `/v1` appended by the provider code. |
-| `OLLAMA_MODEL` | Yes | Chat model name served by that endpoint. |
-| `OLLAMA_API_KEY` | Sometimes | ****** for hosted providers such as OpenRouter or OpenAI; blank is normal for local Ollama/LM Studio. |
-| `MAXWELL_OWNER_IDS` | Strongly recommended | Comma-separated Discord user IDs allowed to run admin commands. Blank means admin commands are denied to everyone. |
-| `MAXWELL_ADMIN_USER` | Optional | Admin username for dashboard/API auth (defaults to `admin`). |
-| `MAXWELL_ADMIN_PASSWORD` | Strongly recommended | Password for the admin API/dashboard. Blank makes the API return 503. |
-| `ENABLE_AUTONOMY` | Optional | Timed self-directed background actions; off by default to avoid surprise token spend. |
-| `ENABLE_REM` | Optional | Timed memory consolidation (also accepted as `REM_ENABLED`); off by default to avoid surprise token spend. |
-| `ENABLE_SHELL` | Optional | Shell tool. The supported Docker install leaves this on; the sandbox is a sibling container. |
-| `MAXWELL_HOST_BIND` | Set by installer | Host path of this checkout, used when sibling containers bind-mount files. |
-| `MAXWELL_SITE_DIR` | `public/bot` | Where `create_site` writes HTML. If this is an absolute path outside the checkout (typical Caddy root `/var/www/maxwell/bot`), docker compose bind-mounts it. Leave it unset to write under the checkout. |
+| `DISCORD_BOT_TOKEN` | Yes | Official bot token from the Discord Developer Portal. User/self-bot tokens are not supported. |
+| `DISCORD_TOKEN` | Deprecated alias | Used only when the official bot-token setting is empty. |
+| `AI_API_URL` / `OLLAMA_BASE_URL` | Yes | Primary OpenAI-compatible endpoint. |
+| `AI_MODEL` / `OLLAMA_MODEL` | Yes | Primary chat model. |
+| `AI_API_KEY` / `OLLAMA_API_KEY` | Sometimes | Provider key; blank can be valid for local endpoints. |
+| `MAXWELL_OWNER_IDS` | Strongly recommended | Comma-separated Discord IDs authorized for owner/admin features. |
+| `MAXWELL_ADMIN_USER` | Optional | Dashboard username; defaults to `admin`. |
+| `MAXWELL_ADMIN_PASSWORD` | Strongly recommended | Dashboard password. A blank value leaves the admin API unavailable. |
+| `MAXWELL_HOST_BIND` | Installer-managed | Absolute host checkout path used by sibling containers. |
+| `MAXWELL_SITE_DIR` | Optional | Generated-site directory. Leave unset for the repository default or use an absolute host path. |
+| `MAXWELL_PUBLIC_BASE_URL` | Optional | Public origin for generated sites. Keep it separate from the dashboard origin. |
 
-See [`.env.example`](../.env.example) for the full set of advanced knobs, including embeddings, dashboard host/port, TTS, X/Twitter, email, captcha solving, generated-site paths, and tool-specific limits.
+See [`.env.example`](../.env.example) for the complete advanced environment reference.
 
-## Autofix (self-heal PRs)
-
-When a tool handler raises a programming error (for example `TypeError` from a
-dispatcher clash), Maxwell's own chat model — not a sub-agent — drafts a
-minimal patch and a unit test, commits them on `fix/autofix-<error>-<timestamp>`,
-and opens a GitHub pull request. It never checks out or pushes `main` and never
-auto-merges. Turn it off with the dashboard `autofix_enabled` switch or
-`MAXWELL_AUTOFIX=false`. Opening PRs needs `gh` or `GITHUB_TOKEN`.
-
-## Message reliability
-
-These controls live in the dashboard's **Replies & Triggers** and
-**Concurrency & Limits** sections and are persisted in `DATA_DIR/control.json`.
-
-| Control | Default | Purpose |
-|---|---:|---|
-| `require_direct_response` | `true` | An eligible DM, personal mention, or reply to Maxwell requires an answer or acknowledgement rather than discretionary `no_response`. Does not bypass blocked channels, ignored users, sleep, or reply switches. |
-| `respond_to_edited_mentions` | `true` | Allow a newly added direct mention to start one reply when the original message was not already answered or pending. Ordinary text edits and embed updates do not start extra replies. |
-| `live_turn_timeout_seconds` | `180` | Whole live-turn deadline, including preparation and waiting for an AI slot. Range 1–7200 seconds. Long work should use background jobs rather than occupy a live turn indefinitely. |
-| `inbound_retry_attempts` | `2` | Maximum safe processing attempts, including the initial attempt; range 1–5. Never automatically repeat a request after a tool/send may have taken effect. |
-| `inbound_retry_delay_seconds` | `5` | Base retry delay, range 1–300 seconds. The periodic recovery worker applies backoff. |
-| `gap_recovery_max_messages` | `0` | Unused for replies. Startup skips the offline backlog (no answers to messages from while Maxwell was down). |
-
-Personal follow-ups now wait their turn instead of cancelling the same user's
-earlier question. `,stop` remains an explicit cancellation. Directed requests that
-do not fit the in-memory queue remain deferred on disk; they are not expired
-because a slow request took five minutes. Unrelated chatter still coalesces.
-Role mentions and `@everyone`/`@here` remain soft signals, not guaranteed requests.
-Sleep is an explicit suppression policy, not a promise to reply after waking.
-
-### Diagnose an unanswered ping
-
-Keep the Discord **message ID**, channel ID, and timestamp. Correlate them with
-`inbound` lifecycle log entries and `DATA_DIR/inbound_requests.sqlite3`.
-The journal stores IDs, state, attempt counts, timestamps, fixed reason labels,
-and confirmed response IDs—not message content or credentials. Keep the data
-directory private and persistent across deployments.
-
-- **No receipt:** compare Discord history with gateway disconnect/resume logs.
-  Check channel access. Offline backlog is intentionally not answered after a
-  restart; a missing receipt for a message sent while Maxwell was down is expected.
-- **Suppressed:** inspect the reason (reply switch, channel/user restriction,
-  sleep, soft-watch policy, or allowed model silence).
-- **Queued/deferred/running:** inspect queue pressure, retries, and stage timing.
-  The next DM or ping does not cancel this work.
-- **Failed:** inspect the recorded failure reason. An uncertain tool/send outcome
-  is deliberately not replayed automatically.
-- **Delivered:** use the response ID, when available, to find the actual Discord message. A
-  generated answer, typing indicator, or progress placeholder is not proof of
-  delivery. A partial multi-message reply is distinguished from a complete send.
-  Voice-tool delivery currently records confirmation without a response ID.
-
-LLM traces now include the triggering message ID, allowing model/tool decisions
-to be joined to receipt and delivery. Their short ring is not a durable record;
-use the journal and retained process logs for longer investigations.
-Provider timing logs use `request_id` for the same ID and report the actual
-endpoint/model selected on each attempt, including nighttime and error fallbacks.
-
-Recovery re-fetches pending messages from Discord rather than keeping copies of
-private content in a second database. Deleted messages or revoked permissions
-can therefore prevent recovery and produce an explicit failure. A crash between
-an external tool/Discord send and its confirmation cannot provide exactly-once
-delivery: such requests require operator reconciliation rather than blindly
-repeating a potentially completed action. Completed journal history is bounded,
-so this is not a permanent archive of every message.
-
-For regressions, compare deployments **by timestamp**, including the effective
-control settings and the primary/fallback model actually used. Night routing
-can prefer the fallback from local 22:00–09:00. Record the installed versions
-with `python -m pip show discord.py-self aiohttp` using the bot's interpreter;
-the lower-bound requirements do not pin those versions. Logs, deployed versions,
-and affected message IDs are needed to attribute a production incident.
-
-The August 31–September 7, 2026 source-history review identified `c640af9`
-(August 31, 20:15 UTC) as introducing both the directed-queue eviction/expiry and
-the early receipt watermark paths corrected here. Nighttime fallback was added
-just before that window in `ee61a8c` (August 30). These dates identify plausible
-regression points, not proof of which version was deployed or which path caused
-a particular missed ping.
-
-## Identity
-
-Names and IDs are env-driven. Empty Discord IDs mean no baked-in owner — admin access comes only from `MAXWELL_OWNER_IDS` / `admins.json`.
+## Identity and ownership
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BOT_NAME` | `Maxwell` | Spoken name in prompts; live Discord nick still wins in chat. |
-| `CREATOR_NAME` | empty | Optional human owner label in prompts. |
-| `CREATOR_ID` | empty | Optional creator Discord user ID. Blank = not assumed. |
-| `MAXWELL_USER_ID` | empty | Optional Discord ID of this bot account. |
-| `COMMAND_PREFIX` | `,` | Prefix for this bot's text commands. |
-| `BOT_BIRTHDAY` | `2026-05-21` | ISO date used when the bot talks about its birthday. |
-| `BOT_INVITE_URL` | empty | Official invite the bot may share. |
-| `DISCORD_BOT_PERMISSIONS` | `0` | Permission integer used by `/install` for **Add to a server**. Default is a normal add with no extra permissions. Administrator is never requested. User-install (`Add to my apps`) is admin-only and does not request bot permissions. |
-| `MAXWELL_USAGE_URL` | empty | Provider quota endpoint for the `usage` tool. |
+| `BOT_NAME` | `Maxwell` | Bot/persona name where a live Discord nickname does not override it. |
+| `CREATOR_NAME` | blank | Optional creator label. |
+| `CREATOR_ID` | blank | Optional creator Discord ID. |
+| `MAXWELL_OWNER_IDS` | blank | Comma-separated owner/admin Discord IDs. |
+| `MAXWELL_USER_ID` | blank | Optional configured bot user ID. |
+| `COMMAND_PREFIX` | `,` when unset | Prefix for legacy text commands. |
+| `BOT_BIRTHDAY` | `2026-05-21` | ISO persona birthday. |
+| `BOT_INVITE_URL` | blank | Optional public invite URL. |
+| `DISCORD_BOT_PERMISSIONS` | `0` | Permission integer used for server-install links. Administrator is not requested by default. |
+| `MAXWELL_USAGE_URL` | blank | Optional provider usage/quota endpoint. |
 
-## Common provider snippets
+Blank IDs do not grant implicit ownership.
 
-```ini
-# Local Ollama
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=qwen3:8b
-OLLAMA_API_KEY=
+## `/owner` control panel
+
+The `maxwell_extras` plugin registers an owner-only `/owner` application command. It can show runtime state, controls, memory, autonomy, tools, and plugins; export redacted data; persist validated control changes; and reload the control file.
+
+Changes are sanitized and persisted to `DATA_DIR/bot_control.json`. Secret-like values are redacted and are not editable through the Discord owner panel.
+
+Examples:
+
+```text
+/owner action:overview
+/owner action:enable key:autonomy_enabled
+/owner action:set key:ai_concurrency value:3
 ```
 
-```ini
-# OpenRouter
-OLLAMA_BASE_URL=https://openrouter.ai/api/v1
-OLLAMA_MODEL=moonshotai/kimi-k2.6:free
-OLLAMA_API_KEY=your-openrouter-key
-```
+## Runtime controls
 
-```ini
-# OpenAI
-OLLAMA_BASE_URL=https://api.openai.com/v1
-OLLAMA_MODEL=gpt-4.1-mini
-OLLAMA_API_KEY=your-openai-key
-```
+Defaults live in `control_defaults.py`. `bot_control.json` overrides them at runtime.
 
-```ini
-# LM Studio
-OLLAMA_BASE_URL=http://localhost:1234/v1
-OLLAMA_MODEL=the-loaded-model-name
-OLLAMA_API_KEY=
-```
+Frequently used controls include:
+
+| Control | Purpose |
+|---|---|
+| `bot_enabled` | Master live-response switch |
+| `tools_enabled` | Master tool-layer switch |
+| `native_tool_calls` | Prefer OpenAI-style provider-native tool calls |
+| `disabled_tools` | Per-tool deny list |
+| `require_direct_response` | Require an answer/acknowledgement for eligible direct requests |
+| `respond_to_edited_mentions` | Allow a newly added direct mention to start one request |
+| `ai_concurrency` | Live AI concurrency limit |
+| `max_tool_iterations` | Tool-loop iteration cap |
+| `tool_iteration_timeout_seconds` | Tool-loop timeout |
+| `prompt_context_budget` | Approximate prompt/context budget |
+| `memory_context_budget` | Approximate memory contribution budget |
+| `store_memory` | Conversation-memory storage switch |
+| `long_term_memory_enabled` | Long-term memory switch |
+| `cross_context_enabled` | Scoped cross-context facts |
+| `entity_memory_enabled` | Entity memory |
+| `knowledge_graph_enabled` | Relationship/knowledge-graph memory |
+| `autonomy_enabled` | Runtime autonomy switch |
+| `autofix_enabled` | Runtime autofix switch |
+| `enable_night_fallback` | Night-window fallback routing when configured |
+
+The authoritative set and valid ranges are in `control_defaults.py` and `api.state._sanitize_control`. Prefer the dashboard or `/owner` to editing `bot_control.json` while Maxwell is running.
+
+## Message reliability
+
+Directed inbound work is journaled in `DATA_DIR/inbound_requests.sqlite3` with lifecycle state such as received, queued/deferred, running, failed, and delivered. The journal records IDs/state/timing rather than duplicating full private message content.
+
+Relevant controls include `live_turn_timeout_seconds`, `inbound_retry_attempts`, and `inbound_retry_delay_seconds`. Maxwell deliberately avoids blind replay after a tool or Discord send may already have taken effect.
+
+## Memory and RAG
+
+Current Maxwell includes `rag_memory.py`. `RAGMemoryManager` is a vector-backed, SQLite-backed memory manager for channel memory, long-term facts, and scoped shared context using an OpenAI-compatible embedding endpoint.
+
+`knowledge_graph.py` adds entity/relationship memory. REM-style consolidation is optional and controlled separately. Embedding/RAG settings live in the advanced `.env.example`; `doctor.py --probe` checks the configured embedding endpoint when RAG is enabled.
+
+## Optional/background features
+
+Many `ENABLE_*` environment switches accept `auto`, `true`, or `false`. Important examples include `ENABLE_RAG`, `ENABLE_AUTONOMY`, `ENABLE_REM`, and `ENABLE_SHELL`.
+
+Simple installs keep token-spending background loops off by default. The exact dependency detection is implemented in `config.py` and reported by `doctor.py`.
+
+## App-command behavior
+
+For `/maxwell`, fast answers use the original deferred interaction. A tool-backed or >10-second command promotes that interaction to a stable `working on it…` status and sends the final result as a follow-up. Textual `/maxwell` follow-ups are rendered as embeds unless the response already contains an explicit rich payload.
+
+## Tool safety behavior
+
+Tools marked destructive are blocked when the current turn has been tainted by fetched/web content. A fresh user message starts a clean turn. There is no manual confirmation command that overrides a tainted destructive action.
+
+See [../SECURITY.md](../SECURITY.md) for the Docker-daemon trust boundary and deployment warnings.
 
 ## Reconfigure
 
-From a cloned checkout:
+For a simple/easy install, edit the friendly `.env` values and restart:
 
 ```bash
-./install.sh --local --reconfigure
+cd ~/maxwell
+nano .env
+./run.sh -d
 ```
 
-Or, for an existing install made by the one-liner:
+For the full wizard:
 
 ```bash
 cd ~/maxwell
 ./install.sh --local --reconfigure
+```
+
+Then validate:
+
+```bash
+docker compose exec maxwell python3 doctor.py
+docker compose exec maxwell python3 doctor.py --probe
 ```
