@@ -663,6 +663,7 @@
           <section id="llm" class="panel"></section>
           <section id="rem" class="panel"></section>
           <section id="autonomy" class="panel"></section>
+          <section id="plugins" class="panel"></section>
           <section id="controls" class="panel"></section>
           <section id="memory" class="panel"></section>
           <section id="context" class="panel"></section>
@@ -700,6 +701,8 @@
         autonomyStatus: null,
         autonomyLog: [],
         autonomyGoals: [],
+        pluginCatalog: [],
+        pluginState: {},
         pm2: [],
         inbox: [],
         traces: [],
@@ -720,6 +723,7 @@
         ["llm", "LLM"],
         ["rem", "REM"],
         ["autonomy", "Autonomy"],
+        ["plugins", "Plugins"],
         ["controls", "Controls"],
         ["memory", "Memory"],
         ["context", "Context"],
@@ -964,6 +968,14 @@
           url: "/api/autonomy/goals",
           norm: (d) => (Array.isArray(d) ? d : d?.goals || []),
         },
+        {
+          key: "pluginCatalog",
+          url: "/api/plugins",
+          norm: (d) => {
+            S.pluginState = d && typeof d.plugins === "object" ? d.plugins : {};
+            return Array.isArray(d?.catalog) ? d.catalog : [];
+          },
+        },
         { key: "pm2", url: "/api/pm2", norm: (d) => (Array.isArray(d) ? d : []) },
         {
           key: "traces",
@@ -1059,6 +1071,7 @@
         llm();
         rem();
         autonomy();
+        plugins();
         controls();
         memory();
         context();
@@ -1615,6 +1628,57 @@
           out[k] = raw;
         });
         return out;
+      }
+      function plugins() {
+        const catalog = Array.isArray(S.pluginCatalog) ? S.pluginCatalog : [];
+        const rows = catalog
+          .map((p) => {
+            const on = !!p.enabled_globally;
+            const err = p.error ? `<div class="muted" style="color:var(--red)">${esc(p.error)}</div>` : "";
+            const tools = (p.tools || [])
+              .map((t) => (typeof t === "string" ? t : t.name))
+              .filter(Boolean);
+            const perms = (p.permissions || []).map(esc).join(", ") || "none";
+            const warn = (p.permissions || []).some((x) =>
+              ["shell", "secrets.read", "plugins.manage", "config.modify"].includes(x),
+            )
+              ? `<span class="badge warn">privileged</span>`
+              : "";
+            const restart = p.requires_restart
+              ? `<span class="badge warn">restart</span>`
+              : "";
+            const prot = p.protected ? `<span class="badge">protected</span>` : "";
+            return `<div class="item"><div><b>${esc(p.name)}</b> v${esc(p.version || "")} ${prot} ${warn} ${restart}<div class="muted">${esc(p.description || "")}</div>${err}<div class="muted">tools: ${esc(tools.join(", ") || "none")}</div><div class="muted">permissions: ${perms}</div></div><div class="row"><button class="btn small ${on ? "red" : "green"}" data-plug="${esc(p.name)}" data-act="${on ? "disable" : "enable"}">${on ? "Disable" : "Enable"}</button></div></div>`;
+          })
+          .join("");
+        $("plugins").innerHTML =
+          `<div class="card" style="margin-top:12px"><h3>Installed plugins</h3><p class="muted">Enable or disable features without editing source. Protected plugins cannot be turned off globally. Python plugins run in-process and are trusted code — a permission declaration is not a sandbox.</p><div class="row"><button class="btn small" id="plugReload">Reload plugins</button></div><div class="stack" style="margin-top:12px">${rows || '<div class="muted">No plugins discovered.</div>'}</div></div>`;
+        $("plugReload")?.addEventListener("click", async () => {
+          try {
+            await api("/api/plugins/reload", { method: "POST" });
+            toast("Reload queued");
+            loadAll(true);
+          } catch (e) {
+            toast(e.message);
+          }
+        });
+        $("plugins").querySelectorAll("[data-plug]").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            const name = btn.getAttribute("data-plug");
+            const act = btn.getAttribute("data-act");
+            try {
+              await api("/api/plugins/" + encodeURIComponent(name) + "/" + act, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ is_global: true }),
+              });
+              toast(act + " queued for " + name);
+              loadAll(true);
+            } catch (e) {
+              toast(e.message);
+            }
+          });
+        });
       }
       function controls() {
         const covered = new Set(

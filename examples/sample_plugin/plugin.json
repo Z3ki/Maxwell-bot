@@ -1,0 +1,17 @@
+{
+  "id": "sample_echo",
+  "name": "Sample Echo",
+  "version": "1.0.0",
+  "description": "Example plugin that registers an echo tool without editing Maxwell core.",
+  "author": "Maxwell",
+  "api_version": 1,
+  "enabled_globally": true,
+  "enabled_by_default": true,
+  "permissions": [],
+  "tools": [
+    {
+      "name": "sample_echo",
+      "returns_result": true
+    }
+  ]
+}

@@ -207,8 +207,10 @@ The giant `.env.example` is still available for every advanced option.
 ## Project layout
 
 ```text
-bot.py                  Main Discord bot
-bot_tools.py            Tool implementations
+bot.py                  Discord transport and turn loop
+maxwell_core/           Plugin host, tool registry, prompts, hooks
+plugins/                Feature plugins (tools, jobs, prompt slices)
+bot_tools.py            Compatibility re-exports of plugin tools
 providers.py            OpenAI-compatible provider wrapper
 config.py               Environment-backed config
 rag_memory.py           Vector/RAG memory
@@ -222,6 +224,7 @@ install.sh              Full installer
 .env.simple.example     Small human-friendly config
 .env.example            Full advanced config
 docker-compose.yml      Linux Docker runtime
+docs/PLUGINS.md         Plugin development API
 ```
 
 ## More documentation
@@ -229,6 +232,7 @@ docker-compose.yml      Linux Docker runtime
 - [Installation details](docs/INSTALL.md)
 - [Configuration reference](docs/CONFIGURATION.md)
 - [Architecture overview](docs/OVERVIEW.md)
+- [Plugin development](docs/PLUGINS.md)
 
 ## Security notes
 

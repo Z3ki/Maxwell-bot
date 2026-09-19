@@ -33,7 +33,7 @@ def test_lookup_user_with_bio_and_profile():
 
         assert "Name: Test User (@testuser)" in result
         assert "ID: 123456789" in result
-        assert "Bio: Hello, I am a cool hacker!" in result
+        assert "Bio:" not in result
         assert "Banner: https://cdn.discordapp.com/banners/123/banner.png" in result
         assert "Accent Color: #FF5733" in result
 

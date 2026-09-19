@@ -10,15 +10,16 @@ Maxwell logs in with an official bot token from the Discord Developer Portal. En
 Discord account/session
         │
         ▼
-     bot.py ────────────────┐
-        │                   │
-        ▼                   ▼
-   providers.py       bot_tools.py / tool_registry.py
-        │                   │
-        ▼                   ├── docker/ bot image + shell sandbox
-OpenAI-compatible LLM       ├── rag_memory.py + SQLite memory
-(Ollama, OpenRouter,        ├── autonomy.py / rem.py background loops
- OpenAI, LM Studio, etc.)   └── api/api_server.py + web/ dashboard
+     bot.py (transport + turn loop)
+        │
+        ▼
+ maxwell_core (plugins, tools, prompts, hooks)
+        │
+        ├── plugins/<feature>/     tools, jobs, prompt slices
+        ├── providers.py           OpenAI-compatible adapter
+        ├── rag_memory.py          SQLite/RAG memory
+        ├── autonomy.py / rem.py   background host loops
+        └── api/ + web/            dashboard
 ```
 
 ## Main modules
@@ -26,9 +27,11 @@ OpenAI-compatible LLM       ├── rag_memory.py + SQLite memory
 | Path | What it does |
 |---|---|
 | `bot.py` | Discord client, message ingestion, multimodal handling, tool-call loop, chat commands. |
+| `maxwell_core/` | Plugin host, tool registry, prompt manager, hook bus. |
+| `plugins/` | Feature packages (Discord tools, web, sites, chess, extras, …). |
 | `config.py` | Loads `.env`, validates core settings, resolves optional feature flags. |
 | `providers.py` | OpenAI-compatible chat/streaming provider client and base URL normalization. |
-| `bot_tools.py`, `tool_registry.py`, `tool_schemas.py`, `tools.py` | Tool implementations, registration, and LLM schemas. |
+| `bot_tools.py`, `tool_registry.py`, `tool_schemas.py`, `tools.py` | Compatibility re-exports, reasoning traces, and schema helpers. |
 | `rag_memory.py` | SQLite-backed semantic memory using an OpenAI-compatible embeddings endpoint. |
 | `autonomy.py`, `rem.py` | Optional timed background reasoning and REM memory consolidation. |
 | `api/api_server.py`, `web/` | Local admin API and dashboard. |

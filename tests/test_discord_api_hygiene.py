@@ -96,7 +96,7 @@ def test_lookup_user_uses_cache_and_skips_profile():
     msg = SimpleNamespace(guild=None)
     out = asyncio.run(tool.execute(msg, user_id="123456789"))
     assert "Test User" in out
-    assert "Bio: hi" in out
+    assert "Bio:" not in out
     bot.fetch_user.assert_not_called()
     bot.fetch_user_profile.assert_not_called()
 

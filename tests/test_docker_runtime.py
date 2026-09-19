@@ -70,7 +70,7 @@ def test_site_runtime_stays_unprivileged():
 
 
 def test_runtime_flags_disable_swap():
-    tools = (ROOT / "bot_tools.py").read_text()
+    tools = (ROOT / "plugins" / "shell" / "impl.py").read_text()
     assert '"--memory-swap"' in tools
     site = (ROOT / "site_server.py").read_text()
     assert '"--memory-swap", MEMORY' in site

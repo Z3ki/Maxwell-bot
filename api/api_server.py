@@ -1734,6 +1734,11 @@ async def commands_post(request):
         "context_cleanup_enable",
         "context_cleanup_disable",
         "context_cleanup_interval",
+        "plugin_reload",
+        "plugin_reload_state",
+        "plugin_enable",
+        "plugin_disable",
+        "plugin_config",
     }:
         pass
     elif cmd_type == "inbox_act":
@@ -2776,20 +2781,111 @@ app.router.add_get("/api/chat/history", chat_history)
 
 
 async def plugins_get(request):
-    # This is a read-only endpoint. Resolve DATA_DIR at request time so tests
-    # and deployments that override the data directory see the same state as
-    # the rest of the API, and treat a missing/corrupt file as empty rather
-    # than raising a NameError or returning a malformed payload.
+    # Merge on-disk enablement with discovered manifests so the dashboard
+    # can list tools/capabilities without constructing MaxwellBot.
     state = _load(DATA_DIR / "plugins.json")
     if not isinstance(state, dict):
         state = {}
-    plugins = state.get("plugins")
-    if not isinstance(plugins, dict):
-        plugins = {}
-    return _json_response({"ok": True, "plugins": plugins})
+    stored = state.get("plugins")
+    if not isinstance(stored, dict):
+        stored = {}
+    catalog = []
+    try:
+        from maxwell_core.plugins.catalog import discover_plugin_manifests
+
+        for path, manifest, error in discover_plugin_manifests():
+            name = path.name
+            cfg = stored.get(name) if isinstance(stored.get(name), dict) else {}
+            item = {
+                "name": name,
+                "path": str(path),
+                "error": error,
+                "enabled_globally": bool(cfg.get("enabled_globally")),
+                "allowed_users": list(cfg.get("allowed_users") or []),
+                "denied_users": list(cfg.get("denied_users") or []),
+                "config": dict(cfg.get("config") or {})
+                if isinstance(cfg.get("config"), dict)
+                else {},
+            }
+            if manifest is not None:
+                item.update(manifest.as_public_dict())
+                item["name"] = name
+            catalog.append(item)
+    except Exception as exc:
+        logger.exception("plugin catalog scan failed")
+        return _json_response(
+            {"ok": True, "plugins": stored, "catalog": [], "warning": str(exc)}
+        )
+    return _json_response({"ok": True, "plugins": stored, "catalog": catalog})
+
+
+async def plugins_enable(request):
+    name = str(request.match_info.get("name") or "").strip()
+    if not name:
+        return _json_response({"error": "plugin name required"}, 400)
+    body = {}
+    if request.can_read_body:
+        with contextlib.suppress(Exception):
+            body = await request.json()
+    is_global = bool((body or {}).get("is_global", True))
+    cmd_id, err = await _queue_command(
+        "plugin_enable",
+        extra={"plugin": name, "is_global": is_global, "user_id": (body or {}).get("user_id")},
+    )
+    if err:
+        return _json_response({"error": err}, 409)
+    return _json_response({"ok": True, "id": cmd_id, "queued": "plugin_enable"})
+
+
+async def plugins_disable(request):
+    name = str(request.match_info.get("name") or "").strip()
+    if not name:
+        return _json_response({"error": "plugin name required"}, 400)
+    body = {}
+    if request.can_read_body:
+        with contextlib.suppress(Exception):
+            body = await request.json()
+    is_global = bool((body or {}).get("is_global", True))
+    cmd_id, err = await _queue_command(
+        "plugin_disable",
+        extra={"plugin": name, "is_global": is_global, "user_id": (body or {}).get("user_id")},
+    )
+    if err:
+        return _json_response({"error": err}, 409)
+    return _json_response({"ok": True, "id": cmd_id, "queued": "plugin_disable"})
+
+
+async def plugins_reload(request):
+    cmd_id, err = await _queue_command("plugin_reload")
+    if err:
+        return _json_response({"error": err}, 409)
+    return _json_response({"ok": True, "id": cmd_id, "queued": "plugin_reload"})
+
+
+async def plugins_config(request):
+    name = str(request.match_info.get("name") or "").strip()
+    if not name:
+        return _json_response({"error": "plugin name required"}, 400)
+    try:
+        body = await request.json()
+    except Exception:
+        return _json_response({"error": "JSON object required"}, 400)
+    config = body.get("config") if isinstance(body, dict) else None
+    if not isinstance(config, dict):
+        return _json_response({"error": "config must be a JSON object"}, 400)
+    cmd_id, err = await _queue_command(
+        "plugin_config", extra={"plugin": name, "config": config}
+    )
+    if err:
+        return _json_response({"error": err}, 409)
+    return _json_response({"ok": True, "id": cmd_id, "queued": "plugin_config"})
 
 
 app.router.add_get("/api/plugins", plugins_get)
+app.router.add_post("/api/plugins/{name}/enable", plugins_enable)
+app.router.add_post("/api/plugins/{name}/disable", plugins_disable)
+app.router.add_post("/api/plugins/reload", plugins_reload)
+app.router.add_put("/api/plugins/{name}/config", plugins_config)
 app.router.add_get("/api/status", bot_status)
 app.router.add_get("/api/system", system_stats)
 app.router.add_options(
