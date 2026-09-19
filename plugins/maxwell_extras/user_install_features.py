@@ -441,25 +441,25 @@ def install_user_install_tool_disclosure(bot: Any) -> None:
         return
     from . import audit_ui
 
-    current = ui.UserInstallSession.send
-    if getattr(current, "_maxwell_user_install_disclosure", False):
-        _DISCLOSURE_INSTALLED = True
-        return
+    def factory(original):
+        async def disclosed_send(
+            self: Any,
+            content: str | None = None,
+            file: Any = None,
+            **kwargs: Any,
+        ) -> Any:
+            sent = await original(self, content=content, file=file, **kwargs)
+            inbound = SimpleNamespace(id=getattr(self.interaction, "id", 0))
+            with contextlib.suppress(Exception):
+                await audit_ui._attach_trace(bot, sent, inbound)
+            return sent
 
-    async def disclosed_send(
-        self: Any,
-        content: str | None = None,
-        file: Any = None,
-        **kwargs: Any,
-    ) -> Any:
-        sent = await current(self, content=content, file=file, **kwargs)
-        inbound = SimpleNamespace(id=getattr(self.interaction, "id", 0))
-        with contextlib.suppress(Exception):
-            await audit_ui._attach_trace(bot, sent, inbound)
-        return sent
+        disclosed_send._maxwell_user_install_disclosure = True  # type: ignore[attr-defined]
+        return disclosed_send
 
-    disclosed_send._maxwell_user_install_disclosure = True  # type: ignore[attr-defined]
-    ui.UserInstallSession.send = disclosed_send
+    # wrap_session_send rebuilds UserInstallSession.send from _send_impl.
+    # Patching .send directly is wiped when embed/progress wrappers install.
+    ui.wrap_session_send(factory, name="tool_disclosure", priority=80)
     _DISCLOSURE_INSTALLED = True
 
 

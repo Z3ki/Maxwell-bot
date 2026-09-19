@@ -86,6 +86,7 @@ def teardown(bot):
 
     ui.unwrap_session_send("maxwell_embed")
     ui.unwrap_session_send("interaction_progress")
+    ui.unwrap_session_send("tool_disclosure")
     ui.unregister_interaction_handler("owner_control")
     ui.unregister_interaction_handler("interaction_progress")
     del bot

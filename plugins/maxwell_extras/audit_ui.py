@@ -28,7 +28,29 @@ _MAX_CALLS_PER_TURN = 40
 _MAX_RESULT_PREVIEW = 700
 _WEB_SOURCE: ContextVar[str] = ContextVar("maxwell_web_source", default="direct")
 _MESSAGE_BOTS: dict[str, Any] = {}
+_TOOL_STARTED: dict[tuple[str, str], float] = {}
 _PROGRESS_PATCHED = False
+# The reply itself is not a hidden tool. Recording send_message (and the
+# other delivery tools) made every hi show "Tools · 1" and dumped the
+# execution embed into personal-app chats.
+_DELIVERY_TOOLS = {
+    "send_message",
+    "send_file",
+    "send_rich_message",
+    "send_media",
+    "send_meme",
+    "tts",
+    "create_poll",
+    "no_response",
+}
+_VISIBLE_RESULT_MARKERS = (
+    "__MESSAGE_SENT__",
+    "__FILE_SENT__",
+    "__MEDIA_SENT__",
+    "__MEME_SENT__",
+    "__TTS_SENT__",
+    "__POLL_SENT__",
+)
 
 
 def _mid(message: Any) -> str:
@@ -52,6 +74,16 @@ def _safe_params(params: Any) -> Any:
         return sanitize_tool_args(params if isinstance(params, dict) else {"value": params})
     except Exception:
         return {"value": "[unavailable]"}
+
+
+def _is_delivery_tool(name: str, *, tool: Any = None, result: Any = "") -> bool:
+    """True when the tool *is* the user-visible Discord reply."""
+    if str(name or "") in _DELIVERY_TOOLS:
+        return True
+    if tool is not None and bool(getattr(tool, "produces_visible_output", False)):
+        return True
+    text = str(result or "")
+    return any(marker in text for marker in _VISIBLE_RESULT_MARKERS)
 
 
 class ToolAuditStore:
@@ -179,7 +211,9 @@ class ToolTraceView(discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-async def _record_call(bot: Any, message: Any, *, name: str, params: Any, result: Any = "", error: bool = False, started: float, source: str = "model") -> None:
+async def _record_call(bot: Any, message: Any, *, name: str, params: Any, result: Any = "", error: bool = False, started: float, source: str = "model", tool: Any = None) -> None:
+    if _is_delivery_tool(name, tool=tool, result=result):
+        return
     store = getattr(bot, "_maxwell_tool_audit_store", None)
     if store is None:
         return
@@ -257,18 +291,30 @@ def install_tool_audit(bot: Any, ctx: Any) -> ToolAuditStore:
     if ctx is not None and hasattr(ctx, "register_hook") and not getattr(
         bot, "_maxwell_tool_audit_execute_wrapped", False
     ):
+        async def before_tool(payload) -> None:
+            data = getattr(payload, "data", payload) or {}
+            inbound = _mid(data.get("message"))
+            name = str(data.get("name") or "")
+            if inbound and name:
+                _TOOL_STARTED[(inbound, name)] = time.monotonic()
+
         async def after_tool(payload) -> None:
             data = getattr(payload, "data", payload) or {}
+            inbound = _mid(data.get("message"))
+            name = str(data.get("name") or "")
+            started = _TOOL_STARTED.pop((inbound, name), time.monotonic())
             await _record_call(
                 data.get("bot") or bot,
                 data.get("message"),
-                name=str(data.get("name") or ""),
+                name=name,
                 params=dict(data.get("params") or {}),
                 result=str(data.get("result") or ""),
                 error=str(data.get("result") or "").startswith(("Error:", "Error ")),
-                started=time.monotonic(),
+                started=started,
+                tool=data.get("tool"),
             )
 
+        ctx.register_hook("before_tool", before_tool, priority=50)
         ctx.register_hook("after_tool", after_tool, priority=50)
         bot._maxwell_tool_audit_execute_wrapped = True
     elif not getattr(bot, "_maxwell_tool_audit_execute_wrapped", False):

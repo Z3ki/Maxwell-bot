@@ -148,3 +148,23 @@ def test_modern_session_send_preserves_embed_view_and_multiple_files():
     assert payload["embed"] == "embed"
     assert payload["view"] == "view"
     assert payload["silent"] is True
+
+
+def test_tool_disclosure_survives_later_session_send_wrappers():
+    import user_install as ui
+
+    prior = list(ui._SEND_WRAPPERS)
+    prior_flag = mod._DISCLOSURE_INSTALLED
+    try:
+        ui._SEND_WRAPPERS[:] = []
+        ui._rebuild_session_send()
+        mod._DISCLOSURE_INSTALLED = False
+        mod.install_user_install_tool_disclosure(SimpleNamespace())
+        ui.wrap_session_send(lambda original: original, name="later", priority=10)
+        names = [name for _prio, name, _factory in ui._SEND_WRAPPERS]
+        assert "tool_disclosure" in names
+        assert "later" in names
+    finally:
+        ui._SEND_WRAPPERS[:] = prior
+        ui._rebuild_session_send()
+        mod._DISCLOSURE_INSTALLED = prior_flag
