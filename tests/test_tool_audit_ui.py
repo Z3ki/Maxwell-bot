@@ -116,7 +116,7 @@ def test_audit_hook_path_skips_delivery_and_times_hidden_tools(tmp_path):
 
     bot._send_with_slowmode = send
     install_tool_audit(bot, _HookCtx(tmp_path))
-    registered = {name: cb for name, cb in hooks}
+    registered = dict(hooks)
     assert "before_tool" in registered
     assert "after_tool" in registered
     message = SimpleNamespace(id=103, channel=SimpleNamespace(id=5))

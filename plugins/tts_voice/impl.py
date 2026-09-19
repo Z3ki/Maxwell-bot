@@ -5,6 +5,8 @@ Moved out of the historical bot_tools.py monolith. Shared helpers live in
 """
 from __future__ import annotations
 
+from typing import ClassVar
+
 from tooling import helpers as _helpers
 from tools import Tool
 

@@ -308,7 +308,7 @@ def class_ranges(tree: ast.AST) -> dict[str, tuple[int, int]]:
     out: dict[str, tuple[int, int]] = {}
     for node in tree.body:
         if isinstance(node, ast.ClassDef):
-            end = int(getattr(node, "end_lineno") or node.lineno)
+            end = int(node.end_lineno or node.lineno)
             out[node.name] = (node.lineno, end)
     return out
 
