@@ -9,6 +9,7 @@ import inspect
 import json
 import logging
 import os
+import shutil
 import sys
 import time
 from importlib import import_module, reload
@@ -84,6 +85,11 @@ class PluginManager:
             Path(state_file) if state_file else (self.data_dir / "plugins.json")
         )
         self.extra_plugin_dirs = [Path(p) for p in (extra_plugin_dirs or [])]
+        if plugins_dir is None:
+            installed = self.data_dir / "installed_plugins"
+            installed.mkdir(parents=True, exist_ok=True)
+            if installed not in self.extra_plugin_dirs:
+                self.extra_plugin_dirs.append(installed)
 
         self.plugins_dir.mkdir(parents=True, exist_ok=True)
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -102,6 +108,7 @@ class PluginManager:
         self._maxwell_plugin_views: Dict[str, set[Any]] = {}
         self._maxwell_dynamic_items: Dict[str, set[Any]] = {}
         self._pending_async_setup: list[Any] = []
+        self._tool_wraps: Dict[str, list[tuple[Any, Any]]] = {}
 
         self.hooks = HookBus()
         self.prompts = PromptManager()
@@ -261,6 +268,26 @@ class PluginManager:
     ) -> None:
         bucket = self._extensions.setdefault(plugin, {})
         bucket[f"{kind}:{key}"] = {"kind": kind, "key": key, "payload": payload}
+
+    def wrap_tool(self, plugin: str, name: str, wrapper: Callable[..., Any]) -> Any:
+        """Replace tool.execute; restored on plugin teardown."""
+        tool = self.get_tool(name) or (getattr(self.bot, "tools", None) or {}).get(name)
+        if tool is None:
+            raise KeyError(f"tool {name!r} is not registered")
+        original = getattr(tool, "execute", None)
+        if not callable(original):
+            raise TypeError(f"tool {name!r} has no execute()")
+        replacement = wrapper(original)
+        if not callable(replacement):
+            raise TypeError("wrap_tool factory must return a callable execute")
+        tool.execute = replacement
+        self._tool_wraps.setdefault(str(plugin), []).append((tool, original))
+        return tool
+
+    def _unwrap_tools(self, plugin: str) -> None:
+        for tool, original in self._tool_wraps.pop(str(plugin), []):
+            with contextlib.suppress(Exception):
+                tool.execute = original
 
     def register_context_tool(
         self, plugin_name: str, tool: Any, *, name: str | None = None
@@ -596,6 +623,7 @@ class PluginManager:
         self._extensions.clear()
 
     def _clear_plugin_registrations(self, plugin_name: str) -> None:
+        self._unwrap_tools(plugin_name)
         self._drop_registrations(plugin_name)
         self.hooks.unregister_plugin(plugin_name)
         self.prompts.unregister_plugin(plugin_name)
@@ -627,6 +655,8 @@ class PluginManager:
         return iter_plugin_dirs(extra)
 
     def load_plugins(self) -> Dict[str, Any]:
+        for plugin_name in list(self._tool_wraps):
+            self._unwrap_tools(plugin_name)
         self.loaded_plugins.clear()
         self.all_plugin_tools.clear()
         self.load_errors.clear()
@@ -1237,3 +1267,111 @@ class PluginManager:
                 }
             )
         return result
+
+    def installed_plugins_dir(self) -> Path:
+        path = self.data_dir / "installed_plugins"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def install_from_path(self, source: str | Path, *, replace: bool = False) -> str:
+        """Copy a plugin directory into installed_plugins after validating it.
+
+        Does not execute the new code until reload. Owner-only callers should
+        reload afterwards. Bundled plugins cannot be overwritten this way.
+        """
+        src = Path(source).expanduser()
+        try:
+            src = src.resolve()
+        except OSError as exc:
+            return f"Error: cannot resolve {source}: {exc}"
+        if src.is_file() and src.suffix.lower() == ".zip":
+            extract = self.data_dir / "plugin_incoming" / src.stem
+            if extract.exists():
+                shutil.rmtree(extract)
+            extract.mkdir(parents=True, exist_ok=True)
+            shutil.unpack_archive(str(src), str(extract))
+            nested = [p for p in extract.iterdir() if p.is_dir() and (p / "plugin.json").is_file()]
+            src = nested[0] if len(nested) == 1 else extract
+        if not src.is_dir() or not (src / "plugin.json").is_file():
+            return "Error: plugin source must be a directory (or zip) containing plugin.json"
+        try:
+            manifest = load_manifest_file(src / "plugin.json", directory_name=src.name)
+        except ManifestError as exc:
+            return f"Error: invalid plugin.json: {exc}"
+        if manifest.bundled or manifest.protected:
+            return f"Error: cannot overwrite bundled/protected plugin {manifest.id!r}"
+        dest = self.installed_plugins_dir() / manifest.id
+        if dest.exists() and not replace:
+            return (
+                f"Error: plugin {manifest.id!r} is already installed. "
+                "Pass replace=true to update it."
+            )
+        staging = dest.with_name(dest.name + ".incoming")
+        if staging.exists():
+            shutil.rmtree(staging)
+        shutil.copytree(src, staging)
+        backup = None
+        if dest.exists():
+            backup = dest.with_name(dest.name + ".bak")
+            if backup.exists():
+                shutil.rmtree(backup)
+            dest.replace(backup)
+        try:
+            staging.replace(dest)
+        except Exception as exc:
+            if backup is not None and backup.exists() and not dest.exists():
+                backup.replace(dest)
+            return f"Error installing plugin: {exc}"
+        if backup is not None and backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
+        if src.parent.name == "plugin_incoming":
+            shutil.rmtree(src.parent, ignore_errors=True)
+        return (
+            f"Installed plugin '{manifest.id}' v{manifest.version} to {dest}. "
+            "Reload plugins to activate it."
+        )
+
+    def uninstall_plugin(self, plugin_name: str) -> str:
+        """Remove an independently installed plugin's code. Data is kept."""
+        dest = self.installed_plugins_dir() / plugin_name
+        if (
+            plugin_name not in self.loaded_plugins
+            and plugin_name not in self.load_errors
+            and not dest.exists()
+        ):
+            return f"Plugin '{plugin_name}' is not installed."
+        if self.is_protected(plugin_name):
+            return f"Plugin '{plugin_name}' is protected and cannot be uninstalled."
+        data = self.loaded_plugins.get(plugin_name) or {}
+        manifest = data.get("typed_manifest")
+        if manifest is not None and manifest.bundled:
+            return (
+                f"Plugin '{plugin_name}' is bundled. Disable it instead of uninstalling."
+            )
+        path = Path(str(data.get("path") or dest))
+        installed_root = self.installed_plugins_dir().resolve()
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
+        if installed_root not in resolved.parents and resolved != installed_root / plugin_name:
+            return (
+                f"Plugin '{plugin_name}' is not independently installed "
+                f"(code lives at {path})."
+            )
+        if plugin_name in self.loaded_plugins:
+            self.disable_plugin(plugin_name, is_global=True)
+        trash = self.data_dir / "plugin_trash" / f"{plugin_name}-{int(time.time())}"
+        trash.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.move(str(resolved), str(trash))
+        except OSError as exc:
+            return f"Error moving plugin code aside: {exc}"
+        self._clear_plugin_registrations(plugin_name)
+        self.loaded_plugins.pop(plugin_name, None)
+        self.sync_bot_tools()
+        return (
+            f"Uninstalled plugin '{plugin_name}'. Code moved to {trash}. "
+            f"Stored data in {self.data_dir / 'plugins' / plugin_name} was kept."
+        )
+

@@ -16,21 +16,23 @@ plugin host. Remaining work for a later session:
 - Plugin runtime (`spawn`/`after`/timeouts/health) is core, not extras
 - Dashboard Plugins tab + owner API enable/disable/reload/config
 - Sample plugin under `examples/sample_plugin/`
+- Autonomy routing, visible-output suppression, modern user-install send,
+  `/owner` and `/maxwell` embed wrapping use host APIs instead of wrapping
+  MaxwellBot methods
+- Chat providers (primary / autonomy / aux) are constructed through
+  `maxwell_core.providers.factory`
+- Memory is published on the service container as `memory`
+- Owner plugin install/uninstall from a local directory or zip, with
+  rollback of a failed replace and preserved plugin data directories
 
-## Remaining
+## Remaining (intentionally later)
 
-- Several `maxwell_extras` behaviours still wrap host methods
-  (interaction progress, embed output, owner control, visible output guard,
-  rich interactions, image-generator capture, autonomy routing). Convert
-  those to the new hooks.
-- `providers.py` is still the live client; `maxwell_core.providers.factory`
-  wraps it. Autonomy/aux/vision slots should go through the factory only.
-- `rag_memory.py` should be consumed only via `MemoryService`.
 - Split `plugins/*/impl.py` further (helpers still share one large module).
-- Third-party install/update/uninstall from a URL, with owner approval and
-  rollback, is not implemented (workbench covers human-approved local code).
-- Hot-reload of arbitrary binary dependencies still requires a restart;
-  manifests should set `requires_restart` when that is true.
+- Remote URL plugin install still requires a local path/zip the owner already
+  trusts. Workbench covers generated local code. Manifests should set
+  `requires_restart` when binary deps change.
+- `rag_memory.py` remains the SQLite implementation; plugins should take it
+  from `ctx.service("memory")` rather than constructing their own.
 
 Do not re-audit the old `bot.py` `_setup_tools` list — it is gone. Start from
 `plugins/*/plugin.json` and `maxwell_core`.

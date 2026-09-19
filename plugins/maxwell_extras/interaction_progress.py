@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from types import MethodType
 from typing import Any
 
 from user_install import UserInstallSession, is_user_install_command, is_user_install_message
@@ -148,14 +147,11 @@ async def _slow_timer(state: _InteractionProgressState) -> None:
 
 def _patch_session() -> None:
     global _SESSION_PATCHED
-    if _SESSION_PATCHED or getattr(
-        UserInstallSession.send, "_maxwell_interaction_progress_wrapped", False
-    ):
-        _SESSION_PATCHED = True
+    if _SESSION_PATCHED:
         return
 
     original_init = UserInstallSession.__init__
-    original_send = UserInstallSession.send
+    next_send = {"fn": UserInstallSession._send_impl}
 
     def session_init(self: Any, interaction: Any) -> None:
         original_init(self, interaction)
@@ -174,7 +170,7 @@ def _patch_session() -> None:
     ) -> Any:
         state = getattr(self, "_maxwell_progress_state", None)
         if state is None:
-            return await original_send(self, content=content, file=file, **kwargs)
+            return await next_send["fn"](self, content=content, file=file, **kwargs)
 
         await self.ensure_deferred()
         elapsed = time.monotonic() - state.started
@@ -253,12 +249,19 @@ def _patch_session() -> None:
         ):
             await _mark_working(state)
 
-        return await original_send(self, content=content, file=file, **kwargs)
+        return await next_send["fn"](self, content=content, file=file, **kwargs)
 
     session_init._maxwell_interaction_progress_wrapped = True  # type: ignore[attr-defined]
     session_send._maxwell_interaction_progress_wrapped = True  # type: ignore[attr-defined]
     UserInstallSession.__init__ = session_init
-    UserInstallSession.send = session_send
+
+    def progress_factory(original_send):
+        next_send["fn"] = original_send
+        return session_send
+
+    from user_install import wrap_session_send
+
+    wrap_session_send(progress_factory, name="interaction_progress", priority=50)
     _SESSION_PATCHED = True
 
 
@@ -308,7 +311,7 @@ def _patch_tool_progress() -> None:
     _TOOL_PROGRESS_PATCHED = True
 
 
-def install_interaction_progress(bot: Any) -> None:
+def install_interaction_progress(bot: Any, ctx: Any = None) -> None:
     """Install the 10-second/tool escalation behavior once for this bot."""
     if getattr(bot, "_maxwell_interaction_progress_installed", False):
         return
@@ -316,60 +319,29 @@ def install_interaction_progress(bot: Any) -> None:
     _patch_session()
     _patch_tool_progress()
 
-    # bot.py imported handle_user_install_interaction directly, so patch the
-    # global used by on_interaction rather than importing bot.py a second time
-    # (which would happen when bot.py is running as __main__).
-    on_interaction = getattr(bot, "on_interaction", None)
-    func = getattr(on_interaction, "__func__", on_interaction)
-    namespace = getattr(func, "__globals__", None)
-    if isinstance(namespace, dict):
-        original_handler = namespace.get("handle_user_install_interaction")
-        if callable(original_handler) and not getattr(
-            original_handler, "_maxwell_interaction_progress_wrapped", False
-        ):
+    async def pre_handler(_bot_obj: Any, interaction: Any) -> bool:
+        if is_user_install_command(interaction):
+            _begin(interaction)
+        return False
 
-            async def handler_wrapper(bot_obj: Any, interaction: Any) -> bool:
-                if is_user_install_command(interaction):
-                    _begin(interaction)
-                return await original_handler(bot_obj, interaction)
+    from user_install import register_interaction_handler
 
-            handler_wrapper._maxwell_interaction_progress_wrapped = True  # type: ignore[attr-defined]
-            namespace["handle_user_install_interaction"] = handler_wrapper
+    register_interaction_handler(
+        pre_handler, priority=20, name="interaction_progress"
+    )
 
-    original_execute = getattr(bot, "_execute_tool_by_name", None)
-    if callable(original_execute) and not getattr(
-        original_execute, "_maxwell_interaction_progress_wrapped", False
-    ):
+    async def before_tool(payload) -> None:
+        data = getattr(payload, "data", payload) or {}
+        message = data.get("message")
+        if message is not None and is_user_install_message(message):
+            state = _state_for_message(message)
+            if state is not None:
+                await _mark_working(state)
 
-        async def execute_wrapper(self_obj: Any, *args: Any, **kwargs: Any) -> Any:
-            message = args[0] if args else kwargs.get("message")
-            if message is not None and is_user_install_message(message):
-                state = _state_for_message(message)
-                if state is not None:
-                    await _mark_working(state)
-            return await original_execute(*args, **kwargs)
-
-        execute_wrapper._maxwell_interaction_progress_wrapped = True  # type: ignore[attr-defined]
-        bot._execute_tool_by_name = MethodType(execute_wrapper, bot)
-
-    # Direct web_search.execute() bypasses _execute_tool_by_name.
-    web_tool = (getattr(bot, "tools", None) or {}).get("web_search")
-    web_execute = getattr(web_tool, "execute", None) if web_tool is not None else None
-    if callable(web_execute) and not getattr(
-        web_execute, "_maxwell_interaction_progress_wrapped", False
-    ):
-
-        async def web_wrapper(
-            self_tool: Any, message: Any, *args: Any, **kwargs: Any
-        ) -> Any:
-            if is_user_install_message(message):
-                state = _state_for_message(message)
-                if state is not None:
-                    await _mark_working(state)
-            return await web_execute(message, *args, **kwargs)
-
-        web_wrapper._maxwell_interaction_progress_wrapped = True  # type: ignore[attr-defined]
-        web_tool.execute = MethodType(web_wrapper, web_tool)
+    if ctx is not None and hasattr(ctx, "register_hook"):
+        ctx.register_hook("before_tool", before_tool, priority=40)
+    elif hasattr(bot, "hooks") and bot.hooks is not None:
+        bot.hooks.register("maxwell_extras", "before_tool", before_tool, priority=40)
 
     bot._maxwell_interaction_progress_installed = True
 

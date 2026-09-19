@@ -2565,8 +2565,31 @@ def _only_promise_results(tool_results: list[str]) -> bool:
     return saw_promise
 
 
+_VISIBLE_RESULT_MARKERS = (
+    "__MESSAGE_SENT__",
+    "__FILE_SENT__",
+    "__MEDIA_SENT__",
+    "__MEME_SENT__",
+    "__TTS_SENT__",
+    "__POLL_SENT__",
+)
+
+
 def _turn_sent_message(tool_results: list[str] | None) -> bool:
-    return any("__MESSAGE_SENT__" in (tr or "") for tr in (tool_results or []))
+    """True when a tool already delivered the user-visible result this turn."""
+    for tr in tool_results or []:
+        text = str(tr or "")
+        if any(marker in text for marker in _VISIBLE_RESULT_MARKERS):
+            return True
+        lowered = text.lower()
+        if "tool send_rich_message:" in lowered and not lowered.startswith(
+            ("tool send_rich_message: error",)
+        ):
+            if "error" not in lowered.split(":", 1)[-1][:12]:
+                return True
+        if "tool create_poll:" in lowered and "error" not in lowered.split(":", 1)[-1][:12]:
+            return True
+    return False
 
 
 def _is_short_plaintext_followup(response: str) -> bool:
@@ -3252,8 +3275,30 @@ class MaxwellBot(commands.Bot):
         """Drop completed task handles. Called on a soft cadence; cheap."""
         self._tasks = [t for t in self._tasks if not t.done()]
 
+    def _make_chat_provider(self, *, name: str = "primary", **kwargs):
+        """Build a chat client without the turn loop naming a vendor class.
+
+        Tests patch ``bot.OllamaProvider``. Plugins should use
+        ``maxwell_core.providers.factory`` or ``ctx.register_provider``.
+        """
+        from maxwell_core.providers.base import ProviderCapabilities
+
+        client = OllamaProvider(**kwargs)
+        client.name = name
+        client.capabilities = ProviderCapabilities(
+            text=True,
+            streaming=True,
+            native_tools=True,
+            vision=True,
+            audio=True,
+            reasoning=True,
+            model_discovery=True,
+        )
+        return client
+
     def _setup_ai(self):
-        self.ai_provider = OllamaProvider(
+        self.ai_provider = self._make_chat_provider(
+            name="primary",
             base_url=self.config.OLLAMA_BASE_URL,
             model=self.config.OLLAMA_MODEL,
             max_tokens=self.config.OLLAMA_MAX_TOKENS,
@@ -3419,7 +3464,8 @@ class MaxwellBot(commands.Bot):
                         logger.warning(
                             f"Failed to schedule old autonomy provider close: {e}"
                         )
-                provider = OllamaProvider(
+                provider = self._make_chat_provider(
+                    name="autonomy",
                     base_url=base_url,
                     model=model or self.config.OLLAMA_MODEL,
                     max_tokens=autonomy_max_tokens,
@@ -3539,7 +3585,8 @@ class MaxwellBot(commands.Bot):
                         logger.warning(
                             f"Failed to schedule old aux provider close: {e}"
                         )
-                provider = OllamaProvider(
+                provider = self._make_chat_provider(
+                    name="aux",
                     base_url=base_url,
                     model=model or self.config.OLLAMA_MODEL,
                     max_tokens=aux_max_tokens,
@@ -3694,6 +3741,7 @@ class MaxwellBot(commands.Bot):
         self.prompts = getattr(self.plugin_manager, "prompts", None)
         self.tool_registry = getattr(self.plugin_manager, "tool_registry", None)
         self._install_core_prompt_components()
+        self._publish_core_services()
         # Reasoning now rides inside every tool call. Keep a backfill instance
         # off the model-facing map so a turn with no reasoning still records
         # a stub for the dashboard.
@@ -3740,6 +3788,17 @@ class MaxwellBot(commands.Bot):
             # Reload re-creates the PromptManager; a second install on the
             # same manager is a programming error we ignore.
             pass
+
+    def _publish_core_services(self) -> None:
+        pm = getattr(self, "plugin_manager", None)
+        if pm is None:
+            return
+        memory = getattr(self, "memory", None)
+        if memory is not None:
+            pm.services.register("memory", memory, owner="core")
+        provider = getattr(self, "ai_provider", None)
+        if provider is not None:
+            pm.services.register("provider:primary", provider, owner="core")
 
     def _build_activities(self):
         activities = []
@@ -8287,10 +8346,40 @@ class MaxwellBot(commands.Bot):
                     installer = getattr(self, "_install_core_prompt_components", None)
                     if callable(installer):
                         installer()
+                    publisher = getattr(self, "_publish_core_services", None)
+                    if callable(publisher):
+                        publisher()
+                    await message.channel.send(res)
+                elif sub == "install":
+                    if not is_admin:
+                        await message.channel.send(
+                            "Error: Only bot admins can install plugins."
+                        )
+                        return
+                    if len(parts) < 2:
+                        await message.channel.send(
+                            "Usage: `,plugin install <directory-or-zip>`"
+                        )
+                        return
+                    source = " ".join(parts[1:]).strip().strip("`")
+                    res = pm.install_from_path(source)
+                    await message.channel.send(res)
+                elif sub in ("uninstall", "remove"):
+                    if not is_admin:
+                        await message.channel.send(
+                            "Error: Only bot admins can uninstall plugins."
+                        )
+                        return
+                    if len(parts) < 2:
+                        await message.channel.send(
+                            "Usage: `,plugin uninstall <name>`"
+                        )
+                        return
+                    res = pm.uninstall_plugin(parts[1].lower())
                     await message.channel.send(res)
                 else:
                     await message.channel.send(
-                        "Usage: `,plugin <list|enable|disable|reload> [plugin_name] [--global]`"
+                        "Usage: `,plugin <list|enable|disable|reload|install|uninstall>`"
                     )
             elif cmd == "confirm":
                 # Removed. Tainted destructive tools fail closed until a
@@ -11121,6 +11210,9 @@ class MaxwellBot(commands.Bot):
                                 installer = getattr(self, "_install_core_prompt_components", None)
                                 if callable(installer):
                                     installer()
+                                publisher = getattr(self, "_publish_core_services", None)
+                                if callable(publisher):
+                                    publisher()
                         elif typ in ("plugin_enable", "plugin_disable"):
                             pm = getattr(self, "plugin_manager", None)
                             if pm is None:
@@ -11145,6 +11237,23 @@ class MaxwellBot(commands.Bot):
                                 cmd["result"] = pm.set_plugin_config(
                                     str(cmd.get("plugin") or ""),
                                     cmd.get("config") or {},
+                                )
+                        elif typ == "plugin_install":
+                            pm = getattr(self, "plugin_manager", None)
+                            if pm is None:
+                                cmd["result"] = "plugin manager missing"
+                            else:
+                                cmd["result"] = pm.install_from_path(
+                                    str(cmd.get("path") or ""),
+                                    replace=bool(cmd.get("replace")),
+                                )
+                        elif typ == "plugin_uninstall":
+                            pm = getattr(self, "plugin_manager", None)
+                            if pm is None:
+                                cmd["result"] = "plugin manager missing"
+                            else:
+                                cmd["result"] = pm.uninstall_plugin(
+                                    str(cmd.get("plugin") or "")
                                 )
                         elif typ == "rem_run":
                             ok, reason, run = await self._run_rem_once_guarded()
@@ -15572,7 +15681,7 @@ class MaxwellBot(commands.Bot):
         self._last_native_followup_messages = []
         self._last_native_tool_media = []
         if native_tool_calls:
-            return await MaxwellBot._process_native_tool_calls(
+            result = await MaxwellBot._process_native_tool_calls(
                 self,
                 message,
                 response,
@@ -15580,6 +15689,16 @@ class MaxwellBot(commands.Bot):
                 include_images=include_images,
                 existing_progress=existing_progress,
             )
+            # Co-emitted assistant prose next to native tool_calls is not a
+            # second user-facing answer. The tool (or its follow-up) owns
+            # the visible result.
+            if isinstance(result, tuple) and result:
+                tool_results = result[1] if len(result) > 1 else []
+                if tool_results:
+                    parts = list(result)
+                    parts[0] = ""
+                    result = tuple(parts)
+            return result
         cleaned = strip_tool_payload_leaks(response or "")
         return (cleaned, [], []) if include_images else (cleaned, [])
 

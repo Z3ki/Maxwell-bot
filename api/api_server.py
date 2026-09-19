@@ -1739,6 +1739,8 @@ async def commands_post(request):
         "plugin_enable",
         "plugin_disable",
         "plugin_config",
+        "plugin_install",
+        "plugin_uninstall",
     }:
         pass
     elif cmd_type == "inbox_act":
@@ -2881,9 +2883,38 @@ async def plugins_config(request):
     return _json_response({"ok": True, "id": cmd_id, "queued": "plugin_config"})
 
 
+async def plugins_install(request):
+    try:
+        body = await request.json()
+    except Exception:
+        return _json_response({"error": "JSON object required"}, 400)
+    path = str((body or {}).get("path") or "").strip()
+    if not path:
+        return _json_response({"error": "path is required"}, 400)
+    cmd_id, err = await _queue_command(
+        "plugin_install",
+        extra={"path": path, "replace": bool((body or {}).get("replace"))},
+    )
+    if err:
+        return _json_response({"error": err}, 409)
+    return _json_response({"ok": True, "id": cmd_id, "queued": "plugin_install"})
+
+
+async def plugins_uninstall(request):
+    name = str(request.match_info.get("name") or "").strip()
+    if not name:
+        return _json_response({"error": "plugin name required"}, 400)
+    cmd_id, err = await _queue_command("plugin_uninstall", extra={"plugin": name})
+    if err:
+        return _json_response({"error": err}, 409)
+    return _json_response({"ok": True, "id": cmd_id, "queued": "plugin_uninstall"})
+
+
 app.router.add_get("/api/plugins", plugins_get)
+app.router.add_post("/api/plugins/install", plugins_install)
 app.router.add_post("/api/plugins/{name}/enable", plugins_enable)
 app.router.add_post("/api/plugins/{name}/disable", plugins_disable)
+app.router.add_post("/api/plugins/{name}/uninstall", plugins_uninstall)
 app.router.add_post("/api/plugins/reload", plugins_reload)
 app.router.add_put("/api/plugins/{name}/config", plugins_config)
 app.router.add_get("/api/status", bot_status)

@@ -429,10 +429,7 @@ def install_user_install_features(bot: Any) -> None:
 
     ui.build_user_install_turn = build_turn
     ui.snapshot_channel_history = _snapshot_channel_history
-
-    _ORIGINAL_SESSION_SEND = ui.UserInstallSession.send
-    _modern_session_send._maxwell_user_install_features = True  # type: ignore[attr-defined]
-    ui.UserInstallSession.send = _modern_session_send
+    # Payload-preserving send is the host UserInstallSession._send_impl.
     _FEATURES_INSTALLED = True
 
 

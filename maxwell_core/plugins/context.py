@@ -142,6 +142,13 @@ class PluginContext:
     def register_tool(self, tool: Any, *, name: str | None = None) -> None:
         self._manager.register_context_tool(self.name, tool, name=name)
 
+    def wrap_tool(self, name: str, wrapper: Callable[..., Any]) -> Any:
+        """Replace ``tool.execute`` and restore it on plugin teardown.
+
+        ``wrapper`` is ``(original_execute) -> new_execute``.
+        """
+        return self._manager.wrap_tool(self.name, name, wrapper)
+
     def register_hook(
         self,
         hook: str,

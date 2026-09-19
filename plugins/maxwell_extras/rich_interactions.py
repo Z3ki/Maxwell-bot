@@ -24,7 +24,6 @@ from typing import Any
 
 import discord
 
-import plugin_manager as plugin_manager_module
 from plugin_manager import PluginContext
 from user_install import UserInstallMessageAdapter
 
@@ -260,13 +259,7 @@ def _patch_rich_message_tool(tool: Any, store: RichInteractionStore) -> None:
 
 
 def _upgrade_plugin_ui_api(bot: Any) -> None:
-    # Make on_interaction an officially supported plugin event. PluginContext's
-    # validator resolves this module global at call time, so existing contexts
-    # pick up the capability immediately.
-    allowed = set(getattr(plugin_manager_module, "ALLOWED_EVENTS", ()) or ())
-    allowed.add("on_interaction")
-    plugin_manager_module.ALLOWED_EVENTS = frozenset(allowed)
-
+    """Ensure view tracking dicts exist. add_view / on_interaction are core."""
     manager = getattr(bot, "plugin_manager", None)
     if manager is None:
         return
@@ -274,65 +267,6 @@ def _upgrade_plugin_ui_api(bot: Any) -> None:
         manager._maxwell_plugin_views = {}
     if not isinstance(getattr(manager, "_maxwell_dynamic_items", None), dict):
         manager._maxwell_dynamic_items = {}
-
-    if not hasattr(PluginContext, "add_view"):
-        def add_view(self: PluginContext, view: Any, *, message_id: int | None = None) -> Any:
-            register = getattr(self.bot, "add_view", None)
-            if not callable(register):
-                raise TypeError("bot client does not support persistent views")
-            register(view, message_id=message_id)
-            self._manager._maxwell_plugin_views.setdefault(self.name, set()).add(view)
-            return view
-        PluginContext.add_view = add_view  # type: ignore[attr-defined]
-
-    if not hasattr(PluginContext, "add_dynamic_items"):
-        def add_dynamic_items(self: PluginContext, *items: Any) -> None:
-            register = getattr(self.bot, "add_dynamic_items", None)
-            if not callable(register):
-                raise TypeError("installed discord.py does not support dynamic items")
-            register(*items)
-            self._manager._maxwell_dynamic_items.setdefault(self.name, set()).update(items)
-        PluginContext.add_dynamic_items = add_dynamic_items  # type: ignore[attr-defined]
-
-    if getattr(manager, "_maxwell_plugin_ui_cleanup_installed", False):
-        return
-
-    def cleanup() -> None:
-        groups = getattr(manager, "_maxwell_plugin_views", {}) or {}
-        for views in groups.values():
-            for view in list(views):
-                stop = getattr(view, "stop", None)
-                if callable(stop):
-                    try:
-                        stop()
-                    except Exception:
-                        pass
-        groups.clear()
-        dynamic = getattr(manager, "_maxwell_dynamic_items", {}) or {}
-        remove = getattr(bot, "remove_dynamic_items", None)
-        if callable(remove):
-            for items in dynamic.values():
-                if items:
-                    try:
-                        remove(*tuple(items))
-                    except Exception:
-                        pass
-        dynamic.clear()
-
-    original_reload = manager.reload_plugins
-    original_teardown = manager.teardown
-
-    def reload_wrapper(self: Any) -> str:
-        cleanup()
-        return original_reload()
-
-    async def teardown_wrapper(self: Any) -> None:
-        cleanup()
-        await original_teardown()
-
-    manager.reload_plugins = MethodType(reload_wrapper, manager)
-    manager.teardown = MethodType(teardown_wrapper, manager)
-    manager._maxwell_plugin_ui_cleanup_installed = True
 
 
 def _component_data(interaction: Any) -> dict[str, Any]:

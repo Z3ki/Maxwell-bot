@@ -832,33 +832,20 @@ class _MessageProxy:
         return getattr(self._original, name)
 
 
-def patch_image_generators(bot: Any) -> int:
+def patch_image_generators(bot: Any, ctx: Any = None) -> int:
     """Capture generated image sends and feed bytes back through the tool result."""
     patched = 0
     registry = getattr(bot, "tools", None) or {}
-    for name in ("image_generator", "hd_image"):
-        tool = registry.get(name)
-        if tool is None or getattr(tool, "_maxwell_llm_image_capture", False):
-            continue
-        original = getattr(tool, "execute", None)
-        if not callable(original):
-            continue
 
-        async def wrapped_execute(
-            _self,
-            message: Any,
-            *args,
-            __original=original,
-            __name=name,
-            **kwargs,
-        ):
+    def _wrap(original, tool_name: str):
+        async def wrapped_execute(_self, message: Any, *args, **kwargs):
             capture = _CaptureChannel(getattr(message, "channel", None))
             proxy = _MessageProxy(message, capture)
-            result = await __original(proxy, *args, **kwargs)
+            result = await original(proxy, *args, **kwargs)
             if not capture.images:
                 return result
             parts = [
-                str(result or f"{__name} generated image for model inspection.")
+                str(result or f"{tool_name} generated image for model inspection.")
             ]
             for filename, data in capture.images[:4]:
                 payload = base64.b64encode(data).decode("ascii")
@@ -873,7 +860,19 @@ def patch_image_generators(bot: Any) -> int:
                 )
             return "\n".join(parts)
 
-        tool.execute = MethodType(wrapped_execute, tool)
+        return wrapped_execute
+
+    for name in ("image_generator", "hd_image"):
+        tool = registry.get(name)
+        if tool is None or getattr(tool, "_maxwell_llm_image_capture", False):
+            continue
+        original = getattr(tool, "execute", None)
+        if not callable(original):
+            continue
+        if ctx is not None and hasattr(ctx, "wrap_tool"):
+            ctx.wrap_tool(name, lambda orig, _name=name: _wrap(orig, _name))
+        else:
+            tool.execute = MethodType(_wrap(original, name), tool)
         tool._maxwell_llm_image_capture = True
         patched += 1
     return patched

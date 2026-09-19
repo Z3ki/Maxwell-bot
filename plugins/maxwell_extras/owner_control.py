@@ -528,28 +528,10 @@ def install_owner_control(bot: Any) -> None:
     if getattr(bot, "_maxwell_owner_control_installed", False):
         return
 
-    commands = ui.USER_INSTALL_COMMANDS
-    commands[:] = [cmd for cmd in commands if cmd.get("name") != OWNER_COMMAND_NAME]
-    commands.append(dict(OWNER_COMMAND))
-    ui.USER_INSTALL_NAMES = frozenset({*ui.USER_INSTALL_NAMES, OWNER_COMMAND_NAME})
-
-    on_interaction = getattr(bot, "on_interaction", None)
-    func = getattr(on_interaction, "__func__", on_interaction)
-    namespace = getattr(func, "__globals__", None)
-    if isinstance(namespace, dict):
-        original_handler = namespace.get("handle_user_install_interaction")
-        if callable(original_handler) and not getattr(
-            original_handler, "_maxwell_owner_control_wrapped", False
-        ):
-
-            async def handler_wrapper(bot_obj: Any, interaction: Any) -> bool:
-                if await handle_owner_interaction(bot_obj, interaction):
-                    return True
-                return await original_handler(bot_obj, interaction)
-
-            handler_wrapper._maxwell_owner_control_wrapped = True  # type: ignore[attr-defined]
-            namespace["handle_user_install_interaction"] = handler_wrapper
-
+    ui.register_command(OWNER_COMMAND)
+    ui.register_interaction_handler(
+        handle_owner_interaction, priority=10, name="owner_control"
+    )
     bot._maxwell_owner_control_installed = True
 
 

@@ -86,11 +86,17 @@ compatibility parser, the dashboard disable list, autonomy, and audit logs.
 
 ## Managing plugins
 
-- Discord: `,plugin list|enable|disable|reload` (admin for `--global` / reload)
+- Discord: `,plugin list|enable|disable|reload|install|uninstall`
 - Tool: `manage_plugin`
 - Dashboard: Plugins tab
-- API: `GET /api/plugins`, `POST /api/plugins/{name}/enable|disable`,
+- API: `GET /api/plugins`, `POST /api/plugins/install`,
+  `POST /api/plugins/{name}/enable|disable|uninstall`,
   `POST /api/plugins/reload`, `PUT /api/plugins/{name}/config`
+
+Install copies a local directory or zip into `data/installed_plugins/` after
+validating `plugin.json`. Uninstall moves the code aside and keeps
+`data/plugins/<id>/`. Only independently installed plugins can be uninstalled;
+bundled plugins are disabled instead.
 
 Disabling a plugin removes its tools, events, prompts, jobs, and hooks from
 new requests. It does **not** delete `data/plugins/<name>/`.

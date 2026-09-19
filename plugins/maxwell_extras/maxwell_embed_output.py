@@ -63,42 +63,34 @@ def _reply_embed(text: str, bot: Any = None) -> discord.Embed:
 
 
 def install_maxwell_embed_output(bot: Any) -> None:
-    """Render textual /maxwell follow-ups as branded Discord embeds.
+    """Render textual /maxwell follow-ups as branded Discord embeds."""
 
-    This wrapper intentionally re-checks the live transport on every install.
-    Other personal-app features can wrap UserInstallSession.send during plugin
-    reloads; if that happens, this layer must become outermost again so even the
-    interaction-progress fast path receives an embed before it edits Discord's
-    deferred original response.
-    """
+    global _INSTALLED
 
-    global _INSTALLED, _ORIGINAL_SEND
+    def factory(original):
+        async def embedded_send(
+            self: Any,
+            content: str | None = None,
+            file: Any = None,
+            **kwargs: Any,
+        ) -> Any:
+            text = None if content is None else str(content)
+            has_explicit_embed = kwargs.get("embed") is not None or bool(
+                kwargs.get("embeds")
+            )
+            if (
+                text
+                and _is_maxwell_slash(getattr(self, "interaction", None))
+                and not has_explicit_embed
+            ):
+                kwargs["embed"] = _reply_embed(text, bot)
+                content = None
+            return await original(self, content=content, file=file, **kwargs)
 
-    current = ui.UserInstallSession.send
-    if getattr(current, "_maxwell_embed_output", False):
-        _INSTALLED = True
-        return
-    _ORIGINAL_SEND = current
+        embedded_send._maxwell_embed_output = True  # type: ignore[attr-defined]
+        return embedded_send
 
-    async def embedded_send(
-        self: Any,
-        content: str | None = None,
-        file: Any = None,
-        **kwargs: Any,
-    ) -> Any:
-        text = None if content is None else str(content)
-        has_explicit_embed = kwargs.get("embed") is not None or bool(kwargs.get("embeds"))
-        if (
-            text
-            and _is_maxwell_slash(getattr(self, "interaction", None))
-            and not has_explicit_embed
-        ):
-            kwargs["embed"] = _reply_embed(text, bot)
-            content = None
-        return await current(self, content=content, file=file, **kwargs)
-
-    embedded_send._maxwell_embed_output = True  # type: ignore[attr-defined]
-    ui.UserInstallSession.send = embedded_send
+    ui.wrap_session_send(factory, name="maxwell_embed", priority=10)
     _INSTALLED = True
 
 

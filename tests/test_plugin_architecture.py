@@ -198,6 +198,109 @@ def test_every_bundled_manifest_is_valid():
     assert errors == []
 
 
+def test_install_from_path_validates_then_copies(tmp_path):
+    src = tmp_path / "incoming" / "echo"
+    src.mkdir(parents=True)
+    (src / "plugin.json").write_text(
+        json.dumps(
+            {
+                "id": "echo",
+                "version": "1.2.0",
+                "api_version": 1,
+                "enabled_by_default": True,
+                "tools": [{"name": "echo_tool", "returns_result": True}],
+            }
+        )
+    )
+    (src / "__init__.py").write_text(
+        "from tools import Tool\n"
+        "class Echo(Tool):\n"
+        "    tool_name = 'echo_tool'\n"
+        "    returns_result = True\n"
+        "    def get_description(self):\n"
+        "        return 'echo'\n"
+        "    async def execute(self, message, text='', **kwargs):\n"
+        "        return text\n"
+        "def setup(bot, ctx):\n"
+        "    return [Echo(bot)]\n"
+    )
+    bot = SimpleNamespace(tools={})
+    pm = PluginManager(
+        bot,
+        plugins_dir=str(tmp_path / "plugins"),
+        data_dir=str(tmp_path / "data"),
+        state_file=str(tmp_path / "data" / "plugins.json"),
+        extra_plugin_dirs=[str(tmp_path / "data" / "installed_plugins")],
+    )
+    msg = pm.install_from_path(src)
+    assert "Installed plugin 'echo'" in msg
+    dest = tmp_path / "data" / "installed_plugins" / "echo"
+    assert dest.is_dir()
+    assert (dest / "plugin.json").is_file()
+    keep = tmp_path / "data" / "plugins" / "echo"
+    keep.mkdir(parents=True)
+    (keep / "state.json").write_text("{}", encoding="utf-8")
+    gone = pm.uninstall_plugin("echo")
+    assert "Uninstalled" in gone
+    assert not dest.exists()
+    assert (keep / "state.json").exists()
+
+
+def test_wrap_tool_restores_on_teardown(tmp_path):
+    class Echo(Tool):
+        tool_name = "echo_tool"
+        returns_result = True
+
+        def get_description(self):
+            return "echo"
+
+        async def execute(self, message, text="", **kwargs):
+            return f"orig:{text}"
+
+    bot = SimpleNamespace(tools={})
+    pm = PluginManager(
+        bot,
+        plugins_dir=str(tmp_path / "plugins"),
+        data_dir=str(tmp_path / "data"),
+        state_file=str(tmp_path / "data" / "plugins.json"),
+    )
+    tool = Echo(bot)
+    pm.tool_registry.register_tool(tool, name="echo_tool", plugin="demo")
+    bot.tools["echo_tool"] = tool
+
+    def wrapper(original):
+        async def wrapped(message, text="", **kwargs):
+            return f"wrap:{await original(message, text=text, **kwargs)}"
+
+        return wrapped
+
+    pm.wrap_tool("demo", "echo_tool", wrapper)
+
+    async def run():
+        assert await tool.execute(None, text="hi") == "wrap:orig:hi"
+        pm._unwrap_tools("demo")
+        assert await tool.execute(None, text="hi") == "orig:hi"
+
+    import asyncio
+
+    asyncio.run(run())
+
+
+def test_provider_factory_builds_openai_compat():
+    from maxwell_core.providers.factory import openai_compat_provider
+
+    client = openai_compat_provider(
+        name="primary",
+        base_url="http://example.test/v1",
+        model="unit",
+        api_key="",
+        max_tokens=16,
+        temperature=0.1,
+    )
+    assert client.name == "primary"
+    assert client.model == "unit"
+
+
 def test_tool_registry_contracts_are_exclusive():
     registry = ToolRegistry()
 

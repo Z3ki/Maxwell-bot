@@ -572,6 +572,114 @@ AUTONOMY_POST_TOOLS = frozenset(
     }
 )
 
+
+def _digits_id(value: Any) -> str:
+    return re.sub(r"[^0-9]", "", str(value or ""))
+
+
+def autonomy_configured_channels(engine: Any) -> set[str]:
+    out: set[str] = set()
+    bot = getattr(engine, "bot", None)
+    for raw in getattr(bot, "_auto_channels", None) or set():
+        cid = _digits_id(raw)
+        if cid:
+            out.add(cid)
+    return out
+
+
+def autonomy_known_kind(engine: Any, cid: str) -> str:
+    idx = getattr(engine, "_context_index", None)
+    kind_by_id = getattr(idx, "kind_by_id", None)
+    if isinstance(kind_by_id, dict):
+        kind = str(kind_by_id.get(cid) or "")
+        if kind:
+            return kind
+    bot = getattr(engine, "bot", None)
+    channel = None
+    getter = getattr(bot, "get_channel", None)
+    if callable(getter) and cid.isdigit():
+        with contextlib.suppress(Exception):
+            channel = getter(int(cid))
+    if channel is None:
+        return "unknown"
+    if isinstance(channel, discord.DMChannel):
+        return "dm"
+    if isinstance(channel, discord.GroupChannel):
+        return "group"
+    if getattr(channel, "guild", None) is not None:
+        return "guild"
+    return "unknown"
+
+
+def autonomy_route_allowed(engine: Any, raw_cid: Any) -> tuple[bool, str, str]:
+    """Fail-closed guild routing for unattended speech/tools."""
+    cid = _digits_id(raw_cid)
+    if not cid:
+        return False, "", "missing target_channel_id; autonomy will not guess a room"
+    channel_allowed = getattr(engine, "_channel_allowed", None)
+    if callable(channel_allowed):
+        try:
+            if not channel_allowed(cid):
+                return False, cid, "channel not allowed for autonomy"
+        except Exception:
+            return False, cid, "could not verify channel policy safely"
+    kind = autonomy_known_kind(engine, cid)
+    if kind == "dm":
+        return False, cid, "DM channels must use send_dm instead of post_channel"
+    if kind == "group":
+        idx = getattr(engine, "_context_index", None)
+        handle_by_id = getattr(idx, "handle_by_id", None)
+        if isinstance(handle_by_id, dict) and cid in handle_by_id:
+            return True, cid, ""
+        return False, cid, "group DM was not part of this tick's addressable context"
+    configured = autonomy_configured_channels(engine)
+    if cid not in configured:
+        return (
+            False,
+            cid,
+            "guild channel is context-only; autonomous speech is limited to configured auto channels",
+        )
+    return True, cid, ""
+
+
+def autonomy_reply_channel(engine: Any, reply_message_id: Any) -> str | None:
+    mid = _digits_id(reply_message_id)
+    if not mid:
+        return None
+    idx = getattr(engine, "_context_index", None)
+    reverse = getattr(idx, "msg_idx_by_id", None)
+    by_idx = getattr(idx, "message_channel_by_idx", None)
+    if not isinstance(reverse, dict) or not isinstance(by_idx, dict):
+        return None
+    msg_idx = reverse.get(mid)
+    if msg_idx is None:
+        return None
+    cid = _digits_id(by_idx.get(msg_idx))
+    return cid or None
+
+
+def autonomy_reply_matches_route(
+    engine: Any, action: dict[str, Any], cid: str
+) -> tuple[bool, str]:
+    reply_id = action.get("reply_to_message_id")
+    if not reply_id:
+        return True, ""
+    reply_cid = autonomy_reply_channel(engine, reply_id)
+    if reply_cid and reply_cid != cid:
+        return (
+            False,
+            f"reply target belongs to channel {reply_cid}, not target channel {cid}",
+        )
+    return True, ""
+
+
+def _needs_autonomy_channel_route(action: dict[str, Any]) -> bool:
+    kind = str(action.get("kind") or "")
+    tool_name = str(action.get("tool_name") or "")
+    return kind == "post_channel" or (
+        kind == "run_tool" and tool_name in AUTONOMY_POST_TOOLS
+    )
+
 # Per-section context budgets. Channel activity used to be 2800 chars and
 # a global last-40-lines slice, so later rooms vanished. Keep rooms intact
 # and give the planner enough space to actually see them.
@@ -1112,13 +1220,21 @@ class AutonomyEngine:
         return ch_map_lines
 
     def _auto_channel_candidates(self) -> list[str]:
-        """Stable target list for autonomous posts/tools."""
-        channels = []
-        for raw_cid in sorted(self.bot._auto_channels or set(), key=str):
-            cid = re.sub(r"[^0-9]", "", str(raw_cid))
-            if cid:
-                channels.append(cid)
-        return channels
+        """Stable numeric auto-channel list, blocked rooms filtered out."""
+        candidates = {
+            _digits_id(x) for x in (getattr(self.bot, "_auto_channels", None) or set())
+        }
+        candidates.discard("")
+        allowed: list[str] = []
+        for cid in sorted(candidates, key=lambda value: int(value)):
+            checker = getattr(self, "_channel_allowed", None)
+            try:
+                if callable(checker) and not checker(cid):
+                    continue
+            except Exception:
+                continue
+            allowed.append(cid)
+        return allowed
 
     def _activity_channel_limit(self) -> int:
         raw = (getattr(self.bot, "_control", None) or {}).get(
@@ -3503,6 +3619,26 @@ class AutonomyEngine:
             # slot, and the next action aimed at the same room would come
             # back "already sent" — which is false, and that string is fed
             # to the planner as feedback next tick.
+            if _needs_autonomy_channel_route(action):
+                ok, cid, reason = autonomy_route_allowed(
+                    self, action.get("target_channel_id") or post_cid
+                )
+                if not ok:
+                    verdicts.append(
+                        GateVerdict(action, False, "wrong_channel", reason, cid or None)
+                    )
+                    continue
+                reply_ok, reply_reason = autonomy_reply_matches_route(self, action, cid)
+                if not reply_ok:
+                    verdicts.append(
+                        GateVerdict(
+                            action, False, "wrong_reply_channel", reply_reason, cid
+                        )
+                    )
+                    continue
+                action["target_channel_id"] = cid
+                post_cid = cid
+
             planned_post_channels.add(post_cid)
             verdicts.append(GateVerdict(action, True, "ok", "", post_cid))
         return verdicts
@@ -3696,6 +3832,18 @@ class AutonomyEngine:
             return
 
     async def _exec_post_channel(self, action: dict, result: dict):
+        ok, cid, reason = autonomy_route_allowed(self, action.get("target_channel_id"))
+        if not ok:
+            result["result"] = "error"
+            result["error"] = reason
+            return
+        reply_ok, reply_reason = autonomy_reply_matches_route(self, action, cid)
+        if not reply_ok:
+            result["result"] = "error"
+            result["error"] = reply_reason
+            return
+        action = dict(action)
+        action["target_channel_id"] = cid
         channel_id = action["target_channel_id"]
         content = action["content"][:MAX_CONTENT_CHARS]
         reply_to_message_id = action.get("reply_to_message_id")
@@ -3863,6 +4011,16 @@ class AutonomyEngine:
 
     async def _exec_run_tool(self, action: dict, result: dict):
         tool_name = action["tool_name"]
+        if tool_name in AUTONOMY_POST_TOOLS:
+            ok, cid, reason = autonomy_route_allowed(
+                self, action.get("target_channel_id")
+            )
+            if not ok:
+                result["result"] = "error"
+                result["error"] = reason
+                return
+            action = dict(action)
+            action["target_channel_id"] = cid
         tool_args = action.get("tool_args", {})
         result["target"] = f"tool:{tool_name}"
         result["tool_called"] = tool_name

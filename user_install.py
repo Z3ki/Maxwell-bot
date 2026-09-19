@@ -12,6 +12,7 @@ clicked message (Discord's official way to point at channel content).
 
 from __future__ import annotations
 
+import inspect
 import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -36,6 +37,64 @@ USER_INSTALL_NAMES = frozenset(
 # only user-installed (not also in that server).
 USER_INSTALL_MESSAGE_CAP = 6
 USER_INSTALL_HISTORY_LIMIT = 25
+
+# Official extension points. Plugins register here instead of replacing
+# UserInstallSession.send or patching bot.on_interaction globals.
+_INTERACTION_HANDLERS: list[tuple[int, str, Any]] = []
+_SEND_WRAPPERS: list[tuple[int, str, Any]] = []
+
+
+def register_command(command: dict[str, Any]) -> None:
+    """Add or replace a user-install application command by name."""
+    name = str((command or {}).get("name") or "").strip()
+    if not name:
+        raise ValueError("command name is required")
+    USER_INSTALL_COMMANDS[:] = [
+        cmd for cmd in USER_INSTALL_COMMANDS if cmd.get("name") != name
+    ]
+    USER_INSTALL_COMMANDS.append(dict(command))
+    global USER_INSTALL_NAMES
+    USER_INSTALL_NAMES = frozenset({*USER_INSTALL_NAMES, name})
+
+
+def register_interaction_handler(
+    callback: Any, *, priority: int = 100, name: str = ""
+) -> None:
+    """Run before the default user-install AI turn. Return True to consume."""
+    if not callable(callback):
+        raise TypeError("interaction handler must be callable")
+    key = str(name or getattr(callback, "__name__", "handler"))
+    _INTERACTION_HANDLERS[:] = [item for item in _INTERACTION_HANDLERS if item[1] != key]
+    _INTERACTION_HANDLERS.append((int(priority), key, callback))
+    _INTERACTION_HANDLERS.sort(key=lambda item: (item[0], item[1]))
+
+
+def unregister_interaction_handler(name: str) -> None:
+    _INTERACTION_HANDLERS[:] = [item for item in _INTERACTION_HANDLERS if item[1] != name]
+
+
+def wrap_session_send(factory: Any, *, name: str, priority: int = 100) -> None:
+    """Wrap UserInstallSession.send. Lower priority is outer."""
+    if not callable(factory):
+        raise TypeError("send wrapper factory must be callable")
+    key = str(name or "").strip()
+    if not key:
+        raise ValueError("wrapper name is required")
+    _SEND_WRAPPERS[:] = [item for item in _SEND_WRAPPERS if item[1] != key]
+    _SEND_WRAPPERS.append((int(priority), key, factory))
+    _rebuild_session_send()
+
+
+def unwrap_session_send(name: str) -> None:
+    _SEND_WRAPPERS[:] = [item for item in _SEND_WRAPPERS if item[1] != name]
+    _rebuild_session_send()
+
+
+def _rebuild_session_send() -> None:
+    send = UserInstallSession._send_impl
+    for _prio, _name, factory in sorted(_SEND_WRAPPERS, key=lambda item: -item[0]):
+        send = factory(send)
+    UserInstallSession.send = send
 
 _USER_INSTALL_META = {
     "integration_types": [1],
@@ -525,10 +584,13 @@ class UserInstallSession:
             await defer()
 
     async def send(self, content: str | None = None, file=None, **kwargs):
+        return await type(self)._send_impl(self, content, file, **kwargs)
+
+    async def _send_impl(self, content: str | None = None, file=None, **kwargs):
+        """Webhook send that preserves embeds, views, polls, and files."""
         await self.ensure_deferred()
-        kwargs.pop("stickers", None)
-        kwargs.pop("reference", None)
-        kwargs.pop("mention_author", None)
+        for ignored in ("stickers", "reference", "mention_author"):
+            kwargs.pop(ignored, None)
         text = None if content is None else str(content)
         if text == "":
             text = None
@@ -541,8 +603,31 @@ class UserInstallSession:
         payload: dict[str, Any] = {}
         if text is not None:
             payload["content"] = text
-        if file is not None:
+        extra_files = kwargs.pop("files", None)
+        if file is not None and extra_files:
+            payload["files"] = [file, *list(extra_files)]
+        elif file is not None:
             payload["file"] = file
+        elif extra_files:
+            payload["files"] = list(extra_files)
+        embed = kwargs.pop("embed", None)
+        embeds = kwargs.pop("embeds", None)
+        if embed is not None:
+            payload["embed"] = embed
+        elif embeds:
+            payload["embeds"] = list(embeds)
+        for key in (
+            "view",
+            "allowed_mentions",
+            "suppress_embeds",
+            "silent",
+            "tts",
+            "poll",
+            "ephemeral",
+            "delete_after",
+        ):
+            if key in kwargs and kwargs[key] is not None:
+                payload[key] = kwargs[key]
         if not payload:
             payload["content"] = "\u200b"
         sent = await send(**payload)
@@ -648,6 +733,16 @@ async def _ephemeral(interaction: Any, text: str) -> None:
 
 async def handle_user_install_interaction(bot: Any, interaction: Any) -> bool:
     """Claim and start a user-install turn. True if this was ours."""
+    for _prio, _name, handler in list(_INTERACTION_HANDLERS):
+        try:
+            claimed = handler(bot, interaction)
+            if inspect.isawaitable(claimed):
+                claimed = await claimed
+        except Exception:
+            logger.exception("user-install handler %s failed", _name)
+            continue
+        if claimed:
+            return True
     if not is_user_install_command(interaction):
         return False
     user = getattr(interaction, "user", None)
