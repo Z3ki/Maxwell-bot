@@ -1,0 +1,46 @@
+{
+  "id": "web",
+  "name": "Web",
+  "version": "1.0.0",
+  "description": "Search the web and fetch URLs.",
+  "author": "Maxwell",
+  "api_version": 1,
+  "bundled": true,
+  "enabled_globally": true,
+  "enabled_by_default": true,
+  "protected": false,
+  "uninstallable": true,
+  "permissions": [
+    "network"
+  ],
+  "optional_dependencies": [],
+  "platforms": [
+    "discord",
+    "telegram"
+  ],
+  "tools": [
+    {
+      "name": "web_search",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "fetch_url",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    }
+  ],
+  "prompt": {
+    "position": "tools",
+    "priority": 80,
+    "requires_tools": [
+      "web_search",
+      "fetch_url"
+    ],
+    "text": "WHEN TO SEARCH: nothing is searched for you. If you are unsure, the topic is current (news, scores, releases, people, prices), or you were asked to check \u2014 call web_search yourself. RESULT TOOLS: call fetch_url for page content. Do not guess facts or training data. Skip lookup only for banter and opinions."
+  }
+}

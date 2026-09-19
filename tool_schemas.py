@@ -1053,6 +1053,14 @@ def set_plugin_result_tools(names: set[str] | frozenset[str] | None) -> None:
 
 def returns_result(name: str) -> bool:
     """Whether ``name`` hands its output back for a follow-up turn."""
+    try:
+        from maxwell_core.tools.registry import get_global_registry
+
+        spec = get_global_registry().get(name)
+        if spec is not None:
+            return bool(spec.returns_result)
+    except Exception:
+        pass
     return name in RESULT_TOOL_NAMES or name in _PLUGIN_RESULT_TOOL_NAMES
 
 

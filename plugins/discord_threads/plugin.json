@@ -1,0 +1,34 @@
+{
+  "id": "discord_threads",
+  "name": "Discord Threads",
+  "version": "1.0.0",
+  "description": "Create and control Discord threads Maxwell can work in.",
+  "author": "Maxwell",
+  "api_version": 1,
+  "bundled": true,
+  "enabled_globally": true,
+  "enabled_by_default": true,
+  "tools": [
+    {
+      "name": "create_thread",
+      "returns_result": true
+    },
+    {
+      "name": "thread_control",
+      "returns_result": true
+    }
+  ],
+  "protected": false,
+  "permissions": [
+    "discord.channels"
+  ],
+  "prompt": {
+    "position": "tools",
+    "priority": 80,
+    "requires_tools": [
+      "create_thread",
+      "thread_control"
+    ],
+    "text": "To spin off focused work, create_thread with name= and context= (required). context= is injected into every turn in that thread so thread-you is not cold \u2014 put the goal, decisions so far, and what to do next. Use thread_control to add context, rename, archive, or list. Do not open a questionnaire thread; brief thread-you and work there."
+  }
+}

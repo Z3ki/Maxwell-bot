@@ -1,0 +1,51 @@
+{
+  "id": "email",
+  "name": "Email",
+  "version": "1.0.0",
+  "description": "Send and read email through the local mail stack.",
+  "author": "Maxwell",
+  "api_version": 1,
+  "bundled": true,
+  "enabled_globally": true,
+  "enabled_by_default": true,
+  "protected": false,
+  "uninstallable": true,
+  "permissions": [
+    "network"
+  ],
+  "optional_dependencies": [],
+  "platforms": [
+    "discord",
+    "telegram"
+  ],
+  "tools": [
+    {
+      "name": "email_send",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": true,
+      "requires_admin": false
+    },
+    {
+      "name": "email_read_inbox",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": true,
+      "requires_admin": false
+    },
+    {
+      "name": "email_get_message",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": true,
+      "requires_admin": false
+    },
+    {
+      "name": "email_search",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": true,
+      "requires_admin": false
+    }
+  ]
+}

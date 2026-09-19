@@ -1,0 +1,163 @@
+{
+  "id": "discord_guild",
+  "name": "Discord Servers",
+  "version": "1.0.0",
+  "description": "List and manage servers, channels, roles, members, and invites.",
+  "author": "Maxwell",
+  "api_version": 1,
+  "bundled": true,
+  "enabled_globally": true,
+  "enabled_by_default": true,
+  "protected": false,
+  "uninstallable": true,
+  "permissions": [
+    "discord.channels"
+  ],
+  "optional_dependencies": [],
+  "platforms": [
+    "discord",
+    "telegram"
+  ],
+  "tools": [
+    {
+      "name": "leave_server",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": true
+    },
+    {
+      "name": "lookup_user",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "list_servers",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "list_admin_servers",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "list_channels",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "list_roles",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "list_members",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "create_category",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "create_channel",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "edit_channel",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "delete_channel",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "edit_category",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "move_channel",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "clone_channel",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "sync_channel",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "list_permissions",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "manage_invites",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "edit_server",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "audit_log",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "manage_emoji",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    }
+  ]
+}

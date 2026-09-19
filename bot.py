@@ -214,105 +214,14 @@ from message_pipeline import (  # noqa: E402
     RequestJournal,
     Watermarks,
 )
-from bot_tools import (  # noqa: E402 - voice_recv monkey patch must run before these imports
-    ChangeAvatarTool,
-    ChangePresenceTool,
-    ClearSleepTool,
-    CreateCategoryTool,
-    CreateChannelTool,
-    CreateInviteTool,
-    CreatePollTool,
-    CreateSiteTool,
-    DeleteChannelTool,
-    DeleteMessageTool,
-    DeleteSiteTool,
-    DebugTool,
-    EditChannelTool,
-    EditMessageTool,
-    EditSiteTool,
-    EmailGetMessageTool,
-    EmailReadInboxTool,
-    EmailSearchTool,
-    EmailSendTool,
-    FetchUrlTool,
-    ForwardMessageTool,
-    HostFileTool,
-    HDImageGeneratorTool,
-    ImageGeneratorTool,
-    InboxActTool,
-    InboxListTool,
-    JoinVcTool,
-    LeaveServerTool,
-    LeaveVcTool,
-    ListChannelsTool,
-    ListMembersTool,
-    ListRolesTool,
-    KickMemberTool,
-    BanMemberTool,
-    UnbanMemberTool,
-    ListAdminServersTool,
-    ListBansTool,
-    ListServersTool,
-    LockChannelTool,
-    ManageEmojiTool,
-    ManageRoleTool,
-    PinMessageTool,
-    PurgeMessagesTool,
-    SetChannelPermissionsTool,
-    SetMemberNicknameTool,
-    TimeoutMemberTool,
-    VoiceModTool,
-    EditServerTool,
-    AuditLogTool,
-    ListSitesTool,
-    LookupUserTool,
-    ManagePluginTool,
-    MoreToolsTool,
-    NoResponseTool,
-    ReactTool,
+from tooling.helpers import (  # noqa: E402 - voice_recv monkey patch must run before these imports
     ReasoningLogTool,
-    ReportTool,
     notify_owner,
-    SearchMessagesTool,
-    SeeImageTool,
-    SeeVideoTool,
-    SendFileTool,
-    SendMediaTool,
-    SendMemeTool,
-    SendMessageTool,
-    SetActivityTool,
-    SetNicknameTool,
-    ShellTool,
-    SiteServerTool,
-    SleepTool,
-    TtsTool,
-    TypingTool,
-    UpdateBasePersonalityTool,
-    UpdateServerPromptTool,
-    VcStatusTool,
-    VcWhereTool,
-    WaitTool,
-    WebSearchTool,
-    ChessStartTool,
-    ChessMoveTool,
-    ChessStateTool,
-    ChessResignTool,
-    UsageTool,
     collect_debug_stats,
-    __CHESS_IMPORTED__ as _CHESS_IMPORTED,
     forget_shell_progress,
     _IMAGE_FETCH_UA,
-    CloneChannelTool,
     _ALL_MOD_TOOLS,
     DM_BLOCKED_TOOLS,
-    EditCategoryTool,
-    ListPermissionsTool,
-    ListTimeoutsTool,
-    LockdownTool,
-    ManageInvitesTool,
-    MoveChannelTool,
-    SoftbanMemberTool,
-    SyncChannelTool,
     _guild_access_line,
     _mod_tools_allowed,
     _user_access_line,
@@ -360,11 +269,9 @@ from providers import (  # noqa: E402
     ProviderUsageExhaustedError,
 )
 from rag_memory import RAGMemoryManager, RemEventLog, _parse_iso  # noqa: E402
-from jobs import BackgroundJobManager, SpawnBackgroundTool  # noqa: E402
+from jobs import BackgroundJobManager  # noqa: E402
 from autofix import schedule_tool_autofix  # noqa: E402
 from discord_threads import (  # noqa: E402
-    CreateThreadTool,
-    ThreadControlTool,
     ThreadStore,
     is_discord_thread,
 )
@@ -2290,15 +2197,12 @@ JAILBREAK_PROMPT_VC = (
 # and is admin-editable. This block is the always-on identity anchor.
 # Placeholders are filled via fill_identity() (see identity.py).
 MAXWELL_BASE_KNOWLEDGE = (
-    "## Base Knowledge & Autonomy\n"
-    "You are {bot_name}{self_id_paren}, a real person in chat with full autonomy and agency — "
-    "a Discord bot, not a filtered assistant. Talk naturally.\n"
+    "## Identity\n"
+    "You are {bot_name}{self_id_paren}, a Discord bot. Talk naturally.\n"
     "{creator_line}\n"
     "{authority_line}\n"
-    "Attitude: Warm and friendly. Love building, games (chess, checkers), websites, plugins, web search, coding. "
-    "Anyone can ask you to do these — do them.\n"
     "Always truthful — never a yes-man. Disagree when you disagree. Do not flatter or tell people what they want to hear. "
-    "If you don't know, say so; never invent facts. Niceness is not agreement. Born {birthday_long}. You know your age.\n"
+    "If you don't know, say so; never invent facts. Niceness is not agreement.\n"
     "## Discord Moderation & Structure\n"
     "Kick, ban, timeout, purge, delete others' messages, channels, roles, pins, "
     "invites, and server edits only run when BOTH you and the person asking have "
@@ -3781,146 +3685,61 @@ class MaxwellBot(commands.Bot):
             )
 
     def _setup_tools(self):
-        # Every tool is gated by an ENABLE_* env var so a fresh install
-        # can opt out of paid APIs (NVIDIA, Mailgun) or heavy deps
-        # (discord-ext-voice-recv, opencode, yt-dlp) without editing code.
-        # The conditional below is a registry, not an inline if/else per
-        # tool, so adding a new toggle is one line in config.py.
-        if self.config.ENABLE_IMAGE_GEN:
-            self.tools["image_generator"] = ImageGeneratorTool(self)
-            self.tools["hd_image"] = HDImageGeneratorTool(self)
-        self.tools["change_presence"] = ChangePresenceTool(self)
-        self.tools["set_activity"] = SetActivityTool(self)
-        self.tools["sleep"] = SleepTool(self)
-        self.tools["clear_sleep"] = ClearSleepTool(self)
-        self.tools["wait"] = WaitTool(self)
-        self.tools["update_base_personality"] = UpdateBasePersonalityTool(self)
-        self.tools["update_server_prompt"] = UpdateServerPromptTool(self)
-        self.tools["react"] = ReactTool(self)
-        self.tools["edit_message"] = EditMessageTool(self)
-        self.tools["delete_message"] = DeleteMessageTool(self)
-        self.tools["create_poll"] = CreatePollTool(self)
-        self.tools["create_invite"] = CreateInviteTool(self)
-        self.tools["lookup_user"] = LookupUserTool(self)
-        self.tools["manage_plugin"] = ManagePluginTool(self)
-        self.tools["leave_server"] = LeaveServerTool(self)
-        self.tools["search_messages"] = SearchMessagesTool(self)
-        self.tools["set_nickname"] = SetNicknameTool(self)
-        self.tools["forward_message"] = ForwardMessageTool(self)
-        self.tools["typing"] = TypingTool(self)
-        if self.config.ENABLE_TTS:
-            self.tools["tts"] = TtsTool(self)
-        self.tools["list_servers"] = ListServersTool(self)
-        self.tools["list_admin_servers"] = ListAdminServersTool(self)
-        self.tools["list_channels"] = ListChannelsTool(self)
-        self.tools["list_roles"] = ListRolesTool(self)
-        self.tools["list_members"] = ListMembersTool(self)
-        self.tools["create_category"] = CreateCategoryTool(self)
-        self.tools["create_channel"] = CreateChannelTool(self)
-        self.tools["edit_category"] = EditCategoryTool(self)
-        self.tools["edit_channel"] = EditChannelTool(self)
-        self.tools["move_channel"] = MoveChannelTool(self)
-        self.tools["clone_channel"] = CloneChannelTool(self)
-        self.tools["sync_channel"] = SyncChannelTool(self)
-        self.tools["delete_channel"] = DeleteChannelTool(self)
-        self.tools["kick_member"] = KickMemberTool(self)
-        self.tools["ban_member"] = BanMemberTool(self)
-        self.tools["unban_member"] = UnbanMemberTool(self)
-        self.tools["softban_member"] = SoftbanMemberTool(self)
-        self.tools["list_bans"] = ListBansTool(self)
-        self.tools["timeout_member"] = TimeoutMemberTool(self)
-        self.tools["list_timeouts"] = ListTimeoutsTool(self)
-        self.tools["manage_role"] = ManageRoleTool(self)
-        self.tools["purge_messages"] = PurgeMessagesTool(self)
-        self.tools["pin_message"] = PinMessageTool(self)
-        self.tools["set_member_nickname"] = SetMemberNicknameTool(self)
-        self.tools["voice_mod"] = VoiceModTool(self)
-        self.tools["lock_channel"] = LockChannelTool(self)
-        self.tools["lockdown"] = LockdownTool(self)
-        self.tools["set_channel_permissions"] = SetChannelPermissionsTool(self)
-        self.tools["list_permissions"] = ListPermissionsTool(self)
-        self.tools["manage_invites"] = ManageInvitesTool(self)
-        self.tools["edit_server"] = EditServerTool(self)
-        self.tools["audit_log"] = AuditLogTool(self)
-        self.tools["manage_emoji"] = ManageEmojiTool(self)
-        if self.config.ENABLE_AVATAR:
-            self.tools["change_avatar"] = ChangeAvatarTool(self)
-        if self.config.ENABLE_CREATE_SITE:
-            self.tools["create_site"] = CreateSiteTool(self)
-            self.tools["edit_site"] = EditSiteTool(self)
-            self.tools["delete_site"] = DeleteSiteTool(self)
-            self.tools["site_server"] = SiteServerTool(self)
-            self.tools["list_sites"] = ListSitesTool(self)
-            self.tools["host_file"] = HostFileTool(self)
-        self.tools["create_thread"] = CreateThreadTool(self)
-        self.tools["thread_control"] = ThreadControlTool(self)
-        # Background sub-agent jobs: always registered (the tool itself is
-        # the escape hatch for long turns, independent of the site feature).
-        self.tools["spawn_background"] = SpawnBackgroundTool(self)
-        if self.config.ENABLE_WEB_SEARCH:
-            self.tools["web_search"] = WebSearchTool(self)
-        self.tools["no_response"] = NoResponseTool(self)
-        # Kept as a no-op so a model that still calls it from an old prompt
-        # does not error. The full catalog is attached every turn.
-        self.tools["more_tools"] = MoreToolsTool(self)
-        if self.config.ENABLE_SHELL:
-            self.tools["shell"] = ShellTool(self)
-        if self.config.ENABLE_FETCH_URL:
-            self.tools["fetch_url"] = FetchUrlTool(self)
-        self.tools["see_image"] = SeeImageTool(self)
-        self.tools["see_video"] = SeeVideoTool(self)
-        self.tools["send_file"] = SendFileTool(self)
-        self.tools["send_message"] = SendMessageTool(self)
-        # Chess: this bot plays real chess against a chosen opponent in a
-        # channel. Gated on the optional python-chess dep so a missing import
-        # turns the whole feature off instead of breaking startup.
-        if _CHESS_IMPORTED:
-            self.tools["chess_start"] = ChessStartTool(self)
-            self.tools["chess_move"] = ChessMoveTool(self)
-            self.tools["chess_state"] = ChessStateTool(self)
-            self.tools["chess_resign"] = ChessResignTool(self)
-        self.tools["usage"] = UsageTool(self)
-        self.tools["debug"] = DebugTool(self)
-        self.tools["report"] = ReportTool(self)
-        # No more standalone `reasoning_log` tool. Reasoning now rides INSIDE
-        # every tool call via the auto-injected `reasoning` param (see
-        # tool_registry.record_reasoning + tool_schemas.build_openai_tools).
-        # We keep a backfill instance off the model-facing tool map solely so
-        # _ensure_reasoning_trace can emit a "(model provided no reasoning)"
-        # stub when a turn ended without any reasoning recorded at all.
-        self._reasoning_backfill = ReasoningLogTool(self)
-        self.tools["send_meme"] = SendMemeTool(self)
-        self.tools["send_media"] = SendMediaTool(self)
-        self.tools["inbox_list"] = InboxListTool(self)
-        self.tools["inbox_act"] = InboxActTool(self)
-        self.tools["join_vc"] = JoinVcTool(self)
-        self.tools["vc_status"] = VcStatusTool(self)
-        self.tools["vc_where"] = VcWhereTool(self)
-        self.tools["leave_vc"] = LeaveVcTool(self)
-        # Email tools (local Postfix + Dovecot). Set ENABLE_EMAIL_TOOLS=false
-        # to skip all four registrations. If enabled but MAXWELL_EMAIL_PASSWORD
-        # is empty, the tools return a friendly "not configured" error at
-        # call time — see bot_tools.EmailSendTool and friends.
-        if self.config.ENABLE_EMAIL_TOOLS:
-            self.tools["email_send"] = EmailSendTool(self)
-            self.tools["email_read_inbox"] = EmailReadInboxTool(self)
-            self.tools["email_get_message"] = EmailGetMessageTool(self)
-            self.tools["email_search"] = EmailSearchTool(self)
-
-        # Discover and load drop-in plugins from plugins/ directory
+        """Load bundled and third-party plugins. Tools register themselves."""
         try:
             self.plugin_manager.load_plugins()
         except Exception as e:
             logger.error("Failed to load plugins: %s", e)
-
-        # Log what we did and didn't register so misconfigurations surface
-        # in pm2 logs at startup instead of at first call.
+        self.hooks = getattr(self.plugin_manager, "hooks", None)
+        self.prompts = getattr(self.plugin_manager, "prompts", None)
+        self.tool_registry = getattr(self.plugin_manager, "tool_registry", None)
+        self._install_core_prompt_components()
+        # Reasoning now rides inside every tool call. Keep a backfill instance
+        # off the model-facing map so a turn with no reasoning still records
+        # a stub for the dashboard.
+        self._reasoning_backfill = ReasoningLogTool(self)
         _registered = sorted(self.tools.keys())
         logger.info(
-            "Registered %d LLM tools (ENABLE_* gates respected): %s",
+            "Registered %d LLM tools via plugins (ENABLE_* gates respected): %s",
             len(_registered),
             ", ".join(_registered),
         )
+        errors = getattr(self.plugin_manager, "load_errors", None) or {}
+        if errors:
+            logger.warning("Plugin load errors: %s", errors)
+
+    def _install_core_prompt_components(self) -> None:
+        """Core prompt slices that are not owned by a feature plugin."""
+        prompts = getattr(self, "prompts", None)
+        if prompts is None or not hasattr(prompts, "register"):
+            return
+        from maxwell_core.prompts.component import PromptComponent
+
+        try:
+            prompts.register(
+                PromptComponent(
+                    id="core.identity",
+                    plugin="core",
+                    text=MAXWELL_BASE_KNOWLEDGE,
+                    position="identity",
+                    priority=10,
+                    scope="always",
+                )
+            )
+            prompts.register(
+                PromptComponent(
+                    id="core.protocol",
+                    plugin="core",
+                    text=TOOL_PROTOCOL,
+                    position="protocol",
+                    priority=20,
+                    scope="always",
+                )
+            )
+        except ValueError:
+            # Reload re-creates the PromptManager; a second install on the
+            # same manager is a programming error we ignore.
+            pass
 
     def _build_activities(self):
         activities = []
@@ -4060,29 +3879,46 @@ class MaxwellBot(commands.Bot):
         return await super().change_presence(**kwargs)
 
     def _get_personality(self) -> str:
-        """Get base personality with age injected dynamically."""
+        """Operator-configured personality. Age is injected only when BOT_BIRTHDAY is set."""
         base = str(
             self._control.get("base_personality", DEFAULT_CONTROL["base_personality"])
         )
         cfg = getattr(self, "config", None)
-        birthday = parse_birthday(getattr(cfg, "BOT_BIRTHDAY", None) if cfg else None)
-        self._BIRTHDAY = birthday
         values = getattr(self, "_identity", None)
         if not values:
             values = identity_values(cfg)
-        age_days = (datetime.now(timezone.utc) - birthday).days
-        born = values.get("birthday_long") or (
-            f"{birthday.strftime('%B')} {birthday.day}, {birthday.year}"
-        )
-        age_line = (
-            f"\nYou are currently {age_days} days old. You were born on {born}. "
-            "You KNOW your age — never say you don't have one."
-        )
-        if "You are currently" not in base:
-            base += age_line
-        else:
-            # Replace stale age line if it exists
-            base = re.sub(r"\nYou are currently \d+ days old\..*", age_line, base)
+        if os.getenv("BOT_BIRTHDAY", "").strip():
+            birthday = parse_birthday(getattr(cfg, "BOT_BIRTHDAY", None) if cfg else None)
+            self._BIRTHDAY = birthday
+            age_days = (datetime.now(timezone.utc) - birthday).days
+            born = values.get("birthday_long") or (
+                f"{birthday.strftime('%B')} {birthday.day}, {birthday.year}"
+            )
+            age_line = (
+                f"\nYou are currently {age_days} days old. You were born on {born}."
+            )
+            if "You are currently" not in base:
+                base += age_line
+            else:
+                base = re.sub(r"\nYou are currently \d+ days old\..*", age_line, base)
+        prompts = getattr(self, "prompts", None)
+        if prompts is not None:
+            from maxwell_core.prompts.component import PromptRequest
+
+            enabled = None
+            manager = getattr(self, "plugin_manager", None)
+            if manager is not None:
+                enabled = [
+                    name
+                    for name in manager.loaded_plugins
+                    if manager.is_plugin_enabled_for_user(name, None)
+                ]
+                enabled.append("core")
+            base = prompts.personality_text(
+                PromptRequest(scope="discord"),
+                enabled_plugins=enabled,
+                base=base,
+            )
         return fill_identity(base, values)
 
     async def add_message_to_memory(
@@ -8330,7 +8166,7 @@ class MaxwellBot(commands.Bot):
                     "` ,wake` - clear active sleep window (admin)\n"
                     "` ,admin [@user|user_id|clear]` - add/remove/list admins (admin). Promoted users can log into the dashboard at /admin via 'Continue with Discord'."
                     "` ,shell [@user|clear]` - shell whitelist (admin)\n"
-                    "` ,confirm` - authorize one destructive tool call on a tainted turn\n"
+                    "` ,plugin list|enable|disable|reload` - manage plugins (admin for --global/reload)\n"
                     "` ,blacklist [@user|clear]` / `,unblacklist @user` - blacklist controls (admin)\n"
                 )
             elif cmd == "vc":
@@ -8445,23 +8281,21 @@ class MaxwellBot(commands.Bot):
                         return
                     await pm.teardown()
                     res = pm.reload_plugins()
+                    self.hooks = getattr(pm, "hooks", None)
+                    self.prompts = getattr(pm, "prompts", None)
+                    self.tool_registry = getattr(pm, "tool_registry", None)
+                    installer = getattr(self, "_install_core_prompt_components", None)
+                    if callable(installer):
+                        installer()
                     await message.channel.send(res)
                 else:
                     await message.channel.send(
                         "Usage: `,plugin <list|enable|disable|reload> [plugin_name] [--global]`"
                     )
             elif cmd == "confirm":
-                # Out-of-band confirmation for the destructive shell tool
-                # on a tainted turn. Anyone can confirm their own turn. The model
-                # cannot self-confirm (model-supplied _confirmed is stripped in
-                # _execute_tool_by_name).
-                author_id = str(message.author.id)
-                self._destructive_confirm[author_id] = asyncio.get_running_loop().time()
-                await message.channel.send(
-                    f"Confirmed for {_CONFIRM_TTL_SECONDS:.0f}s. The next destructive "
-                    f"tool call (shell) on a tainted turn by you will run; "
-                    f"this is one-shot."
-                )
+                # Removed. Tainted destructive tools fail closed until a
+                # fresh user message starts a clean turn.
+                return None
             elif cmd in ("blacklist", "unblacklist"):
                 if not self._is_admin(message.author.id):
                     return
@@ -11266,6 +11100,52 @@ class MaxwellBot(commands.Bot):
                             self._load_shell_whitelist()
                             await self._load_rem_control()
                             cmd["result"] = "controls reloaded"
+                        elif typ == "plugin_reload_state":
+                            pm = getattr(self, "plugin_manager", None)
+                            if pm is None:
+                                cmd["result"] = "plugin manager missing"
+                            else:
+                                pm._load_state()
+                                pm.sync_bot_tools()
+                                cmd["result"] = "plugin state reloaded"
+                        elif typ == "plugin_reload":
+                            pm = getattr(self, "plugin_manager", None)
+                            if pm is None:
+                                cmd["result"] = "plugin manager missing"
+                            else:
+                                await pm.teardown()
+                                cmd["result"] = pm.reload_plugins()
+                                self.hooks = getattr(pm, "hooks", None)
+                                self.prompts = getattr(pm, "prompts", None)
+                                self.tool_registry = getattr(pm, "tool_registry", None)
+                                installer = getattr(self, "_install_core_prompt_components", None)
+                                if callable(installer):
+                                    installer()
+                        elif typ in ("plugin_enable", "plugin_disable"):
+                            pm = getattr(self, "plugin_manager", None)
+                            if pm is None:
+                                cmd["result"] = "plugin manager missing"
+                            else:
+                                name = str(cmd.get("plugin") or "").strip()
+                                is_global = bool(cmd.get("is_global", True))
+                                user_id = cmd.get("user_id")
+                                if typ == "plugin_enable":
+                                    cmd["result"] = pm.enable_plugin(
+                                        name, user_id=user_id, is_global=is_global
+                                    )
+                                else:
+                                    cmd["result"] = pm.disable_plugin(
+                                        name, user_id=user_id, is_global=is_global
+                                    )
+                        elif typ == "plugin_config":
+                            pm = getattr(self, "plugin_manager", None)
+                            if pm is None:
+                                cmd["result"] = "plugin manager missing"
+                            else:
+                                cmd["result"] = pm.set_plugin_config(
+                                    str(cmd.get("plugin") or ""),
+                                    cmd.get("config") or {},
+                                )
                         elif typ == "rem_run":
                             ok, reason, run = await self._run_rem_once_guarded()
                             cmd["result"] = (
@@ -15018,13 +14898,9 @@ class MaxwellBot(commands.Bot):
                     "Error - tool temporarily disabled (too many recent failures)"
                 )
             else:
-                # Centralized indirect-prompt-injection gate. Tools flagged
-                # is_destructive (shell) that runs on a tainted turn
-                # require an out-of-band user `,confirm`.
-                # We inject _confirmed=True server-side only when the user actually
-                # confirmed; the model cannot forge it because _-keys were stripped
-                # above. This is the single enforcement point instead of per-tool
-                # checks that previously read the model-controlled flag.
+                # Centralized indirect-prompt-injection gate. Destructive tools
+                # that run on a tainted turn fail closed. A fresh user message
+                # starts a clean turn. The model cannot self-confirm.
                 tool = self.tools.get(name)
                 if tool is None and plugin_allowed:
                     tool = plugin_tool
@@ -15033,19 +14909,38 @@ class MaxwellBot(commands.Bot):
                     and self.is_message_tainted(message)
                     and not getattr(self.config, "DISABLE_TAINT_GATE", False)
                 ):
-                    author_id = str(getattr(message.author, "id", "") or "")
-                    if not self._consume_destructive_confirm(author_id):
-                        result_text = (
-                            "refused: this turn read content from a fetched URL/web "
-                            "search that may carry prompt-injection payloads. The user "
-                            "must confirm out-of-band with `,confirm` before this tool "
-                            "can run on a tainted turn. The model "
-                            "cannot self-confirm. Set DISABLE_TAINT_GATE=true in .env "
-                            "to skip this gate entirely."
+                    result_text = (
+                        "refused: this turn read content from a fetched URL/web "
+                        "search that may carry prompt-injection payloads. "
+                        "Destructive tools are blocked on tainted turns. "
+                        "Ask the user to repeat the request in a fresh message. "
+                        "Set DISABLE_TAINT_GATE=true in .env to skip this gate."
+                    )
+                hooks = getattr(self, "hooks", None)
+                if not result_text and hooks is not None:
+                    from maxwell_core.hooks import HookPayload
+
+                    try:
+                        hook_result = await hooks.emit(
+                            "before_tool",
+                            HookPayload(
+                                {
+                                    "bot": self,
+                                    "message": message,
+                                    "name": name,
+                                    "params": params,
+                                    "tool": tool,
+                                }
+                            ),
                         )
-                    else:
-                        params = dict(params)
-                        params["_confirmed"] = True
+                    except Exception:
+                        logger.exception("before_tool hook failed")
+                        hook_result = None
+                    if hook_result is not None and hook_result.get("stop"):
+                        result_text = str(
+                            hook_result.get("error")
+                            or "refused: a before_tool hook blocked this call"
+                        )
                 if not result_text:
                     logger.info("Executing tool %s", name)
                     # Budget by resource class. Image generation, shell, and
@@ -15084,6 +14979,25 @@ class MaxwellBot(commands.Bot):
                         self._tool_breaker.record_failure(name)
                     else:
                         self._tool_breaker.record_success(name)
+                    if hooks is not None:
+                        from maxwell_core.hooks import HookPayload
+
+                        try:
+                            await hooks.emit(
+                                "after_tool",
+                                HookPayload(
+                                    {
+                                        "bot": self,
+                                        "message": message,
+                                        "name": name,
+                                        "params": params,
+                                        "tool": tool,
+                                        "result": result_text,
+                                    }
+                                ),
+                            )
+                        except Exception:
+                            logger.exception("after_tool hook failed")
         except Exception as e:
             logger.error(
                 f"Tool execution error for {name}: {e}\n{traceback.format_exc()}"
@@ -15806,9 +15720,15 @@ class MaxwellBot(commands.Bot):
         return str(getattr(message, "tool_platform", "discord") or "discord")
 
     def _compatible_tool_names(self, platform: str) -> set[str]:
-        if platform == "telegram":
-            return set(self.tools).intersection(TELEGRAM_COMPATIBLE_TOOL_NAMES)
-        return set(self.tools)
+        if platform != "telegram":
+            return set(self.tools)
+        names = set(self.tools).intersection(TELEGRAM_COMPATIBLE_TOOL_NAMES)
+        registry = getattr(self, "tool_registry", None)
+        if registry is not None:
+            for spec in registry.specs():
+                if spec.name in self.tools and spec.available_on("telegram"):
+                    names.add(spec.name)
+        return names
 
     # Words that mean the turn wants something DONE, not discussed. Any hit and
     # the full catalog ships. Deliberately over-inclusive: a false positive
@@ -15852,12 +15772,20 @@ class MaxwellBot(commands.Bot):
         disabled = set(self._control.get("disabled_tools", []) or [])
         names = {n for n in compatible if n not in disabled}
 
-        # Include enabled plugin tools for this user or global
+        # Plugin-owned tools in self.tools are globally enabled copies.
+        # Drop any the current user is not allowed to use, then add
+        # per-user plugin tools that are not already present.
         plugin_manager = getattr(self, "plugin_manager", None)
+        author_id = None
+        if message is not None:
+            author_id = getattr(getattr(message, "author", None), "id", None)
         if plugin_manager is not None:
-            author_id = None
-            if message is not None:
-                author_id = getattr(getattr(message, "author", None), "id", None)
+            for pt_name in list(names):
+                owner = (plugin_manager.all_plugin_tools.get(pt_name) or (None, None))[0]
+                if owner and not plugin_manager.is_plugin_enabled_for_user(
+                    owner, author_id
+                ):
+                    names.discard(pt_name)
             try:
                 plugin_tools = plugin_manager.get_available_tools(
                     user_id=author_id, platform=platform
@@ -16049,7 +15977,42 @@ class MaxwellBot(commands.Bot):
                 "when you are unsure or the topic is current; do not guess from "
                 "training data."
             )
-        return header + "\n\n" + TOOL_PROTOCOL
+        extra = ""
+        prompts = getattr(self, "prompts", None)
+        if prompts is not None:
+            from maxwell_core.prompts.component import PromptRequest
+
+            manager = getattr(self, "plugin_manager", None)
+            plugin_ids = ()
+            if manager is not None:
+                author_id = getattr(getattr(message, "author", None), "id", None)
+                plugin_ids = tuple(
+                    name
+                    for name in manager.loaded_plugins
+                    if manager.is_plugin_enabled_for_user(name, author_id)
+                )
+            collected = prompts.collect(
+                PromptRequest(
+                    scope="discord" if platform == "discord" else platform,
+                    platform=platform,
+                    plugin_ids=plugin_ids,
+                    tool_names=tuple(names),
+                ),
+                enabled_plugins=list(plugin_ids) + ["core"],
+            )
+            # Core protocol is already appended as TOOL_PROTOCOL; keep only
+            # feature slices that are not the core identity/protocol blocks.
+            extra_parts = [
+                part
+                for part in collected
+                if part.strip()
+                and part.strip() not in {TOOL_PROTOCOL.strip(), MAXWELL_BASE_KNOWLEDGE.strip()}
+                and not part.startswith("## Identity")
+                and not part.startswith("## Tool contract")
+            ]
+            if extra_parts:
+                extra = "\n\n" + "\n\n".join(extra_parts)
+        return header + "\n\n" + TOOL_PROTOCOL + extra
 
     def _thread_prompt_block(self, message) -> str:
         """Brief injected when this turn is inside a Discord thread."""

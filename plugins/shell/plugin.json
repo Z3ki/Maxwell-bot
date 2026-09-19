@@ -1,0 +1,30 @@
+{
+  "id": "shell",
+  "name": "Shell Sandbox",
+  "version": "1.0.0",
+  "description": "Run commands in the Docker shell sandbox.",
+  "author": "Maxwell",
+  "api_version": 1,
+  "bundled": true,
+  "enabled_globally": true,
+  "enabled_by_default": true,
+  "protected": false,
+  "uninstallable": true,
+  "permissions": [
+    "shell"
+  ],
+  "optional_dependencies": [],
+  "platforms": [
+    "discord",
+    "telegram"
+  ],
+  "tools": [
+    {
+      "name": "shell",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": true,
+      "requires_admin": false
+    }
+  ]
+}

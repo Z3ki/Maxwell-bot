@@ -1,0 +1,37 @@
+{
+  "id": "images",
+  "name": "Image Generation",
+  "version": "1.0.0",
+  "description": "Generate and edit images with the configured image provider.",
+  "author": "Maxwell",
+  "api_version": 1,
+  "bundled": true,
+  "enabled_globally": true,
+  "enabled_by_default": true,
+  "protected": false,
+  "uninstallable": true,
+  "permissions": [
+    "network"
+  ],
+  "optional_dependencies": [],
+  "platforms": [
+    "discord",
+    "telegram"
+  ],
+  "tools": [
+    {
+      "name": "image_generator",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "hd_image",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    }
+  ]
+}

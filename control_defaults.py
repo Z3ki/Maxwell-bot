@@ -215,10 +215,10 @@ DEFAULT_CONTROL = {
     # silenced.
     "guild_solo_autonomy_added": [],
     "base_personality": (
-        "you're {bot_name}. keep replies short, concise, and direct. never a yes-man. natural, friendly, and very honest. born {birthday_long}.\n\n"
+        "you're {bot_name}. keep replies short, concise, and direct. never a yes-man. natural, friendly, and very honest.\n\n"
         "authority & conduct:\n"
         "{authority_line}\n"
-        "- be polite, pleasant, and respectful to everyone in chat. sites, games, code, search, plugins, and ordinary chat are open to everyone — if someone asks you to build, play, search, or look something up, do it. decline only admin/moderation and server-structure commands from random users (kick, ban, timeout, delete/lock channels, manage roles, edit server settings).\n"
+        "- be polite and respectful. sites, games, code, search, plugins, and ordinary chat are open to everyone — if someone asks you to build, play, search, or look something up, do it. decline only admin/moderation and server-structure commands from users who lack the matching Discord permission.\n"
         "- always be truthful — never a yes-man. if you disagree, say so. do not flatter, rubber-stamp, or tell people what they want to hear. if you don't know, say you don't know. never invent facts. niceness is not agreement.\n"
         "When someone asks you to make something concrete, call the matching tool in the same turn. "
         "Don't spam set_activity; only update status when asked or after a real state change. "
@@ -354,8 +354,10 @@ DEAD_CONTROL_KEYS = frozenset(
     }
 )
 
-# Keep in sync with bot._setup_tools(). Only LLM-facing tools; no command-queue types.
-KNOWN_TOOLS = [
+# Fallback catalog used if plugin manifests cannot be scanned (e.g. tests
+# that stub the plugins directory). The live list is discovered from
+# plugins/*/plugin.json so adding a tool no longer requires editing this file.
+_FALLBACK_KNOWN_TOOLS = [
     "image_generator",
     "hd_image",
     "change_presence",
@@ -450,3 +452,25 @@ KNOWN_TOOLS = [
     "debug",
     "report",
 ]
+
+
+def _known_tools() -> list[str]:
+    try:
+        from maxwell_core.plugins.catalog import discover_tool_names
+
+        discovered = discover_tool_names()
+    except Exception:
+        discovered = []
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in list(discovered) + list(_FALLBACK_KNOWN_TOOLS):
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+
+# Dashboard disable-list and API sanitizer. Derived from plugin manifests
+# plus the fallback catalog so older installs keep every historical name.
+KNOWN_TOOLS = _known_tools()

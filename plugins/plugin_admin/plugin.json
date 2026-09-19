@@ -1,0 +1,30 @@
+{
+  "id": "plugin_admin",
+  "name": "Plugin Administration",
+  "version": "1.0.0",
+  "description": "List, enable, and disable Maxwell plugins.",
+  "author": "Maxwell",
+  "api_version": 1,
+  "bundled": true,
+  "enabled_globally": true,
+  "enabled_by_default": true,
+  "protected": true,
+  "uninstallable": false,
+  "permissions": [
+    "plugins.manage"
+  ],
+  "optional_dependencies": [],
+  "platforms": [
+    "discord",
+    "telegram"
+  ],
+  "tools": [
+    {
+      "name": "manage_plugin",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    }
+  ]
+}

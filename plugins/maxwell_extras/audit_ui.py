@@ -254,7 +254,24 @@ def install_tool_audit(bot: Any, ctx: Any) -> ToolAuditStore:
                 add_view(ToolTraceView(bot))
                 bot._maxwell_tool_audit_view_registered = True
 
-    if not getattr(bot, "_maxwell_tool_audit_execute_wrapped", False):
+    if ctx is not None and hasattr(ctx, "register_hook") and not getattr(
+        bot, "_maxwell_tool_audit_execute_wrapped", False
+    ):
+        async def after_tool(payload) -> None:
+            data = getattr(payload, "data", payload) or {}
+            await _record_call(
+                data.get("bot") or bot,
+                data.get("message"),
+                name=str(data.get("name") or ""),
+                params=dict(data.get("params") or {}),
+                result=str(data.get("result") or ""),
+                error=str(data.get("result") or "").startswith(("Error:", "Error ")),
+                started=time.monotonic(),
+            )
+
+        ctx.register_hook("after_tool", after_tool, priority=50)
+        bot._maxwell_tool_audit_execute_wrapped = True
+    elif not getattr(bot, "_maxwell_tool_audit_execute_wrapped", False):
         original_execute = getattr(bot, "_execute_tool_by_name", None)
         if callable(original_execute):
             async def execute_wrapper(self_obj: Any, message: Any, name: str, params: dict, *, disabled: set, compatible: set) -> str:

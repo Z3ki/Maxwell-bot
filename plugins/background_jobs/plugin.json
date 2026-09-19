@@ -1,0 +1,29 @@
+{
+  "id": "background_jobs",
+  "name": "Background Jobs",
+  "version": "1.0.0",
+  "description": "Spawn detached background coding/research jobs.",
+  "author": "Maxwell",
+  "api_version": 1,
+  "bundled": true,
+  "enabled_globally": true,
+  "enabled_by_default": true,
+  "tools": [
+    {
+      "name": "spawn_background",
+      "returns_result": true
+    }
+  ],
+  "protected": true,
+  "permissions": [
+    "jobs.run"
+  ],
+  "prompt": {
+    "position": "tools",
+    "priority": 80,
+    "requires_tools": [
+      "spawn_background"
+    ],
+    "text": "LONG TASKS GO TO BACKGROUND: if a job takes many tool calls (site, research, images, code, anything long), call spawn_background(goal=...) FIRST, then send_message ONE short ack line naming the job id and end the turn. Never start a long job inline when you could spawn it."
+  }
+}

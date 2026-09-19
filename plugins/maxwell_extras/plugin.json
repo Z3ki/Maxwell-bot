@@ -4,5 +4,38 @@
   "description": "Power tools: rich Discord UI with stateful callback and Premium buttons, persistent reminders, cross-server recall, URL media inspection, generated-image handoff, verified tool-call disclosure on the final response chunk, managed plugin interaction/views, conversational style freedom, and human-approved live plugin development.",
   "enabled_globally": true,
   "allowed_users": [],
-  "denied_users": []
+  "denied_users": [],
+  "id": "maxwell_extras",
+  "api_version": 1,
+  "author": "Maxwell",
+  "bundled": true,
+  "enabled_by_default": true,
+  "permissions": [
+    "messages.send",
+    "memory.read",
+    "plugins.manage"
+  ],
+  "tools": [
+    {
+      "name": "reminder",
+      "returns_result": true
+    },
+    {
+      "name": "send_rich_message",
+      "returns_result": false
+    },
+    {
+      "name": "recall_cross_server_memory",
+      "returns_result": true
+    },
+    {
+      "name": "inspect_media_url",
+      "returns_result": true
+    },
+    {
+      "name": "plugin_workbench",
+      "returns_result": true,
+      "requires_admin": true
+    }
+  ]
 }

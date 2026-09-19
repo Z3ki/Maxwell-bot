@@ -1,0 +1,62 @@
+{
+  "id": "chess",
+  "name": "Chess",
+  "version": "1.0.0",
+  "description": "Play chess against Maxwell in a channel.",
+  "author": "Maxwell",
+  "api_version": 1,
+  "bundled": true,
+  "enabled_globally": true,
+  "enabled_by_default": true,
+  "protected": false,
+  "uninstallable": true,
+  "permissions": [],
+  "optional_dependencies": [
+    "chess"
+  ],
+  "platforms": [
+    "discord",
+    "telegram"
+  ],
+  "tools": [
+    {
+      "name": "chess_start",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "chess_move",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "chess_state",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "chess_resign",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    }
+  ],
+  "prompt": {
+    "position": "tools",
+    "priority": 80,
+    "requires_tools": [
+      "chess_start",
+      "chess_move",
+      "chess_state",
+      "chess_resign"
+    ],
+    "text": "chess: you play your own moves. chess_move returns legal moves annotated with tactical value \u2014 read it, pick strongest, pass as move=. Nothing plays for you. Play to win."
+  }
+}

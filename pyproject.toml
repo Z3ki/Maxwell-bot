@@ -67,6 +67,10 @@ ignore = [
 # and loop-built history rows are easier to audit than the micro-optimized form.
 "plugins/maxwell_extras/user_install_features.py" = ["C416"]
 "plugins/maxwell_extras/workbench_v2.py" = ["PERF401"]
+# Mechanical split of bot_tools.py binds helper globals by name.
+"plugins/**/impl.py" = ["F401", "F403", "F405", "F821"]
+"tooling/helpers.py" = ["F401", "F811"]
+"bot_tools.py" = ["F401", "F403"]
 
 [tool.ruff.lint.flake8-bugbear]
 # discord.py and aiohttp decorators legitimately take call-expression defaults.

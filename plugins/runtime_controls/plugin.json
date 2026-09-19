@@ -1,0 +1,49 @@
+{
+  "id": "runtime_controls",
+  "name": "Runtime Controls",
+  "version": "1.0.0",
+  "description": "Sleep, wait, and leftover catalog compatibility tools.",
+  "author": "Maxwell",
+  "api_version": 1,
+  "bundled": true,
+  "enabled_globally": true,
+  "enabled_by_default": true,
+  "protected": true,
+  "uninstallable": true,
+  "permissions": [],
+  "optional_dependencies": [],
+  "platforms": [
+    "discord",
+    "telegram"
+  ],
+  "tools": [
+    {
+      "name": "sleep",
+      "returns_result": false,
+      "ends_turn": true,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "clear_sleep",
+      "returns_result": false,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "wait",
+      "returns_result": false,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "more_tools",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    }
+  ]
+}

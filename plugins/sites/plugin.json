@@ -1,0 +1,79 @@
+{
+  "id": "sites",
+  "name": "Generated Sites",
+  "version": "1.0.0",
+  "description": "Create, edit, host, and list generated websites.",
+  "author": "Maxwell",
+  "api_version": 1,
+  "bundled": true,
+  "enabled_globally": true,
+  "enabled_by_default": true,
+  "protected": false,
+  "uninstallable": true,
+  "permissions": [
+    "files.write",
+    "network"
+  ],
+  "optional_dependencies": [],
+  "platforms": [
+    "discord",
+    "telegram"
+  ],
+  "tools": [
+    {
+      "name": "create_site",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "edit_site",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "delete_site",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "site_server",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "list_sites",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "host_file",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    }
+  ],
+  "prompt": {
+    "position": "tools",
+    "priority": 80,
+    "requires_tools": [
+      "create_site",
+      "edit_site",
+      "delete_site",
+      "site_server",
+      "list_sites",
+      "host_file"
+    ],
+    "text": "create_site: full HTML document in `body`, or url= of an existing HTML file to fetch and host. Never paste the page into chat. Real line breaks or <br> in visible HTML; never literal \\n text. Full visual freedom \u2014 invent a new look each time; no house style unless the user asked.\nSites: build the real thing on first pass with complete content. NO placeholders \u2014 no 'lorem ipsum', no 'TODO', no 'coming soon', no '[insert here]', no empty href='#' nav, no commented-out 'implement later', no fake returns. If you ship a shell that says 'Loading\u2026' and the app never mounts, you have built nothing.\ncreate_site backend is OPTIONAL. Static HTML/CSS/JS is fine. Only pass backend=true and use site_server when the site actually needs server-side state."
+  }
+}
