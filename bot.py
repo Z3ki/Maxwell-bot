@@ -2170,6 +2170,7 @@ TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "usage",
     "debug",
     "report",
+    "bot_invite_url",
     "wait",
     "sleep",
     "clear_sleep",
@@ -2392,7 +2393,10 @@ TOOL_PROTOCOL = (
     "channel or server. From a server, sending to another channel or DM is admin-only — "
     "if a non-admin asks you to speak somewhere else, tell them it needs an admin and "
     "reply here instead. Shell, sites, search, and ordinary chat tools stay available in DMs. "
-    "People add this bot with BOT_INVITE_URL — it cannot join servers from an invite code. "
+    "If they ask how to add this bot, add as app, or add to a server, "
+    "call bot_invite_url then send_message the matching OAuth link. "
+    "kind=app is Add to my apps; kind=server is Add to a server; default both. "
+    "It cannot join from a discord.gg invite code. "
     "Discord mod/structure tools (kick, ban, timeout, purge, delete others' messages, "
     "channels, roles, pins, invites, server edits) require the person asking to have "
     "that Discord permission — same perm you need. Maxwell-owner status is not a bypass. "
@@ -2426,6 +2430,7 @@ LEAN_TOOL_PROTOCOL = (
     "send_message stays in this chat. "
     "In a server, only run a Discord mod tool if the person asking has that permission. "
     "Call report to DM the owner about a real problem.\n"
+    "If they ask how to add this bot, call bot_invite_url and send the OAuth link.\n"
     "ONE send_message holds your whole reply. Consecutive short messages read "
     "as spam. If you have nothing new to add, use no_response.\n"
     "Do the work first. Call the tools that do the job, then send_message once "

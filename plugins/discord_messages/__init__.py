@@ -15,7 +15,7 @@ def _flag(bot: Any, name: str | None) -> bool:
 
 def setup(bot, ctx=None):
     pass
-    from .impl import ReactTool, EditMessageTool, DeleteMessageTool, CreatePollTool, ForwardMessageTool, TypingTool, SendMessageTool, SendFileTool, PinMessageTool, PurgeMessagesTool, SearchMessagesTool, CreateInviteTool, NoResponseTool
+    from .impl import ReactTool, EditMessageTool, DeleteMessageTool, CreatePollTool, ForwardMessageTool, TypingTool, SendMessageTool, SendFileTool, PinMessageTool, PurgeMessagesTool, SearchMessagesTool, CreateInviteTool, BotInviteUrlTool, NoResponseTool
 
     mapping = [
         ('react', ReactTool, None),
@@ -30,6 +30,7 @@ def setup(bot, ctx=None):
         ('purge_messages', PurgeMessagesTool, None),
         ('search_messages', SearchMessagesTool, None),
         ('create_invite', CreateInviteTool, None),
+        ('bot_invite_url', BotInviteUrlTool, None),
         ('no_response', NoResponseTool, None),
     ]
     tools = []

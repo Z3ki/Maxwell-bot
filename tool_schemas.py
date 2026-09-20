@@ -109,6 +109,19 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "max_age": _int("Max age in seconds"),
         }
     ),
+    "bot_invite_url": _obj(
+        {
+            "kind": _str(
+                "app (Add to my apps) | server (Add to a server) | both (default)"
+            ),
+            "permissions": _str(
+                "Optional Discord permission bitfield for the server install"
+            ),
+            "guild_id": _str(
+                "Optional server id to pre-select on the server install page"
+            ),
+        }
+    ),
     "leave_server": _obj(
         {"server": _str("Server name or numeric ID to leave")},
         ["server"],
@@ -907,6 +920,7 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "manage_plugin",
         "search_messages",
         "create_invite",
+        "bot_invite_url",
         "leave_server",
         "create_poll",
         "forward_message",

@@ -105,11 +105,24 @@
       "requires_admin": false
     },
     {
+      "name": "bot_invite_url",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
       "name": "no_response",
       "returns_result": false,
       "ends_turn": true,
       "is_destructive": false,
       "requires_admin": false
     }
-  ]
+  ],
+  "prompt": {
+    "position": "tools",
+    "priority": 80,
+    "requires_tools": ["bot_invite_url"],
+    "text": "ADD THIS BOT: when someone asks how to add Maxwell / this bot, add as app, add to my apps, or add to a server, call bot_invite_url then send_message the matching link. kind=app or kind=server if they only want one; default both. Do not invent a URL. This is not create_invite (that makes a discord.gg for the current server)."
+  }
 }

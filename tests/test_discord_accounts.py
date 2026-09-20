@@ -5,11 +5,15 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+from urllib.parse import parse_qs, urlparse
+
 from discord_account import (
     account_ids,
+    application_client_id,
+    bot_oauth_install_urls,
     configured_bot_token,
 )
-from bot import MaxwellBot, TOOL_PROTOCOL
+from bot import LEAN_TOOL_PROTOCOL, MaxwellBot, TOOL_PROTOCOL
 
 
 def test_clear_application_commands_puts_empty_list(monkeypatch):
@@ -268,4 +272,78 @@ def test_author_is_self_uses_bot_id():
 def test_protocol_does_not_offer_selfbot_join():
     text = TOOL_PROTOCOL.lower()
     assert "join_server" not in text
-    assert "bot_invite_url" in text or "invite" in text
+    assert "bot_invite_url" in text
+    assert "bot_invite_url" in LEAN_TOOL_PROTOCOL.lower()
+
+
+def test_bot_oauth_install_urls_app_and_server():
+    urls = bot_oauth_install_urls("123456789012345678")
+    assert set(urls) == {"app", "server"}
+    app = parse_qs(urlparse(urls["app"]).query)
+    assert app["client_id"] == ["123456789012345678"]
+    assert app["integration_type"] == ["1"]
+    assert app["scope"] == ["applications.commands"]
+    server = parse_qs(urlparse(urls["server"]).query)
+    assert server["integration_type"] == ["0"]
+    assert "bot" in server["scope"][0]
+    assert "applications.commands" in server["scope"][0]
+    assert "permissions" not in server
+
+    assert set(bot_oauth_install_urls("123456789012345678", kind="app")) == {
+        "app"
+    }
+    q = parse_qs(
+        urlparse(
+            bot_oauth_install_urls(
+                "123456789012345678",
+                kind="server",
+                permissions="8",
+                guild_id="99",
+            )["server"]
+        ).query
+    )
+    assert q["permissions"] == ["8"]
+    assert q["guild_id"] == ["99"]
+    assert q["disable_guild_select"] == ["true"]
+
+
+def test_application_client_id_prefers_bot_application_id(monkeypatch):
+    monkeypatch.delenv("DISCORD_CLIENT_ID", raising=False)
+    bot = SimpleNamespace(
+        application_id=111,
+        user=SimpleNamespace(id=222),
+        config=SimpleNamespace(DISCORD_CLIENT_ID="333"),
+    )
+    assert application_client_id(bot) == "111"
+    bot.application_id = None
+    assert application_client_id(bot) == "222"
+    bot.user = None
+    assert application_client_id(bot) == "333"
+    bot.config = None
+    assert application_client_id(bot) == ""
+
+
+def test_bot_invite_url_tool_returns_oauth_links(monkeypatch):
+    from plugins.discord_messages.impl import BotInviteUrlTool
+
+    monkeypatch.delenv("DISCORD_CLIENT_ID", raising=False)
+    bot = SimpleNamespace(
+        application_id=1472755214623703190,
+        user=None,
+        config=SimpleNamespace(DISCORD_CLIENT_ID=""),
+    )
+    out = asyncio.run(
+        BotInviteUrlTool(bot).execute(SimpleNamespace(), kind="both")
+    )
+    assert "Add as app" in out
+    assert "Add to a server" in out
+    assert "1472755214623703190" in out
+    assert "integration_type=1" in out
+    assert "integration_type=0" in out
+
+    missing = asyncio.run(
+        BotInviteUrlTool(
+            SimpleNamespace(application_id=None, user=None, config=None)
+        ).execute(SimpleNamespace())
+    )
+    assert missing.startswith("Error:")

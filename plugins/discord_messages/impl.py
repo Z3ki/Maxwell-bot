@@ -15,6 +15,8 @@ for _name in dir(_helpers):
         continue
     globals().setdefault(_name, getattr(_helpers, _name))
 del _name
+from discord_account import application_client_id, bot_oauth_install_urls
+
 
 class ReactTool(Tool):
     """React to a message with an emoji"""
@@ -1035,6 +1037,61 @@ class CreateInviteTool(Tool):
             return "Error: max_uses and max_age must be numbers"
         except Exception as e:
             return f"Error creating invite: {e}"
+
+
+class BotInviteUrlTool(Tool):
+    """Generate Discord OAuth links to add this bot as an app or server bot."""
+    tool_name = "bot_invite_url"
+    returns_result = True
+    ends_turn = False
+
+    def get_description(self):
+        return (
+            "Generate Discord OAuth links so someone can add this bot. "
+            "Call this when they ask how to add Maxwell, add as app, "
+            "add to my apps, add to a server, or want an install/invite "
+            "link for THIS bot. kind=app (Add to my apps), kind=server "
+            "(Add to a server), or kind=both (default). "
+            "Not create_invite — that makes a discord.gg for the current server."
+        )
+
+    async def execute(
+        self,
+        message: Message,
+        kind: str = "both",
+        permissions: str = "",
+        guild_id: str = "",
+        **kwargs,
+    ) -> str:
+        client_id = application_client_id(self.bot)
+        if not client_id:
+            return (
+                "Error: Discord application id is unknown. "
+                "Set DISCORD_CLIENT_ID or wait until the bot is logged in."
+            )
+        try:
+            urls = bot_oauth_install_urls(
+                client_id,
+                kind=kind,
+                permissions=permissions,
+                guild_id=guild_id,
+            )
+        except ValueError as exc:
+            return f"Error: {exc}"
+        lines: list[str] = []
+        if "app" in urls:
+            lines.append("Add as app (Add to my apps / user install):")
+            lines.append(urls["app"])
+        if "server" in urls:
+            if lines:
+                lines.append("")
+            lines.append("Add to a server (guild bot):")
+            lines.append(urls["server"])
+        lines.append("")
+        lines.append(
+            "These are Discord OAuth install pages, not a discord.gg invite."
+        )
+        return "\n".join(lines)
 
 class NoResponseTool(Tool):
     """Silently skip sending any reply to the current message"""

@@ -8,7 +8,9 @@ no dual user+bot connections.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Iterable
+from urllib.parse import urlencode
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +20,80 @@ _USER_INSTALL_OAUTH_PARAMS = {
     "scopes": ["applications.commands"],
     "permissions": "0",
 }
+_OAUTH_AUTHORIZE = "https://discord.com/oauth2/authorize"
+_APP_KIND_ALIASES = frozenset({"app", "user", "user_install", "add_app"})
+_SERVER_KIND_ALIASES = frozenset(
+    {"server", "guild", "bot", "guild_install", "add_server"}
+)
+
+
+def application_client_id(bot: Any = None) -> str:
+    """Discord application id used as OAuth client_id for install links."""
+    cfg = getattr(bot, "config", None) if bot is not None else None
+    user = getattr(bot, "user", None) if bot is not None else None
+    candidates = (
+        getattr(bot, "application_id", None) if bot is not None else None,
+        getattr(user, "id", None),
+        getattr(cfg, "DISCORD_CLIENT_ID", None),
+        os.getenv("DISCORD_CLIENT_ID", ""),
+    )
+    for raw in candidates:
+        text = str(raw or "").strip()
+        if text.isdigit():
+            return text
+    return ""
+
+
+def normalize_install_kind(kind: str | None) -> str:
+    text = str(kind or "both").strip().lower()
+    if text in _APP_KIND_ALIASES:
+        return "app"
+    if text in _SERVER_KIND_ALIASES:
+        return "server"
+    return "both"
+
+
+def bot_oauth_install_urls(
+    client_id: str,
+    *,
+    kind: str | None = "both",
+    permissions: str | int | None = None,
+    guild_id: str | None = None,
+) -> dict[str, str]:
+    """Discord OAuth authorize URLs for Add App and Add to Server."""
+    cid = str(client_id or "").strip()
+    if not cid.isdigit():
+        raise ValueError("Discord application id is missing")
+    which = normalize_install_kind(kind)
+    urls: dict[str, str] = {}
+    if which in {"app", "both"}:
+        urls["app"] = _oauth_authorize_url(
+            {
+                "client_id": cid,
+                "integration_type": "1",
+                "scope": "applications.commands",
+            }
+        )
+    if which in {"server", "both"}:
+        params = {
+            "client_id": cid,
+            "integration_type": "0",
+            "scope": "bot applications.commands",
+        }
+        perms = str(permissions).strip() if permissions is not None else ""
+        if perms.isdigit():
+            params["permissions"] = perms
+        gid = str(guild_id or "").strip()
+        if gid.isdigit():
+            params["guild_id"] = gid
+            params["disable_guild_select"] = "true"
+        urls["server"] = _oauth_authorize_url(params)
+    return urls
+
+
+def _oauth_authorize_url(params: dict[str, str]) -> str:
+    return f"{_OAUTH_AUTHORIZE}?{urlencode(params)}"
+
 
 
 def user_install_integration_config(existing: dict | None) -> dict[str, Any]:

@@ -367,6 +367,7 @@ _FALLBACK_KNOWN_TOOLS = [
     "delete_message",
     "create_poll",
     "create_invite",
+    "bot_invite_url",
     "lookup_user",
     "search_messages",
     "set_nickname",

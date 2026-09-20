@@ -22,6 +22,7 @@ from plugins.discord_messages.impl import PinMessageTool  # noqa: F401
 from plugins.discord_messages.impl import PurgeMessagesTool  # noqa: F401
 from plugins.discord_messages.impl import SearchMessagesTool  # noqa: F401
 from plugins.discord_messages.impl import CreateInviteTool  # noqa: F401
+from plugins.discord_messages.impl import BotInviteUrlTool  # noqa: F401
 from plugins.discord_messages.impl import NoResponseTool  # noqa: F401
 from plugins.discord_presence.impl import ChangePresenceTool  # noqa: F401
 from plugins.discord_presence.impl import SetActivityTool  # noqa: F401
