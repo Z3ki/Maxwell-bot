@@ -316,8 +316,6 @@ class ShellTool(Tool):
                         idle,
                     )
                     return
-        except asyncio.CancelledError:
-            raise
         finally:
             if cls._idle_reaper_task is asyncio.current_task():
                 cls._idle_reaper_task = None
