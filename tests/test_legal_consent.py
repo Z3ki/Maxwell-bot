@@ -48,9 +48,9 @@ def _message(author_id, *, content="hey", dm=False):
     )
 
 
-def test_admins_and_agreed_users_skip_the_gate(tmp_path):
+def test_everyone_including_admins_must_agree(tmp_path):
     bot = _bot(tmp_path, admins=("1",), agreed=("2",))
-    assert legal_consent.needs_consent(bot, "1") is False
+    assert legal_consent.needs_consent(bot, "1") is True
     assert legal_consent.needs_consent(bot, "2") is False
     assert legal_consent.needs_consent(bot, "3") is True
 

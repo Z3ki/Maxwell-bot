@@ -47,6 +47,7 @@ main "$@"
                 "MAXWELL_",
                 "DISCORD_",
                 "OLLAMA_",
+                "AI_",
                 "ENABLE_",
                 "CREATOR_",
                 "BOT_",

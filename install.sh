@@ -57,7 +57,8 @@ Options:
 Useful environment variables:
   MAXWELL_INSTALL_DIR, MAXWELL_REPO_URL, MAXWELL_BRANCH,
   MAXWELL_NONINTERACTIVE=1, MAXWELL_SKIP_SYSTEM_DEPS=1,
-  DISCORD_BOT_TOKEN, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_API_KEY,
+  DISCORD_BOT_TOKEN, AI_API_URL, AI_MODEL, AI_API_KEY,
+  OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_API_KEY,
   MAXWELL_OWNER_IDS, MAXWELL_ADMIN_PASSWORD,
   BOT_NAME, CREATOR_NAME, CREATOR_ID, COMMAND_PREFIX
 EOF
@@ -82,7 +83,7 @@ if [ -r /dev/tty ] && [ -w /dev/tty ] && ( : <> /dev/tty ) 2>/dev/null; then
 elif [ "$NONINTERACTIVE" != "1" ]; then
   NONINTERACTIVE=1
   warn "No controlling TTY is available; switching to non-interactive mode."
-  warn "Set DISCORD_BOT_TOKEN, OLLAMA_MODEL, and other MAXWELL_* variables, then re-run with --reconfigure if needed."
+  warn "Set DISCORD_BOT_TOKEN, AI_MODEL (or OLLAMA_MODEL), and other MAXWELL_* variables, then re-run with --reconfigure if needed."
 fi
 
 prompt() {
@@ -279,12 +280,13 @@ copy_env_if_needed() {
 configure_env() {
   step "Configuring Maxwell"
   if [ -f .env ] && [ "$RECONFIGURE" != "1" ]; then
-    ok ".env already exists — leaving it unchanged (use --reconfigure to edit it)"
+    ok ".env already exists — leaving values unchanged (use --reconfigure to edit it)"
+    python3 scripts/migrate_ai_env.py .env >/dev/null || warn "Could not add AI_* provider aliases; run: python3 scripts/migrate_ai_env.py .env"
     return
   fi
   if [ -f .env ] && [ "$RECONFIGURE" = "1" ] && [ "$NONINTERACTIVE" != "1" ]; then
     keep=$(yes_no ".env exists. Update it with the wizard?" "yes" "")
-    [ "$keep" = "yes" ] || { ok "kept existing .env"; return; }
+    [ "$keep" = "yes" ] || { ok "kept existing .env"; python3 scripts/migrate_ai_env.py .env >/dev/null || true; return; }
   fi
   # Explicit ENABLE_REM is also an override when updating a legacy REM_ENABLED.
   if printenv ENABLE_REM >/dev/null 2>&1 && ! printenv REM_ENABLED >/dev/null 2>&1; then
@@ -296,7 +298,8 @@ configure_env() {
   if [ -f .env ]; then
     defaults_file=$(mktemp)
     if ! python3 scripts/env_defaults.py .env \
-      DISCORD_BOT_TOKEN DISCORD_TOKEN OLLAMA_BASE_URL OLLAMA_MODEL OLLAMA_API_KEY \
+      DISCORD_BOT_TOKEN DISCORD_TOKEN AI_API_URL AI_MODEL AI_API_KEY \
+      OLLAMA_BASE_URL OLLAMA_MODEL OLLAMA_API_KEY \
       BOT_NAME CREATOR_NAME CREATOR_ID MAXWELL_OWNER_IDS COMMAND_PREFIX \
       MAXWELL_ADMIN_USER MAXWELL_ADMIN_PASSWORD ENABLE_AUTONOMY ENABLE_REM REM_ENABLED ENABLE_SHELL \
       > "$defaults_file"; then
@@ -315,15 +318,16 @@ configure_env() {
   printf '\n%sStep 1/5: Discord bot token%s\n' "$BOLD" "$RESET"
   printf '  Create an application at https://discord.com/developers/applications, add a Bot, copy the bot token.\n'
   printf '  Enable Privileged Gateway Intents: Message Content, Server Members, Presence.\n'
-  printf '  Invite the bot with applications.commands omitted is fine; Maxwell uses prefix commands, not slash commands.\n'
+  printf '  Invite with bot + applications.commands. Maxwell uses prefix commands and Discord app commands (/maxwell, /owner).\n'
+  printf '  Official bot token only — never a user token or browser Authorization header.\n'
   bot_token=$(prompt_secret "Discord bot token" "${DISCORD_BOT_TOKEN:-${DISCORD_TOKEN:-}}")
   if [ -n "$bot_token" ]; then set_env_value DISCORD_BOT_TOKEN "$bot_token"; ok "Discord bot token saved"; else warn "DISCORD_BOT_TOKEN left blank; set it in .env before starting."; fi
 
   printf '\n%sStep 2/5: LLM provider%s\n' "$BOLD" "$RESET"
-  base_default="${OLLAMA_BASE_URL:-http://localhost:11434}"
-  model_default="${OLLAMA_MODEL:-qwen3:8b}"
-  api_key_default="${OLLAMA_API_KEY:-}"
-  if [ "$NONINTERACTIVE" != "1" ] && [ -z "${OLLAMA_BASE_URL:-}" ] && [ -z "${OLLAMA_MODEL:-}" ]; then
+  base_default="${AI_API_URL:-${OLLAMA_BASE_URL:-http://localhost:11434}}"
+  model_default="${AI_MODEL:-${OLLAMA_MODEL:-qwen3:8b}}"
+  api_key_default="${AI_API_KEY:-${OLLAMA_API_KEY:-}}"
+  if [ "$NONINTERACTIVE" != "1" ] && [ -z "${AI_API_URL:-}" ] && [ -z "${OLLAMA_BASE_URL:-}" ] && [ -z "${AI_MODEL:-}" ] && [ -z "${OLLAMA_MODEL:-}" ]; then
     printf '  Choose an OpenAI-compatible provider:\n' > "$TTY"
     printf '    1) Local Ollama (http://localhost:11434)\n    2) OpenRouter (https://openrouter.ai/api/v1, key from openrouter.ai/keys, free model moonshotai/kimi-k2.6:free)\n    3) OpenAI (https://api.openai.com/v1)\n    4) LM Studio (http://localhost:1234/v1)\n    5) Custom OpenAI-compatible URL\n' > "$TTY"
     provider=$(prompt "Provider" "1")
@@ -352,11 +356,18 @@ configure_env() {
       fi
     fi
   fi
-  base=$(prompt "Provider base URL" "$base_default")
+  base=$(prompt "AI API URL" "$base_default")
   model=$(prompt "Model name" "$model_default")
   key=$(prompt_secret "API key (blank for local providers)" "$api_key_default")
+  set_env_value AI_API_URL "$base"
   set_env_value OLLAMA_BASE_URL "$base"
-  if [ -n "$model" ]; then set_env_value OLLAMA_MODEL "$model"; else warn "OLLAMA_MODEL left blank; set it before starting Maxwell."; fi
+  if [ -n "$model" ]; then
+    set_env_value AI_MODEL "$model"
+    set_env_value OLLAMA_MODEL "$model"
+  else
+    warn "AI_MODEL / OLLAMA_MODEL left blank; set it before starting Maxwell."
+  fi
+  set_env_value AI_API_KEY "$key"
   set_env_value OLLAMA_API_KEY "$key"
 
   printf '\n%sStep 3/5: Identity (name, owner, prefix)%s\n' "$BOLD" "$RESET"
@@ -432,6 +443,7 @@ configure_env() {
   fi
 
   set_env_value ENABLE_SHELL "${ENABLE_SHELL:-auto}"
+  python3 scripts/migrate_ai_env.py .env >/dev/null || true
 }
 
 write_host_bind() {
@@ -530,8 +542,9 @@ run_doctor() {
 
 banner_and_confirm() {
   printf '%sMaxwell installer%s\n' "$BOLD" "$RESET"
-  printf 'Maxwell is an official Discord bot backed by any OpenAI-compatible LLM. This installer fetches the app, writes .env, and runs Maxwell in Docker.\n\n'
+  printf 'Maxwell is an official Discord bot backed by any OpenAI-compatible LLM. MIT open source; this installer fetches the app, writes .env, and runs it in Docker.\n\n'
   printf 'You need a bot token from https://discord.com/developers/applications (not a user token).\n'
+  printf 'Enable Message Content, Server Members, and Presence intents. Invite with bot + applications.commands (/maxwell, /owner).\n'
 }
 
 final_summary() {
@@ -540,13 +553,16 @@ final_summary() {
   cat <<EOF
   Install path: $(pwd -P)
   Maxwell runs in Docker, not on the host Python.
+  Primary AI settings: AI_API_URL, AI_MODEL, AI_API_KEY (OLLAMA_* aliases are kept).
 
   Start:     cd $(pwd -P) && ./run.sh -d
              (or: docker compose -f $compose up -d)
   Logs:      docker compose -f $compose logs -f maxwell
   Stop:      docker compose -f $compose down
   Doctor:    docker compose -f $compose exec maxwell python3 doctor.py
+             docker compose -f $compose exec maxwell python3 doctor.py --probe
   Dashboard: http://127.0.0.1:8765
+  App cmds:  /owner (owners), /maxwell (user-install, owners/admins)
   Edit config: $(pwd -P)/.env   then   docker compose -f $compose up -d
   Reconfigure: ./install.sh --local --reconfigure
   Update:      git pull --ff-only && ./install.sh --local

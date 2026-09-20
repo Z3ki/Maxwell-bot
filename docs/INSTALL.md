@@ -28,7 +28,7 @@ Use the full wizard when you want advanced settings during installation:
 curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/install.sh | bash
 ```
 
-The full wizard still exposes the historical `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, and `OLLAMA_API_KEY` names for the primary OpenAI-compatible provider. Those names do not mean Maxwell requires Ollama; OpenRouter, OpenAI, LM Studio, and other compatible endpoints work too.
+The full wizard writes `AI_API_URL`, `AI_MODEL`, and `AI_API_KEY`, plus `OLLAMA_*` compatibility aliases. Those names do not mean Maxwell requires Ollama; OpenRouter, OpenAI, LM Studio, and other compatible endpoints work too.
 
 The full installer can configure:
 

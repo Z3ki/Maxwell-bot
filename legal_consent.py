@@ -135,9 +135,6 @@ def needs_consent(bot: Any, user_id: Any) -> bool:
         return False
     if not isinstance(getattr(bot, "_tos_users", None), dict):
         return False
-    is_admin = getattr(bot, "_is_admin", None)
-    if callable(is_admin) and is_admin(uid):
-        return False
     return not has_agreed(bot, uid)
 
 
