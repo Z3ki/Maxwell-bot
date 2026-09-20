@@ -161,6 +161,32 @@ def test_list_without_user_token_returns_error(tmp_path, monkeypatch):
         )
         out = await tool.execute(msg, action="list")
         assert out.startswith("Error:")
-        assert "MAXWELL_GITHUB_USER_TOKEN_664824253526573056" in out
+        assert "auth_set" in out
+
+    asyncio.run(run())
+
+
+def test_auth_set_is_per_user_and_never_echoed(tmp_path, monkeypatch):
+    monkeypatch.delenv("MAXWELL_GITHUB_USER_TOKEN_1", raising=False)
+    monkeypatch.delenv("MAXWELL_GITHUB_USER_TOKEN_2", raising=False)
+    pat = "ghp_" + ("a" * 36)
+
+    async def run():
+        svc = GitHubProjectService(Bot(), Ctx(tmp_path))
+        tool = GitHubRepoTool(Bot(), svc)
+        one = SimpleNamespace(author=SimpleNamespace(id="1"), channel=SimpleNamespace(id="10"))
+        two = SimpleNamespace(author=SimpleNamespace(id="2"), channel=SimpleNamespace(id="20"))
+        out = await tool.execute(one, action="auth_set", token=pat)
+        assert "saved" in out.lower()
+        assert pat not in out
+        assert svc.token("1") == pat
+        assert svc.token("2") == ""
+        status = await tool.execute(one, action="auth")
+        assert "saved=yes" in status
+        assert pat not in status
+        assert await tool.execute(two, action="auth_clear")
+        assert svc.token("1") == pat
+        await tool.execute(one, action="auth_clear")
+        assert svc.token("1") == ""
 
     asyncio.run(run())

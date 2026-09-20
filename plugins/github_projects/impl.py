@@ -18,6 +18,7 @@ _IMAGE = "maxwell-github-workspace:1"
 _API = "https://api.github.com"
 _MAX_OUTPUT = 120_000
 _MAX_DIFF = 90_000
+_PAT_RE = re.compile(r"^(ghp_|github_pat_|gho_|ghu_)[A-Za-z0-9_]{20,}$")
 
 
 def _uid(message: Any) -> str:
@@ -85,6 +86,33 @@ class PolicyStore:
             cur.update(changes); cur["updated_at"] = time.time(); users[repo] = cur
             _json_atomic(self.path, data); return dict(cur)
 
+class TokenStore:
+    def __init__(self, path: Path):
+        self.path, self.lock = path, asyncio.Lock()
+    def _read(self) -> dict[str, Any]:
+        try:
+            raw = json.loads(self.path.read_text("utf-8"))
+            return raw if isinstance(raw, dict) else {}
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return {}
+    def peek(self, uid: str) -> str:
+        row = self._read().get(str(uid))
+        if isinstance(row, dict):
+            return str(row.get("token") or "").strip()
+        return str(row or "").strip()
+    async def set(self, uid: str, token: str) -> None:
+        async with self.lock:
+            data = self._read()
+            data[str(uid)] = {"token": token, "updated_at": time.time()}
+            _json_atomic(self.path, data)
+    async def clear(self, uid: str) -> bool:
+        async with self.lock:
+            data = self._read()
+            existed = str(uid) in data
+            data.pop(str(uid), None)
+            _json_atomic(self.path, data)
+            return existed
+
 
 class RepoKnowledge:
     def __init__(self, path: Path, bot: Any | None = None):
@@ -132,6 +160,7 @@ class GitHubProjectService:
         self.data_dir = base; self.data_dir.mkdir(parents=True, exist_ok=True)
         self.workspace_root = self.data_dir/"workspaces"; self.workspace_root.mkdir(parents=True, exist_ok=True)
         self.policy = PolicyStore(self.data_dir/"policies.json")
+        self.user_tokens = TokenStore(self.data_dir/"user_tokens.json")
         self.knowledge = RepoKnowledge(self.data_dir/"repo_knowledge.json", bot)
         self.poll_state = self.data_dir/"poll_state.json"
         self.webhook_queue = self.data_dir/"webhook_events.json"
@@ -143,17 +172,19 @@ class GitHubProjectService:
             self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=45))
         return self._session
 
-    @staticmethod
-    def token(uid: str, identity: str = "user") -> str:
+    def token(self, uid: str, identity: str = "user") -> str:
         if identity == "bot": return str(os.getenv("MAXWELL_GITHUB_TOKEN","") or "").strip()
         safe = re.sub(r"[^0-9A-Za-z]", "_", uid)
-        return str(os.getenv(f"MAXWELL_GITHUB_USER_TOKEN_{safe}","") or "").strip()
+        env = str(os.getenv(f"MAXWELL_GITHUB_USER_TOKEN_{safe}","") or "").strip()
+        if env: return env
+        return self.user_tokens.peek(uid)
 
     async def _api(self, uid: str, policy: dict[str, Any], method: str, path: str, *, json_body: Any=None, accept: str="application/vnd.github+json") -> tuple[int,str,Any]:
         identity = str(policy.get("identity") or "user"); token = self.token(uid, identity)
         if not token:
-            key = "MAXWELL_GITHUB_TOKEN" if identity=="bot" else f"MAXWELL_GITHUB_USER_TOKEN_{re.sub(r'[^0-9A-Za-z]','_',uid)}"
-            raise PermissionError(f"no GitHub credential configured; set {key}")
+            if identity=="bot":
+                raise PermissionError("no GitHub credential configured; set MAXWELL_GITHUB_TOKEN")
+            raise PermissionError("no GitHub credential for this Discord user. Have them create a fine-grained PAT at https://github.com/settings/tokens and save it with github_repo action=auth_set token=...")
         headers = {"Authorization":f"Bearer {token}","Accept":accept,"X-GitHub-Api-Version":"2022-11-28","User-Agent":"Maxwell-GitHub-Projects/1.0"}
         async with (await self.session()).request(method.upper(), _API+path, headers=headers, json=json_body) as resp:
             text = await resp.text(); parsed = None
@@ -350,11 +381,11 @@ class GitHubRepoTool(Tool):
     tool_name="github_repo"; returns_result=True; ends_turn=False; is_destructive=True
     required_capabilities=("network","files.read","files.write","shell","secrets.read"); timeout_seconds=3600
     parameters: ClassVar[dict[str, Any]] = {"type":"object","properties":{
-        "action":{"type":"string","enum":["policy_get","policy_set","list","checkout","sync","status","run","diff","verify","commit","push","pr_create","pr_get","pr_diff","pr_checkout","review","merge","issue_get","issue_reply","schedule_set","knowledge"]},
-        "repo":{"type":"string"},"ref":{"type":"string"},"command":{"type":"string"},"message":{"type":"string"},"title":{"type":"string"},"body":{"type":"string"},"number":{"type":"integer"},"event":{"type":"string","enum":["COMMENT","APPROVE","REQUEST_CHANGES"]},"mode":{"type":"string","enum":["read","write","admin"]},"identity":{"type":"string","enum":["user","bot"]},"auto_review":{"type":"boolean"},"auto_merge":{"type":"boolean"},"auto_issue_reply":{"type":"boolean"},"allow_security_testing":{"type":"boolean"},"merge_method":{"type":"string","enum":["merge","squash","rebase"]},"base":{"type":"string"},"head":{"type":"string"},"schedule_enabled":{"type":"boolean"},"schedule_minutes":{"type":"integer","minimum":5},"schedule_goal":{"type":"string"}},"required":["action"],"additionalProperties":True}
+        "action":{"type":"string","enum":["auth","auth_set","auth_clear","policy_get","policy_set","list","checkout","sync","status","run","diff","verify","commit","push","pr_create","pr_get","pr_diff","pr_checkout","review","merge","issue_get","issue_reply","schedule_set","knowledge"]},
+        "repo":{"type":"string"},"ref":{"type":"string"},"command":{"type":"string"},"message":{"type":"string"},"title":{"type":"string"},"body":{"type":"string"},"token":{"type":"string"},"number":{"type":"integer"},"event":{"type":"string","enum":["COMMENT","APPROVE","REQUEST_CHANGES"]},"mode":{"type":"string","enum":["read","write","admin"]},"identity":{"type":"string","enum":["user","bot"]},"auto_review":{"type":"boolean"},"auto_merge":{"type":"boolean"},"auto_issue_reply":{"type":"boolean"},"allow_security_testing":{"type":"boolean"},"merge_method":{"type":"string","enum":["merge","squash","rebase"]},"base":{"type":"string"},"head":{"type":"string"},"schedule_enabled":{"type":"boolean"},"schedule_minutes":{"type":"integer","minimum":5},"schedule_goal":{"type":"string"}},"required":["action"],"additionalProperties":True}
     def __init__(self,bot,service): super().__init__(bot); self.service=service
     def get_description(self):
-        return "Per-user isolated GitHub workspace. Actions: policy_get/set, list, checkout/sync/status/run/diff/verify/commit/push, pr_create/get/diff/pr_checkout/review/merge, issue_get/reply, schedule_set, knowledge. Repo policy controls write/admin and autonomous behavior; normal shell commands never receive GitHub tokens."
+        return "Per-user isolated GitHub workspace. Users save their own PAT with auth_set (never printed back). Other actions: auth/auth_clear, policy_get/set, list, checkout/sync/status/run/diff/verify/commit/push, pr_create/get/diff/pr_checkout/review/merge, issue_get/reply, schedule_set, knowledge. Repo policy controls write/admin; normal shell commands never receive GitHub tokens."
 
     async def execute(self,message:Any,action:str|None=None,repo:str|None=None,**kw:Any)->str:
         try:
@@ -364,6 +395,23 @@ class GitHubRepoTool(Tool):
 
     async def _execute(self,message:Any,action:str|None=None,repo:str|None=None,**kw:Any)->str:
         uid=_uid(message); action=str(action or "").strip().lower()
+        if action in {"auth","auth_status","connect"}:
+            stored=bool(self.service.user_tokens.peek(uid))
+            env=bool(str(os.getenv(f"MAXWELL_GITHUB_USER_TOKEN_{re.sub(r'[^0-9A-Za-z]','_',uid)}","") or "").strip())
+            return (
+                f"GitHub identity for Discord user {uid}: saved={'yes' if stored or env else 'no'}. "
+                "To connect yourself, create a fine-grained PAT (Contents, Pull requests, Issues) at https://github.com/settings/tokens "
+                "and ask Maxwell to github_repo action=auth_set token=... Maxwell stores it for this Discord user only and never prints it back. No operator .env edit required."
+            )
+        if action=="auth_set":
+            raw=str(kw.get("token") or kw.get("body") or kw.get("message") or "").strip()
+            if not _PAT_RE.fullmatch(raw):
+                return "Error: token must be a GitHub PAT starting with ghp_ or github_pat_. Create one at https://github.com/settings/tokens"
+            await self.service.user_tokens.set(uid, raw)
+            return f"GitHub PAT saved for Discord user {uid}. It will not be shown again."
+        if action=="auth_clear":
+            await self.service.user_tokens.clear(uid)
+            return f"GitHub PAT removed for Discord user {uid}."
         if action=="policy_set":
             r=_repo(repo); changes={k:kw[k] for k in ("mode","identity","auto_review","auto_merge","auto_issue_reply","allow_security_testing","merge_method") if k in kw and kw[k] is not None}
             if changes.get("mode") not in (None,"read","write","admin"):return "Error: mode must be read, write, or admin"
