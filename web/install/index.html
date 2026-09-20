@@ -81,6 +81,82 @@
       .hidden {
         display: none !important;
       }
+      .legal-links {
+        margin: 16px 0 0;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .legal-links a {
+        color: var(--text);
+      }
+      #legal-gate {
+        position: fixed;
+        inset: 0;
+        z-index: 1000;
+        background: rgba(10, 10, 12, 0.92);
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+      body.legal-locked {
+        overflow: hidden;
+      }
+      .legal-card {
+        width: min(440px, 100%);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 28px 24px;
+      }
+      .legal-kicker {
+        font-size: 11px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-bottom: 10px;
+      }
+      #legal-gate h2 {
+        font-size: 20px;
+        margin: 0 0 12px;
+        font-weight: 600;
+      }
+      #legal-gate p {
+        font-size: 14px;
+        color: var(--muted);
+        margin-bottom: 16px;
+        line-height: 1.55;
+      }
+      #legal-gate a {
+        color: var(--text);
+      }
+      .legal-check {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+        font-size: 13px;
+        color: var(--text);
+        margin: 18px 0;
+        line-height: 1.45;
+      }
+      .legal-check input {
+        margin-top: 3px;
+      }
+      .legal-hint {
+        min-height: 18px;
+        font-size: 12px;
+        color: var(--red);
+      }
+      #legal-agree {
+        width: 100%;
+        border: 0;
+        border-radius: 8px;
+        padding: 12px;
+        background: var(--text);
+        color: var(--bg);
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
     </style>
   </head>
   <body>
@@ -88,8 +164,8 @@
       <div class="card">
         <h1>Add Maxwell</h1>
         <p id="copy">
-          Sign in with Discord. Only Maxwell admins can add this app —
-          to a server or to their own account.
+          Very early public testing. Sign in with Discord. Only Maxwell
+          admins can add this app — to a server or to their own account.
         </p>
         <div id="error" class="err"></div>
         <button id="discordLogin" class="btn primary" type="button">
@@ -101,6 +177,9 @@
         <button id="addUser" class="btn hidden" type="button">
           Add to my apps
         </button>
+        <p class="legal-links">
+          <a href="/terms/">Terms</a> · <a href="/privacy/">Privacy</a> · MIT open source
+        </p>
       </div>
     </div>
     <script>
@@ -223,5 +302,6 @@
         }
       })();
     </script>
+    <script src="/legal-gate.js"></script>
   </body>
 </html>

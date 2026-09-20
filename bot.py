@@ -288,6 +288,7 @@ from user_install import (  # noqa: E402
     is_user_install_message,
     merge_user_install_history,
 )
+import legal_consent  # noqa: E402
 from rem import RemStore, load_rem_defaults, run_rem_once  # noqa: E402
 from tool_progress import make_progress as _make_tool_progress  # noqa: E402
 from tool_registry import (  # noqa: E402 — reasoning now rides inside tool calls
@@ -2976,6 +2977,8 @@ class MaxwellBot(commands.Bot):
         # Off everywhere until an admin runs `,ticket on` in that server.
         self._ticket_greeting_servers: set[str] = set()
         self._blacklist: set[str] = set()
+        self._tos_users: dict[str, str] = {}
+        self._tos_offered_at: dict[str, float] = {}
         self._shell_whitelist: set[str] = set()
         self._admins: set[str] = configured_admin_ids(self.config)
         self._guild_emojis: dict[str, dict[str, str]] = {}
@@ -5494,6 +5497,7 @@ class MaxwellBot(commands.Bot):
         self._load_progress_servers()
         self._load_ticket_greeting_servers()
         self._load_blacklist()
+        legal_consent.install(self)
         self._load_shell_whitelist()
         self._load_control(force=True)
         # The reply queue is the single serialization point for generating a
@@ -5654,6 +5658,11 @@ class MaxwellBot(commands.Bot):
 
     async def on_interaction(self, interaction):
         self._dispatch_plugin_event("on_interaction", interaction)
+        try:
+            if await legal_consent.handle_interaction(self, interaction):
+                return
+        except Exception:
+            logger.exception("TOS interaction failed")
         try:
             if await handle_user_install_interaction(self, interaction):
                 return
@@ -7084,6 +7093,10 @@ class MaxwellBot(commands.Bot):
             in set(self._control.get("ignore_users", []) or [])
         ) and not self._is_admin(message.author.id):
             return "ignored_author"
+        if not author.bot and legal_consent.directed_for_consent(self, message):
+            tos_reason = await legal_consent.gate_message(self, message)
+            if tos_reason:
+                return tos_reason
 
         # DMs are off unless reply_dms is on. When on, anyone can DM; the
         # turn still hides Discord mod/server tools (see DM_BLOCKED_TOOLS).
@@ -7425,6 +7438,11 @@ class MaxwellBot(commands.Bot):
                 or caller_id in set(self._control.get("ignore_users", []) or [])
             ):
                 await self._deny_incoming_call(call, channel, "blacklist")
+                return
+            if caller_id and legal_consent.needs_consent(self, caller_id):
+                with contextlib.suppress(Exception):
+                    await legal_consent.offer(self, channel)
+                await self._deny_incoming_call(call, channel, "tos_required")
                 return
             pickup = False
             reason = "llm"
@@ -13783,6 +13801,10 @@ class MaxwellBot(commands.Bot):
     async def _handle_message(self, message, content: str | None = None):
         content = content or message.content
         channel_id = str(message.channel.id)
+        tos_reason = await legal_consent.gate_message(self, message)
+        if tos_reason:
+            MaxwellBot._record_request_outcome(self, message, "suppressed", tos_reason)
+            return
         # Sleep gate: when the bot is in a sleep window, abort the
         # dispatch, send a one-shot notice in the triggering channel
         # saying "Max is sleeping, back in Xm", and return. Never DM.

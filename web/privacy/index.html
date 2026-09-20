@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy — maxwell</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#0a0a0c;--card:#0f0f12;--bdr:#1c1c22;--bdr2:#2a2a32;
+  --fg:#e4e4e8;--fg2:#8a8a96;--fg3:#4a4a56;
+}
+body{background:var(--bg);color:var(--fg);font-family:Inter,system-ui,sans-serif;line-height:1.65;min-height:100vh;-webkit-font-smoothing:antialiased}
+a{color:inherit}
+.page{max-width:680px;margin:0 auto;padding:80px 24px 80px}
+.tag{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--fg3);letter-spacing:.1em;text-transform:uppercase;margin-bottom:16px}
+h1{font-family:'JetBrains Mono',monospace;font-size:clamp(28px,6vw,40px);font-weight:700;letter-spacing:-.04em;line-height:1.1;margin-bottom:12px}
+.meta{font-size:13px;color:var(--fg2);margin-bottom:36px}
+.warn{border:1px solid var(--bdr);border-radius:10px;padding:16px 20px;font-size:14px;color:var(--fg2);line-height:1.6;margin-bottom:40px}
+.warn strong{color:var(--fg)}
+h2{font-family:'JetBrains Mono',monospace;font-size:13px;letter-spacing:.04em;margin:36px 0 12px;color:var(--fg)}
+p,li{font-size:15px;color:var(--fg2);margin-bottom:12px}
+ul{padding-left:20px;margin-bottom:16px}
+li{margin-bottom:8px}
+em{color:var(--fg);font-style:normal;font-weight:500}
+footer{margin-top:64px;padding-top:32px;border-top:1px solid var(--bdr);font-size:12px;color:var(--fg3);display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+footer a{text-decoration:none}
+footer a:hover{color:var(--fg)}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="tag">hosted instance · v1</div>
+  <h1>Privacy Policy</h1>
+  <p class="meta">Last updated 20 September 2026. This describes the hosted Maxwell instance, not every self-hosted copy of the MIT source.</p>
+
+  <div class="warn">
+    <strong>Very early public testing.</strong> Data may be lost, migrated, or deleted while the operator iterates. Do not send secrets you cannot afford to leak to a model provider.
+  </div>
+
+  <h2>1. Who this covers</h2>
+  <p>This policy applies when you use the hosted Maxwell Discord bot, the website at <em>maxwell.z3ki.dev</em>, or sites Maxwell generates on that origin. If you run your own Maxwell, you are the operator of that copy — this page does not bind you and does not describe your server.</p>
+
+  <h2>2. What we collect</h2>
+  <p>Depending on how you use the hosted bot, the operator may process:</p>
+  <ul>
+    <li>Discord user IDs, usernames, display names, and server/channel IDs</li>
+    <li>messages, attachments, stickers, and reply context when Maxwell is in the room or you talk to it</li>
+    <li>slash-command / user-install payloads if you use those surfaces</li>
+    <li>voice/audio you send it, if voice features are on</li>
+    <li>memory the bot stores about you and the channel (RAG/vector store, long-term facts, knowledge-graph entities)</li>
+    <li>generated sites, images, and files you ask it to publish</li>
+    <li>operational logs: request IDs, timestamps, tool traces, error reports — usually not a second full copy of private message text, but IDs and state are still personal data</li>
+    <li>TOS/privacy consent records (that you agreed, when, which version)</li>
+    <li>on this website: a localStorage flag that you agreed, stored only in your browser</li>
+  </ul>
+  <p>Dashboard login credentials and bot tokens are operator secrets, not something we collect from ordinary users.</p>
+
+  <h2>3. Why we process it</h2>
+  <p>To run the bot you asked to talk to: generate replies, remember context, run tools, moderate abuse, debug outages, enforce these Terms, and (later) apply usage limits or a paid plan. Legal basis where GDPR-style rules apply: you asked for the service (contract / steps at your request) and the operator's legitimate interest in running a tiny public experiment without it getting wrecked.</p>
+
+  <h2>4. Model providers and other processors</h2>
+  <p>Prompts, relevant memory, and attachments Maxwell needs for a turn are sent to whatever AI, embedding, image, search, or speech provider the operator has configured (for example an OpenAI-compatible API). Those companies see what the bot sends them. Discord already has the messages. Generated-site visitors hit the public origin, not Discord.</p>
+  <p>Do not paste passwords, private keys, or other people's private data into Maxwell.</p>
+
+  <h2>5. Where it lives</h2>
+  <p>Application data lives in the operator's <em>data/</em> directory and related databases on the host that runs Maxwell. Early testing means backups may be incomplete and wipes may happen.</p>
+
+  <h2>6. Retention</h2>
+  <p>Memory and logs are kept while they are useful to operate the bot, then deleted or overwritten as the operator rotates storage. Generated sites may expire on a timer or be deleted by you or the operator. Consent records are kept so we know you agreed. There is no multi-year archive promise.</p>
+
+  <h2>7. Sharing</h2>
+  <p>We do not sell your data. We share it with processors needed to run the service (Discord, model/image/search/voice APIs, the host/network). We may share information if required by law, to stop abuse, or if the hosted project is handed to a successor who keeps this policy in spirit.</p>
+
+  <h2>8. Your choices</h2>
+  <p>Stop using the bot. Leave servers that have it. Click “No thanks” on the consent prompt. Ask via GitHub issues or the bot (after agreeing) to delete stored memory tied to your Discord user ID — the operator will try, but early-testing backups and model-provider logs may be out of reach. You can clear this site's localStorage in your browser.</p>
+
+  <h2>9. Children</h2>
+  <p>The hosted service is not directed at children under 13 (or the Discord minimum in your country). Do not use it if you are under that age.</p>
+
+  <h2>10. Cookies</h2>
+  <p>The public site uses localStorage for TOS agreement (<em>mw_legal_v1</em>). No advertising cookies. The operator dashboard uses its own login storage for admins only.</p>
+
+  <h2>11. International</h2>
+  <p>The host and model providers may be in other countries. If you use the hosted bot, you understand your data may leave your country.</p>
+
+  <h2>12. Changes</h2>
+  <p>This policy can change. The version on this page is current. A material change may bump the consent version so Discord users agree again.</p>
+
+  <h2>13. Contact</h2>
+  <p>Source and issues: <a href="https://github.com/Z3ki/Maxwell-bot">github.com/Z3ki/Maxwell-bot</a>. Also see the <a href="/terms/">Terms of Service</a>.</p>
+
+  <footer>
+    <a href="/">maxwell</a>
+    <span>·</span>
+    <a href="/terms/">terms</a>
+    <span>·</span>
+    <a href="https://github.com/Z3ki/Maxwell-bot">github</a>
+  </footer>
+</div>
+</body>
+</html>

@@ -91,6 +91,7 @@ def test_caddy_separates_dashboard_and_generated_site_roots():
     assert "admin.maxwell.example.com {" in admin
     assert "handle /api/*" in admin
     assert "handle @admin" in admin
+    assert "handle @legal" in admin
     assert "handle /bot/" not in admin
     assert "root * /var/www/maxwell/bot" in public
     assert "handle_path /bot/*" in public

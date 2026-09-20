@@ -24,6 +24,10 @@ admin.maxwell.example.com {
 	handle @install {
 		file_server
 	}
+	@legal path /terms /terms/* /privacy /privacy/* /legal-gate.js
+	handle @legal {
+		file_server
+	}
 	handle {
 		respond "Not found" 404
 	}

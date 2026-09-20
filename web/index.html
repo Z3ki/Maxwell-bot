@@ -19,7 +19,7 @@ a{color:inherit;text-decoration:none}
 .page{max-width:680px;margin:0 auto;padding:140px 24px 80px}
 
 /* hero */
-.tag{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--fg3);letter-spacing:.1em;text-transform:uppercase;margin-bottom:20px}
+.tag{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--fg3);letter-spacing:.1em;text-transform:uppercase;margin-bottom:12px}
 h1{font-family:'JetBrains Mono',monospace;font-size:clamp(40px,9vw,64px);font-weight:700;letter-spacing:-.04em;line-height:1;margin-bottom:28px}
 .lead{font-size:17px;color:var(--fg2);max-width:540px;margin-bottom:36px}
 .lead em{color:var(--fg);font-style:normal;font-weight:500}
@@ -51,10 +51,10 @@ pre .cm{color:var(--fg3)}
 .stack .c:first-child{margin-top:0}
 
 /* warning */
-.warn{border:1px solid var(--bdr);border-radius:10px;padding:16px 20px;font-size:13px;color:var(--fg2);line-height:1.6}
+.warn{border:1px solid var(--bdr);border-radius:10px;padding:16px 20px;font-size:13px;color:var(--fg2);line-height:1.6;margin-bottom:24px}
 .warn strong{color:var(--fg)}
 
-footer{margin-top:64px;padding-top:32px;border-top:1px solid var(--bdr);font-size:12px;color:var(--fg3);display:flex;gap:14px;align-items:center}
+footer{margin-top:64px;padding-top:32px;border-top:1px solid var(--bdr);font-size:12px;color:var(--fg3);display:flex;gap:14px;align-items:center;flex-wrap:wrap}
 footer a{transition:color .2s}
 footer a:hover{color:var(--fg)}
 
@@ -62,14 +62,26 @@ footer a:hover{color:var(--fg)}
   .page{padding:96px 18px 48px}
   li{grid-template-columns:1fr;gap:6px}
 }
+
+#legal-gate{position:fixed;inset:0;z-index:1000;background:rgba(10,10,12,.92);display:grid;place-items:center;padding:24px}
+body.legal-locked{overflow:hidden}
+.legal-card{width:min(440px,100%);background:var(--card);border:1px solid var(--bdr);border-radius:12px;padding:28px 24px}
+.legal-kicker{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--fg3);margin-bottom:10px}
+#legal-gate h2{font-family:'JetBrains Mono',monospace;font-size:20px;letter-spacing:-.03em;text-transform:none;color:var(--fg);margin:0 0 12px;font-weight:700}
+#legal-gate p{font-size:14px;color:var(--fg2);margin-bottom:16px;line-height:1.55}
+#legal-gate a{text-decoration:underline}
+.legal-check{display:flex;gap:10px;align-items:flex-start;font-size:13px;color:var(--fg);margin:18px 0;line-height:1.45}
+.legal-check input{margin-top:3px}
+.legal-hint{min-height:18px;font-size:12px;color:#e57585}
+#legal-agree{width:100%;border:0;border-radius:8px;padding:12px;background:var(--fg);color:var(--bg);font:inherit;font-weight:600;cursor:pointer}
 </style>
 </head>
 <body>
 <div class="page">
 
-<div class="tag">the world's buggiest bot of today</div>
+<div class="tag">very early public testing</div>
 <h1>maxwell</h1>
-<p class="lead">An official Discord bot that talks, thinks, and remembers. <em>Not an assistant — just someone in the chat who happens to have access to an LLM, a shell, and zero self-preservation instincts. Somehow it still works. Most of the time.</em></p>
+<p class="lead">An official Discord bot that talks, thinks, and remembers. <em>Open source. Hosted copy is experimental.</em> Not an assistant — just someone in the chat who happens to have access to an LLM, a shell, and zero self-preservation instincts.</p>
 <div class="links">
   <a class="accent" href="https://github.com/Z3ki/Maxwell-bot" target="_blank">source code</a>
   <a href="/admin/">dashboard</a>
@@ -111,15 +123,20 @@ footer a:hover{color:var(--fg)}
 <div class="sep"></div>
 
 <div class="warn">
-  <strong>official Discord bot.</strong> Create an application in the Discord Developer Portal, enable Message Content / Server Members / Presence intents, and set DISCORD_BOT_TOKEN.
+  <strong>very very early testing for public use.</strong> Expect bugs, downtime, lost memory, and sudden limits. The code is MIT. This hosted instance may later add usage caps or a small subscription (around $3 — not a promise). First Discord message requires agreeing to the terms. Self-host: official Discord bot token, Message Content / Server Members / Presence intents, <em>DISCORD_BOT_TOKEN</em>.
 </div>
 
 <footer>
   <a href="https://github.com/Z3ki/Maxwell-bot" target="_blank">github</a>
   <span>&middot;</span>
   <a href="/admin/">dashboard</a>
+  <span>&middot;</span>
+  <a href="/terms/">terms</a>
+  <span>&middot;</span>
+  <a href="/privacy/">privacy</a>
 </footer>
 
 </div>
+<script src="/legal-gate.js"></script>
 </body>
 </html>
