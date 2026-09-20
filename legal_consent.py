@@ -165,7 +165,7 @@ def _tos_embed(bot: Any):
 
     terms, privacy = legal_urls(bot)
     embed = discord.Embed(
-        title="Maxwell is in very early public testing",
+        title="Maxwell is in Public Alpha",
         description=(
             "Before I can talk to you, you have to agree to the hosted-service "
             "Terms and Privacy Policy.\n\n"
@@ -180,7 +180,7 @@ def _tos_embed(bot: Any):
         ),
         colour=0xE4E4E8,
     )
-    embed.set_footer(text=f"TOS v{TOS_VERSION} · early public testing")
+    embed.set_footer(text=f"TOS v{TOS_VERSION} · Public Alpha")
     return embed
 
 
@@ -209,17 +209,34 @@ def tos_view():
     return view
 
 
-async def _send(destination: Any, **kwargs) -> None:
+async def _send(destination: Any, *, reply_to: Any = None, **kwargs) -> None:
+    if reply_to is not None:
+        reply = getattr(reply_to, "reply", None)
+        if callable(reply):
+            try:
+                await reply(**kwargs)
+                return
+            except Exception:
+                logger.exception("TOS reply failed; falling back to channel send")
     send = getattr(destination, "send", None)
     if callable(send):
-        await send(**kwargs)
+        if reply_to is not None:
+            kwargs.setdefault("reference", reply_to)
+            kwargs.setdefault("mention_author", True)
+        try:
+            await send(**kwargs)
+            return
+        except Exception:
+            kwargs.pop("reference", None)
+            kwargs.pop("mention_author", None)
+            await send(**kwargs)
 
 
-async def offer(bot: Any, destination: Any) -> None:
+async def offer(bot: Any, destination: Any, *, reply_to: Any = None) -> None:
     terms, privacy = legal_urls(bot)
     kwargs: dict[str, Any] = {
         "content": (
-            "Maxwell is in very early public testing. "
+            "Maxwell is in Public Alpha. "
             f"Read the Terms ({terms}) and Privacy Policy ({privacy}). "
             "Click Agree or reply `agree`."
         )
@@ -235,7 +252,7 @@ async def offer(bot: Any, destination: Any) -> None:
         view = None
     if view is not None:
         kwargs["view"] = view
-    await _send(destination, **kwargs)
+    await _send(destination, reply_to=reply_to, **kwargs)
 
 
 def _normalized_reply(bot: Any, message: Any) -> str:
@@ -261,8 +278,9 @@ async def gate_message(bot: Any, message: Any) -> str | None:
         try:
             await _send(
                 channel,
+                reply_to=message,
                 content=(
-                    "You're in. Maxwell is still in very early public testing — "
+                    "You're in. Maxwell is still in Public Alpha — "
                     "expect bugs, limits, and the occasional fire. Send your "
                     "message again."
                 ),
@@ -274,6 +292,7 @@ async def gate_message(bot: Any, message: Any) -> str | None:
         try:
             await _send(
                 channel,
+                reply_to=message,
                 content=(
                     "Okay. I won't process your messages on this hosted instance. "
                     "The code stays open source if you want to run your own copy."
@@ -293,15 +312,16 @@ async def gate_message(bot: Any, message: Any) -> str | None:
         return _REASON
     offered[key] = now
     try:
-        await offer(bot, channel)
+        await offer(bot, channel, reply_to=message)
     except Exception:
         logger.exception("Failed to send TOS prompt to %s", key)
         terms, privacy = legal_urls(bot)
         try:
             await _send(
                 channel,
+                reply_to=message,
                 content=(
-                    "Maxwell is in very early public testing. Reply `agree` "
+                    "Maxwell is in Public Alpha. Reply `agree` "
                     f"to the Terms ({terms}) and Privacy ({privacy}) before "
                     "I can talk to you."
                 ),
@@ -326,7 +346,7 @@ async def handle_interaction(bot: Any, interaction: Any) -> bool:
     if custom_id == CUSTOM_AGREE:
         record_agreement(bot, uid)
         text = (
-            "You're in. Maxwell is still in very early public testing — expect "
+            "You're in. Maxwell is still in Public Alpha — expect "
             "bugs, limits, and the occasional fire. Send your message again."
         )
     else:

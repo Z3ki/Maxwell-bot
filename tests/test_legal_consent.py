@@ -39,13 +39,21 @@ class _Channel:
 
 def _message(author_id, *, content="hey", dm=False):
     channel = _Channel(dm=dm)
-    return SimpleNamespace(
+    message = SimpleNamespace(
         author=SimpleNamespace(id=author_id, bot=False),
         channel=channel,
         content=content,
         guild=None if dm else SimpleNamespace(id=99),
         user_install=False,
     )
+
+    async def reply(**kwargs):
+        payload = dict(kwargs)
+        payload["_replied"] = True
+        return await channel.send(**payload)
+
+    message.reply = reply
+    return message
 
 
 def test_everyone_including_admins_must_agree(tmp_path):
@@ -81,9 +89,12 @@ def test_gate_sends_one_prompt_and_blocks(tmp_path, monkeypatch):
     message = _message(11, dm=True)
     calls = []
 
-    async def fake_offer(_bot, dest):
+    async def fake_offer(_bot, dest, *, reply_to=None):
         calls.append(dest)
-        await dest.send(content="tos-prompt")
+        if reply_to is not None:
+            await reply_to.reply(content="tos-prompt")
+        else:
+            await dest.send(content="tos-prompt")
 
     monkeypatch.setattr(legal_consent, "offer", fake_offer)
     monkeypatch.setattr(legal_consent.time, "monotonic", lambda: 12.0)
@@ -97,7 +108,7 @@ def test_gate_sends_one_prompt_and_blocks(tmp_path, monkeypatch):
     assert first == "tos_required"
     assert second == "tos_required"
     assert calls == [message.channel]
-    assert message.channel.sent == [{"content": "tos-prompt"}]
+    assert message.channel.sent == [{"content": "tos-prompt", "_replied": True}]
 
 
 def test_replying_agree_records_consent(tmp_path):
@@ -106,7 +117,8 @@ def test_replying_agree_records_consent(tmp_path):
     assert asyncio.run(legal_consent.gate_message(bot, message)) == "tos_required"
     assert legal_consent.has_agreed(bot, 11) is True
     assert message.channel.sent
-    assert "early public testing" in message.channel.sent[0]["content"]
+    assert message.channel.sent[0].get("_replied") is True
+    assert "Public Alpha" in message.channel.sent[0]["content"]
 
 
 def test_command_prefix_agree_also_counts(tmp_path):
@@ -138,7 +150,7 @@ def test_agree_button_records_consent(tmp_path):
     )
     assert asyncio.run(legal_consent.handle_interaction(bot, interaction)) is True
     assert legal_consent.has_agreed(bot, 77) is True
-    assert sent and "early public testing" in sent[0][0]
+    assert sent and "Public Alpha" in sent[0][0]
     assert sent[0][1].get("ephemeral") is True
 
 
@@ -188,7 +200,7 @@ def test_legal_pages_are_on_the_public_site():
     terms = (root / "terms" / "index.html").read_text()
     privacy = (root / "privacy" / "index.html").read_text()
     home = (root / "index.html").read_text()
-    assert "early public testing" in terms.lower()
+    assert "public alpha" in terms.lower()
     assert "MIT" in terms
     assert "US$3" in terms
     assert "Discord user IDs" in privacy
