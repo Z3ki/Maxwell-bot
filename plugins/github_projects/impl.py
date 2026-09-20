@@ -1,7 +1,8 @@
 """Per-user GitHub repository automation with isolated workspaces."""
 from __future__ import annotations
 
-import asyncio, contextlib, hashlib, json, os, re, shlex, time
+import asyncio, base64, contextlib, hashlib, hmac, json, os, re, shlex, time
+from urllib.parse import urlencode
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,105 @@ _API = "https://api.github.com"
 _MAX_OUTPUT = 120_000
 _MAX_DIFF = 90_000
 _PAT_RE = re.compile(r"^(ghp_|github_pat_|gho_|ghu_)[A-Za-z0-9_]{20,}$")
+_ALLOWED_SCOPES = frozenset({
+    "repo","public_repo","repo:status","repo_deployment","workflow",
+    "write:packages","read:packages","gist","user","read:user","user:email",
+    "read:org","notifications","project","read:project",
+    "admin:repo_hook","write:repo_hook","read:repo_hook",
+})
+_DEFAULT_SCOPES = ("repo",)
+
+
+def oauth_client_id() -> str:
+    return str(os.getenv("MAXWELL_GITHUB_OAUTH_CLIENT_ID", "") or "").strip()
+
+
+def oauth_client_secret() -> str:
+    return str(os.getenv("MAXWELL_GITHUB_OAUTH_CLIENT_SECRET", "") or "").strip()
+
+
+def oauth_redirect_uri() -> str:
+    override = str(os.getenv("MAXWELL_GITHUB_OAUTH_REDIRECT_URI", "") or "").strip()
+    if override:
+        return override
+    base = str(os.getenv("MAXWELL_PUBLIC_BASE_URL", "") or "").strip().rstrip("/")
+    if not base:
+        raise RuntimeError("MAXWELL_PUBLIC_BASE_URL is required for GitHub login links")
+    return base + "/api/github/oauth/callback"
+
+
+def oauth_configured() -> bool:
+    return bool(oauth_client_id() and oauth_client_secret() and str(os.getenv("MAXWELL_PUBLIC_BASE_URL", "") or "").strip())
+
+
+def normalize_scopes(raw: Any = None) -> list[str]:
+    if raw is None or str(raw).strip() == "":
+        parts = list(_DEFAULT_SCOPES)
+    elif isinstance(raw, (list, tuple)):
+        parts = [str(x).strip() for x in raw]
+    else:
+        parts = re.split(r"[,\s]+", str(raw).strip())
+    out: list[str] = []
+    for part in parts:
+        if not part:
+            continue
+        if part not in _ALLOWED_SCOPES:
+            raise ValueError(
+                f"unsupported GitHub permission {part!r}. Allowed: {', '.join(sorted(_ALLOWED_SCOPES))}"
+            )
+        if part not in out:
+            out.append(part)
+    return out or list(_DEFAULT_SCOPES)
+
+
+def sign_oauth_state(uid: str, scopes: list[str] | None = None) -> str:
+    uid = str(uid or "").strip()
+    if not uid.isdigit():
+        raise ValueError("oauth state requires a Discord user id")
+    secret = oauth_client_secret().encode()
+    if not secret:
+        raise RuntimeError("GitHub OAuth is not configured")
+    payload = json.dumps({"u": uid, "s": normalize_scopes(scopes), "e": int(time.time()) + 600}, separators=(",", ":"))
+    body = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+    sig = hmac.new(secret, body.encode(), hashlib.sha256).hexdigest()
+    return body + "." + sig
+
+
+def verify_oauth_state(state: str) -> dict[str, Any]:
+    raw = str(state or "")
+    if "." not in raw:
+        raise ValueError("invalid oauth state")
+    body, sig = raw.rsplit(".", 1)
+    secret = oauth_client_secret().encode()
+    expected = hmac.new(secret, body.encode(), hashlib.sha256).hexdigest() if secret else ""
+    try:
+        valid = bool(secret) and hmac.compare_digest(sig, expected)
+    except Exception:
+        valid = False
+    if not valid:
+        raise ValueError("invalid oauth state")
+    pad = "=" * (-len(body) % 4)
+    data = json.loads(base64.urlsafe_b64decode(body + pad))
+    if int(data.get("e") or 0) < time.time():
+        raise ValueError("oauth login link expired; ask Maxwell for a new one")
+    uid = str(data.get("u") or "")
+    if not uid.isdigit():
+        raise ValueError("invalid oauth state")
+    return {"uid": uid, "scopes": normalize_scopes(data.get("s"))}
+
+
+def authorize_url(uid: str, scopes: Any = None) -> str:
+    if not oauth_configured():
+        raise RuntimeError("GitHub OAuth is not configured")
+    scopes = normalize_scopes(scopes)
+    params = {
+        "client_id": oauth_client_id(),
+        "redirect_uri": oauth_redirect_uri(),
+        "scope": " ".join(scopes),
+        "state": sign_oauth_state(uid, scopes),
+        "allow_signup": "true",
+    }
+    return "https://github.com/login/oauth/authorize?" + urlencode(params)
 
 
 def _uid(message: Any) -> str:
@@ -96,15 +196,28 @@ class TokenStore:
         except (FileNotFoundError, OSError, json.JSONDecodeError):
             return {}
     def peek(self, uid: str) -> str:
-        row = self._read().get(str(uid))
-        if isinstance(row, dict):
-            return str(row.get("token") or "").strip()
-        return str(row or "").strip()
-    async def set(self, uid: str, token: str) -> None:
-        async with self.lock:
+        row = self.row(uid)
+        return str(row.get("token") or "").strip()
+    def row(self, uid: str) -> dict[str, Any]:
+        raw = self._read().get(str(uid))
+        if isinstance(raw, dict):
+            return dict(raw)
+        if raw:
+            return {"token": str(raw)}
+        return {}
+    def write(self, uid: str, token: str, **meta: Any) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with FileLock(self.path, timeout=5.0):
             data = self._read()
-            data[str(uid)] = {"token": token, "updated_at": time.time()}
+            row = {"token": token, "updated_at": time.time()}
+            for key, value in meta.items():
+                if value is not None:
+                    row[key] = value
+            data[str(uid)] = row
             _json_atomic(self.path, data)
+    async def set(self, uid: str, token: str, **meta: Any) -> None:
+        async with self.lock:
+            self.write(uid, token, **meta)
     async def clear(self, uid: str) -> bool:
         async with self.lock:
             data = self._read()
@@ -184,7 +297,7 @@ class GitHubProjectService:
         if not token:
             if identity=="bot":
                 raise PermissionError("no GitHub credential configured; set MAXWELL_GITHUB_TOKEN")
-            raise PermissionError("no GitHub credential for this Discord user. Have them create a fine-grained PAT at https://github.com/settings/tokens and save it with github_repo action=auth_set token=...")
+            raise PermissionError("this Discord user has not logged into GitHub. Call github_repo action=auth to generate a login link.")
         headers = {"Authorization":f"Bearer {token}","Accept":accept,"X-GitHub-Api-Version":"2022-11-28","User-Agent":"Maxwell-GitHub-Projects/1.0"}
         async with (await self.session()).request(method.upper(), _API+path, headers=headers, json=json_body) as resp:
             text = await resp.text(); parsed = None
@@ -382,10 +495,10 @@ class GitHubRepoTool(Tool):
     required_capabilities=("network","files.read","files.write","shell","secrets.read"); timeout_seconds=3600
     parameters: ClassVar[dict[str, Any]] = {"type":"object","properties":{
         "action":{"type":"string","enum":["auth","auth_set","auth_clear","policy_get","policy_set","list","checkout","sync","status","run","diff","verify","commit","push","pr_create","pr_get","pr_diff","pr_checkout","review","merge","issue_get","issue_reply","schedule_set","knowledge"]},
-        "repo":{"type":"string"},"ref":{"type":"string"},"command":{"type":"string"},"message":{"type":"string"},"title":{"type":"string"},"body":{"type":"string"},"token":{"type":"string"},"number":{"type":"integer"},"event":{"type":"string","enum":["COMMENT","APPROVE","REQUEST_CHANGES"]},"mode":{"type":"string","enum":["read","write","admin"]},"identity":{"type":"string","enum":["user","bot"]},"auto_review":{"type":"boolean"},"auto_merge":{"type":"boolean"},"auto_issue_reply":{"type":"boolean"},"allow_security_testing":{"type":"boolean"},"merge_method":{"type":"string","enum":["merge","squash","rebase"]},"base":{"type":"string"},"head":{"type":"string"},"schedule_enabled":{"type":"boolean"},"schedule_minutes":{"type":"integer","minimum":5},"schedule_goal":{"type":"string"}},"required":["action"],"additionalProperties":True}
+        "repo":{"type":"string"},"ref":{"type":"string"},"command":{"type":"string"},"message":{"type":"string"},"title":{"type":"string"},"body":{"type":"string"},"token":{"type":"string"},"scopes":{"type":"string"},"permissions":{"type":"string"},"number":{"type":"integer"},"event":{"type":"string","enum":["COMMENT","APPROVE","REQUEST_CHANGES"]},"mode":{"type":"string","enum":["read","write","admin"]},"identity":{"type":"string","enum":["user","bot"]},"auto_review":{"type":"boolean"},"auto_merge":{"type":"boolean"},"auto_issue_reply":{"type":"boolean"},"allow_security_testing":{"type":"boolean"},"merge_method":{"type":"string","enum":["merge","squash","rebase"]},"base":{"type":"string"},"head":{"type":"string"},"schedule_enabled":{"type":"boolean"},"schedule_minutes":{"type":"integer","minimum":5},"schedule_goal":{"type":"string"}},"required":["action"],"additionalProperties":True}
     def __init__(self,bot,service): super().__init__(bot); self.service=service
     def get_description(self):
-        return "Per-user isolated GitHub workspace. Users save their own PAT with auth_set (never printed back). Other actions: auth/auth_clear, policy_get/set, list, checkout/sync/status/run/diff/verify/commit/push, pr_create/get/diff/pr_checkout/review/merge, issue_get/reply, schedule_set, knowledge. Repo policy controls write/admin; normal shell commands never receive GitHub tokens."
+        return "Per-user isolated GitHub workspace. action=auth generates a GitHub login link with selectable scopes (default repo). Other actions: auth_clear, policy_get/set, list, checkout/sync/status/run/diff/verify/commit/push, pr_create/get/diff/pr_checkout/review/merge, issue_get/reply, schedule_set, knowledge. Repo policy controls write/admin; normal shell commands never receive GitHub tokens."
 
     async def execute(self,message:Any,action:str|None=None,repo:str|None=None,**kw:Any)->str:
         try:
@@ -396,12 +509,18 @@ class GitHubRepoTool(Tool):
     async def _execute(self,message:Any,action:str|None=None,repo:str|None=None,**kw:Any)->str:
         uid=_uid(message); action=str(action or "").strip().lower()
         if action in {"auth","auth_status","connect"}:
-            stored=bool(self.service.user_tokens.peek(uid))
-            env=bool(str(os.getenv(f"MAXWELL_GITHUB_USER_TOKEN_{re.sub(r'[^0-9A-Za-z]','_',uid)}","") or "").strip())
+            scopes = normalize_scopes(kw.get("scopes") or kw.get("permissions") or kw.get("scope"))
+            row = self.service.user_tokens.row(uid)
+            login = str(row.get("login") or "")
+            connected = "yes" + (f" as {login}" if login else "") if (self.service.token(uid) or login) else "no"
+            try:
+                url = authorize_url(uid, scopes)
+            except Exception as exc:
+                return f"Error: cannot generate GitHub login link: {exc}"
             return (
-                f"GitHub identity for Discord user {uid}: saved={'yes' if stored or env else 'no'}. "
-                "To connect yourself, create a fine-grained PAT (Contents, Pull requests, Issues) at https://github.com/settings/tokens "
-                "and ask Maxwell to github_repo action=auth_set token=... Maxwell stores it for this Discord user only and never prints it back. No operator .env edit required."
+                f"GitHub login for Discord user {uid}. connected={connected}. scopes={','.join(scopes)}.\n"
+                f"Click this link and authorize Maxwell, then come back:\n{url}\n"
+                "Ask for different permissions by passing scopes= (repo, public_repo, workflow, gist, read:org, user, notifications, …)."
             )
         if action=="auth_set":
             raw=str(kw.get("token") or kw.get("body") or kw.get("message") or "").strip()

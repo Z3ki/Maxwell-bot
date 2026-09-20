@@ -2649,6 +2649,86 @@ async def github_webhook(request):
         return _json_response({"ok":True})
     return _json_response({"ok":True,"ignored":event_name})
 
+def _github_oauth_page(title: str, body: str, *, ok: bool = True, status: int = 200):
+    import html as _html
+    color = "#3fb950" if ok else "#f85149"
+    text = (
+        "<!doctype html><html><head><meta charset='utf-8'><title>"
+        + _html.escape(title)
+        + "</title><style>body{font-family:system-ui,sans-serif;background:#0d1117;color:#e6edf3;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}.card{max-width:32rem;padding:2rem;border:1px solid #30363d;border-radius:12px;background:#161b22}h1{margin-top:0}</style></head><body><div class='card'><h1 style='color:"
+        + color
+        + "'>"
+        + _html.escape(title)
+        + "</h1><p>"
+        + body
+        + "</p><p>You can close this tab and go back to Discord.</p></div></body></html>"
+    )
+    return web.Response(text=text, content_type="text/html", status=status)
+
+
+async def github_oauth_callback(request):
+    import html as _html
+    from plugins.github_projects.impl import (
+        TokenStore,
+        oauth_client_id,
+        oauth_client_secret,
+        oauth_redirect_uri,
+        verify_oauth_state,
+    )
+
+    if request.query.get("error"):
+        detail = str(request.query.get("error_description") or request.query.get("error") or "cancelled")
+        return _github_oauth_page("GitHub login cancelled", _html.escape(detail), ok=False, status=400)
+    code = str(request.query.get("code") or "")
+    state = str(request.query.get("state") or "")
+    if not code or not state:
+        return _github_oauth_page("GitHub login failed", "Missing code/state.", ok=False, status=400)
+    try:
+        payload = verify_oauth_state(state)
+    except Exception as exc:
+        return _github_oauth_page("GitHub login failed", _html.escape(str(exc)), ok=False, status=400)
+    cid, secret = oauth_client_id(), oauth_client_secret()
+    if not cid or not secret:
+        return _github_oauth_page("GitHub login failed", "OAuth is not configured.", ok=False, status=503)
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.post(
+                "https://github.com/login/oauth/access_token",
+                json={
+                    "client_id": cid,
+                    "client_secret": secret,
+                    "code": code,
+                    "redirect_uri": oauth_redirect_uri(),
+                },
+                headers={"Accept": "application/json", "User-Agent": "Maxwell-GitHub-Projects/1.0"},
+            ) as resp:
+                data = await resp.json(content_type=None)
+        token = str((data or {}).get("access_token") or "")
+        if not token:
+            err = str((data or {}).get("error_description") or (data or {}).get("error") or "no access token")
+            return _github_oauth_page("GitHub login failed", _html.escape(err), ok=False, status=400)
+        login = ""
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get(
+                "https://api.github.com/user",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": "Maxwell-GitHub-Projects/1.0",
+                },
+            ) as resp:
+                user = await resp.json(content_type=None)
+        if isinstance(user, dict):
+            login = str(user.get("login") or "")[:80]
+        store = TokenStore(DATA_DIR / "plugins" / "github_projects" / "user_tokens.json")
+        store.write(payload["uid"], token, login=login, scopes=payload.get("scopes"), source="oauth")
+    except Exception:
+        logger.exception("github oauth callback failed")
+        return _github_oauth_page("GitHub login failed", "Could not finish login.", ok=False, status=500)
+    who = _html.escape(login or "GitHub")
+    return _github_oauth_page("GitHub connected", f"Logged in as <strong>{who}</strong>. Maxwell can use this GitHub account for your Discord user now.")
+
+
 
 app = web.Application(
     middlewares=[_reliability_middleware, _auth_middleware_unless_login],
@@ -2657,6 +2737,7 @@ app = web.Application(
 app.router.add_get("/health", health_check)
 app.router.add_get("/api/health", health_check)
 app.router.add_post("/api/github/webhook", github_webhook)
+app.router.add_get("/api/github/oauth/callback", github_oauth_callback)
 app.router.add_get("/data/{file}", data_file)
 app.router.add_options(
     "/data/{file}",

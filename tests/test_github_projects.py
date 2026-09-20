@@ -16,6 +16,10 @@ from plugins.github_projects.impl import (
     GitHubProjectService,
     GitHubRepoTool,
     PolicyStore,
+    authorize_url,
+    normalize_scopes,
+    sign_oauth_state,
+    verify_oauth_state,
     _ref,
     _repo,
 )
@@ -161,7 +165,7 @@ def test_list_without_user_token_returns_error(tmp_path, monkeypatch):
         )
         out = await tool.execute(msg, action="list")
         assert out.startswith("Error:")
-        assert "auth_set" in out
+        assert "github_repo action=auth" in out
 
     asyncio.run(run())
 
@@ -181,12 +185,46 @@ def test_auth_set_is_per_user_and_never_echoed(tmp_path, monkeypatch):
         assert pat not in out
         assert svc.token("1") == pat
         assert svc.token("2") == ""
-        status = await tool.execute(one, action="auth")
-        assert "saved=yes" in status
-        assert pat not in status
         assert await tool.execute(two, action="auth_clear")
         assert svc.token("1") == pat
         await tool.execute(one, action="auth_clear")
         assert svc.token("1") == ""
+
+    asyncio.run(run())
+
+
+def test_oauth_scopes_and_signed_login_link(monkeypatch):
+    monkeypatch.setenv("MAXWELL_GITHUB_OAUTH_CLIENT_ID", "client123")
+    monkeypatch.setenv("MAXWELL_GITHUB_OAUTH_CLIENT_SECRET", "s3cret")
+    monkeypatch.setenv("MAXWELL_PUBLIC_BASE_URL", "https://maxwell.z3ki.dev")
+    assert normalize_scopes("repo,workflow") == ["repo", "workflow"]
+    with pytest.raises(ValueError):
+        normalize_scopes("repo,admin:org")
+    state = sign_oauth_state("664824253526573056", ["repo"])
+    payload = verify_oauth_state(state)
+    assert payload["uid"] == "664824253526573056"
+    assert payload["scopes"] == ["repo"]
+    with pytest.raises(ValueError):
+        verify_oauth_state(state[:-1] + ("0" if state[-1] != "0" else "1"))
+    url = authorize_url("664824253526573056", "repo,workflow")
+    assert url.startswith("https://github.com/login/oauth/authorize?")
+    assert "client_id=client123" in url
+    assert "repo+workflow" in url or "repo%20workflow" in url
+
+
+def test_auth_returns_login_link(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAXWELL_GITHUB_OAUTH_CLIENT_ID", "client123")
+    monkeypatch.setenv("MAXWELL_GITHUB_OAUTH_CLIENT_SECRET", "s3cret")
+    monkeypatch.setenv("MAXWELL_PUBLIC_BASE_URL", "https://maxwell.z3ki.dev")
+    monkeypatch.delenv("MAXWELL_GITHUB_USER_TOKEN_1", raising=False)
+
+    async def run():
+        svc = GitHubProjectService(Bot(), Ctx(tmp_path))
+        tool = GitHubRepoTool(Bot(), svc)
+        msg = SimpleNamespace(author=SimpleNamespace(id="1"), channel=SimpleNamespace(id="10"))
+        out = await tool.execute(msg, action="auth", scopes="repo,workflow")
+        assert "https://github.com/login/oauth/authorize?" in out
+        assert "scopes=repo,workflow" in out
+        assert "s3cret" not in out
 
     asyncio.run(run())
