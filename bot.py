@@ -4459,7 +4459,7 @@ class MaxwellBot(commands.Bot):
         return self._soft_addressed(message)
 
     def _directly_addressed(self, message) -> bool:
-        """Hard ping: DM, @Maxwell, a Discord reply to Maxwell, or /maxwell."""
+        """Hard ping: DM, @Maxwell, a role he has, a Discord reply to him, or /maxwell."""
         if is_user_install_message(message):
             return True
         getter = getattr(self, "_self_ids", None)
@@ -4477,6 +4477,9 @@ class MaxwellBot(commands.Bot):
             return True
         if self.user is not None and self.user in mentions:
             return True
+        hits_role = getattr(self, "_role_mention_hits_self", None)
+        if callable(hits_role) and hits_role(message):
+            return True
         if message_reference_is_forward(message):
             return False
         ref = getattr(message, "reference", None)
@@ -4485,7 +4488,42 @@ class MaxwellBot(commands.Bot):
             return getattr(resolved.author, "id", None) in self_ids
         return False
 
-    def _content_without_self_mention(self, content: str | None) -> str:
+    def _role_mention_hits_self(self, message) -> bool:
+        """True when they @ a role Maxwell holds — the same ping a human in that role gets."""
+        guild = getattr(message, "guild", None)
+        if guild is None:
+            return False
+        me = getattr(guild, "me", None)
+        if me is None:
+            getter = getattr(self, "_self_ids", None)
+            ids = list(getter()) if callable(getter) else []
+            uid = getattr(getattr(self, "user", None), "id", None)
+            if uid is not None:
+                ids.append(uid)
+            get_member = getattr(guild, "get_member", None)
+            if callable(get_member):
+                for sid in ids:
+                    me = get_member(sid)
+                    if me is not None:
+                        break
+        if me is None:
+            return False
+        default_id = getattr(getattr(guild, "default_role", None), "id", None)
+        bot_roles = {
+            getattr(role, "id", role)
+            for role in (getattr(me, "roles", None) or [])
+            if getattr(role, "id", role) not in (None, default_id)
+        }
+        mentioned = {
+            getattr(role, "id", role)
+            for role in (getattr(message, "role_mentions", None) or [])
+        }
+        mentioned.update(getattr(message, "raw_role_mentions", None) or [])
+        mentioned.discard(default_id)
+        mentioned.discard(None)
+        return bool(bot_roles & mentioned)
+
+    def _content_without_self_mention(self, content: str | None, message=None) -> str:
         text = str(content or "")
         getter = getattr(self, "_self_ids", None)
         ids = set(getter()) if callable(getter) else set()
@@ -4494,6 +4532,16 @@ class MaxwellBot(commands.Bot):
             ids.add(uid)
         for sid in ids:
             text = re.sub(rf"<@!?{sid}>", "", text)
+        if message is not None:
+            hits_role = getattr(self, "_role_mention_hits_self", None)
+            if callable(hits_role) and hits_role(message):
+                rids = set(getattr(message, "raw_role_mentions", None) or [])
+                for role in getattr(message, "role_mentions", None) or []:
+                    rid = getattr(role, "id", None)
+                    if rid is not None:
+                        rids.add(rid)
+                for rid in rids:
+                    text = re.sub(rf"<@&{rid}>", "", text)
         return text.strip()
 
     def _is_bare_ping(self, message, content: str | None = None) -> bool:
@@ -4501,7 +4549,8 @@ class MaxwellBot(commands.Bot):
         if not self._directly_addressed(message):
             return False
         text = self._content_without_self_mention(
-            content if content is not None else getattr(message, "content", "")
+            content if content is not None else getattr(message, "content", ""),
+            message,
         )
         if text:
             return False
@@ -4514,28 +4563,8 @@ class MaxwellBot(commands.Bot):
         return True
 
     def _soft_addressed(self, message) -> bool:
-        """@everyone / @here / a role Maxwell has — not a personal ping."""
-        if getattr(message, "mention_everyone", False):
-            return True
-        guild = getattr(message, "guild", None)
-        if not guild:
-            return False
-        me = guild.me
-        if me is None:
-            getter = getattr(self, "_self_ids", None)
-            ids = list(getter()) if callable(getter) else []
-            uid = getattr(getattr(self, "user", None), "id", None)
-            if uid is not None:
-                ids.append(uid)
-            for sid in ids:
-                me = guild.get_member(sid)
-                if me:
-                    break
-        if not me:
-            return False
-        bot_roles = set(getattr(me, "roles", []) or [])
-        msg_roles = set(getattr(message, "role_mentions", []) or [])
-        return bool(bot_roles & msg_roles)
+        """@everyone / @here — room-wide, not a personal or role ping."""
+        return bool(getattr(message, "mention_everyone", False))
 
     def _addressing_someone_else(self, message) -> bool:
         """@ someone other than Maxwell, and not also @ Maxwell."""
@@ -7356,7 +7385,7 @@ class MaxwellBot(commands.Bot):
                 return "user_install_not_admin"
             self._dispatch_reply(
                 message,
-                self._content_without_self_mention(message.content),
+                self._content_without_self_mention(message.content, message),
                 directed=True,
             )
             return
@@ -7366,7 +7395,7 @@ class MaxwellBot(commands.Bot):
                 return "dm_replies_disabled"
             self._dispatch_reply(
                 message,
-                self._content_without_self_mention(message.content),
+                self._content_without_self_mention(message.content, message),
                 directed=True,
             )
             return
@@ -7376,7 +7405,7 @@ class MaxwellBot(commands.Bot):
                 self._touch_watch_debounce(message)
                 return "group_replies_disabled"
             await self._maybe_live_reply(
-                message, self._content_without_self_mention(message.content)
+                message, self._content_without_self_mention(message.content, message)
             )
             return
 
@@ -7384,7 +7413,7 @@ class MaxwellBot(commands.Bot):
             if not self._control.get("reply_mentions", True):
                 self._touch_watch_debounce(message)
                 return "mention_replies_disabled"
-            clean = self._content_without_self_mention(message.content)
+            clean = self._content_without_self_mention(message.content, message)
             # Bare @Maxwell with no extra text: still a turn. Do not
             # invent "look at this" — he should read the room (and any
             # reply-parent) and answer from that.

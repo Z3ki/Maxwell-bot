@@ -52,6 +52,7 @@ def _bot(*, watch_seconds=180, debounce_seconds=0.05, watch_enabled=True):
         MaxwellBot._content_without_self_mention.__get__(bot)
     )
     bot._is_bare_ping = MaxwellBot._is_bare_ping.__get__(bot)
+    bot._role_mention_hits_self = MaxwellBot._role_mention_hits_self.__get__(bot)
     bot._soft_addressed = MaxwellBot._soft_addressed.__get__(bot)
     bot._reply_meta_from_message = MaxwellBot._reply_meta_from_message.__get__(bot)
     bot._replying_to_other = MaxwellBot._replying_to_other.__get__(bot)
@@ -425,6 +426,38 @@ def test_mention_still_counts_as_addressed():
     msg.mentions = [bot.user]
     assert MaxwellBot._directly_addressed(bot, msg) is True
     assert MaxwellBot._should_live_reply(bot, msg) is True
+
+
+def test_role_mention_replies_like_a_user_ping():
+    bot = _bot()
+    mods = SimpleNamespace(id=55, name="mods")
+    other = SimpleNamespace(id=66, name="unrelated")
+    everyone = SimpleNamespace(id=1, name="everyone")
+    msg = _plain_followup(content="<@&55> you around")
+    msg.guild = SimpleNamespace(
+        me=SimpleNamespace(roles=[everyone, mods]),
+        default_role=everyone,
+        get_member=lambda _uid: None,
+    )
+    msg.role_mentions = [mods]
+    msg.raw_role_mentions = [55]
+    assert MaxwellBot._role_mention_hits_self(bot, msg) is True
+    assert MaxwellBot._directly_addressed(bot, msg) is True
+    assert MaxwellBot._should_live_reply(bot, msg) is True
+    assert MaxwellBot._content_without_self_mention(bot, msg.content, msg) == "you around"
+    assert MaxwellBot._is_bare_ping(bot, msg) is False
+    bare = _plain_followup(content="<@&55>")
+    bare.guild = msg.guild
+    bare.role_mentions = [mods]
+    bare.raw_role_mentions = [55]
+    assert MaxwellBot._is_bare_ping(bot, bare) is True
+    miss = _plain_followup(content="<@&66> mods")
+    miss.guild = msg.guild
+    miss.role_mentions = [other]
+    miss.raw_role_mentions = [66]
+    assert MaxwellBot._role_mention_hits_self(bot, miss) is False
+    assert MaxwellBot._directly_addressed(bot, miss) is False
+    assert MaxwellBot._should_live_reply(bot, miss) is False
 
 
 def test_reply_to_someone_else_is_his_choice_on_watch():
