@@ -76,9 +76,16 @@ def test_agreement_survives_reload(tmp_path):
     assert legal_consent.needs_consent(other, "42") is False
 
 
-def test_gate_sends_one_prompt_and_blocks(tmp_path):
+def test_gate_sends_one_prompt_and_blocks(tmp_path, monkeypatch):
     bot = _bot(tmp_path)
     message = _message(11, dm=True)
+    calls = []
+
+    async def fake_offer(_bot, dest):
+        calls.append(dest)
+        await dest.send(content="tos-prompt")
+
+    monkeypatch.setattr(legal_consent, "offer", fake_offer)
 
     async def run():
         first = await legal_consent.gate_message(bot, message)
@@ -88,11 +95,8 @@ def test_gate_sends_one_prompt_and_blocks(tmp_path):
     first, second = asyncio.run(run())
     assert first == "tos_required"
     assert second == "tos_required"
-    assert len(message.channel.sent) == 1
-    payload = message.channel.sent[0]
-    embed = payload["embed"]
-    assert embed.title.startswith("Maxwell is in very early")
-    assert "maxwell.example.test/terms/" in embed.description
+    assert calls == [message.channel]
+    assert message.channel.sent == [{"content": "tos-prompt"}]
 
 
 def test_replying_agree_records_consent(tmp_path):

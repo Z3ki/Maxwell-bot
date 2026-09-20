@@ -219,8 +219,23 @@ async def _send(destination: Any, **kwargs) -> None:
 
 
 async def offer(bot: Any, destination: Any) -> None:
-    kwargs: dict[str, Any] = {"embed": _tos_embed(bot)}
-    view = tos_view()
+    terms, privacy = legal_urls(bot)
+    kwargs: dict[str, Any] = {
+        "content": (
+            "Maxwell is in very early public testing. "
+            f"Read the Terms ({terms}) and Privacy Policy ({privacy}). "
+            "Click Agree or reply `agree`."
+        )
+    }
+    try:
+        kwargs["embed"] = _tos_embed(bot)
+    except Exception:
+        logger.exception("TOS embed failed")
+    try:
+        view = tos_view()
+    except Exception:
+        logger.exception("TOS view failed")
+        view = None
     if view is not None:
         kwargs["view"] = view
     await _send(destination, **kwargs)
