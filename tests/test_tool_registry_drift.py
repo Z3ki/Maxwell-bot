@@ -42,6 +42,9 @@ def test_every_registered_tool_has_a_parameter_schema():
             "recall_cross_server_memory",
             "inspect_media_url",
             "plugin_workbench",
+            "github_repo",
+            "agent_life",
+            "user_sandbox",
         }
     ]
     assert missing == []

@@ -110,18 +110,18 @@ def _json_response(data, status=200):
     )
 
 
-# Public routes, both of them a generated site's own backend talking to a
-# visitor's browser — which cannot carry admin credentials by definition.
+# Public routes. These cannot carry admin credentials by definition.
 #
 #   /api/site/<slug>/...   the built-in datastore (site_backend.py), scoped to
 #                          one slug, size-capped and rate-limited.
 #   /bot/<slug>/api/...    the site's own server, proxied to a container that
 #                          only that slug's registry row can name
 #                          (site_server.py). Caddy routes this path here.
+#   /api/github/webhook    signed GitHub wakeup; HMAC-verified, no admin auth.
 #
-# Neither can reach another slug's data, and nothing else on the API is
-# reachable through them.
-PUBLIC_PATH_PREFIXES = ("/api/site/",)
+# Neither site namespace can reach another slug's data, and nothing else on
+# the API is reachable through them.
+PUBLIC_PATH_PREFIXES = ("/api/site/", "/api/github/webhook")
 PUBLIC_PATH_RE = re.compile(r"^/bot/[a-z0-9-]{2,30}/api(?:/|$)")
 
 

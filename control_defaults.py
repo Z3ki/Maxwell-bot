@@ -451,6 +451,9 @@ _FALLBACK_KNOWN_TOOLS = [
     "usage",
     "debug",
     "report",
+    "github_repo",
+    "agent_life",
+    "user_sandbox",
 ]
 
 

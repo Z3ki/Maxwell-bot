@@ -208,6 +208,8 @@ docs/PLUGINS.md         Plugin development API
 - [Security](SECURITY.md)
 - [Discord persona](docs/MAXWELL_PERSONA.md)
 - [Audit snapshot](docs/AUDIT.md)
+- [GitHub projects](docs/GITHUB_PROJECTS.md)
+- [Agent life](docs/LIVING_AGENT.md)
 - [Email integration](email_integration/README.md)
 
 `CONTEXT_MEMORY_ANALYSIS.md` and `RELIABILITY_RESEARCH.md` are retained as historical/research entry points, but their current-status sections replace obsolete architecture claims and point back to the live implementation/docs.
