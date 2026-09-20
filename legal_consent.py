@@ -291,25 +291,26 @@ async def gate_message(bot: Any, message: Any) -> str | None:
         offered = {}
         bot._tos_offered_at = offered
     key = str(uid)
-    last = float(offered.get(key) or 0.0)
-    if now - last >= OFFER_COOLDOWN_SECONDS:
-        offered[key] = now
+    last = offered.get(key)
+    if last is not None and now - float(last) < OFFER_COOLDOWN_SECONDS:
+        return _REASON
+    offered[key] = now
+    try:
+        await offer(bot, channel)
+    except Exception:
+        logger.exception("Failed to send TOS prompt to %s", key)
+        terms, privacy = legal_urls(bot)
         try:
-            await offer(bot, channel)
+            await _send(
+                channel,
+                content=(
+                    "Maxwell is in very early public testing. Reply `agree` "
+                    f"to the Terms ({terms}) and Privacy ({privacy}) before "
+                    "I can talk to you."
+                ),
+            )
         except Exception:
-            logger.exception("Failed to send TOS prompt to %s", key)
-            terms, privacy = legal_urls(bot)
-            try:
-                await _send(
-                    channel,
-                    content=(
-                        "Maxwell is in very early public testing. Reply `agree` "
-                        f"to the Terms ({terms}) and Privacy ({privacy}) before "
-                        "I can talk to you."
-                    ),
-                )
-            except Exception:
-                logger.exception("TOS text fallback failed for %s", key)
+            logger.exception("TOS text fallback failed for %s", key)
     return _REASON
 
 

@@ -86,6 +86,7 @@ def test_gate_sends_one_prompt_and_blocks(tmp_path, monkeypatch):
         await dest.send(content="tos-prompt")
 
     monkeypatch.setattr(legal_consent, "offer", fake_offer)
+    monkeypatch.setattr(legal_consent.time, "monotonic", lambda: 12.0)
 
     async def run():
         first = await legal_consent.gate_message(bot, message)
