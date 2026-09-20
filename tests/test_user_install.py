@@ -252,18 +252,28 @@ def test_adapter_send_caps_at_six():
     assert "chunk 7" in last.content
 
 
-def test_handle_rejects_non_admin():
-    interaction = _interaction(user_id=2)
+def test_handle_spawns_for_non_admin():
+    interaction = _interaction(user_id=2, prompt="ping me")
+    spawned = []
+
+    async def on_message(message):
+        return None
+
+    def spawn(coro):
+        spawned.append(coro.cr_frame.f_locals["message"])
+        coro.close()
+
     bot = SimpleNamespace(
         _is_admin=lambda uid: str(uid) == "1",
-        _spawn_detached=lambda coro: (_ for _ in ()).throw(AssertionError("spawned")),
-        on_message=lambda message: (_ for _ in ()).throw(AssertionError("ran")),
+        _spawn_detached=spawn,
+        on_message=on_message,
     )
     claimed = asyncio.run(handle_user_install_interaction(bot, interaction))
     assert claimed is True
-    assert interaction.response.messages
-    assert "admins" in interaction.response.messages[0]["content"].lower()
-    assert interaction.response.messages[0]["ephemeral"] is True
+    assert interaction.response.deferred is True
+    assert spawned
+    assert is_user_install_message(spawned[0])
+    assert spawned[0].content == "ping me"
 
 
 def test_handle_defers_and_spawns_for_admin():
@@ -309,7 +319,7 @@ def test_policy_skips_channel_allowlist_for_user_install():
         },
         _blacklist=set(),
     )
-    bot._is_admin = lambda uid: True
+    bot._is_admin = lambda uid: False
     bot._solo_blocks = lambda message: True
     bot._queued_request_policy_reason = MaxwellBot._queued_request_policy_reason.__get__(
         bot

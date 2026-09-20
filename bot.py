@@ -4342,8 +4342,6 @@ class MaxwellBot(commands.Bot):
             return "bot_disabled"
         author = message.author
         if is_user_install_message(message):
-            if not self._is_admin(author.id):
-                return "user_install_not_admin"
             return ""
         if (
             str(author.id) in (getattr(self, "_blacklist", None) or set())
@@ -5702,7 +5700,7 @@ class MaxwellBot(commands.Bot):
             await parent(interaction)
 
     async def _sync_slash_commands(self) -> None:
-        """Register the admin-only user-install /maxwell command globally."""
+        """Register the user-install /maxwell command globally."""
         token = (
             getattr(getattr(self, "http", None), "token", None)
             or getattr(getattr(self, "config", None), "DISCORD_BOT_TOKEN", "")
@@ -7381,8 +7379,6 @@ class MaxwellBot(commands.Bot):
                 return "cooldown"
 
         if is_user_install_message(message):
-            if not self._is_admin(message.author.id):
-                return "user_install_not_admin"
             self._dispatch_reply(
                 message,
                 self._content_without_self_mention(message.content, message),

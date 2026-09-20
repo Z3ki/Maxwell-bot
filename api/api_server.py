@@ -2186,24 +2186,14 @@ async def login_post(request):
 
 
 # ---------- Discord OAuth login ----------
-# The frontend hits /api/auth/discord/state to get a one-time state token and
-# the authorize URL, then Discord redirects to /api/auth/discord/callback which
-# exchanges the code and issues a bearer token the dashboard stores and sends
-# as `X-Discord-Token` for subsequent API calls.
-#
-# The same identify login gates Discord's Custom Install Link at /install:
-# only a Maxwell admin session can fetch the bot-add authorize URL.
+# Dashboard identify login. The frontend hits /api/auth/discord/state, Discord
+# redirects to /api/auth/discord/callback, and the dashboard stores the bearer
+# as `X-Discord-Token`. Bot add is Discord's own OAuth URL — no /install page.
 _DISCORD_STATES: dict[str, dict] = {}
-_OAUTH_NEXT_PATHS = frozenset({"/admin", "/admin/", "/install", "/install/"})
-_BOT_INSTALL_SCOPES = frozenset({"bot", "applications.commands"})
 
 
 def _oauth_next_path(raw) -> str:
-    path = str(raw or "").strip()
-    if path not in _OAUTH_NEXT_PATHS:
-        return "/admin/"
-    if path.startswith("/install"):
-        return "/install/"
+    del raw
     return "/admin/"
 
 
@@ -2234,50 +2224,6 @@ def _oauth_state_payload(entry) -> dict | None:
         "guild_id": _discord_snowflake(entry.get("guild_id")),
     }
 
-
-_ADMINISTRATOR_PERM_BIT = 8
-
-
-def _bot_install_permissions() -> str:
-    # Default 0 = Discord's normal add (no extra permissions requested).
-    # Administrator is never requested on the install link even if the env
-    # still has the old default of 8.
-    raw = os.getenv("DISCORD_BOT_PERMISSIONS", "0").strip()
-    if not raw.isdigit():
-        return "0"
-    return str(int(raw) & ~_ADMINISTRATOR_PERM_BIT)
-
-
-def _bot_install_scopes() -> str:
-    raw = os.getenv("DISCORD_INSTALL_SCOPES", "bot applications.commands")
-    parts = [
-        part
-        for part in str(raw).replace(",", " ").split()
-        if part in _BOT_INSTALL_SCOPES
-    ]
-    return " ".join(parts) if parts else "bot applications.commands"
-
-
-def _bot_install_authorize_url(*, guild_id: str = "", context: str = "guild") -> str:
-    from urllib.parse import urlencode
-
-    if context == "user":
-        params = {
-            "client_id": DISCORD_CLIENT_ID,
-            "scope": "applications.commands",
-            "integration_type": "1",
-        }
-        return "https://discord.com/oauth2/authorize?" + urlencode(params)
-    params = {
-        "client_id": DISCORD_CLIENT_ID,
-        "scope": _bot_install_scopes(),
-        "permissions": _bot_install_permissions(),
-        "integration_type": "0",
-    }
-    if guild_id:
-        params["guild_id"] = guild_id
-        params["disable_guild_select"] = "true"
-    return "https://discord.com/oauth2/authorize?" + urlencode(params)
 
 
 def _oauth_error_redirect(base: str, next_path: str, error: str):
@@ -2362,7 +2308,6 @@ async def discord_auth_callback(request):
     base = _discord_redirect_base(request)
     payload = _oauth_state_payload(_DISCORD_STATES.pop(state, None)) if state else None
     next_path = payload["next"] if payload else "/admin/"
-    guild_id = payload["guild_id"] if payload else ""
     if not code or not state:
         return _json_response({"error": "missing code/state"}, 400)
     if not payload or time.time() - payload["issued"] > 600:
@@ -2431,37 +2376,12 @@ async def discord_auth_callback(request):
         "avatar_url": avatar_url,
     })
     dest = f"{base}{next_path}"
-    if next_path.startswith("/install") and guild_id:
-        dest = f"{dest}?guild_id={guild_id}"
     # Token stays in the hash fragment so it never hits server logs as a query.
     raise web.HTTPFound(f"{dest}#discord_token={bearer}")
 
 
-async def install_authorize(request):
-    """Return Discord's Add App URL only to a Maxwell admin session."""
-    if not _has_admin_auth(request):
-        return _json_response({"error": "unauthorized"}, 401)
-    if not DISCORD_CLIENT_ID:
-        return _json_response({"error": "discord oauth not configured"}, 503)
-    context = str(request.query.get("context") or "guild").strip().lower()
-    if context not in {"guild", "user"}:
-        return _json_response({"error": "context must be guild or user"}, 400)
-    guild_id = _discord_snowflake(request.query.get("guild_id"))
-    if context == "user":
-        return _json_response(
-            {
-                "ok": True,
-                "authorize_url": _bot_install_authorize_url(context="user"),
-                "context": "user",
-            }
-        )
-    return _json_response(
-        {
-            "ok": True,
-            "authorize_url": _bot_install_authorize_url(guild_id=guild_id),
-            "context": "guild",
-        }
-    )
+
+
 
 
 async def discord_auth_verify(request):
@@ -2774,7 +2694,6 @@ app.router.add_get("/api/auth/discord/state", discord_auth_state)
 app.router.add_get("/api/auth/discord/callback", discord_auth_callback)
 app.router.add_get("/api/auth/discord/verify", discord_auth_verify)
 app.router.add_post("/api/auth/discord/logout", discord_auth_logout)
-app.router.add_get("/api/install/authorize", install_authorize)
 app.router.add_get("/api/pm2", pm2_status)
 app.router.add_get("/api/pm2/logs", pm2_logs)
 app.router.add_post("/api/pm2/restart", pm2_restart)

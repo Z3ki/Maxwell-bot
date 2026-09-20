@@ -562,7 +562,7 @@ final_summary() {
   Doctor:    docker compose -f $compose exec maxwell python3 doctor.py
              docker compose -f $compose exec maxwell python3 doctor.py --probe
   Dashboard: http://127.0.0.1:8765
-  App cmds:  /owner (owners), /maxwell (user-install, owners/admins)
+  App cmds:  /owner (owners), /maxwell (user-install)
   Edit config: $(pwd -P)/.env   then   docker compose -f $compose up -d
   Reconfigure: ./install.sh --local --reconfigure
   Update:      git pull --ff-only && ./install.sh --local

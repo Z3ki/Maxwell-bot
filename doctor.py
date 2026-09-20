@@ -126,7 +126,7 @@ def check_required_settings(cfg) -> None:
         line(
             "ok",
             "Discord OAuth configured",
-            "Custom Install Link is /install (admins only)",
+            "dashboard login only — bot add is Discord's own OAuth URL",
         )
     elif client_id or client_secret:
         line(

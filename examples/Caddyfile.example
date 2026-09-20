@@ -18,12 +18,6 @@ admin.maxwell.example.com {
 	handle @admin {
 		file_server
 	}
-	# Discord Custom Install Link. Register https://admin.maxwell.example.com/install
-	# in the Developer Portal (Installation → Install Link → Custom URL).
-	@install path /install /install/*
-	handle @install {
-		file_server
-	}
 	@legal path /terms /terms/* /privacy /privacy/* /legal-gate.js
 	handle @legal {
 		file_server

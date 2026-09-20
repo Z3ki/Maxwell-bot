@@ -44,7 +44,7 @@ Discord bot / app commands
 | `user_install.py` | Discord user-install/app-command and context-menu support. |
 | `plugins/maxwell_extras/` | Owner control panel, app-command progress, rich `/maxwell` output, tool-audit disclosure. |
 | `api/api_server.py`, `api/state.py`, `api/storage.py` | Dashboard/admin API, sanitized controls, persisted admin state. |
-| `web/` | Dashboard/install frontend. |
+| `web/` | Dashboard frontend. |
 | `site_server.py`, `site_backend.py` | Generated-site serving/backend runtime integration. |
 | `docker/` | Bot image (`maxwell.Dockerfile`), shell sandbox, and site-runtime images. |
 | `docker-compose.yml` | Linux Compose file (host network). `docker-compose.bridge.yml` is the Docker Desktop variant. |

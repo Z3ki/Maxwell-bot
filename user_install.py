@@ -1,9 +1,8 @@
-"""User-installable Discord app for Maxwell admins.
+"""User-installable Discord app.
 
 Discord user-install is command-only: slash, message context menus, and user
-context menus. Maxwell registers those with USER_INSTALL. The Custom Install
-Link still gates who can click Add to my apps; invocations are also refused
-unless the user is a Maxwell admin.
+context menus. Maxwell registers those with USER_INSTALL. Anyone can add the
+app; TOS consent still gates first use.
 
 Channel history is not in the command payload. When Maxwell is also in the
 server, we snapshot recent messages. Message context menus include the
@@ -105,7 +104,7 @@ _USER_INSTALL_META = {
 USER_INSTALL_COMMANDS: list[dict[str, Any]] = [
     {
         "name": USER_INSTALL_COMMAND_NAME,
-        "description": "Ask Maxwell. Maxwell admins only.",
+        "description": "Ask Maxwell.",
         "type": 1,
         **_USER_INSTALL_META,
         "options": [
@@ -745,15 +744,6 @@ async def handle_user_install_interaction(bot: Any, interaction: Any) -> bool:
             return True
     if not is_user_install_command(interaction):
         return False
-    user = getattr(interaction, "user", None)
-    uid = getattr(user, "id", None)
-    is_admin = getattr(bot, "_is_admin", None)
-    if not callable(is_admin) or uid is None or not is_admin(uid):
-        await _ephemeral(
-            interaction,
-            "Only Maxwell admins can use this user-installed app.",
-        )
-        return True
     turn = build_user_install_turn(interaction)
     if turn is None or not str(turn.get("prompt") or "").strip():
         await _ephemeral(interaction, "Maxwell could not read that command.")

@@ -1,11 +1,8 @@
-"""Gated Discord Custom Install Link."""
+"""Discord dashboard OAuth. Bot add is Discord's own authorize URL."""
 
 import asyncio
-import json
 import time
-from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import parse_qs, urlsplit
 
 import aiohttp
 import pytest
@@ -19,9 +16,9 @@ def _query(**kwargs):
     return SimpleNamespace(get=lambda key, default=None: kwargs.get(key, default))
 
 
-def test_oauth_next_path_whitelist():
-    assert api._oauth_next_path("/install") == "/install/"
-    assert api._oauth_next_path("/install/") == "/install/"
+def test_oauth_next_path_is_always_dashboard():
+    assert api._oauth_next_path("/install") == "/admin/"
+    assert api._oauth_next_path("/install/") == "/admin/"
     assert api._oauth_next_path("/admin") == "/admin/"
     assert api._oauth_next_path("/admin/") == "/admin/"
     assert api._oauth_next_path("https://evil.example/phish") == "/admin/"
@@ -36,94 +33,7 @@ def test_discord_snowflake():
     assert api._discord_snowflake("1472755214623703190/../x") == ""
 
 
-def test_bot_install_authorize_url(monkeypatch):
-    monkeypatch.setattr(api, "DISCORD_CLIENT_ID", "1472755214623703190")
-    monkeypatch.setenv("DISCORD_BOT_PERMISSIONS", "2048")
-    url = api._bot_install_authorize_url(guild_id="123456789012345678")
-    parsed = urlsplit(url)
-    assert parsed.scheme == "https"
-    assert parsed.netloc == "discord.com"
-    assert parsed.path == "/oauth2/authorize"
-    q = parse_qs(parsed.query)
-    assert q["client_id"] == ["1472755214623703190"]
-    assert q["permissions"] == ["2048"]
-    assert q["integration_type"] == ["0"]
-    assert q["guild_id"] == ["123456789012345678"]
-    assert "bot" in q["scope"][0]
-
-
-def test_bot_install_strips_administrator(monkeypatch):
-    monkeypatch.setattr(api, "DISCORD_CLIENT_ID", "1472755214623703190")
-    monkeypatch.setenv("DISCORD_BOT_PERMISSIONS", "8")
-    url = api._bot_install_authorize_url()
-    q = parse_qs(urlsplit(url).query)
-    assert q["permissions"] == ["0"]
-
-
-def test_bot_install_default_is_normal_add(monkeypatch):
-    monkeypatch.setattr(api, "DISCORD_CLIENT_ID", "1472755214623703190")
-    monkeypatch.delenv("DISCORD_BOT_PERMISSIONS", raising=False)
-    url = api._bot_install_authorize_url()
-    q = parse_qs(urlsplit(url).query)
-    assert q["permissions"] == ["0"]
-
-
-def test_install_authorize_requires_admin(monkeypatch):
-    monkeypatch.setattr(api, "DISCORD_CLIENT_ID", "1472755214623703190")
-    monkeypatch.setattr(auth, "_discord_token_authed", lambda request: False)
-    monkeypatch.setattr(api, "_has_admin_auth", lambda request: False)
-    request = SimpleNamespace(query=_query(context="guild"), headers={})
-    resp = asyncio.run(api.install_authorize(request))
-    assert resp.status == 401
-
-
-def test_install_authorize_returns_url_for_admin(monkeypatch):
-    monkeypatch.setattr(api, "DISCORD_CLIENT_ID", "1472755214623703190")
-    monkeypatch.setattr(api, "_has_admin_auth", lambda request: True)
-    request = SimpleNamespace(
-        query=_query(context="guild", guild_id="123456789012345678"),
-        headers={"X-Discord-Token": "session"},
-    )
-    resp = asyncio.run(api.install_authorize(request))
-    assert resp.status == 200
-    data = json.loads(resp.body)
-    assert data["ok"] is True
-    assert data["authorize_url"].startswith("https://discord.com/oauth2/authorize?")
-    assert "123456789012345678" in data["authorize_url"]
-    assert data["context"] == "guild"
-    assert parse_qs(urlsplit(data["authorize_url"]).query)["integration_type"] == ["0"]
-
-
-def test_install_authorize_allows_user_install_for_admin(monkeypatch):
-    monkeypatch.setattr(api, "DISCORD_CLIENT_ID", "1472755214623703190")
-    monkeypatch.setattr(api, "_has_admin_auth", lambda request: True)
-    request = SimpleNamespace(
-        query=_query(context="user"),
-        headers={"X-Discord-Token": "session"},
-    )
-    resp = asyncio.run(api.install_authorize(request))
-    assert resp.status == 200
-    data = json.loads(resp.body)
-    assert data["ok"] is True
-    assert data["context"] == "user"
-    q = parse_qs(urlsplit(data["authorize_url"]).query)
-    assert q["integration_type"] == ["1"]
-    assert q["scope"] == ["applications.commands"]
-    assert "permissions" not in q
-
-
-def test_install_authorize_rejects_unknown_context(monkeypatch):
-    monkeypatch.setattr(api, "DISCORD_CLIENT_ID", "1472755214623703190")
-    monkeypatch.setattr(api, "_has_admin_auth", lambda request: True)
-    request = SimpleNamespace(
-        query=_query(context="everyone"),
-        headers={"X-Discord-Token": "session"},
-    )
-    resp = asyncio.run(api.install_authorize(request))
-    assert resp.status == 400
-
-
-def test_oauth_state_stores_install_next():
+def test_oauth_state_ignores_install_next():
     async def run():
         api._DISCORD_STATES.clear()
         request = SimpleNamespace(
@@ -135,13 +45,12 @@ def test_oauth_state_stores_install_next():
         assert resp.status == 200
         assert len(api._DISCORD_STATES) == 1
         entry = next(iter(api._DISCORD_STATES.values()))
-        assert api._oauth_state_payload(entry)["next"] == "/install/"
-        assert api._oauth_state_payload(entry)["guild_id"] == "123456789012345678"
+        assert api._oauth_state_payload(entry)["next"] == "/admin/"
 
     asyncio.run(run())
 
 
-def test_oauth_callback_redirects_install_admins(monkeypatch, tmp_path):
+def test_oauth_callback_redirects_admins_to_dashboard(monkeypatch, tmp_path):
     async def run():
         api._DISCORD_STATES.clear()
         monkeypatch.setattr(api, "DISCORD_CLIENT_ID", "cid")
@@ -200,14 +109,12 @@ def test_oauth_callback_redirects_install_admins(monkeypatch, tmp_path):
         with pytest.raises(web.HTTPFound) as raised:
             await api.discord_auth_callback(request)
         location = raised.value.location
-        assert location.startswith(
-            "https://admin.example.test/install/?guild_id=123456789012345678#discord_token="
-        )
+        assert location.startswith("https://admin.example.test/admin/#discord_token=")
 
     asyncio.run(run())
 
 
-def test_oauth_callback_denies_non_admin_to_install(monkeypatch):
+def test_oauth_callback_denies_non_admin(monkeypatch):
     async def run():
         api._DISCORD_STATES.clear()
         monkeypatch.setattr(api, "DISCORD_CLIENT_ID", "cid")
@@ -261,18 +168,15 @@ def test_oauth_callback_denies_non_admin_to_install(monkeypatch):
         )
         with pytest.raises(web.HTTPFound) as raised:
             await api.discord_auth_callback(request)
-        assert raised.value.location.endswith("/install/#error=unauthorized")
+        assert raised.value.location.endswith("/admin/#error=unauthorized")
 
     asyncio.run(run())
 
 
-def test_install_page_exists():
-    html = (
-        Path(__file__).resolve().parents[1] / "web/install/index.html"
-    ).read_text(encoding="utf-8")
-    assert "/api/install/authorize" in html
-    assert "next=/install/" in html or 'next: "/install/"' in html
-    assert "Only Maxwell admins" in html
-    assert "Add to my apps" in html
-    assert 'authorize("user")' in html or "authorize('user')" in html
-    assert 'authorize("guild")' in html or "authorize('guild')" in html
+def test_install_page_is_gone():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "web"
+    assert not (root / "install" / "index.html").exists()
+    home = (root / "index.html").read_text(encoding="utf-8")
+    assert "/install" not in home

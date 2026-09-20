@@ -65,7 +65,6 @@ See [`.env.example`](../.env.example) for the complete advanced environment refe
 | `COMMAND_PREFIX` | `,` when unset | Prefix for legacy text commands. |
 | `BOT_BIRTHDAY` | `2026-05-21` | ISO persona birthday. |
 | `BOT_INVITE_URL` | blank | Optional public invite URL. |
-| `DISCORD_BOT_PERMISSIONS` | `0` | Permission integer used for server-install links. Administrator is not requested by default. |
 | `MAXWELL_USAGE_URL` | blank | Optional provider usage/quota endpoint. |
 
 Blank IDs do not grant implicit ownership.
