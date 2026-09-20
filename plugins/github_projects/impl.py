@@ -357,6 +357,12 @@ class GitHubRepoTool(Tool):
         return "Per-user isolated GitHub workspace. Actions: policy_get/set, list, checkout/sync/status/run/diff/verify/commit/push, pr_create/get/diff/pr_checkout/review/merge, issue_get/reply, schedule_set, knowledge. Repo policy controls write/admin and autonomous behavior; normal shell commands never receive GitHub tokens."
 
     async def execute(self,message:Any,action:str|None=None,repo:str|None=None,**kw:Any)->str:
+        try:
+            return await self._execute(message, action, repo, **kw)
+        except (PermissionError, FileNotFoundError, ValueError, RuntimeError, OSError) as exc:
+            return f"Error: {exc}"
+
+    async def _execute(self,message:Any,action:str|None=None,repo:str|None=None,**kw:Any)->str:
         uid=_uid(message); action=str(action or "").strip().lower()
         if action=="policy_set":
             r=_repo(repo); changes={k:kw[k] for k in ("mode","identity","auto_review","auto_merge","auto_issue_reply","allow_security_testing","merge_method") if k in kw and kw[k] is not None}

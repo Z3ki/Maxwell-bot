@@ -14,6 +14,7 @@ import pytest
 import api.api_server as api
 from plugins.github_projects.impl import (
     GitHubProjectService,
+    GitHubRepoTool,
     PolicyStore,
     _ref,
     _repo,
@@ -146,3 +147,20 @@ def test_github_webhook_ignores_unhandled_events(tmp_path, monkeypatch):
     assert _payload(resp) == {"ok": True, "ignored": "star"}
     queue = tmp_path / "plugins" / "github_projects" / "webhook_events.json"
     assert not queue.exists()
+
+
+def test_list_without_user_token_returns_error(tmp_path, monkeypatch):
+    monkeypatch.delenv("MAXWELL_GITHUB_USER_TOKEN_664824253526573056", raising=False)
+
+    async def run():
+        svc = GitHubProjectService(Bot(), Ctx(tmp_path))
+        tool = GitHubRepoTool(Bot(), svc)
+        msg = SimpleNamespace(
+            author=SimpleNamespace(id="664824253526573056"),
+            channel=SimpleNamespace(id="1"),
+        )
+        out = await tool.execute(msg, action="list")
+        assert out.startswith("Error:")
+        assert "MAXWELL_GITHUB_USER_TOKEN_664824253526573056" in out
+
+    asyncio.run(run())
