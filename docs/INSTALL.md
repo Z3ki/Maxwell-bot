@@ -184,6 +184,8 @@ Create an application at the Discord Developer Portal, add a **Bot**, copy its *
 
 Use Guild Install when adding Maxwell to a server. Maxwell does not require the Administrator permission by default. Grant only the Discord permissions needed for the moderation/management tools you intend to use.
 
+Ask Maxwell for an invite link to a server it is already in by naming the server or giving its ID. `create_invite` selects a usable text channel and requires the requesting user and Maxwell to have `create_instant_invite` in that target server. Maxwell cannot join a server from a `discord.gg` invite; use the OAuth add-server link for that.
+
 User Install enables the personal `/maxwell` command and context-menu actions for configured admins/owners. `/owner` is owner-only and is authorized through configured admin IDs.
 
 Never use a Discord user/self-bot token. Never copy a browser `Authorization` header into Maxwell.

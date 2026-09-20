@@ -815,22 +815,26 @@ _ALL_MOD_TOOLS = tuple(
 # Guild/moderation tools plus anything that posts into another Discord room.
 # Hidden and refused in DMs/group DMs so opening DMs does not hand strangers
 # a remote mod console. Shell, sites, search, and current-chat send_message
-# stay available.
-DM_BLOCKED_TOOLS = frozenset(_ALL_MOD_TOOLS) | {
-    "leave_server",
-    "list_admin_servers",
-    "list_servers",
-    "list_channels",
-    "list_roles",
-    "list_members",
-    "forward_message",
-    "set_nickname",
-    "update_server_prompt",
-    "create_thread",
-    "thread_control",
-    "join_vc",
-    "leave_vc",
-}
+# stay available. create_invite is kept: it can target another server the
+# asker already has create_instant_invite in, and execute still checks that.
+DM_BLOCKED_TOOLS = (
+    frozenset(_ALL_MOD_TOOLS)
+    | {
+        "leave_server",
+        "list_admin_servers",
+        "list_servers",
+        "list_channels",
+        "list_roles",
+        "list_members",
+        "forward_message",
+        "set_nickname",
+        "update_server_prompt",
+        "create_thread",
+        "thread_control",
+        "join_vc",
+        "leave_vc",
+    }
+) - {"create_invite"}
 _SNOWFLAKE_RE = re.compile(r"(\d{15,22})")
 _DURATION_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhd])?\s*$", re.I)
 

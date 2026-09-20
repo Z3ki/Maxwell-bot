@@ -1000,43 +1000,143 @@ class SearchMessagesTool(Tool):
             return f"Error searching messages: {e}"
 
 class CreateInviteTool(Tool):
-    """Create an invite link for the server"""
-    tool_name = 'create_invite'
+    """Create an invite link for a server Maxwell is in."""
+    tool_name = "create_invite"
     returns_result = True
     ends_turn = False
 
-
     def get_description(self):
         return (
-            "Create a server invite link. Only works in servers. "
-            "Params: max_uses (optional, default 1), max_age (optional, seconds, default 86400)."
+            "Create a discord.gg invite for a server this bot is in. "
+            "Pass server= name or ID when it is not the current room, "
+            "including from DMs. Optional channel_id to pick the channel. "
+            "The person asking still needs create_instant_invite there. "
+            "Params: server, channel_id, max_uses (default 1), "
+            "max_age (seconds, default 86400)."
         )
 
     async def execute(
-        self, message: Message, max_uses: str = "1", max_age: str = "86400", **kwargs
+        self,
+        message: Message,
+        max_uses: str = "1",
+        max_age: str = "86400",
+        server: str | None = None,
+        channel_id: str | None = None,
+        **kwargs,
     ) -> str:
-        if not message.guild:
-            return "Error: Cannot create invites in DMs"
+        target = str(
+            server or kwargs.get("guild") or kwargs.get("guild_id") or ""
+        ).strip()
+        channel_id = str(
+            channel_id or kwargs.get("channel") or ""
+        ).strip()
+        guild = None
+        if target:
+            guild, err = _find_guild(list(self.bot.guilds or []), target)
+            if guild is None:
+                return err
+        elif getattr(message, "guild", None):
+            guild = message.guild
+        else:
+            return (
+                "Error: say which server (name or ID). "
+                "I can only make invites for servers I am in."
+            )
         try:
             uses = int(max_uses)
             age = int(max_age)
-            if uses < 1 or uses > 100:
-                return "Error: max_uses must be between 1 and 100"
-            if age < 0 or age > 604800:
-                return "Error: max_age must be between 0 and 604800 seconds"
-            channel = cast(Any, message.channel)
-            if not hasattr(channel, "create_invite"):
-                return "Error: Cannot create invites from this channel type"
+        except (TypeError, ValueError):
+            return "Error: max_uses and max_age must be numbers"
+        if uses < 1 or uses > 100:
+            return "Error: max_uses must be between 1 and 100"
+        if age < 0 or age > 604800:
+            return "Error: max_age must be between 0 and 604800 seconds"
+        missing = _missing_cap(guild, "create_instant_invite", message)
+        if missing:
+            return missing
+        channel = None
+        if channel_id:
+            channel, error = await _get_guild_channel(self.bot, channel_id)
+            if error:
+                return error
+            ch_guild = getattr(channel, "guild", None)
+            if getattr(ch_guild, "id", None) != getattr(guild, "id", None):
+                return f"Error: that channel is not in {guild.name}"
+        else:
+            msg_guild = getattr(message, "guild", None)
+            msg_channel = getattr(message, "channel", None)
+            if (
+                getattr(msg_guild, "id", None) == getattr(guild, "id", None)
+                and hasattr(msg_channel, "create_invite")
+            ):
+                channel = msg_channel
+            else:
+                channel, err = _pick_invite_channel(guild)
+                if channel is None:
+                    return err
+        missing = _missing_cap(
+            guild, "create_instant_invite", message, channel=channel
+        )
+        if missing:
+            return missing
+        if not hasattr(channel, "create_invite"):
+            return "Error: Cannot create invites from this channel type"
+        try:
             invite = await channel.create_invite(max_uses=uses, max_age=age)
             return (
-                f"Invite created: {invite.url} (max uses: {uses}, expires in: {age}s)"
+                f"Invite created for {guild.name}: {invite.url} "
+                f"(max uses: {uses}, expires in: {age}s)"
             )
         except discord.Forbidden:
-            return "Error: I don't have permission to create invites here"
-        except ValueError:
-            return "Error: max_uses and max_age must be numbers"
+            return (
+                f"Error: I don't have permission to create invites in {guild.name}"
+            )
         except Exception as e:
             return f"Error creating invite: {e}"
+
+
+def _pick_invite_channel(guild) -> tuple[Any, str]:
+    """First channel in `guild` this bot can actually create an invite from."""
+    me = _guild_me(guild)
+    seen: set[int] = set()
+    candidates: list[Any] = []
+    for attr in ("system_channel", "rules_channel"):
+        ch = getattr(guild, attr, None)
+        cid = getattr(ch, "id", None)
+        if ch is not None and cid not in seen:
+            seen.add(cid)
+            candidates.append(ch)
+    text_channels = getattr(guild, "text_channels", None)
+    if text_channels is None:
+        text_channels = [
+            ch
+            for ch in (getattr(guild, "channels", None) or [])
+            if hasattr(ch, "create_invite")
+        ]
+    for ch in text_channels:
+        cid = getattr(ch, "id", None)
+        if cid in seen:
+            continue
+        seen.add(cid)
+        candidates.append(ch)
+    for ch in candidates:
+        if not hasattr(ch, "create_invite"):
+            continue
+        if me is not None:
+            perms_for = getattr(ch, "permissions_for", None)
+            if callable(perms_for):
+                perms = None
+                with contextlib.suppress(Exception):
+                    perms = perms_for(me)
+                if perms is not None and not (
+                    getattr(perms, "administrator", False)
+                    or getattr(perms, "create_instant_invite", False)
+                ):
+                    continue
+        return ch, ""
+    name = getattr(guild, "name", "that server")
+    return None, f"Error: no channel in {name} I can create an invite from"
+
 
 
 class BotInviteUrlTool(Tool):
@@ -1052,7 +1152,7 @@ class BotInviteUrlTool(Tool):
             "add to my apps, add to a server, or want an install/invite "
             "link for THIS bot. kind=app (Add to my apps), kind=server "
             "(Add to a server), or kind=both (default). "
-            "Not create_invite — that makes a discord.gg for the current server."
+            "Not create_invite — that makes a discord.gg for a server I am in."
         )
 
     async def execute(

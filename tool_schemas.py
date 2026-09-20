@@ -105,6 +105,10 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     ),
     "create_invite": _obj(
         {
+            "server": _str(
+                "Server name or ID when not the current room (required from DMs)"
+            ),
+            "channel_id": _str("Optional channel to create the invite from"),
             "max_uses": _int("Max uses (default 1)"),
             "max_age": _int("Max age in seconds"),
         }

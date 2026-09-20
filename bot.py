@@ -2396,7 +2396,10 @@ TOOL_PROTOCOL = (
     "If they ask how to add this bot, add as app, or add to a server, "
     "call bot_invite_url then send_message the matching OAuth link. "
     "kind=app is Add to my apps; kind=server is Add to a server; default both. "
-    "It cannot join from a discord.gg invite code. "
+    "create_invite makes a discord.gg for a server I am already in. "
+    "Pass server= name or ID when it is not this room, including from DMs. "
+    "The asker still needs create_instant_invite there. "
+    "I cannot join from a discord.gg invite code. "
     "Discord mod/structure tools (kick, ban, timeout, purge, delete others' messages, "
     "channels, roles, pins, invites, server edits) require the person asking to have "
     "that Discord permission — same perm you need. Maxwell-owner status is not a bypass. "
@@ -2430,7 +2433,9 @@ LEAN_TOOL_PROTOCOL = (
     "send_message stays in this chat. "
     "In a server, only run a Discord mod tool if the person asking has that permission. "
     "Call report to DM the owner about a real problem.\n"
-    "If they ask how to add this bot, call bot_invite_url and send the OAuth link.\n"
+    "If they ask how to add this bot, call bot_invite_url and send the OAuth link. "
+    "If they want a discord.gg for a server I am in, create_invite with server= "
+    "when it is not this room.\n"
     "ONE send_message holds your whole reply. Consecutive short messages read "
     "as spam. If you have nothing new to add, use no_response.\n"
     "Do the work first. Call the tools that do the job, then send_message once "
@@ -16016,6 +16021,9 @@ class MaxwellBot(commands.Bot):
             for tool in _ALL_MOD_TOOLS:
                 # Own-message deletes stay available without manage_messages.
                 if tool == "delete_message":
+                    continue
+                # Invites can target another server the asker has perm in.
+                if tool == "create_invite":
                     continue
                 if tool not in allowed_mod:
                     names.discard(tool)

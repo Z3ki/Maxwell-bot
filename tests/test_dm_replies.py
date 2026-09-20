@@ -95,3 +95,13 @@ def test_private_chat_helper_and_blocked_tools():
     assert "create_site" not in DM_BLOCKED_TOOLS
     assert "site_server" not in DM_BLOCKED_TOOLS
     assert "send_message" not in DM_BLOCKED_TOOLS
+    assert "create_invite" not in DM_BLOCKED_TOOLS
+
+
+def test_cross_server_create_invite_is_visible_in_dm():
+    bot = _bot()
+    bot.tools = {"create_invite": object(), "send_message": object()}
+    bot._compatible_tool_names = MaxwellBot._compatible_tool_names.__get__(bot)
+    bot._turn_tool_names = MaxwellBot._turn_tool_names.__get__(bot)
+    names = bot._turn_tool_names("discord", _dm_message(), "invite me")
+    assert "create_invite" in names

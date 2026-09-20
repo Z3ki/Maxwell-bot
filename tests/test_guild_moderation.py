@@ -159,7 +159,12 @@ def test_turn_hides_kick_when_asker_lacks_permission():
     asker = _member(uid=5, name="Ada", position=1, perms=_perms(kick_members=False))
     guild = SimpleNamespace(id=10, name="Villa", me=me)
     bot = SimpleNamespace(
-        tools={"kick_member": object(), "delete_message": object(), "send_message": object()},
+        tools={
+            "kick_member": object(),
+            "delete_message": object(),
+            "send_message": object(),
+            "create_invite": object(),
+        },
         _control={"disabled_tools": []},
         plugin_manager=None,
         _is_admin=lambda _uid: False,
@@ -173,3 +178,5 @@ def test_turn_hides_kick_when_asker_lacks_permission():
     assert "kick_member" not in names
     assert "delete_message" in names
     assert "send_message" in names
+    # Invites can still target another server; the current guild filter skips it.
+    assert "create_invite" in names

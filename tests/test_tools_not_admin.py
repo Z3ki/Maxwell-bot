@@ -123,8 +123,75 @@ def test_list_servers_works_for_anyone():
     assert "Villa" in result
 
 
-def test_create_invite_reaches_guild_check_for_anyone():
-    bot = SimpleNamespace(_is_admin=lambda _uid: False)
+def test_create_invite_requires_server_from_dms():
+    bot = SimpleNamespace(_is_admin=lambda _uid: False, guilds=[])
     msg = SimpleNamespace(author=SimpleNamespace(id=999), guild=None)
     result = asyncio.run(CreateInviteTool(bot).execute(msg))
-    assert result == "Error: Cannot create invites in DMs"
+    assert "which server" in result
+
+
+def _invite_guild(*, gid=2, name="Other", asker_id=5, can_invite=True):
+    perms = SimpleNamespace(
+        administrator=False, create_instant_invite=can_invite
+    )
+
+    async def make_invite(**kwargs):
+        return SimpleNamespace(url="https://discord.gg/abc")
+
+    channel = SimpleNamespace(
+        id=21,
+        name="general",
+        create_invite=make_invite,
+        permissions_for=lambda _m: perms,
+    )
+    asker = SimpleNamespace(
+        id=asker_id,
+        display_name="Ada",
+        guild_permissions=perms,
+    )
+    guild = SimpleNamespace(
+        id=gid,
+        name=name,
+        me=SimpleNamespace(guild_permissions=perms),
+        get_member=lambda uid: asker if uid == asker_id else None,
+        system_channel=channel,
+        text_channels=[channel],
+        channels=[channel],
+    )
+    channel.guild = guild
+    return guild
+
+
+def test_create_invite_for_another_server_by_name():
+    other = _invite_guild()
+    here = SimpleNamespace(id=1, name="Here")
+    bot = SimpleNamespace(
+        _is_admin=lambda _uid: False,
+        guilds=[here, other],
+        get_guild=lambda gid: other if gid == 2 else here,
+    )
+    msg = SimpleNamespace(
+        guild=here,
+        author=SimpleNamespace(id=5, guild=here),
+        channel=SimpleNamespace(id=11),
+    )
+    result = asyncio.run(CreateInviteTool(bot).execute(msg, server="Other"))
+    assert "https://discord.gg/abc" in result
+    assert "Other" in result
+
+
+def test_create_invite_refuses_without_target_perm():
+    other = _invite_guild(can_invite=False)
+    bot = SimpleNamespace(
+        _is_admin=lambda _uid: False,
+        guilds=[other],
+        get_guild=lambda gid: other if gid == 2 else None,
+    )
+    msg = SimpleNamespace(
+        guild=None,
+        author=SimpleNamespace(id=5),
+        channel=None,
+    )
+    result = asyncio.run(CreateInviteTool(bot).execute(msg, server="Other"))
+    assert result.startswith("Error:")
+    assert "create_instant_invite" in result
