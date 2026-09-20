@@ -1,3 +1,5 @@
+import asyncio
+import time
 from pathlib import Path
 
 from bot_tools import (
@@ -217,6 +219,182 @@ PY"""
         assert tool._validate_command("ls -la | head -20") is None
         assert tool._validate_command("grep -r 'TODO' src/") is None
         assert tool._validate_command("echo hello world") is None
+
+
+class TestShellIdleRecycle:
+    def setup_method(self):
+        ShellTool._last_used_monotonic = 0.0
+        ShellTool._lifecycle_lock = asyncio.Lock()
+        task = ShellTool._idle_reaper_task
+        ShellTool._idle_reaper_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    def teardown_method(self):
+        self.setup_method()
+
+    def _spy_docker(self, monkeypatch, inspect_payloads, workspace):
+        calls = []
+        payloads = list(inspect_payloads)
+        workspace.mkdir(parents=True, exist_ok=True)
+
+        async def fake_docker(cls, *args, timeout=30):
+            calls.append(args[0])
+            if args[0] == "inspect":
+                if payloads:
+                    return payloads.pop(0)
+                return (b"", b""), 1
+            if args[0] == "start":
+                raise AssertionError("stale sandbox must not be started")
+            return (b"", b""), 0
+
+        async def fake_image(_name):
+            return None
+
+        monkeypatch.setattr(ShellTool, "_run_docker", classmethod(fake_docker))
+        monkeypatch.setattr(
+            "plugins.shell.impl._ensure_sandbox_image", fake_image
+        )
+        monkeypatch.setattr(
+            ShellTool,
+            "_workspace_host_path",
+            classmethod(lambda cls: str(workspace)),
+        )
+        return calls
+
+    def test_idle_seconds_default_zero_and_invalid(self, monkeypatch):
+        monkeypatch.delenv("MAXWELL_SHELL_IDLE_SECONDS", raising=False)
+        assert ShellTool._idle_seconds() == 600
+        monkeypatch.setenv("MAXWELL_SHELL_IDLE_SECONDS", "0")
+        assert ShellTool._idle_seconds() == 0
+        monkeypatch.setenv("MAXWELL_SHELL_IDLE_SECONDS", "nope")
+        assert ShellTool._idle_seconds() == 600
+        monkeypatch.setenv("MAXWELL_SHELL_IDLE_SECONDS", "30")
+        assert ShellTool._idle_seconds() == 30
+
+    def test_description_mentions_idle_recycle(self, monkeypatch):
+        monkeypatch.delenv("MAXWELL_SHELL_IDLE_SECONDS", raising=False)
+        tool = ShellTool(None)  # type: ignore[arg-type]
+        assert "wiped after 600s idle" in tool.get_description()
+        monkeypatch.setenv("MAXWELL_SHELL_IDLE_SECONDS", "0")
+        assert "persists across calls" in tool.get_description()
+
+    def test_unknown_age_running_container_is_recycled(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MAXWELL_SHELL_IDLE_SECONDS", "600")
+        tool = ShellTool(None)  # type: ignore[arg-type]
+        init = tool._SANDBOX_INIT
+        ws = tmp_path / "shelldocker"
+        calls = self._spy_docker(
+            monkeypatch,
+            [((f"true isolated {init}\n".encode(), b""), 0)],
+            ws,
+        )
+        ShellTool._last_used_monotonic = 0.0
+
+        async def run():
+            await tool._ensure_container()
+
+        asyncio.run(run())
+        assert calls == ["inspect", "rm", "inspect", "run"]
+
+    def test_fresh_running_container_is_reused(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MAXWELL_SHELL_IDLE_SECONDS", "600")
+        tool = ShellTool(None)  # type: ignore[arg-type]
+        init = tool._SANDBOX_INIT
+        calls = self._spy_docker(
+            monkeypatch,
+            [((f"true isolated {init}\n".encode(), b""), 0)],
+            tmp_path / "shelldocker",
+        )
+        ShellTool._last_used_monotonic = time.monotonic()
+
+        async def run():
+            await tool._ensure_container()
+
+        asyncio.run(run())
+        assert calls == ["inspect"]
+
+    def test_stopped_container_is_destroyed_not_started(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MAXWELL_SHELL_IDLE_SECONDS", "600")
+        tool = ShellTool(None)  # type: ignore[arg-type]
+        init = tool._SANDBOX_INIT
+        calls = self._spy_docker(
+            monkeypatch,
+            [((f"false isolated {init}\n".encode(), b""), 0)],
+            tmp_path / "shelldocker",
+        )
+        ShellTool._last_used_monotonic = time.monotonic()
+
+        async def run():
+            await tool._ensure_container()
+
+        asyncio.run(run())
+        assert "start" not in calls
+        assert calls[0] == "inspect"
+        assert "rm" in calls
+        assert calls[-1] == "run"
+
+    def test_wipe_workspace_clears_files_and_dirs(self, monkeypatch, tmp_path):
+        ws = tmp_path / "shelldocker"
+        ws.mkdir()
+        (ws / "junk.py").write_text("x")
+        nested = ws / "dir"
+        nested.mkdir()
+        (nested / "a").write_text("y")
+        monkeypatch.setattr(
+            ShellTool,
+            "_workspace_host_path",
+            classmethod(lambda cls: str(ws)),
+        )
+        ShellTool._wipe_workspace()
+        assert ws.is_dir()
+        assert list(ws.iterdir()) == []
+
+    def test_wipe_refuses_non_shelldocker_path(self, monkeypatch, tmp_path):
+        other = tmp_path / "notshell"
+        other.mkdir()
+        keep = other / "keep"
+        keep.write_text("x")
+        monkeypatch.setattr(
+            ShellTool,
+            "_workspace_host_path",
+            classmethod(lambda cls: str(other)),
+        )
+        ShellTool._wipe_workspace()
+        assert keep.read_text() == "x"
+
+    def test_destroy_wipes_workspace(self, monkeypatch, tmp_path):
+        ws = tmp_path / "shelldocker"
+        ws.mkdir()
+        (ws / "leftover.py").write_text("secret")
+        self._spy_docker(monkeypatch, [], ws)
+
+        async def run():
+            await ShellTool._destroy_container_unlocked()
+
+        asyncio.run(run())
+        assert ws.is_dir()
+        assert list(ws.iterdir()) == []
+
+    def test_idle_reaper_destroys_sandbox(self, monkeypatch):
+        monkeypatch.setenv("MAXWELL_SHELL_IDLE_SECONDS", "1")
+        destroyed = []
+
+        async def fake_destroy():
+            destroyed.append(True)
+
+        monkeypatch.setattr(ShellTool, "_destroy_container_unlocked", fake_destroy)
+        ShellTool._last_used_monotonic = time.monotonic() - 2
+
+        async def run():
+            ShellTool._schedule_idle_reaper()
+            task = ShellTool._idle_reaper_task
+            assert task is not None
+            await asyncio.wait_for(task, timeout=5)
+
+        asyncio.run(run())
+        assert destroyed == [True]
+        assert ShellTool._last_used_monotonic == 0.0
 
 
 class TestImapArgumentSanitizers:

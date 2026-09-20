@@ -14,6 +14,7 @@ Open a private security advisory or contact the maintainer privately before disc
 - Treat browser/site probes as capable of making page-directed network requests. Do not place the service on a network where untrusted generated pages can reach sensitive internal services.
 - Autofix runs generated regression tests only in the configured local Docker test image (`MAXWELL_AUTOFIX_TEST_IMAGE`, default `maxwell:local`) with no network, no host credentials/socket, an unprivileged user, and resource limits. A passing regression is required before it pushes a topic branch. If the isolation image is unavailable, autofix fails closed.
 - The Maxwell service can control the host Docker daemon through `docker.sock`. A read-only socket mount, dropped capabilities, and `no-new-privileges` do **not** restrict Docker API operations or prevent host-root-equivalent control through that daemon. Treat the Maxwell service as host-root trusted. Shell/site sibling containers have narrower mounts but are still orchestrated through the daemon.
+- The shell sandbox is destroyed after 10 minutes idle (`MAXWELL_SHELL_IDLE_SECONDS`, `0` disables). Recycle wipes `shelldocker/` (`/home/maxwell`) and starts a new container so leftover processes, packages, and workspace files do not accumulate.
 
 ## Fetched/web content and destructive tools
 

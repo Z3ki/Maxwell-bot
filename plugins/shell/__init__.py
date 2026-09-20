@@ -29,3 +29,9 @@ def setup(bot, ctx=None):
         inst.tool_name = runtime_name
         tools.append(inst)
     return tools
+
+
+async def teardown(bot):
+    from .impl import ShellTool
+
+    await ShellTool.shutdown_sandbox()
