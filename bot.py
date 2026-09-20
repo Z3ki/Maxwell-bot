@@ -3313,6 +3313,10 @@ class MaxwellBot(commands.Bot):
             fallback_model=self.config.OLLAMA_FALLBACK_MODEL,
             fallback_api_key=self.config.OLLAMA_FALLBACK_API_KEY,
             fallback_disable_reasoning=self.config.OLLAMA_FALLBACK_DISABLE_REASONING,
+            fallback_reasoning_effort=getattr(
+                self.config, "OLLAMA_FALLBACK_REASONING_EFFORT", ""
+            )
+            or "",
             retry_attempts=self.config.OLLAMA_RETRY_ATTEMPTS,
             empty_response_retries=getattr(
                 self.config, "OLLAMA_EMPTY_RESPONSE_RETRIES", None
@@ -3482,6 +3486,10 @@ class MaxwellBot(commands.Bot):
                     fallback_model=self.config.OLLAMA_FALLBACK_MODEL,
                     fallback_api_key=self.config.OLLAMA_FALLBACK_API_KEY,
                     fallback_disable_reasoning=self.config.OLLAMA_FALLBACK_DISABLE_REASONING,
+                    fallback_reasoning_effort=getattr(
+                        self.config, "OLLAMA_FALLBACK_REASONING_EFFORT", ""
+                    )
+                    or "",
                     retry_attempts=self.config.OLLAMA_RETRY_ATTEMPTS,
                     empty_response_retries=getattr(
                         self.config, "OLLAMA_EMPTY_RESPONSE_RETRIES", None
@@ -3600,6 +3608,10 @@ class MaxwellBot(commands.Bot):
                     fallback_model=self.config.OLLAMA_FALLBACK_MODEL,
                     fallback_api_key=self.config.OLLAMA_FALLBACK_API_KEY,
                     fallback_disable_reasoning=self.config.OLLAMA_FALLBACK_DISABLE_REASONING,
+                    fallback_reasoning_effort=getattr(
+                        self.config, "OLLAMA_FALLBACK_REASONING_EFFORT", ""
+                    )
+                    or "",
                     retry_attempts=self.config.OLLAMA_RETRY_ATTEMPTS,
                     empty_response_retries=getattr(
                         self.config, "OLLAMA_EMPTY_RESPONSE_RETRIES", None

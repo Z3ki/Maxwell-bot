@@ -1831,6 +1831,7 @@ class OllamaProvider:
         fallback_model: str = "",
         fallback_api_key: str = "",
         fallback_disable_reasoning: bool = True,
+        fallback_reasoning_effort: str = "",
         retry_attempts: int = 3,
         enable_audio_input: bool = False,
         vision_base_url: str = "",
@@ -1878,6 +1879,7 @@ class OllamaProvider:
                     fallback_model,
                     fallback_api_key.strip(),
                     fallback_disable_reasoning,
+                    (fallback_reasoning_effort or "").strip(),
                 )
             )
         # Appended last so text routing can keep treating index 1 as fallback.
@@ -2158,16 +2160,9 @@ class OllamaProvider:
             # with an empty content delta. Pin thinking on so the visible
             # reply actually arrives.
             data["thinking"] = {"type": "enabled"}
-        if (
-            not use_disable_reasoning
-            and self.reasoning_effort
-            and endpoint.name == "primary"
-        ):
-            # Explicit per-provider effort (e.g. grok-4.6 "low").
-            # Top-level shape only: the nested `reasoning.effort` variant
-            # tested slower through CLIProxyAPI, and "none" stays reserved
-            # for the disable_reasoning path above.
-            data["reasoning_effort"] = self.reasoning_effort
+        if not use_disable_reasoning and (endpoint.reasoning_effort or "").strip():
+            # Explicit per-endpoint effort (primary grok "low", Muse "minimal").
+            data["reasoning_effort"] = endpoint.reasoning_effort.strip()
         if tools:
             data["tools"] = tools
             data["tool_choice"] = "auto"
