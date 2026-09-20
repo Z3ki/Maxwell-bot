@@ -118,10 +118,11 @@ def _json_response(data, status=200):
 #                          only that slug's registry row can name
 #                          (site_server.py). Caddy routes this path here.
 #   /api/github/webhook    signed GitHub wakeup; HMAC-verified, no admin auth.
+#   /api/github/oauth/...  GitHub login callback; state is HMAC-signed.
 #
 # Neither site namespace can reach another slug's data, and nothing else on
 # the API is reachable through them.
-PUBLIC_PATH_PREFIXES = ("/api/site/", "/api/github/webhook")
+PUBLIC_PATH_PREFIXES = ("/api/site/", "/api/github/webhook", "/api/github/oauth")
 PUBLIC_PATH_RE = re.compile(r"^/bot/[a-z0-9-]{2,30}/api(?:/|$)")
 
 
