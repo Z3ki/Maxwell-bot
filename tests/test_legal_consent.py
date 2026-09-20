@@ -89,7 +89,7 @@ def test_gate_sends_one_prompt_and_blocks(tmp_path, monkeypatch):
     message = _message(11, dm=True)
     calls = []
 
-    async def fake_offer(_bot, dest, *, reply_to=None):
+    async def fake_offer(_bot, dest, *, reply_to=None, user_id=None):
         calls.append(dest)
         if reply_to is not None:
             await reply_to.reply(content="tos-prompt")
@@ -118,7 +118,25 @@ def test_replying_agree_records_consent(tmp_path):
     assert legal_consent.has_agreed(bot, 11) is True
     assert message.channel.sent
     assert message.channel.sent[0].get("_replied") is True
-    assert "Public Alpha" in message.channel.sent[0]["content"]
+    assert "free" in message.channel.sent[0]["content"].lower()
+
+
+def test_text_agree_edits_the_prompt(tmp_path):
+    bot = _bot(tmp_path)
+    edits = []
+
+    class Prompt:
+        async def edit(self, **kwargs):
+            edits.append(kwargs)
+
+    bot._tos_prompts = {"11": Prompt()}
+    message = _message(11, content="agree", dm=True)
+    assert asyncio.run(legal_consent.gate_message(bot, message)) == "tos_required"
+    assert legal_consent.has_agreed(bot, 11) is True
+    assert edits
+    assert edits[0].get("view") is None
+    assert "free" in edits[0]["content"].lower()
+    assert message.channel.sent == []
 
 
 def test_command_prefix_agree_also_counts(tmp_path):
@@ -135,41 +153,47 @@ def test_agreed_user_is_not_prompted(tmp_path):
     assert message.channel.sent == []
 
 
-def test_agree_button_records_consent(tmp_path):
+def test_agree_button_updates_the_prompt(tmp_path):
     bot = _bot(tmp_path)
-    sent = []
+    edited = []
 
     class Response:
-        async def send_message(self, text, **kwargs):
-            sent.append((text, kwargs))
+        async def edit_message(self, **kwargs):
+            edited.append(kwargs)
 
     interaction = SimpleNamespace(
         data={"custom_id": legal_consent.CUSTOM_AGREE},
         user=SimpleNamespace(id=77),
         response=Response(),
+        message=None,
     )
     assert asyncio.run(legal_consent.handle_interaction(bot, interaction)) is True
     assert legal_consent.has_agreed(bot, 77) is True
-    assert sent and "Public Alpha" in sent[0][0]
-    assert sent[0][1].get("ephemeral") is True
+    assert edited
+    assert edited[0].get("view") is None
+    assert "free" in edited[0]["content"].lower()
+    assert "free" in edited[0]["embed"].title.lower()
 
 
-def test_decline_button_does_not_record(tmp_path):
+def test_decline_button_updates_the_prompt(tmp_path):
     bot = _bot(tmp_path)
-    sent = []
+    edited = []
 
     class Response:
-        async def send_message(self, text, **_kwargs):
-            sent.append(text)
+        async def edit_message(self, **kwargs):
+            edited.append(kwargs)
 
     interaction = SimpleNamespace(
         data={"custom_id": legal_consent.CUSTOM_DECLINE},
         user=SimpleNamespace(id=77),
         response=Response(),
+        message=None,
     )
     assert asyncio.run(legal_consent.handle_interaction(bot, interaction)) is True
     assert legal_consent.has_agreed(bot, 77) is False
-    assert sent and "open source" in sent[0]
+    assert edited
+    assert edited[0].get("view") is None
+    assert "sitting this out" in edited[0]["embed"].title.lower()
 
 
 def test_unknown_interaction_is_ignored(tmp_path):

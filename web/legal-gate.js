@@ -8,7 +8,7 @@
     '<div class="legal-card">' +
     '<p class="legal-kicker">Public Alpha</p>' +
     "<h2>Agree to use Maxwell</h2>" +
-    "<p>The hosted bot and this site are Public Alpha. Expect bugs, downtime, lost memory, usage limits, and possible paid access later. The software is MIT open source; these terms cover <em>this</em> hosted instance.</p>" +
+    "<p>It's free during Public Alpha. Expect bugs, downtime, lost memory, usage limits, and possible paid access later. The software is MIT open source; these terms cover <em>this</em> hosted instance.</p>" +
     '<label class="legal-check"><input id="legal-box" type="checkbox"> I am 13+, I have read and agree to the <a href="/terms/" target="_blank" rel="noopener">Terms of Service</a> and <a href="/privacy/" target="_blank" rel="noopener">Privacy Policy</a>.</label>' +
     '<p id="legal-hint" class="legal-hint"></p>' +
     '<button id="legal-agree" type="button">Agree and continue</button>' +

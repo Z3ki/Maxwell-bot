@@ -160,27 +160,51 @@ def directed_for_consent(bot: Any, message: Any) -> bool:
     return bool(prefix and content.startswith(prefix))
 
 
-def _tos_embed(bot: Any):
+def _tos_embed(bot: Any, *, state: str = "offer"):
     import discord
 
     terms, privacy = legal_urls(bot)
+    if state == "accepted":
+        embed = discord.Embed(
+            title="You're in — hosted Maxwell is free",
+            description=(
+                "**Free during Public Alpha.** No card, no sub. Expect bugs, "
+                "downtime, lost memory, and usage limits if this gets expensive. "
+                "A small paid plan (around US$3) might show up later — not a "
+                "promise. Self-host stays MIT-free forever.\n\n"
+                "Send your message again."
+            ),
+            colour=0x3BA55D,
+        )
+        embed.set_footer(text=f"TOS v{TOS_VERSION} · Public Alpha · free")
+        return embed
+    if state == "declined":
+        embed = discord.Embed(
+            title="Okay, sitting this out",
+            description=(
+                "I won't process your messages on this hosted instance. "
+                "The code stays open source if you want to run your own copy."
+            ),
+            colour=0x4A4A56,
+        )
+        embed.set_footer(text=f"TOS v{TOS_VERSION} · Public Alpha")
+        return embed
     embed = discord.Embed(
-        title="Maxwell is in Public Alpha",
+        title="Maxwell is free right now",
         description=(
-            "Before I can talk to you, you have to agree to the hosted-service "
-            "Terms and Privacy Policy.\n\n"
-            "This copy of Maxwell is **open source (MIT)** — you can run your "
-            "own. These terms are for **this hosted bot**, which is unstable, "
-            "may lose data, may grow usage limits, and may later cost a small "
-            "subscription (around US$3, not a promise).\n\n"
+            "Public Alpha. Agree to the hosted Terms and Privacy before I can "
+            "talk to you.\n\n"
+            "**It's free.** No payment, no extra account. Usage limits may "
+            "appear if the hosted copy gets expensive. A small subscription "
+            "(around US$3) might come later — not a promise, not a price. "
+            "Self-host is always free (MIT).\n\n"
             f"[Terms of Service]({terms})\n"
             f"[Privacy Policy]({privacy})\n\n"
-            "Click **Agree**, or reply `agree`. Click **No thanks** (or reply "
-            "`no thanks`) and I will ignore you."
+            "Click **Agree**, or reply `agree`. **No thanks** and I ignore you."
         ),
         colour=0xE4E4E8,
     )
-    embed.set_footer(text=f"TOS v{TOS_VERSION} · Public Alpha")
+    embed.set_footer(text=f"TOS v{TOS_VERSION} · Public Alpha · free")
     return embed
 
 
@@ -194,7 +218,7 @@ def tos_view():
     view = View(timeout=None)
     view.add_item(
         Button(
-            label="Agree",
+            label="Agree — it's free",
             style=discord.ButtonStyle.success,
             custom_id=CUSTOM_AGREE,
         )
@@ -209,13 +233,124 @@ def tos_view():
     return view
 
 
-async def _send(destination: Any, *, reply_to: Any = None, **kwargs) -> None:
+def _remember_prompt(bot: Any, user_id: Any, sent: Any) -> None:
+    if sent is None or user_id is None:
+        return
+    prompts = getattr(bot, "_tos_prompts", None)
+    if not isinstance(prompts, dict):
+        prompts = {}
+        bot._tos_prompts = prompts
+    prompts[str(user_id)] = sent
+
+
+def _forget_prompt(bot: Any, user_id: Any) -> Any:
+    prompts = getattr(bot, "_tos_prompts", None)
+    if not isinstance(prompts, dict):
+        return None
+    return prompts.pop(str(user_id), None)
+
+
+def _result_copy(*, accepted: bool) -> tuple[str, str]:
+    if accepted:
+        return (
+            "You're in. Hosted Maxwell is **free** during Public Alpha — "
+            "send your message again.",
+            "accepted",
+        )
+    return (
+        "Okay. I won't process your messages on this hosted instance.",
+        "declined",
+    )
+
+
+async def _edit_prompt(target: Any, *, content: str, embed: Any = None) -> bool:
+    if target is None:
+        return False
+    edit = getattr(target, "edit", None)
+    if not callable(edit):
+        return False
+    payload: dict[str, Any] = {"content": content, "view": None}
+    if embed is not None:
+        payload["embed"] = embed
+    try:
+        await edit(**payload)
+        return True
+    except TypeError:
+        payload.pop("view", None)
+        try:
+            await edit(**payload)
+            return True
+        except Exception:
+            logger.exception("TOS prompt edit failed")
+            return False
+    except Exception:
+        logger.exception("TOS prompt edit failed")
+        return False
+
+
+async def _settle_prompt(
+    bot: Any,
+    uid: Any,
+    *,
+    accepted: bool,
+    interaction: Any = None,
+    fallback_destination: Any = None,
+    reply_to: Any = None,
+) -> None:
+    content, state = _result_copy(accepted=accepted)
+    embed = None
+    try:
+        embed = _tos_embed(bot, state=state)
+    except Exception:
+        logger.exception("TOS result embed failed")
+    prompt = _forget_prompt(bot, uid)
+    updated = False
+    response = getattr(interaction, "response", None) if interaction is not None else None
+    edit_message = getattr(response, "edit_message", None) if response is not None else None
+    if callable(edit_message):
+        payload: dict[str, Any] = {"content": content, "view": None}
+        if embed is not None:
+            payload["embed"] = embed
+        try:
+            await edit_message(**payload)
+            updated = True
+        except TypeError:
+            payload.pop("view", None)
+            try:
+                await edit_message(**payload)
+                updated = True
+            except Exception:
+                logger.exception("TOS interaction edit failed")
+        except Exception:
+            logger.exception("TOS interaction edit failed")
+    if not updated:
+        target = getattr(interaction, "message", None) if interaction is not None else None
+        updated = await _edit_prompt(target or prompt, content=content, embed=embed)
+    if updated:
+        return
+    send = getattr(response, "send_message", None) if response is not None else None
+    if callable(send):
+        try:
+            await send(content, ephemeral=True)
+            return
+        except Exception:
+            logger.exception("TOS interaction fallback send failed")
+    if fallback_destination is not None:
+        try:
+            kwargs: dict[str, Any] = {"content": content}
+            if embed is not None:
+                kwargs["embed"] = embed
+            await _send(fallback_destination, reply_to=reply_to, **kwargs)
+        except Exception:
+            logger.exception("TOS settle fallback failed for %s", uid)
+
+
+async def _send(destination: Any, *, reply_to: Any = None, **kwargs) -> Any:
     if reply_to is not None:
         reply = getattr(reply_to, "reply", None)
         if callable(reply):
             try:
-                await reply(**kwargs)
-                return
+                return await reply(**kwargs)
             except Exception:
                 logger.exception("TOS reply failed; falling back to channel send")
     send = getattr(destination, "send", None)
@@ -224,21 +359,27 @@ async def _send(destination: Any, *, reply_to: Any = None, **kwargs) -> None:
             kwargs.setdefault("reference", reply_to)
             kwargs.setdefault("mention_author", True)
         try:
-            await send(**kwargs)
-            return
+            return await send(**kwargs)
         except Exception:
             kwargs.pop("reference", None)
             kwargs.pop("mention_author", None)
-            await send(**kwargs)
+            return await send(**kwargs)
+    return None
 
 
-async def offer(bot: Any, destination: Any, *, reply_to: Any = None) -> None:
+async def offer(
+    bot: Any,
+    destination: Any,
+    *,
+    reply_to: Any = None,
+    user_id: Any = None,
+) -> None:
     terms, privacy = legal_urls(bot)
     kwargs: dict[str, Any] = {
         "content": (
-            "Maxwell is in Public Alpha. "
-            f"Read the Terms ({terms}) and Privacy Policy ({privacy}). "
-            "Click Agree or reply `agree`."
+            "Hosted Maxwell is **free** during Public Alpha. "
+            f"Read the Terms ({terms}) and Privacy Policy ({privacy}), "
+            "then click Agree — or reply `agree`."
         )
     }
     try:
@@ -252,7 +393,11 @@ async def offer(bot: Any, destination: Any, *, reply_to: Any = None) -> None:
         view = None
     if view is not None:
         kwargs["view"] = view
-    await _send(destination, reply_to=reply_to, **kwargs)
+    sent = await _send(destination, reply_to=reply_to, **kwargs)
+    uid = user_id
+    if uid is None and reply_to is not None:
+        uid = getattr(getattr(reply_to, "author", None), "id", None)
+    _remember_prompt(bot, uid, sent)
 
 
 def _normalized_reply(bot: Any, message: Any) -> str:
@@ -275,31 +420,14 @@ async def gate_message(bot: Any, message: Any) -> str | None:
     reply = _normalized_reply(bot, message)
     if reply in AGREE_PHRASES:
         record_agreement(bot, uid)
-        try:
-            await _send(
-                channel,
-                reply_to=message,
-                content=(
-                    "You're in. Maxwell is still in Public Alpha — "
-                    "expect bugs, limits, and the occasional fire. Send your "
-                    "message again."
-                ),
-            )
-        except Exception:
-            logger.exception("TOS agree ack failed for %s", uid)
+        await _settle_prompt(
+            bot, uid, accepted=True, fallback_destination=channel, reply_to=message
+        )
         return _REASON
     if reply in DECLINE_PHRASES:
-        try:
-            await _send(
-                channel,
-                reply_to=message,
-                content=(
-                    "Okay. I won't process your messages on this hosted instance. "
-                    "The code stays open source if you want to run your own copy."
-                ),
-            )
-        except Exception:
-            logger.exception("TOS decline ack failed for %s", uid)
+        await _settle_prompt(
+            bot, uid, accepted=False, fallback_destination=channel, reply_to=message
+        )
         return _REASON
     now = time.monotonic()
     offered = getattr(bot, "_tos_offered_at", None)
@@ -312,20 +440,21 @@ async def gate_message(bot: Any, message: Any) -> str | None:
         return _REASON
     offered[key] = now
     try:
-        await offer(bot, channel, reply_to=message)
+        await offer(bot, channel, reply_to=message, user_id=uid)
     except Exception:
         logger.exception("Failed to send TOS prompt to %s", key)
         terms, privacy = legal_urls(bot)
         try:
-            await _send(
+            sent = await _send(
                 channel,
                 reply_to=message,
                 content=(
-                    "Maxwell is in Public Alpha. Reply `agree` "
-                    f"to the Terms ({terms}) and Privacy ({privacy}) before "
-                    "I can talk to you."
+                    "Hosted Maxwell is **free** during Public Alpha. Reply "
+                    f"`agree` to the Terms ({terms}) and Privacy ({privacy}) "
+                    "before I can talk to you."
                 ),
             )
+            _remember_prompt(bot, uid, sent)
         except Exception:
             logger.exception("TOS text fallback failed for %s", key)
     return _REASON
@@ -341,24 +470,10 @@ async def handle_interaction(bot: Any, interaction: Any) -> bool:
         return False
     user = getattr(interaction, "user", None) or getattr(interaction, "author", None)
     uid = getattr(user, "id", None)
-    response = getattr(interaction, "response", None)
-    send = getattr(response, "send_message", None) if response is not None else None
-    if custom_id == CUSTOM_AGREE:
+    accepted = custom_id == CUSTOM_AGREE
+    if accepted:
         record_agreement(bot, uid)
-        text = (
-            "You're in. Maxwell is still in Public Alpha — expect "
-            "bugs, limits, and the occasional fire. Send your message again."
-        )
-    else:
-        text = (
-            "Okay. I won't process your messages on this hosted instance. "
-            "The code stays open source if you want to run your own copy."
-        )
-    if callable(send):
-        try:
-            await send(text, ephemeral=True)
-        except Exception:
-            logger.exception("TOS interaction reply failed")
+    await _settle_prompt(bot, uid, accepted=accepted, interaction=interaction)
     return True
 
 
