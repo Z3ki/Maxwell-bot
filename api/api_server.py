@@ -13,6 +13,7 @@ import re
 import shutil
 import sqlite3
 import hashlib
+import hmac
 import time
 import uuid as _uuid
 from pathlib import Path
@@ -2604,12 +2605,58 @@ async def _reliability_middleware(request, handler):
         return web.json_response({"error": "internal error"}, status=500)
 
 
+def _github_webhook_store(event: dict) -> None:
+    path = DATA_DIR / "plugins" / "github_projects" / "webhook_events.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with FileLock(path, timeout=5.0):
+        try:
+            current = json.loads(path.read_text("utf-8")) if path.exists() else []
+            if not isinstance(current, list): current = []
+        except Exception:
+            current = []
+        current.append(event)
+        _atomic_json_write_sync(path, current[-500:])
+
+async def github_webhook(request):
+    secret = str(os.getenv("MAXWELL_GITHUB_WEBHOOK_SECRET", "") or "").encode()
+    if not secret:
+        return _json_response({"error":"github webhook is not configured"}, 503)
+    raw = await request.read()
+    supplied = str(request.headers.get("X-Hub-Signature-256", "") or "")
+    expected = "sha256=" + hmac.new(secret, raw, hashlib.sha256).hexdigest()
+    try:
+        valid = hmac.compare_digest(supplied, expected)
+    except Exception:
+        valid = False
+    if not valid:
+        return _json_response({"error":"invalid signature"}, 401)
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return _json_response({"error":"invalid json"}, 400)
+    event_name = str(request.headers.get("X-GitHub-Event", "") or "")[:80]
+    repo = str(((payload.get("repository") or {}).get("full_name")) or "")[:220]
+    if not repo or "/" not in repo:
+        return _json_response({"ok":True,"ignored":"no repository"})
+    number = payload.get("number")
+    if not isinstance(number, int):
+        check_obj = payload.get("check_run") or payload.get("check_suite") or {}
+        prs = check_obj.get("pull_requests") if isinstance(check_obj, dict) else []
+        if isinstance(prs, list) and prs and isinstance(prs[0], dict): number = prs[0].get("number")
+    row = {"delivery":str(request.headers.get("X-GitHub-Delivery","") or "")[:120],"event":event_name,"action":str(payload.get("action") or "")[:80],"repo":repo,"number":int(number) if isinstance(number,int) else 0,"sender":str(((payload.get("sender") or {}).get("login")) or "")[:120],"received_at":time.time()}
+    if event_name in {"pull_request","issues","check_run","check_suite"}:
+        await asyncio.to_thread(_github_webhook_store, row)
+        return _json_response({"ok":True})
+    return _json_response({"ok":True,"ignored":event_name})
+
+
 app = web.Application(
     middlewares=[_reliability_middleware, _auth_middleware_unless_login],
     client_max_size=256 * 1024,
 )
 app.router.add_get("/health", health_check)
 app.router.add_get("/api/health", health_check)
+app.router.add_post("/api/github/webhook", github_webhook)
 app.router.add_get("/data/{file}", data_file)
 app.router.add_options(
     "/data/{file}",

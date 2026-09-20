@@ -62,7 +62,7 @@ BG_MAX_JOBS_DEFAULT = 2
 BG_MAX_PER_USER_DEFAULT = 1
 
 _NO_RECURSE_TOOL = "spawn_background"
-_WORKER_HIDDEN_TOOLS = frozenset({_NO_RECURSE_TOOL, "send_message"})
+_WORKER_HIDDEN_TOOLS = frozenset({_NO_RECURSE_TOOL, "send_message", "agent_life"})
 
 
 def _worker_tools(openai_tools: Any) -> list[dict[str, Any]]:
@@ -735,6 +735,8 @@ def _worker_system_body(job_id: str, goal: str, context: str = "") -> str:
         "tools. One route = one definition; don't remount the same path.\n"
         "6. Do the whole job. No placeholders. Finishing is the job; once acceptance criteria "
         "are met, stop using tools and return the result.\n"
+        "7. For code/repo work, use a builder→critic loop: inspect the actual diff and test output as if reviewing someone else's patch. Fix concrete defects, missing edge cases, fake stubs/TODOs, or unverified assumptions, then rerun only the relevant checks. Do not declare success from inspection alone when executable verification exists.\n"
+        "8. When user_sandbox is available, it is the pre-authorized YOLO zone for coding: freely edit files, install dependencies, build, test, run local services and iterate there without asking for each command. The sandbox boundary is absolute: do not escape it, mount host resources, or touch another user's workspace.\n"
         "Last message: one concrete result line, not 'done' or 'finished'. If you produced a "
         "real URL: `Built <title>: <url> — <one line>` with the title and URL from tools. "
         "Otherwise give the answer/artifact (path, summary, image, findings). Never invent a "

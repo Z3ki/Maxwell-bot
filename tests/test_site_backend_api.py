@@ -112,6 +112,7 @@ def test_site_routes_are_public_and_the_rest_is_not():
     assert _needs_auth(FakeRequest(path="/api/site/guest/items/notes")) is False
     assert _needs_auth(FakeRequest(path="/api/control", method="PUT")) is True
     assert _needs_auth(FakeRequest(path="/api/sites", method="DELETE")) is True
+    assert _needs_auth(FakeRequest(path="/api/github/webhook", method="POST")) is False
     # A slug can't prefix its way out of its own namespace.
     assert _needs_auth(FakeRequest(path="/api/sites?slug=x", method="DELETE")) is True
 
