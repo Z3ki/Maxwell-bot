@@ -53,7 +53,7 @@ def load(bot: Any) -> None:
     except Exception:
         logger.exception("Failed to load legal notice records")
     bot._legal_notice_users = users
-    bot._legal_notice_lock = asyncio.Lock()
+    bot._legal_notice_locks = {}
     logger.info("Loaded %d legal notice record(s)", len(users))
 
 
@@ -81,10 +81,13 @@ async def notify_user(bot: Any, user: Any) -> None:
     users = getattr(bot, "_legal_notice_users", None)
     if not isinstance(users, dict):
         return
-    lock = getattr(bot, "_legal_notice_lock", None)
-    if lock is None:
-        lock = asyncio.Lock()
-        bot._legal_notice_lock = lock
+    if uid in users:
+        return
+    locks = getattr(bot, "_legal_notice_locks", None)
+    if locks is None:
+        locks = bot._legal_notice_locks = {}
+    # Only requests for the same user need to wait for the same DM.
+    lock = locks.setdefault(uid, asyncio.Lock())
     async with lock:
         if uid in users:
             return

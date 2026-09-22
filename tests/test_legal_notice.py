@@ -81,6 +81,34 @@ def test_parallel_first_interactions_send_only_one_dm(tmp_path):
     assert len(user.sent) == 1
 
 
+def test_slow_dm_does_not_hold_up_other_users(tmp_path):
+    bot = _bot(tmp_path)
+    slow = User(11)
+    fast = User(12)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_send(content):
+        started.set()
+        await release.wait()
+        slow.sent.append(content)
+
+    slow.send = slow_send
+
+    async def run():
+        pending = asyncio.create_task(legal_notice.notify_user(bot, slow))
+        await started.wait()
+        try:
+            await asyncio.wait_for(legal_notice.notify_user(bot, fast), timeout=1)
+            assert len(fast.sent) == 1
+        finally:
+            release.set()
+            await pending
+
+    asyncio.run(run())
+    assert len(slow.sent) == 1
+
+
 def test_existing_agreements_are_imported(tmp_path):
     (tmp_path / "tos_consent.json").write_text(json.dumps({"users": {"42": {"version": "0", "agreed_at": 1}}}))
     bot = _bot(tmp_path)
