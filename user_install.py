@@ -2,7 +2,7 @@
 
 Discord user-install is command-only: slash, message context menus, and user
 context menus. Maxwell registers those with USER_INSTALL. Anyone can add the
-app; TOS consent still gates first use.
+app; first use receives a nonblocking legal notice by DM.
 
 Channel history is not in the command payload. When Maxwell is also in the
 server, we snapshot recent messages. Message context menus include the

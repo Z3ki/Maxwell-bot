@@ -18,7 +18,7 @@ admin.maxwell.example.com {
 	handle @admin {
 		file_server
 	}
-	@legal path /terms /terms/* /privacy /privacy/* /legal-gate.js
+	@legal path /terms /terms/* /privacy /privacy/*
 	handle @legal {
 		file_server
 	}

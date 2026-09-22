@@ -63,17 +63,6 @@ footer a:hover{color:var(--fg)}
   li{grid-template-columns:1fr;gap:6px}
 }
 
-#legal-gate{position:fixed;inset:0;z-index:1000;background:rgba(10,10,12,.92);display:grid;place-items:center;padding:24px}
-body.legal-locked{overflow:hidden}
-.legal-card{width:min(440px,100%);background:var(--card);border:1px solid var(--bdr);border-radius:12px;padding:28px 24px}
-.legal-kicker{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--fg3);margin-bottom:10px}
-#legal-gate h2{font-family:'JetBrains Mono',monospace;font-size:20px;letter-spacing:-.03em;text-transform:none;color:var(--fg);margin:0 0 12px;font-weight:700}
-#legal-gate p{font-size:14px;color:var(--fg2);margin-bottom:16px;line-height:1.55}
-#legal-gate a{text-decoration:underline}
-.legal-check{display:flex;gap:10px;align-items:flex-start;font-size:13px;color:var(--fg);margin:18px 0;line-height:1.45}
-.legal-check input{margin-top:3px}
-.legal-hint{min-height:18px;font-size:12px;color:#e57585}
-#legal-agree{width:100%;border:0;border-radius:8px;padding:12px;background:var(--fg);color:var(--bg);font:inherit;font-weight:600;cursor:pointer}
 </style>
 </head>
 <body>
@@ -123,7 +112,7 @@ body.legal-locked{overflow:hidden}
 <div class="sep"></div>
 
 <div class="warn">
-  <strong>Public Alpha.</strong> Expect bugs, downtime, lost memory, and sudden limits. The code is MIT. This hosted instance may later add usage caps or a small subscription (around $3 — not a promise). First Discord message requires agreeing to the terms. Self-host: official Discord bot token, Message Content / Server Members / Presence intents, <em>DISCORD_BOT_TOKEN</em>.
+  <strong>Public Alpha.</strong> Expect bugs, downtime, lost memory, and sudden limits. The code is MIT. This hosted instance may later add usage caps or a small subscription (around $3 — not a promise). New Discord users receive the Terms and Privacy links by DM. Self-host: official Discord bot token, Message Content / Server Members / Presence intents, <em>DISCORD_BOT_TOKEN</em>.
 </div>
 
 <footer>
@@ -137,6 +126,5 @@ body.legal-locked{overflow:hidden}
 </footer>
 
 </div>
-<script src="/legal-gate.js"></script>
 </body>
 </html>
