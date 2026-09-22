@@ -72,7 +72,7 @@ def test_live_provider_calls_charge_actual_usage_and_stop_at_limit(tmp_path):
     bot._control = {"daily_user_token_limit_enabled": True, "daily_user_token_limit": 120, "live_max_output_tokens": 64}
     bot._daily_tokens = ledger
     bot.ai_provider = SimpleNamespace(generate_response=generate, model="test")
-    bot._night_fallback_kwargs = lambda: {}
+    bot._night_fallback_kwargs = dict
     message = SimpleNamespace(id=1, author=SimpleNamespace(id=42, bot=False), channel=SimpleNamespace(id=2))
     token = _current_inbound.set(message)
     try:
