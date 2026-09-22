@@ -31,6 +31,7 @@ import discord
 from discord.ext import commands
 from discord.utils import MISSING
 from process_utils import communicate_process
+from daily_tokens import DailyTokens, DailyTokenLimitExceeded
 
 try:
     if os.environ.get("ENABLE_VC", "true").strip().lower() in {
@@ -3086,9 +3087,10 @@ class MaxwellBot(commands.Bot):
         )
         self._token_tracker = TokenBudgetTracker(
             daily_budget=_safe_int(
-                os.environ.get("MAXWELL_DAILY_TOKEN_BUDGET", "500000"), 500000
+                os.environ.get("MAXWELL_DAILY_TOKEN_BUDGET", "3000000"), 3000000
             )
         )
+        self._daily_tokens = DailyTokens(Path(self.config.DATA_DIR) / "daily_tokens.sqlite3")
         # Concurrency safety (see concurrency_safety.py): per-(guild, channel)
         # serialized work queues and bounded per-tool-class semaphores. Built
         # here so the types are known; the watchdog task is started/stopped in
@@ -3376,14 +3378,54 @@ class MaxwellBot(commands.Bot):
 
     async def _generate_response(self, messages: list[dict], **kwargs):
         """Generate through the main provider, preferring fallback at night."""
+        quota_user_id = kwargs.pop("quota_user_id", None)
         for key, value in self._night_fallback_kwargs().items():
             kwargs.setdefault(key, value)
         message = _current_inbound.get()
         if message is not None:
             kwargs.setdefault("request_id", str(getattr(message, "id", "") or ""))
+        reservation = None
+        reserved_tokens = 0
+        ledger = getattr(self, "_daily_tokens", None)
+        author = getattr(message, "author", None)
+        if quota_user_id is None and author is not None and not getattr(author, "bot", False):
+            quota_user_id = getattr(author, "id", None)
+        if (
+            ledger is not None
+            and quota_user_id is not None
+            and self._control.get("daily_user_token_limit_enabled", True)
+        ):
+            # Include tool schemas and media metadata in the estimate. Provider
+            # usage replaces this estimate after a successful call.
+            payload_chars = len(json.dumps(messages, default=str))
+            payload_chars += len(json.dumps(kwargs.get("tools") or [], default=str))
+            prompt_estimate = max(1, (payload_chars + 2) // 3)
+            requested_output = max(1, int(kwargs.get("max_tokens") or 16384))
+            default_limit = int(self._control.get("daily_user_token_limit", 3_000_000))
+            reservation, output_allowance = ledger.reserve(
+                str(quota_user_id), default_limit, prompt_estimate, requested_output
+            )
+            reserved_tokens = prompt_estimate + output_allowance
+            kwargs["max_tokens"] = output_allowance
         started = time.monotonic()
         try:
-            return await self.ai_provider.generate_response(messages, **kwargs)
+            result = await self.ai_provider.generate_response(messages, **kwargs)
+            usage = getattr(result, "usage", None) or {}
+            actual = int(usage.get("total_tokens") or 0)
+            if not actual:
+                actual = int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0)
+            if not actual:
+                actual = prompt_estimate + max(1, (len(str(result)) + 2) // 3) if reservation else 0
+            if reservation:
+                ledger.settle(reservation, actual)
+                reservation = None
+            return result
+        except BaseException:
+            # A timed-out provider may still have billed the request. Charging
+            # the reservation avoids silently reopening the same quota.
+            if reservation:
+                ledger.settle(reservation, reserved_tokens)
+            raise
         finally:
             if message is not None:
                 logger.info(
@@ -4318,6 +4360,16 @@ class MaxwellBot(commands.Bot):
                 "cancelled_after_effect" if row.get("effects_started") else "cancelled",
             )
             raise
+        except DailyTokenLimitExceeded as exc:
+            try:
+                self._mark_request_effect(message)
+                sent = await self._send_with_slowmode(
+                    message.channel, str(exc), reply_to=message
+                )
+                self._record_delivery(message, sent)
+            except Exception:
+                logger.exception("Could not deliver daily token limit notice")
+                self._record_request_outcome(message, "failed", "quota_notice_failed")
         except Exception as exc:
             logger.warning(
                 "inbound mid=%s cid=%s stage=turn_error error=%s",
@@ -9040,7 +9092,7 @@ class MaxwellBot(commands.Bot):
         )
         return messages
 
-    async def _vc_generate_ai_response(self, messages: list) -> str:
+    async def _vc_generate_ai_response(self, messages: list, user_id=None) -> str:
         vc_timeout = max(
             8,
             min(
@@ -9063,6 +9115,7 @@ class MaxwellBot(commands.Bot):
             async with self._vc_ai_semaphore:
                 return await self._generate_response(
                     messages,
+                    quota_user_id=user_id,
                     media=[],
                     timeout=vc_timeout,
                     max_tokens=vc_max_tokens,
@@ -9189,7 +9242,7 @@ class MaxwellBot(commands.Bot):
                 transcript[:160],
             )
             t_ai = time.perf_counter()
-            raw_resp = await self._vc_generate_ai_response(messages)
+            raw_resp = await self._vc_generate_ai_response(messages, user.id)
             t_ai_done = time.perf_counter()
             resp = self._vc_format_response(raw_resp)
             if not resp:
@@ -10510,6 +10563,12 @@ class MaxwellBot(commands.Bot):
                     ),
                     2000000,
                 ),
+            )
+            control["daily_user_token_limit"] = max(
+                1, min(_safe_int(control.get("daily_user_token_limit"), 3_000_000), 100_000_000)
+            )
+            control["live_max_output_tokens"] = max(
+                256, min(_safe_int(control.get("live_max_output_tokens"), 4096), 32768)
             )
             control["autonomy_interval_seconds"] = max(
                 30, _safe_int(control.get("autonomy_interval_seconds", 300) or 300, 300)
@@ -13887,7 +13946,10 @@ class MaxwellBot(commands.Bot):
                 7200,
             ),
         )
-        max_out_tokens = getattr(self.config, "OLLAMA_MAX_TOKENS", 16384) or 16384
+        max_out_tokens = min(
+            getattr(self.config, "OLLAMA_MAX_TOKENS", 16384) or 16384,
+            max(256, _safe_int(self._control.get("live_max_output_tokens", 4096), 4096)),
+        )
         if self._is_short_live_turn(message, content):
             # Banter does not need a 16k output budget.
             max_out_tokens = min(int(max_out_tokens), 4096)
@@ -14401,8 +14463,9 @@ class MaxwellBot(commands.Bot):
                     custom_tool_calls, provider_tools = self._select_tool_protocol(
                         openai_tools
                     )
-                    max_out_tokens = (
-                        getattr(self.config, "OLLAMA_MAX_TOKENS", 16384) or 16384
+                    max_out_tokens = min(
+                        getattr(self.config, "OLLAMA_MAX_TOKENS", 16384) or 16384,
+                        max(256, _safe_int(self._control.get("live_max_output_tokens", 4096), 4096)),
                     )
                     logger.info(
                         "more_tools: reattached %d tools for follow-up",
@@ -14847,6 +14910,11 @@ class MaxwellBot(commands.Bot):
         except asyncio.CancelledError as _exc:
             logger.info(f"Cancelled active request in channel {channel_id}")
             raise
+        except DailyTokenLimitExceeded as e:
+            if MaxwellBot._request_state(self, message):
+                raise
+            await message.channel.send(str(e))
+            normal_reply_sent = True
         except ProviderUsageExhaustedError as e:
             if MaxwellBot._request_state(self, message):
                 raise
@@ -17753,11 +17821,13 @@ class MaxwellBot(commands.Bot):
             try:
                 response_text = await self._generate_response(
                     messages,
+                    quota_user_id=f"tg:{user_id}",
+                    max_tokens=max(256, _safe_int(self._control.get("live_max_output_tokens", 4096), 4096)),
                     media=tg_media,
                     timeout=ai_timeout,
                     tools=tg_openai_tools or None,
                 )
-            except ProviderUsageExhaustedError as e:
+            except (ProviderUsageExhaustedError, DailyTokenLimitExceeded) as e:
                 logger.warning("Provider usage exhausted in Telegram: %s", e)
                 await TelegramMessageAdapter(
                     session,
@@ -17766,7 +17836,7 @@ class MaxwellBot(commands.Bot):
                     message.get("message_id"),
                     user_id,
                     user_name,
-                ).reply(e.user_message)
+                ).reply(getattr(e, "user_message", str(e)))
                 return
         finally:
             await self._release_ai_slot()
@@ -18329,6 +18399,8 @@ class MaxwellBot(commands.Bot):
             try:
                 followup = await self._generate_response(
                     result_messages,
+                    quota_user_id=f"tg:{user_id}",
+                    max_tokens=max(256, _safe_int(self._control.get("live_max_output_tokens", 4096), 4096)),
                     media=[],
                     timeout=ai_timeout,
                     tools=tg_openai_tools or None,

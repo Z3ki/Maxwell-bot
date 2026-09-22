@@ -25,7 +25,6 @@ from utils import _atomic_json_write_sync
 OWNER_COMMAND_NAME = "owner"
 _SENSITIVE_KEY_PARTS = (
     "api_key",
-    "token",
     "secret",
     "password",
     "authorization",
@@ -45,6 +44,12 @@ _ACTION_CHOICES = [
     {"name": "Enable boolean control", "value": "enable"},
     {"name": "Disable boolean control", "value": "disable"},
     {"name": "Reload control file", "value": "reload_control"},
+    {"name": "User token usage", "value": "quota"},
+    {"name": "Set user daily limit", "value": "quota_set"},
+    {"name": "Clear user limit override", "value": "quota_clear"},
+    {"name": "Reset user usage", "value": "quota_reset"},
+    {"name": "Exempt user from limit", "value": "quota_exempt"},
+    {"name": "Remove user exemption", "value": "quota_unexempt"},
 ]
 
 OWNER_COMMAND = {
@@ -63,14 +68,14 @@ OWNER_COMMAND = {
         },
         {
             "name": "key",
-            "description": "Control key for set/enable/disable",
+            "description": "Control key, or user ID for quota actions",
             "type": 3,
             "required": False,
             "max_length": 100,
         },
         {
             "name": "value",
-            "description": "New value for set; JSON is accepted for lists/objects",
+            "description": "Control value, or token count for quota_set",
             "type": 3,
             "required": False,
             "max_length": 1000,
@@ -92,7 +97,11 @@ def _is_owner(bot: Any, user_id: Any) -> bool:
 
 def _is_sensitive_key(key: Any) -> bool:
     lowered = str(key or "").lower()
-    return any(part in lowered for part in _SENSITIVE_KEY_PARTS)
+    return (
+        any(part in lowered for part in _SENSITIVE_KEY_PARTS)
+        or lowered == "token"
+        or lowered.endswith("_token")
+    )
 
 
 def _redact(value: Any, key: str = "") -> Any:
@@ -217,7 +226,10 @@ def _embed(bot: Any, section: str) -> discord.Embed:
                 f"Model: **{runtime['model']}**\n"
                 f"AI concurrency: **{_fmt(control.get('ai_concurrency'))}**\n"
                 f"Max tool iterations: **{_fmt(control.get('max_tool_iterations'))}**\n"
-                f"Prompt budget: **{_fmt(control.get('prompt_context_budget'))}** chars"
+                f"Prompt budget: **{_fmt(control.get('prompt_context_budget'))}** chars\n"
+                f"Max live output: **{_fmt(control.get('live_max_output_tokens'))}** tokens"
+                f"\nDaily user limit: **{_fmt(control.get('daily_user_token_limit'))}** "
+                f"({'on' if control.get('daily_user_token_limit_enabled') else 'off'})"
             ),
             inline=False,
         )
@@ -356,7 +368,7 @@ def _coerce_value(key: str, raw: Any) -> Any:
         raise ValueError("boolean values must be true/false, on/off, yes/no, or 1/0")
     if isinstance(default, int):
         try:
-            return int(float(text))
+            return int(text)
         except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError("this control requires a number") from exc
     if isinstance(default, float):
@@ -493,6 +505,42 @@ async def handle_owner_interaction(bot: Any, interaction: Any) -> bool:
             await _send(interaction, content=f"Control reload failed: {type(exc).__name__}: {exc}")
         else:
             await _send(interaction, content="Reloaded `bot_control.json` into the live bot.")
+        return True
+
+    if action in {"quota", "quota_set", "quota_clear", "quota_reset", "quota_exempt", "quota_unexempt"}:
+        valid_discord = key.isdecimal() and len(key) <= 20
+        valid_telegram = key.startswith("tg:") and key[3:].isdecimal() and len(key) <= 23
+        if not (valid_discord or valid_telegram):
+            await _send(interaction, content="Provide a Discord user ID or `tg:<Telegram user ID>` in `key`.")
+            return True
+        ledger = getattr(bot, "_daily_tokens", None)
+        if ledger is None:
+            await _send(interaction, content="Daily token ledger is unavailable.")
+            return True
+        try:
+            if action == "quota_set":
+                amount = int(str(value or ""))
+                if not 1 <= amount <= 100_000_000:
+                    raise ValueError("limit must be between 1 and 100,000,000")
+                ledger.configure(key, limit=amount)
+            elif action == "quota_clear":
+                ledger.configure(key, clear=True)
+            elif action == "quota_reset":
+                ledger.configure(key, reset=True)
+            elif action == "quota_exempt":
+                ledger.configure(key, exempt=True)
+            elif action == "quota_unexempt":
+                ledger.configure(key, exempt=False)
+            state = ledger.status(key, int(_control(bot)["daily_user_token_limit"]))
+        except (TypeError, ValueError) as exc:
+            await _send(interaction, content=f"Could not update quota: {exc}")
+            return True
+        await _send(interaction, content=(
+            f"User `{key}` · {state['day']} UTC · "
+            f"{state['spent']:,}/{state['limit']:,} tokens used "
+            f"({state['reserved']:,} pending) · "
+            f"exempt: {'yes' if state['exempt'] else 'no'}"
+        ))
         return True
 
     if action in {"set", "enable", "disable"}:

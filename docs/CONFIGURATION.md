@@ -81,7 +81,14 @@ Examples:
 /owner action:overview
 /owner action:enable key:autonomy_enabled
 /owner action:set key:ai_concurrency value:3
+/owner action:quota key:123456789012345678
+/owner action:quota_set key:123456789012345678 value:1000000
+/owner action:quota_reset key:123456789012345678
+/owner action:quota_exempt key:123456789012345678
+/owner action:enable key:daily_user_token_limit_enabled
 ```
+
+Each user has a persistent 3,000,000 token allowance per UTC day by default. The ledger lives at `DATA_DIR/daily_tokens.sqlite3`. Usage from Discord text and voice calls, user-created background jobs, and Telegram calls is charged after each model call; requests reserve estimated input and output tokens first, so concurrent calls cannot oversubscribe the estimated allowance. A provider timeout charges the reservation conservatively. Telegram user IDs use `tg:<id>` in quota actions. `quota_clear` removes a user's limit and exemption overrides; `quota_unexempt` removes only the exemption. Set the global allowance with `daily_user_token_limit`; turn enforcement on or off with `daily_user_token_limit_enabled`.
 
 ## Runtime controls
 
@@ -102,6 +109,9 @@ Frequently used controls include:
 | `tool_iteration_timeout_seconds` | Tool-loop timeout |
 | `prompt_context_budget` | Approximate prompt/context budget |
 | `memory_context_budget` | Approximate memory contribution budget |
+| `live_max_output_tokens` | Maximum output tokens for a live text response (default 4096) |
+| `daily_user_token_limit` | Default per-user token allowance per UTC day (default 3000000) |
+| `daily_user_token_limit_enabled` | Enforce the per-user allowance |
 | `store_memory` | Conversation-memory storage switch |
 | `long_term_memory_enabled` | Long-term memory switch |
 | `cross_context_enabled` | Scoped cross-context facts |

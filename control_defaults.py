@@ -4,6 +4,8 @@ Single source of truth for DEFAULT_CONTROL, KNOWN_TOOLS, and parse_bool.
 Both bot.py and api_server.py import from here so config ranges never drift.
 """
 
+import os
+
 from identity import default_wake_words
 
 
@@ -25,6 +27,8 @@ def parse_bool(value, default: bool = False) -> bool:
 # If you change a value here, it changes everywhere. That's the point.
 DEFAULT_CONTROL = {
     "bot_enabled": True,
+    "daily_user_token_limit_enabled": True,
+    "daily_user_token_limit": 3_000_000,
     "log_messages": False,
     "error_replies": True,
     # When True, the apology posted on a failed turn carries a short,
@@ -162,11 +166,12 @@ DEFAULT_CONTROL = {
     "night_fallback_end_hour": 9,
     "ai_timeout_seconds": 3600,
     "ai_concurrency": 2,
-    "memory_history_messages": 40,
-    "memory_context_budget": 48000,
-    "tool_history_messages": 8,
-    "prompt_context_budget": 96000,
-    "max_tool_iterations": 50,
+    "memory_history_messages": 20,
+    "memory_context_budget": 24000,
+    "tool_history_messages": 4,
+    "prompt_context_budget": 48000,
+    "live_max_output_tokens": 4096,
+    "max_tool_iterations": 12,
     "tool_iteration_timeout_seconds": 3600,
     "max_response_chars": 4000,
     # ─── background sub-agent jobs (jobs.py) ────────────────────────────
@@ -240,7 +245,7 @@ DEFAULT_CONTROL = {
     "vc_tts_voice": "",
     "vc_reply_mode": "voice",
     "vc_response_mode": "always",
-    "vc_wake_words": default_wake_words(),
+    "vc_wake_words": default_wake_words(os.getenv("BOT_NAME") or "Maxwell"),
     "vc_interrupt_enabled": True,
     "vc_debug": True,
     "autonomy_enabled": False,

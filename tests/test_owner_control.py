@@ -54,6 +54,7 @@ def test_redaction_hides_nested_secrets():
         "normal": True,
         "nested": {"token": "<redacted>", "model": "test"},
     }
+    assert _redact({"daily_user_token_limit": 3_000_000}) == {"daily_user_token_limit": 3_000_000}
 
 
 def test_control_value_coercion_is_strict():

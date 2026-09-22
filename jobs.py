@@ -780,7 +780,7 @@ async def _reply_short(target_message: Any, channel: Any, text: str) -> None:
 
 
 async def _llm_delivery_line(
-    bot: Any, final_text: Any, job_id: str, job_goal: str = ""
+    bot: Any, final_text: Any, job_id: str, job_goal: str = "", user_id: str = ""
 ) -> str:
     fallback = _delivery_line(final_text, job_id)
     try:
@@ -815,6 +815,7 @@ async def _llm_delivery_line(
                     {"role": "user", "content": prompt},
                 ],
                 max_tokens=256,
+                quota_user_id=user_id or None,
                 timeout=120,
                 disable_reasoning=False,
             )
@@ -1053,6 +1054,7 @@ async def run_background_job(bot: Any, job_id: str) -> None:
             try:
                 response = await bot._generate_response(
                     messages,
+                    quota_user_id=job.user_id,
                     timeout=min(timeout, remaining),
                     max_tokens=max_tokens,
                     tools=provider_tools,
@@ -1266,7 +1268,7 @@ async def run_background_job(bot: Any, job_id: str) -> None:
 
         manager.mark(job.id, progress="delivering")
         try:
-            body = await _llm_delivery_line(bot, final_text, job.id, job.goal)
+            body = await _llm_delivery_line(bot, final_text, job.id, job.goal, job.user_id)
         except Exception:
             body = _delivery_line(final_text, job.id)
         try:
