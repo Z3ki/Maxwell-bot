@@ -294,23 +294,6 @@ def test_progress_final_waits_for_inflight_status_edit():
     run(scenario())
 
 
-def test_telegram_progress_stores_and_deletes_actual_message():
-    async def scenario():
-        posted = SimpleNamespace(delete=AsyncMock())
-        progress = ToolProgress(
-            SimpleNamespace(
-                tool_platform="telegram", reply=AsyncMock(return_value=posted)
-            )
-        )
-        await progress.start()
-        assert progress.posted is posted
-        await progress.stop()
-        await asyncio.sleep(0)
-        posted.delete.assert_awaited_once()
-
-    run(scenario())
-
-
 @pytest.mark.parametrize(
     "text,expected",
     [

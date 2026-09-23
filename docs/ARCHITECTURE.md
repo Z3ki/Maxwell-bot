@@ -3,7 +3,7 @@
 Maxwell is a small core plus feature plugins.
 
 ```text
-Discord / Telegram transport
+Discord transport
         │
         ▼
      bot.py  (composition root, Discord client, turn loop)

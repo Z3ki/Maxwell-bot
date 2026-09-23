@@ -23,7 +23,7 @@ POSITIONS = (
 SCOPES = (
     "always",
     "discord",
-    "telegram",
+
     "voice",
     "autonomy",
     "jobs",

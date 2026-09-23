@@ -195,11 +195,7 @@ class Config:
         for item in os.getenv("MAXWELL_DEV_GUILD_IDS", "").split(",")
         if item.strip().isdigit()
     )
-    TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
-    TELEGRAM_WEBHOOK_URL = os.getenv("TELEGRAM_WEBHOOK_URL", "").strip()
-    TELEGRAM_WEBHOOK_PORT = _int_env(
-        "TELEGRAM_WEBHOOK_PORT", 8443, min_value=1024, max_value=65535
-    )
+
 
     OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", os.getenv("OPENAI_COMPAT_API_KEY", ""))
@@ -269,7 +265,7 @@ class Config:
     ENABLE_FETCH_URL = _feature_env("ENABLE_FETCH_URL")
     ENABLE_CREATE_SITE = _feature_env("ENABLE_CREATE_SITE")
     ENABLE_AVATAR = _feature_env("ENABLE_AVATAR")
-    ENABLE_TELEGRAM = _feature_env("ENABLE_TELEGRAM")
+
     ENABLE_AUTONOMY = _feature_env("ENABLE_AUTONOMY")
     # image_generator uses Pollinations (free, keyless); hd_image needs an
     # NVIDIA key but degrades to a clear error instead of breaking the tool.
@@ -549,7 +545,7 @@ class Config:
         ("ENABLE_EMAIL_TOOLS", "email tools"),
         ("ENABLE_SHELL", "shell (docker sandbox)"),
         ("ENABLE_RAG", "RAG vector memory"),
-        ("ENABLE_TELEGRAM", "Telegram transport"),
+
         ("ENABLE_AUTONOMY", "autonomy engine"),
         ("REM_ENABLED", "REM dreaming pass"),
     )
@@ -620,11 +616,7 @@ class Config:
                 "call. Either set MAXWELL_EMAIL_PASSWORD or set "
                 "ENABLE_EMAIL_TOOLS=false."
             )
-        if cls.ENABLE_TELEGRAM and cls.TELEGRAM_TOKEN:
-            _log.info(
-                "TELEGRAM_TOKEN is set — Telegram polling will auto-start. "
-                "Set ENABLE_TELEGRAM=false to suppress without removing the token."
-            )
+
         if cls.ENABLE_SHELL:
             _log.warning(
                 "ENABLE_SHELL is on — the model can run commands on this host "

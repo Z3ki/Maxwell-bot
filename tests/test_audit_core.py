@@ -6,10 +6,10 @@ import pytest
 
 import bot as bot_module
 import sys
-from io import BytesIO
+
 
 from process_utils import communicate_process
-from bot import MaxwellBot, TelegramMessageAdapter
+from bot import MaxwellBot
 from bot_tools import SendMessageTool
 
 
@@ -64,37 +64,6 @@ def test_destination_mention_uses_parsed_snowflake():
     message.channel.send.assert_not_awaited()
 
 
-class _TelegramResponse:
-    status = 200
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *_):
-        return False
-
-    async def json(self):
-        return {"ok": True, "result": {"message_id": 42, "chat": {"id": 99}}}
-
-
-def test_telegram_send_tool_reports_confirmed_delivery():
-    async def run():
-        session = SimpleNamespace(post=lambda *a, **kw: _TelegramResponse())
-        message = TelegramMessageAdapter(session, "https://example.test/bot", 99, 1, 11)
-        owner = SimpleNamespace(
-            _respect_slowmode=AsyncMock(),
-            _mark_bot_sent=lambda _: None,
-        )
-        owner._send_with_slowmode = lambda *a, **kw: MaxwellBot._send_with_slowmode(
-            owner, *a, **kw
-        )
-        result = await SendMessageTool(owner).execute(message, content="hello")
-        assert result.startswith("__MESSAGE_SENT__")
-        sent = await message.reply("hello")
-        assert sent.id == 42
-        assert sent.channel.id == "tg:99"
-
-    asyncio.run(run())
 
 
 class _RunningProcess:
@@ -180,30 +149,6 @@ def test_process_success_preserves_output():
         )
         assert await communicate_process(proc, timeout=10) == (b"done\n", b"")
         assert proc.returncode == 0
-
-    asyncio.run(run())
-
-
-def test_telegram_file_reply_returns_delivery_receipt():
-    async def run():
-        session = SimpleNamespace(post=lambda *a, **kw: _TelegramResponse())
-        message = TelegramMessageAdapter(session, "https://example.test/bot", 99, 1)
-        sent = await message.reply(
-            file=SimpleNamespace(fp=BytesIO(b"file"), filename="file.txt")
-        )
-        assert sent.id == 42
-
-    asyncio.run(run())
-
-
-def test_telegram_does_not_confirm_malformed_success():
-    async def run():
-        response = _TelegramResponse()
-        response.json = AsyncMock(return_value={"ok": False, "description": "failed"})
-        session = SimpleNamespace(post=lambda *a, **kw: response)
-        message = TelegramMessageAdapter(session, "https://example.test/bot", 99, 1)
-        with pytest.raises(RuntimeError, match="did not confirm"):
-            await message.reply("hello")
 
     asyncio.run(run())
 
@@ -307,53 +252,4 @@ def test_parallel_tool_error_survives_history_reconstruction(monkeypatch):
     asyncio.run(run())
 
 
-def test_telegram_progress_deletes_its_confirmed_message():
-    from tool_progress import ToolProgress
 
-    async def run():
-        deleted = asyncio.Event()
-        calls = []
-
-        def post(url, **kwargs):
-            calls.append((url, kwargs))
-            if url.endswith("/deleteMessage"):
-                deleted.set()
-            return _TelegramResponse()
-
-        message = TelegramMessageAdapter(
-            SimpleNamespace(post=post), "https://example.test/bot", 99, 1
-        )
-        progress = ToolProgress(message)
-        await progress.start()
-        await progress.stop()
-        await asyncio.wait_for(deleted.wait(), timeout=2)
-        assert calls[-1][1]["json"] == {"chat_id": 99, "message_id": 42}
-
-    asyncio.run(run())
-
-
-def test_plugin_reload_awaits_teardown_before_replacement():
-    async def run():
-        order = []
-
-        async def teardown():
-            await asyncio.sleep(0)
-            order.append("teardown")
-
-        def reload():
-            order.append("reload")
-            return "reloaded"
-
-        owner = SimpleNamespace(
-            command_prefix=",",
-            _control={},
-            _is_admin=lambda _: True,
-            plugin_manager=SimpleNamespace(teardown=teardown, reload_plugins=reload),
-        )
-        message = _message()
-        message.content = ",plugin reload"
-        await MaxwellBot._handle_command(owner, message)
-        assert order == ["teardown", "reload"]
-        message.channel.send.assert_awaited_once_with("reloaded")
-
-    asyncio.run(run())

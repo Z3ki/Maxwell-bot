@@ -69,7 +69,7 @@ Docker restart policies and need a separate inventory and migration plan.
 
 ## Remaining high-priority work
 
-1. Remove Telegram transport and generated references, with stored identifiers preserved.
+1. Telegram transport and generated references are removed on this branch. Stored `tg:<id>` ledger keys remain addressable; no Telegram database rows are deleted.
 2. Replace global/per-user plugin toggles and protected prompt editing with authorized, isolated Discord `/config` and `/personality` commands.
 3. Audit all Discord sends, edits, slash responses, chunking, and user-supplied content for formatting and mention safety; validate with a dev bot.
 4. Remove or isolate Docker socket access after migrating existing site backends and dashboard operations.

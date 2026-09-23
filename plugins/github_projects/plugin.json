@@ -12,7 +12,7 @@
   "uninstallable": true,
   "permissions": ["network", "files.read", "files.write", "shell", "jobs.run", "secrets.read"],
   "optional_dependencies": [],
-  "platforms": ["discord", "telegram"],
+  "platforms": ["discord"],
   "tools": [{"name":"github_repo","returns_result":true,"ends_turn":false,"is_destructive":true,"requires_admin":false}],
   "prompt": {
     "position": "tools",

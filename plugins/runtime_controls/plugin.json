@@ -13,8 +13,7 @@
   "permissions": [],
   "optional_dependencies": [],
   "platforms": [
-    "discord",
-    "telegram"
+    "discord"
   ],
   "tools": [
     {
