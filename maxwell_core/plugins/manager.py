@@ -31,6 +31,12 @@ from maxwell_core.tools.registry import ToolRegistry, set_global_registry
 
 logger = logging.getLogger("maxwell.plugins")
 
+# Legacy detached LLM workers are not part of the single-assistant runtime.
+# Skip their setup entirely: loading agent_life schedules its periodic wake
+# even if plugins.json says it is disabled. Keep the source for old data and
+# migration work, but never start these workers in the default runtime.
+_RETIRED_AGENT_PLUGINS = frozenset({"agent_life", "background_jobs"})
+
 _EVENT_TIMEOUT = max(1.0, float(os.getenv("MAXWELL_PLUGIN_EVENT_TIMEOUT", "15") or 15))
 _JOB_TIMEOUT = max(5.0, float(os.getenv("MAXWELL_PLUGIN_JOB_TIMEOUT", "120") or 120))
 _MAX_TRACKED_TASKS_PER_PLUGIN = 32
@@ -676,6 +682,8 @@ class PluginManager:
         discovered: dict[str, tuple[Path, PluginManifest]] = {}
         for entry in self._plugin_dirs():
             plugin_name = entry.name
+            if plugin_name in _RETIRED_AGENT_PLUGINS and entry.parent == self.plugins_dir:
+                continue
             try:
                 manifest = self._load_typed_manifest(entry, plugin_name)
             except ManifestError as exc:
@@ -1374,4 +1382,3 @@ class PluginManager:
             f"Uninstalled plugin '{plugin_name}'. Code moved to {trash}. "
             f"Stored data in {self.data_dir / 'plugins' / plugin_name} was kept."
         )
-

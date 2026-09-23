@@ -46,7 +46,7 @@ def test_tool_protocol_states_dm_and_cross_chat_restrictions():
     assert "in dms, discord moderation" in text
     assert "send_message stays in the current chat" in text
     assert "from a dm you cannot send" in text
-    assert "shell, sites" in text
+    assert "sites, search" in text
     assert "list_channels" in text
     assert "list_roles" in text
     assert "list_members" in text
