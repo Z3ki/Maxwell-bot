@@ -2379,9 +2379,8 @@ TOOL_PROTOCOL = (
     "put the goal, decisions so far, and what to do next. Use thread_control to add "
     "context, rename, archive, or list. Do not open a questionnaire thread; brief "
     "thread-you and work there.\n"
-    "LONG TASKS GO TO BACKGROUND: if a job takes many tool calls (site, research, images, code, anything long), "
-    "call spawn_background(goal=...) FIRST, then send_message ONE short ack line naming the job id "
-    "and end the turn. Never start a long job inline when you could spawn it.\n"
+    "Work through multi-step requests with the available tools in this conversation. "
+    "Only report completion after checking the tool results; if a tool fails, say what failed.\n"
     "chess: you play your own moves. chess_move returns legal moves annotated with tactical "
     "value — read it, pick strongest, pass as move=. Nothing plays for you. Play to win.\n"
     "Sites, games, code, search, plugins and chat are open to everyone. "
@@ -2393,7 +2392,7 @@ TOOL_PROTOCOL = (
     "send_message stays in the current chat; from a DM you cannot send to another "
     "channel or server. From a server, sending to another channel or DM is admin-only — "
     "if a non-admin asks you to speak somewhere else, tell them it needs an admin and "
-    "reply here instead. Shell, sites, search, and ordinary chat tools stay available in DMs. "
+    "reply here instead. Sites, search, and ordinary chat tools stay available in DMs. "
     "If they ask how to add this bot, add as app, or add to a server, "
     "call bot_invite_url then send_message the matching OAuth link. "
     "kind=app is Add to my apps; kind=server is Add to a server; default both. "
@@ -7867,37 +7866,9 @@ class MaxwellBot(commands.Bot):
                         last[channel_id] = now
                         await message.channel.send("nothing to stop")
             elif cmd == "bg":
-                # Manual background job: `,bg <goal>`. Everyone may use it;
-                # the live turn ends at once and the job pings back when done.
-                _goal = (args or "").strip()
-                if not _goal:
-                    await message.channel.send("usage: `,bg <what to do>`")
-                else:
-                    try:
-                        _job = self.bg_jobs.create(
-                            guild_id=message.guild.id if message.guild else "DM",
-                            channel_id=channel_id,
-                            user_id=message.author.id,
-                            goal=_goal,
-                        )
-                    except (ValueError, RuntimeError) as _exc:
-                        await message.channel.send(str(_exc))
-                    else:
-                        from jobs import run_background_job as _run_bg
-
-                        self.bg_jobs.attach_runtime(
-                            _job.id, message=message, channel=message.channel
-                        )
-                        try:
-                            _task = _spawn_background(_run_bg(self, _job.id))
-                            self.bg_jobs.track_task(_job.id, _task)
-                        except RuntimeError as _exc:
-                            self.bg_jobs.mark(_job.id, status="error", progress=str(_exc)[:200])
-                            await message.channel.send(f"could not launch job: {_exc}")
-                        else:
-                            await message.channel.send(
-                                f"on it — job `{_job.id}`, I'll ping you when it's done"
-                            )
+                await message.channel.send(
+                    "Detached AI jobs are retired. Ask me here and I'll handle the request."
+                )
             elif cmd == "jobs":
                 _gid = str(message.guild.id) if message.guild else "DM"
                 _uid = str(message.author.id)
@@ -15113,7 +15084,11 @@ class MaxwellBot(commands.Bot):
                 if getattr(message, "guild", None):
                     content = self._render_custom_emojis(content, message.guild)
                 params["content"] = content
-            if name in disabled:
+            if name == "shell" and str(getattr(message.author, "id", "")) not in (
+                getattr(self.config, "MAXWELL_OWNER_IDS", set()) or set()
+            ):
+                result_text = "Error - shell is restricted to the bot owner"
+            elif name in disabled:
                 result_text = "Error - tool is disabled"
             elif name in DM_BLOCKED_TOOLS and _is_private_chat(message):
                 result_text = (
@@ -15235,7 +15210,19 @@ class MaxwellBot(commands.Bot):
                 f"Tool execution error for {name}: {e}\n{traceback.format_exc()}"
             )
             self._tool_breaker.record_failure(name)
-            result_text = f"Error - {e}"
+            # Exception text often contains paths, API responses, or credentials.
+            # Keep the traceback in private logs; give the model a category only.
+            if isinstance(e, (ValueError, TypeError)):
+                category = "invalid tool arguments"
+            elif isinstance(e, PermissionError):
+                category = "permission denied"
+            elif isinstance(e, (TimeoutError, asyncio.TimeoutError)):
+                category = "tool timed out"
+            elif isinstance(e, ImportError):
+                category = "missing tool dependency"
+            else:
+                category = "internal tool failure"
+            result_text = f"Error - {category} ({name})"
             try:
                 schedule_tool_autofix(
                     self, tool_name=name, tool_args=params, exc=e

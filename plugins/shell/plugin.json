@@ -24,7 +24,7 @@
       "returns_result": true,
       "ends_turn": false,
       "is_destructive": true,
-      "requires_admin": false
+      "requires_admin": true
     }
   ]
 }

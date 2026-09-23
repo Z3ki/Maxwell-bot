@@ -21,6 +21,7 @@ class ShellTool(Tool):
     tool_name = 'shell'
     returns_result = True
     ends_turn = False
+    requires_admin = True
 
 
     # Shell executes arbitrary code in a container. It's the most dangerous
