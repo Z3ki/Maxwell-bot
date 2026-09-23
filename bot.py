@@ -32,6 +32,7 @@ from discord.ext import commands
 from discord.utils import MISSING
 from process_utils import communicate_process
 from daily_tokens import DailyTokens, DailyTokenLimitExceeded
+import premium_discovery
 
 try:
     if os.environ.get("ENABLE_VC", "true").strip().lower() in {
@@ -5784,6 +5785,7 @@ class MaxwellBot(commands.Bot):
         app_id = getattr(self, "application_id", None) or getattr(
             getattr(self, "user", None), "id", None
         )
+        premium_discovery.install(self)
         try:
             await ensure_user_install_context(str(token))
             synced = await sync_application_commands(
@@ -8304,6 +8306,8 @@ class MaxwellBot(commands.Bot):
                     "` ,shell [@user|clear]` - shell whitelist (admin)\n"
                     "` ,plugin list|enable|disable|reload` - manage plugins (admin for --global/reload)\n"
                     "` ,blacklist [@user|clear]` / `,unblacklist @user` - blacklist controls (admin)\n"
+                    + ("`/premium` - future optional plans (unavailable)\n" if premium_discovery.state(self) != "off" else "")
+                    + "`/usage` - check daily AI usage and notice preference\n"
                 )
             elif cmd == "vc":
                 await self._handle_vc_command(message, args)
