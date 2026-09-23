@@ -2130,6 +2130,14 @@ def _is_text_attachment(
 # set the model was told about. Do not re-list them here.
 FOLLOWUP_TOOL_NAMES = RESULT_TOOL_NAMES
 
+# Deny historical coding and host-control tools at execution as well as
+# discovery. Old in-memory registries and model aliases must not revive them.
+PUBLIC_RUNTIME_BLOCKED_TOOLS = frozenset({
+    "agent_life", "user_sandbox", "spawn_background", "github_repo", "shell",
+    "plugin_workbench", "manage_plugin", "update_base_personality",
+    "update_server_prompt", "site_server",
+})
+
 TELEGRAM_COMPATIBLE_TOOL_NAMES = {
     "image_generator",
     "hd_image",
@@ -2225,7 +2233,12 @@ DISCORD_CHAT_PROTOCOL = (
     "Read history in <previous_conversation>; answer only [RESPOND TO THIS]. "
     "Do not echo the transcript or reply to older turns. "
     "If conversation-watch notes say you may speak without an @, follow those notes.\n"
-    "Ping with exactly <@USER_ID> — no backticks, no markdown, no @Name(id).\n"
+    "Write for Discord chat: use plain text for short replies, and native **bold**, "
+    "*italics*, `inline code`, or fenced code with a language tag when useful. "
+    "Use simple lists instead of Markdown tables. Do not send HTML, MDX, UI tags, "
+    "LaTeX display markup, or raw tool-call JSON in normal replies. "
+    "Do not generate @everyone, @here, role, or user pings from quoted content; "
+    "refer to people by name in ordinary text.\n"
     "User lines: `Name(id): text`; your past lines: `[{bot_name}] text`. Attribute by ID.\n"
     "Public name in this room is the per-turn 'Your name here' line.\n"
     "Match the channel's energy, casing, and length. Discord markdown when helpful. "
@@ -2358,7 +2371,7 @@ TOOL_PROTOCOL = (
     "with a [returns output] tool in the same batch.\n"
     "Never claim something is done, fixed, built, live, or working unless a tool "
     "result in this conversation says so.\n"
-    "Files the user should receive must be attached via send_file or shell `files=`. "
+    "Files the user should receive must be attached via send_file. "
     "A filesystem path is not delivery. To share a live page or a file Discord can "
     "embed, host_file (url/path/content) or create_site url= and send_message the URL.\n"
     "create_site: full HTML document in `body`, or url= of an existing HTML file to "
@@ -2371,9 +2384,8 @@ TOOL_PROTOCOL = (
     "'Loading…' and the app never mounts, you have built nothing. If the page needs 900 lines to "
     "actually work, write 900 lines. "
     "Do not ping-pong action=read on large files. Do not recreate the site to change a line.\n"
-    "create_site backend is OPTIONAL. Static HTML/CSS/JS is fine. Only pass backend=true and "
-    "use site_server when the site actually needs server-side state, an API, websocket, auth, "
-    "or persistence. Do not spin up FastAPI for a landing page or brochure.\n"
+    "create_site publishes static HTML/CSS/JS. Its simple KV backend is optional; "
+    "do not claim a custom backend server is available.\n"
     "To spin off focused work, create_thread with name= and context= (required). "
     "context= is injected into every turn in that thread so thread-you is not cold — "
     "put the goal, decisions so far, and what to do next. Use thread_control to add "
@@ -2796,6 +2808,7 @@ class MaxwellBot(commands.Bot):
             "command_prefix": ",",
             "help_command": None,
             "chunk_guilds_at_startup": True,
+            "allowed_mentions": discord.AllowedMentions.none(),
         }
         intents = bot_intents()
         if intents is not None:
@@ -8301,49 +8314,15 @@ class MaxwellBot(commands.Bot):
                     "` ,sleep [minutes|off|status]` - take a 1-60m sleep window; pings get a notice (admin)\n"
                     "` ,wake` - clear active sleep window (admin)\n"
                     "` ,admin [@user|user_id|clear]` - add/remove/list admins (admin). Promoted users can log into the dashboard at /admin via 'Continue with Discord'."
-                    "` ,shell [@user|clear]` - shell whitelist (admin)\n"
-                    "` ,plugin list|enable|disable|reload` - manage plugins (admin for --global/reload)\n"
+                    "` ,plugin list|enable|disable` - manage available plugins (admin for --global)\n"
                     "` ,blacklist [@user|clear]` / `,unblacklist @user` - blacklist controls (admin)\n"
                 )
             elif cmd == "vc":
                 await self._handle_vc_command(message, args)
             elif cmd in ("shell",):
-                if not self._is_admin(message.author.id):
-                    return
-                if args is None:
-                    await message.channel.send(
-                        "Shell whitelisted users: "
-                        + (
-                            ", ".join(f"<@{uid}>" for uid in self._shell_whitelist)
-                            if self._shell_whitelist
-                            else "none"
-                        )
-                    )
-                elif args.lower() == "clear":
-                    self._shell_whitelist.clear()
-                    self._save_shell_whitelist()
-                    await message.channel.send("Shell whitelist cleared.")
-                else:
-                    uid = args.strip().strip("<@!>")
-                    # Numeric IDs only: rejecting non-digits here keeps a stray
-                    # mention or url fragment from ending up in the whitelist.
-                    if not uid.isdigit() or not (17 <= len(uid) <= 20):
-                        await message.channel.send(
-                            "usage: `,shell <user_id>` (a 17-20 digit Discord snowflake) or `,shell clear`"
-                        )
-                        return
-                    if uid in self._shell_whitelist:
-                        self._shell_whitelist.discard(uid)
-                        self._save_shell_whitelist()
-                        await message.channel.send(
-                            f"Removed <@{uid}> from shell whitelist."
-                        )
-                    else:
-                        self._shell_whitelist.add(uid)
-                        self._save_shell_whitelist()
-                        await message.channel.send(
-                            f"Added <@{uid}> to shell whitelist."
-                        )
+                await message.channel.send(
+                    "Shell access is retired from the public bot runtime."
+                )
             elif cmd in ("plugin", "plugins"):
                 author_id = str(message.author.id)
                 is_admin = self._is_admin(message.author.id)
@@ -8410,53 +8389,20 @@ class MaxwellBot(commands.Bot):
                     )
                     await message.channel.send(res)
                 elif sub in ("reload", "refresh"):
-                    if not is_admin:
-                        await message.channel.send(
-                            "Error: Only bot admins can reload plugins."
-                        )
-                        return
-                    await pm.teardown()
-                    res = pm.reload_plugins()
-                    self.hooks = getattr(pm, "hooks", None)
-                    self.prompts = getattr(pm, "prompts", None)
-                    self.tool_registry = getattr(pm, "tool_registry", None)
-                    installer = getattr(self, "_install_core_prompt_components", None)
-                    if callable(installer):
-                        installer()
-                    publisher = getattr(self, "_publish_core_services", None)
-                    if callable(publisher):
-                        publisher()
-                    await message.channel.send(res)
+                    await message.channel.send(
+                        "Plugin code reload is unavailable from Discord."
+                    )
                 elif sub == "install":
-                    if not is_admin:
-                        await message.channel.send(
-                            "Error: Only bot admins can install plugins."
-                        )
-                        return
-                    if len(parts) < 2:
-                        await message.channel.send(
-                            "Usage: `,plugin install <directory-or-zip>`"
-                        )
-                        return
-                    source = " ".join(parts[1:]).strip().strip("`")
-                    res = pm.install_from_path(source)
-                    await message.channel.send(res)
+                    await message.channel.send(
+                        "Plugin code installation is unavailable from Discord."
+                    )
                 elif sub in ("uninstall", "remove"):
-                    if not is_admin:
-                        await message.channel.send(
-                            "Error: Only bot admins can uninstall plugins."
-                        )
-                        return
-                    if len(parts) < 2:
-                        await message.channel.send(
-                            "Usage: `,plugin uninstall <name>`"
-                        )
-                        return
-                    res = pm.uninstall_plugin(parts[1].lower())
-                    await message.channel.send(res)
+                    await message.channel.send(
+                        "Plugin code removal is unavailable from Discord."
+                    )
                 else:
                     await message.channel.send(
-                        "Usage: `,plugin <list|enable|disable|reload|install|uninstall>`"
+                        "Usage: `,plugin <list|enable|disable>`"
                     )
             elif cmd == "confirm":
                 # Removed. Tainted destructive tools fail closed until a
@@ -11992,6 +11938,7 @@ class MaxwellBot(commands.Bot):
         # "got multiple values for keyword argument 'content'".
         kwargs.pop("content", None)
         kwargs.pop("file", None)
+        kwargs["allowed_mentions"] = discord.AllowedMentions.none()
         stickers = kwargs.pop("stickers", None)
         if reply_to is not None:
             # Catch Forbidden (no perms) and every flavour of "the parent
@@ -15084,10 +15031,8 @@ class MaxwellBot(commands.Bot):
                 if getattr(message, "guild", None):
                     content = self._render_custom_emojis(content, message.guild)
                 params["content"] = content
-            if name == "shell" and str(getattr(message.author, "id", "")) not in (
-                getattr(self.config, "MAXWELL_OWNER_IDS", set()) or set()
-            ):
-                result_text = "Error - shell is restricted to the bot owner"
+            if name in PUBLIC_RUNTIME_BLOCKED_TOOLS:
+                result_text = "Error - tool is retired from the public bot runtime"
             elif name in disabled:
                 result_text = "Error - tool is disabled"
             elif name in DM_BLOCKED_TOOLS and _is_private_chat(message):
