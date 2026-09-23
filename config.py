@@ -189,6 +189,12 @@ class Config:
     # tokens are not supported.
     DISCORD_BOT_TOKEN = (os.getenv("DISCORD_BOT_TOKEN") or "").strip()
     DISCORD_TOKEN = (os.getenv("DISCORD_TOKEN") or "").strip()
+    MAXWELL_DEV_MODE = _bool_env("MAXWELL_DEV_MODE", False)
+    MAXWELL_DEV_GUILD_IDS: ClassVar[frozenset[str]] = frozenset(
+        item.strip()
+        for item in os.getenv("MAXWELL_DEV_GUILD_IDS", "").split(",")
+        if item.strip().isdigit()
+    )
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
     TELEGRAM_WEBHOOK_URL = os.getenv("TELEGRAM_WEBHOOK_URL", "").strip()
     TELEGRAM_WEBHOOK_PORT = _int_env(
@@ -570,6 +576,11 @@ class Config:
                 "DISCORD_BOT_TOKEN is required (official Discord bot token from "
                 "the Developer Portal). Run ./setup.sh, or set it in .env, then "
                 "start the bot again. Self-bot user tokens are not supported."
+            )
+        if cls.MAXWELL_DEV_MODE and not cls.MAXWELL_DEV_GUILD_IDS:
+            raise ValueError(
+                "MAXWELL_DEV_GUILD_IDS must contain at least one Discord guild ID "
+                "when MAXWELL_DEV_MODE=true."
             )
         if not cls.OLLAMA_BASE_URL:
             raise ValueError(

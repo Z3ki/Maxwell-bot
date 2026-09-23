@@ -5716,7 +5716,8 @@ class MaxwellBot(commands.Bot):
         self._gateway_last_disconnect = None
         self._gateway_last_ok = time.monotonic()
         self._spawn_detached(self._recover_missed_messages())
-        self._dispatch_plugin_event("on_ready")
+        if not getattr(self.config, "MAXWELL_DEV_MODE", False):
+            self._dispatch_plugin_event("on_ready")
 
     async def on_ready(self):
         self._capture_recovery_snapshot()
@@ -5752,10 +5753,11 @@ class MaxwellBot(commands.Bot):
             self._spawn_detached(self._sync_slash_commands())
         logger.info(f"Connected to {len(self.guilds)} guilds")
         self._load_emojis()
-        try:
-            await self.inbox.seed_from_bot(self)
-        except Exception as e:
-            logger.warning("Inbox seed failed: %s", e)
+        if not getattr(self.config, "MAXWELL_DEV_MODE", False):
+            try:
+                await self.inbox.seed_from_bot(self)
+            except Exception as e:
+                logger.warning("Inbox seed failed: %s", e)
         await self._save_discord_state()
         if self._sleep_window_active():
             await self._apply_sleep_presence(asleep=True)
@@ -5766,9 +5768,35 @@ class MaxwellBot(commands.Bot):
         # A fresh ready event can follow a restart or non-resumable session.
         # Reconcile history to find any messages missing from durable receipt.
         self._spawn_detached(self._recover_missed_messages())
-        self._dispatch_plugin_event("on_ready")
+        if not getattr(self.config, "MAXWELL_DEV_MODE", False):
+            self._dispatch_plugin_event("on_ready")
+
+    def _dev_scope_allows(self, context, *, guild_id=None) -> bool:
+        """Fail closed outside configured Dev guilds, including DMs."""
+        cfg = getattr(self, "config", None)
+        if not getattr(cfg, "MAXWELL_DEV_MODE", False):
+            return True
+        if guild_id is None:
+            guild_id = getattr(context, "guild_id", None)
+        if guild_id is None:
+            guild_id = getattr(getattr(context, "guild", None), "id", None)
+        if guild_id is None:
+            guild_id = getattr(
+                getattr(getattr(context, "channel", None), "guild", None),
+                "id",
+                None,
+            )
+        if guild_id is None:
+            guild_id = getattr(
+                getattr(getattr(context, "message", None), "guild", None),
+                "id",
+                None,
+            )
+        return str(guild_id or "") in getattr(cfg, "MAXWELL_DEV_GUILD_IDS", frozenset())
 
     async def on_interaction(self, interaction):
+        if not MaxwellBot._dev_scope_allows(self, interaction):
+            return
         await legal_notice.notify_user(self, getattr(interaction, "user", None))
         self._dispatch_plugin_event("on_interaction", interaction)
         try:
@@ -5781,7 +5809,7 @@ class MaxwellBot(commands.Bot):
             await parent(interaction)
 
     async def _sync_slash_commands(self) -> None:
-        """Register the user-install /maxwell command globally."""
+        """Register slash commands globally, or only in configured Dev guilds."""
         token = (
             getattr(getattr(self, "http", None), "token", None)
             or getattr(getattr(self, "config", None), "DISCORD_BOT_TOKEN", "")
@@ -5789,27 +5817,34 @@ class MaxwellBot(commands.Bot):
         )
         if not token:
             return
-        guild_ids = []
-        for guild in getattr(self, "guilds", []) or []:
-            gid = getattr(guild, "id", None)
-            if gid is not None:
-                guild_ids.append(int(gid))
+        dev_mode = bool(getattr(self.config, "MAXWELL_DEV_MODE", False))
+        guild_ids = (
+            sorted(int(gid) for gid in self.config.MAXWELL_DEV_GUILD_IDS)
+            if dev_mode
+            else [
+                int(guild.id)
+                for guild in (getattr(self, "guilds", []) or [])
+                if getattr(guild, "id", None) is not None
+            ]
+        )
         app_id = getattr(self, "application_id", None) or getattr(
             getattr(self, "user", None), "id", None
         )
         try:
-            await ensure_user_install_context(str(token))
+            if not dev_mode:
+                await ensure_user_install_context(str(token))
             synced = await sync_application_commands(
                 str(token),
                 USER_INSTALL_COMMANDS,
                 application_id=app_id,
                 guild_ids=guild_ids,
+                guild_only=dev_mode,
             )
         except Exception:
             logger.exception("Failed to sync slash commands")
             return
         logger.info(
-            "Slash commands synced: global=%s guild_cleared=%s",
+            "Slash commands synced: global=%s guild=%s",
             synced.get("global", 0),
             synced.get("guild", 0),
         )
@@ -5961,6 +5996,13 @@ class MaxwellBot(commands.Bot):
                 if not str(channel_id).isdigit():
                     self._recovery_cursors.pop(channel_id, None)
                     continue
+                if getattr(getattr(self, "config", None), "MAXWELL_DEV_MODE", False):
+                    # Recovery may contain stale channel IDs. Never fetch an
+                    # unknown channel or a channel outside the Dev guild.
+                    channel = self.get_channel(int(channel_id))
+                    if not MaxwellBot._dev_scope_allows(self, channel):
+                        self._recovery_cursors.pop(channel_id, None)
+                        continue
                 try:
                     channel = await self._fetch_inbound_channel(channel_id)
                     latest = await self._latest_channel_message_id(channel)
@@ -6008,6 +6050,12 @@ class MaxwellBot(commands.Bot):
                 break
             mid, cid = row["message_id"], row["channel_id"]
             self._inbound_retry_after = (row["created_at"], mid)
+            if getattr(getattr(self, "config", None), "MAXWELL_DEV_MODE", False):
+                channel = self.get_channel(int(cid)) if str(cid).isdigit() else None
+                if not MaxwellBot._dev_scope_allows(self, channel):
+                    with contextlib.suppress(Exception):
+                        journal.update(mid, "suppressed", reason="outside_dev_guild")
+                    continue
             if boot and float(row.get("created_at") or 0) < boot:
                 with contextlib.suppress(Exception):
                     journal.update(mid, "suppressed", reason="stale_offline")
@@ -6089,6 +6137,15 @@ class MaxwellBot(commands.Bot):
                 logger.warning(f"Discord state snapshot error: {e}")
 
     def _dispatch_plugin_event(self, event: str, *args: Any, **kwargs: Any) -> None:
+        if event != "on_ready" and getattr(
+            getattr(self, "config", None), "MAXWELL_DEV_MODE", False
+        ):
+            context = args[0] if args else None
+            guild_id = getattr(context, "id", None) if event in {
+                "on_guild_join", "on_guild_remove"
+            } else None
+            if not MaxwellBot._dev_scope_allows(self, context, guild_id=guild_id):
+                return
         pm = getattr(self, "plugin_manager", None)
         if pm is None:
             return
@@ -6118,6 +6175,8 @@ class MaxwellBot(commands.Bot):
     async def _save_discord_state(self):
         guilds = []
         for guild in self.guilds:
+            if not MaxwellBot._dev_scope_allows(self, guild, guild_id=guild.id):
+                continue
             channels = [
                 {
                     "id": str(channel.id),
@@ -6137,7 +6196,10 @@ class MaxwellBot(commands.Bot):
                 }
             )
         dms = []
-        for channel in getattr(self, "private_channels", [])[:100]:
+        for channel in (
+            [] if getattr(self.config, "MAXWELL_DEV_MODE", False)
+            else getattr(self, "private_channels", [])[:100]
+        ):
             recipient = getattr(channel, "recipient", None)
             recipients = getattr(channel, "recipients", None)
             name = (
@@ -6248,6 +6310,8 @@ class MaxwellBot(commands.Bot):
                 await store.mark(item_id, "read")
 
     async def on_relationship_add(self, relationship):
+        if getattr(self.config, "MAXWELL_DEV_MODE", False):
+            return
         self._dispatch_plugin_event("on_relationship_add", relationship)
         try:
             await self.inbox.ingest_relationship(relationship, event="add")
@@ -6255,6 +6319,8 @@ class MaxwellBot(commands.Bot):
             logger.warning("Inbox relationship_add failed: %s", e)
 
     async def on_relationship_update(self, before, after):
+        if getattr(self.config, "MAXWELL_DEV_MODE", False):
+            return
         self._dispatch_plugin_event("on_relationship_update", before, after)
         try:
             await self.inbox.ingest_relationship(after, event="update", before=before)
@@ -6262,6 +6328,8 @@ class MaxwellBot(commands.Bot):
             logger.warning("Inbox relationship_update failed: %s", e)
 
     async def on_relationship_remove(self, relationship):
+        if getattr(self.config, "MAXWELL_DEV_MODE", False):
+            return
         self._dispatch_plugin_event("on_relationship_remove", relationship)
         try:
             await self.inbox.ingest_relationship(relationship, event="remove")
@@ -6269,6 +6337,8 @@ class MaxwellBot(commands.Bot):
             logger.warning("Inbox relationship_remove failed: %s", e)
 
     async def on_group_join(self, channel, user):
+        if getattr(self.config, "MAXWELL_DEV_MODE", False):
+            return
         me = self.user
         if me is None or getattr(user, "id", None) != me.id:
             return
@@ -6289,6 +6359,8 @@ class MaxwellBot(commands.Bot):
         self._guild_emojis = {}
         self._guild_stickers = {}
         for guild in self.guilds:
+            if not MaxwellBot._dev_scope_allows(self, guild, guild_id=guild.id):
+                continue
             gid = str(guild.id)
             self._guild_emojis[gid] = {}
             for emoji in guild.emojis:
@@ -6995,6 +7067,8 @@ class MaxwellBot(commands.Bot):
 
     async def on_message_edit(self, before, after):
         """Refresh context; only newly added direct mentions can start a turn."""
+        if not MaxwellBot._dev_scope_allows(self, after):
+            return
         self._dispatch_plugin_event("on_message_edit", before, after)
         try:
             loader = getattr(self, "_load_control", None)
@@ -7010,6 +7084,8 @@ class MaxwellBot(commands.Bot):
 
     async def on_raw_message_edit(self, payload):
         """Handle embeds for messages not present in discord.py's cache."""
+        if not MaxwellBot._dev_scope_allows(self, payload):
+            return
         try:
             loader = getattr(self, "_load_control", None)
             if callable(loader) and getattr(self, "config", None) is not None:
@@ -7062,6 +7138,8 @@ class MaxwellBot(commands.Bot):
         never answered. It also had no dedup, so a gateway resume that
         redelivered MESSAGE_CREATE produced a second full reply.
         """
+        if not MaxwellBot._dev_scope_allows(self, message):
+            return
         message_id = str(getattr(message, "id", "") or "")
         channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
         journal = getattr(self, "_request_journal", None)
@@ -7502,6 +7580,8 @@ class MaxwellBot(commands.Bot):
 
     async def _maybe_handle_incoming_call(self, call):
         """Pick up or decline a DM/group call that is ringing Maxwell."""
+        if getattr(self.config, "MAXWELL_DEV_MODE", False):
+            return
         if not getattr(self.config, "ENABLE_VC", True):
             return
         if not self.user or not call:
@@ -7690,6 +7770,8 @@ class MaxwellBot(commands.Bot):
 
     async def _note_reaction(self, reaction, user, *, added: bool) -> None:
         """Remember who reacted. Never start a live turn from an emoji."""
+        if not MaxwellBot._dev_scope_allows(self, getattr(reaction, "message", None)):
+            return
         if not self.user or getattr(user, "id", None) == self.user.id:
             return
         self._load_control()
@@ -7720,6 +7802,8 @@ class MaxwellBot(commands.Bot):
 
     async def on_typing(self, channel, user, when):
         """Discord TYPING_START — someone is composing in a room we can see."""
+        if not MaxwellBot._dev_scope_allows(self, channel):
+            return
         self._dispatch_plugin_event("on_typing", channel, user, when)
         try:
             self._note_typing(channel, user)
@@ -9760,6 +9844,8 @@ class MaxwellBot(commands.Bot):
 
     async def on_guild_join(self, guild):
         """Someone added this official bot to a server."""
+        if not MaxwellBot._dev_scope_allows(self, guild, guild_id=guild.id):
+            return
         self._dispatch_plugin_event("on_guild_join", guild)
         with contextlib.suppress(Exception):
             logger.info("Joined guild: %s (id=%s)", guild.name, guild.id)
@@ -9806,6 +9892,8 @@ class MaxwellBot(commands.Bot):
         by ``,ticket on`` for this server, ``bot_enabled``, and the bot
         actually having send permission in the channel.
         """
+        if not MaxwellBot._dev_scope_allows(self, channel):
+            return
         try:
             self._load_control()
         except Exception:

@@ -1,0 +1,88 @@
+name: maxwell-dev
+
+# Run from a separate Dev checkout. This project has its own image, token,
+# network, and named volumes; it never mounts Production's data or Docker socket.
+services:
+  maxwell-dev:
+    build:
+      context: .
+      dockerfile: docker/maxwell.Dockerfile
+    image: maxwell:dev-local
+    container_name: maxwell-dev
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env.dev
+    environment:
+      MAXWELL_ENV_FILE: /app/.env.dev
+      MAXWELL_DEV_MODE: "true"
+      MAXWELL_START_API: "0"
+      DATA_DIR: /app/data
+      MAXWELL_SITE_DIR: /app/public/bot
+      MAXWELL_IN_DOCKER: "1"
+      MAXWELL_APP_ROOT: /app
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cpus: "1.0"
+    mem_limit: 3g
+    memswap_limit: 3g
+    pids_limit: 384
+    shm_size: 128mb
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=128m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
+    # The checkout bind is read-only, so these mountpoints must already exist:
+    # mkdir -p data logs public/bot shelldocker
+    volumes:
+      - .:/app:ro
+      - dev_data:/app/data
+      - dev_logs:/app/logs
+      - dev_public:/app/public/bot
+      - dev_shell:/app/shelldocker
+    networks:
+      - dev
+    depends_on:
+      - ollama-dev
+    stop_grace_period: 30s
+
+  ollama-dev:
+    image: ollama/ollama@sha256:7ab595e4ead391f6818c7215297781282babe0701f6d9a9f8862ac591360a58b
+    restart: unless-stopped
+    init: true
+    cpus: "1.0"
+    mem_limit: 3g
+    memswap_limit: 3g
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - dev_models:/root/.ollama
+    networks:
+      - dev
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+volumes:
+  dev_data:
+  dev_logs:
+  dev_public:
+  dev_shell:
+  dev_models:
+
+networks:
+  dev:

@@ -14,7 +14,7 @@ public stability claim. No stored plugin, game, site, or memory data is deleted.
 | Discord output | `DISCORD_CHAT_PROTOCOL` → `_send_with_slowmode` | Prompt now names native Discord formatting. The central normal send/reply path suppresses all mentions; the client also defaults to no mentions. Other interaction and media paths still need a complete send-boundary audit. |
 | External providers | `config.py` → `providers.py`, image and speech plugins | Endpoint and model are environment-configurable. The checked-in defaults do not identify the live API account, service tier, or data terms. No provider privacy assurance can be published from this checkout. |
 | Website and policies | `web/index.html`, `web/admin/index.html`, `web/privacy/index.html`, `web/terms/index.html`, `api/api_server.py` | Existing admin/API and policy pages remain. The published text still describes retired shell behavior and lacks verified provider retention and review details; replacement policies require operator and legal review. |
-| Deployment | `docker-compose.yml`, `site_server.py` | One host-network Compose service still mounts the Docker socket. Production/dev isolation, socket removal, and site-backend migration are release blockers. |
+| Deployment | `docker-compose.yml`, `docker-compose.dev.yml`, `site_server.py` | Dev Compose is a separate project: own checkout, token, network, named volumes, no host ports, and no Docker socket. Production remains the host-network service that mounts the socket. Socket removal and site-backend migration are still release blockers. |
 
 ## Why these tools were retired
 

@@ -245,8 +245,9 @@ async def sync_application_commands(
     *,
     application_id: str | int | None = None,
     guild_ids: Iterable[int] | None = None,
+    guild_only: bool = False,
 ) -> dict[str, int]:
-    """PUT the global application-command set; wipe leftover guild commands."""
+    """Publish globally, or only to designated Dev guilds after clearing globals."""
     import aiohttp
 
     token = _strip_bot_prefix(token)
@@ -267,28 +268,42 @@ async def sync_application_commands(
         if not app_id:
             logger.warning("Could not resolve application id; slash commands not synced")
             return result
-        async with session.put(
-            f"{_DISCORD_API}/applications/{app_id}/commands", json=payload
-        ) as resp:
-            if resp.status not in {200, 201}:
-                body = await resp.text()
-                logger.warning(
-                    "Failed to sync global slash commands: HTTP %s %s",
-                    resp.status,
-                    body[:200],
-                )
-            else:
-                result["global"] = len(payload)
-                logger.info("Synced %s global slash command(s)", result["global"])
+        global_url = f"{_DISCORD_API}/applications/{app_id}/commands"
+        if guild_only:
+            async with session.put(global_url, json=[]) as resp:
+                if resp.status not in {200, 201}:
+                    body = await resp.text()
+                    logger.warning(
+                        "Failed to clear global slash commands: HTTP %s %s",
+                        resp.status,
+                        body[:200],
+                    )
+        else:
+            async with session.put(global_url, json=payload) as resp:
+                if resp.status not in {200, 201}:
+                    body = await resp.text()
+                    logger.warning(
+                        "Failed to sync global slash commands: HTTP %s %s",
+                        resp.status,
+                        body[:200],
+                    )
+                else:
+                    result["global"] = len(payload)
+                    logger.info("Synced %s global slash command(s)", result["global"])
         for gid in guild_ids or ():
-            async with session.get(
-                f"{_DISCORD_API}/applications/{app_id}/guilds/{gid}/commands"
-            ) as resp:
-                current = await resp.json() if resp.status == 200 else []
-            n = len(current) if isinstance(current, list) else 0
+            if guild_only:
+                guild_payload = payload
+                n = len(payload)
+            else:
+                async with session.get(
+                    f"{_DISCORD_API}/applications/{app_id}/guilds/{gid}/commands"
+                ) as resp:
+                    current = await resp.json() if resp.status == 200 else []
+                n = len(current) if isinstance(current, list) else 0
+                guild_payload = []
             async with session.put(
                 f"{_DISCORD_API}/applications/{app_id}/guilds/{gid}/commands",
-                json=[],
+                json=guild_payload,
             ) as resp:
                 if resp.status in {200, 201}:
                     result["guild"] += n
