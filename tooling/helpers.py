@@ -71,7 +71,9 @@ try:  # noqa: E402
     )
 
     __CHESS_IMPORTED__ = True
-except Exception as _chess_err:  # pragma: no cover - missing optional dep
+except ModuleNotFoundError as _chess_err:  # pragma: no cover - missing optional dep
+    if _chess_err.name != "chess":
+        raise  # An unrelated broken import is a programming error, not a missing chess dependency.
     __CHESS_IMPORTED__ = False
     _ChessManager = None
     _chess_annotate_legal_moves = None

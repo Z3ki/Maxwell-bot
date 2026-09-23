@@ -6,6 +6,7 @@ Moved out of the historical bot_tools.py monolith. Shared helpers live in
 from __future__ import annotations
 
 from tooling import helpers as _helpers
+from tooling.helpers import __CHESS_IMPORTED__
 from tools import Tool
 
 # Mechanical split: the original classes used the bot_tools module globals.
@@ -61,7 +62,7 @@ class ChessStartTool(Tool):
 
         manager = _chess_get_manager()
         existing = manager.active(channel_id)
-        if existing is not None:
+        if existing is not None and not existing.is_over:
             return (
                 f"Error: a chess game is already active in this channel. "
                 f"It is between {name} and {existing.player_name}. "
@@ -82,7 +83,10 @@ class ChessStartTool(Tool):
         # wedge-breaker for when Maxwell repeatedly fails to name a legal move.
         # Kept accepted-but-clamped so an old caller passing depth= is not an
         # error, and stored on the game so the fallback still has settings.
-        max_depth = int(depth or 3)
+        try:
+            max_depth = int(depth or 3)
+        except (TypeError, ValueError, OverflowError):
+            return "Error: depth must be an integer from 1 to 4."
         if max_depth < 1:
             max_depth = 1
         if max_depth > 4:

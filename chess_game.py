@@ -956,7 +956,7 @@ class ChessManager:
     ) -> ChessGame:
         with self._lock:
             key = str(channel_id)
-            if key in self._games and not force:
+            if key in self._games and not self._games[key].is_over and not force:
                 existing = self._games[key]
                 raise ValueError(
                     f"A chess game is already active in this channel with "
