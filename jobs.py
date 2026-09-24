@@ -1055,6 +1055,7 @@ async def run_background_job(bot: Any, job_id: str) -> None:
                 response = await bot._generate_response(
                     messages,
                     quota_user_id=job.user_id,
+                    charge_message=step == 0 and bool(job.user_id),
                     timeout=min(timeout, remaining),
                     max_tokens=max_tokens,
                     tools=provider_tools,

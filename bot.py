@@ -31,6 +31,19 @@ from discord.ext import commands
 from discord.utils import MISSING
 from process_utils import communicate_process
 from daily_tokens import DailyTokens, DailyTokenLimitExceeded
+from message_quota import (
+    MessageQuota,
+    MessageQuotaExceeded,
+    enforced_message_limit,
+    enforced_window_seconds,
+)
+from usage_commands import (
+    command_help_text,
+    discovery_enabled,
+    install_usage_commands,
+    premium_text_for,
+    usage_text_for,
+)
 
 try:
     if os.environ.get("ENABLE_VC", "true").strip().lower() in {
@@ -1901,7 +1914,9 @@ DISCORD_CHAT_PROTOCOL = (
     "User lines: `Name(id): text`; your past lines: `[{bot_name}] text`. Attribute by ID.\n"
     "Public name in this room is the per-turn 'Your name here' line.\n"
     "Match the channel's energy, casing, and length. Discord markdown when helpful. "
-    "No *does a thing* stage directions (italic markdown is fine). No 'as an AI'. {invite_line}"
+    "No *does a thing* stage directions (italic markdown is fine). No 'as an AI'. "
+    "Do not advertise Premium, prices, or upgrades, and do not send promotional DMs. "
+    "If someone asks about plans, point them to /premium instead of pitching. {invite_line}"
 )
 
 
@@ -2610,6 +2625,10 @@ class MaxwellBot(commands.Bot):
         self._typing_users: dict[str, dict[str, dict]] = {}
         self._active_requests: dict[str, asyncio.Task] = {}
         self._active_request_user: dict[str, str] = {}
+        # discord.Message uses slots, so per-message admission flags must live
+        # on the bot rather than being attached to Discord model objects.
+        self._same_user_interrupts: dict[str, None] = {}
+        self._same_user_latest: dict[str, int] = {}
         # Per-channel current progress. Under load many channels can
         # have tool batches in flight concurrently; a single bot-wide
         # attribute would let channel B's run_one clobber channel A's,
@@ -2760,6 +2779,8 @@ class MaxwellBot(commands.Bot):
             )
         )
         self._daily_tokens = DailyTokens(Path(self.config.DATA_DIR) / "daily_tokens.sqlite3")
+        self._message_quota = MessageQuota(Path(self.config.DATA_DIR) / "message_quota.sqlite3")
+        install_usage_commands()
         # Concurrency safety (see concurrency_safety.py): per-(guild, channel)
         # serialized work queues and bounded per-tool-class semaphores. Built
         # here so the types are known; the watchdog task is started/stopped in
@@ -3048,6 +3069,7 @@ class MaxwellBot(commands.Bot):
     async def _generate_response(self, messages: list[dict], **kwargs):
         """Generate through the main provider, preferring fallback at night."""
         quota_user_id = kwargs.pop("quota_user_id", None)
+        charge_message = bool(kwargs.pop("charge_message", False))
         for key, value in self._night_fallback_kwargs().items():
             kwargs.setdefault(key, value)
         message = _current_inbound.get()
@@ -3055,6 +3077,7 @@ class MaxwellBot(commands.Bot):
             kwargs.setdefault("request_id", str(getattr(message, "id", "") or ""))
         reservation = None
         reserved_tokens = 0
+        prompt_estimate = 0
         ledger = getattr(self, "_daily_tokens", None)
         author = getattr(message, "author", None)
         if quota_user_id is None and author is not None and not getattr(author, "bot", False):
@@ -3064,8 +3087,8 @@ class MaxwellBot(commands.Bot):
             and quota_user_id is not None
             and self._control.get("daily_user_token_limit_enabled", True)
         ):
-            # Include tool schemas and media metadata in the estimate. Provider
-            # usage replaces this estimate after a successful call.
+            # Internal spend cap. Provider usage replaces this estimate after
+            # a successful call. This is not the customer-facing allowance.
             payload_chars = len(json.dumps(messages, default=str))
             payload_chars += len(json.dumps(kwargs.get("tools") or [], default=str))
             prompt_estimate = max(1, (payload_chars + 2) // 3)
@@ -3076,6 +3099,26 @@ class MaxwellBot(commands.Bot):
             )
             reserved_tokens = prompt_estimate + output_allowance
             kwargs["max_tokens"] = output_allowance
+        if (
+            charge_message
+            and quota_user_id is not None
+            and self._control.get("message_quota_enabled", True)
+        ):
+            quotas = getattr(self, "_message_quota", None)
+            if quotas is not None:
+                guild = getattr(message, "guild", None)
+                try:
+                    quotas.charge(
+                        str(quota_user_id),
+                        enforced_message_limit(self._control),
+                        enforced_window_seconds(self._control),
+                        guild_id=str(getattr(guild, "id", "") or ""),
+                    )
+                except MessageQuotaExceeded:
+                    if reservation:
+                        ledger.settle(reservation, 0)
+                        reservation = None
+                    raise
         started = time.monotonic()
         try:
             result = await self.ai_provider.generate_response(messages, **kwargs)
@@ -3086,12 +3129,12 @@ class MaxwellBot(commands.Bot):
             if not actual:
                 actual = prompt_estimate + max(1, (len(str(result)) + 2) // 3) if reservation else 0
             if reservation:
-                ledger.settle(reservation, actual)
+                ledger.settle(reservation, actual, float(usage.get("cost_usd") or 0))
                 reservation = None
             return result
         except BaseException:
             # A timed-out provider may still have billed the request. Charging
-            # the reservation avoids silently reopening the same quota.
+            # the reservation avoids silently reopening the same internal cap.
             if reservation:
                 ledger.settle(reservation, reserved_tokens)
             raise
@@ -3804,9 +3847,11 @@ class MaxwellBot(commands.Bot):
             stats = {}
             self._reply_drop_counts = stats
         stats[why] = int(stats.get(why, 0) or 0) + 1
-        status = {"deferred": "deferred", "channel cleared": "superseded"}.get(
-            why, "suppressed"
-        )
+        status = {
+            "deferred": "deferred",
+            "channel cleared": "superseded",
+            "same_user_interrupt": "superseded",
+        }.get(why, "suppressed")
         MaxwellBot._record_request_outcome(self, entry.message, status, f"queue_{why}")
 
     def _request_state(self, message) -> dict:
@@ -4029,7 +4074,13 @@ class MaxwellBot(commands.Bot):
                 "cancelled_after_effect" if row.get("effects_started") else "cancelled",
             )
             raise
-        except DailyTokenLimitExceeded as exc:
+        except (DailyTokenLimitExceeded, MessageQuotaExceeded) as exc:
+            if getattr(exc, "spent", None) is not None:
+                logger.warning(
+                    "internal spending guard spent=%s limit=%s",
+                    exc.spent,
+                    exc.limit,
+                )
             try:
                 self._mark_request_effect(message)
                 sent = await self._send_with_slowmode(
@@ -4037,7 +4088,7 @@ class MaxwellBot(commands.Bot):
                 )
                 self._record_delivery(message, sent)
             except Exception:
-                logger.exception("Could not deliver daily token limit notice")
+                logger.exception("Could not deliver message quota notice")
                 self._record_request_outcome(message, "failed", "quota_notice_failed")
         except Exception as exc:
             logger.warning(
@@ -4121,6 +4172,14 @@ class MaxwellBot(commands.Bot):
                 self, message, "failed", "missing_channel"
             )
             return "dropped"
+        if self._is_same_user_interrupt(message):
+            if not self._note_same_user_latest(message):
+                self._record_request_outcome(message, "superseded", "same_user_interrupt")
+                return "superseded"
+            drop_author = getattr(self._reply_queue, "drop_author", None)
+            if callable(drop_author):
+                for entry in drop_author(channel_id, getattr(message.author, "id", "")):
+                    self._record_request_outcome(entry.message, "superseded", "same_user_interrupt")
         journal = getattr(self, "_request_journal", None)
         if journal is not None:
             journal.accept(
@@ -4161,9 +4220,108 @@ class MaxwellBot(commands.Bot):
             )
         return outcome
 
+    def _inflight_reply_user(self, channel_id: Any) -> str:
+        """User id of the turn currently being answered in this channel."""
+        cid = str(channel_id or "")
+        active = (getattr(self, "_active_requests", None) or {}).get(cid)
+        if active is not None and not active.done():
+            uid = (getattr(self, "_active_request_user", None) or {}).get(cid)
+            if uid:
+                return str(uid)
+        queue = getattr(self, "_reply_queue", None)
+        state = (getattr(queue, "_channels", None) or {}).get(cid)
+        running = getattr(state, "running", None)
+        entry = getattr(state, "running_entry", None)
+        if entry is None or running is None or running.done():
+            return ""
+        author = getattr(getattr(entry.message, "author", None), "id", None)
+        return "" if author is None else str(author)
+
     def _should_interrupt_inflight(self, message) -> bool:
-        """New pings are independent requests; only explicit ,stop cancels."""
-        return False
+        """Stop a generation only when the same user sends a newer message."""
+        author = getattr(message, "author", None)
+        if author is None or getattr(author, "bot", False):
+            return False
+        channel = getattr(message, "channel", None)
+        cid = str(getattr(channel, "id", "") or "")
+        if not cid:
+            return False
+        inflight = MaxwellBot._inflight_reply_user(self, cid)
+        if not inflight or inflight != str(getattr(author, "id", "") or ""):
+            return False
+        active_message = (getattr(self, "_active_request_messages", None) or {}).get(cid)
+        if active_message is not None and str(getattr(active_message, "id", "") or "") == str(
+            getattr(message, "id", "") or ""
+        ):
+            return False
+        return True
+
+    def _note_same_user_latest(self, message) -> bool:
+        """True when this message is the newest same-user replacement in the room."""
+        cid = str(getattr(getattr(message, "channel", None), "id", "") or "")
+        try:
+            mid = int(getattr(message, "id", 0) or 0)
+        except (TypeError, ValueError):
+            mid = 0
+        if not cid or mid <= 0:
+            return True
+        latest = getattr(self, "_same_user_latest", None)
+        if latest is None:
+            latest = self._same_user_latest = {}
+        if mid < int(latest.get(cid, 0) or 0):
+            return False
+        latest[cid] = mid
+        return True
+
+    def _mark_same_user_interrupt(self, message) -> None:
+        """Remember an interrupt without mutating Discord's slotted Message."""
+        mid = str(getattr(message, "id", "") or "")
+        if not mid:
+            return
+        interrupted = getattr(self, "_same_user_interrupts", None)
+        if interrupted is None:
+            interrupted = self._same_user_interrupts = {}
+        interrupted[mid] = None
+        if len(interrupted) > 4096:
+            for stale in list(interrupted)[:2048]:
+                interrupted.pop(stale, None)
+
+    def _is_same_user_interrupt(self, message) -> bool:
+        mid = str(getattr(message, "id", "") or "")
+        return bool(
+            mid
+            and mid in (getattr(self, "_same_user_interrupts", None) or {})
+        )
+
+    def _interrupt_same_user(self, message) -> None:
+        """Cancel the in-flight reply for this user. Other users keep their place."""
+        channel = getattr(message, "channel", None)
+        cid = str(getattr(channel, "id", "") or "")
+        uid = str(getattr(getattr(message, "author", None), "id", "") or "")
+        if not cid or not uid:
+            return
+        active_message = (getattr(self, "_active_request_messages", None) or {}).get(cid)
+        if active_message is not None and str(getattr(active_message, "id", "") or "") != str(
+            getattr(message, "id", "") or ""
+        ):
+            self._record_request_outcome(active_message, "superseded", "same_user_interrupt")
+        queue = getattr(self, "_reply_queue", None)
+        if queue is not None and hasattr(queue, "drop_author"):
+            for entry in queue.drop_author(cid, uid):
+                self._record_request_outcome(entry.message, "superseded", "same_user_interrupt")
+            queue.cancel_channel(cid, clear_queue=False)
+        active = (getattr(self, "_active_requests", None) or {}).get(cid)
+        if active is not None and not active.done():
+            active.cancel()
+        cancel_watch = getattr(self, "_cancel_watch_debounce", None)
+        if callable(cancel_watch):
+            cancel_watch(cid)
+        logger.info(
+            "Same-user interrupt cid=%s user=%s latest=%s",
+            cid,
+            uid,
+            getattr(message, "id", ""),
+        )
 
     def _mem_kwargs(self, message) -> dict:
         """Build the standard kwargs for add_to_channel_memory from a
@@ -5194,7 +5352,10 @@ class MaxwellBot(commands.Bot):
 
     async def _maybe_live_reply(self, message, content: str) -> None:
         """Direct mentions reply immediately; soft chatter waits debounce quiet timer."""
-        if self._directly_addressed(message):
+        if self._is_same_user_interrupt(message) or self._directly_addressed(message):
+            if self._is_same_user_interrupt(message) and not self._note_same_user_latest(message):
+                self._record_request_outcome(message, "superseded", "same_user_interrupt")
+                return
             self._cancel_watch_debounce(
                 getattr(getattr(message, "channel", None), "id", "")
             )
@@ -6930,6 +7091,14 @@ class MaxwellBot(commands.Bot):
             return "dm_replies_disabled"
 
         if (
+            not getattr(author, "bot", False)
+            and self._should_interrupt_inflight(message)
+            and self._note_same_user_latest(message)
+        ):
+            self._interrupt_same_user(message)
+            self._mark_same_user_interrupt(message)
+
+        if (
             not is_user_install_message(message)
             and message.content
             and message.content.startswith(self.command_prefix)
@@ -7169,7 +7338,7 @@ class MaxwellBot(commands.Bot):
         # an LLM turn — so RAG keeps every message but the bot doesn't
         # burn provider calls replying to every rapid-fire text.
         if cooldown_for_reply and not message.author.bot:
-            if not self._should_live_reply(message):
+            if not self._should_live_reply(message) and not self._is_same_user_interrupt(message):
                 logger.info(
                     f"Cooldown skip reply for user {message.author.id} in {channel_id} (still stored to memory)"
                 )
@@ -7503,6 +7672,8 @@ class MaxwellBot(commands.Bot):
             "admin",
             "solo",
             "help",
+            "usage",
+            "premium",
             "x",
             "vc",
             "shell",
@@ -8019,28 +8190,14 @@ class MaxwellBot(commands.Bot):
                 await message.channel.send(f"```\n{text[:1900]}\n```")
             elif cmd == "help":
                 await message.channel.send(
-                    "Commands:\n"
-                    "` ,help` - show this list\n"
-                    "` ,debug` - last LLM call TTFT / TPS / tokens (admin)\n"
-                    "` ,stop` - stop active response in this channel\n"
-                    "` ,prompt [text]` - view/set server prompt (admin)\n"
-                    "` ,clearprompt` - clear server prompt (admin)\n"
-                    "` ,clearmem` - clear channel memory (admin)\n"
-                    "` ,context ...` - manage memory/context (admin)\n"
-                    "` ,rem ...` - manage/run REM (admin)\n"
-                    "` ,autonomy ...` - manage autonomy engine + channel/server blacklists (admin)\n"
-                    "` ,vc ...` - voice commands\n"
-                    "` ,drug [minutes|off|status]` - drug mode timer\n"
-                    "` ,solo [#channel|off|status]` - lock this server to ONE channel: silence everywhere else and stop autonomy here (admin)\n"
-                    "` ,jailbreak on|off|status` - toggle freedom-mode prompt for this server (admin)\n"
-                    "` ,progress on|off|status` - toggle live 'thinking: …' messages during tool calls, per server (admin)\n"
-                    "` ,ticket on|off|status` - greet new ticket/support channels in this server (admin; off by default)\n"
-                    "` ,sleep [minutes|off|status]` - take a 1-60m sleep window; pings get a notice (admin)\n"
-                    "` ,wake` - clear active sleep window (admin)\n"
-                    "` ,admin [@user|user_id|clear]` - add/remove/list admins (admin). Promoted users can log into the dashboard at /admin via 'Continue with Discord'."
-                    "` ,plugin list|enable|disable` - manage available plugins (admin for --global)\n"
-                    "` ,blacklist [@user|clear]` / `,unblacklist @user` - blacklist controls (admin)\n"
+                    command_help_text(discovery=discovery_enabled(self._control))
                 )
+            elif cmd == "usage":
+                await message.channel.send(
+                    usage_text_for(self, str(getattr(message.author, "id", "") or ""))
+                )
+            elif cmd == "premium":
+                await message.channel.send(premium_text_for(self))
             elif cmd == "vc":
                 await self._handle_vc_command(message, args)
             elif cmd in ("shell",):
@@ -8645,7 +8802,8 @@ class MaxwellBot(commands.Bot):
             "Output is fed to TTS so it must read naturally when spoken — avoid 'lol', 'ngl', 'fr', "
             "or anything that sounds weird read aloud.\n"
             "Reply directly to what they said. No reasoning, no "
-            "chain-of-thought, no meta-commentary, no narrating what you're doing."
+            "chain-of-thought, no meta-commentary, no narrating what you're doing. "
+            "Do not advertise Premium or send a promotional message."
             "\nOptional: start your reply with [voice=NAME] to pick your TTS voice "
             f"(choices: tiktok, mommy, espanol/spanish). Defaults to "
             f"{str(self._control.get('vc_tts_voice') or 'the configured Fish reference')} "
@@ -8746,6 +8904,7 @@ class MaxwellBot(commands.Bot):
                 return await self._generate_response(
                     messages,
                     quota_user_id=user_id,
+                    charge_message=True,
                     media=[],
                     timeout=vc_timeout,
                     max_tokens=vc_max_tokens,
@@ -10201,6 +10360,14 @@ class MaxwellBot(commands.Bot):
             control["daily_user_token_limit"] = max(
                 1, min(_safe_int(control.get("daily_user_token_limit"), 3_000_000), 100_000_000)
             )
+            control["message_quota_limit"] = max(
+                1, min(_safe_int(control.get("message_quota_limit"), 300), 100_000)
+            )
+            control["message_quota_window_seconds"] = max(
+                60,
+                min(_safe_int(control.get("message_quota_window_seconds"), 5 * 60 * 60), 7 * 24 * 3600),
+            )
+            control["premium_billing_enabled"] = False
             control["live_max_output_tokens"] = max(
                 256, min(_safe_int(control.get("live_max_output_tokens"), 4096), 32768)
             )
@@ -13997,6 +14164,7 @@ class MaxwellBot(commands.Bot):
                     media=active_media,
                     timeout=ai_timeout,
                     max_tokens=max_out_tokens,
+                    charge_message=True,
                     tools=provider_tools,
                     on_tool_call_name=_on_tool_call_name,
                     on_token=_on_token,
@@ -14542,7 +14710,7 @@ class MaxwellBot(commands.Bot):
         except asyncio.CancelledError as _exc:
             logger.info(f"Cancelled active request in channel {channel_id}")
             raise
-        except DailyTokenLimitExceeded as e:
+        except (DailyTokenLimitExceeded, MessageQuotaExceeded) as e:
             if MaxwellBot._request_state(self, message):
                 raise
             await message.channel.send(str(e))

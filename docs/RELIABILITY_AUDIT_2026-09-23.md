@@ -98,19 +98,28 @@ were not changed through this repository checkout.
 
 ## Maxwell Plus, after reliability and security gates
 
-Start with per-server settings and bounded usage, potentially $4.99/month per
-server, without withholding core working features. Build an entitlement
-ledger keyed by Discord guild ID and provider subscription ID. For Stripe,
-verify webhook signatures against the raw body, deduplicate event IDs,
-reconcile subscription status from the provider, and test renewals, failures,
-refunds, transfer of ownership, and revocation. For Discord Premium Apps,
-consume per-guild entitlements from its API and check developer onboarding
-eligibility for Puerto Rico directly in the Developer Portal or with Developer
-Support before choosing billing. Discord describes a 15% Growth Tier platform
-fee plus applicable processing/transaction fees and requires supported paid
-features to be available through its own Premium Apps in supported regions.
-Stripe says businesses in Puerto Rico can register as US businesses. No live
-payment path is implemented or enabled by this change.
+Customer-facing AI usage is messages, not tokens. The free allowance is 100
+messages per rolling five-hour window. Personal Plus is proposed at
+$2.99/month per user and would raise that individual allowance; the higher
+amount is not decided. Server Plus is proposed at $4.99/month per server and
+would use Discord's native Guild Subscription, remaining associated with the
+purchased server. It is not transferable. Its shared allowance and per-user
+fair-use cap are not decided. Do not build a subscription-transfer flow.
+
+Token and API-cost accounting stay internal for spending protection. Premium
+is not launching: do not activate billing, paid restrictions, checkout, or
+promotional announcements. `/premium` is an optional discovery command, with
+a quiet line in `/help` and `/usage` only. No live payment path is implemented
+or enabled.
+
+When billing is eventually chosen, verify provider signatures, deduplicate
+event IDs, and reconcile renewals, failures, refunds, and revocation. Do not
+test or implement transfer of a server subscription. Check Discord developer
+onboarding eligibility for Puerto Rico before choosing a billing provider.
+Discord describes a 15% Growth Tier platform fee plus applicable fees and
+requires supported paid features to be available through its own Premium Apps
+in supported regions. Stripe says businesses in Puerto Rico can register as
+US businesses.
 
 Official references:
 

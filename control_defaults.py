@@ -27,8 +27,19 @@ def parse_bool(value, default: bool = False) -> bool:
 # If you change a value here, it changes everywhere. That's the point.
 DEFAULT_CONTROL = {
     "bot_enabled": True,
+    # Internal spend cap. Not the customer-facing allowance.
     "daily_user_token_limit_enabled": True,
     "daily_user_token_limit": 3_000_000,
+    # Customer-facing AI usage. Free tier is 300 messages / rolling 5 hours.
+    # Plus limits are stored and not applied; billing stays off.
+    "message_quota_enabled": True,
+    "message_quota_limit": 300,
+    "message_quota_window_seconds": 5 * 60 * 60,
+    "message_quota_personal_plus_limit": 0,
+    "message_quota_server_plus_limit": 0,
+    "message_quota_server_fair_use_limit": 0,
+    "premium_discovery_enabled": True,
+    "premium_billing_enabled": False,
     "log_messages": False,
     "error_replies": True,
     # When True, the apology posted on a failed turn carries a short,

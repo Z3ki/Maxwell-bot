@@ -17,6 +17,17 @@ from message_pipeline import InboundDedup, ReplyQueue, RequestJournal, Watermark
 USER = SimpleNamespace(id=999, display_name="Maxwell", name="maxwell")
 
 
+class _DiscordMessage(SimpleNamespace):
+    """Test double that rejects the slotted attribute from the production crash."""
+
+    def __setattr__(self, name, value):
+        if name == "_same_user_interrupt":
+            raise AttributeError(
+                "'Message' object has no attribute '_same_user_interrupt'"
+            )
+        super().__setattr__(name, value)
+
+
 def _bot(path, *, capacity=2):
     bot = object.__new__(MaxwellBot)
     bot._connection = SimpleNamespace(user=USER)
@@ -85,7 +96,7 @@ def _message(bot, mid=101, cid=22, *, directed=True, content="question"):
         channel.fetch_message = AsyncMock(side_effect=lambda mid: channel.messages[mid])
         channel.last_message_id = mid
         bot._channels_for_test[cid] = channel
-    message = SimpleNamespace(
+    message = _DiscordMessage(
         id=mid,
         content=content,
         channel=channel,
@@ -180,38 +191,38 @@ def test_gate_returns_have_terminal_reason(tmp_path, control, reason):
     assert (row["status"], row["reason"]) == ("suppressed", reason)
 
 
-def test_new_same_user_pings_overflow_durably_without_cancelling(tmp_path):
+def test_same_user_followup_stops_generation_and_answers_only_latest(tmp_path):
     bot = _bot(tmp_path)
-    messages = [_message(bot, mid) for mid in range(101, 111)]
+    first, second, third = (_message(bot, mid) for mid in (101, 102, 103))
+    other = _message(bot, 201)
+    other.author = SimpleNamespace(id=22, display_name="Bob", bot=False)
     handled = []
 
     async def run():
-        started, release = asyncio.Event(), asyncio.Event()
+        started = asyncio.Event()
 
         async def answer(message, _content):
             handled.append(message.id)
             if message.id == 101:
                 started.set()
-                await release.wait()
+                await asyncio.Event().wait()
             await bot._send_with_slowmode(message.channel, "answer")
 
         bot._handle_message = answer
-        await bot.on_message(messages[0])
+        await bot.on_message(first)
         await started.wait()
-        for message in messages[1:]:
-            await bot.on_message(message)
-        assert bot._request_state(messages[0])["status"] == "running"
-        assert bot._request_state(messages[-1])["status"] == "deferred"
-        assert bot._reply_queue.depth(22) <= 2
-        release.set()
+        await bot.on_message(other)
+        assert bot._request_state(first)["status"] == "running"
+        await bot.on_message(second)
+        await bot.on_message(third)
         await _drain(bot)
-        for _ in range(10):
-            await bot._retry_pending_inbound()
-            await _drain(bot)
 
     asyncio.run(run())
-    assert handled == list(range(101, 111))
-    assert all(bot._request_state(m)["status"] == "delivered" for m in messages)
+    assert bot._request_state(first)["status"] == "superseded"
+    assert bot._request_state(second)["status"] == "superseded"
+    assert bot._request_state(third)["status"] == "delivered"
+    assert 101 not in handled[1:]
+    assert handled[-1] == 103
 
 
 def test_explicit_stop_supersedes_active_queued_and_persisted(tmp_path):

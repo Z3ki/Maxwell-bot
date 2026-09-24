@@ -1474,6 +1474,23 @@
           ],
         },
         {
+          title: "Message allowance",
+          note:
+            "Customer-facing AI usage is messages, not tokens. Plus limits are stored and not applied. Billing cannot be turned on.",
+          fields: [
+            { k: "message_quota_enabled", t: "bool", hint: "enforce the free message allowance" },
+            { k: "message_quota_limit", t: "int", min: 1, max: 100000, hint: "free messages per window (default 300)" },
+            { k: "message_quota_window_seconds", t: "int", min: 60, max: 604800, hint: "rolling window, default 18000 (5 hours)" },
+            { k: "message_quota_personal_plus_limit", t: "int", min: 0, max: 1000000, hint: "undecided; not applied" },
+            { k: "message_quota_server_plus_limit", t: "int", min: 0, max: 1000000, hint: "undecided shared server pool; not applied" },
+            { k: "message_quota_server_fair_use_limit", t: "int", min: 0, max: 1000000, hint: "undecided per-user fair use; not applied" },
+            { k: "premium_discovery_enabled", t: "bool", hint: "allow /premium and the help/usage plan line" },
+            { k: "premium_billing_enabled", t: "bool", hint: "forced off" },
+            { k: "daily_user_token_limit_enabled", t: "bool", hint: "internal spend cap, not the customer allowance" },
+            { k: "daily_user_token_limit", t: "int", min: 1, max: 100000000, hint: "internal tokens per UTC day" },
+          ],
+        },
+        {
           title: "Autonomy & Proactivity",
           note:
             "The autonomy on/off switch and tick interval live in the Autonomy tab — " +

@@ -410,7 +410,16 @@ def install_user_install_features(bot: Any) -> None:
 
     ui.USER_INSTALL_MESSAGE_EXPLAIN = MESSAGE_EXPLAIN
     ui.USER_INSTALL_MESSAGE_FACT_CHECK = MESSAGE_FACT_CHECK
-    ui.USER_INSTALL_COMMANDS[:] = modern_user_install_commands()
+    # This plugin replaces the base user-install list. Preserve discovery
+    # commands registered earlier by install_usage_commands().
+    from usage_commands import HELP_COMMAND, PREMIUM_COMMAND, USAGE_COMMAND
+
+    ui.USER_INSTALL_COMMANDS[:] = [
+        *modern_user_install_commands(),
+        dict(HELP_COMMAND),
+        dict(USAGE_COMMAND),
+        dict(PREMIUM_COMMAND),
+    ]
     ui.USER_INSTALL_NAMES = frozenset(
         {
             ui.USER_INSTALL_COMMAND_NAME,
@@ -419,6 +428,9 @@ def install_user_install_features(bot: Any) -> None:
             ui.USER_INSTALL_USER_ASK,
             MESSAGE_EXPLAIN,
             MESSAGE_FACT_CHECK,
+            "help",
+            "usage",
+            "premium",
         }
     )
 

@@ -82,13 +82,15 @@ Examples:
 /owner action:enable key:autonomy_enabled
 /owner action:set key:ai_concurrency value:3
 /owner action:quota key:123456789012345678
-/owner action:quota_set key:123456789012345678 value:1000000
+/owner action:quota_set key:123456789012345678 value:200
 /owner action:quota_reset key:123456789012345678
 /owner action:quota_exempt key:123456789012345678
-/owner action:enable key:daily_user_token_limit_enabled
+/owner action:spend key:123456789012345678
 ```
 
-Each user has a persistent 3,000,000 token allowance per UTC day by default. The ledger lives at `DATA_DIR/daily_tokens.sqlite3`. Usage from Discord text and voice calls and user-created background jobs is charged after each model call; requests reserve estimated input and output tokens first, so concurrent calls cannot oversubscribe the estimated allowance. A provider timeout charges the reservation conservatively. Historical Telegram ledger keys remain addressable as `tg:<id>`; the Telegram transport itself is removed and no new Telegram usage is recorded. `quota_clear` removes a user's limit and exemption overrides; `quota_unexempt` removes only the exemption. Set the global allowance with `daily_user_token_limit`; turn enforcement on or off with `daily_user_token_limit_enabled`.
+Customer-facing AI usage is messages, not tokens. The free allowance is 300 messages per rolling five-hour window (`message_quota_limit` / `message_quota_window_seconds`). The ledger lives at `DATA_DIR/message_quota.sqlite3`. One user-visible AI turn, voice utterance, or user-created background job counts as one message. Tool-loop follow-ups do not. `/usage` and `,usage` show that allowance. `/premium` is an optional discovery command and is not a purchase. Premium is not launched: Personal Plus is proposed at $2.99/month per user and Server Plus at $4.99/month per server, using Discord's native Guild Subscription that stays with the purchased server and cannot be transferred. Exact Plus allowances are not decided and are not applied. Billing, checkout, and …
+
+Token and reported API-cost accounting stay internal, in `DATA_DIR/daily_tokens.sqlite3`, as a spending cap. Requests still reserve estimated tokens so concurrent calls cannot oversubscribe that cap. A provider timeout charges the reservation conservatively. Owners inspect that ledger with `/owner action:spend`. Historical Telegram ledger keys remain addressable as `tg:<id>` on the internal ledger only. `quota_clear` removes a user's message-limit override; `quota_unexempt` removes only the exemption.
 
 ## Runtime controls
 
@@ -110,8 +112,12 @@ Frequently used controls include:
 | `prompt_context_budget` | Approximate prompt/context budget |
 | `memory_context_budget` | Approximate memory contribution budget |
 | `live_max_output_tokens` | Maximum output tokens for a live text response (default 4096) |
-| `daily_user_token_limit` | Default per-user token allowance per UTC day (default 3000000) |
-| `daily_user_token_limit_enabled` | Enforce the per-user allowance |
+| `message_quota_limit` | Free messages per rolling window (default 300) |
+| `message_quota_window_seconds` | Rolling window length (default 18000, five hours) |
+| `message_quota_enabled` | Enforce the customer-facing message allowance |
+| `daily_user_token_limit` | Internal per-user token spend cap per UTC day (default 3000000) |
+| `daily_user_token_limit_enabled` | Enforce the internal spend cap |
+| `premium_billing_enabled` | Forced off. Billing is not available |
 | `store_memory` | Conversation-memory storage switch |
 | `long_term_memory_enabled` | Long-term memory switch |
 | `cross_context_enabled` | Scoped cross-context facts |

@@ -394,6 +394,25 @@ class ReplyQueue:
             return True
         return False
 
+    def drop_author(self, channel_id: Any, user_id: Any) -> list[Any]:
+        """Drop queued turns from one author. The running turn is left alone."""
+        cid = str(channel_id or "")
+        uid = str(user_id or "")
+        state = self._channels.get(cid)
+        if state is None or not uid:
+            return []
+        kept: list[_Pending] = []
+        dropped: list[_Pending] = []
+        for entry in state.queue:
+            author = getattr(getattr(entry.message, "author", None), "id", None)
+            if str(author or "") == uid:
+                dropped.append(entry)
+                self._note_drop(cid, entry, "same_user_interrupt")
+                continue
+            kept.append(entry)
+        state.queue = kept
+        return dropped
+
     def drop_soft(self, channel_id: Any) -> int:
         """Drop pending soft (watch/chatter) entries. Directed pings stay.
 

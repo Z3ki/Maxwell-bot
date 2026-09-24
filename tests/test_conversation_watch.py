@@ -656,24 +656,24 @@ def test_memory_lock_timeout_is_bounded():
     assert MaxwellBot._channel_lock_timeout(bot) == 3.0
 
 
-def test_neither_watch_chatter_nor_new_ping_interrupts_inflight():
+def test_only_the_user_being_answered_interrupts_generation():
     bot = _bot()
     fake = SimpleNamespace(done=lambda: False)
 
     async def run():
-        chatter = _plain_followup(content="lol")
+        chatter = _plain_followup(content="wait, do the other one")
         cid = str(chatter.channel.id)
         bot._active_requests[cid] = fake
         bot._active_request_user[cid] = str(chatter.author.id)
-        MaxwellBot._arm_conversation_watch(bot, chatter.channel.id)
-        ping = _plain_followup(content=f"<@{bot.user.id}> make it a cat")
-        ping.mentions = [bot.user]
-        # It does not even earn a turn now, let alone cancel the running one.
-        assert MaxwellBot._should_live_reply(bot, chatter) is False
+        bot._active_request_messages = {}
+        assert MaxwellBot._should_interrupt_inflight(bot, chatter) is True
+        other = _plain_followup(content="hey", author_id=42, display_name="Bob")
+        assert MaxwellBot._should_interrupt_inflight(bot, other) is False
+        bot._active_request_user[cid] = "999"
         assert MaxwellBot._should_interrupt_inflight(bot, chatter) is False
-        assert MaxwellBot._should_interrupt_inflight(bot, ping) is False
 
     asyncio.run(run())
+
 
 
 def test_a_busy_room_queues_the_ping_instead_of_dropping_it():

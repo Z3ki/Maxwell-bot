@@ -291,6 +291,20 @@ def _sanitize_control(control):
     out["daily_user_token_limit"] = max(
         1, min(_safe_int(out.get("daily_user_token_limit"), 3_000_000), 100_000_000)
     )
+    out["message_quota_limit"] = max(
+        1, min(_safe_int(out.get("message_quota_limit"), 300), 100_000)
+    )
+    out["message_quota_window_seconds"] = max(
+        60, min(_safe_int(out.get("message_quota_window_seconds"), 5 * 60 * 60), 7 * 24 * 3600)
+    )
+    for _plus_key in (
+        "message_quota_personal_plus_limit",
+        "message_quota_server_plus_limit",
+        "message_quota_server_fair_use_limit",
+    ):
+        out[_plus_key] = max(0, min(_safe_int(out.get(_plus_key), 0), 1_000_000))
+    # Premium is not launched. A stored true must not turn billing on.
+    out["premium_billing_enabled"] = False
     out["live_max_output_tokens"] = max(
         256, min(_safe_int(out.get("live_max_output_tokens"), 4096), 32768)
     )

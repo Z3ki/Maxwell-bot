@@ -1049,10 +1049,26 @@ def _first_present_token_count(raw: dict, *keys: str) -> int:
     return 0
 
 
+def _reported_cost_usd(raw) -> float:
+    if not isinstance(raw, dict):
+        return 0.0
+    for key in ("cost", "total_cost"):
+        value = raw.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return max(0.0, float(value))
+    details = raw.get("cost_details")
+    if isinstance(details, dict):
+        for key in ("upstream_inference_cost", "total"):
+            value = details.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return max(0.0, float(value))
+    return 0.0
+
+
 def _normalize_llm_usage(raw) -> dict:
     """Map OpenAI / OpenRouter / Ollama usage blobs onto one shape."""
     if not isinstance(raw, dict):
-        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost_usd": 0.0}
     prompt = _first_present_token_count(
         raw, "prompt_tokens", "input_tokens", "prompt_eval_count"
     )
@@ -1064,6 +1080,7 @@ def _normalize_llm_usage(raw) -> dict:
         "prompt_tokens": prompt,
         "completion_tokens": completion,
         "total_tokens": total,
+        "cost_usd": _reported_cost_usd(raw),
     }
 
 

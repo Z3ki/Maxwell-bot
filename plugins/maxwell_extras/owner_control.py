@@ -44,12 +44,13 @@ _ACTION_CHOICES = [
     {"name": "Enable boolean control", "value": "enable"},
     {"name": "Disable boolean control", "value": "disable"},
     {"name": "Reload control file", "value": "reload_control"},
-    {"name": "User token usage", "value": "quota"},
-    {"name": "Set user daily limit", "value": "quota_set"},
+    {"name": "User message quota", "value": "quota"},
+    {"name": "Set user message limit", "value": "quota_set"},
     {"name": "Clear user limit override", "value": "quota_clear"},
-    {"name": "Reset user usage", "value": "quota_reset"},
+    {"name": "Reset user messages", "value": "quota_reset"},
     {"name": "Exempt user from limit", "value": "quota_exempt"},
     {"name": "Remove user exemption", "value": "quota_unexempt"},
+    {"name": "Internal token spend", "value": "spend"},
 ]
 
 OWNER_COMMAND = {
@@ -75,7 +76,7 @@ OWNER_COMMAND = {
         },
         {
             "name": "value",
-            "description": "Control value, or token count for quota_set",
+            "description": "Control value, or message count for quota_set",
             "type": 3,
             "required": False,
             "max_length": 1000,
@@ -228,8 +229,12 @@ def _embed(bot: Any, section: str) -> discord.Embed:
                 f"Max tool iterations: **{_fmt(control.get('max_tool_iterations'))}**\n"
                 f"Prompt budget: **{_fmt(control.get('prompt_context_budget'))}** chars\n"
                 f"Max live output: **{_fmt(control.get('live_max_output_tokens'))}** tokens"
-                f"\nDaily user limit: **{_fmt(control.get('daily_user_token_limit'))}** "
+                f"\nMessage quota: **{_fmt(control.get('message_quota_limit'))}** / "
+                f"{_fmt(control.get('message_quota_window_seconds'))}s "
+                f"({'on' if control.get('message_quota_enabled') else 'off'})"
+                f"\nInternal spend cap: **{_fmt(control.get('daily_user_token_limit'))}** tokens/day "
                 f"({'on' if control.get('daily_user_token_limit_enabled') else 'off'})"
+                f"\nPlus billing: **off**"
             ),
             inline=False,
         )
@@ -507,7 +512,7 @@ async def handle_owner_interaction(bot: Any, interaction: Any) -> bool:
             await _send(interaction, content="Reloaded `bot_control.json` into the live bot.")
         return True
 
-    if action in {"quota", "quota_set", "quota_clear", "quota_reset", "quota_exempt", "quota_unexempt"}:
+    if action == "spend":
         valid_discord = key.isdecimal() and len(key) <= 20
         valid_telegram = key.startswith("tg:") and key[3:].isdecimal() and len(key) <= 23
         if not (valid_discord or valid_telegram):
@@ -515,13 +520,32 @@ async def handle_owner_interaction(bot: Any, interaction: Any) -> bool:
             return True
         ledger = getattr(bot, "_daily_tokens", None)
         if ledger is None:
-            await _send(interaction, content="Daily token ledger is unavailable.")
+            await _send(interaction, content="Internal spend ledger is unavailable.")
             return True
+        state = ledger.status(key, int(_control(bot)["daily_user_token_limit"]))
+        await _send(interaction, content=(
+            f"Internal spend `{key}` · {state['day']} UTC · "
+            f"{state['spent']:,}/{state['limit']:,} tokens "
+            f"({state['reserved']:,} pending) · "
+            f"reported API cost ${state.get('cost_usd', 0):.4f} · "
+            f"exempt: {'yes' if state['exempt'] else 'no'}"
+        ))
+        return True
+
+    if action in {"quota", "quota_set", "quota_clear", "quota_reset", "quota_exempt", "quota_unexempt"}:
+        if not (key.isdecimal() and len(key) <= 20):
+            await _send(interaction, content="Provide a Discord user ID in `key`.")
+            return True
+        ledger = getattr(bot, "_message_quota", None)
+        if ledger is None:
+            await _send(interaction, content="Message quota ledger is unavailable.")
+            return True
+        control = _control(bot)
         try:
             if action == "quota_set":
                 amount = int(str(value or ""))
-                if not 1 <= amount <= 100_000_000:
-                    raise ValueError("limit must be between 1 and 100,000,000")
+                if not 1 <= amount <= 100_000:
+                    raise ValueError("limit must be between 1 and 100,000")
                 ledger.configure(key, limit=amount)
             elif action == "quota_clear":
                 ledger.configure(key, clear=True)
@@ -531,14 +555,17 @@ async def handle_owner_interaction(bot: Any, interaction: Any) -> bool:
                 ledger.configure(key, exempt=True)
             elif action == "quota_unexempt":
                 ledger.configure(key, exempt=False)
-            state = ledger.status(key, int(_control(bot)["daily_user_token_limit"]))
+            state = ledger.status(
+                key,
+                int(control.get("message_quota_limit") or 300),
+                int(control.get("message_quota_window_seconds") or 18000),
+            )
         except (TypeError, ValueError) as exc:
             await _send(interaction, content=f"Could not update quota: {exc}")
             return True
         await _send(interaction, content=(
-            f"User `{key}` · {state['day']} UTC · "
-            f"{state['spent']:,}/{state['limit']:,} tokens used "
-            f"({state['reserved']:,} pending) · "
+            f"User `{key}` · {state['used']}/{state['limit']} messages "
+            f"in the last {state['window_seconds']}s · "
             f"exempt: {'yes' if state['exempt'] else 'no'}"
         ))
         return True
@@ -546,6 +573,9 @@ async def handle_owner_interaction(bot: Any, interaction: Any) -> bool:
     if action in {"set", "enable", "disable"}:
         if not key:
             await _send(interaction, content="Provide `key` for this action.")
+            return True
+        if key == "premium_billing_enabled":
+            await _send(interaction, content="Billing, checkout, and paid restrictions are not available.")
             return True
         if action in {"enable", "disable"}:
             if key not in DEFAULT_CONTROL or not isinstance(DEFAULT_CONTROL[key], bool):
