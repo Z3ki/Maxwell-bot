@@ -4248,6 +4248,17 @@ class MaxwellBot(commands.Bot):
         cid = str(getattr(channel, "id", "") or "")
         if not cid:
             return False
+        active_task = (getattr(self, "_active_requests", None) or {}).get(cid)
+        active_user = (getattr(self, "_active_request_user", None) or {}).get(cid)
+        if active_task is not None and not active_task.done() and active_user:
+            if str(active_user) != str(getattr(author, "id", "") or ""):
+                return False
+            active_message = (getattr(self, "_active_request_messages", None) or {}).get(cid)
+            if active_message is not None and str(getattr(active_message, "id", "") or "") == str(
+                getattr(message, "id", "") or ""
+            ):
+                return False
+            return True
         inflight = MaxwellBot._inflight_reply_user(self, cid)
         if not inflight:
             state = getattr(getattr(self, "_reply_queue", None), "_channels", {}).get(cid)
