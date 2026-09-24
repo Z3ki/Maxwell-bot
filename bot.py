@@ -4251,19 +4251,22 @@ class MaxwellBot(commands.Bot):
         active_task = (getattr(self, "_active_requests", None) or {}).get(cid)
         active_user = (getattr(self, "_active_request_user", None) or {}).get(cid)
         if active_task is not None and not active_task.done() and active_user:
-            if str(active_user) != str(getattr(author, "id", "") or ""):
-                return False
-            active_message = (getattr(self, "_active_request_messages", None) or {}).get(cid)
-            if active_message is not None and str(getattr(active_message, "id", "") or "") == str(
-                getattr(message, "id", "") or ""
-            ):
-                return False
-            return True
+            if str(active_user) == str(getattr(author, "id", "") or ""):
+                active_message = (getattr(self, "_active_request_messages", None) or {}).get(cid)
+                if active_message is not None and str(getattr(active_message, "id", "") or "") == str(
+                    getattr(message, "id", "") or ""
+                ):
+                    return False
+                return True
+            # A different user's turn may be running while this user's
+            # replacement waits in the queue. Inspect queued entries below;
+            # never interrupt the other user's active turn.
         inflight = MaxwellBot._inflight_reply_user(self, cid)
-        if not inflight:
+        queued = None
+        if not inflight or inflight != str(getattr(author, "id", "") or ""):
             state = getattr(getattr(self, "_reply_queue", None), "_channels", {}).get(cid)
             queued = getattr(state, "queue", None) if state is not None else None
-            return any(
+            if any(
                 str(
                     getattr(
                         getattr(getattr(entry, "message", None), "author", None),
@@ -4274,7 +4277,10 @@ class MaxwellBot(commands.Bot):
                 )
                 == str(getattr(author, "id", "") or "")
                 for entry in (queued or [])
-            )
+            ):
+                return True
+        if not inflight:
+            return False
         if inflight != str(getattr(author, "id", "") or ""):
             return False
         active_message = (getattr(self, "_active_request_messages", None) or {}).get(cid)
@@ -4328,18 +4334,21 @@ class MaxwellBot(commands.Bot):
         uid = str(getattr(getattr(message, "author", None), "id", "") or "")
         if not cid or not uid:
             return
+        active_user = MaxwellBot._inflight_reply_user(self, cid)
         active_message = (getattr(self, "_active_request_messages", None) or {}).get(cid)
-        if active_message is not None and str(getattr(active_message, "id", "") or "") != str(
-            getattr(message, "id", "") or ""
-        ):
-            self._record_request_outcome(active_message, "superseded", "same_user_interrupt")
+        if active_user == uid:
+            if active_message is not None and str(getattr(active_message, "id", "") or "") != str(
+                getattr(message, "id", "") or ""
+            ):
+                self._record_request_outcome(active_message, "superseded", "same_user_interrupt")
         queue = getattr(self, "_reply_queue", None)
         if queue is not None and hasattr(queue, "drop_author"):
             for entry in queue.drop_author(cid, uid):
                 self._record_request_outcome(entry.message, "superseded", "same_user_interrupt")
-            queue.cancel_channel(cid, clear_queue=False)
+            if active_user == uid:
+                queue.cancel_channel(cid, clear_queue=False)
         active = (getattr(self, "_active_requests", None) or {}).get(cid)
-        if active is not None and not active.done():
+        if active_user == uid and active is not None and not active.done():
             active.cancel()
         cancel_watch = getattr(self, "_cancel_watch_debounce", None)
         if callable(cancel_watch):
