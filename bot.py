@@ -4249,7 +4249,22 @@ class MaxwellBot(commands.Bot):
         if not cid:
             return False
         inflight = MaxwellBot._inflight_reply_user(self, cid)
-        if not inflight or inflight != str(getattr(author, "id", "") or ""):
+        if not inflight:
+            state = getattr(getattr(self, "_reply_queue", None), "_channels", {}).get(cid)
+            queued = getattr(state, "queue", None) if state is not None else None
+            return any(
+                str(
+                    getattr(
+                        getattr(getattr(entry, "message", None), "author", None),
+                        "id",
+                        "",
+                    )
+                    or ""
+                )
+                == str(getattr(author, "id", "") or "")
+                for entry in (queued or [])
+            )
+        if inflight != str(getattr(author, "id", "") or ""):
             return False
         active_message = (getattr(self, "_active_request_messages", None) or {}).get(cid)
         if active_message is not None and str(getattr(active_message, "id", "") or "") == str(
