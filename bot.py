@@ -4172,7 +4172,9 @@ class MaxwellBot(commands.Bot):
                 self, message, "failed", "missing_channel"
             )
             return "dropped"
-        if self._is_same_user_interrupt(message):
+        same_user_check = getattr(self, "_is_same_user_interrupt", None)
+        same_user_interrupt = bool(same_user_check(message)) if callable(same_user_check) else False
+        if same_user_interrupt:
             if not self._note_same_user_latest(message):
                 self._record_request_outcome(message, "superseded", "same_user_interrupt")
                 return "superseded"
@@ -5352,8 +5354,10 @@ class MaxwellBot(commands.Bot):
 
     async def _maybe_live_reply(self, message, content: str) -> None:
         """Direct mentions reply immediately; soft chatter waits debounce quiet timer."""
-        if self._is_same_user_interrupt(message) or self._directly_addressed(message):
-            if self._is_same_user_interrupt(message) and not self._note_same_user_latest(message):
+        same_user_check = getattr(self, "_is_same_user_interrupt", None)
+        same_user_interrupt = bool(same_user_check(message)) if callable(same_user_check) else False
+        if same_user_interrupt or self._directly_addressed(message):
+            if same_user_interrupt and not self._note_same_user_latest(message):
                 self._record_request_outcome(message, "superseded", "same_user_interrupt")
                 return
             self._cancel_watch_debounce(
