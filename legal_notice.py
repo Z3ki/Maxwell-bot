@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,11 @@ logger = logging.getLogger(__name__)
 NOTICE_FILE = "legal_notice.json"
 LEGACY_CONSENT_FILE = "tos_consent.json"
 DEFAULT_PUBLIC_BASE = "https://maxwell.z3ki.dev"
+
+def enabled() -> bool:
+    raw = os.getenv("MAXWELL_LEGAL_NOTICE", "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
 
 
 def legal_urls(bot: Any | None = None) -> tuple[str, str]:
@@ -73,7 +79,7 @@ def _save(bot: Any) -> None:
 
 async def notify_user(bot: Any, user: Any) -> None:
     """Try one DM; a failed delivery never prevents the user's action."""
-    if user is None or getattr(user, "bot", False):
+    if not enabled() or user is None or getattr(user, "bot", False):
         return
     uid = str(getattr(user, "id", "") or "").strip()
     if not uid:
