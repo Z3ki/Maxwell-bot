@@ -110,12 +110,8 @@ class CreateSiteTool(Tool):
             "(fetch existing HTML and host it), "
             'files (extra files {"path":"content"}), '
             "backend (optional, default false), encoding, permanent. "
-            "Static HTML/CSS/JS is first-class. Use backend=true + site_server only when "
-            "the page needs server-side state, REST, websockets, auth, or persistence "
-            "(Python in site_servers/<slug>/app.py, FastAPI+uvicorn on $PORT). "
-            "When a backend exists, "
-            "frontend API calls are RELATIVE ('api/notes', never '/api/...' — absolute "
-            "paths 404 under /bot/<name>/)."
+            "Static HTML/CSS/JS is first-class. backend=true enables only the "
+            "simple site KV API; custom backend deployment is unavailable."
         )
 
     async def _fetch_site_html(self, url: str) -> str:
@@ -415,13 +411,7 @@ class CreateSiteTool(Tool):
                 result += f"\nFiles: {', '.join(written)}"
             if wants_backend:
                 result += "\n" + site_backend.client_guide(f"/api/site/{slug}")
-                result += (
-                    "\nNOTE: /api/site/<slug>/... above is the simple KV store. If this "
-                    "site also gets a site_server container backend (/bot/<slug>/api/...), "
-                    "the frontend uses the container with RELATIVE paths ('api/...') — "
-                    "pick the backend that fits, use its exact routes, never invent "
-                    "routes or mix the two."
-                )
+                result += "\nThe simple KV API is the only supported backend here."
             result += f"\nLifetime: {site_expiry_label(site_entry, control)}."
             # Placeholders shipped in the HTML are invisible in a 200 response
             # and in a screenshot of a page that has not mounted, so they are

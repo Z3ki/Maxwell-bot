@@ -11,7 +11,7 @@
   "protected": false,
   "uninstallable": true,
   "permissions": ["shell", "files.read", "files.write", "network", "jobs.run"],
-  "platforms": ["discord", "telegram"],
+  "platforms": ["discord"],
   "tools": [
     {"name":"agent_life","returns_result":true,"ends_turn":false,"is_destructive":false},
     {"name":"user_sandbox","returns_result":true,"ends_turn":false,"is_destructive":true}

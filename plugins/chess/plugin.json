@@ -15,8 +15,7 @@
     "chess"
   ],
   "platforms": [
-    "discord",
-    "telegram"
+    "discord"
   ],
   "tools": [
     {

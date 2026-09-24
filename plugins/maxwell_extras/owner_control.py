@@ -511,7 +511,7 @@ async def handle_owner_interaction(bot: Any, interaction: Any) -> bool:
         valid_discord = key.isdecimal() and len(key) <= 20
         valid_telegram = key.startswith("tg:") and key[3:].isdecimal() and len(key) <= 23
         if not (valid_discord or valid_telegram):
-            await _send(interaction, content="Provide a Discord user ID or `tg:<Telegram user ID>` in `key`.")
+            await _send(interaction, content="Provide a Discord user ID, or a stored `tg:<id>` ledger key, in `key`.")
             return True
         ledger = getattr(bot, "_daily_tokens", None)
         if ledger is None:

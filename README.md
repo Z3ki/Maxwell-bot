@@ -170,7 +170,7 @@ See [`docs/INSTALL.md`](docs/INSTALL.md) for Docker Desktop, reverse-proxy, OAut
 - SQLite-backed RAG/vector memory plus scoped context, entity/knowledge-graph memory, and optional REM-style consolidation.
 - Optional autonomy/background actions with runtime controls.
 - Generated static sites and optional backend containers.
-- Telegram as an optional second transport.
+
 - Docker-first runtime so host Python/package versions do not fight the bot.
 
 ## Project layout

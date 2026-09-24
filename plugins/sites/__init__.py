@@ -15,13 +15,12 @@ def _flag(bot: Any, name: str | None) -> bool:
 
 def setup(bot, ctx=None):
     pass
-    from .impl import CreateSiteTool, EditSiteTool, DeleteSiteTool, SiteServerTool, ListSitesTool, HostFileTool
+    from .impl import CreateSiteTool, EditSiteTool, DeleteSiteTool, ListSitesTool, HostFileTool
 
     mapping = [
         ('create_site', CreateSiteTool, 'ENABLE_CREATE_SITE'),
         ('edit_site', EditSiteTool, 'ENABLE_CREATE_SITE'),
         ('delete_site', DeleteSiteTool, 'ENABLE_CREATE_SITE'),
-        ('site_server', SiteServerTool, 'ENABLE_CREATE_SITE'),
         ('list_sites', ListSitesTool, 'ENABLE_CREATE_SITE'),
         ('host_file', HostFileTool, 'ENABLE_CREATE_SITE'),
     ]

@@ -88,7 +88,7 @@ Examples:
 /owner action:enable key:daily_user_token_limit_enabled
 ```
 
-Each user has a persistent 3,000,000 token allowance per UTC day by default. The ledger lives at `DATA_DIR/daily_tokens.sqlite3`. Usage from Discord text and voice calls, user-created background jobs, and Telegram calls is charged after each model call; requests reserve estimated input and output tokens first, so concurrent calls cannot oversubscribe the estimated allowance. A provider timeout charges the reservation conservatively. Telegram user IDs use `tg:<id>` in quota actions. `quota_clear` removes a user's limit and exemption overrides; `quota_unexempt` removes only the exemption. Set the global allowance with `daily_user_token_limit`; turn enforcement on or off with `daily_user_token_limit_enabled`.
+Each user has a persistent 3,000,000 token allowance per UTC day by default. The ledger lives at `DATA_DIR/daily_tokens.sqlite3`. Usage from Discord text and voice calls and user-created background jobs is charged after each model call; requests reserve estimated input and output tokens first, so concurrent calls cannot oversubscribe the estimated allowance. A provider timeout charges the reservation conservatively. Historical Telegram ledger keys remain addressable as `tg:<id>`; the Telegram transport itself is removed and no new Telegram usage is recorded. `quota_clear` removes a user's limit and exemption overrides; `quota_unexempt` removes only the exemption. Set the global allowance with `daily_user_token_limit`; turn enforcement on or off with `daily_user_token_limit_enabled`.
 
 ## Runtime controls
 

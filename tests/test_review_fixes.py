@@ -3,22 +3,9 @@
 import asyncio
 from types import SimpleNamespace
 
-from bot import TelegramMessageAdapter, strip_tool_payload_leaks
+from bot import strip_tool_payload_leaks
 from rem import RemStore
 from tool_schemas import TOOL_PARAMETERS, build_openai_tools
-
-
-class _FakeSession:
-    def post(self, *args, **kwargs):
-        raise AssertionError("should not send")
-
-
-def test_telegram_adapter_does_not_reuse_chat_id_as_message_id():
-    adapter = TelegramMessageAdapter(
-        _FakeSession(), "https://api.telegram.org/botx", 999888777, None
-    )
-    assert adapter.id is None
-    assert adapter.chat_id == 999888777
 
 
 def test_native_calls_from_string_does_not_consume_stash():

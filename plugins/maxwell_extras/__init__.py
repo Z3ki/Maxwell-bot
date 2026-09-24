@@ -1,4 +1,4 @@
-"""Discord extras plugin: rich messages, reminders, media inspection, plugin IDE, and audit UI."""
+"""Discord extras plugin: rich messages, reminders, media inspection, and audit UI."""
 
 
 def setup(bot, ctx):
@@ -14,7 +14,6 @@ def setup(bot, ctx):
         install_user_install_tool_disclosure,
     )
 
-    from .workbench_v2 import PluginWorkbenchTool
     from .tools import (
         InspectMediaUrlTool,
         RecallCrossServerMemoryTool,
@@ -71,13 +70,11 @@ def setup(bot, ctx):
     rich_tool = SendRichMessageTool(bot)
     install_rich_interactions(bot, ctx, rich_tool)
 
-    workbench = PluginWorkbenchTool(bot, ctx)
     return [
         ReminderTool(bot, store),
         rich_tool,
         RecallCrossServerMemoryTool(bot),
         InspectMediaUrlTool(bot),
-        workbench,
     ]
 
 

@@ -31,11 +31,14 @@ from maxwell_core.tools.registry import ToolRegistry, set_global_registry
 
 logger = logging.getLogger("maxwell.plugins")
 
-# Legacy detached LLM workers are not part of the single-assistant runtime.
-# Skip their setup entirely: loading agent_life schedules its periodic wake
-# even if plugins.json says it is disabled. Keep the source for old data and
-# migration work, but never start these workers in the default runtime.
-_RETIRED_AGENT_PLUGINS = frozenset({"agent_life", "background_jobs"})
+# These bundled plugins expose detached AI workers, repository/host shell,
+# global plugin configuration, or edits to protected prompt state. Skip setup
+# entirely: some register periodic work even when plugins.json says disabled.
+# Keep their source and stored data for a reviewed migration.
+_RETIRED_PUBLIC_RUNTIME_PLUGINS = frozenset({
+    "agent_life", "background_jobs", "github_projects", "shell",
+    "plugin_admin", "personality",
+})
 
 _EVENT_TIMEOUT = max(1.0, float(os.getenv("MAXWELL_PLUGIN_EVENT_TIMEOUT", "15") or 15))
 _JOB_TIMEOUT = max(5.0, float(os.getenv("MAXWELL_PLUGIN_JOB_TIMEOUT", "120") or 120))
@@ -102,6 +105,7 @@ class PluginManager:
 
         self.loaded_plugins: Dict[str, Dict[str, Any]] = {}
         self.all_plugin_tools: Dict[str, tuple[str, Any]] = {}
+        self._published_tool_names: set[str] = set()
         self.load_errors: Dict[str, str] = {}
 
         self._listeners: Dict[str, List[tuple[str, Callable[..., Any]]]] = {}
@@ -682,7 +686,7 @@ class PluginManager:
         discovered: dict[str, tuple[Path, PluginManifest]] = {}
         for entry in self._plugin_dirs():
             plugin_name = entry.name
-            if plugin_name in _RETIRED_AGENT_PLUGINS and entry.parent == self.plugins_dir:
+            if plugin_name in _RETIRED_PUBLIC_RUNTIME_PLUGINS:
                 continue
             try:
                 manifest = self._load_typed_manifest(entry, plugin_name)
@@ -944,12 +948,12 @@ class PluginManager:
             for name, (plugin, _tool) in self.all_plugin_tools.items()
             if self.is_plugin_enabled_for_user(plugin, None)
         }
-        for name in list(bot_tools):
-            if name in self.all_plugin_tools and name not in published:
-                bot_tools.pop(name, None)
+        for name in self._published_tool_names - published:
+            bot_tools.pop(name, None)
         for name, (_plugin, tool) in self.all_plugin_tools.items():
             if name in published:
                 bot_tools[name] = tool
+        self._published_tool_names = published
 
     def reload_plugins(self) -> str:
         for tasks in list(self._job_tasks.values()):

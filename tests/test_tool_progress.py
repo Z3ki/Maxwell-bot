@@ -6,8 +6,7 @@ Covers the four behaviors the user actually cares about:
   3. Rate limit coalesces rapid updates — the channel doesn't see every tick
   4. notify_streaming() + stop() cleanly deletes the message so the
      channel is left with only the tool's own streamed output
-  5. Telegram platform doesn't try to edit (no adapter for it)
-  6. stop() is idempotent and safe from finally blocks
+  5. stop() is idempotent and safe from finally blocks
 
 We test against a fake Message/Channel so we don't need Discord.
 """
@@ -235,23 +234,6 @@ def test_notify_streaming_marks_for_deletion():
     assert len(msg.channel.edited) == edits_before
     asyncio.run(prog.stop())
     assert posted_msg in msg.channel.deleted
-
-
-def test_telegram_does_not_try_to_edit():
-    """Telegram progress skips edits but deletes its returned message handle."""
-    msg = FakeMessage(platform="telegram")
-    prog = tool_progress.ToolProgress(msg)
-    asyncio.run(prog.start())
-    # First post went out
-    assert len(msg.channel.sent) == 1
-    # update() should be a no-op (we don't have editMessage on Telegram)
-    edits_before = len(msg.channel.edited)
-    prog._last_edit = 0
-    asyncio.run(prog.update("shell", "any reasoning"))
-    assert len(msg.channel.edited) == edits_before
-    # Delete the returned message directly; no fetch by ID is needed.
-    asyncio.run(prog.stop())
-    assert msg.channel.deleted == msg.channel.sent
 
 
 def test_start_is_idempotent():
