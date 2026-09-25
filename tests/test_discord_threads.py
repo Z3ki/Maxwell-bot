@@ -73,7 +73,8 @@ class MemoryStub:
             {"author": "maxwell", "content": "ok what kind"},
         ]
 
-    async def get_channel_memory(self, channel_id):
+    async def get_channel_memory(self, channel_id, *, requester=None):
+        assert requester is not None
         return list(self.rows)
 
 

@@ -17,8 +17,22 @@ from email_inbox import MailPollState, _fetch_new_sync
 from inbox import InboxStore
 from jobs import BackgroundJobManager
 from knowledge_graph import KnowledgeGraph
-from rag_memory import EMBED_DIM, EMBED_MAX_CHARS, RAGMemoryManager
+from rag_memory import EMBED_DIM, EMBED_MAX_CHARS, MemoryRequester, RAGMemoryManager
 from rem import RemStore, run_rem_once
+
+
+def _requester(
+    user_id="123", channel_id="channel-1", guild_id="guild-1", *,
+    is_dm=False, is_admin=False, channel_is_public=True,
+):
+    return MemoryRequester(
+        user_id=user_id, channel_id=channel_id, guild_id=guild_id,
+        is_dm=is_dm, is_admin=is_admin, channel_is_public=channel_is_public,
+    )
+
+
+def _admin_requester():
+    return _requester(user_id="operator", is_admin=True)
 
 
 def test_floor_settings_honor_zero_and_reject_infinity():
@@ -110,28 +124,40 @@ def test_background_task_setup_failure_releases_runtime_and_capacity(tmp_path, f
 
 def test_entity_profiles_exclude_restricted_or_expired_shared_facts(memory):
     async def run():
+        requester = _requester("123")
+        dm_requester = _requester(
+            "123", channel_id="dm-123", guild_id="", is_dm=True,
+            channel_is_public=False,
+        )
         for visibility in ("private", "admin_only", "shared"):
             await memory.add_shared_context(
-                {"scope": "user:123", "content": visibility, "visibility": visibility}
+                {"scope": "user:123", "content": visibility, "visibility": visibility},
+                requester=requester,
             )
         await memory.add_shared_context(
             {
                 "scope": "dm:123",
                 "content": "expired",
                 "expires_at": "2000-01-01T00:00:00+00:00",
-            }
+            },
+            requester=dm_requester,
         )
-        assert [r["content"] for r in await memory.get_entity_facts("123")] == [
-            "shared"
-        ]
+        assert [r["content"] for r in await memory.get_entity_facts(
+            "123", requester=requester
+        )] == ["shared"]
 
     asyncio.run(run())
 
 
 def test_entity_budget_does_not_force_oversized_first_fact(memory):
     async def run():
-        await memory.add_entity_fact("123", "a very long durable fact")
-        assert await memory.get_entity_facts("123", budget=1) == []
+        requester = _requester("123")
+        await memory.add_entity_fact(
+            "123", "a very long durable fact", requester=requester
+        )
+        assert await memory.get_entity_facts(
+            "123", budget=1, requester=requester
+        ) == []
 
     asyncio.run(run())
 
@@ -139,15 +165,22 @@ def test_entity_budget_does_not_force_oversized_first_fact(memory):
 def test_shared_facts_in_different_scopes_survive_restart(memory):
     async def run():
         first = await memory.add_shared_context(
-            {"scope": "user:1", "content": "prefers tea"}
+            {"scope": "user:1", "content": "prefers tea"},
+            requester=_requester("1"),
         )
         second = await memory.add_shared_context(
-            {"scope": "user:2", "content": "prefers tea"}
+            {"scope": "user:2", "content": "prefers tea"},
+            requester=_requester("2"),
         )
-        assert {r["id"] for r in await memory.list_shared_context()} == {first, second}
+        admin = _admin_requester()
+        assert {r["id"] for r in await memory.list_shared_context(
+            requester=admin
+        )} == {first, second}
         fresh = RAGMemoryManager(str(memory.data_dir))
         try:
-            assert {r["id"] for r in await fresh.list_shared_context()} == {
+            assert {r["id"] for r in await fresh.list_shared_context(
+                requester=admin
+            )} == {
                 first,
                 second,
             }
@@ -160,19 +193,23 @@ def test_shared_facts_in_different_scopes_survive_restart(memory):
 def test_legacy_shared_hashes_migrate_without_losing_scopes(memory):
     async def run():
         first = await memory.add_shared_context(
-            {"scope": "user:1", "content": "prefers tea"}
+            {"scope": "user:1", "content": "prefers tea"},
+            requester=_requester("1"),
         )
         memory._db.execute("UPDATE vectors SET content_hash='' WHERE id=?", (first,))
         fresh = RAGMemoryManager(str(memory.data_dir))
+        admin = _admin_requester()
         try:
             await fresh.add_shared_context(
-                {"scope": "user:2", "content": "prefers tea"}
+                {"scope": "user:2", "content": "prefers tea"},
+                requester=_requester("2"),
             )
-            assert len(await fresh.list_shared_context()) == 2
+            assert len(await fresh.list_shared_context(requester=admin)) == 2
             await fresh.add_shared_context(
-                {"scope": "user:1", "content": "prefers tea"}
+                {"scope": "user:1", "content": "prefers tea"},
+                requester=_requester("1"),
             )
-            assert len(await fresh.list_shared_context()) == 2
+            assert len(await fresh.list_shared_context(requester=admin)) == 2
         finally:
             fresh._db.close()
 
@@ -181,17 +218,28 @@ def test_legacy_shared_hashes_migrate_without_losing_scopes(memory):
 
 def test_private_global_facts_without_owner_fail_closed(memory):
     async def run():
-        await memory.add_shared_context(
+        # A write without source context is rejected and cannot become a
+        # prompt-visible global fact.
+        assert await memory.add_shared_context(
             {"content": "private REM fact", "visibility": "private"}
-        )
-        assert await memory.get_relevant_shared_context(user_id="stranger") == []
-        assert len(await memory.get_relevant_shared_context(is_admin=True)) == 1
+        ) == ""
+        admin = _admin_requester()
+        assert await memory.get_relevant_shared_context(
+            requester=admin, is_admin=True
+        ) == []
+        owner = _requester("123")
         await memory.add_shared_context(
-            {"content": "my fact", "scope": "user:123", "visibility": "private"}
+            {"content": "my fact", "scope": "user:123", "visibility": "private"},
+            requester=owner,
         )
+        assert await memory.get_relevant_shared_context(
+            requester=_requester("stranger"), user_id="stranger"
+        ) == []
         assert [
             r["content"]
-            for r in await memory.get_relevant_shared_context(user_id="123")
+            for r in await memory.get_relevant_shared_context(
+                requester=owner, user_id="123"
+            )
         ] == ["my fact"]
 
     asyncio.run(run())
@@ -238,7 +286,12 @@ def test_batch_embedding_does_not_overwrite_edited_content(memory, monkeypatch):
         def post(self, *args, **kwargs):
             return Response()
 
-    monkeypatch.setattr("rag_memory.aiohttp.ClientSession", Session)
+    session = Session()
+
+    async def get_shared_session():
+        return session
+
+    monkeypatch.setattr(memory, "_get_embed_session", get_shared_session)
     memory._db.execute(
         "INSERT INTO vectors (id, kind, content, timestamp, created_at) VALUES ('old', 'ltm', 'old fact', '', 0)"
     )
@@ -410,7 +463,7 @@ def memory(tmp_path, monkeypatch):
     monkeypatch.setattr(RAGMemoryManager, "_spawn", lambda self, coro: coro.close())
     mgr = RAGMemoryManager(str(tmp_path))
 
-    async def embed(text):
+    async def embed(text, *, background=False):
         return np.array([1.0, 0.0], dtype=np.float32)
 
     monkeypatch.setattr(mgr, "_embed", embed)
@@ -446,13 +499,16 @@ def test_entity_salted_hash_does_not_prevent_embedding(memory):
 def test_shared_metadata_updates_are_merged_together(memory):
     async def run():
         fid = await memory.add_shared_context(
-            {"content": "a fact", "visibility": "shared"}
+            {"content": "a fact", "visibility": "shared"},
+            requester=_requester("123"),
         )
+        admin = _admin_requester()
         assert await memory.update_shared_context(
             fid,
             {"visibility": "admin_only", "tags": ["audit"], "expires_at": "2099-01-01"},
+            requester=admin,
         )
-        row = (await memory.list_shared_context())[0]
+        row = (await memory.list_shared_context(requester=admin))[0]
         assert row["visibility"] == "admin_only"
         assert row["tags"] == ["audit"]
         assert row["expires_at"] == "2099-01-01"
@@ -462,11 +518,15 @@ def test_shared_metadata_updates_are_merged_together(memory):
 
 def test_shared_content_edit_updates_hash_and_rejects_stale_embedding(memory):
     async def run():
-        fid = await memory.add_shared_context({"content": "old fact"})
+        fid = await memory.add_shared_context(
+            {"content": "old fact"}, requester=_requester("123")
+        )
         before = memory._db.execute(
             "SELECT content_hash FROM vectors WHERE id=?", (fid,)
         ).fetchone()[0]
-        assert await memory.update_shared_context(fid, {"content": "new fact"})
+        assert await memory.update_shared_context(
+            fid, {"content": "new fact"}, requester=_admin_requester()
+        )
         after = memory._db.execute(
             "SELECT content_hash FROM vectors WHERE id=?", (fid,)
         ).fetchone()[0]
@@ -480,7 +540,12 @@ def test_shared_content_edit_updates_hash_and_rejects_stale_embedding(memory):
 @pytest.mark.parametrize("budget", [0, 1, 5])
 def test_shared_context_respects_even_tiny_budgets(memory, budget):
     async def run():
-        await memory.add_shared_context({"content": "a long durable fact"})
-        assert await memory.get_relevant_shared_context(budget=budget) == []
+        requester = _requester("123")
+        await memory.add_shared_context(
+            {"content": "a long durable fact"}, requester=requester
+        )
+        assert await memory.get_relevant_shared_context(
+            requester=requester, budget=budget
+        ) == []
 
     asyncio.run(run())

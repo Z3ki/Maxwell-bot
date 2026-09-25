@@ -23,7 +23,7 @@ class FakeMemory:
     def __init__(self, messages=None):
         self.messages = list(messages or [])
 
-    async def get_channel_memory(self, channel_id):
+    async def get_channel_memory(self, channel_id, *, requester=None):
         return list(self.messages)
 
     def get_server_prompt(self, server_id):

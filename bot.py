@@ -268,7 +268,7 @@ from providers import (  # noqa: E402
     ProviderEmptyResponseError,
     ProviderUsageExhaustedError,
 )
-from rag_memory import RAGMemoryManager, RemEventLog, _parse_iso  # noqa: E402
+from rag_memory import RAGMemoryManager, RemEventLog, MemoryRequester, _parse_iso  # noqa: E402
 from jobs import BackgroundJobManager  # noqa: E402
 from autofix import schedule_tool_autofix  # noqa: E402
 from discord_threads import (  # noqa: E402
@@ -329,6 +329,17 @@ from utils import (  # fd-safe, single source of truth  # noqa: E402
     message_reference_is_forward,
     render_discord_context_text,
 )
+
+
+def _memory_requester_for(bot, message) -> MemoryRequester:
+    """Build request scope without making tests/plugins assume bot internals."""
+    checker = getattr(bot, "_is_admin", None)
+    author = getattr(message, "author", None)
+    try:
+        is_admin = bool(checker(getattr(author, "id", None))) if callable(checker) else False
+    except Exception:
+        is_admin = False
+    return MemoryRequester.from_message(message, is_admin=is_admin)
 
 
 class _MaxLevelFilter(logging.Filter):
@@ -7289,7 +7300,12 @@ class MaxwellBot(commands.Bot):
     ) -> bool:
         recent = []
         try:
-            mem = await self.memory.get_channel_memory(str(channel.id))
+            mem = await self.memory.get_channel_memory(
+                str(channel.id),
+                requester=MemoryRequester(
+                    user_id=str(caller_id), channel_id=str(channel.id), is_dm=True
+                ),
+            )
             for msg in (mem or [])[-8:]:
                 author = str(msg.get("author") or "user")[:40]
                 text = str(msg.get("content") or "").replace("\n", " ")[:160]
@@ -8697,7 +8713,15 @@ class MaxwellBot(commands.Bot):
             ),
         )
         memory = (
-            await self.memory.get_channel_memory(channel_id) if memory_count else []
+            await self.memory.get_channel_memory(
+                channel_id,
+                requester=MemoryRequester(
+                    user_id=str(user.id), channel_id=str(channel_id),
+                    guild_id=str(getattr(guild, 'id', '') or ''),
+                    is_dm=(guild is None), is_admin=self._is_admin(user.id),
+                    channel_is_public=False,
+                ),
+            ) if memory_count else []
         )
         for msg in memory[-memory_count:]:
             role = (
@@ -8845,6 +8869,11 @@ class MaxwellBot(commands.Bot):
             facts = []
             if self._control.get("vc_cross_context_enabled", False):
                 facts = await self.memory.get_relevant_shared_context(
+                    requester=MemoryRequester(
+                        user_id=str(user.id), channel_id=channel_id, guild_id=guild_id,
+                        is_dm=(guild is None), is_admin=self._is_admin(user.id),
+                        channel_is_public=False,
+                    ),
                     user_id=str(user.id),
                     guild_id=guild_id,
                     channel_id=channel_id,
@@ -9055,6 +9084,9 @@ class MaxwellBot(commands.Bot):
 
         if not arg:
             entries = await self.memory.get_relevant_shared_context(
+                requester=MemoryRequester.from_message(
+                    message, is_admin=is_admin
+                ),
                 user_id=user_id,
                 guild_id=guild_id,
                 channel_id=channel_id,
@@ -9067,12 +9099,22 @@ class MaxwellBot(commands.Bot):
             return
         if arg.lower() == "all":
             await send_entries(
-                await self.memory.list_shared_context(limit=50), "Recent context facts"
+                await self.memory.list_shared_context(
+                    limit=50,
+                    requester=MemoryRequester.from_message(
+                        message, is_admin=is_admin
+                    ),
+                ), "Recent context facts"
             )
             return
         if arg.lower().startswith("forget "):
             context_id = arg.split(maxsplit=1)[1].strip()
-            ok = await self.memory.remove_shared_context(context_id)
+            ok = await self.memory.remove_shared_context(
+                context_id,
+                requester=MemoryRequester.from_message(
+                    message, is_admin=is_admin
+                ),
+            )
             await message.channel.send(
                 "Context fact removed." if ok else "Context fact not found."
             )
@@ -9080,7 +9122,10 @@ class MaxwellBot(commands.Bot):
         if arg.lower().startswith("private "):
             context_id = arg.split(maxsplit=1)[1].strip()
             ok = await self.memory.update_shared_context(
-                context_id, {"visibility": "private"}
+                context_id, {"visibility": "private"},
+                requester=MemoryRequester.from_message(
+                    message, is_admin=is_admin
+                ),
             )
             await message.channel.send(
                 "Context fact marked private." if ok else "Context fact not found."
@@ -9089,7 +9134,20 @@ class MaxwellBot(commands.Bot):
         if arg.lower().startswith("global "):
             context_id = arg.split(maxsplit=1)[1].strip()
             ok = await self.memory.update_shared_context(
-                context_id, {"scope": "global", "visibility": "shared"}
+                context_id, {
+                    "scope": "global",
+                    "visibility": "public",
+                    "public_approved": True,
+                    "source_kind": "operator_public",
+                    "source_user_id": user_id,
+                    "source_channel_id": channel_id,
+                    "source_guild_id": guild_id,
+                    "source_is_dm": is_dm,
+                    "source_channel_public": False,
+                },
+                requester=MemoryRequester.from_message(
+                    message, is_admin=is_admin
+                ),
             )
             await message.channel.send(
                 "Context fact promoted globally." if ok else "Context fact not found."
@@ -9117,9 +9175,17 @@ class MaxwellBot(commands.Bot):
                     "source_user_id": user_id,
                     "source_channel_id": channel_id,
                     "source_guild_id": guild_id,
-                    "source_kind": "admin",
+                    "source_kind": (
+                        "operator_public" if scope == "global" else "admin"
+                    ),
+                    "public_approved": scope == "global",
+                    "source_is_dm": is_dm,
+                    "source_channel_public": False,
                     "tags": ["manual"],
-                }
+                },
+                requester=MemoryRequester.from_message(
+                    message, is_admin=is_admin
+                ),
             )
             await message.channel.send(
                 f"Context fact saved: {context_id}"
@@ -10541,6 +10607,15 @@ class MaxwellBot(commands.Bot):
             "source_channel_id": channel_id,
             "source_guild_id": guild_id,
             "source_kind": self._context_source_kind(message),
+            "source_is_dm": is_dm,
+            "source_channel_public": bool(
+                not is_dm and getattr(
+                    getattr(message.channel, "permissions_for", lambda *_: None)(
+                        getattr(message.guild, "default_role", None)
+                    ),
+                    "view_channel", False,
+                )
+            ),
             "tags": tags,
             "expires_at": expires_at,
         }
@@ -10653,7 +10728,10 @@ class MaxwellBot(commands.Bot):
             entry = self._normalize_context_entry(message, data)
             if not entry:
                 return
-            context_id = await self.memory.add_shared_context(entry)
+            context_id = await self.memory.add_shared_context(
+                entry,
+                requester=_memory_requester_for(self, message),
+            )
             if context_id:
                 logger.info(
                     f"Context watcher stored fact {context_id}: {entry['content'][:120]}"
@@ -10664,7 +10742,7 @@ class MaxwellBot(commands.Bot):
             logger.warning(f"Context extraction error: {e}")
 
     async def _mirror_fact_to_entity(self, message, entry: dict) -> None:
-        """Copy a person-scoped extracted fact into global entity memory.
+        """Copy an explicitly shared, non-expiring fact into scoped entity memory.
 
         A ``user:<id>`` or ``dm:<id>`` fact is already about one human and
         already ignores guild boundaries — it is the entity tier under an
@@ -10672,11 +10750,9 @@ class MaxwellBot(commands.Bot):
         one instead of starting empty, and gets per-person semantic ranking
         that the scope-string lookup cannot do.
 
-        Deliberately a copy rather than a move: shared_context retrieval has
-        its own visibility rules (private / admin_only, expiry) that the
-        entity tier does not model, so the original stays the authority for
-        those. `add_entity_fact` dedups by (person, content), so re-running
-        the extractor on the same fact is a no-op.
+        Private, restricted, admin-only and expiring facts stay only in their
+        original scope. The entity row receives the same requester provenance,
+        so retrieval cannot silently broaden access.
         """
         if not self._control.get("entity_memory_enabled", True):
             return
@@ -10685,9 +10761,11 @@ class MaxwellBot(commands.Bot):
         scope = str((entry or {}).get("scope") or "")
         if not scope.startswith(("user:", "dm:")):
             return
-        # Secrets and admin-only material are exactly what should not follow
-        # someone into another server.
-        if str(entry.get("visibility") or "") == "admin_only":
+        # The entity tier has no expiry policy of its own. Only facts
+        # explicitly marked shareable are eligible, and DM facts never travel.
+        if str(entry.get("visibility") or "").lower() not in {"shared", "public_hint"}:
+            return
+        if scope.startswith("dm:"):
             return
         # An expiring fact is explicitly temporary, and the entity tier has no
         # concept of expiry — mirroring one would make a fact the extractor
@@ -10710,6 +10788,8 @@ class MaxwellBot(commands.Bot):
                 source_guild_id=str(getattr(guild, "id", "") or ""),
                 source="extract",
                 author=str(getattr(author, "display_name", "") or ""),
+                requester=_memory_requester_for(self, message),
+                visibility=str(entry.get("visibility") or "private"),
             )
             if created:
                 logger.info("Entity memory: new fact for user %s", uid)
@@ -10737,13 +10817,21 @@ class MaxwellBot(commands.Bot):
                 triples,
                 speaker_id=str(getattr(author, "id", "") or ""),
                 speaker_name=str(getattr(author, "display_name", "") or ""),
+                requester=_memory_requester_for(self, message),
             )
             if n:
                 logger.info("Knowledge graph: stored %s triple(s)", n)
         except Exception as e:
             logger.debug("graph triple ingest skipped: %s", e)
 
-    def _graph_prompt_block(self, query: str, user_id: str, budget: int) -> str:
+    def _graph_prompt_block(
+        self, query: str, user_id: str, budget: int,
+        requester: MemoryRequester | None = None,
+    ) -> str:
+        # Chat triples predate provenance scopes. Only an authorized admin can
+        # inspect the legacy unscoped graph until edges carry validated scope.
+        if not isinstance(requester, MemoryRequester) or not requester.is_admin:
+            return ""
         if not parse_bool(
             (getattr(self, "_control", None) or {}).get(
                 "knowledge_graph_enabled", True
@@ -10755,7 +10843,9 @@ class MaxwellBot(commands.Bot):
         if graph is None:
             return ""
         try:
-            return graph.prompt_block(query=query, user_id=user_id, budget=budget)
+            return graph.prompt_block(
+                query=query, user_id=user_id, budget=budget, requester=requester
+            )
         except Exception as e:
             logger.debug("graph prompt skipped: %s", e)
             return ""
@@ -16122,12 +16212,11 @@ class MaxwellBot(commands.Bot):
     async def _entity_profile_for(
         self, message, user_message: str, budget: int
     ) -> tuple[dict | None, list[dict]]:
-        """Identity + durable facts for whoever is talking, from everywhere.
+        """Return identity facts that are authorized in this message's scope.
 
-        Discord user ids are global, so this deliberately does not filter by
-        guild: what the bot learned about someone in a DM is what it knows
-        about them in a server, and vice versa. Facts that should NOT travel
-        are the ones that never enter this tier — see _mirror_fact_to_entity.
+        Entity fact retrieval applies the same guild, channel, user, and DM
+        boundaries as the other memory tiers. A Discord user ID alone does not
+        authorize sharing a fact across servers.
         """
         author = getattr(message, "author", None)
         uid = str(getattr(author, "id", "") or "")
@@ -16142,7 +16231,8 @@ class MaxwellBot(commands.Bot):
             min(_safe_int(control.get("entity_memory_max_items", 8) or 8, 8), 50),
         )
         profile = await get_profile(
-            uid, query=user_message, top_k=max_items, budget=budget
+            uid, query=user_message, top_k=max_items, budget=budget,
+            requester=_memory_requester_for(self, message),
         )
         return profile, list(profile.get("facts") or [])
 
@@ -16236,7 +16326,10 @@ class MaxwellBot(commands.Bot):
                 uid = str(u.id)
                 conv_users[uid] = getattr(u, "display_name", str(uid))
             mem = (
-                await self.memory.get_channel_memory(channel_id)
+                await self.memory.get_channel_memory(
+                    channel_id,
+                    requester=_memory_requester_for(self, message),
+                )
                 if hasattr(self, "memory")
                 else []
             )
@@ -16404,6 +16497,7 @@ class MaxwellBot(commands.Bot):
             user_message,
             str(getattr(message.author, "id", "") or ""),
             budget=min(900, max(ctx_spare, 240)),
+            requester=_memory_requester_for(self, message),
         )
         if graph_block:
             dynamic_parts.append(graph_block)
@@ -16419,7 +16513,9 @@ class MaxwellBot(commands.Bot):
                 # conversation topic, not just the most recently added ones.
                 # We still include recent LTM as a fallback in case embeddings
                 # aren't ready yet (cold start).
-                ltm = self.memory.get_long_term_memory()
+                ltm = self.memory.get_long_term_memory(
+                    _memory_requester_for(self, message)
+                )
                 rag_context = []
                 rag_recent = []
                 if hasattr(self.memory, "rag_search") and not self._is_short_live_turn(
@@ -16431,6 +16527,7 @@ class MaxwellBot(commands.Bot):
                         kinds=["ltm"],
                         guild_id=str(getattr(message.guild, "id", "") or ""),
                         channel_id=str(getattr(message.channel, "id", "") or ""),
+                        requester=_memory_requester_for(self, message),
                         apply_recency=False,
                         top_k=max(
                             5,
@@ -16458,6 +16555,7 @@ class MaxwellBot(commands.Bot):
                         source="user",
                         guild_id=str(getattr(message.guild, "id", "") or ""),
                         channel_id=str(getattr(message.channel, "id", "") or ""),
+                        requester=_memory_requester_for(self, message),
                         apply_recency=True,
                         recency_tau_days=3.0,  # tight tau — recent chat
                         top_k=8,
@@ -16481,6 +16579,7 @@ class MaxwellBot(commands.Bot):
                         web_rows = await self.memory.recall_web_results(
                             user_message,
                             guild_id=str(getattr(message.guild, "id", "") or ""),
+                            requester=_memory_requester_for(self, message),
                             top_k=4,
                             min_similarity=0.40,
                             max_age_days=7,
@@ -16655,6 +16754,7 @@ class MaxwellBot(commands.Bot):
         ) and not self._is_short_live_turn(message, user_message):
             try:
                 facts = await self.memory.get_relevant_shared_context(
+                    requester=_memory_requester_for(self, message),
                     user_id=str(message.author.id),
                     guild_id=str(message.guild.id) if message.guild else "",
                     channel_id=channel_id,
@@ -16789,7 +16889,10 @@ class MaxwellBot(commands.Bot):
         # message capped the reusable prefix at a few hundred tokens and left
         # the whole (much larger) transcript uncacheable.
         messages = [{"role": "system", "content": "\n\n".join(system_parts)}]
-        memory = await self.memory.get_channel_memory(channel_id)
+        memory = await self.memory.get_channel_memory(
+            channel_id,
+            requester=_memory_requester_for(self, message),
+        )
         memory = merge_user_install_history(
             memory, getattr(message, "user_install_history", None)
         )

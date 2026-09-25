@@ -27,3 +27,6 @@ jobs:
       - run: ruff check .
       - run: bash -n install.sh setup.sh docker/entrypoint.sh
       - run: python -m pytest
+      - name: Benchmark scoped memory retrieval
+        if: matrix.python-version == '3.12'
+        run: python scripts/benchmark_memory_scaling.py --guilds 100 500 1000 --facts-per-guild 5 --iterations 10

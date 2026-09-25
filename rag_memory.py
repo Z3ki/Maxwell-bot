@@ -25,6 +25,7 @@ import os
 import sqlite3
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -161,9 +162,7 @@ LEGACY_EMBED_TRUNCATE = 8000
 # Recency decay (seconds). 14 days. Score multiplied by exp(-age/tau).
 RECENCY_TAU_SECONDS = 14 * 86400.0
 
-MAX_CHANNELS = 25
 MAX_MEMORY_CHARS = 1000
-MAX_LTM_LINES = 999
 DEFAULT_REM_EVENT_BUFFER_MAX = 500
 
 # ─── global user entity memory ──────────────────────────────────────────
@@ -179,6 +178,179 @@ MAX_ENTITY_FACTS_PER_USER = 200
 MAX_ENTITY_ALIASES = 8
 # Guilds recorded per person. Only used to describe where we know them from.
 MAX_ENTITY_GUILDS = 32
+
+
+@dataclass(frozen=True)
+class MemoryRequester:
+    """Validated, Discord-independent authorization context for memory access."""
+
+    user_id: str
+    channel_id: str
+    guild_id: str = ""
+    is_dm: bool = False
+    is_admin: bool = False
+    channel_is_public: bool = False
+
+    def __post_init__(self):
+        for name in ("user_id", "channel_id", "guild_id"):
+            value = str(getattr(self, name) or "").strip()
+            object.__setattr__(self, name, value if len(value) <= 128 else "")
+        for name in ("is_dm", "is_admin", "channel_is_public"):
+            object.__setattr__(self, name, getattr(self, name) is True)
+
+    @property
+    def valid(self) -> bool:
+        return bool(self.user_id and self.channel_id and
+                    (not self.guild_id if self.is_dm else self.guild_id))
+
+    @classmethod
+    def from_message(cls, message, *, is_admin: bool = False):
+        author = getattr(message, "author", None)
+        channel = getattr(message, "channel", None)
+        guild = getattr(message, "guild", None)
+        public = False
+        if guild is not None and channel is not None:
+            try:
+                public = bool(channel.permissions_for(guild.default_role).view_channel)
+            except Exception:
+                public = False
+        return cls(
+            user_id=str(getattr(author, "id", "") or ""),
+            channel_id=str(getattr(channel, "id", "") or ""),
+            guild_id=str(getattr(guild, "id", "") or ""),
+            is_dm=guild is None,
+            is_admin=is_admin is True,
+            channel_is_public=public,
+        )
+
+
+def _has_requester(requester: MemoryRequester | None) -> bool:
+    return isinstance(requester, MemoryRequester) and requester.valid
+
+
+def _decode_metadata(raw) -> dict:
+    try:
+        result = json.loads(raw or "{}")
+        return result if isinstance(result, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _memory_row_visible(row: dict, requester: MemoryRequester | None) -> bool:
+    """Fail closed unless source provenance fits the requester's current scope."""
+    if not _has_requester(requester):
+        return False
+    metadata = row.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = _decode_metadata(metadata)
+    kind = str(row.get("kind") or "")
+    channel_id = str(row.get("channel_id") or "")
+    guild_id = str(row.get("guild_id") or "")
+
+    # Administrator status never widens ordinary transcript retrieval.
+    if kind in {"message", "bot_output"}:
+        return channel_id == requester.channel_id and (
+            guild_id == "" if requester.is_dm else guild_id == requester.guild_id
+        )
+
+    if kind == WEB_RESULT_KIND:
+        source_user = str(metadata.get("source_user_id") or "")
+        source_channel = str(metadata.get("source_channel_id") or "")
+        source_guild = str(metadata.get("source_guild_id") or "")
+        scope = str(row.get("scope") or "")
+        if metadata.get("source_is_dm") is True:
+            return bool(
+                requester.is_dm
+                and source_user == requester.user_id
+                and source_channel == requester.channel_id
+                and not guild_id
+                and scope == f"dm:{requester.user_id}"
+            )
+        if requester.is_dm or not requester.guild_id:
+            return False
+        if (
+            guild_id != requester.guild_id
+            or source_guild != requester.guild_id
+            or not source_channel
+        ):
+            return False
+        if scope == "guild":
+            return metadata.get("source_channel_public") is True
+        return bool(
+            scope == f"channel:{requester.channel_id}"
+            and source_channel == requester.channel_id
+        )
+
+    source_user = str(metadata.get("source_user_id") or row.get("author_id") or "")
+    source_channel = str(metadata.get("source_channel_id") or channel_id or "")
+    source_guild = str(metadata.get("source_guild_id") or guild_id or "")
+    if not source_user or not source_channel:
+        return False
+    expires = str(metadata.get("expires_at") or "").strip()
+    if expires:
+        expiry = _parse_iso(expires)
+        if expiry is None or expiry < _utcnow():
+            return False
+
+    scope = str(row.get("scope") or "")
+    scope_kind, _, scope_id = scope.partition(":")
+    visibility = str(metadata.get("visibility") or "private").strip().lower()
+    source_is_dm = metadata.get("source_is_dm") is True
+    if source_is_dm:
+        return bool(
+            requester.is_dm
+            and source_user == requester.user_id
+            and source_channel == requester.channel_id
+            and scope_kind == "dm"
+            and scope_id == requester.user_id
+        )
+
+    # Only explicitly approved operator facts are cross-community.
+    if scope == "global":
+        return bool(
+            metadata.get("public_approved") is True
+            and metadata.get("source_kind") == "operator_public"
+            and (
+                visibility in {"public", "shared"}
+                or (visibility == "admin_only" and requester.is_admin)
+            )
+        )
+    if requester.is_dm or not requester.guild_id or source_guild != requester.guild_id:
+        return False
+
+    same_channel = source_channel == requester.channel_id
+    source_public = metadata.get("source_channel_public") is True
+    if scope_kind == "channel":
+        in_scope = scope_id == requester.channel_id and same_channel
+    elif scope_kind == "guild":
+        in_scope = scope_id == requester.guild_id and (same_channel or source_public)
+    elif scope_kind == "user":
+        in_scope = (
+            scope_id == requester.user_id == source_user
+            and (same_channel or source_public)
+        )
+    else:
+        in_scope = False
+
+    if visibility == "private":
+        return bool(
+            source_user == requester.user_id
+            and same_channel
+            and scope_kind in {"channel", "user"}
+            and scope_id in {requester.channel_id, requester.user_id}
+        )
+    if visibility == "restricted":
+        return bool(requester.is_admin and same_channel and in_scope)
+    if visibility == "admin_only":
+        return bool(
+            requester.is_admin
+            and in_scope
+            and (scope_kind != "user" or source_user == requester.user_id)
+        )
+    if visibility not in {"shared", "public_hint", "public"}:
+        return False
+    return in_scope
+
 
 # Cosine similarity threshold for RAG retrieval. Below this, results are
 # considered noise and filtered out.
@@ -627,7 +799,18 @@ class RAGMemoryManager:
         self.prompts_file = self.data_dir / "prompts.json"
         self._db: sqlite3.Connection  # always set by _init_db() in __init__
         self._lock = asyncio.Lock()
-        self._embed_semaphore = asyncio.Semaphore(1)  # ollama NUM_PARALLEL=1; extra in-flight embeds just queue and time out
+        # One Ollama request at a time. Interactive queries take priority over
+        # queued background indexing so a memory backlog cannot delay replies.
+        self._embed_slot_condition = asyncio.Condition()
+        self._embed_slot_active = False
+        self._interactive_embed_waiters = 0
+        self._embed_session: aiohttp.ClientSession | None = None
+        self._embed_session_loop: asyncio.AbstractEventLoop | None = None
+        self._embed_metrics = {
+            "requests": 0, "failures": 0, "cache_hits": 0,
+            "cache_misses": 0, "elapsed_seconds": 0.0,
+        }
+        self._last_embed_metrics_log = 0.0
         # Self-tuning cache state (kept minimal; SQLite holds the real cache)
         self._embed_cache: dict[
             str, np.ndarray
@@ -801,6 +984,14 @@ class RAGMemoryManager:
             "CREATE INDEX IF NOT EXISTS idx_kind_channel ON vectors(kind, channel_id)"
         )
         self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_kind_channel_guild_created "
+            "ON vectors(kind, channel_id, guild_id, created_at DESC)"
+        )
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_kind_scope_created "
+            "ON vectors(kind, scope, created_at DESC)"
+        )
+        self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_timestamp ON vectors(timestamp)"
         )
         # NEW indices for the new retrieval paths
@@ -824,24 +1015,15 @@ class RAGMemoryManager:
                 self._db.execute(
                     "UPDATE vectors SET content_hash=? WHERE id=?", (digest, row["id"])
                 )
-        # Duplicate hashed rows block CREATE UNIQUE INDEX (and used to crash
-        # the hash backfill). Keep the oldest row per (kind, channel, hash).
+        # Message identity is the Discord ID, not content. Drop the legacy
+        # uniqueness rule and never discard rows during startup migration.
         with contextlib.suppress(Exception):
+            self._db.execute("DROP INDEX IF EXISTS idx_unique_content")
+        with contextlib.suppress(sqlite3.IntegrityError):
             self._db.execute(
-                """
-                DELETE FROM vectors
-                WHERE content_hash != ''
-                  AND rowid NOT IN (
-                    SELECT MIN(rowid) FROM vectors
-                    WHERE content_hash != ''
-                    GROUP BY kind, channel_id, content_hash
-                  )
-                """
-            )
-        with contextlib.suppress(Exception):
-            self._db.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_content "
-                "ON vectors(kind, channel_id, content_hash) WHERE content_hash != ''"
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_fact_content "
+                "ON vectors(kind, channel_id, content_hash) "
+                "WHERE content_hash != '' AND kind NOT IN ('message','bot_output')"
             )
 
         # ─── persistent embedding cache ────────────────────────────────
@@ -1082,7 +1264,77 @@ class RAGMemoryManager:
 
     # ─── embedding ──────────────────────────────────────────────────
 
-    async def _embed(self, text: str) -> np.ndarray | None:
+    async def _get_embed_session(self) -> aiohttp.ClientSession:
+        """Return one reusable HTTP session for this manager's event loop."""
+        loop = asyncio.get_running_loop()
+        session = self._embed_session
+        if session is not None and not session.closed:
+            if self._embed_session_loop is not loop:
+                raise RuntimeError("RAGMemoryManager cannot span event loops")
+            return session
+        session = aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(limit=1, enable_cleanup_closed=True)
+        )
+        self._embed_session = session
+        self._embed_session_loop = loop
+        return session
+
+    @contextlib.asynccontextmanager
+    async def _embed_slot(self, *, background: bool = False):
+        """Serialize Ollama calls while letting queued interactive work go first."""
+        condition = self._embed_slot_condition
+        interactive_waiter = not background
+        async with condition:
+            if interactive_waiter:
+                self._interactive_embed_waiters += 1
+            try:
+                while self._embed_slot_active or (
+                    background and self._interactive_embed_waiters > 0
+                ):
+                    await condition.wait()
+                if interactive_waiter:
+                    self._interactive_embed_waiters -= 1
+                    interactive_waiter = False
+                self._embed_slot_active = True
+            except BaseException:
+                if interactive_waiter:
+                    self._interactive_embed_waiters -= 1
+                    condition.notify_all()
+                raise
+        try:
+            yield
+        finally:
+            async with condition:
+                self._embed_slot_active = False
+                condition.notify_all()
+
+    async def _embed(
+        self, text: str, *, background: bool = False
+    ) -> np.ndarray | None:
+        """Track latency and failures around the reusable embedding client."""
+        enabled = bool(EMBEDDINGS_ENABLED and str(text or "").strip())
+        if enabled:
+            self._embed_metrics["requests"] += 1
+        started = time.monotonic()
+        try:
+            result = await self._embed_impl(text, background=background)
+            if enabled and result is None:
+                self._embed_metrics["failures"] += 1
+            return result
+        finally:
+            if enabled:
+                self._embed_metrics["elapsed_seconds"] += time.monotonic() - started
+                now = time.monotonic()
+                if now - self._last_embed_metrics_log >= 60.0:
+                    self._last_embed_metrics_log = now
+                    with contextlib.suppress(Exception):
+                        logger.info(
+                            "RAG embedding metrics: %s", self.get_embedding_metrics()
+                        )
+
+    async def _embed_impl(
+        self, text: str, *, background: bool = False
+    ) -> np.ndarray | None:
         """Generate embedding via ollama, cached on disk to SQLite.
 
         Cache key is sha256(stripped_text). The cache survives bot
@@ -1130,11 +1382,13 @@ class RAGMemoryManager:
                             "WHERE key=? AND dim=?",
                             (time.time(), cache_key, EMBED_DIM),
                         )
+                    self._embed_metrics["cache_hits"] += 1
                     return vec
         except Exception as e:
             # Cache read failure is not fatal — fall through and re-embed.
             logger.debug("embed_cache lookup failed, re-embedding: %s", e)
 
+        self._embed_metrics["cache_misses"] += 1
         # ─── endpoint breaker ───────────────────────────────────────
         # Checked AFTER the cache lookup on purpose: a cached vector is still
         # served while the embedder is down.
@@ -1145,10 +1399,8 @@ class RAGMemoryManager:
         # ─── embed (single-chunk fast path vs multi-chunk mean-pool) ───
         try:
             chunk_vecs: list[np.ndarray] = []
-            async with (
-                self._embed_semaphore,
-                aiohttp.ClientSession() as session,
-            ):
+            async with self._embed_slot(background=background):
+                session = await self._get_embed_session()
                 for ci, chunk_text in enumerate(chunks_to_embed):
                     payload = {"model": EMBED_MODEL, "input": chunk_text}
                     async with session.post(
@@ -1339,7 +1591,7 @@ class RAGMemoryManager:
     async def _embed_and_store(self, row_id: str, text: str) -> bool:
         """Generate embedding and update the row in DB."""
         try:
-            vec = await self._embed(text)
+            vec = await self._embed(text, background=True)
             if vec is not None:
                 blob = _embedding_to_blob(vec)
                 import hashlib
@@ -1418,38 +1670,38 @@ class RAGMemoryManager:
 
                 try:
                     fallback_rows = None
-                    async with (
-                        self._embed_semaphore,
-                        aiohttp.ClientSession() as session,
-                        session.post(
+                    session = await self._get_embed_session()
+                    async with self._embed_slot(background=True):
+                        async with session.post(
                             EMBED_URL,
                             json=payload,
                             headers=EMBED_HEADERS,
-                            timeout=aiohttp.ClientTimeout(total=120),
-                        ) as resp,
-                    ):
-                        if resp.status != 200:
-                            body = await resp.text()
-                            logger.warning(
-                                f"Batch embed API returned {resp.status}: {body[:200]}"
-                            )
-                            fallback_rows = rows
-                        else:
-                            data = await resp.json()
-                            embeddings = _extract_embeddings(data)
-                            if not embeddings:
-                                logger.warning("Batch embed returned no embeddings")
+                            timeout=aiohttp.ClientTimeout(
+                                total=EMBED_HTTP_TIMEOUT_SECONDS
+                            ),
+                        ) as resp:
+                            if resp.status != 200:
+                                body = await resp.text()
+                                logger.warning(
+                                    f"Batch embed API returned {resp.status}: {body[:200]}"
+                                )
+                                fallback_rows = rows
                             else:
-                                for i, row in enumerate(rows):
-                                    if i < len(embeddings):
-                                        vec = np.array(embeddings[i], dtype=np.float32)
-                                        if len(vec) == EMBED_DIM:
-                                            blob = _embedding_to_blob(vec)
-                                            cursor = self._db.execute(
-                                                "UPDATE vectors SET embedding=? WHERE id=? AND content=?",
-                                                (blob, row["id"], row["content"]),
-                                            )
-                                            total_embedded += cursor.rowcount
+                                data = await resp.json()
+                                embeddings = _extract_embeddings(data)
+                                if not embeddings:
+                                    logger.warning("Batch embed returned no embeddings")
+                                else:
+                                    for i, row in enumerate(rows):
+                                        if i < len(embeddings):
+                                            vec = np.array(embeddings[i], dtype=np.float32)
+                                            if len(vec) == EMBED_DIM:
+                                                blob = _embedding_to_blob(vec)
+                                                cursor = self._db.execute(
+                                                    "UPDATE vectors SET embedding=? WHERE id=? AND content=?",
+                                                    (blob, row["id"], row["content"]),
+                                                )
+                                                total_embedded += cursor.rowcount
                     if fallback_rows:
                         for row in fallback_rows:
                             if await self._embed_and_store(row["id"], row["content"]):
@@ -1482,25 +1734,30 @@ class RAGMemoryManager:
         ).fetchall()
         return [str(row["channel_id"]) for row in rows if row["channel_id"]]
 
-    async def get_channel_memory(self, channel_id: str) -> list[dict]:
-        """Return recent messages for a channel, oldest first.
-
-        Includes BOTH user messages (kind='message') and the bot's own
-        replies (kind='bot_output') so the conversation transcript the
-        model sees has proper user/assistant turn alternation. Before this
-        fix, bot_output rows were excluded here — the bot's own replies
-        never appeared in context, consecutive user turns collapsed into
-        one merged block, and the model lost the turn boundary (e.g. it
-        kept obeying an earlier "just say ok" instruction for a later
-        "what did i say" question).
-        """
+    async def get_channel_memory(
+        self,
+        channel_id: str,
+        *,
+        requester: MemoryRequester | None = None,
+    ) -> list[dict]:
+        """Return recent transcript lines visible in the requester's channel."""
+        if not _has_requester(requester) or str(channel_id) != requester.channel_id:
+            return []
+        guild_sql, guild_params = (
+            ("guild_id=''", ()) if requester.is_dm
+            else ("guild_id=?", (requester.guild_id,))
+        )
         rows = self._db.execute(
-            "SELECT id, author, author_id, content, timestamp, metadata FROM vectors WHERE kind IN ('message', 'bot_output') AND channel_id=? ORDER BY created_at DESC LIMIT ?",
-            (str(channel_id), self.max_messages),
+            "SELECT id, kind, channel_id, guild_id, scope, author, author_id, "
+            "content, timestamp, metadata FROM vectors WHERE kind IN "
+            "('message', 'bot_output') AND channel_id=? AND " + guild_sql +
+            " ORDER BY timestamp DESC, created_at DESC LIMIT ?",
+            (requester.channel_id, *guild_params, self.max_messages),
         ).fetchall()
-        # Reverse to oldest-first, and build dict entries matching old format
         result = []
         for row in reversed(rows):
+            if not _memory_row_visible(dict(row), requester):
+                continue
             entry = {
                 "author": row["author"],
                 "author_id": row["author_id"],
@@ -1508,12 +1765,7 @@ class RAGMemoryManager:
                 "message_id": row["id"],
                 "timestamp": row["timestamp"],
             }
-            try:
-                meta = json.loads(row["metadata"] or "{}")
-                entry.update(meta)
-            except Exception as e:
-                # Corrupt metadata JSON: the row is still usable without it.
-                logger.debug("Bad metadata JSON on row %s: %s", row["id"], e)
+            entry.update(_decode_metadata(row["metadata"]))
             result.append(entry)
         return result
 
@@ -1526,16 +1778,12 @@ class RAGMemoryManager:
           - if source='user'  → store as kind='message', full embedding
           - if content stripped of URLs/mentions/emoji is < 4 chars,
             store the row but do NOT request an embedding (cheap skip)
-          - dedupe by (channel_id, content_hash) — silent ignore on collision
+          - Discord message_id is the identity; identical text with a new ID
+            remains a separate row, while duplicate deliveries replace that ID
         """
-        # 2026-07-31: the multi-statement write sequence (SELECT dedup →
-        # UPDATE/INSERT → DELETE → INSERT → SELECT count → DELETE excess)
-        # is wrapped in self._lock so concurrent calls for different
-        # channels don't interleave on the same SQLite connection.
-        # Previously the Lock was created but never acquired; the bot.py
-        # channel lock serialized same-channel writes but cross-channel
-        # writes raced, producing IntegrityError on the unique content-hash
-        # index that was silently swallowed by bot.py:2997.
+        # Serialize the SQLite connection's multi-statement write and
+        # per-channel retention sequence. Message identity is the Discord ID;
+        # content hashes are not used to deduplicate conversation rows.
         async with self._lock:
             await self._add_to_channel_memory_locked(channel_id, message)
 
@@ -1621,13 +1869,8 @@ class RAGMemoryManager:
         # doesn't pollute user-message RAG results.
         kind = "bot_output" if source == "bot" else "message"
 
-        # MESSAGE_UPDATE uses the real Discord message id. Give that exact row
-        # precedence over content-hash deduplication so an edited message
-        # cannot leave its old text in the transcript (or silently collapse
-        # into a different message that happens to have the new same text).
-        # The normal idempotent create path still remains cheap: only an
-        # existing row with this exact id is removed before the usual hash
-        # collision check.
+        # Message ID is the identity key. An edit replaces that exact row;
+        # identical content from a different message must remain distinct.
         exact = self._db.execute(
             "SELECT id FROM vectors WHERE id=? AND channel_id=? "
             "AND kind IN ('message', 'bot_output') LIMIT 1",
@@ -1635,39 +1878,6 @@ class RAGMemoryManager:
         ).fetchone()
         if exact:
             self._db.execute("DELETE FROM vectors WHERE id=?", (msg_id,))
-
-        # Dedupe by (channel_id, content_hash). If a row already exists
-        # with the same hash in this channel, just refresh its source/metadata
-        # and bail — no new row, no re-embed. An edited message is different:
-        # preserve its exact Discord id even if another message already has
-        # the new text. A blank hash intentionally bypasses the partial
-        # unique index, and _embed_and_store accepts it after the insert.
-        existing = self._db.execute(
-            "SELECT id FROM vectors WHERE channel_id=? AND content_hash=? "
-            "AND id != ? LIMIT 1",
-            (channel_id, content_hash, msg_id),
-        ).fetchone()
-        if existing and message.get("edited_at"):
-            content_hash = ""
-            existing = None
-        if existing:
-            # Refresh the row in place — but bump created_at so repeated
-            # identical messages (e.g. the bot saying "ok" twice) stay at
-            # the correct position in the transcript instead of pinning the
-            # original timestamp forever. Without this, get_channel_memory
-            # returns a stale ordering and the turn boundary is wrong.
-            self._db.execute(
-                "UPDATE vectors SET metadata=?, source=?, created_at=?, updated_at=? "
-                "WHERE id=?",
-                (
-                    json.dumps(metadata),
-                    source,
-                    time.time(),
-                    time.time(),
-                    existing["id"],
-                ),
-            )
-            return
 
         # Delete any prior row with this exact message_id (idempotent re-send).
         self._db.execute("DELETE FROM vectors WHERE id=?", (msg_id,))
@@ -1707,22 +1917,9 @@ class RAGMemoryManager:
             self._db.execute(
                 "DELETE FROM vectors WHERE id IN ("
                 "SELECT id FROM vectors WHERE kind IN ('message','bot_output') AND channel_id=? "
-                "ORDER BY created_at ASC LIMIT ?)",
+                "ORDER BY timestamp ASC, created_at ASC LIMIT ?)",
                 (channel_id, excess),
             )
-
-        # Prune channels if too many
-        chan_rows = self._db.execute(
-            "SELECT channel_id, COUNT(*) as c FROM vectors "
-            "WHERE kind IN ('message','bot_output') GROUP BY channel_id "
-            "ORDER BY MAX(created_at) DESC"
-        ).fetchall()
-        if len(chan_rows) > MAX_CHANNELS:
-            for row in chan_rows[MAX_CHANNELS:]:
-                self._db.execute(
-                    "DELETE FROM vectors WHERE kind IN ('message','bot_output') AND channel_id=?",
-                    (row["channel_id"],),
-                )
 
         # Embed the whole message in background. qwen3-embedding:0.6b's
         # 32k-token context absorbs any Discord message — no chunking.
@@ -1755,49 +1952,73 @@ class RAGMemoryManager:
         except Exception:
             return {"entries": 0, "oldest": None, "newest_used": None, "total_hits": 0}
 
-    def get_long_term_memory(self) -> list[dict]:
-        """Return all LTM entries (sync, for backwards compat)."""
+    def get_long_term_memory(
+        self, requester: MemoryRequester | None = None
+    ) -> list[dict]:
+        """Return only provenance-scoped LTM; ambiguous legacy rows stay stored."""
+        if not _has_requester(requester):
+            return []
         rows = self._db.execute(
-            "SELECT id, content, timestamp FROM vectors WHERE kind='ltm' ORDER BY created_at ASC"
+            "SELECT id, kind, channel_id, guild_id, author_id, content, timestamp, "
+            "scope, metadata FROM vectors WHERE kind='ltm' "
+            "AND (scope IN (?, ?, ?, ?) OR scope='global') "
+            "ORDER BY created_at ASC",
+            (
+                f"channel:{requester.channel_id}",
+                f"user:{requester.user_id}",
+                f"dm:{requester.user_id}",
+                f"guild:{requester.guild_id}" if requester.guild_id else "__none__",
+            ),
         ).fetchall()
         return [
-            {
-                "id": row["id"],
-                "content": row["content"],
-                "timestamp": row["timestamp"],
-            }
+            {"id": row["id"], "content": row["content"], "timestamp": row["timestamp"]}
             for row in rows
+            if _memory_row_visible(dict(row), requester)
         ]
 
-    async def add_long_term_memory(self, content: str) -> str:
-        """Store one durable fact. Returns the row id, new or existing."""
-        row_id, _created = await self.add_long_term_memory_dedup(content)
+    async def add_long_term_memory(
+        self, content: str, *, requester: MemoryRequester | None = None
+    ) -> str:
+        row_id, _created = await self.add_long_term_memory_dedup(
+            content, requester=requester
+        )
         return row_id
 
-    async def add_long_term_memory_dedup(self, content: str) -> tuple[str, bool]:
-        """Same as `add_long_term_memory`, but says whether it was new.
-
-        Returns ``(id, created)``.
-
-        Write-time dedup: the unique index on (kind, channel_id, content_hash)
-        already refused duplicate lines, but it refused them by raising
-        IntegrityError out of this method. `apply_ltm_batch` counted that as
-        an *error*, so a model re-asserting something it had already learned
-        was told the write failed — and models retry failures. Now a repeat
-        returns the existing id and refreshes its timestamp, which is what
-        "the fact is stored" should look like from the caller's side.
-        """
+    async def add_long_term_memory_dedup(
+        self, content: str, *, requester: MemoryRequester | None = None
+    ) -> tuple[str, bool]:
         content = _normalize_ltm_line(content)
         mid = uuid.uuid4().hex
         ts = _utcnow_iso()
         import hashlib as _hashlib
-
         norm = _strip_for_embedding(content)
         ch = _hashlib.sha256(norm.encode("utf-8")).hexdigest()
+        if _has_requester(requester):
+            channel_id = requester.channel_id
+            guild_id = requester.guild_id
+            author_id = requester.user_id
+            scope = (
+                f"dm:{requester.user_id}" if requester.is_dm
+                else f"channel:{requester.channel_id}"
+            )
+            metadata = {
+                "source_user_id": requester.user_id,
+                "source_channel_id": requester.channel_id,
+                "source_guild_id": requester.guild_id,
+                "source_is_dm": requester.is_dm,
+                "source_channel_public": requester.channel_is_public,
+                "source_kind": "scoped_ltm",
+                "visibility": "private",
+            }
+        else:
+            # Retain unscoped writers' data without making it prompt-visible.
+            channel_id = guild_id = author_id = ""
+            scope = "global"
+            metadata = {"source_kind": "unscoped_legacy"}
         existing = self._db.execute(
-            "SELECT id FROM vectors WHERE kind='ltm' AND channel_id='' "
+            "SELECT id FROM vectors WHERE kind='ltm' AND channel_id=? "
             "AND content_hash=? LIMIT 1",
-            (ch,),
+            (channel_id, ch),
         ).fetchone()
         if existing is not None:
             self._db.execute(
@@ -1809,29 +2030,19 @@ class RAGMemoryManager:
                 "INSERT INTO vectors (id, kind, channel_id, guild_id, author, author_id, "
                 "source, content, content_hash, embedding, metadata, scope, importance, "
                 "parent_id, chunk_index, downvotes, timestamp, created_at) "
-                "VALUES (?, 'ltm', '', '', '', '', 'user', ?, ?, NULL, '{}', 'global', "
-                "5, '', 0, 0, ?, ?)",
-                (mid, content, ch, ts, time.time()),
+                "VALUES (?, 'ltm', ?, ?, '', ?, 'user', ?, ?, NULL, ?, ?, 5, '', 0, 0, ?, ?)",
+                (
+                    mid, channel_id, guild_id, author_id, content, ch,
+                    json.dumps(metadata), scope, ts, time.time(),
+                ),
             )
         except sqlite3.IntegrityError:
-            # Raced with another writer of the identical line — same outcome.
             row = self._db.execute(
-                "SELECT id FROM vectors WHERE kind='ltm' AND channel_id='' "
+                "SELECT id FROM vectors WHERE kind='ltm' AND channel_id=? "
                 "AND content_hash=? LIMIT 1",
-                (ch,),
+                (channel_id, ch),
             ).fetchone()
             return (str(row["id"]) if row else mid), False
-        # Prune if exceeding max
-        count_row = self._db.execute(
-            "SELECT COUNT(*) as c FROM vectors WHERE kind='ltm'"
-        ).fetchone()
-        if count_row and count_row["c"] > MAX_LTM_LINES:
-            excess = count_row["c"] - MAX_LTM_LINES
-            self._db.execute(
-                "DELETE FROM vectors WHERE id IN (SELECT id FROM vectors WHERE kind='ltm' ORDER BY created_at ASC LIMIT ?)",
-                (excess,),
-            )
-        # Embed in background
         self._spawn(self._embed_and_store(mid, content))
         return mid, True
 
@@ -1857,8 +2068,10 @@ class RAGMemoryManager:
         )
         return cursor.rowcount > 0
 
-    async def apply_ltm_batch(self, ops: list[dict]) -> dict:
-        """Apply batch LTM operations (add/edit/delete)."""
+    async def apply_ltm_batch(
+        self, ops: list[dict], *, requester: MemoryRequester | None = None
+    ) -> dict:
+        """Apply batch LTM operations; unscoped adds remain private legacy rows."""
         added = 0
         edited = 0
         deleted = 0
@@ -1870,7 +2083,9 @@ class RAGMemoryManager:
                 if kind == "add":
                     content = str(op.get("content") or "")
                     if content:
-                        _fid, created = await self.add_long_term_memory_dedup(content)
+                        _fid, created = await self.add_long_term_memory_dedup(
+                            content, requester=requester
+                        )
                         if created:
                             added += 1
                         else:
@@ -2008,6 +2223,8 @@ class RAGMemoryManager:
         source_guild_id: str = "",
         source: str = "extract",
         author: str = "",
+        requester: MemoryRequester | None = None,
+        visibility: str = "private",
     ) -> tuple[str, bool]:
         """Store a durable fact about a person. Returns ``(id, created)``.
 
@@ -2019,6 +2236,11 @@ class RAGMemoryManager:
         uid = str(user_id or "").strip()
         text = " ".join(str(content or "").split())[:1200]
         if not uid or not text:
+            return "", False
+        if requester is not None and (
+            not _has_requester(requester)
+            or (requester.user_id != uid and not requester.is_admin)
+        ):
             return "", False
         digest = self._entity_hash(uid, text)
         existing = self._db.execute(
@@ -2046,10 +2268,21 @@ class RAGMemoryManager:
         )
         fid = uuid.uuid4().hex
         ts = _utcnow_iso()
+        fact_scope = (
+            f"dm:{uid}" if _has_requester(requester) and requester.is_dm
+            else f"user:{uid}"
+        )
         meta = json.dumps(
             {
                 "source": str(source or "extract")[:32],
-                "source_guild_id": str(source_guild_id or ""),
+                "source_guild_id": str(
+                    requester.guild_id if _has_requester(requester) else source_guild_id or ""
+                ),
+                "source_user_id": uid,
+                "source_channel_id": requester.channel_id if _has_requester(requester) else "",
+                "source_is_dm": requester.is_dm if _has_requester(requester) else False,
+                "source_channel_public": requester.channel_is_public if _has_requester(requester) else False,
+                "visibility": str(visibility or "private"),
             }
         )
         try:
@@ -2066,7 +2299,7 @@ class RAGMemoryManager:
                     text,
                     digest,
                     meta,
-                    f"user:{uid}",
+                    fact_scope,
                     max(1, min(int(importance or 5), 10)),
                     ts,
                     time.time(),
@@ -2111,129 +2344,102 @@ class RAGMemoryManager:
         top_k: int = 8,
         budget: int | None = None,
         include_shared_context: bool = True,
+        requester: MemoryRequester | None = None,
     ) -> list[dict]:
-        """Facts about one person, from every guild and DM they appear in.
-
-        With a ``query`` the entity tier is ranked semantically; without one
-        (or before embeddings are warm) it falls back to importance then
-        recency, so a cold start still says something true about the person
-        instead of nothing.
-
-        ``include_shared_context`` folds in the pre-existing ``user:<id>`` /
-        ``dm:<id>`` shared-context rows. Those were already global — they are
-        the same tier by another name — and merging them here means the
-        upgrade does not start from an empty profile.
-        """
+        """Return only requester-visible facts about the requester."""
         uid = str(user_id or "").strip()
-        if not uid:
+        if not uid or not _has_requester(requester):
+            return []
+        if uid != requester.user_id:
             return []
         top_k = max(1, min(int(top_k or 8), 50))
         picked: dict[str, dict] = {}
-
-        if query and hasattr(self, "rag_search"):
-            try:
-                for row in await self.rag_search(
-                    query,
-                    kinds=["entity"],
-                    author_id=uid,
-                    apply_recency=False,
-                    top_k=top_k * 2,
-                    exclude_negatives=False,
-                ):
-                    picked[str(row["id"])] = {
-                        "id": row["id"],
-                        "content": row["content"],
-                        "importance": row.get("importance", 5),
-                        "timestamp": row.get("timestamp", ""),
-                        "similarity": row.get("similarity", 0.0),
-                        "origin": "entity",
-                    }
-            except Exception as e:
-                logger.debug(f"entity semantic recall skipped: {e}")
-
-        # Always take the importance-ranked head too. Semantic recall answers
-        # "what is relevant to this message"; a profile also needs the things
-        # that are true regardless of what was just said (their name, their
-        # timezone), which no query reliably retrieves.
-        for row in self._db.execute(
-            "SELECT id, content, importance, timestamp FROM vectors "
+        if query:
+            for row in await self.rag_search(
+                query, kinds=["entity"], author_id=uid,
+                apply_recency=False, top_k=top_k * 2,
+                exclude_negatives=False, requester=requester,
+            ):
+                picked[str(row["id"])] = {
+                    "id": row["id"], "content": row["content"],
+                    "importance": row.get("importance", 5),
+                    "timestamp": row.get("timestamp", ""),
+                    "similarity": row.get("similarity", 0.0),
+                    "origin": "entity",
+                }
+        rows = self._db.execute(
+            "SELECT id, kind, channel_id, guild_id, author_id, content, scope, "
+            "importance, timestamp, metadata FROM vectors "
             "WHERE kind='entity' AND author_id=? "
             "ORDER BY importance DESC, created_at DESC LIMIT ?",
-            (uid, top_k * 2),
-        ).fetchall():
-            picked.setdefault(
-                str(row["id"]),
-                {
-                    "id": row["id"],
-                    "content": row["content"],
-                    "importance": row["importance"],
-                    "timestamp": row["timestamp"],
-                    "similarity": 0.0,
-                    "origin": "entity",
-                },
-            )
-
+            (uid, top_k * 8),
+        ).fetchall()
+        for row in rows:
+            if not _memory_row_visible(dict(row), requester):
+                continue
+            picked.setdefault(str(row["id"]), {
+                "id": row["id"], "content": row["content"],
+                "importance": row["importance"], "timestamp": row["timestamp"],
+                "similarity": 0.0, "origin": "entity",
+            })
         if include_shared_context:
-            for row in self._db.execute(
-                "SELECT id, content, importance, timestamp, metadata FROM vectors "
-                "WHERE kind='shared_context' AND scope IN (?, ?) "
+            rows = self._db.execute(
+                "SELECT id, kind, channel_id, guild_id, author_id, content, scope, "
+                "importance, timestamp, metadata FROM vectors "
+                "WHERE kind='shared_context' AND scope IN (?, ?, ?) "
                 "ORDER BY importance DESC, created_at DESC LIMIT ?",
-                (f"user:{uid}", f"dm:{uid}", top_k * 2),
-            ).fetchall():
-                try:
-                    meta = json.loads(row["metadata"] or "{}")
-                except (ValueError, TypeError):
-                    continue
-                if not isinstance(meta, dict):
-                    continue
-                # Entity profiles travel across rooms and have no requester
-                # authorization. Restricted facts belong in the scoped tier.
-                if str(meta.get("visibility") or "shared").strip().lower() not in {"shared", "public_hint"}:
-                    continue
-                expires = _parse_iso(str(meta.get("expires_at") or ""))
-                if expires is not None and expires < _utcnow():
-                    continue
-                picked.setdefault(
-                    str(row["id"]),
-                    {
-                        "id": row["id"],
-                        "content": row["content"],
-                        "importance": row["importance"],
-                        "timestamp": row["timestamp"],
-                        "similarity": 0.0,
-                        "origin": "shared_context",
-                    },
+                (
+                    f"user:{uid}", f"dm:{uid}",
+                    f"channel:{requester.channel_id}", top_k * 8,
+                ),
+            ).fetchall()
+            for row in rows:
+                metadata = _decode_metadata(row["metadata"])
+                visibility = str(metadata.get("visibility") or "private").lower()
+                dm_private = (
+                    visibility == "private"
+                    and requester.is_dm
+                    and metadata.get("source_is_dm") is True
                 )
-
+                if visibility not in {"shared", "public_hint"} and not dm_private:
+                    continue
+                if not _memory_row_visible(dict(row), requester):
+                    continue
+                picked.setdefault(str(row["id"]), {
+                    "id": row["id"], "content": row["content"],
+                    "importance": row["importance"], "timestamp": row["timestamp"],
+                    "similarity": 0.0, "origin": "shared_context",
+                })
         results = sorted(
             picked.values(),
-            key=lambda r: (
-                float(r.get("similarity") or 0.0),
-                int(r.get("importance") or 0),
-                str(r.get("timestamp") or ""),
+            key=lambda item: (
+                float(item.get("similarity") or 0.0),
+                int(item.get("importance") or 0),
+                str(item.get("timestamp") or ""),
             ),
             reverse=True,
         )[:top_k]
-
         if budget is not None:
             try:
-                budget_i = max(0, int(budget))
+                limit = max(0, int(budget))
             except (TypeError, ValueError):
-                budget_i = 0
-            if budget_i <= 0:
-                return []
+                limit = 0
             kept, used = [], 0
             for entry in results:
-                cost = len(str(entry.get("content") or ""))
-                if used + cost > budget_i:
+                size = len(str(entry.get("content") or ""))
+                if limit <= 0 or used + size > limit:
                     break
                 kept.append(entry)
-                used += cost
+                used += size
             results = kept
         return results
 
-    def get_user_entity(self, user_id: str) -> dict | None:
-        """The identity row for one person, or None if never seen."""
+    def get_user_entity(
+        self, user_id: str, *, requester: MemoryRequester | None = None
+    ) -> dict | None:
+        """Admin-only identity view; aliases aggregate across server scopes."""
+        if not _has_requester(requester) or not requester.is_admin:
+            return None
         uid = str(user_id or "").strip()
         if not uid:
             return None
@@ -2268,8 +2474,12 @@ class RAGMemoryManager:
             "fact_count": int(fact_count["c"] if fact_count else 0),
         }
 
-    def list_user_entities(self, limit: int = 100) -> list[dict]:
-        """Everyone we have on file, most recently seen first."""
+    def list_user_entities(
+        self, limit: int = 100, *, requester: MemoryRequester | None = None
+    ) -> list[dict]:
+        """Admin-only identity listing; aliases aggregate across server scopes."""
+        if not _has_requester(requester) or not requester.is_admin:
+            return []
         limit = max(1, min(int(limit or 100), 1000))
         return [
             self._entity_row_to_dict(row)
@@ -2280,14 +2490,21 @@ class RAGMemoryManager:
         ]
 
     async def get_user_profile(
-        self, user_id: str, query: str = "", top_k: int = 8, budget: int | None = None
+        self,
+        user_id: str,
+        query: str = "",
+        top_k: int = 8,
+        budget: int | None = None,
+        requester: MemoryRequester | None = None,
     ) -> dict:
-        """Identity + facts in one call — what the prompt tier renders."""
-        entity = self.get_user_entity(user_id) or {"user_id": str(user_id)}
-        entity["facts"] = await self.get_entity_facts(
-            user_id, query=query, top_k=top_k, budget=budget
+        """Scoped profile; legacy cross-guild aliases are never prompt material."""
+        uid = str(user_id or "").strip()
+        if not _has_requester(requester):
+            return {"user_id": uid, "facts": []}
+        facts = await self.get_entity_facts(
+            uid, query=query, top_k=top_k, budget=budget, requester=requester
         )
-        return entity
+        return {"user_id": uid, "facts": facts}
 
     def entity_stats(self) -> dict:
         """Counters for the dashboard's memory panel."""
@@ -2328,32 +2545,84 @@ class RAGMemoryManager:
 
     # ─── shared context ───────────────────────────────────────────
 
-    async def add_shared_context(self, entry: dict) -> str:
+    async def add_shared_context(
+        self, entry: dict, *, requester: MemoryRequester | None = None
+    ) -> str:
+        if not _has_requester(requester) or not isinstance(entry, dict):
+            return ""
+        scope = str(entry.get("scope") or f"user:{requester.user_id}")
+        scope_kind, _, scope_id = scope.partition(":")
+        visibility = str(entry.get("visibility") or "private").strip().lower()
+        if scope == "global":
+            if not (
+                requester.is_admin
+                and entry.get("public_approved") is True
+                and entry.get("source_kind") == "operator_public"
+            ):
+                return ""
+        elif scope_kind == "user":
+            if scope_id != requester.user_id:
+                return ""
+        elif scope_kind == "dm":
+            if not requester.is_dm or scope_id != requester.user_id:
+                return ""
+        elif scope_kind == "channel":
+            if scope_id != requester.channel_id:
+                return ""
+        elif scope_kind == "guild":
+            if (
+                not requester.guild_id or scope_id != requester.guild_id
+                or not requester.channel_is_public
+            ):
+                return ""
+        else:
+            return ""
         cid = str(entry.get("id") or uuid.uuid4().hex)
         content = str(entry.get("content") or "")[:1200]
-        scope = str(entry.get("scope") or "global")
-        importance = int(entry.get("importance") or 5)
+        if not content:
+            return ""
+        importance = max(1, min(int(entry.get("importance") or 5), 10))
         ts = str(entry.get("timestamp") or _utcnow_iso())
-        metadata = json.dumps(
-            {
-                k: v
-                for k, v in entry.items()
-                if k not in ("id", "content", "scope", "importance", "timestamp")
-            }
-        )
+        metadata = {
+            k: v for k, v in entry.items()
+            if k not in ("id", "content", "scope", "importance", "timestamp")
+        }
+        metadata.update({
+            "source_user_id": requester.user_id,
+            "source_channel_id": requester.channel_id,
+            "source_guild_id": requester.guild_id,
+            "source_is_dm": requester.is_dm,
+            "source_channel_public": requester.channel_is_public,
+            "visibility": visibility,
+        })
+        if scope == "global":
+            if visibility in {"shared", "public", "public_hint"}:
+                visibility = "public"
+                metadata["visibility"] = "public"
+            metadata["public_approved"] = True
+            metadata["source_kind"] = "operator_public"
+        else:
+            metadata.pop("public_approved", None)
         ch = _shared_context_hash(scope, content)
         self._db.execute(
             "INSERT OR REPLACE INTO vectors (id, kind, channel_id, guild_id, author, "
             "author_id, source, content, content_hash, embedding, metadata, scope, "
             "importance, parent_id, chunk_index, downvotes, timestamp, created_at) "
-            "VALUES (?, 'shared_context', '', '', '', '', 'user', ?, ?, NULL, ?, ?, ?, "
+            "VALUES (?, 'shared_context', '', '', ?, ?, 'user', ?, ?, NULL, ?, ?, ?, "
             "'', 0, 0, ?, ?)",
-            (cid, content, ch, metadata, scope, importance, ts, time.time()),
+            (
+                cid, requester.user_id, requester.user_id, content, ch,
+                json.dumps(metadata), scope, importance, ts, time.time(),
+            ),
         )
         self._spawn(self._embed_and_store(cid, content))
         return cid
 
-    async def remove_shared_context(self, context_id: str) -> bool:
+    async def remove_shared_context(
+        self, context_id: str, *, requester: MemoryRequester | None = None
+    ) -> bool:
+        if not _has_requester(requester) or not requester.is_admin:
+            return False
         cursor = self._db.execute(
             "DELETE FROM vectors WHERE id=? AND kind='shared_context'",
             (str(context_id),),
@@ -2385,7 +2654,12 @@ class RAGMemoryManager:
             )
             return True
 
-    async def update_shared_context(self, context_id: str, updates: dict) -> bool:
+    async def update_shared_context(
+        self, context_id: str, updates: dict,
+        *, requester: MemoryRequester | None = None,
+    ) -> bool:
+        if not _has_requester(requester) or not requester.is_admin:
+            return False
         sets = []
         params = []
         for key in ("content", "scope", "importance"):
@@ -2401,7 +2675,11 @@ class RAGMemoryManager:
         # fact. Merge them into the existing metadata payload.
         metadata_updates = {
             key: updates[key]
-            for key in ("visibility", "tags", "expires_at")
+            for key in (
+                "visibility", "tags", "expires_at", "public_approved",
+                "source_kind", "source_user_id", "source_channel_id",
+                "source_guild_id", "source_is_dm", "source_channel_public",
+            )
             if key in updates
         }
         if metadata_updates:
@@ -2453,26 +2731,21 @@ class RAGMemoryManager:
             return True
         return False
 
-    async def list_shared_context(self, limit: int = 200) -> list[dict]:
+    async def list_shared_context(
+        self, limit: int = 200, *, requester: MemoryRequester | None = None
+    ) -> list[dict]:
+        if not _has_requester(requester) or not requester.is_admin:
+            return []
         rows = self._db.execute(
-            "SELECT id, content, scope, importance, timestamp, metadata FROM vectors WHERE kind='shared_context' ORDER BY importance DESC, created_at DESC LIMIT ?",
-            (limit,),
+            "SELECT id, kind, channel_id, guild_id, author_id, content, scope, "
+            "importance, timestamp, metadata FROM vectors WHERE kind='shared_context' "
+            "ORDER BY importance DESC, created_at DESC LIMIT ?",
+            (max(1, min(int(limit or 200), 1000)),),
         ).fetchall()
         result = []
         for row in rows:
-            entry = {
-                "id": row["id"],
-                "content": row["content"],
-                "scope": row["scope"],
-                "importance": row["importance"],
-                "timestamp": row["timestamp"],
-            }
-            try:
-                meta = json.loads(row["metadata"] or "{}")
-                entry.update(meta)
-            except Exception as e:
-                # Corrupt metadata JSON: the row is still usable without it.
-                logger.debug("Bad metadata JSON on row %s: %s", row["id"], e)
+            entry = dict(row)
+            entry.update(_decode_metadata(row["metadata"]))
             result.append(entry)
         return result
 
@@ -2485,33 +2758,42 @@ class RAGMemoryManager:
         is_admin: bool = False,
         max_items: int = 10,
         budget: int | None = None,
+        *,
+        requester: MemoryRequester | None = None,
         **kwargs,
     ) -> list[dict]:
-        """Return shared context entries relevant to the current context.
-
-        Filters by scope (user/channel/guild/global) and returns the most
-        important entries. With RAG, this could also do semantic search
-        but we keep scope-based filtering for shared context since it's
-        already structured.
-        """
-        scopes = ["global"]
-        if guild_id:
-            scopes.append(f"guild:{guild_id}")
-        if channel_id:
-            scopes.append(f"channel:{channel_id}")
-        if user_id:
-            scopes.append(f"user:{user_id}")
-        if is_dm and user_id:
-            scopes.append(f"dm:{user_id}")
-
+        """Return scoped facts only when an authenticated requester is supplied."""
+        if not _has_requester(requester):
+            return []
+        if user_id and str(user_id) != requester.user_id and not requester.is_admin:
+            return []
+        if guild_id and str(guild_id) != requester.guild_id:
+            return []
+        if channel_id and str(channel_id) != requester.channel_id:
+            return []
+        scopes = [
+            f"channel:{requester.channel_id}",
+            f"user:{requester.user_id}",
+        ]
+        if requester.guild_id:
+            scopes.append(f"guild:{requester.guild_id}")
+        if requester.is_dm:
+            scopes.append(f"dm:{requester.user_id}")
         placeholders = ",".join("?" * len(scopes))
         rows = self._db.execute(
-            f"SELECT id, content, scope, importance, timestamp, metadata FROM vectors WHERE kind='shared_context' AND scope IN ({placeholders}) ORDER BY importance DESC, created_at DESC LIMIT ?",
-            (*scopes, max_items * 2),
+            "SELECT id, kind, channel_id, guild_id, author_id, content, scope, "
+            "importance, timestamp, metadata FROM vectors WHERE kind='shared_context' "
+            f"AND (scope IN ({placeholders}) OR (scope='global' AND "
+            "metadata LIKE '%\"public_approved\": true%' AND "
+            "metadata LIKE '%\"source_kind\": \"operator_public\"%')) "
+            "ORDER BY importance DESC, created_at DESC LIMIT ?",
+            (*scopes, max(1, min(int(max_items) * 10, 500))),
         ).fetchall()
-
         result = []
         for row in rows:
+            raw = dict(row)
+            if not _memory_row_visible(raw, requester):
+                continue
             entry = {
                 "id": row["id"],
                 "content": row["content"],
@@ -2519,62 +2801,22 @@ class RAGMemoryManager:
                 "importance": row["importance"],
                 "timestamp": row["timestamp"],
             }
-            try:
-                meta = json.loads(row["metadata"] or "{}")
-                entry.update(meta)
-            except Exception as e:
-                # Corrupt metadata JSON: the row is still usable without it.
-                logger.debug("Bad metadata JSON on row %s: %s", row["id"], e)
+            entry.update(_decode_metadata(row["metadata"]))
             result.append(entry)
-
-        # Filter DM-to-admin-only
-        if not is_admin:
-            result = [
-                e
-                for e in result
-                if not str(e.get("scope", "")).startswith("dm:")
-                or str(e.get("scope", "")) == f"dm:{user_id}"
-            ]
-
-        now = datetime.now(timezone.utc)
-        filtered = []
-        for entry in result:
-            vis = str(entry.get("visibility") or "shared").strip().lower()
-            if vis == "admin_only" and not is_admin:
-                continue
-            if vis == "private" and not is_admin:
-                source_uid = str(entry.get("source_user_id") or "")
-                if not source_uid:
-                    scope_kind, _, scope_id = str(entry.get("scope") or "").partition(":")
-                    if scope_kind in {"user", "dm"}:
-                        source_uid = scope_id
-                if not source_uid or source_uid != str(user_id):
-                    continue
-            expires = str(entry.get("expires_at") or "").strip()
-            if expires:
-                try:
-                    exp = datetime.fromisoformat(expires.replace("Z", "+00:00"))
-                    if exp.tzinfo is None:
-                        exp = exp.replace(tzinfo=timezone.utc)
-                    if exp < now:
-                        continue
-                except (TypeError, ValueError):
-                    pass
-            filtered.append(entry)
-        result = filtered[:max_items]
+            if len(result) >= max(1, int(max_items)):
+                break
         if budget is not None:
             try:
                 budget_i = max(0, int(budget))
             except (TypeError, ValueError):
                 budget_i = 0
-            kept = []
-            used = 0
+            kept, used = [], 0
             for entry in result:
-                piece = str(entry.get("content") or "")
-                if used + len(piece) > budget_i:
+                cost = len(str(entry.get("content") or ""))
+                if budget_i <= 0 or used + cost > budget_i:
                     break
                 kept.append(entry)
-                used += len(piece)
+                used += cost
             result = kept
         return result
 
@@ -2825,6 +3067,7 @@ class RAGMemoryManager:
         results: list[dict],
         *,
         guild_id: str = "",
+        requester: MemoryRequester | None = None,
         max_per_query: int = WEB_RESULT_DEFAULT_MAX_PER_QUERY,
         ttl_days: int = WEB_RESULT_DEFAULT_TTL_DAYS,
         scope_to_guild: bool = WEB_RESULT_GUILD_SCOPED,
@@ -2835,21 +3078,34 @@ class RAGMemoryManager:
             query: original search query (stored in metadata for context).
             results: list of dicts from ddgs: {title, href, body}. Extra
                 keys are tolerated and stored in metadata.
-            guild_id: discord guild ID of the requesting user, used to
-                scope the rows if scope_to_guild=True (default: global,
-                so any future turn in any channel that asks a related
-                question can recall).
+            guild_id: optional compatibility check against the requester.
+            requester: validated source user, channel, guild, and visibility.
             max_per_query: cap rows stored per call. Defaults to 3.
             ttl_days: prune rows older than this on the next store/recall.
-            scope_to_guild: True → store rows with the requesting guild_id
-                only (channel-specific recall). False (default) → global.
+            scope_to_guild: True may share results from a public guild
+                channel with that guild. Private channels and DMs always
+                remain channel/user scoped. False always uses channel scope.
 
         Returns:
             Number of rows newly inserted. Existing URLs are deduped via
             content_hash; a re-fetch of the same query is a no-op.
         """
-        if not results:
+        if not results or not _has_requester(requester):
             return 0
+        if guild_id and str(guild_id) != requester.guild_id:
+            return 0
+        if requester.is_dm:
+            storage_guild_id = ""
+            storage_scope = f"dm:{requester.user_id}"
+            storage_channel_id = requester.channel_id
+        else:
+            storage_guild_id = requester.guild_id
+            if scope_to_guild and requester.channel_is_public:
+                storage_scope = "guild"
+                storage_channel_id = ""
+            else:
+                storage_scope = f"channel:{requester.channel_id}"
+                storage_channel_id = requester.channel_id
         # Truncate to top N before paying the embed cost.
         top = results[:max_per_query]
         inserted = 0
@@ -2898,7 +3154,7 @@ class RAGMemoryManager:
                     title = str(r.get("title") or "").strip()
                     href = str(r.get("href") or "").strip()
                     content_hash = hashlib.sha256(
-                        href.encode("utf-8")
+                        f"{storage_scope}\0{href}".encode("utf-8")
                     ).hexdigest()
                     metadata = {
                         "url": href,
@@ -2906,6 +3162,11 @@ class RAGMemoryManager:
                         "query": query,
                         "fetched_at": now_iso,
                         "source_engine": "ddgs",
+                        "source_user_id": requester.user_id,
+                        "source_channel_id": requester.channel_id,
+                        "source_guild_id": requester.guild_id,
+                        "source_is_dm": requester.is_dm,
+                        "source_channel_public": requester.channel_is_public,
                     }
                     try:
                         self._db.execute(
@@ -2920,15 +3181,15 @@ class RAGMemoryManager:
                             (
                                 f"web_{content_hash[:16]}",
                                 WEB_RESULT_KIND,
-                                "",  # channel_id — global
-                                guild_id if scope_to_guild else "",
+                                storage_channel_id,
+                                storage_guild_id,
                                 "web_search",
                                 "",
                                 "web",
                                 stored_content,
                                 content_hash,
                                 json.dumps(metadata),
-                                "global" if not scope_to_guild else "guild",
+                                storage_scope,
                                 0,
                                 now_iso,
                                 now_ts,
@@ -2956,7 +3217,8 @@ class RAGMemoryManager:
                 return 0
         if inserted:
             logger.info(
-                f"store_web_results: {inserted} new rows for query={query!r}"
+                "store_web_results: %s scoped result(s), query_chars=%s",
+                inserted, len(query),
             )
         return inserted
 
@@ -2965,6 +3227,7 @@ class RAGMemoryManager:
         query: str,
         *,
         guild_id: str = "",
+        requester: MemoryRequester | None = None,
         top_k: int = 5,
         min_similarity: float = SIM_THRESHOLD,
         max_age_days: int | None = None,
@@ -2975,6 +3238,8 @@ class RAGMemoryManager:
         and with TTL pruning applied at search time so stale rows never
         surface.
         """
+        if not _has_requester(requester):
+            return []
         # `async with` rather than acquire()/finally-release(): if the acquire
         # itself is cancelled, the finally would call release() on a lock this
         # task never held and raise RuntimeError, masking the cancellation.
@@ -2990,6 +3255,7 @@ class RAGMemoryManager:
             kinds=[WEB_RESULT_KIND],
             guild_id=guild_id,
             source="web",
+            requester=requester,
             top_k=top_k,
             min_similarity=min_similarity,
             apply_recency=False,  # web results don't decay — TTL handles it
@@ -3021,210 +3287,182 @@ class RAGMemoryManager:
         top_k: int = 10,
         min_similarity: float = SIM_THRESHOLD,
         apply_recency: bool = True,
-        recency_tau_days: float | None = None,  # override global RECENCY_TAU_SECONDS
+        recency_tau_days: float | None = None,
         exclude_negatives: bool = True,
         over_fetch: int = 3,
+        requester: MemoryRequester | None = None,
+        global_public_only: bool = False,
     ) -> list[dict]:
-        """Semantic search across the vector store.
-
-        Args:
-            query: search text
-            kinds: filter by kind ('message', 'ltm', 'shared_context',
-                   'bot_output', 'negative')
-            channel_id: filter messages by channel; matches exact channel
-                        OR global (channel_id='') by default
-            guild_id: NEW — if set, restrict to this server (discord)
-            source: NEW — 'user' | 'bot' | 'system' filter; or list of those
-            author_id: restrict to rows attributed to one person. Exact
-                       match — used by the entity-memory tier, where a
-                       global row would be about the wrong human.
-            top_k: max results to RETURN (after scoring)
-            min_similarity: cosine similarity cutoff
-            apply_recency: NEW — multiply score by recency decay
-            recency_tau_days: NEW — override the default 14-day recency τ.
-                        Pass 3.0 for "give me recent chat", 0.5 for
-                        "today's conversation only", 30.0 for "month
-                        of context". None = use module default.
-            exclude_negatives: NEW — exclude rows similar to anything in
-                                kind='negative'
-            over_fetch: NEW — internally pull top_k*over_fetch candidates
-                        from cosine before applying recency/rerank/dedup
-                        (gives room for filtering without starving the limit)
-
-        Returns list of dicts with: id, kind, content, author, channel_id,
-            guild_id, timestamp, similarity, score (recency-decayed),
-            metadata.
-        """
+        """Scoped semantic search with SQL narrowing before vector decoding."""
+        if not _has_requester(requester):
+            return []
+        if global_public_only and not requester.is_admin:
+            return []
+        if channel_id and str(channel_id) != requester.channel_id:
+            return []
+        if guild_id and str(guild_id) != requester.guild_id:
+            return []
+        if author_id and str(author_id) != requester.user_id:
+            return []
         query_vec = await self._embed_for_query(query)
         if query_vec is None:
             return []
+        query_norm = np.asarray(query_vec, dtype=np.float32)
+        query_norm /= np.linalg.norm(query_norm) + 1e-8
+        top_k = max(1, min(int(top_k or 10), 100))
+        over_fetch = max(1, min(int(over_fetch or 1), 20))
+        requested_kinds = list(kinds or [
+            "message", "bot_output", "ltm", "shared_context", "entity", WEB_RESULT_KIND
+        ])
+        if not requested_kinds:
+            return []
 
-        # Per-call override of recency tau. Caller passes recency_tau_days;
-        # we expose `_score_with_recency_tau` so the multiplier uses the
-        # caller's value rather than the module-level constant.
         if recency_tau_days is not None:
-            _tau_seconds = float(recency_tau_days) * 86400.0
-            # Re-bind locally so the score function uses this tau
             import math
-
-            def _decay(ts_str):
-                if not ts_str:
-                    return 1.0
-                dt = _parse_iso(ts_str)
+            tau_seconds = max(1.0, float(recency_tau_days) * 86400.0)
+            def decay(ts_str):
+                dt = _parse_iso(ts_str) if ts_str else None
                 if dt is None:
                     return 1.0
                 age = max(0.0, _utcnow().timestamp() - dt.timestamp())
-                decay = math.exp(-age / max(1.0, _tau_seconds))
-                return 0.25 + 0.75 * decay
+                return 0.25 + 0.75 * math.exp(-age / tau_seconds)
         else:
+            def decay(ts_str):
+                return _score_with_recency(1.0, ts_str)
 
-            def _decay(ts_str):
-                return _score_with_recency(1.0, ts_str)  # just the multiplier
-
-        # ─── build SQL ───────────────────────────────────────────────
         where_parts = ["embedding IS NOT NULL"]
         params: list = []
-        if kinds:
-            placeholders = ",".join("?" * len(kinds))
-            where_parts.append(f"kind IN ({placeholders})")
-            params.extend(kinds)
-        if channel_id:
-            where_parts.append("(channel_id=? OR channel_id='')")
-            params.append(str(channel_id))
-        if guild_id:
-            where_parts.append("(guild_id=? OR guild_id='')")
-            params.append(str(guild_id))
+        placeholders = ",".join("?" * len(requested_kinds))
+        where_parts.append(f"kind IN ({placeholders})")
+        params.extend(requested_kinds)
         if source:
-            src = [source] if isinstance(source, str) else list(source)
-            placeholders = ",".join("?" * len(src))
-            where_parts.append(f"source IN ({placeholders})")
-            params.extend(src)
+            sources = [source] if isinstance(source, str) else list(source)
+            if not sources:
+                return []
+            where_parts.append("source IN (" + ",".join("?" * len(sources)) + ")")
+            params.extend(sources)
         if author_id:
-            # Exact match, unlike channel_id/guild_id above: those widen to
-            # include global rows because a global fact is relevant in every
-            # channel. A fact about a *person* is not relevant for a
-            # different person, so there is no '' escape hatch here.
             where_parts.append("author_id=?")
             params.append(str(author_id))
 
-        where_clause = " AND ".join(where_parts)
+        if global_public_only:
+            where_parts.append(
+                "scope='global' AND (metadata LIKE '%\"visibility\": \"public\"%' "
+                "OR metadata LIKE '%\"visibility\": \"shared\"%') "
+                "AND metadata LIKE '%\"public_approved\": true%' "
+                "AND metadata LIKE '%\"source_kind\": \"operator_public\"%'"
+            )
+        else:
+            allowed_scopes = [
+                f"channel:{requester.channel_id}",
+                f"user:{requester.user_id}",
+            ]
+            if requester.guild_id:
+                allowed_scopes.append(f"guild:{requester.guild_id}")
+            if requester.is_dm:
+                allowed_scopes.append(f"dm:{requester.user_id}")
+            scope_marks = ",".join("?" * len(allowed_scopes))
+            where_parts.append(
+                "((kind IN ('message','bot_output') AND channel_id=? AND "
+                "guild_id=?) OR (kind IN ('shared_context','ltm','entity') "
+                f"AND scope IN ({scope_marks})) OR (kind='web_result' AND ("
+                "scope IN (?,?) OR (scope='guild' AND guild_id=? AND "
+                "metadata LIKE '%\"source_channel_public\": true%'))) OR "
+                "(scope='global' AND metadata LIKE '%\"public_approved\": true%' "
+                "AND metadata LIKE '%\"source_kind\": \"operator_public\"%'))"
+            )
+            params.extend((
+                requester.channel_id,
+                "" if requester.is_dm else requester.guild_id,
+                *allowed_scopes,
+                f"channel:{requester.channel_id}",
+                f"dm:{requester.user_id}",
+                requester.guild_id,
+            ))
+            if "entity" in requested_kinds:
+                where_parts.append("(kind!='entity' OR author_id=?)")
+                params.append(requester.user_id)
+
         rows = self._db.execute(
-            f"SELECT id, kind, channel_id, guild_id, author, author_id, source, "
-            f"content, embedding, metadata, scope, importance, parent_id, "
-            f"downvotes, timestamp FROM vectors WHERE {where_clause}",
+            "SELECT id, kind, channel_id, guild_id, author, author_id, source, "
+            "content, embedding, metadata, scope, importance, downvotes, timestamp "
+            "FROM vectors WHERE " + " AND ".join(where_parts),
             params,
         ).fetchall()
-
         if not rows:
             return []
 
-        # ─── score ───────────────────────────────────────────────────
-        results = []
-        query_norm = query_vec / (np.linalg.norm(query_vec) + 1e-8)
-        for row in rows:
-            blob = row["embedding"]
-            if not blob:
-                continue
+        visible_rows = [r for r in rows if _memory_row_visible(dict(r), requester)]
+        if not visible_rows:
+            return []
+        vectors = []
+        valid_rows = []
+        for row in visible_rows:
             try:
-                vec = _blob_to_embedding(blob)
+                vec = _blob_to_embedding(row["embedding"])
                 if len(vec) != EMBED_DIM:
                     continue
-                vec_norm = vec / (np.linalg.norm(vec) + 1e-8)
-                sim = float(np.dot(query_norm, vec_norm))
-                if sim < min_similarity:
+                norm = float(np.linalg.norm(vec))
+                if norm <= 1e-8:
                     continue
-                # Downvoted rows are pulled in scoring but pulled down.
-                if row["downvotes"]:
-                    sim *= max(0.05, 1.0 - 0.2 * row["downvotes"])
-                if apply_recency and row["kind"] in ("message", "bot_output"):
-                    if recency_tau_days is not None:
-                        # _decay(ts) returns the multiplier (0.25..1.0).
-                        score = sim * _decay(row["timestamp"])
-                    else:
-                        score = _score_with_recency(sim, row["timestamp"])
-                else:
-                    score = sim
-                entry = {
-                    "id": row["id"],
-                    "kind": row["kind"],
-                    "channel_id": row["channel_id"],
-                    "guild_id": row["guild_id"],
-                    "author": row["author"],
-                    "author_id": row["author_id"],
-                    "source": row["source"],
-                    "content": row["content"],
-                    "scope": row["scope"],
-                    "importance": row["importance"],
-                    "timestamp": row["timestamp"],
-                    "similarity": sim,
-                    "score": score,
-                    "downvotes": row["downvotes"],
-                }
-                try:
-                    meta = json.loads(row["metadata"] or "{}")
-                    entry.update(meta)
-                except Exception as e:
-                    logger.debug("Bad metadata JSON on row %s: %s", row["id"], e)
-                results.append(entry)
-            except Exception as e:
-                # One unusable row must not kill the whole search result set.
-                logger.debug("Skipping unreadable search row: %s", e)
+                vectors.append(np.asarray(vec, dtype=np.float32) / norm)
+                valid_rows.append(row)
+            except Exception as exc:
+                logger.debug("Skipping unreadable search vector: %s", exc)
+        if not vectors:
+            return []
+        matrix = np.stack(vectors)
+        similarities = matrix @ query_norm
+        results = []
+        for vector_index, (row, similarity) in enumerate(zip(valid_rows, similarities)):
+            sim = float(similarity)
+            if sim < min_similarity:
                 continue
+            if row["downvotes"]:
+                sim *= max(0.05, 1.0 - 0.2 * row["downvotes"])
+            score = (
+                sim * decay(row["timestamp"])
+                if apply_recency and row["kind"] in ("message", "bot_output")
+                else sim
+            )
+            entry = {
+                "id": row["id"], "kind": row["kind"],
+                "channel_id": row["channel_id"], "guild_id": row["guild_id"],
+                "author": row["author"], "author_id": row["author_id"],
+                "source": row["source"], "content": row["content"],
+                "scope": row["scope"], "importance": row["importance"],
+                "timestamp": row["timestamp"], "similarity": sim,
+                "score": score, "downvotes": row["downvotes"],
+            }
+            entry.update(_decode_metadata(row["metadata"]))
+            results.append((entry, row, vectors[vector_index]))
+        results.sort(key=lambda item: item[0]["score"], reverse=True)
+        candidates = results[:top_k * over_fetch]
 
-        # Sort by decayed score (not raw cosine) so recent-but-slightly-less-
-        # similar memories beat older more-similar ones.
-        results.sort(key=lambda x: x["score"], reverse=True)
-
-        # Over-fetch up to top_k * over_fetch so we have candidates to
-        # filter through the next step.
-        candidates = results[: top_k * over_fetch]
-
-        # ─── exclude negatives ───────────────────────────────────────
-        # Compare each candidate's embedding against everything in
-        # kind='negative'. If cosine ≥ 0.85, drop the candidate.
-        # Negatives are rare so this is cheap.
-        if exclude_negatives:
+        if exclude_negatives and candidates:
             try:
                 neg_rows = self._db.execute(
                     "SELECT embedding FROM vectors WHERE kind='negative' "
                     "AND embedding IS NOT NULL"
                 ).fetchall()
-                if neg_rows:
-                    neg_vecs = []
-                    for nr in neg_rows:
-                        nb = nr["embedding"]
-                        if not nb:
-                            continue
-                        nv = _blob_to_embedding(nb)
-                        if len(nv) == EMBED_DIM:
-                            nv_norm = nv / (np.linalg.norm(nv) + 1e-8)
-                            neg_vecs.append(nv_norm)
-                    if neg_vecs:
-                        neg_stack = np.stack(neg_vecs)
-                        filtered = []
-                        for c in candidates:
-                            blob = None
-                            for r in rows:
-                                if r["id"] == c["id"]:
-                                    blob = r["embedding"]
-                                    break
-                            if not blob:
-                                filtered.append(c)
-                                continue
-                            cv = _blob_to_embedding(blob)
-                            cv_norm = cv / (np.linalg.norm(cv) + 1e-8)
-                            # max cosine with any negative
-                            max_neg_sim = float(np.max(neg_stack @ cv_norm))
-                            if max_neg_sim >= 0.85:
-                                continue  # too similar to a known bad rec
-                            filtered.append(c)
-                        candidates = filtered
-            except Exception as e:
-                logger.debug(f"negative exclusion skipped: {e}")
-
-        # ─── done ────────────────────────────────────────────────────
-        candidates.sort(key=lambda x: x.get("score", 0.0), reverse=True)
-        return candidates[:top_k]  # type: ignore[index]  # always len > 0 here
+                neg_vecs = []
+                for neg in neg_rows:
+                    vec = _blob_to_embedding(neg["embedding"])
+                    if len(vec) == EMBED_DIM:
+                        norm = float(np.linalg.norm(vec))
+                        if norm > 1e-8:
+                            neg_vecs.append(np.asarray(vec, dtype=np.float32) / norm)
+                if neg_vecs:
+                    negative_similarities = np.stack(neg_vecs) @ np.stack(
+                        [item[2] for item in candidates]
+                    ).T
+                    candidates = [
+                        item for i, item in enumerate(candidates)
+                        if float(np.max(negative_similarities[:, i])) < 0.85
+                    ]
+            except Exception as exc:
+                logger.debug("negative exclusion skipped: %s", exc)
+        return [item[0] for item in candidates[:top_k]]
 
     async def rag_relevant_context(  # type: ignore[override]
         self,
@@ -3232,6 +3470,7 @@ class RAGMemoryManager:
         channel_id: str = "",
         guild_id: str = "",
         top_k: int = 15,
+        requester: MemoryRequester | None = None,
     ) -> list[dict]:
         """Get semantically relevant context for a user message.
 
@@ -3244,6 +3483,7 @@ class RAGMemoryManager:
             kinds=["message", "ltm", "shared_context"],
             channel_id=channel_id,
             guild_id=guild_id,
+            requester=requester,
             source=["user"],  # user messages dominate the mix
             top_k=top_k * 3,
             apply_recency=True,
@@ -3257,6 +3497,7 @@ class RAGMemoryManager:
                     kinds=["bot_output", "ltm", "shared_context"],
                     channel_id=channel_id,
                     guild_id=guild_id,
+                    requester=requester,
                     top_k=top_k * 2,
                     apply_recency=True,
                     exclude_negatives=True,
@@ -3300,6 +3541,40 @@ class RAGMemoryManager:
 
     # ─── lifecycle ────────────────────────────────────────────────
 
+    def get_embedding_metrics(self) -> dict:
+        """Return safe operational counters without exposing memory contents."""
+        try:
+            pending = self._db.execute(
+                "SELECT COUNT(*) AS c FROM vectors "
+                "WHERE embedding IS NULL AND kind NOT IN ('negative')"
+            ).fetchone()
+            pending_work = int(pending["c"] if pending else 0)
+        except Exception:
+            pending_work = 0
+        metrics = self._embed_metrics
+        requests = int(metrics["requests"])
+        cache_hits = int(metrics["cache_hits"])
+        cache_misses = int(metrics["cache_misses"])
+        elapsed = float(metrics["elapsed_seconds"])
+        return {
+            "background_queue_depth": len(self._embed_tasks),
+            "pending_work": pending_work,
+            "requests": requests,
+            "failures": int(metrics["failures"]),
+            "average_processing_ms": (
+                round(elapsed * 1000.0 / requests, 2) if requests else 0.0
+            ),
+            "cache_hits": cache_hits,
+            "cache_misses": cache_misses,
+            "cache_hit_ratio": (
+                round(cache_hits / (cache_hits + cache_misses), 4)
+                if cache_hits + cache_misses else 0.0
+            ),
+            "endpoint_cooldown_remaining_seconds": round(
+                max(0.0, self._embed_endpoint_down_until - time.monotonic()), 2
+            ),
+        }
+
     async def flush(self):
         """Give in-flight embed tasks a short shutdown grace period.
 
@@ -3332,6 +3607,12 @@ class RAGMemoryManager:
                 logger.warning(f"Error awaiting embed tasks during flush: {e}")
             finally:
                 self._embed_tasks.clear()
+        session = self._embed_session
+        self._embed_session = None
+        self._embed_session_loop = None
+        if session is not None and not session.closed:
+            with contextlib.suppress(Exception):
+                await session.close()
 
     def load_from_disk(self):
         """No-op — DB is loaded in __init__. Kept for interface compat."""

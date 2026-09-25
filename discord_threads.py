@@ -23,6 +23,7 @@ import discord
 from discord import Message
 
 from tools import Tool
+from rag_memory import MemoryRequester
 from utils import FileLock, _atomic_json_write_sync, _load_json_safe, _safe_int
 
 logger = logging.getLogger(__name__)
@@ -333,7 +334,15 @@ async def snapshot_parent_conversation(
     channel_id = str(getattr(channel, "id", "") or "")
     if memory is not None and hasattr(memory, "get_channel_memory") and channel_id:
         try:
-            mem = await memory.get_channel_memory(channel_id)
+            checker = getattr(bot, "_is_admin", None)
+            try:
+                is_admin = bool(checker(getattr(message.author, "id", None))) if callable(checker) else False
+            except Exception:
+                is_admin = False
+            mem = await memory.get_channel_memory(
+                channel_id,
+                requester=MemoryRequester.from_message(message, is_admin=is_admin),
+            )
         except Exception:
             mem = []
         for row in (mem or [])[-limit:]:
