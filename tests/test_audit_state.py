@@ -248,7 +248,7 @@ def test_private_global_facts_without_owner_fail_closed(memory):
 def test_pending_embedding_failures_do_not_starve_later_rows(memory, monkeypatch):
     attempted = []
 
-    async def fail(row_id, text):
+    async def fail(row_id, text, *, reservation_held=False):
         attempted.append(row_id)
         return False
 

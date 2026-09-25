@@ -3650,7 +3650,7 @@ class RAGMemoryManager:
         try:
             pending = self._db.execute(
                 "SELECT COUNT(*) AS c FROM vectors "
-                "WHERE embedding IS NULL AND kind NOT IN ('negative')"
+                "WHERE embedding IS NULL"
             ).fetchone()
             pending_work = int(pending["c"] if pending else 0)
         except Exception:

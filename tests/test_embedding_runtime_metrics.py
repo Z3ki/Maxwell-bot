@@ -189,3 +189,13 @@ def test_pending_embedding_index_supports_ordered_backlog_scan(tmp_path):
     ).fetchall()
     assert any("idx_vectors_pending_embedding" in row[3] for row in plan)
     manager._db.close()
+
+
+def test_embedding_metrics_include_pending_negative_vectors(tmp_path):
+    manager = RAGMemoryManager(str(tmp_path))
+    manager._db.execute(
+        "INSERT INTO vectors (id, kind, content, embedding, timestamp, created_at) "
+        "VALUES ('negative-pending', 'negative', 'do not repeat', NULL, '', 0)"
+    )
+    assert manager.get_embedding_metrics()["pending_work"] == 1
+    manager._db.close()
