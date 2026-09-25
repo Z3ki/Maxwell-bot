@@ -492,7 +492,7 @@ class _InteractionChannel:
     async def fetch_message(self, message_id: Any) -> Any:
         getter = getattr(self._channel, "fetch_message", None)
         if not callable(getter):
-            raise LookupError("message lookup is unavailable for this interaction")
+            raise TypeError("message lookup is unavailable for this interaction")
         return await getter(message_id)
 
     async def send(self, content: str | None = None, file: Any = None, **kwargs: Any) -> Any:
@@ -504,7 +504,7 @@ class _InteractionChannel:
             followup = getattr(self.interaction, "followup", None)
             sender = getattr(followup, "send", None)
         if not callable(sender):
-            raise RuntimeError("interaction response transport is unavailable")
+            raise TypeError("interaction response transport is unavailable")
         kwargs.pop("ephemeral", None)
         payload = {**kwargs, "ephemeral": True}
         if content is not None:

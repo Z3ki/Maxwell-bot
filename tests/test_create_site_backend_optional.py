@@ -128,18 +128,16 @@ def test_create_site_has_no_per_user_site_count_cap(tmp_path):
     message = SimpleNamespace(author=SimpleNamespace(id=42, display_name="tester"))
 
     async def run():
-        results = []
-        for index in range(11):
-            results.append(
-                await tool.execute(
-                    message,
-                    name=f"site-{index}",
-                    title=f"Site {index}",
-                    body=_PAGE,
-                    backend=False,
-                )
+        return [
+            await tool.execute(
+                message,
+                name=f"site-{index}",
+                title=f"Site {index}",
+                body=_PAGE,
+                backend=False,
             )
-        return results
+            for index in range(11)
+        ]
 
     results = asyncio.run(run())
     assert all(result.startswith("Site created:") for result in results)
