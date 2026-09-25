@@ -30,7 +30,6 @@ import discord
 from discord.ext import commands
 from discord.utils import MISSING
 from process_utils import communicate_process
-from daily_tokens import DailyTokens, DailyTokenLimitExceeded
 from message_quota import (
     MessageQuota,
     MessageQuotaExceeded,
@@ -2400,55 +2399,6 @@ class ToolCircuitBreaker:
         return False
 
 
-class TokenBudgetTracker:
-    """Daily token spend tracker with budget alerts."""
-
-    def __init__(self, daily_budget: int = 500_000):
-        self.daily_budget = daily_budget
-        self._today = self._today_key()
-        self._prompt_tokens = 0
-        self._completion_tokens = 0
-        self._total_tokens = 0
-        self._alerted = False
-
-    @staticmethod
-    def _today_key() -> str:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    def record(self, usage: dict):
-        today = self._today_key()
-        if today != self._today:
-            self._today = today
-            self._prompt_tokens = 0
-            self._completion_tokens = 0
-            self._total_tokens = 0
-            self._alerted = False
-        self._prompt_tokens += _safe_int(usage.get("prompt_tokens", 0), 0)
-        self._completion_tokens += _safe_int(usage.get("completion_tokens", 0), 0)
-        self._total_tokens += _safe_int(usage.get("total_tokens", 0), 0)
-        # Tracking only — daily-budget enforcement was removed; we just keep
-        # the counter so dashboards/reports can still show usage if desired.
-
-    @property
-    def exceeded(self) -> bool:
-        return self._total_tokens > self.daily_budget
-
-    @property
-    def usage_ratio(self) -> float:
-        if self.daily_budget <= 0:
-            return 0.0
-        return self._total_tokens / self.daily_budget
-
-    def summary(self) -> dict:
-        return {
-            "date": self._today,
-            "prompt_tokens": self._prompt_tokens,
-            "completion_tokens": self._completion_tokens,
-            "total_tokens": self._total_tokens,
-            "daily_budget": self.daily_budget,
-            "exceeded": self.exceeded,
-        }
-
 
 def _prepare_tool_params(name: str, params: dict | None) -> dict:
     """Drop kwargs that collide with ``tool.execute(message, **params)``.
@@ -2796,12 +2746,6 @@ class MaxwellBot(commands.Bot):
         self._tool_breaker = ToolCircuitBreaker(
             failure_threshold=5, recovery_seconds=30
         )
-        self._token_tracker = TokenBudgetTracker(
-            daily_budget=_safe_int(
-                os.environ.get("MAXWELL_DAILY_TOKEN_BUDGET", "3000000"), 3000000
-            )
-        )
-        self._daily_tokens = DailyTokens(Path(self.config.DATA_DIR) / "daily_tokens.sqlite3")
         self._message_quota = MessageQuota(Path(self.config.DATA_DIR) / "message_quota.sqlite3")
         install_usage_commands()
         # Concurrency safety (see concurrency_safety.py): per-(guild, channel)
@@ -3098,30 +3042,9 @@ class MaxwellBot(commands.Bot):
         message = _current_inbound.get()
         if message is not None:
             kwargs.setdefault("request_id", str(getattr(message, "id", "") or ""))
-        reservation = None
-        reserved_tokens = 0
-        prompt_estimate = 0
-        ledger = getattr(self, "_daily_tokens", None)
         author = getattr(message, "author", None)
         if quota_user_id is None and author is not None and not getattr(author, "bot", False):
             quota_user_id = getattr(author, "id", None)
-        if (
-            ledger is not None
-            and quota_user_id is not None
-            and self._control.get("daily_user_token_limit_enabled", True)
-        ):
-            # Internal spend cap. Provider usage replaces this estimate after
-            # a successful call. This is not the customer-facing allowance.
-            payload_chars = len(json.dumps(messages, default=str))
-            payload_chars += len(json.dumps(kwargs.get("tools") or [], default=str))
-            prompt_estimate = max(1, (payload_chars + 2) // 3)
-            requested_output = max(1, int(kwargs.get("max_tokens") or 16384))
-            default_limit = int(self._control.get("daily_user_token_limit", 3_000_000))
-            reservation, output_allowance = ledger.reserve(
-                str(quota_user_id), default_limit, prompt_estimate, requested_output
-            )
-            reserved_tokens = prompt_estimate + output_allowance
-            kwargs["max_tokens"] = output_allowance
         if (
             charge_message
             and quota_user_id is not None
@@ -3144,23 +3067,7 @@ class MaxwellBot(commands.Bot):
                     raise
         started = time.monotonic()
         try:
-            result = await self.ai_provider.generate_response(messages, **kwargs)
-            usage = getattr(result, "usage", None) or {}
-            actual = int(usage.get("total_tokens") or 0)
-            if not actual:
-                actual = int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0)
-            if not actual:
-                actual = prompt_estimate + max(1, (len(str(result)) + 2) // 3) if reservation else 0
-            if reservation:
-                ledger.settle(reservation, actual, float(usage.get("cost_usd") or 0))
-                reservation = None
-            return result
-        except BaseException:
-            # A timed-out provider may still have billed the request. Charging
-            # the reservation avoids silently reopening the same internal cap.
-            if reservation:
-                ledger.settle(reservation, reserved_tokens)
-            raise
+            return await self.ai_provider.generate_response(messages, **kwargs)
         finally:
             if message is not None:
                 logger.info(
@@ -4097,13 +4004,7 @@ class MaxwellBot(commands.Bot):
                 "cancelled_after_effect" if row.get("effects_started") else "cancelled",
             )
             raise
-        except (DailyTokenLimitExceeded, MessageQuotaExceeded) as exc:
-            if getattr(exc, "spent", None) is not None:
-                logger.warning(
-                    "internal spending guard spent=%s limit=%s",
-                    exc.spent,
-                    exc.limit,
-                )
+        except MessageQuotaExceeded as exc:
             try:
                 self._mark_request_effect(message)
                 sent = await self._send_with_slowmode(
@@ -10505,9 +10406,6 @@ class MaxwellBot(commands.Bot):
                     2000000,
                 ),
             )
-            control["daily_user_token_limit"] = max(
-                1, min(_safe_int(control.get("daily_user_token_limit"), 3_000_000), 100_000_000)
-            )
             control["message_quota_limit"] = max(
                 1, min(_safe_int(control.get("message_quota_limit"), 300), 100_000)
             )
@@ -14345,11 +14243,6 @@ class MaxwellBot(commands.Bot):
             finally:
                 await self._release_ai_slot()
             native_calls = self._native_calls_from(response)
-            # Token usage rides on the ProviderResult, so read it BEFORE the
-            # recovery below can replace `response` with a plain string.
-            usage = self._usage_from(response)
-            if usage:
-                self._token_tracker.record(usage)
             # No native tool_calls, but the model may have written the call
             # into the visible text instead. Recover it so it actually runs
             # instead of being posted to the channel as raw markup.
@@ -14566,9 +14459,6 @@ class MaxwellBot(commands.Bot):
                                 await followup_progress.stop()
                             followup_progress = None
                         raise
-                    usage = self._usage_from(followup)
-                    if usage:
-                        self._token_tracker.record(usage)
                     pending_native = self._native_calls_from(followup)
                     if not pending_native:
                         pending_native, followup = self._recover_text_tool_calls(
@@ -14882,7 +14772,7 @@ class MaxwellBot(commands.Bot):
         except asyncio.CancelledError as _exc:
             logger.info(f"Cancelled active request in channel {channel_id}")
             raise
-        except (DailyTokenLimitExceeded, MessageQuotaExceeded) as e:
+        except MessageQuotaExceeded as e:
             if MaxwellBot._request_state(self, message):
                 raise
             await message.channel.send(str(e))
@@ -15822,12 +15712,6 @@ class MaxwellBot(commands.Bot):
         )
         return calls, leftover
 
-    def _usage_from(self, response) -> dict:
-        """Race-free token-usage extraction (see ``_native_calls_from``)."""
-        usage = getattr(response, "usage", None)
-        if usage:
-            return dict(usage)
-        return getattr(self.ai_provider, "_last_usage", None) or {}
 
     def mark_message_tainted(self, message) -> None:
         """Mark a message as having read untrusted content in the current turn.

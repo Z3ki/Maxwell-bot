@@ -25,6 +25,7 @@ def test_admin_surface_splits_diagnostics_from_maintenance_and_removes_owner_com
         for choice in option["choices"]
     }
     assert {"set", "enable", "disable", "reload_control", "quota_set"} <= actions
+    assert "spend" not in actions
     assert {"overview", "controls", "data"} <= {
         choice["value"]
         for option in DIAGNOSTICS_COMMAND["options"]
@@ -60,7 +61,6 @@ def test_redaction_hides_nested_secrets():
         "normal": True,
         "nested": {"token": "<redacted>", "model": "test"},
     }
-    assert _redact({"daily_user_token_limit": 3_000_000}) == {"daily_user_token_limit": 3_000_000}
 
 
 def test_control_value_coercion_is_strict():

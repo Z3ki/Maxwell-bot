@@ -183,9 +183,9 @@ def test_streaming_tps_zero_when_only_first_token():
 
 
 def test_format_timing_debug_empty():
-    text = format_timing_debug([], daily={"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3})
+    text = format_timing_debug([])
     assert "no calls recorded" in text
-    assert "today 1 in / 2 out" in text
+    assert "today" not in text
 
 
 def test_format_timing_debug_last_call():
@@ -246,13 +246,6 @@ def test_collect_debug_stats_from_provider():
     )
     bot = SimpleNamespace(
         ai_provider=SimpleNamespace(_timing_history=[rec], _last_timing=rec),
-        _token_tracker=SimpleNamespace(
-            summary=lambda: {
-                "prompt_tokens": 10,
-                "completion_tokens": 20,
-                "total_tokens": 30,
-            }
-        ),
         _reply_queue=SimpleNamespace(depth=lambda _cid: 0),
         _active_requests={},
     )
@@ -335,9 +328,6 @@ def test_debug_command_admin_gating_and_output():
         model="demo",
     )
     bot.ai_provider = SimpleNamespace(_timing_history=[rec], _last_timing=rec)
-    bot._token_tracker = SimpleNamespace(
-        summary=lambda: {"prompt_tokens": 80, "completion_tokens": 40, "total_tokens": 120}
-    )
     bot._reply_queue = SimpleNamespace(depth=lambda _cid: 2)
     bot._active_requests = {}
 

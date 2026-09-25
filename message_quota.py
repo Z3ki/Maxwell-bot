@@ -1,7 +1,7 @@
 """Customer-facing message quotas.
 
-Usage is counted in messages over a rolling window, not tokens. Token and
-API-cost accounting stay in ``daily_tokens`` for internal spending protection.
+Usage is counted in messages over a rolling window. There is no token-based
+usage or daily spend quota.
 
 Plus allowances are not applied. Premium is not launched, and this module
 must not grant a paid tier, start checkout, or transfer a server subscription.
@@ -25,9 +25,8 @@ class MessageQuotaExceeded(Exception):
         self.limit = int(limit)
         self.window_seconds = int(window_seconds)
         super().__init__(
-            f"Message limit reached ({self.used}/{self.limit} used in the last "
-            f"{format_window(self.window_seconds)}). Older messages leave the "
-            "window as they age out."
+            "Current message allowance reached. Older usage leaves the rolling "
+            f"{format_window(self.window_seconds)} window as it ages out."
         )
 
 

@@ -32,6 +32,8 @@ def test_rolling_window_drops_aged_messages(tmp_path):
         quota.charge("12", 2, 100)
     assert "token" not in str(exc.value).lower()
     assert "premium" not in str(exc.value).lower()
+    assert "current message allowance" in str(exc.value).lower()
+    assert "2/2" not in str(exc.value)
     now["t"] += 101
     assert quota.charge("12", 2, 100) is not None
     assert quota.status("12", 2, 100)["used"] == 1
@@ -83,11 +85,25 @@ def test_plus_allowances_are_not_enforced():
     assert FREE_MESSAGE_LIMIT == 300
 
 
+def test_retired_daily_token_controls_are_discarded():
+    sanitized = _sanitize_control({
+        "daily_user_token_limit_enabled": True,
+        "daily_user_token_limit": 12345,
+        "message_quota_limit": 25,
+    })
+    assert "daily_user_token_limit_enabled" not in sanitized
+    assert "daily_user_token_limit" not in sanitized
+    assert sanitized["message_quota_limit"] == 25
+
+
 def test_premium_copy_states_prices_and_refuses_sale():
     text = premium_discovery_text()
     assert "$2.99/month per user" in text
     assert "$4.99/month per server" in text
-    assert "300 messages per rolling 5 hours" in text
+    assert "higher individual allowance" in text
+    assert "may change as needed" in text
+    assert "percentage" in text
+    assert "300 messages per rolling 5 hours" not in text
     assert "not for sale" in text
     assert "cannot be transferred" in text
     assert "Guild Subscription" in text
@@ -109,7 +125,8 @@ def test_help_and_usage_mention_premium_only_as_discovery():
         {"used": 3, "limit": 100, "window_seconds": 18000, "resets_in": 0},
         discovery=True,
     )
-    assert "3/100" in usage
+    assert "3%" in usage
+    assert "3/100" not in usage
     assert "Plan details: /premium" in usage
     assert "$4.99" not in usage
     quiet = usage_status_text(
@@ -134,7 +151,6 @@ def test_live_turn_charges_one_message_not_followups(tmp_path):
 
     bot = object.__new__(MaxwellBot)
     bot._control = {
-        "daily_user_token_limit_enabled": False,
         "message_quota_enabled": True,
         "message_quota_limit": 100,
         "message_quota_window_seconds": 18000,

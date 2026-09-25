@@ -5392,7 +5392,7 @@ def _chess_game_result(
 
 
 def collect_debug_stats(bot, channel_id: str | None = None) -> str:
-    """TTFT / TPS / token dump from the live provider + daily counter."""
+    """TTFT / TPS diagnostics from recent provider calls."""
     from providers import format_timing_debug
 
     provider = getattr(bot, "ai_provider", None)
@@ -5401,11 +5401,6 @@ def collect_debug_stats(bot, channel_id: str | None = None) -> str:
         last = getattr(provider, "_last_timing", None)
         if isinstance(last, dict) and last:
             history = [last]
-    daily = None
-    tracker = getattr(bot, "_token_tracker", None)
-    if tracker is not None and hasattr(tracker, "summary"):
-        with contextlib.suppress(Exception):
-            daily = tracker.summary()
     extra: list[str] = []
     queue = getattr(bot, "_reply_queue", None)
     if queue is not None and channel_id and hasattr(queue, "depth"):
@@ -5414,7 +5409,7 @@ def collect_debug_stats(bot, channel_id: str | None = None) -> str:
     active = getattr(bot, "_active_requests", None)
     if isinstance(active, dict):
         extra.append(f"in-flight turns {sum(1 for t in active.values() if t and not t.done())}")
-    return format_timing_debug(history, daily=daily, extra=extra or None)
+    return format_timing_debug(history, extra=extra or None)
 
 
 _OWNER_NOTIFY_MIN_INTERVAL = 45.0

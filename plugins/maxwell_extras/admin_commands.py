@@ -49,7 +49,6 @@ _MAINTENANCE_CHOICES = [
     {"name": "Reset user messages", "value": "quota_reset"},
     {"name": "Exempt user from limit", "value": "quota_exempt"},
     {"name": "Remove user exemption", "value": "quota_unexempt"},
-    {"name": "Internal token spend", "value": "spend"},
 ]
 
 _ADMIN_COMMAND_META = {
@@ -250,8 +249,6 @@ def _embed(bot: Any, section: str) -> discord.Embed:
                 f"\nMessage quota: **{_fmt(control.get('message_quota_limit'))}** / "
                 f"{_fmt(control.get('message_quota_window_seconds'))}s "
                 f"({'on' if control.get('message_quota_enabled') else 'off'})"
-                f"\nInternal spend cap: **{_fmt(control.get('daily_user_token_limit'))}** tokens/day "
-                f"({'on' if control.get('daily_user_token_limit_enabled') else 'off'})"
                 f"\nPlus billing: **off**"
             ),
             inline=False,
@@ -526,7 +523,7 @@ async def handle_admin_interaction(bot: Any, interaction: Any) -> bool:
             interaction,
             content=(
                 "Maintenance actions: set or toggle a control, reload `bot_control.json`, "
-                "inspect or update a user's message quota, or inspect internal token spend. "
+                "inspect or update a user's message quota. "
                 "Use `/diagnostics` to view runtime and control details."
             ),
         )
@@ -539,25 +536,6 @@ async def handle_admin_interaction(bot: Any, interaction: Any) -> bool:
             await _send(interaction, content=f"Control reload failed: {type(exc).__name__}: {exc}")
         else:
             await _send(interaction, content="Reloaded `bot_control.json` into the live bot.")
-        return True
-
-    if action == "spend":
-        valid_discord = key.isdecimal() and len(key) <= 20
-        if not valid_discord:
-            await _send(interaction, content="Provide a Discord user ID in `key`.")
-            return True
-        ledger = getattr(bot, "_daily_tokens", None)
-        if ledger is None:
-            await _send(interaction, content="Internal spend ledger is unavailable.")
-            return True
-        state = ledger.status(key, int(_control(bot)["daily_user_token_limit"]))
-        await _send(interaction, content=(
-            f"Internal spend `{key}` · {state['day']} UTC · "
-            f"{state['spent']:,}/{state['limit']:,} tokens "
-            f"({state['reserved']:,} pending) · "
-            f"reported API cost ${state.get('cost_usd', 0):.4f} · "
-            f"exempt: {'yes' if state['exempt'] else 'no'}"
-        ))
         return True
 
     if action in {"quota", "quota_set", "quota_clear", "quota_reset", "quota_exempt", "quota_unexempt"}:

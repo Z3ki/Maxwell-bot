@@ -34,7 +34,7 @@ footer a:hover{color:var(--fg)}
 <div class="page">
   <div class="tag">hosted instance · v1</div>
   <h1>Privacy Policy</h1>
-  <p class="meta">Last updated 20 September 2026. This describes the hosted Maxwell instance, not every self-hosted copy of the MIT source.</p>
+  <p class="meta">Last updated 25 September 2026. This describes the hosted Maxwell instance, not every self-hosted copy of the MIT source.</p>
 
   <div class="warn">
     <strong>Public Alpha.</strong> Data may be lost, migrated, or deleted while the operator iterates. Do not send secrets you cannot afford to leak to a model provider.
@@ -53,12 +53,13 @@ footer a:hover{color:var(--fg)}
     <li>memory the bot stores about you and the channel (RAG/vector store, long-term facts, knowledge-graph entities)</li>
     <li>generated sites, images, and files you ask it to publish</li>
     <li>operational logs: request IDs, timestamps, tool traces, error reports — usually not a second full copy of private message text, but IDs and state are still personal data</li>
+    <li>usage-meter records: Discord user ID, server ID, and timestamps for counted AI use, used to calculate current usage and enforce limits; this ledger does not duplicate message text</li>
     <li>Legal notice delivery records (Discord user ID and when the DM was sent)</li>
   </ul>
   <p>Dashboard login credentials and bot tokens are operator secrets, not something we collect from ordinary users.</p>
 
   <h2>3. Why we process it</h2>
-  <p>To run the bot you asked to talk to: generate replies, remember context, run tools, moderate abuse, debug outages, enforce these Terms, and (later) apply usage limits or a paid plan. Legal basis where GDPR-style rules apply: you asked for the service (contract / steps at your request) and the operator's legitimate interest in running a tiny public experiment without it getting wrecked.</p>
+  <p>To run the bot you asked to talk to: generate replies, remember context, run tools, moderate abuse, debug outages, enforce these Terms, calculate usage-meter percentages, manage current limits, and (later) apply a paid plan. Legal basis where GDPR-style rules apply: you asked for the service (contract / steps at your request) and the operator's legitimate interest in running a tiny public experiment without it getting wrecked.</p>
 
   <h2>4. Model providers and other processors</h2>
   <p>Prompts, relevant memory, and attachments Maxwell needs for a turn are sent to whatever AI, embedding, image, search, or speech provider the operator has configured (for example an OpenAI-compatible API). Those companies see what the bot sends them. Discord already has the messages. Generated-site visitors hit the public origin, not Discord.</p>
@@ -68,7 +69,7 @@ footer a:hover{color:var(--fg)}
   <p>Application data lives in the operator's <em>data/</em> directory and related databases on the host that runs Maxwell. Public Alpha means backups may be incomplete and wipes may happen.</p>
 
   <h2>6. Retention</h2>
-  <p>Memory and logs are kept while they are useful to operate the bot, then deleted or overwritten as the operator rotates storage. Generated sites may expire on a timer or be deleted by you or the operator. Legal notice records are kept so we do not send duplicate DMs. There is no multi-year archive promise.</p>
+  <p>Memory and logs are kept while they are useful to operate the bot, then deleted or overwritten as the operator rotates storage. Rolling-window usage records are deleted after they fall outside the current window when that account is next checked or uses the bot; an inactive account's expired rows may remain until then. Generated sites may expire on a timer or be deleted by you or the operator. Legal notice records are kept so we do not send duplicate DMs. There is no multi-year archive promise.</p>
 
   <h2>7. Sharing</h2>
   <p>We do not sell your data. We share it with processors needed to run the service (Discord, model/image/search/voice APIs, the host/network). We may share information if required by law, to stop abuse, or if the hosted project is handed to a successor who keeps this policy in spirit.</p>

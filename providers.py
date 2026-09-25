@@ -1275,7 +1275,6 @@ def compute_llm_timing(
 def format_timing_debug(
     records,
     *,
-    daily: dict | None = None,
     extra: list[str] | None = None,
 ) -> str:
     """Human-readable TTFT / TPS dump for `/debug` and the debug tool."""
@@ -1321,12 +1320,6 @@ def format_timing_debug(
                     f"{float(rec.get('total_ms') or 0):.0f}ms  {tps_s}  "
                     f"{rec.get('endpoint') or '?'}"
                 )
-    if isinstance(daily, dict) and daily:
-        lines.append(
-            f"today {daily.get('prompt_tokens', 0)} in / "
-            f"{daily.get('completion_tokens', 0)} out  "
-            f"({daily.get('total_tokens', 0)} total)"
-        )
     if extra:
         lines.extend(str(item) for item in extra if item)
     return "\n".join(lines)

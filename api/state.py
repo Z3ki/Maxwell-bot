@@ -291,9 +291,6 @@ def _sanitize_control(control):
         10000,
         min(_safe_int(out.get("prompt_context_budget"), 240000), 500000),
     )
-    out["daily_user_token_limit"] = max(
-        1, min(_safe_int(out.get("daily_user_token_limit"), 3_000_000), 100_000_000)
-    )
     out["message_quota_limit"] = max(
         1, min(_safe_int(out.get("message_quota_limit"), 300), 100_000)
     )

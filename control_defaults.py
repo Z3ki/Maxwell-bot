@@ -27,9 +27,6 @@ def parse_bool(value, default: bool = False) -> bool:
 # If you change a value here, it changes everywhere. That's the point.
 DEFAULT_CONTROL = {
     "bot_enabled": True,
-    # Internal spend cap. Not the customer-facing allowance.
-    "daily_user_token_limit_enabled": True,
-    "daily_user_token_limit": 3_000_000,
     # Customer-facing AI usage. Free tier is 300 messages / rolling 5 hours.
     # Plus limits are stored and not applied; billing stays off.
     "message_quota_enabled": True,
@@ -366,6 +363,9 @@ DEAD_CONTROL_KEYS = frozenset(
         "x_cache_seconds",
         "x_mention_poll_seconds",
         "x_autonomy_post",
+        # Retired token spend caps; message/request quotas are the usage measure.
+        "daily_user_token_limit_enabled",
+        "daily_user_token_limit",
     }
 )
 

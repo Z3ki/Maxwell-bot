@@ -79,8 +79,6 @@ The former comma-prefix commands are no longer accepted. `/help` lists the avail
 
 Customer-facing AI usage is messages, not tokens. The free allowance is 300 messages per rolling five-hour window (`message_quota_limit` / `message_quota_window_seconds`). The ledger lives at `DATA_DIR/message_quota.sqlite3`. One user-visible AI turn, voice utterance, or user-created background job counts as one message. Tool-loop follow-ups do not. `/usage` shows that allowance. `/premium` is an optional discovery command and is not a purchase. Premium is not launched: Personal Plus is proposed at $2.99/month per user and Server Plus at $4.99/month per server, using Discord's native Guild Subscription that stays with the purchased server and cannot be transferred. Exact Plus allowances are not decided and are not applied. Billing, checkout, and …
 
-Token and reported API-cost accounting stay internal, in `DATA_DIR/daily_tokens.sqlite3`, as a spending cap. Requests still reserve estimated tokens so concurrent calls cannot oversubscribe that cap. A provider timeout charges the reservation conservatively. Authorized developers inspect that ledger with `/maintenance action:spend`. Historical Telegram ledger keys remain addressable as `tg:<id>` on the internal ledger only. `quota_clear` removes a user's message-limit override; `quota_unexempt` removes only the exemption.
-
 ## Runtime controls
 
 Defaults live in `control_defaults.py`. `bot_control.json` overrides them at runtime.
@@ -104,8 +102,6 @@ Frequently used controls include:
 | `message_quota_limit` | Free messages per rolling window (default 300) |
 | `message_quota_window_seconds` | Rolling window length (default 18000, five hours) |
 | `message_quota_enabled` | Enforce the customer-facing message allowance |
-| `daily_user_token_limit` | Internal per-user token spend cap per UTC day (default 3000000) |
-| `daily_user_token_limit_enabled` | Enforce the internal spend cap |
 | `premium_billing_enabled` | Forced off. Billing is not available |
 | `store_memory` | Conversation-memory storage switch |
 | `long_term_memory_enabled` | Long-term memory switch |
