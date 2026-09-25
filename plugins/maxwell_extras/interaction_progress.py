@@ -13,7 +13,12 @@ import contextlib
 import time
 from typing import Any
 
-from user_install import UserInstallSession, is_user_install_command, is_user_install_message
+from user_install import (
+    USER_INSTALL_MESSAGE_CAP,
+    UserInstallSession,
+    is_user_install_command,
+    is_user_install_message,
+)
 
 _SLOW_AFTER_SECONDS = 10.0
 _STATUS_TEXT = "working on it…"
@@ -34,6 +39,7 @@ class _InteractionProgressState:
         self.started = time.monotonic()
         self.escalated = False
         self.status_set = False
+        self.status_message: Any | None = None
         self.completed = False
         self.session: Any = None
         self.tool_calls: list[str] = []
@@ -126,14 +132,16 @@ async def _mark_working(state: _InteractionProgressState) -> Any | None:
             original = getattr(state.interaction, "original_response", None)
             if callable(original):
                 with contextlib.suppress(Exception):
-                    return await original()
-            return None
+                    state.status_message = await original()
+                    return state.status_message
+            return state.status_message
         try:
             posted = await _edit_original(state.interaction, _STATUS_TEXT)
         except Exception:
             # A tool can race the initial defer. Keep ``escalated`` true so the
             # answer still becomes a follow-up; the next send retries the status.
             return None
+        state.status_message = posted
         state.status_set = posted is not None
         return posted
 
@@ -202,8 +210,10 @@ async def _note_interaction_tool(
         await _flush_tool_status(state)
 
 
-async def _clear_working_status(state: _InteractionProgressState) -> None:
-    """Remove the temporary interaction response before the final follow-up."""
+async def _clear_working_status(
+    state: _InteractionProgressState, *, delete: bool = True
+) -> None:
+    """Finish the status; keep it when a slow answer will reply to it."""
     pending = state.tool_status_task
     if pending is not None and not pending.done() and state.tool_calls:
         with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
@@ -211,14 +221,15 @@ async def _clear_working_status(state: _InteractionProgressState) -> None:
     async with state.lock:
         if state.completed:
             return
-        should_delete = state.escalated and state.status_set
+        should_delete = delete and state.escalated and state.status_set
         state.completed = True
         _cancel_timer(state)
         pending = state.tool_status_task
         state.tool_status_task = None
         if pending is not None and not pending.done():
             pending.cancel()
-        state.status_set = False
+        if delete:
+            state.status_set = False
     if not should_delete:
         return
     delete = getattr(state.interaction, "delete_original_response", None)
@@ -349,8 +360,74 @@ def _patch_session() -> None:
         ):
             await _mark_working(state)
 
-        if state.escalated:
-            await _clear_working_status(state)
+        if state.escalated and not state.completed:
+            # Webhook follow-ups cannot carry a message reference. Reply through
+            # the channel when possible; preserve privacy and the answer on
+            # channels where that is not allowed by editing the original.
+            await _clear_working_status(state, delete=False)
+            status_message = state.status_message
+            flags = getattr(status_message, "flags", None)
+            ephemeral = bool(getattr(flags, "ephemeral", False) or kwargs.get("ephemeral"))
+            channel = getattr(self.interaction, "channel", None)
+            send = getattr(channel, "send", None)
+            if (
+                status_message is not None
+                and not ephemeral
+                and callable(send)
+                and int(getattr(self, "_sent", 0) or 0) < USER_INSTALL_MESSAGE_CAP
+            ):
+                reply_kwargs = dict(kwargs)
+                for key in ("ephemeral", "reference", "mention_author", "stickers"):
+                    reply_kwargs.pop(key, None)
+                extra_files = reply_kwargs.pop("files", None)
+                reply_file = file
+                if file is not None and extra_files:
+                    reply_kwargs["files"] = [file, *list(extra_files)]
+                    reply_file = None
+                elif extra_files:
+                    reply_kwargs["files"] = list(extra_files)
+                try:
+                    sent = await send(
+                        content,
+                        file=reply_file,
+                        reference=status_message,
+                        mention_author=False,
+                        **reply_kwargs,
+                    )
+                except Exception:
+                    sent = None
+                if sent is not None:
+                    self._sent = int(getattr(self, "_sent", 0) or 0) + 1
+                    self._last = sent
+                    return sent
+
+            if (
+                status_message is not None
+                and (
+                    not bool(kwargs.get("ephemeral"))
+                    or bool(getattr(flags, "ephemeral", False))
+                )
+                and not has_file_payload
+                and not has_followup_only_payload
+            ):
+                text = None if content is None else str(content)
+                if text == "":
+                    text = None
+                visible_content = text
+                if visible_content is None and not fast_payload:
+                    visible_content = "\u200b"
+                try:
+                    sent = await _edit_original(
+                        self.interaction, visible_content, **fast_payload
+                    )
+                except Exception:
+                    sent = None
+                if sent is not None:
+                    state.status_set = False
+                    state.status_message = None
+                    self._sent = max(int(getattr(self, "_sent", 0) or 0), 1)
+                    self._last = sent
+                    return sent
         return await next_send["fn"](self, content=content, file=file, **kwargs)
 
     session_init._maxwell_interaction_progress_wrapped = True  # type: ignore[attr-defined]

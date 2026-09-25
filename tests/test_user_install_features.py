@@ -51,14 +51,17 @@ def test_slash_prompt_applies_research_web_detail_and_language():
         },
     )
     assert "Research this request" in text
-    assert "Use web_search" in text
+    assert "Search the web before answering" in text
     assert "thorough" in text
     assert "Respond in Spanish" in text
     assert text.endswith("compare the new releases")
 
 
-def test_slash_prompt_stays_clean_with_defaults():
-    assert mod._slash_prompt("hello", {}) == "hello"
+def test_slash_prompt_auto_mode_sets_current_fact_search_rule():
+    text = mod._slash_prompt("hello", {})
+    assert "current/latest" in text
+    assert "web_search" in text
+    assert text.endswith("User request:\nhello")
 
 
 def test_context_limit_is_user_selectable_and_sanitized():
@@ -94,11 +97,16 @@ def test_enhanced_slash_turn_keeps_core_attachments():
     assert "concise" in turn["prompt"]
     assert turn["attachments"][0].filename == "log.txt"
     assert turn["history_limit"] == 10
+    assert turn["search_query"] == "debug it"
+    assert turn["web"] == "auto"
+    assert turn["mode"] == "code"
     assert "mode=code" in turn["note"]
 
 
 def test_fact_check_context_action_targets_selected_message(monkeypatch):
-    target = SimpleNamespace(id=88, mentions=[SimpleNamespace(id=9)])
+    target = SimpleNamespace(
+        id=88, mentions=[SimpleNamespace(id=9)], content="current claim"
+    )
     monkeypatch.setattr(mod.ui, "parse_target_message", lambda _interaction: target)
     interaction = _interaction(name=mod.MESSAGE_FACT_CHECK, cmd_type=3)
 
@@ -107,6 +115,9 @@ def test_fact_check_context_action_targets_selected_message(monkeypatch):
     assert "Fact-check" in turn["prompt"]
     assert "web search" in turn["prompt"].lower()
     assert turn["reference"].resolved is target
+    assert turn["search_query"] == "current claim"
+    assert turn["mode"] == "research"
+    assert turn["web"] == "search"
 
 
 def test_modern_session_send_preserves_embed_view_and_multiple_files():

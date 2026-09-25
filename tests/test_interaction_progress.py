@@ -12,6 +12,7 @@ class _Message:
         self.id = 999
         self.content = content
         self.deleted = False
+        self.flags = SimpleNamespace(ephemeral=False)
 
     async def edit(self, *, content=None, **_kwargs):
         if content is not None:
@@ -43,11 +44,27 @@ class _Followup:
         return msg
 
 
+class _Channel:
+    def __init__(self):
+        self.id = 123
+        self.name = "general"
+        self.sent = []
+        self.fail_send = False
+
+    async def send(self, content=None, **payload):
+        if self.fail_send:
+            raise RuntimeError("channel send unavailable")
+        msg = _Message(str(content or ""))
+        recorded = {"content": content, **payload}
+        self.sent.append((recorded, msg))
+        return msg
+
+
 class _Interaction:
     def __init__(self, iid: int):
         self.id = iid
         self.channel_id = 123
-        self.channel = SimpleNamespace(name="general")
+        self.channel = _Channel()
         self.guild = SimpleNamespace(id=456)
         self.response = _Response()
         self.followup = _Followup()
@@ -107,7 +124,7 @@ def test_fast_answer_uses_original_interaction():
     asyncio.run(run())
 
 
-def test_tool_escalation_removes_working_status_and_uses_followup():
+def test_tool_escalation_keeps_status_and_replies_to_it():
     async def run():
         mod._patch_session()
         interaction = _Interaction(2)
@@ -118,12 +135,15 @@ def test_tool_escalation_removes_working_status_and_uses_followup():
         sent = await session.send("final answer")
         assert interaction.original.content == mod._STATUS_TEXT
         assert interaction.edits == [mod._STATUS_TEXT]
-        assert interaction.original_deleted is True
-        assert interaction.original.deleted is True
-        assert interaction.followup.sent[0][0]["content"] == "final answer"
-        assert sent is interaction.followup.sent[0][1]
+        assert interaction.original_deleted is False
+        assert interaction.original.deleted is False
+        assert interaction.channel.sent[0][0]["reference"] is interaction.original
+        assert interaction.channel.sent[0][0]["mention_author"] is False
+        assert sent is interaction.channel.sent[0][1]
+        assert interaction.followup.sent == []
         assert state.escalated is True
-        assert state.status_set is False
+        assert state.status_set is True
+        assert state.completed is True
 
     asyncio.run(run())
 
@@ -144,7 +164,7 @@ def test_answer_between_five_and_ten_seconds_stays_original():
     asyncio.run(run())
 
 
-def test_answer_after_ten_seconds_escalates_before_send():
+def test_answer_after_ten_seconds_replies_to_working_status():
     async def run():
         mod._patch_session()
         interaction = _Interaction(4)
@@ -152,15 +172,17 @@ def test_answer_after_ten_seconds_escalates_before_send():
         session = UserInstallSession(interaction)
         sent = await session.send("late answer")
         assert interaction.original.content == mod._STATUS_TEXT
-        assert interaction.original_deleted is True
-        assert interaction.followup.sent[0][0]["content"] == "late answer"
-        assert sent is interaction.followup.sent[0][1]
+        assert interaction.original_deleted is False
+        assert interaction.channel.sent[0][0]["reference"] is interaction.original
+        assert interaction.channel.sent[0][0]["content"] == "late answer"
+        assert sent is interaction.channel.sent[0][1]
+        assert interaction.followup.sent == []
         assert state.escalated is True
 
     asyncio.run(run())
 
 
-def test_interaction_tool_status_accumulates_then_is_removed_before_reply():
+def test_interaction_tool_status_is_kept_as_reply_parent():
     async def run():
         mod._patch_session()
         interaction = _Interaction(6)
@@ -177,8 +199,60 @@ def test_interaction_tool_status_accumulates_then_is_removed_before_reply():
         )
 
         sent = await session.send("final answer")
-        assert interaction.original_deleted is True
-        assert interaction.followup.sent[0][0]["content"] == "final answer"
+        assert interaction.original_deleted is False
+        assert interaction.channel.sent[0][0]["reference"] is interaction.original
+        assert sent is interaction.channel.sent[0][1]
+        assert interaction.followup.sent == []
+
+    asyncio.run(run())
+
+
+def test_slow_reply_falls_back_to_editing_status_when_channel_send_fails():
+    async def run():
+        mod._patch_session()
+        interaction = _Interaction(7)
+        interaction.channel.fail_send = True
+        state = _state(interaction, age=11.0)
+        session = UserInstallSession(interaction)
+
+        sent = await session.send("late answer")
+        assert interaction.channel.sent == []
+        assert interaction.original_deleted is False
+        assert interaction.original.content == "late answer"
+        assert sent is interaction.original
+        assert state.status_set is False
+
+    asyncio.run(run())
+
+
+def test_ephemeral_working_status_is_not_replied_to_publicly():
+    async def run():
+        mod._patch_session()
+        interaction = _Interaction(8)
+        interaction.original.flags.ephemeral = True
+        state = _state(interaction, age=11.0)
+        session = UserInstallSession(interaction)
+
+        sent = await session.send("private late answer")
+        assert interaction.channel.sent == []
+        assert interaction.followup.sent == []
+        assert interaction.original.content == "private late answer"
+        assert sent is interaction.original
+
+    asyncio.run(run())
+
+
+def test_ephemeral_answer_does_not_replace_public_working_status():
+    async def run():
+        mod._patch_session()
+        interaction = _Interaction(9)
+        state = _state(interaction, age=11.0)
+        session = UserInstallSession(interaction)
+
+        sent = await session.send("private late answer", ephemeral=True)
+        assert interaction.original.content == mod._STATUS_TEXT
+        assert interaction.channel.sent == []
+        assert interaction.followup.sent[0][0]["ephemeral"] is True
         assert sent is interaction.followup.sent[0][1]
 
     asyncio.run(run())

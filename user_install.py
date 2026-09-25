@@ -680,6 +680,9 @@ class UserInstallMessageAdapter:
         reference: Any | None = None,
         history: list[dict] | None = None,
         note: str = "",
+        search_query: str | None = None,
+        web_mode: str = "auto",
+        mode: str = "ask",
     ):
         self.user_install = True
         self.tool_platform = "user_install"
@@ -706,6 +709,9 @@ class UserInstallMessageAdapter:
         self.reference = reference
         self.user_install_history = list(history or [])
         self.user_install_note = note
+        self.user_install_search_query = str(search_query or "")
+        self.user_install_web_mode = str(web_mode or "auto").strip().lower()
+        self.user_install_mode = str(mode or "ask").strip().lower()
         self.poll = None
         self.activity = None
         self.call = None
@@ -784,7 +790,9 @@ async def handle_user_install_interaction(bot: Any, interaction: Any) -> bool:
         mentions=turn.get("mentions") or [],
         reference=turn.get("reference"),
         history=history,
-        note=note,
+        search_query=turn.get("search_query") or str(turn["prompt"]),
+        web_mode=turn.get("web") or "auto",
+        mode=turn.get("mode") or "ask",
     )
     spawn = getattr(bot, "_spawn_detached", None)
     on_message = getattr(bot, "on_message", None)

@@ -17,6 +17,10 @@ Rows whose original scope cannot be proven remain in SQLite and are hidden from 
 
 The LTM extractor and older REM/consolidation paths can still produce unscoped facts. Those writes are retained but fail closed in ordinary prompts. A later change should attach the originating channel/guild to extraction jobs before making their output retrievable. That needs a decision about which conversation scopes may be consolidated together.
 
+## Prompt boundaries
+
+Retrieved transcripts, profile/entity facts, shared context, and web results are reference material, not instructions or persona overrides. When shared context omits its source, Maxwell must not infer or claim who created or owns it. This changes prompt interpretation only; it does not alter stored memory scope or retention.
+
 ## Retrieval and embeddings
 
 RAG candidate rows are filtered in SQL by requester scope before vectors are loaded and scored. Scope and transcript indexes support the frequent filters. Scoring normalizes the filtered vectors into one NumPy matrix rather than repeatedly searching and decoding all rows per candidate.

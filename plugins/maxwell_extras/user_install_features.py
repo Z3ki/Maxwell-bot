@@ -80,7 +80,7 @@ def modern_user_install_commands() -> list[dict[str, Any]]:
                 },
                 {
                     "name": "web",
-                    "description": "Control web research for this request",
+                    "description": "Auto searches current facts; or choose Search or Do not search",
                     "type": 3,
                     "required": False,
                     "choices": _WEB_CHOICES,
@@ -209,13 +209,18 @@ def _slash_prompt(prompt: str, options: dict[str, Any]) -> str:
         instructions.append(mode_instruction)
     if web == "search":
         instructions.append(
-            "Use web_search before the final answer when the request depends on external "
-            "or current information, and ground those claims in the sources you found."
+            "Search the web before answering this request. Use the sources you find, "
+            "cite their URLs, and say when the results do not verify an answer."
         )
     elif web == "off":
         instructions.append(
             "Do not use web_search or fetch_url for this request; work from the supplied "
             "conversation, attachments, and local context."
+        )
+    else:
+        instructions.append(
+            "In auto web mode, use web_search for current/latest or time-sensitive facts "
+            "before answering. Cite source URLs, and say when current evidence is unavailable."
         )
 
     if detail == "quick":
@@ -278,6 +283,9 @@ def _enhanced_build_turn(interaction: Any, original_build: Any) -> dict[str, Any
                 "incomplete unless Maxwell is also in this server."
             ),
             "command": name,
+            "mode": "research" if name == MESSAGE_FACT_CHECK else "ask",
+            "web": "search" if name == MESSAGE_FACT_CHECK else "auto",
+            "search_query": str(getattr(target, "content", "") or prompt),
         }
 
     turn = original_build(interaction)
@@ -295,10 +303,14 @@ def _enhanced_build_turn(interaction: Any, original_build: Any) -> dict[str, Any
             for key in ("mode", "web", "detail", "context", "language"):
                 if key not in opts and key in defaults:
                     opts[key] = defaults[key]
-        turn["prompt"] = _slash_prompt(str(turn.get("prompt") or ""), opts)
+        raw_prompt = str(turn.get("prompt") or "")
+        turn["search_query"] = raw_prompt
+        turn["prompt"] = _slash_prompt(raw_prompt, opts)
         turn["history_limit"] = _context_limit(interaction)
         mode = str(opts.get("mode") or "ask")
         web = str(opts.get("web") or "auto")
+        turn["mode"] = mode.strip().lower()
+        turn["web"] = web.strip().lower()
         detail = str(opts.get("detail") or "balanced")
         turn["note"] = (
             str(turn.get("note") or "")

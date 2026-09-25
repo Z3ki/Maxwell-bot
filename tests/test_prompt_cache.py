@@ -274,3 +274,42 @@ def test_history_window_start_holds_still_when_a_new_message_arrives():
         }
     )
     assert first_line() == before
+
+
+def test_shared_memory_is_historical_and_never_attributed_without_provenance():
+    memory = FakeMemory()
+
+    async def shared_context(**_kwargs):
+        return [
+            {
+                "content": "Persona configured as Dame Curie",
+                "scope": "channel:123",
+                "importance": 7,
+                "source_user_id": "source-owner-42",
+                "visibility": "shared",
+            }
+        ]
+
+    memory.get_relevant_shared_context = shared_context
+    bot = _bot(memory)
+    bot._control["cross_context_enabled"] = True
+    bot._is_admin = lambda _user_id: False
+    bot._shared_fact_relevant = MaxwellBot._shared_fact_relevant
+    question = (
+        "Why did you say I set the Dame Curie persona in my profile? "
+        "Can you trace the memory source from this channel?"
+    )
+
+    async def run():
+        return await MaxwellBot._build_messages(bot, _message(), question)
+
+    messages = asyncio.run(run())
+    prompt = "\n".join(str(row.get("content") or "") for row in messages)
+    assert "persona come only from these system instructions" in messages[0]["content"]
+    assert "never claim a memory belongs to the current asker" in messages[0][
+        "content"
+    ].lower()
+    assert "Dame Curie" in prompt
+    assert "historical reference only" in prompt
+    assert "never infer who created them" in prompt
+    assert "source-owner-42" not in prompt
