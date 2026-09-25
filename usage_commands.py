@@ -11,7 +11,6 @@ from typing import Any
 
 import user_install as ui
 from message_quota import (
-    FREE_MESSAGE_LIMIT,
     FREE_WINDOW_SECONDS,
     enforced_message_limit,
     enforced_window_seconds,
