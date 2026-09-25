@@ -7192,6 +7192,7 @@ class MaxwellBot(commands.Bot):
             # commands. Unknown prefix-like text remains ordinary chat.
             command_name = self._retired_prefix_command_name(message)
             if command_name:
+                self._mark_request_effect(message)
                 await message.channel.send(
                     "Text-prefix commands are retired. Use `/help` to see Maxwell's slash commands."
                 )

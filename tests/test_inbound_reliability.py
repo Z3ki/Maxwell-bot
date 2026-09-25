@@ -694,7 +694,9 @@ def test_explicit_command_is_checkpointed_before_execution(tmp_path):
 
     message.channel.send = send
     asyncio.run(bot.on_message(message))
-    assert sends == ["nothing to stop"]
+    assert sends == [
+        "Text-prefix commands are retired. Use `/help` to see Maxwell's slash commands."
+    ]
     row = bot._request_state(message)
     assert row["status"] == "suppressed"
     assert row["reason"] == "command"

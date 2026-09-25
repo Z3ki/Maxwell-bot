@@ -138,6 +138,9 @@ def _sanitize_control(control):
         if k not in DEFAULT_CONTROL and k not in DEAD_CONTROL_KEYS
     }
     out.update(DEFAULT_CONTROL)
+    # This setting was retired when site creation stopped using a per-user
+    # quota. Drop it even when it is present in an older control.json.
+    out.pop("create_site_quota_per_user", None)
     for key, default in DEFAULT_CONTROL.items():
         value = control.get(key, default)
         if isinstance(default, bool):
