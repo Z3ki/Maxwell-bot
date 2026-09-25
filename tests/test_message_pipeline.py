@@ -957,3 +957,88 @@ def test_watermark_rejects_nonpositive(tmp_path, bad):
     wm = Watermarks(str(tmp_path / "wm.json"))
     wm.note("c1", bad)
     assert wm.get("c1") is None
+
+
+def test_queue_global_capacity_defers_durably_without_tracking_new_channel(tmp_path):
+    async def scenario():
+        journal = RequestJournal(tmp_path / "requests.sqlite3")
+        started = {cid: asyncio.Event() for cid in ("c1", "c2")}
+        release = asyncio.Event()
+        drops = []
+
+        def on_drop(cid, entry, reason):
+            drops.append((cid, str(entry.message_id), reason))
+            journal.update(
+                entry.message.id, "deferred", reason=f"queue_{reason}"
+            )
+
+        async def handler(message, content):
+            started[message.channel.id].set()
+            await release.wait()
+
+        queue = ReplyQueue(max_outstanding=2, on_drop=on_drop)
+        queue.bind(handler)
+        for mid, cid in ((1, "c1"), (2, "c2")):
+            journal.accept(mid, cid, directed=True)
+            journal.update(mid, "queued", directed=True)
+            assert queue.submit(cid, _msg(mid, cid), "directed", directed=True) == "started"
+        await asyncio.gather(*(event.wait() for event in started.values()))
+
+        journal.accept(3, "c3", directed=True)
+        journal.update(3, "queued", directed=True)
+        assert queue.submit("c3", _msg(3, "c3"), "deferred", directed=True) == "deferred"
+        assert queue.outstanding == 2
+        assert queue.stats()["outstanding"] == 2
+        assert queue.stats()["max_outstanding"] == 2
+        assert queue.stats()["channels_tracked"] == 2
+        assert "c3" not in queue._channels
+        assert journal.get(3)["status"] == "deferred"
+        assert [row["message_id"] for row in journal.pending()] == ["1", "2", "3"]
+        assert drops == [("c3", "3", "deferred")]
+
+        release.set()
+        await asyncio.gather(
+            queue._channels["c1"].pump,
+            queue._channels["c2"].pump,
+        )
+        assert queue.outstanding == 0
+        journal.close()
+        await queue.close()
+
+    asyncio.run(scenario())
+
+
+def test_queue_global_capacity_releases_after_exception_and_cancellation():
+    async def scenario():
+        second_started = asyncio.Event()
+
+        async def handler(message, content):
+            if message.id == 1:
+                raise RuntimeError("synthetic handler failure")
+            if message.id == 2:
+                second_started.set()
+                await asyncio.Event().wait()
+
+        queue = ReplyQueue(max_outstanding=1)
+        queue.bind(handler)
+        assert queue.submit("c1", _msg(1), "failure", directed=True) == "started"
+        for _ in range(100):
+            if queue.outstanding == 0:
+                break
+            await asyncio.sleep(0)
+        assert queue.outstanding == 0
+
+        assert queue.submit("c2", _msg(2, "c2"), "cancel", directed=True) == "started"
+        await second_started.wait()
+        assert queue.outstanding == 1
+        assert queue.cancel_channel("c2") is True
+        for _ in range(100):
+            if queue.outstanding == 0:
+                break
+            await asyncio.sleep(0)
+        assert queue.outstanding == 0
+        assert queue.submit("c3", _msg(3, "c3"), "after release", directed=True) == "started"
+        await queue.close()
+        assert queue.outstanding == 0
+
+    asyncio.run(scenario())

@@ -27,6 +27,7 @@ from rag_memory import (
     EMBED_DIM,
     EMBED_MAX_CHARS,
     LEGACY_EMBED_TRUNCATE,
+    MemoryRequester,
     RAGMemoryManager,
     WEB_RESULT_KIND,
     _split_embed_chunks,
@@ -35,6 +36,13 @@ from rag_memory import (
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _requester():
+    return MemoryRequester(
+        user_id="user-1", channel_id="channel-1", guild_id="guild-1",
+        is_dm=False, channel_is_public=True,
+    )
 
 
 def _unit_vec(seed: int) -> np.ndarray:
@@ -153,7 +161,7 @@ def test_embed_pending_all_does_not_truncate_long_rows(tmp_path, monkeypatch):
 
     seen: list[str] = []
 
-    async def _embed_stub(self, text):
+    async def _embed_stub(self, text, *, background=False):
         seen.append(text)
         return _unit_vec(1)
 
@@ -195,7 +203,7 @@ def test_embed_pending_all_terminates_when_embedding_always_fails(
     class _Runaway(BaseException):
         pass
 
-    async def _embed_fail(self, text):
+    async def _embed_fail(self, text, *, background=False):
         calls["n"] += 1
         if calls["n"] > 200:
             raise _Runaway("infinite loop: _embed_pending_all never terminated")
@@ -226,7 +234,7 @@ def test_embed_pending_all_terminates_when_embedding_always_fails(
 
 
 def _stub_simple_embed(monkeypatch):
-    async def _embed_stub(self, text):
+    async def _embed_stub(self, text, *, background=False):
         return _unit_vec(abs(hash(str(text))) % 10_000)
 
     monkeypatch.setattr(RAGMemoryManager, "_embed", _embed_stub)
@@ -241,6 +249,7 @@ def test_store_web_results_does_not_store_doubled_title(tmp_path, monkeypatch):
         mgr.store_web_results(
             "asyncio",
             [{"title": title, "href": "https://ex.com/a", "body": body}],
+            requester=_requester(),
         )
     )
     assert n == 1
@@ -280,6 +289,7 @@ def test_store_web_results_honors_ttl_days_override(tmp_path, monkeypatch):
         mgr.store_web_results(
             "old query",
             [{"title": "Old", "href": "https://ex.com/old", "body": "stale"}],
+            requester=_requester(),
         )
     )
     # Backdate the row by 3 days.
@@ -296,6 +306,7 @@ def test_store_web_results_honors_ttl_days_override(tmp_path, monkeypatch):
             "new query",
             [{"title": "New", "href": "https://ex.com/new", "body": "fresh"}],
             ttl_days=1,
+            requester=_requester(),
         )
     )
     urls = [
@@ -326,6 +337,7 @@ def test_recall_max_age_days_filters_without_deleting(tmp_path, monkeypatch):
                     "body": "coroutines and tasks",
                 }
             ],
+            requester=_requester(),
         )
     )
     import time as _t
@@ -336,7 +348,10 @@ def test_recall_max_age_days_filters_without_deleting(tmp_path, monkeypatch):
         (_t.time() - 3 * 86400, WEB_RESULT_KIND),
     )
 
-    _run(mgr.recall_web_results("asyncio tasks", top_k=4, max_age_days=1))
+    _run(mgr.recall_web_results(
+        "asyncio tasks", requester=_requester(), guild_id="guild-1",
+        top_k=4, max_age_days=1,
+    ))
 
     remaining = mgr._db.execute(
         "SELECT COUNT(*) AS c FROM vectors WHERE kind=?", (WEB_RESULT_KIND,)
@@ -358,9 +373,119 @@ def test_rag_query_timeout_opens_short_circuit(tmp_path, monkeypatch):
     monkeypatch.setattr(rag_memory, "RAG_QUERY_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr(rag_memory, "RAG_QUERY_FAILURE_COOLDOWN_SECONDS", 5.0)
 
-    first = _run(mgr.rag_search("slow query", kinds=["ltm"]))
-    second = _run(mgr.rag_search("slow query", kinds=["message"]))
+    first = _run(mgr.rag_search("slow query", kinds=["ltm"], requester=_requester()))
+    second = _run(mgr.rag_search("slow query", kinds=["message"], requester=_requester()))
 
     assert first == []
     assert second == []
     assert calls["count"] == 1
+
+
+def test_embed_pending_batch_reuses_manager_http_session(tmp_path, monkeypatch):
+    mgr = RAGMemoryManager(str(tmp_path))
+    for i in range(2):
+        mgr._db.execute(
+            "INSERT INTO vectors (id, kind, content, embedding, created_at, "
+            " updated_at, timestamp, channel_id, guild_id, author, author_id, "
+            " source, content_hash, metadata, scope, importance, parent_id, "
+            " chunk_index, downvotes) "
+            "VALUES (?, 'ltm', ?, NULL, 0, 0, '', '', '', '', '', '', '', "
+            " '{}', '', 0, '', 0, 0)",
+            (f"batch-{i}", f"batch content {i}"),
+        )
+
+    vector = _unit_vec(1).tolist()
+
+    class _Response:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def json(self):
+            return {"embeddings": [vector]}
+
+    class _Session:
+        def __init__(self):
+            self.calls = 0
+
+        def post(self, *_args, **_kwargs):
+            self.calls += 1
+            return _Response()
+
+    session = _Session()
+    manager_sessions = {"calls": 0}
+
+    async def _get_shared_session():
+        manager_sessions["calls"] += 1
+        return session
+
+    def _forbid_new_session(**_kwargs):
+        raise AssertionError("batch migration must reuse the manager session")
+
+    monkeypatch.setattr(mgr, "_get_embed_session", _get_shared_session)
+    monkeypatch.setattr(rag_memory.aiohttp, "ClientSession", _forbid_new_session)
+
+    _run(mgr._embed_pending_all(batch_size=1))
+
+    assert manager_sessions["calls"] == 2
+    assert session.calls == 2
+    rows = mgr._db.execute(
+        "SELECT embedding FROM vectors WHERE id LIKE 'batch-%' ORDER BY id"
+    ).fetchall()
+    assert len(rows) == 2
+    assert all(row["embedding"] is not None for row in rows)
+    mgr._db.close()
+
+
+def test_interactive_embedding_overtakes_queued_background_work(tmp_path):
+    async def run():
+        mgr = RAGMemoryManager(str(tmp_path))
+        order = []
+        active_started = asyncio.Event()
+        background_waiting = asyncio.Event()
+        interactive_waiting = asyncio.Event()
+        release_active = asyncio.Event()
+
+        async def active_background():
+            async with mgr._embed_slot(background=True):
+                order.append("active background started")
+                active_started.set()
+                await release_active.wait()
+                order.append("active background finished")
+
+        async def queued_background():
+            background_waiting.set()
+            async with mgr._embed_slot(background=True):
+                order.append("queued background")
+
+        async def interactive():
+            interactive_waiting.set()
+            async with mgr._embed_slot(background=False):
+                order.append("interactive")
+
+        active = asyncio.create_task(active_background())
+        await active_started.wait()
+        queued = asyncio.create_task(queued_background())
+        await background_waiting.wait()
+        query = asyncio.create_task(interactive())
+        await interactive_waiting.wait()
+
+        # The event is set immediately before the interactive task waits on
+        # the occupied slot, so its waiter registration precedes this wakeup.
+        release_active.set()
+        await asyncio.gather(active, queued, query)
+
+        assert order == [
+            "active background started",
+            "active background finished",
+            "interactive",
+            "queued background",
+        ]
+        await mgr.flush()
+        mgr._db.close()
+
+    _run(run())

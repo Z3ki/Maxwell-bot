@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import hashlib
 import json
 import logging
 import re
@@ -253,9 +254,22 @@ class KnowledgeGraph:
                 dst TEXT NOT NULL,
                 props TEXT NOT NULL DEFAULT '{}',
                 updated_at REAL NOT NULL,
+                scope TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY (src, rel, dst)
             )
             """
+        )
+        edge_columns = {
+            row[1] for row in self._db.execute("PRAGMA table_info(graph_edges)")
+        }
+        if "scope" not in edge_columns:
+            # Old edges have no dependable source context. Keep them stored but
+            # hide them from prompts until an administrator reviews them.
+            self._db.execute(
+                "ALTER TABLE graph_edges ADD COLUMN scope TEXT NOT NULL DEFAULT ''"
+            )
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_edges_scope ON graph_edges(scope)"
         )
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_graph_nodes_kind ON graph_nodes(kind)"
@@ -288,7 +302,10 @@ class KnowledgeGraph:
         )
         return nid
 
-    def upsert_edge(self, src: str, rel: str, dst: str, props: dict | None = None) -> None:
+    def upsert_edge(
+        self, src: str, rel: str, dst: str, props: dict | None = None, *,
+        scope: str = "",
+    ) -> None:
         src_id, dst_id = str(src or "").strip(), str(dst or "").strip()
         relation = str(rel or "").strip().upper()
         if not src_id or not dst_id or relation not in ALLOWED_RELS:
@@ -296,13 +313,14 @@ class KnowledgeGraph:
         payload = json.dumps(props or {}, ensure_ascii=False)
         self._db.execute(
             """
-            INSERT INTO graph_edges (src, rel, dst, props, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO graph_edges (src, rel, dst, props, updated_at, scope)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(src, rel, dst) DO UPDATE SET
                 props=excluded.props,
-                updated_at=excluded.updated_at
+                updated_at=excluded.updated_at,
+                scope=excluded.scope
             """,
-            (src_id, relation, dst_id, payload, _now()),
+            (src_id, relation, dst_id, payload, _now(), str(scope or "")),
         )
 
     def drop_site(self, slug: str) -> None:
@@ -351,7 +369,7 @@ class KnowledgeGraph:
             self.upsert_node(
                 user_id, "user", _norm_name(owner_name) or owner_id, {"user_id": owner_id}
             )
-            self.upsert_edge(user_id, "OWNS", site_id)
+            self.upsert_edge(user_id, "OWNS", site_id, scope="public")
 
         routes: list[tuple[str, str]] = []
         calls: list[str] = []
@@ -403,7 +421,7 @@ class KnowledgeGraph:
             seen_routes.add(key)
             rid = f"route:{slug}:{method}:{path}"[:160]
             self.upsert_node(rid, "route", f"{method} {path}", {"slug": slug})
-            self.upsert_edge(site_id, "EXPOSES", rid)
+            self.upsert_edge(site_id, "EXPOSES", rid, scope="public")
 
         seen_calls: set[str] = set()
         for path in calls:
@@ -412,12 +430,12 @@ class KnowledgeGraph:
             seen_calls.add(path)
             rid = f"route:{slug}:*:{path}"[:160]
             self.upsert_node(rid, "route", path, {"slug": slug, "from": "frontend"})
-            self.upsert_edge(site_id, "CALLS", rid)
+            self.upsert_edge(site_id, "CALLS", rid, scope="public")
 
         for rel in files[:MAX_SITE_FILES]:
             fid = f"file:{slug}:{rel}"[:160]
             self.upsert_node(fid, "file", rel, {"slug": slug})
-            self.upsert_edge(site_id, "HAS_FILE", fid)
+            self.upsert_edge(site_id, "HAS_FILE", fid, scope="public")
 
         return self.summarize_site(slug)
 
@@ -453,20 +471,42 @@ class KnowledgeGraph:
             return ""
         return "; ".join(bits)
 
+    @staticmethod
+    def _requester_scope(requester) -> str:
+        if getattr(requester, "is_dm", False):
+            return f"dm:{requester.user_id}:{requester.channel_id}"
+        return f"channel:{requester.guild_id}:{requester.channel_id}"
+
+    @staticmethod
+    def _scope_prefix(scope: str) -> str:
+        digest = hashlib.sha256(scope.encode("utf-8")).hexdigest()[:16]
+        return f"chat-{digest}"
+
     def ingest_triples(
         self,
         triples: Iterable[Any],
         *,
         speaker_id: str = "",
         speaker_name: str = "",
+        requester=None,
     ) -> int:
-        """Store whitelist triples from the context extractor. Returns count."""
+        """Store admin-authorized triples inside their exact source context."""
+        from rag_memory import MemoryRequester
+
+        if (
+            not isinstance(requester, MemoryRequester)
+            or not requester.valid
+            or not requester.is_admin
+        ):
+            return 0
+        scope = self._requester_scope(requester)
+        scope_prefix = self._scope_prefix(scope)
         if speaker_id:
             self.upsert_node(
-                f"user:{speaker_id}",
+                f"{scope_prefix}:user:{speaker_id}",
                 "user",
                 _norm_name(speaker_name) or speaker_id,
-                {"user_id": speaker_id},
+                {"user_id": speaker_id, "source_scope": scope},
             )
         stored = 0
         speaker_l = str(speaker_name or "").strip().lower()
@@ -482,20 +522,30 @@ class KnowledgeGraph:
                 continue
             if subj.lower() in STOP_NAMES or obj.lower() in STOP_NAMES:
                 continue
-            src = self._node_for_label(subj, speaker_id, speaker_l)
-            dst = self._node_for_label(obj, speaker_id, speaker_l)
+            src = self._node_for_label(
+                subj, speaker_id, speaker_l, scope_prefix, scope
+            )
+            dst = self._node_for_label(
+                obj, speaker_id, speaker_l, scope_prefix, scope
+            )
             if not src or not dst or src == dst:
                 continue
-            self.upsert_edge(src, rel, dst)
+            self.upsert_edge(src, rel, dst, scope=scope)
             stored += 1
         return stored
 
-    def _node_for_label(self, label: str, speaker_id: str, speaker_l: str) -> str:
+    def _node_for_label(
+        self, label: str, speaker_id: str, speaker_l: str,
+        scope_prefix: str, scope: str,
+    ) -> str:
         if speaker_id and label.lower() == speaker_l:
-            return f"user:{speaker_id}"
+            return f"{scope_prefix}:user:{speaker_id}"
         if label.isdigit() and len(label) >= 15:
-            nid = f"user:{label}"
-            self.upsert_node(nid, "user", label, {"user_id": label})
+            nid = f"{scope_prefix}:user:{label}"
+            self.upsert_node(
+                nid, "user", label,
+                {"user_id": label, "source_scope": scope},
+            )
             return nid
         slug = re.sub(r"[^a-z0-9-]", "", label.lower())[:30]
         if slug:
@@ -504,12 +554,14 @@ class KnowledgeGraph:
             ).fetchone()
             if row:
                 return str(row["id"])
-        nid = _slug_id("thing", label)
-        self.upsert_node(nid, "thing", label)
+        nid = f"{scope_prefix}:{_slug_id('thing', label)}"
+        self.upsert_node(nid, "thing", label, {"source_scope": scope})
         return nid
 
-    def find_anchors(self, query: str, user_id: str = "") -> list[str]:
-        """Node ids to expand from: the speaker plus anything named in ``query``."""
+    def find_anchors(
+        self, query: str, user_id: str = "", *, scope_prefix: str = ""
+    ) -> list[str]:
+        """Find exact-context chat nodes plus public site nodes mentioned in query."""
         ids: list[str] = []
         seen: set[str] = set()
 
@@ -519,39 +571,60 @@ class KnowledgeGraph:
                 ids.append(nid)
 
         if user_id:
-            add(f"user:{user_id}")
+            add(f"user:{user_id}")  # Public site ownership links only.
+            if scope_prefix:
+                add(f"{scope_prefix}:user:{user_id}")
         text = str(query or "")
         for match in SLUG_IN_TEXT_RE.finditer(text.lower()):
             token = match.group(1)
             if token in STOP_NAMES:
                 continue
             row = self._db.execute(
-                "SELECT id FROM graph_nodes WHERE id=? OR lower(name)=? LIMIT 1",
+                "SELECT id FROM graph_nodes WHERE id=? OR "
+                "(id LIKE 'site:%' AND lower(name)=?) LIMIT 1",
                 (f"site:{token}", token),
             ).fetchone()
             if row:
                 add(str(row["id"]))
-            else:
+            elif scope_prefix:
                 row = self._db.execute(
                     "SELECT id FROM graph_nodes WHERE id=? LIMIT 1",
-                    (_slug_id("thing", token),),
+                    (f"{scope_prefix}:{_slug_id('thing', token)}",),
                 ).fetchone()
                 if row:
                     add(str(row["id"]))
-        # Longer unique names (display names, titles) via substring, bounded.
-        tokens = [t for t in re.findall(r"[A-Za-z0-9][A-Za-z0-9_\-]{2,}", text) if t.lower() not in STOP_NAMES]
+        # Limit substring matches to the current chat scope and public site graph.
+        tokens = [
+            token
+            for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_\-]{2,}", text)
+            if token.lower() not in STOP_NAMES
+        ]
+        node_scope = f"{scope_prefix}:%" if scope_prefix else "__no_chat_scope__"
         for token in tokens[:8]:
-            safe_token = token.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             rows = self._db.execute(
-                "SELECT id FROM graph_nodes WHERE name LIKE ? ESCAPE '\\' LIMIT 3",
-                (f"%{safe_token}%",),
+                "SELECT id FROM graph_nodes WHERE "
+                "(id LIKE ? OR id LIKE 'site:%' OR id LIKE 'route:%' OR id LIKE 'file:%') "
+                "AND instr(lower(name), lower(?)) > 0 LIMIT 3",
+                (node_scope, token),
             ).fetchall()
             for row in rows:
                 add(str(row["id"]))
         return ids[:12]
 
-    def neighbors(self, node_ids: list[str], *, hops: int = 2, limit: int = 40) -> list[tuple[str, str, str, str, str]]:
-        """Return ``(src_id, src_name, rel, dst_id, dst_name)`` within ``hops``."""
+
+    def neighbors(
+        self, node_ids: list[str], *, hops: int = 2, limit: int = 40, requester=None
+    ) -> list[tuple[str, str, str, str, str]]:
+        """Return public site edges and chat edges from this exact context."""
+        from rag_memory import MemoryRequester
+
+        if (
+            not isinstance(requester, MemoryRequester)
+            or not requester.valid
+            or not requester.is_admin
+        ):
+            return []
+        scope = self._requester_scope(requester)
         frontier = [n for n in node_ids if n]
         seen_nodes = set(frontier)
         edges: list[tuple[str, str, str, str, str]] = []
@@ -567,9 +640,10 @@ class KnowledgeGraph:
                 FROM graph_edges e
                 JOIN graph_nodes ns ON ns.id = e.src
                 JOIN graph_nodes nd ON nd.id = e.dst
-                WHERE e.src IN ({placeholders}) OR e.dst IN ({placeholders})
+                WHERE (e.src IN ({placeholders}) OR e.dst IN ({placeholders}))
+                  AND (e.scope='public' OR e.scope=?)
                 """,
-                (*frontier, *frontier),
+                (*frontier, *frontier, scope),
             ).fetchall()
             for row in rows:
                 key = (str(row["src"]), str(row["rel"]), str(row["dst"]))
@@ -594,15 +668,24 @@ class KnowledgeGraph:
             frontier = nxt
         return edges
 
-    def prompt_block(self, *, query: str, user_id: str = "", budget: int = 800) -> str:
-        """Crisp graph triples for the system prompt, or ``""``."""
+    def prompt_block(
+        self, *, query: str, user_id: str = "", budget: int = 800, requester=None
+    ) -> str:
+        """Crisp graph triples for an explicitly authorized requester."""
+        from rag_memory import MemoryRequester
+        if not isinstance(requester, MemoryRequester) or not requester.valid or not requester.is_admin:
+            return ""
         budget = max(0, int(budget or 0))
         if budget < 80:
             return ""
-        anchors = self.find_anchors(query, user_id)
+        scope = self._requester_scope(requester)
+        scope_prefix = self._scope_prefix(scope)
+        anchors = self.find_anchors(query, user_id, scope_prefix=scope_prefix)
         if not anchors:
             return ""
-        edges = self.neighbors(anchors, hops=2, limit=MAX_PROMPT_EDGES)
+        edges = self.neighbors(
+            anchors, hops=2, limit=MAX_PROMPT_EDGES, requester=requester
+        )
         if not edges:
             return ""
         lines = [

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from tooling import helpers as _helpers
 from tools import Tool
+from rag_memory import MemoryRequester
 
 # Mechanical split: the original classes used the bot_tools module globals.
 # Bind every helper/name here so execute() bodies keep working unchanged.
@@ -109,17 +110,29 @@ class WebSearchTool(Tool):
                     and memory is not None
                     and hasattr(memory, "store_web_results")
                 ):
+                    requester = None
                     guild_id = ""
-                    if message is not None and getattr(message, "guild", None):
-                        guild_id = str(message.guild.id)
+                    if message is not None:
+                        checker = getattr(self.bot, "_is_admin", None)
+                        try:
+                            is_admin = bool(
+                                checker(getattr(message.author, "id", None))
+                            ) if callable(checker) else False
+                        except Exception:
+                            is_admin = False
+                        requester = MemoryRequester.from_message(
+                            message, is_admin=is_admin
+                        )
+                        guild_id = requester.guild_id
                     n = await memory.store_web_results(
                         query=query,
                         results=list(hits),
                         guild_id=guild_id,
+                        requester=requester,
                     )
                     if n:
                         logger.info(
-                            f"web_search stored {n} results for query={query!r}"
+                            "web_search stored %s scoped result(s)", n
                         )
             except Exception as e:
                 logger.debug(f"web_search RAG persistence skipped: {e}")

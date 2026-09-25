@@ -5,7 +5,7 @@ from knowledge_graph import (
     extract_frontend_api_paths,
     extract_python_routes,
 )
-from rag_memory import RAGMemoryManager
+from rag_memory import MemoryRequester, RAGMemoryManager
 
 
 FLASK_APP = """
@@ -46,6 +46,15 @@ axios.get('/api/items')
 const other = '/bot/demo/api/telemetry'
 </script>
 """
+
+
+
+
+def _admin():
+    return MemoryRequester(
+        user_id="owner", channel_id="admin-channel", guild_id="g1",
+        is_dm=False, is_admin=True, channel_is_public=True,
+    )
 
 
 def test_extracts_flask_and_fastapi_routes():
@@ -89,7 +98,9 @@ def test_site_index_is_queryable_without_embeddings(tmp_path):
     )
     assert "GET /api/score" in note
     assert "frontend calls" in note
-    block = mgr.graph.prompt_block(query="fix demo telemetry", user_id="111")
+    block = mgr.graph.prompt_block(
+        query="fix demo telemetry", user_id="111", requester=_admin()
+    )
     assert "Z3ki" in block
     assert "OWNS" in block
     assert "EXPOSES" in block or "CALLS" in block
@@ -107,12 +118,87 @@ def test_chat_triples_link_a_person_to_a_project(tmp_path):
         ],
         speaker_id="111",
         speaker_name="Z3ki",
+        requester=_admin(),
     )
     assert n == 2
-    block = mgr.graph.prompt_block(query="LeakBot config", user_id="111")
+    block = mgr.graph.prompt_block(
+        query="LeakBot config", user_id="111", requester=_admin()
+    )
     assert "OWNS" in block
     assert "USES" in block
     assert "EATS" not in block
+
+
+
+def test_chat_triples_are_limited_to_their_source_channel(tmp_path):
+    mgr = RAGMemoryManager(str(tmp_path))
+    source = MemoryRequester(
+        user_id="owner", channel_id="private-one", guild_id="g1",
+        is_dm=False, is_admin=True, channel_is_public=False,
+    )
+    mgr.graph.ingest_triples(
+        [{"s": "Owner", "rel": "WORKS_ON", "o": "SecretProject"}],
+        speaker_id="owner",
+        speaker_name="Owner",
+        requester=source,
+    )
+    same_channel = mgr.graph.prompt_block(
+        query="SecretProject", user_id="owner", requester=source
+    )
+    assert "SecretProject" in same_channel
+
+    other_channel = MemoryRequester(
+        user_id="owner", channel_id="public", guild_id="g1",
+        is_dm=False, is_admin=True, channel_is_public=True,
+    )
+    other_guild = MemoryRequester(
+        user_id="owner", channel_id="same-id", guild_id="g2",
+        is_dm=False, is_admin=True, channel_is_public=True,
+    )
+    assert mgr.graph.prompt_block(
+        query="SecretProject", user_id="owner", requester=other_channel
+    ) == ""
+    assert mgr.graph.prompt_block(
+        query="SecretProject", user_id="owner", requester=other_guild
+    ) == ""
+
+
+
+def test_dm_graph_facts_do_not_reach_a_guild_prompt(tmp_path):
+    mgr = RAGMemoryManager(str(tmp_path))
+    dm = MemoryRequester(
+        user_id="owner", channel_id="dm-owner", guild_id="",
+        is_dm=True, is_admin=True, channel_is_public=False,
+    )
+    mgr.graph.ingest_triples(
+        [{"s": "Owner", "rel": "PREFERS", "o": "PrivateAlias"}],
+        speaker_id="owner",
+        speaker_name="Owner",
+        requester=dm,
+    )
+    assert "PrivateAlias" in mgr.graph.prompt_block(
+        query="PrivateAlias", user_id="owner", requester=dm
+    )
+    guild = MemoryRequester(
+        user_id="owner", channel_id="guild-channel", guild_id="g1",
+        is_dm=False, is_admin=True, channel_is_public=True,
+    )
+    assert mgr.graph.prompt_block(
+        query="PrivateAlias", user_id="owner", requester=guild
+    ) == ""
+
+
+def test_legacy_unscoped_graph_edges_stay_hidden(tmp_path):
+    mgr = RAGMemoryManager(str(tmp_path))
+    mgr.graph.upsert_node("user:old", "user", "OldUser")
+    mgr.graph.upsert_node("thing:legacy", "thing", "LegacySecret")
+    mgr._db.execute(
+        "INSERT INTO graph_edges (src, rel, dst, props, updated_at, scope) "
+        "VALUES ('user:old', 'OWNS', 'thing:legacy', '{}', 0, '')"
+    )
+    assert mgr.graph.prompt_block(
+        query="LegacySecret", user_id="old", requester=_admin()
+    ) == ""
 
 
 def test_prompt_block_respects_budget(tmp_path):
@@ -121,9 +207,14 @@ def test_prompt_block_respects_budget(tmp_path):
         [{"s": "Z3ki", "rel": "OWNS", "o": "Thing"}],
         speaker_id="1",
         speaker_name="Z3ki",
+        requester=_admin(),
     )
-    assert mgr.graph.prompt_block(query="Thing", user_id="1", budget=20) == ""
-    assert "OWNS" in mgr.graph.prompt_block(query="Thing", user_id="1", budget=400)
+    assert mgr.graph.prompt_block(
+        query="Thing", user_id="1", budget=20, requester=_admin()
+    ) == ""
+    assert "OWNS" in mgr.graph.prompt_block(
+        query="Thing", user_id="1", budget=400, requester=_admin()
+    )
 
 
 def test_refresh_site_noops_without_memory():

@@ -23,6 +23,7 @@ import numpy as np
 
 from rag_memory import (
     EMBED_DIM,
+    MemoryRequester,
     RAGMemoryManager,
     WEB_RESULT_DEFAULT_TTL_DAYS,
     WEB_RESULT_KIND,
@@ -31,6 +32,16 @@ from rag_memory import (
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _requester(
+    user="user-1", channel="channel-1", guild="guild-1", *,
+    is_dm=False, public=True,
+):
+    return MemoryRequester(
+        user_id=user, channel_id=channel, guild_id=guild,
+        is_dm=is_dm, channel_is_public=public,
+    )
 
 
 def _stub_embed(monkeypatch):
@@ -112,7 +123,8 @@ def test_store_web_results_persists_with_correct_kind(tmp_path, monkeypatch):
             },
         ]
         n = await mgr.store_web_results(
-            query="test query", results=results, max_per_query=3
+            query="test query", results=results, max_per_query=3, guild_id="guild-1",
+            requester=_requester()
         )
         assert n == 2, f"expected 2 inserts, got {n}"
 
@@ -143,8 +155,8 @@ def test_store_web_results_dedupes_by_url(tmp_path, monkeypatch):
             },
         ]
         # First call inserts, second is a no-op.
-        n1 = await mgr.store_web_results(query="first", results=results)
-        n2 = await mgr.store_web_results(query="second", results=results)
+        n1 = await mgr.store_web_results(query="first", results=results, guild_id="guild-1", requester=_requester())
+        n2 = await mgr.store_web_results(query="second", results=results, guild_id="guild-1", requester=_requester())
         assert n1 == 1
         assert n2 == 0
         rows = mgr._db.execute(
@@ -173,10 +185,15 @@ def test_recall_web_results_finds_relevant(tmp_path, monkeypatch):
                 "body": "Best pans for searing.",
             },
         ]
-        await mgr.store_web_results(query="asyncio tutorial", results=results)
+        await mgr.store_web_results(
+            query="asyncio tutorial", results=results, guild_id="guild-1",
+            requester=_requester()
+        )
         # Query for asyncio topic → first hit should be on top.
         hits = await mgr.recall_web_results(
             query="async python programming",
+            requester=_requester(),
+            guild_id="guild-1",
             top_k=5,
             min_similarity=0.20,
         )
@@ -204,7 +221,10 @@ def test_recall_web_results_respects_ttl(tmp_path, monkeypatch):
                 "body": "Ancient content.",
             },
         ]
-        await mgr.store_web_results(query="stale", results=results)
+        await mgr.store_web_results(
+            query="stale", results=results, guild_id="guild-1",
+            requester=_requester()
+        )
         # Backdate the row to 30 days ago.
         old_ts = time.time() - 30 * 86400.0
         mgr._db.execute(
@@ -214,6 +234,8 @@ def test_recall_web_results_respects_ttl(tmp_path, monkeypatch):
         # Recall with default TTL should prune and return empty.
         hits = await mgr.recall_web_results(
             query="stale",
+            requester=_requester(),
+            guild_id="guild-1",
             top_k=5,
             min_similarity=0.10,
             max_age_days=WEB_RESULT_DEFAULT_TTL_DAYS,
@@ -246,7 +268,8 @@ def test_store_caps_at_max_rows(tmp_path, monkeypatch):
             for i in range(max_rows + 5)
         ]
         n = await mgr.store_web_results(
-            query="bulk", results=results, max_per_query=max_rows + 5
+            query="bulk", results=results, max_per_query=max_rows + 5,
+            requester=_requester()
         )
         assert n == max_rows + 5
         # Prune down to max_rows. Caller's helper is _prune_web_results_locked.
@@ -303,6 +326,10 @@ def test_embed_chunks_long_content(tmp_path, monkeypatch):
     class _FakeSession:
         def __init__(self):
             self.call_count = 0
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
 
         def post(self, url, json=None, **kwargs):
             text = (json or {}).get("input", "")
@@ -319,7 +346,7 @@ def test_embed_chunks_long_content(tmp_path, monkeypatch):
             return False
 
     fake = _FakeSession()
-    monkeypatch.setattr("aiohttp.ClientSession", lambda: fake)
+    monkeypatch.setattr("aiohttp.ClientSession", lambda **kwargs: fake)
 
     async def run():
         mgr = RAGMemoryManager(str(tmp_path))
@@ -343,6 +370,8 @@ def test_embed_chunks_long_content(tmp_path, monkeypatch):
         assert len(v_long) == EMBED_DIM
         # Multi-chunk should have called the API more than once.
         assert fake.call_count >= 2
+        await mgr.flush()
+        mgr._db.close()
 
     _run(run())
 
@@ -364,7 +393,7 @@ def test_store_skips_results_without_url(tmp_path, monkeypatch):
                 "body": "Body.",
             },
         ]
-        n = await mgr.store_web_results(query="mixed", results=results, max_per_query=3)
+        n = await mgr.store_web_results(query="mixed", results=results, max_per_query=3, requester=_requester())
         assert n == 1
         rows = mgr._db.execute(
             "SELECT COUNT(*) AS c FROM vectors WHERE kind=?",
@@ -373,3 +402,71 @@ def test_store_skips_results_without_url(tmp_path, monkeypatch):
         assert rows["c"] == 1
 
     _run(run())
+
+def test_private_web_results_are_channel_scoped(tmp_path, monkeypatch):
+    _stub_embed(monkeypatch)
+
+    async def run():
+        mgr = RAGMemoryManager(str(tmp_path))
+        result = [{
+            "title": "private project search",
+            "href": "https://example.com/private-project",
+            "body": "Private channel query context.",
+        }]
+        private = _requester(channel="private-channel", public=False)
+        assert await mgr.store_web_results(
+            query="private project query",
+            results=result,
+            guild_id="guild-1",
+            requester=private,
+        ) == 1
+
+        same_channel = await mgr.recall_web_results(
+            "private project search",
+            requester=private,
+            guild_id="guild-1",
+            min_similarity=0.1,
+        )
+        other_channel = await mgr.recall_web_results(
+            "private project search",
+            requester=_requester(channel="public-channel", public=True),
+            guild_id="guild-1",
+            min_similarity=0.1,
+        )
+        assert len(same_channel) == 1
+        assert other_channel == []
+
+    _run(run())
+
+
+def test_dm_web_results_are_not_retrievable_from_guild(tmp_path, monkeypatch):
+    _stub_embed(monkeypatch)
+
+    async def run():
+        mgr = RAGMemoryManager(str(tmp_path))
+        dm = _requester(
+            user="user-1", channel="dm-1", guild="", is_dm=True, public=False
+        )
+        results = [{
+            "title": "private account search",
+            "href": "https://example.com/private-account",
+            "body": "DM search result.",
+        }]
+        assert await mgr.store_web_results(
+            query="private account query", results=results, requester=dm
+        ) == 1
+        guild = _requester(user="user-1", channel="guild-channel")
+        assert await mgr.recall_web_results(
+            "private account search",
+            requester=guild,
+            guild_id="guild-1",
+            min_similarity=0.1,
+        ) == []
+        assert len(await mgr.recall_web_results(
+            "private account search",
+            requester=dm,
+            min_similarity=0.1,
+        )) == 1
+
+    _run(run())
+

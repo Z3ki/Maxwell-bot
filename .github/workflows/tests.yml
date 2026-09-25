@@ -27,3 +27,12 @@ jobs:
       - run: ruff check .
       - run: bash -n install.sh setup.sh docker/entrypoint.sh
       - run: python -m pytest
+      - name: Benchmark scoped memory retrieval
+        if: matrix.python-version == '3.12'
+        run: python scripts/benchmark_memory_scaling.py --guilds 100 500 1000 --facts-per-guild 5 --iterations 10
+      - name: Benchmark bounded inbound admission
+        if: matrix.python-version == '3.12'
+        run: python scripts/benchmark_inbound_queue.py --servers 100 500 1000 --iterations 10 --max-outstanding 256
+      - name: Benchmark pending embedding recovery scan
+        if: matrix.python-version == '3.12'
+        run: python scripts/benchmark_embedding_backlog.py --rows 500000 --pending 1000 --iterations 10

@@ -2491,15 +2491,25 @@ async def memory_add(request):
     new_id = _uuid.uuid4().hex
     ts = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    metadata = json.dumps(
+        {
+            "visibility": "public",
+            "public_approved": True,
+            "source_kind": "operator_public",
+            "source_user_id": "operator",
+            "source_channel_id": "operator-api",
+        },
+        ensure_ascii=False,
+    )
     try:
         _rag_exec(
             "INSERT INTO vectors "
             "(id, kind, channel_id, guild_id, author, author_id, source, content, "
             "content_hash, embedding, metadata, scope, importance, parent_id, "
             "chunk_index, downvotes, timestamp, created_at) "
-            "VALUES (?, 'ltm', '', '', '', '', 'user', ?, ?, NULL, '{}', 'global', "
+            "VALUES (?, 'ltm', '', '', '', '', 'user', ?, ?, NULL, ?, 'global', "
             "5, '', 0, 0, ?, ?)",
-            (new_id, content, content_hash, ts, time.time()),
+            (new_id, content, content_hash, metadata, ts, time.time()),
         )
     except sqlite3.Error as e:
         return _json_response({"error": f"rag db: {e}"}, 500)
