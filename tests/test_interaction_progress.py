@@ -230,7 +230,7 @@ def test_ephemeral_working_status_is_not_replied_to_publicly():
         mod._patch_session()
         interaction = _Interaction(8)
         interaction.original.flags.ephemeral = True
-        state = _state(interaction, age=11.0)
+        _state(interaction, age=11.0)
         session = UserInstallSession(interaction)
 
         sent = await session.send("private late answer")
@@ -246,7 +246,7 @@ def test_ephemeral_answer_does_not_replace_public_working_status():
     async def run():
         mod._patch_session()
         interaction = _Interaction(9)
-        state = _state(interaction, age=11.0)
+        _state(interaction, age=11.0)
         session = UserInstallSession(interaction)
 
         sent = await session.send("private late answer", ephemeral=True)

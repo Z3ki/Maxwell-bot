@@ -15868,6 +15868,8 @@ class MaxwellBot(commands.Bot):
                 # Invites can target another server the asker has perm in.
                 if tool == "create_invite":
                     continue
+                if tool not in allowed_mod:
+                    names.discard(tool)
         if (
             str(getattr(message, "user_install_web_mode", "auto") or "auto")
             .strip()
