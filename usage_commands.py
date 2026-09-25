@@ -31,8 +31,26 @@ _COMMAND_META = {
 
 HELP_COMMAND = {
     "name": "help",
-    "description": "Show Maxwell commands.",
+    "description": "Browse Maxwell commands by category.",
     **_COMMAND_META,
+    "options": [
+        {
+            "name": "topic",
+            "description": "Show commands for one topic",
+            "type": 3,
+            "required": False,
+            "choices": [
+                {"name": "Getting started", "value": "start"},
+                {"name": "Personal settings", "value": "personal"},
+                {"name": "AI and games", "value": "creative"},
+                {"name": "Server settings", "value": "server"},
+                {"name": "Memory", "value": "memory"},
+                {"name": "Jobs and voice", "value": "tools"},
+                {"name": "Moderation", "value": "moderation"},
+                {"name": "Developer tools", "value": "developer"},
+            ],
+        },
+    ],
 }
 USAGE_COMMAND = {
     "name": "usage",
@@ -53,18 +71,96 @@ def discovery_enabled(control: dict | None) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def command_help_text(*, discovery: bool) -> str:
-    lines = [
-        "Maxwell slash commands:",
-        "AI: `/maxwell`, `/image`, `/chess`, `/checkers`, `/moderation`, `/memory`, `/reminder`.",
-        "Personal: `/config` for your defaults; `/personality` for your reply-style preference; `/usage` for your allowance.",
-        "Server settings: `/config scope:server` (Manage Server or configured Maxwell admin), `/progress`, `/ticket-greetings`, `/solo`, `/server-prompt`, `/clear-server-prompt`.",
-        "Memory: `/memory`, `/context`, `/clear-memory`, `/negative-memory`, `/downvote`, `/summarize-memory`.",
-        "Operations: `/stop`, `/jobs`, `/job`, `/rem`, `/autonomy`, `/sleep`, `/wake`, `/voice`, `/plugins`, `/admin`, `/blacklist`, `/unblacklist`.",
-        "Restricted: `/diagnostics` and `/maintenance` are available only to configured Maxwell developers.",
-    ]
+_HELP_TOPICS = {
+    "start": (
+        "Getting started",
+        [
+            "`/maxwell prompt:<your question>` — ask Maxwell anything.",
+            "`/help` — browse this list by topic.",
+            "`/usage` — check your current message allowance.",
+        ],
+    ),
+    "personal": (
+        "Personal settings",
+        [
+            "`/config` — open the private settings menu for response mode, research, detail, context, language, and reply style.",
+            "`/personality` — view or edit your reply-style preference directly.",
+        ],
+    ),
+    "creative": (
+        "AI and games",
+        [
+            "`/image prompt:<request>` — create or edit an image; attach an image to use it as a reference.",
+            "`/chess prompt:<request>` and `/checkers prompt:<request>` — start or play a game.",
+            "`/reminder prompt:<request>` — create, inspect, or cancel a reminder.",
+            "`/memory prompt:<request>` — ask Maxwell to recall or manage scoped memory.",
+        ],
+    ),
+    "server": (
+        "Server settings",
+        [
+            "`/config` — open the settings menu. Server controls appear for the server owner, Manage Server administrators, or configured Maxwell admins.",
+            "`/server-prompt`, `/clear-server-prompt`, `/progress`, `/ticket-greetings`, and `/solo` — manage individual server settings.",
+            "`/autonomy` and `/plugins` — inspect or update server behavior and enabled features.",
+        ],
+    ),
+    "memory": (
+        "Memory and feedback",
+        [
+            "`/memory` — ask Maxwell to recall, save, or manage scoped memory.",
+            "`/context` and `/clear-memory` — inspect or clear this channel's stored context.",
+            "`/negative-memory`, `/summarize-memory`, and `/downvote` — manage memory and give response feedback.",
+        ],
+    ),
+    "tools": (
+        "Jobs and voice",
+        [
+            "`/stop` — stop a running response.",
+            "`/jobs` and `/job` — list, inspect, or cancel your jobs.",
+            "`/sleep` and `/wake` — pause or resume Maxwell in a server.",
+            "`/voice` — control Maxwell's voice connection and speech.",
+            "`/rem` — inspect or run REM maintenance.",
+        ],
+    ),
+    "moderation": (
+        "Moderation and access",
+        [
+            "`/moderation prompt:<request>` — ask Maxwell to help with server moderation; Discord permissions still apply.",
+            "`/blacklist` and `/unblacklist` — manage blocked users.",
+            "`/admin` — manage configured Maxwell operators.",
+        ],
+    ),
+    "developer": (
+        "Developer tools",
+        [
+            "`/diagnostics` — view restricted runtime diagnostics.",
+            "`/maintenance` — run restricted maintenance actions.",
+            "`/debug` — view restricted runtime information.",
+            "These commands check the configured Maxwell developer IDs when run; visibility alone does not grant access.",
+        ],
+    ),
+}
+
+
+def command_help_text(*, discovery: bool, topic: str | None = None) -> str:
+    normalized = str(topic or "").strip().lower()
+    if normalized in _HELP_TOPICS:
+        heading, rows = _HELP_TOPICS[normalized]
+        lines = [f"**{heading}**", *rows]
+    else:
+        lines = [
+            "**Maxwell commands**",
+            "**Start:** `/maxwell`, `/help`, `/usage`.",
+            "**Personal:** `/config` opens a private settings menu; `/personality` edits your reply style.",
+            "**AI and games:** `/image`, `/chess`, `/checkers`, `/memory`, `/reminder`, `/moderation`.",
+            "**Server:** `/config` also shows authorized server controls; `/progress`, `/ticket-greetings`, `/server-prompt`, `/solo`, `/autonomy`, `/plugins`.",
+            "**Memory:** `/context`, `/clear-memory`, `/negative-memory`, `/summarize-memory`, `/downvote`.",
+            "**Jobs and voice:** `/stop`, `/jobs`, `/job`, `/sleep`, `/wake`, `/voice`, `/rem`.",
+            "**Restricted:** `/diagnostics`, `/maintenance`, `/debug`.",
+            "Use `/help topic:<category>` to see one set of commands.",
+        ]
     if discovery:
-        lines.append("Discovery: `/premium` shows current plan information; it does not start a purchase.")
+        lines.append("`/premium` shows plan information only; it does not start a purchase.")
     return "\n".join(lines)
 
 
@@ -146,7 +242,8 @@ async def handle_discovery_interaction(bot: Any, interaction: Any) -> bool:
     control = _control(bot)
     discovery = discovery_enabled(control)
     if name == "help":
-        text = command_help_text(discovery=discovery)
+        options = dict(ui._option_pairs(data.get("options")))
+        text = command_help_text(discovery=discovery, topic=options.get("topic"))
     elif name == "usage":
         text = usage_text_for(bot, _user_id(interaction), discovery=discovery)
     else:

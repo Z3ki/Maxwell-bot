@@ -85,7 +85,7 @@ def test_server_config_requires_server_privileges():
     assert command_suite._can_manage_server(bot, interaction)
 
 
-def test_config_personal_defaults_are_available_to_every_user(tmp_path):
+def test_config_opens_a_private_settings_menu(tmp_path):
     store = UserPreferenceStore(tmp_path / "user_preferences.json")
     responses = []
 
@@ -93,16 +93,142 @@ def test_config_personal_defaults_are_available_to_every_user(tmp_path):
         def is_done(self):
             return False
 
-        async def send_message(self, text, *, ephemeral=False):
-            responses.append((text, ephemeral))
+        async def send_message(self, text, *, view=None, ephemeral=False):
+            responses.append((text, view, ephemeral))
 
     bot = SimpleNamespace(_user_preferences=store)
     interaction = SimpleNamespace(
-        data={"name": "config", "options": [{"name": "action", "value": "set"}, {"name": "scope", "value": "personal"}, {"name": "key", "value": "mode"}, {"name": "value", "value": "research"}]},
+        data={"name": "config"},
         user=SimpleNamespace(id=100),
         response=Response(),
     )
 
     assert asyncio.run(command_suite._handle_config(bot, interaction))
+    assert responses and responses[0][2] is True
+    assert "Your personal settings" in responses[0][0]
+    assert isinstance(responses[0][1], command_suite._ConfigPanel)
+    assert not responses[0][1].can_choose_scope
+    assert store.get("100")["defaults"]["mode"] == "ask"
+
+
+def test_config_value_menu_updates_a_personal_default(tmp_path):
+    store = UserPreferenceStore(tmp_path / "user_preferences.json")
+    interaction = SimpleNamespace(user=SimpleNamespace(id=100))
+    bot = SimpleNamespace(_user_preferences=store)
+    panel = command_suite._ConfigPanel(bot, store, interaction)
+    responses = []
+
+    class ComponentResponse:
+        async def edit_message(self, content, *, view):
+            responses.append((content, view))
+
+    interaction.response = ComponentResponse()
+    asyncio.run(panel.set_choice(interaction, "research"))
     assert store.get("100")["defaults"]["mode"] == "research"
-    assert responses and responses[0][1] is True
+    assert responses and "Research" in responses[0][0]
+
+
+def test_config_server_controls_are_hidden_without_manage_permissions(tmp_path):
+    store = UserPreferenceStore(tmp_path / "user_preferences.json")
+    bot = SimpleNamespace(_user_preferences=store, _is_admin=lambda _uid: False)
+    interaction = SimpleNamespace(
+        guild=SimpleNamespace(id=10, owner_id=1, name="Test server"),
+        guild_id=10,
+        user=SimpleNamespace(id=2),
+        member=SimpleNamespace(
+            guild_permissions=SimpleNamespace(manage_guild=False, administrator=False)
+        ),
+    )
+    panel = command_suite._ConfigPanel(bot, store, interaction)
+    assert not panel.can_choose_scope
+    assert not any(
+        isinstance(item, command_suite._ConfigScopeSelect)
+        for item in panel.children
+    )
+
+
+def test_config_rechecks_server_permission_when_a_menu_is_used(tmp_path):
+    store = UserPreferenceStore(tmp_path / "user_preferences.json")
+    permissions = SimpleNamespace(manage_guild=True, administrator=False)
+    bot = SimpleNamespace(_user_preferences=store, _is_admin=lambda _uid: False)
+    opened_by = SimpleNamespace(
+        guild=SimpleNamespace(id=10, owner_id=1, name="Test server"),
+        guild_id=10,
+        user=SimpleNamespace(id=2),
+        member=SimpleNamespace(guild_permissions=permissions),
+    )
+    panel = command_suite._ConfigPanel(bot, store, opened_by)
+    assert panel.can_choose_scope
+    panel.scope = "server"
+    panel.selected_key = "progress"
+
+    denied = []
+
+    class Response:
+        def is_done(self):
+            return False
+
+        async def send_message(self, text, *, ephemeral=False):
+            denied.append((text, ephemeral))
+
+    permissions.manage_guild = False
+    click = SimpleNamespace(
+        guild=opened_by.guild,
+        guild_id=10,
+        user=opened_by.user,
+        member=opened_by.member,
+        response=Response(),
+    )
+    assert asyncio.run(panel.interaction_check(click)) is False
+    assert panel.scope == "personal"
+    assert denied and denied[0][1] is True
+
+
+def test_config_does_not_open_server_settings_after_permission_is_revoked(tmp_path):
+    store = UserPreferenceStore(tmp_path / "user_preferences.json")
+    permissions = SimpleNamespace(manage_guild=True, administrator=False)
+    bot = SimpleNamespace(_user_preferences=store, _is_admin=lambda _uid: False)
+    opened_by = SimpleNamespace(
+        guild=SimpleNamespace(id=10, owner_id=1, name="Test server"),
+        guild_id=10,
+        user=SimpleNamespace(id=2),
+        member=SimpleNamespace(guild_permissions=permissions),
+    )
+    panel = command_suite._ConfigPanel(bot, store, opened_by)
+    scope_select = next(
+        item for item in panel.children
+        if isinstance(item, command_suite._ConfigScopeSelect)
+    )
+    scope_select._values = ["server"]
+    denied = []
+
+    class Response:
+        def is_done(self):
+            return False
+
+        async def send_message(self, text, *, ephemeral=False):
+            denied.append((text, ephemeral))
+
+    permissions.manage_guild = False
+    click = SimpleNamespace(
+        guild=opened_by.guild,
+        guild_id=10,
+        user=opened_by.user,
+        member=opened_by.member,
+        response=Response(),
+    )
+    asyncio.run(scope_select.callback(click))
+    assert panel.scope == "personal"
+    assert denied and "permission" in denied[0][0].lower()
+
+
+def test_config_text_settings_open_a_bounded_modal(tmp_path):
+    store = UserPreferenceStore(tmp_path / "user_preferences.json")
+    interaction = SimpleNamespace(user=SimpleNamespace(id=100))
+    panel = command_suite._ConfigPanel(SimpleNamespace(_user_preferences=store), store, interaction)
+    panel.selected_key = "language"
+    panel._build()
+    modal = panel.edit_modal()
+    assert modal is not None
+    assert modal.title == "Edit response language"
+    assert modal.children[0].max_length == 80

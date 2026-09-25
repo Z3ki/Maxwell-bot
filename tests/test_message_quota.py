@@ -16,6 +16,7 @@ from message_quota import (
 )
 from providers import ProviderResult
 from usage_commands import (
+    HELP_COMMAND,
     command_help_text,
     handle_discovery_interaction,
     premium_discovery_text,
@@ -134,6 +135,46 @@ def test_help_and_usage_mention_premium_only_as_discovery():
         discovery=False,
     )
     assert "/premium" not in quiet
+
+
+def test_help_browses_topics_and_returns_only_the_selected_section():
+    topic_option = HELP_COMMAND["options"][0]
+    assert topic_option["name"] == "topic"
+    assert {choice["value"] for choice in topic_option["choices"]} >= {
+        "start",
+        "personal",
+        "server",
+        "memory",
+    }
+    assert "/config" in command_help_text(discovery=False, topic="personal")
+    assert "/personality" in command_help_text(discovery=False, topic="personal")
+    assert "/image" not in command_help_text(discovery=False, topic="personal")
+
+
+def test_help_interaction_uses_selected_topic():
+    sent = []
+
+    class Response:
+        def is_done(self):
+            return False
+
+        async def send_message(self, text, *, ephemeral=False):
+            sent.append((text, ephemeral))
+
+    interaction = SimpleNamespace(
+        data={
+            "name": "help",
+            "options": [{"name": "topic", "value": "personal"}],
+        },
+        response=Response(),
+    )
+    assert asyncio.run(
+        handle_discovery_interaction(SimpleNamespace(_control={}), interaction)
+    )
+    assert sent and sent[0][1] is True
+    assert "/config" in sent[0][0]
+    assert "/personality" in sent[0][0]
+    assert "/image" not in sent[0][0]
 
 
 def test_protocol_does_not_pitch_premium():

@@ -81,7 +81,7 @@ RAG availability is controlled through configuration/feature switches. Embedding
 Maxwell supports the normal bot conversation path plus Discord app-command/user-install surfaces.
 
 - `/maxwell` is the personal app-command surface when user install is enabled.
-- `/config` exposes personal defaults to everyone and server settings to authorized server administrators.
+- `/config` opens a private settings menu for personal defaults and server settings to authorized server administrators.
 - `/personality` stores a personal reply-style preference.
 - `/diagnostics` and `/maintenance` are restricted to configured Maxwell developers.
 - `/image`, `/chess`, `/checkers`, `/moderation`, `/memory`, and `/reminder` provide focused request paths.

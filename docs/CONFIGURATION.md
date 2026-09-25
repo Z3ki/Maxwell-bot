@@ -71,11 +71,11 @@ Blank IDs do not grant implicit ownership.
 
 ## Discord slash commands
 
-`/config` is available to everyone for personal defaults. The server scope requires the server owner, a Manage Server administrator, or a configured Maxwell admin. Server settings include tool-progress messages, ticket greetings, and custom server instructions. `/personality` stores a short personal reply-style preference for personal app requests.
+`/config` opens a private, click-through menu for personal defaults. Choose a setting, select a saved value, or open a text form for language and style. In a server, the menu also shows tool-progress messages, ticket greetings, and custom server instructions to the server owner, a Manage Server administrator, or a configured Maxwell admin. Permission is checked again before a server setting changes. `/personality` remains available as a direct way to view or edit your personal reply-style preference.
 
 Purpose-specific commands include `/image`, `/chess`, `/checkers`, `/moderation`, `/memory`, and `/reminder`. `/diagnostics` and `/maintenance` replace the former owner command and independently restrict every request to configured Maxwell developers. Sensitive control values remain redacted and cannot be edited through Discord.
 
-The former comma-prefix commands are no longer accepted. `/help` lists the available slash commands.
+The former comma-prefix commands are no longer accepted. `/help` lets you browse available slash commands by topic.
 
 Customer-facing AI usage is messages, not tokens. The free allowance is 300 messages per rolling five-hour window (`message_quota_limit` / `message_quota_window_seconds`). The ledger lives at `DATA_DIR/message_quota.sqlite3`. One user-visible AI turn, voice utterance, or user-created background job counts as one message. Tool-loop follow-ups do not. `/usage` shows that allowance. `/premium` is an optional discovery command and is not a purchase. Premium is not launched: Personal Plus is proposed at $2.99/month per user and Server Plus at $4.99/month per server, using Discord's native Guild Subscription that stays with the purchased server and cannot be transferred. Exact Plus allowances are not decided and are not applied. Billing, checkout, and …
 

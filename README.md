@@ -130,7 +130,7 @@ The installer preserves `.env`, `data/`, and generated-site files.
 
 ## Discord app commands
 
-Maxwell uses Discord slash commands. `/help` lists the command set; `/config` manages personal defaults for everyone and server settings for authorized administrators; `/personality` stores a personal reply-style preference. Focused commands include `/image`, `/chess`, `/checkers`, `/moderation`, `/memory`, and `/reminder`. `/diagnostics` and `/maintenance` provide separate, developer-restricted operator functions.
+Maxwell uses Discord slash commands. `/help` browses commands by topic; `/config` opens a private settings menu for personal defaults and authorized server controls; `/personality` also edits your reply-style preference. Focused commands include `/image`, `/chess`, `/checkers`, `/moderation`, `/memory`, and `/reminder`. `/diagnostics` and `/maintenance` provide separate, developer-restricted operator functions.
 
 The personal-app `/maxwell` command and context-menu actions are available when user install is enabled. `/maxwell` text replies are rendered as Discord embeds. Fast app-command responses stay in the deferred interaction; if a command uses a tool or is still running after about 10 seconds, Maxwell leaves a stable `working on it…` status and sends the final answer as a follow-up.
 

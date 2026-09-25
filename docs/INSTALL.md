@@ -186,13 +186,13 @@ Use Guild Install when adding Maxwell to a server. Maxwell does not require the 
 
 Ask Maxwell for an invite link to a server it is already in by naming the server or giving its ID. `create_invite` selects a usable text channel and requires the requesting user and Maxwell to have `create_instant_invite` in that target server. Maxwell cannot join a server from a `discord.gg` invite; use the OAuth add-server link for that.
 
-User Install enables the personal `/maxwell` command and context-menu actions. `/config` is available to everyone for personal defaults; its server scope checks server permissions. `/diagnostics` and `/maintenance` are restricted to configured Maxwell developer IDs.
+User Install enables the personal `/maxwell` command and context-menu actions. `/config` opens a private settings menu for personal defaults; server controls appear only to authorized server managers and check permissions again when used. `/diagnostics` and `/maintenance` are restricted to configured Maxwell developer IDs.
 
 Never use a Discord user/self-bot token. Never copy a browser `Authorization` header into Maxwell.
 
 ## App-command behavior
 
-`/help` lists slash commands. `/config` manages personal defaults and authorized server settings; `/personality` stores a short style preference. Purpose-specific commands include `/image`, `/chess`, `/checkers`, `/moderation`, `/memory`, and `/reminder`. Restricted runtime status and operational controls are split between `/diagnostics` and `/maintenance`.
+`/help` browses slash commands by topic. `/config` opens a private settings menu for personal defaults and authorized server settings; `/personality` also edits your reply-style preference. Purpose-specific commands include `/image`, `/chess`, `/checkers`, `/moderation`, `/memory`, and `/reminder`. Restricted runtime status and operational controls are split between `/diagnostics` and `/maintenance`.
 
 For `/maxwell`, fast answers remain in the original deferred interaction. If the command invokes a tool or remains unanswered after roughly 10 seconds, Maxwell changes the original interaction to a stable `working on it…` status and sends the final answer separately. Textual `/maxwell` follow-ups are rendered as embeds.
 
