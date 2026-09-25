@@ -25,9 +25,8 @@ class MessageQuotaExceeded(Exception):
         self.limit = int(limit)
         self.window_seconds = int(window_seconds)
         super().__init__(
-            f"Message limit reached ({self.used}/{self.limit} used in the last "
-            f"{format_window(self.window_seconds)}). Older messages leave the "
-            "window as they age out."
+            "Current message allowance reached. Older usage leaves the rolling "
+            f"{format_window(self.window_seconds)} window as it ages out."
         )
 
 

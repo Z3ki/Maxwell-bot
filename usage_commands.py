@@ -11,7 +11,6 @@ from typing import Any
 
 import user_install as ui
 from message_quota import (
-    FREE_MESSAGE_LIMIT,
     FREE_WINDOW_SECONDS,
     enforced_message_limit,
     enforced_window_seconds,
@@ -88,9 +87,12 @@ def command_help_text(*, discovery: bool) -> str:
 
 def usage_status_text(state: dict, *, discovery: bool) -> str:
     window = format_window(int(state.get("window_seconds") or FREE_WINDOW_SECONDS))
+    limit = max(1, int(state.get("limit") or 0))
+    used = max(0, int(state.get("used") or 0))
+    percent_used = int((used * 100 / limit) + 0.5)
     lines = [
-        f"Messages: {int(state.get('used') or 0)}/{int(state.get('limit') or 0)} "
-        f"used in the last {window}."
+        f"Usage: {percent_used}% of your current message allowance used "
+        f"in the last {window}."
     ]
     if state.get("exempt"):
         lines.append("This account is exempt from the message limit.")
@@ -104,21 +106,17 @@ def usage_status_text(state: dict, *, discovery: bool) -> str:
     return "\n".join(lines)
 
 
-def premium_discovery_text(
-    *,
-    limit: int = FREE_MESSAGE_LIMIT,
-    window_seconds: int = FREE_WINDOW_SECONDS,
-    discovery: bool = True,
-) -> str:
+def premium_discovery_text(*, discovery: bool = True) -> str:
     if not discovery:
         return "Plan details are turned off."
-    window = format_window(window_seconds)
     return (
         "Maxwell Plus is not for sale. Billing and paid restrictions are off. "
         "This does not start a purchase.\n"
-        f"Free allowance: {int(limit)} messages per rolling {window}.\n"
-        f"Personal Plus is proposed at {PERSONAL_PLUS_PRICE}. It would raise that "
-        "individual allowance. The higher amount is not decided.\n"
+        "During Public Alpha, message limits and reset windows may change as "
+        "needed to keep the hosted service available. Check /usage for a "
+        "percentage of your current allowance and its reset status.\n"
+        f"Personal Plus is proposed at {PERSONAL_PLUS_PRICE}. It would provide "
+        "a higher individual allowance; exact limits and reset behavior are not decided.\n"
         f"Server Plus is proposed at {SERVER_PLUS_PRICE}. It would use Discord's "
         "native Guild Subscription and remain associated with the purchased server. "
         "It cannot be transferred. The shared server allowance and per-user "
@@ -153,11 +151,7 @@ def usage_text_for(bot: Any, user_id: str, *, discovery: bool | None = None) -> 
 
 def premium_text_for(bot: Any) -> str:
     control = _control(bot)
-    return premium_discovery_text(
-        limit=enforced_message_limit(control),
-        window_seconds=enforced_window_seconds(control),
-        discovery=discovery_enabled(control),
-    )
+    return premium_discovery_text(discovery=discovery_enabled(control))
 
 
 async def handle_discovery_interaction(bot: Any, interaction: Any) -> bool:
