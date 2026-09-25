@@ -1381,7 +1381,7 @@ class AutonomyEngine:
                     control.get("autonomy_blocked_servers", []) or []
                 ):
                     return False
-                # `,solo` locks a server to one channel. Setting it also
+                # `/solo` locks a server to one channel. Setting it also
                 # blacklists the guild above, but enforce the lock here too:
                 # the promise is "nowhere but that channel", and it should not
                 # depend on two settings staying in sync.
@@ -3651,7 +3651,7 @@ class AutonomyEngine:
         """Gate then run. Kept as one call for the many callers that want both.
 
         The tick uses the stages separately so it can report what the gate
-        decided; everything else (tests, `,autonomy run`, the tool loop's
+        decided; everything else (tests, `/autonomy arguments:run`, the tool loop's
         mechanical-skip path) wants plan-in, results-out.
         """
         verdicts = await self.policy_gate(actions, planned_post_channels)

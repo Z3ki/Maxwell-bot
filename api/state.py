@@ -335,9 +335,6 @@ def _sanitize_control(control):
     )
     out["max_tool_iterations"] = max(0, min(out["max_tool_iterations"], 100))
     out["max_response_chars"] = max(80, min(out["max_response_chars"], 8000))
-    out["create_site_quota_per_user"] = max(
-        0, min(_safe_int(out.get("create_site_quota_per_user"), 50), 10000)
-    )
     out["autofix_max_per_hour"] = max(
         1, min(_safe_int(out.get("autofix_max_per_hour"), 3), 20)
     )

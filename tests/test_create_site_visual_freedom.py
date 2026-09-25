@@ -95,8 +95,8 @@ def _make_tool(tmp_path: Path) -> CreateSiteTool:
         _sites={},
         _load_sites=lambda quiet=True: None,
         _is_admin=lambda _uid: False,
-        _control={"create_site_quota_per_user": 50},
-        control={"create_site_quota_per_user": 50},
+        _control={},
+        control={},
         tools={},
     )
     return CreateSiteTool(bot)

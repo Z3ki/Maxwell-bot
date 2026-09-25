@@ -28,7 +28,7 @@ arbitrary server IDs. These paths are incompatible with the requested public
 single-assistant boundary. Their source remains for review and historical data
 retention; the public runtime does not set them up or advertise them.
 
-The old comma `,plugin` command can still list and toggle already available
+The slash `/plugins` command can still list and toggle already available
 plugins. Code install, removal, and reload now return a retired notice. This
 does **not** implement per-guild `/config plugins`; the current enable state
 is global or per-user and must be redesigned before broad release.

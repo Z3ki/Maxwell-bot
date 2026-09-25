@@ -17,7 +17,7 @@ Features tested:
  10. Email & Inbox System (Notices, requests, self-mail filtering, ignored senders)
  11. Security Guardrails & Response Guard (Taint gates, repetition scrubbing, echo loops, code safety)
  12. API Server & Dashboard Controls (HTTP Basic auth, login, /api/control clamping, RAG endpoints)
- 13. Concurrency Safety & Bot Commands (,stop, ,prompt, ,solo, ,drug, ,jailbreak, ,context, ,rem, ,x, ,vc)
+ 13. Concurrency Safety & Discord Slash Commands
 """
 
 import asyncio
@@ -57,6 +57,8 @@ import response_guard  # noqa: E402
 import autonomy_social  # noqa: E402
 import watch_policy  # noqa: E402
 import concurrency_safety  # noqa: E402
+from plugins.maxwell_extras.command_suite import command_definitions  # noqa: E402
+from usage_commands import command_help_text  # noqa: E402
 
 
 @dataclasses.dataclass
@@ -739,18 +741,18 @@ class DeepTestHarness:
         self.current_suite = "Concurrency Safety & Bot Commands"
         print(f"\n\033[1;34m=== SUITE 13: {self.current_suite} ===\033[0m")
 
-        def test_command_prefix_and_routing():
-            prefix = ","
-            cmd_stop = f"{prefix}stop"
-            cmd_prompt = f"{prefix}prompt You are a pirate"
-            cmd_solo = f"{prefix}solo #general"
-            cmd_drug = f"{prefix}drug 10"
-
-            assert cmd_stop.startswith(prefix)
-            assert cmd_prompt.split(None, 1)[0] == ",prompt"
-            assert cmd_solo.split()[1] == "#general"
-            assert int(cmd_drug.split()[1]) == 10
-            return "Command prefix ',' and parameter tokens parsed accurately"
+        def test_slash_command_surface():
+            names = {row["name"] for row in command_definitions()}
+            assert {
+                "config", "personality", "image", "chess", "checkers",
+                "moderation", "memory", "reminder",
+            } <= names
+            assert "owner" not in names
+            help_text = command_help_text(discovery=True)
+            assert "/diagnostics" in help_text
+            assert "/maintenance" in help_text
+            assert "/owner" not in help_text
+            return f"{len(names)} purpose-specific slash commands registered; /owner retired"
 
         async def test_concurrency_work_queues():
             queues = concurrency_safety.ChannelWorkQueues(max_pending=8)
@@ -766,7 +768,7 @@ class DeepTestHarness:
             assert len(executed) == 1
             return "ChannelWorkQueues serialize async tasks safely per channel"
 
-        self.run_sync_test("Bot command string parsing & parameter splitting", test_command_prefix_and_routing)
+        self.run_sync_test("Discord slash command surface", test_slash_command_surface)
         await self.run_async_test("ChannelWorkQueues async task execution", test_concurrency_work_queues)
 
     # =========================================================================

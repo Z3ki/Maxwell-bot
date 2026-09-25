@@ -67,8 +67,8 @@ class EmailSendTool(Tool):
             return (
                 "Error: email_send refused: this turn read content from a "
                 "fetched URL/web search that may carry prompt-injection "
-                "payloads. The user must confirm out-of-band with `,confirm` "
-                "before this can run.\n"
+                "payloads. This request must be made again as a new clean "
+                "message with direct authorization before email can be sent.\n"
                 f"Recipient: {to}\n"
                 f"Subject: {subject}\n"
                 f"Body preview: {preview}"

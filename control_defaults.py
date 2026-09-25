@@ -160,7 +160,7 @@ DEFAULT_CONTROL = {
     # transcribe audio fine (verified on 3.7-flash and 3-pro), so this is on.
     "process_audio": True,
     "max_image_size_mb": 10,
-    # When True, the `sleep` tool and `,sleep` command can put the bot
+    # When True, the `sleep` tool and `/sleep` command can put the bot
     # into a 1-60 minute sleep window where the triggering channel gets
     # a one-shot "max is sleeping, back in Xm" notice (never a DM).
     # Default ON so the 2026-07-19 'goodnight spam' complaint has a
@@ -197,7 +197,6 @@ DEFAULT_CONTROL = {
     # When this is off, the prompt teaches bare JSON lines — not XML tags.
     "native_tool_calls": True,
     "tools_enabled": True,
-    "create_site_quota_per_user": 50,
     # Hours a generated site lives before the cleanup loop removes it.
     # 0 = never expire. A site created with permanent=true (or extended via
     # edit_site) ignores this. Used to be a hardcoded 86400 in two places.
@@ -212,7 +211,7 @@ DEFAULT_CONTROL = {
     # hd_image behind more_tools and made photo requests look like a
     # from-scratch generate. Kept so existing control.json files still load.
     "lean_chat_tools": False,
-    # Unused for posting: ticket greetings are per-server via `,ticket on`.
+    # Unused for posting: ticket greetings are configured per server via slash commands.
     # Kept so existing control.json files still load.
     "auto_ticket_greeting": False,
     "disabled_tools": [],
@@ -222,12 +221,12 @@ DEFAULT_CONTROL = {
     "disabled_commands": [],
     # {guild_id: channel_id}. When a server has an entry, Maxwell only speaks
     # in that one channel there — every other channel in that server is dead to
-    # him, including autonomy. Set with `,solo`, cleared with `,solo off`.
+    # him, including autonomy. Set with `/solo`, cleared with `/solo arguments:off`.
     # Scoped per server on purpose: allowed_channels is global, so using it to
     # quiet one server silences him everywhere.
     "guild_solo_channel": {},
-    # Guild ids whose autonomy blacklist entry was added BY `,solo`. Only these
-    # are handed back on `,solo off` — a server an admin silenced by hand stays
+    # Guild ids whose autonomy blacklist entry was added BY `/solo`. Only these
+    # are handed back on `/solo arguments:off` — a server an admin silenced by hand stays
     # silenced.
     "guild_solo_autonomy_added": [],
     "base_personality": (

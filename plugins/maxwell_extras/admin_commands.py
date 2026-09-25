@@ -1,10 +1,4 @@
-"""Owner-only Discord control panel for Maxwell.
-
-Adds a global ``/owner`` application command that exposes safe runtime status,
-redacted control exports, and validated live control edits. The command works
-for both guild-installed and user-installed contexts but is authorized only by
-MAXWELL_OWNER_IDS / CREATOR_ID.
-"""
+"""Developer-only diagnostics and maintenance application commands."""
 
 from __future__ import annotations
 
@@ -22,7 +16,8 @@ from control_defaults import DEFAULT_CONTROL
 from identity import configured_admin_ids
 from utils import _atomic_json_write_sync
 
-OWNER_COMMAND_NAME = "owner"
+DIAGNOSTICS_COMMAND_NAME = "diagnostics"
+MAINTENANCE_COMMAND_NAME = "maintenance"
 _SENSITIVE_KEY_PARTS = (
     "api_key",
     "secret",
@@ -31,7 +26,7 @@ _SENSITIVE_KEY_PARTS = (
     "cookie",
 )
 
-_ACTION_CHOICES = [
+_DIAGNOSTIC_CHOICES = [
     {"name": "Overview", "value": "overview"},
     {"name": "Runtime", "value": "runtime"},
     {"name": "Controls", "value": "controls"},
@@ -40,6 +35,10 @@ _ACTION_CHOICES = [
     {"name": "Tools", "value": "tools"},
     {"name": "Plugins", "value": "plugins"},
     {"name": "Full data export", "value": "data"},
+]
+
+_MAINTENANCE_CHOICES = [
+    {"name": "Show available actions", "value": "overview"},
     {"name": "Set control", "value": "set"},
     {"name": "Enable boolean control", "value": "enable"},
     {"name": "Disable boolean control", "value": "disable"},
@@ -53,19 +52,38 @@ _ACTION_CHOICES = [
     {"name": "Internal token spend", "value": "spend"},
 ]
 
-OWNER_COMMAND = {
-    "name": OWNER_COMMAND_NAME,
-    "description": "Owner-only Maxwell status, data, and live controls.",
+_ADMIN_COMMAND_META = {
     "type": 1,
     "integration_types": [0, 1],
     "contexts": [0, 1, 2],
+}
+
+DIAGNOSTICS_COMMAND = {
+    "name": DIAGNOSTICS_COMMAND_NAME,
+    "description": "View restricted Maxwell runtime diagnostics.",
+    **_ADMIN_COMMAND_META,
+    "options": [
+        {
+            "name": "section",
+            "description": "Diagnostic section to view",
+            "type": 3,
+            "required": False,
+            "choices": _DIAGNOSTIC_CHOICES,
+        },
+    ],
+}
+
+MAINTENANCE_COMMAND = {
+    "name": MAINTENANCE_COMMAND_NAME,
+    "description": "Run restricted Maxwell maintenance actions.",
+    **_ADMIN_COMMAND_META,
     "options": [
         {
             "name": "action",
-            "description": "What to view or change",
+            "description": "Maintenance action to run",
             "type": 3,
             "required": False,
-            "choices": _ACTION_CHOICES,
+            "choices": _MAINTENANCE_CHOICES,
         },
         {
             "name": "key",
@@ -199,10 +217,10 @@ def _embed(bot: Any, section: str) -> discord.Embed:
     control = _control(bot)
     runtime = _runtime_data(bot)
     embed = discord.Embed(
-        title="Maxwell Owner Control",
+        title="Maxwell Diagnostics",
         description=(
-            "Owner-only live status and controls. Use `action:set`, `action:enable`, "
-            "or `action:disable` with a control key to make a persistent change."
+            "Restricted Maxwell runtime diagnostics. Use `/maintenance` for "
+            "authorized operational changes."
         ),
         color=discord.Color.blurple(),
     )
@@ -350,8 +368,7 @@ def _embed(bot: Any, section: str) -> discord.Embed:
         return embed
 
     embed.set_footer(
-        text="Examples: /owner action:enable key:autonomy_enabled · "
-        "/owner action:set key:ai_concurrency value:3"
+        text="Operational changes are available through `/maintenance`."
     )
     return embed
 
@@ -462,44 +479,56 @@ async def _send(
     raise RuntimeError("interaction has no response transport")
 
 
-async def handle_owner_interaction(bot: Any, interaction: Any) -> bool:
+async def handle_admin_interaction(bot: Any, interaction: Any) -> bool:
     data = ui._interaction_data(interaction)
-    if str(data.get("name") or "") != OWNER_COMMAND_NAME:
+    name = str(data.get("name") or "")
+    if name not in {DIAGNOSTICS_COMMAND_NAME, MAINTENANCE_COMMAND_NAME}:
         return False
 
     user = getattr(interaction, "user", None)
     uid = getattr(user, "id", None)
     if not _is_owner(bot, uid):
-        await _send(interaction, content="This command is restricted to Maxwell's owner.")
+        await _send(interaction, content="This command is restricted to authorized Maxwell developers.")
         return True
 
     opts = _options(interaction)
+    if name == DIAGNOSTICS_COMMAND_NAME:
+        section = str(opts.get("section") or "overview").strip().lower()
+        if section not in {"overview", "runtime", "controls", "memory", "autonomy", "tools", "plugins", "data"}:
+            await _send(interaction, content="Unknown diagnostics section.")
+        elif section == "controls":
+            await _send(
+                interaction,
+                embed=_embed(bot, "controls"),
+                file=_json_file(_redact(_control(bot)), "maxwell-controls.json"),
+            )
+        elif section == "data":
+            payload = {
+                "runtime": _runtime_data(bot),
+                "controls": _redact(_control(bot)),
+                "plugins": _plugin_data(bot),
+            }
+            await _send(
+                interaction,
+                content="Maxwell diagnostics export. Sensitive control values are redacted.",
+                file=_json_file(payload, "maxwell-diagnostics.json"),
+            )
+        else:
+            await _send(interaction, embed=_embed(bot, section))
+        return True
+
     action = str(opts.get("action") or "overview").strip().lower()
     key = str(opts.get("key") or "").strip()
     value = opts.get("value")
 
-    if action in {"overview", "runtime", "memory", "autonomy", "tools", "plugins"}:
-        await _send(interaction, embed=_embed(bot, action))
-        return True
-
-    if action == "controls":
+    if action == "overview":
         await _send(
             interaction,
-            embed=_embed(bot, "controls"),
-            file=_json_file(_redact(_control(bot)), "maxwell-controls.json"),
-        )
-        return True
-
-    if action == "data":
-        payload = {
-            "runtime": _runtime_data(bot),
-            "controls": _redact(_control(bot)),
-            "plugins": _plugin_data(bot),
-        }
-        await _send(
-            interaction,
-            content="Maxwell owner data export. Sensitive control values are redacted.",
-            file=_json_file(payload, "maxwell-owner-data.json"),
+            content=(
+                "Maintenance actions: set or toggle a control, reload `bot_control.json`, "
+                "inspect or update a user's message quota, or inspect internal token spend. "
+                "Use `/diagnostics` to view runtime and control details."
+            ),
         )
         return True
 
@@ -514,9 +543,8 @@ async def handle_owner_interaction(bot: Any, interaction: Any) -> bool:
 
     if action == "spend":
         valid_discord = key.isdecimal() and len(key) <= 20
-        valid_telegram = key.startswith("tg:") and key[3:].isdecimal() and len(key) <= 23
-        if not (valid_discord or valid_telegram):
-            await _send(interaction, content="Provide a Discord user ID, or a stored `tg:<id>` ledger key, in `key`.")
+        if not valid_discord:
+            await _send(interaction, content="Provide a Discord user ID in `key`.")
             return True
         ledger = getattr(bot, "_daily_tokens", None)
         if ledger is None:
@@ -597,25 +625,28 @@ async def handle_owner_interaction(bot: Any, interaction: Any) -> bool:
             )
         return True
 
-    await _send(interaction, content=f"Unknown owner action: `{action}`")
+    await _send(interaction, content=f"Unknown maintenance action: `{action}`")
     return True
 
 
-def install_owner_control(bot: Any) -> None:
-    """Register /owner and intercept it before the normal AI command path."""
-    if getattr(bot, "_maxwell_owner_control_installed", False):
+def install_admin_commands(bot: Any) -> None:
+    """Register restricted /diagnostics and /maintenance commands."""
+    if getattr(bot, "_maxwell_admin_commands_installed", False):
         return
 
-    ui.register_command(OWNER_COMMAND)
+    ui.register_command(DIAGNOSTICS_COMMAND)
+    ui.register_command(MAINTENANCE_COMMAND)
     ui.register_interaction_handler(
-        handle_owner_interaction, priority=10, name="owner_control"
+        handle_admin_interaction, priority=10, name="admin_commands"
     )
-    bot._maxwell_owner_control_installed = True
+    bot._maxwell_admin_commands_installed = True
 
 
 __all__ = [
-    "OWNER_COMMAND",
-    "OWNER_COMMAND_NAME",
-    "handle_owner_interaction",
-    "install_owner_control",
+    "DIAGNOSTICS_COMMAND",
+    "DIAGNOSTICS_COMMAND_NAME",
+    "MAINTENANCE_COMMAND",
+    "MAINTENANCE_COMMAND_NAME",
+    "handle_admin_interaction",
+    "install_admin_commands",
 ]

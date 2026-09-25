@@ -187,6 +187,8 @@ class ToolProgress:
         self._lock = asyncio.Lock()
         self._stopped = False
         self._current_tool: str = ""
+        self._tools_used: list[str] = []
+        self._tools_lock = asyncio.Lock()
         self._tool_streaming = False
         self._edits_made: int = 0
         self._edits_disabled = False
@@ -380,6 +382,37 @@ class ToolProgress:
             return
         await self._flush(content)
 
+    async def note_tool(self, tool_name: str) -> None:
+        """Add an actually dispatched tool to the temporary status message.
+
+        Only tool names are shown. Arguments and results can contain private
+        user data, so they are never copied into a channel progress message.
+        """
+        name = str(tool_name or "").strip()
+        if not name or self._stopped:
+            return
+        async with self._tools_lock:
+            if self._stopped:
+                return
+            self._tools_used.append(name)
+            self._current_tool = name
+            self._tool_streaming = False
+            self._reasoning_buffer = ""
+            self._snippet_buffer = ""
+
+        # User-install commands update their original interaction response in
+        # interaction_progress.before_tool, which also works when no
+        # ToolProgress object was created for a DM.
+        if not self._posted or self._platform == "user_install":
+            return
+        content = self._render()
+        if content == self._last_content:
+            return
+        if time.monotonic() - self._last_edit < _TOKEN_TICK_INTERVAL:
+            self._schedule_deferred_flush()
+            return
+        await self._flush(content)
+
     async def tick(
         self,
         reasoning_delta: str = "",
@@ -494,6 +527,22 @@ class ToolProgress:
         (HTML, code) we collapse whitespace so the preview fits
         one Discord line and is readable while scrolling.
         """
+        if self._tools_used:
+            counts: dict[str, int] = {}
+            order: list[str] = []
+            for name in self._tools_used:
+                if name not in counts:
+                    counts[name] = 0
+                    order.append(name)
+                counts[name] += 1
+            visible = [
+                f"`{name}`" + (f" ×{counts[name]}" if counts[name] > 1 else "")
+                for name in order[:8]
+            ]
+            if len(order) > 8:
+                visible.append(f"+{len(order) - 8} more")
+            return "Maxwell is using: " + ", ".join(visible)
+
         raw = self._reasoning_buffer.strip()
         if not raw:
             # No reasoning yet. If a tool name was announced, say so
@@ -548,7 +597,8 @@ class ToolProgress:
         if self._deferred_task and not self._deferred_task.done():
             self._deferred_task.cancel()
         elapsed = time.monotonic() - self._last_edit
-        delay = max(0.05, _EDIT_INTERVAL_SECONDS - elapsed) + 0.05
+        interval = _TOKEN_TICK_INTERVAL if self._tools_used else _EDIT_INTERVAL_SECONDS
+        delay = max(0.05, interval - elapsed) + 0.05
         try:
             self._deferred_task = asyncio.create_task(self._deferred_flush(delay))
         except RuntimeError:
@@ -557,7 +607,7 @@ class ToolProgress:
     async def _deferred_flush(self, delay: float) -> None:
         try:
             await asyncio.sleep(delay)
-            if self._stopped or self._tool_streaming or not self._posted:
+            if self._stopped or (self._tool_streaming and not self._tools_used) or not self._posted:
                 return
             content = self._render()
             if content == self._last_content:
@@ -590,6 +640,21 @@ class ToolProgress:
         """
         if self._stopped:
             return
+        # Several quick calls can arrive within Discord's edit interval. Let
+        # the coalesced cumulative tool list land once before deleting the
+        # status, with a strict bound so completion is not held up.
+        pending = self._deferred_task
+        if (
+            self._tools_used
+            and self._posted
+            and self._render() != self._last_content
+            and pending is not None
+            and not pending.done()
+        ):
+            with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+                await asyncio.wait_for(
+                    asyncio.shield(pending), timeout=_TOKEN_TICK_INTERVAL + 0.2
+                )
         self._stopped = True
         if self._post_task and not self._post_task.done():
             self._post_task.cancel()

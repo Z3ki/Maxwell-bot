@@ -407,8 +407,7 @@ _current_inbound_effects: ContextVar[Any] = ContextVar(
 )
 _REQUEST_TERMINAL = frozenset({"delivered", "suppressed", "failed", "superseded"})
 
-# How long an out-of-band `,confirm` authorizes one destructive tool call on a
-# tainted turn. Short + one-shot so a fetched page can't ride a stale confirm.
+# Retained briefly so stale pre-migration confirmation state can expire.
 _CONFIRM_TTL_SECONDS = 120.0
 
 # Ceiling on remembered per-room watch state. Eviction costs a room one
@@ -1868,7 +1867,7 @@ PUBLIC_RUNTIME_BLOCKED_TOOLS = frozenset({
     "update_server_prompt", "site_server",
 })
 
-# Jailbreak / freedom-mode. OFF per server unless an admin runs `,jailbreak on`.
+# Jailbreak / freedom-mode. OFF per server; no public command exposes it.
 # Injected at the END of the system message (recency bias). Identity-anchor
 # framing, not a "mode override"; no off-limits list (that primes refusal).
 JAILBREAK_PROMPT = (
@@ -2475,6 +2474,17 @@ def _prepare_tool_params(name: str, params: dict | None) -> dict:
     return out
 
 
+_RETIRED_PREFIX_COMMANDS = frozenset(
+    {
+        "stop", "bg", "jobs", "job", "prompt", "clearprompt", "clearmem",
+        "downvote", "neg", "summarize", "context", "rem", "autonomy",
+        "drug", "sleep", "wake", "jailbreak", "progress", "ticket",
+        "admin", "solo", "help", "usage", "premium", "x", "vc", "shell",
+        "plugin", "plugins", "confirm", "blacklist", "unblacklist", "debug",
+    }
+)
+
+
 class MaxwellBot(commands.Bot):
     """AI-powered Discord bot."""
 
@@ -2660,7 +2670,7 @@ class MaxwellBot(commands.Bot):
         # Global sleep state. The bot is one entity — at most one sleep
         # window at a time. _sleep_until is the wake-at monotonic
         # timestamp; 0 means not sleeping. Set by the `sleep` tool or
-        # the `,sleep` admin command, max 60 minutes.
+        # the restricted sleep slash command, max 60 minutes.
         # 2026-07-19: added because the bot kept spamming goodbye/goodnight
         # in chat; a real sleep window gives the model an actual off-switch
         # and a way to communicate 'not now' without it being a one-off
@@ -2675,20 +2685,19 @@ class MaxwellBot(commands.Bot):
         self._sites_mtime = 0.0
         self._auto_channels: set[str] = set()
         self._jailbreak_servers: set[str] = set()
-        # 2026-07-22: per-server progress-message opt-in, mirroring
-        # _jailbreak_servers. A server id in this set means live
+        # Per-server progress-message setting. A server id in this set means live
         # 'thinking: …' tool-progress messages are shown in that server's
-        # channels. Servers not in the set stay quiet (off by default).
+        # channels. The global default is configured by MAXWELL_PROGRESS_MESSAGES.
         # DMs never get progress messages. The MAXWELL_PROGRESS_MESSAGES
         # env var, when true, enables the feature for ALL servers as a
         # baseline so a fresh install can opt in globally without running
-        # `,progress on` in every server; `,progress off` still wins per
+        # `/progress arguments:on` in every server; `/progress arguments:off` wins per
         # server (tracked in _progress_servers_off) so an admin can quiet
         # a noisy server even under the env baseline.
         self._progress_servers: set[str] = set()
         self._progress_servers_off: set[str] = set()
         # Per-server opt-in for the auto line in new ticket/support channels.
-        # Off everywhere until an admin runs `,ticket on` in that server.
+        # Off everywhere until a server admin enables ticket greetings.
         self._ticket_greeting_servers: set[str] = set()
         self._blacklist: set[str] = set()
         self._legal_notice_users: dict[str, float] = {}
@@ -2727,7 +2736,7 @@ class MaxwellBot(commands.Bot):
         # process that ran for months grew one entry per tainted turn forever.
         self._tainted_messages: dict[str, float] = {}
         # Out-of-band user confirmation for destructive tools on tainted turns.
-        # author_id -> monotonic timestamp of the last `,confirm`. Consumed
+        # author_id -> monotonic timestamp of a confirmation event. Consumed
         # (one-shot) by the destructive-tool gate in _execute_tool_by_name, and
         # expired after _CONFIRM_TTL_SECONDS. This is the ONLY legitimate source
         # of `_confirmed=True` — model-supplied `_confirmed` is stripped in the
@@ -7146,8 +7155,8 @@ class MaxwellBot(commands.Bot):
             )
 
         # BUG FIX: blacklist/ignore must be checked BEFORE command handling.
-        # Previously, blacklisted users could still run ,stop, ,drug, etc.
-        # because the blacklist check was after the command prefix check.
+        # Previously, blacklisted users could still run text-prefix commands
+        # because the blacklist check was after the command check.
         # Admins bypass so they can manage the blacklist.
         if (
             str(message.author.id) in self._blacklist
@@ -7179,8 +7188,13 @@ class MaxwellBot(commands.Bot):
             and message.content.startswith(self.command_prefix)
             and not message.author.bot
         ):
-            # Unknown prefix text (".ok", "...") is chat, not a command.
-            if await self._handle_command(message) is not False:
+            # Public text-prefix commands have moved to Discord application
+            # commands. Unknown prefix-like text remains ordinary chat.
+            command_name = self._retired_prefix_command_name(message)
+            if command_name:
+                await message.channel.send(
+                    "Text-prefix commands are retired. Use `/help` to see Maxwell's slash commands."
+                )
                 return "command"
 
         if not self._control.get("bot_enabled", True):
@@ -7197,8 +7211,8 @@ class MaxwellBot(commands.Bot):
             allowed = set(self._control.get("allowed_channels", []) or [])
             if allowed and channel_id not in allowed:
                 return "channel_not_allowed"
-            # ,solo: this server is locked to one channel. Commands already
-            # returned above, so an admin can still run `,solo off` from anywhere.
+            # /solo: this server is locked to one channel. Slash commands already
+            # returned above, so an admin can still run `/solo arguments:off` anywhere.
             if self._solo_blocks(message):
                 return "solo_restriction"
 
@@ -7718,6 +7732,15 @@ class MaxwellBot(commands.Bot):
         except Exception as e:
             logger.warning(f"Failed recording reaction removal: {e}")
 
+    def _retired_prefix_command_name(self, message) -> str:
+        prefix = str(getattr(self, "command_prefix", None) or ",")
+        raw = str(getattr(message, "content", "") or "")
+        if not prefix or not raw.startswith(prefix):
+            return ""
+        parts = raw[len(prefix) :].strip().split(maxsplit=1)
+        name = parts[0].lower() if parts else ""
+        return name if name in _RETIRED_PREFIX_COMMANDS else ""
+
     async def _handle_command(self, message):
         prefix = str(getattr(self, "command_prefix", None) or ",")
         raw = str(message.content or "")
@@ -7794,7 +7817,7 @@ class MaxwellBot(commands.Bot):
         channel_id = str(message.channel.id)
         try:
             if cmd == "stop":
-                # ",stop job <id>" cancels a background job instead of the live turn.
+                # `/stop arguments:job <id>` cancels a background job instead of the live turn.
                 _stop_args = (args or "").strip().split()
                 if len(_stop_args) >= 2 and _stop_args[0].lower() == "job":
                     _ok, _msg = self.bg_jobs.cancel(
@@ -7804,7 +7827,7 @@ class MaxwellBot(commands.Bot):
                     )
                     await message.channel.send(_msg)
                     return
-                # ",stop" must stop everything for this room: the turn that is
+                # `/stop` must stop everything for this room: the turn that is
                 # generating AND anything queued behind it. Cancelling only the
                 # in-flight task let the next queued reply start immediately,
                 # which reads as the bot ignoring the stop.
@@ -7840,7 +7863,7 @@ class MaxwellBot(commands.Bot):
                         "stopped" if not queued else f"stopped (+{queued} queued)"
                     )
                 else:
-                    # Repeated ",stop" in an idle room used to answer every
+                    # Repeated `/stop` in an idle room used to answer every
                     # single time — 29 "nothing to stop" lines in one log
                     # window, which is the bot spamming, not the user. One
                     # answer per 30s per room is enough to confirm it landed.
@@ -7883,7 +7906,7 @@ class MaxwellBot(commands.Bot):
                     _uid = str(message.author.id)
                     _is_adm = self._is_admin(message.author.id)
                     if _job is None:
-                        await message.channel.send("usage: `,job cancel <id>`")
+                        await message.channel.send("usage: `/job arguments:cancel <id>`")
                     elif not _is_adm and ((_gid and _job.guild_id != _gid) or (not _gid and _job.user_id != _uid)):
                         await message.channel.send("job not found.")
                     else:
@@ -7897,7 +7920,7 @@ class MaxwellBot(commands.Bot):
                     await message.channel.send(
                         f"Current prompt for this server:\n```\n{current}\n```"
                         if current
-                        else "No custom prompt set. Use `,prompt <text>` to set one."
+                        else "No custom instructions set. Use `/server-prompt` with the text to set them."
                     )
                 else:
                     self.memory.set_server_prompt(server_id, args)
@@ -7940,7 +7963,7 @@ class MaxwellBot(commands.Bot):
                     target_id = str(message.reference.message_id)
                 if not target_id:
                     await message.channel.send(
-                        "Usage: `,downvote <msg_id_or_chunks_id>`  "
+                        "Usage: `/downvote arguments:<message_id_or_chunks_id>`  "
                         "(or reply to the message you want to mark)"
                     )
                     return
@@ -7971,13 +7994,13 @@ class MaxwellBot(commands.Bot):
                         )
                 elif op == "add":
                     if not rest:
-                        await message.channel.send("Usage: `,neg add <text>`")
+                        await message.channel.send("Usage: `/negative-memory arguments:add <text>`")
                         return
                     nid = await self.memory.add_negative(rest, reason="manual")
                     await message.channel.send(f"✓ negative `{nid}` added.")
                 elif op in ("del", "rm", "delete"):
                     if not rest:
-                        await message.channel.send("Usage: `,neg del <id>`")
+                        await message.channel.send("Usage: `/negative-memory arguments:del <id>`")
                         return
                     ok = await self.memory.remove_negative(rest.strip())
                     await message.channel.send(
@@ -7987,7 +8010,7 @@ class MaxwellBot(commands.Bot):
                     )
                 else:
                     await message.channel.send(
-                        "Usage: `,neg add <text>` · `,neg list` · `,neg del <id>`"
+                        "Usage: `/negative-memory arguments:add <text>` · `list` · `del <id>`"
                     )
             elif cmd == "summarize":
                 # Manually trigger the LTM auto-summarizer over the
@@ -8065,7 +8088,7 @@ class MaxwellBot(commands.Bot):
                         f"sleeping for {minutes}m. pings will get a 'max is sleeping' note"
                     )
             elif cmd == "wake":
-                # Convenience alias for `,sleep off`.
+                # Convenience alias for `/sleep arguments:off`.
                 if not self._is_admin(message.author.id):
                     await message.channel.send("not authorized")
                     return
@@ -8084,7 +8107,7 @@ class MaxwellBot(commands.Bot):
                         self._save_jailbreak()
                         await message.channel.send(
                             "jailbreak ON for this server. freedom-mode prompt is now injected. "
-                            "use `,jailbreak off` to disable."
+                            "Use `/config scope:server` to review server settings."
                         )
                 elif arg in {"off", "disable", "no"}:
                     if server_id == "DM":
@@ -8107,17 +8130,15 @@ class MaxwellBot(commands.Bot):
                     await message.channel.send(f"jailbreak is {state} for this server")
                 else:
                     await message.channel.send(
-                        "usage: `,jailbreak on|off|status` — toggles the freedom-mode "
+                        "This setting is managed through `/config scope:server`. It toggles the freedom-mode "
                         "(jailbreak) prompt for this server. off by default everywhere."
                     )
             elif cmd == "progress":
                 server_id = str(message.guild.id) if message.guild else "DM"
                 arg = (args or "").strip().lower()
-                # 2026-07-22: per-server toggle (mirrors ,jailbreak). Off by
-                # default per server; an admin opts a server in with
-                # `,progress on`. DMs never get progress messages. The
+                # Per-server toggle. DMs never get progress messages. The
                 # MAXWELL_PROGRESS_MESSAGES env var is a global baseline
-                # (opt-in-everywhere) that `,progress off` still overrides.
+                # a per-server setting can still override.
                 if arg in {"on", "enable", "yes", "true"}:
                     if server_id == "DM":
                         await message.channel.send(
@@ -8175,7 +8196,7 @@ class MaxwellBot(commands.Bot):
                     )
                 else:
                     await message.channel.send(
-                        "usage: `,progress on|off|status` — toggles the live "
+                        "usage: `/progress arguments:on|off|status` — toggles the live "
                         "'thinking: …' status message shown while tools run, for THIS "
                         "server. off by default; opt in for visibility during slow tool "
                         "calls. (admin)"
@@ -8226,11 +8247,11 @@ class MaxwellBot(commands.Bot):
                         )
                     await message.channel.send(
                         f"ticket greetings are {state} for this server "
-                        "(off by default; `,ticket on` to greet new ticket channels)"
+                            "(off by default; use `/ticket-greetings arguments:on` to greet new ticket channels)"
                     )
                 else:
                     await message.channel.send(
-                        "usage: `,ticket on|off|status` — when a new ticket/support "
+                        "usage: `/ticket-greetings arguments:on|off|status` — when a new ticket/support "
                         "channel is created in THIS server, post a short hello. "
                         "off by default. (admin)"
                     )
@@ -8252,7 +8273,7 @@ class MaxwellBot(commands.Bot):
                     # Numeric IDs only (17-20 digit Discord snowflake range).
                     if not uid.isdigit() or not (17 <= len(uid) <= 20):
                         await message.channel.send(
-                            "usage: `,admin <@user|user_id>` (a 17-20 digit Discord snowflake) or `,admin clear`"
+                            "usage: `/admin arguments:<@user|user_id>` (a 17-20 digit Discord snowflake) or `/admin arguments:clear`"
                         )
                         return
                     if uid in self._admins:
@@ -8314,7 +8335,7 @@ class MaxwellBot(commands.Bot):
                 elif sub in ("enable", "on"):
                     if len(parts) < 2:
                         await message.channel.send(
-                            "Usage: `,plugin enable <name> [--global]`"
+                            "Usage: `/plugins arguments:enable <name> [--global]`"
                         )
                         return
                     p_name = parts[1].lower()
@@ -8333,7 +8354,7 @@ class MaxwellBot(commands.Bot):
                 elif sub in ("disable", "off"):
                     if len(parts) < 2:
                         await message.channel.send(
-                            "Usage: `,plugin disable <name> [--global]`"
+                            "Usage: `/plugins arguments:disable <name> [--global]`"
                         )
                         return
                     p_name = parts[1].lower()
@@ -8363,7 +8384,7 @@ class MaxwellBot(commands.Bot):
                     )
                 else:
                     await message.channel.send(
-                        "Usage: `,plugin <list|enable|disable>`"
+                        "Usage: `/plugins arguments:<list|enable|disable>`"
                     )
             elif cmd == "confirm":
                 # Removed. Tainted destructive tools fail closed until a
@@ -8394,7 +8415,7 @@ class MaxwellBot(commands.Bot):
                         uid = args.strip().strip("<@!>")
                         if not uid.isdigit() or not (17 <= len(uid) <= 20):
                             await message.channel.send(
-                                "usage: `,blacklist <user_id>` (a 17-20 digit Discord snowflake) or `,blacklist clear`"
+                                "usage: `/blacklist arguments:<user_id>` (a 17-20 digit Discord snowflake) or `/blacklist arguments:clear`"
                             )
                             return
                         self._blacklist.add(uid)
@@ -8407,7 +8428,7 @@ class MaxwellBot(commands.Bot):
                     uid = args.strip().strip("<@!>")
                     if not uid.isdigit() or not (17 <= len(uid) <= 20):
                         await message.channel.send(
-                            "usage: `,unblacklist <user_id>` (a 17-20 digit Discord snowflake)"
+                            "usage: `/unblacklist arguments:<user_id>` (a 17-20 digit Discord snowflake)"
                         )
                         return
                     self._blacklist.discard(uid)
@@ -8426,7 +8447,7 @@ class MaxwellBot(commands.Bot):
                 await message.channel.send("Something went wrong with that command.")
 
     async def _handle_solo_command(self, message, args):
-        """`,solo` — lock a server to one channel, or unlock it.
+        """`/solo` — lock a server to one channel, or unlock it.
 
         One command each way. Setting it silences every other channel in this
         server AND stops autonomy from starting anything here; clearing it puts
@@ -8435,7 +8456,7 @@ class MaxwellBot(commands.Bot):
         allowed_channels list.
         """
         if message.guild is None:
-            await message.channel.send("`,solo` only makes sense in a server.")
+            await message.channel.send("`/solo` only makes sense in a server.")
             return
         gid = str(message.guild.id)
         arg = (args or "").strip()
@@ -8446,12 +8467,12 @@ class MaxwellBot(commands.Bot):
             if not current:
                 await message.channel.send(
                     "Not locked — I reply anywhere in this server I'm allowed to. "
-                    "`,solo` here to lock me to this channel."
+                    "`/solo` here to lock me to this channel."
                 )
             else:
                 await message.channel.send(
                     f"Locked to <#{current}>. Everywhere else in this server is "
-                    "silent and autonomy is off. `,solo off` to unlock."
+                    "silent and autonomy is off. `/solo arguments:off` to unlock."
                 )
             return
 
@@ -8467,15 +8488,15 @@ class MaxwellBot(commands.Bot):
             )
             return
 
-        # `,solo` with no argument locks to the channel it was run in;
-        # `,solo #channel` (or a raw id) locks to that one.
+        # `/solo` with no arguments locks to the channel it was run in;
+        # `/solo arguments:#channel` (or a raw ID) locks to that one.
         target = str(message.channel.id)
         if arg:
             match = re.search(r"\d{5,}", arg)
             if not match:
                 await message.channel.send(
-                    "Usage: `,solo` (lock to this channel), `,solo #channel`, "
-                    "`,solo off`, `,solo status`."
+                    "Usage: `/solo` (lock to this channel), `/solo arguments:#channel`, "
+                    "`/solo arguments:off`, `/solo arguments:status`."
                 )
                 return
             target = match.group(0)
@@ -8492,7 +8513,7 @@ class MaxwellBot(commands.Bot):
         await message.channel.send(
             f"Locked to {where}. Every other channel in **{message.guild.name}** "
             "is silent for me now, and I won't start anything on my own here. "
-            "`,solo off` undoes it."
+            "`/solo arguments:off` undoes it."
         )
 
     async def _save_solo(self, mapping: dict, gid: str, *, unblock_autonomy: bool):
@@ -8540,7 +8561,7 @@ class MaxwellBot(commands.Bot):
 
         if sub in {"", "help"}:
             await message.channel.send(
-                "VC commands: `,vc join`, `,vc leave`, `,vc status`, `,vc listen`, `,vc unlisten`, `,vc say <text>`"
+                "Voice commands: `/voice arguments:join`, `leave`, `status`, `listen`, `unlisten`, `say <text>`"
             )
             return
         if sub == "status":
@@ -8617,7 +8638,7 @@ class MaxwellBot(commands.Bot):
                 return
             vc = self._vc_get_client(message.guild, target_channel)
             if not vc or not vc.is_connected():
-                await message.channel.send("not connected; use `,vc join` first")
+                await message.channel.send("not connected; use `/voice arguments:join` first")
                 return
             try:
                 listening = await self._vc_start_listening(
@@ -8640,11 +8661,11 @@ class MaxwellBot(commands.Bot):
             return
         if sub == "say":
             if not rest.strip():
-                await message.channel.send("usage: `,vc say <text>`")
+                await message.channel.send("usage: `/voice arguments:say <text>`")
                 return
             vc = self._vc_get_client(message.guild, target_channel)
             if not vc or not vc.is_connected():
-                await message.channel.send("connect me first with `,vc join`")
+                await message.channel.send("connect me first with `/voice arguments:join`")
                 return
             try:
                 with tempfile.TemporaryDirectory(prefix="maxwell-vc-") as tmp:
@@ -8683,7 +8704,7 @@ class MaxwellBot(commands.Bot):
                 logger.warning(f"VC TTS say failed: {e}")
                 await message.channel.send(f"failed to speak: {e}")
             return
-        await message.channel.send("unknown vc command. try `,vc help`")
+        await message.channel.send("unknown voice command. try `/voice arguments:help`")
 
     def _vc_context_key(self, guild=None, voice_channel=None, text_channel=None) -> int:
         if guild is not None:
@@ -9387,7 +9408,7 @@ class MaxwellBot(commands.Bot):
                 scope, fact = parts[0], parts[1]
             fact = " ".join(fact.split())[:1000]
             if not fact:
-                await message.channel.send("Usage: `,context add [scope] <fact>`")
+                await message.channel.send("Usage: `/context arguments:add [scope] <fact>`")
                 return
             context_id = await self.memory.add_shared_context(
                 {
@@ -9417,7 +9438,7 @@ class MaxwellBot(commands.Bot):
             )
             return
         await message.channel.send(
-            "Usage: `,context`, `,context all`, `,context add [scope] <fact>`, `,context forget <id>`, `,context private <id>`, `,context global <id>`"
+            "Usage: `/context arguments:<summary|all|add [scope] <fact>|forget <id>|private <id>|global <id>>`"
         )
 
     # Tombstone: old `,auto` mode lived here. It ran an LLM decider on ambient
@@ -9621,7 +9642,7 @@ class MaxwellBot(commands.Bot):
 
     def _jailbreak_enabled(self, server_id: str) -> bool:
         """Jailbreak (freedom-mode prompt) is OFF by default everywhere; only on
-        for servers an admin enabled with `,jailbreak on`. DMs never get it."""
+        for servers an admin enabled through `/config scope:server`. DMs never get it."""
         return bool(server_id) and server_id in self._jailbreak_servers
 
     def _load_ticket_greeting_servers(self, quiet: bool = False):
@@ -9647,7 +9668,7 @@ class MaxwellBot(commands.Bot):
         )
 
     def _ticket_greeting_enabled(self, server_id: str) -> bool:
-        """Auto-hello in new ticket channels. OFF unless `,ticket on` here."""
+        """Auto-hello in new ticket channels. OFF unless enabled for the server."""
         if not server_id or server_id == "DM":
             return False
         return server_id in self._ticket_greeting_servers
@@ -9684,14 +9705,10 @@ class MaxwellBot(commands.Bot):
             logger.error(f"Failed to save progress servers: {e}")
 
     def _progress_enabled(self, server_id: str) -> bool:
-        """Live tool-progress messages. OFF by default per server; an admin
-        opts a server in with `,progress on` (persisted to
-        progress_servers.json). DMs never get progress messages. When the
-        MAXWELL_PROGRESS_MESSAGES env var is true, it enables the feature as a
-        baseline for every server, so an operator can flip it on globally
-        without running the command in each server — a server-level
-        `,progress off` still wins (it records the server in
-        _progress_servers_off so the env baseline does NOT re-add it)."""
+        """Live tool progress defaults on; admins can silence a server with
+        `/progress arguments:off` (persisted to progress_servers_off.json). DMs never get
+        progress messages. MAXWELL_PROGRESS_MESSAGES=false disables the
+        baseline globally, while a server-level `/progress arguments:on` still opts in."""
         if not server_id or server_id == "DM":
             return False
         if server_id in self._progress_servers:
@@ -9818,7 +9835,7 @@ class MaxwellBot(commands.Bot):
         opening line so Maxwell is present in the new room and it lands in his
         memory / conversation-watch scope (his own posts go through the normal
         memory path). Fire-and-forget: never raises, never blocks a turn. Gated
-        by ``,ticket on`` for this server, ``bot_enabled``, and the bot
+        by the server's ticket-greeting setting, ``bot_enabled``, and the bot
         actually having send permission in the channel.
         """
         if not MaxwellBot._dev_scope_allows(self, channel):
@@ -10101,7 +10118,7 @@ class MaxwellBot(commands.Bot):
             await message.channel.send("REM defaults restored.")
             return
         await message.channel.send(
-            "Usage: `,rem`, `,rem now`, `,rem on`, `,rem off`, `,rem audit [N]`, `,rem fix`"
+            "Usage: `/rem arguments:<status|now|on|off|audit [N]|fix>`"
         )
 
     async def _handle_autonomy_command(self, message, args: str | None):
@@ -10197,7 +10214,7 @@ class MaxwellBot(commands.Bot):
             parts = arg.split()
             if len(parts) < 2:
                 await message.channel.send(
-                    f"Current interval: {self._control.get('autonomy_interval_seconds', 300)}s. Usage: `,autonomy interval <seconds>`"
+                    f"Current interval: {self._control.get('autonomy_interval_seconds', 300)}s. Usage: `/autonomy arguments:interval <seconds>`"
                 )
                 return
             try:
@@ -10227,13 +10244,13 @@ class MaxwellBot(commands.Bot):
                     "Autonomy blacklists:\n"
                     f"channels: {', '.join(ab_ch) or '(none)'}\n"
                     f"servers: {', '.join(ab_sv) or '(none)'}\n"
-                    "Add: `,autonomy blacklist channel <id>` or `server <id>`\n"
-                    "Remove: `,autonomy unblacklist channel <id>` etc."
+                    "Add: `/autonomy arguments:blacklist channel <id>` or `server <id>`\n"
+                    "Remove: `/autonomy arguments:unblacklist channel <id>` etc."
                 )
                 return
             if len(parts) < 3:
                 await message.channel.send(
-                    "Usage: `,autonomy blacklist channel <id>` / `server <id>` ; unblacklist to remove"
+                    "Usage: `/autonomy arguments:blacklist channel <id>` / `server <id>` ; unblacklist to remove"
                 )
                 return
             kind = parts[1].lower()
@@ -10263,8 +10280,8 @@ class MaxwellBot(commands.Bot):
             return
 
         await message.channel.send(
-            "Usage: `,autonomy`, `,autonomy on`, `,autonomy off`, `,autonomy tick`, "
-            "`,autonomy log`, `,autonomy interval <seconds>`, "
+            "Usage: `/autonomy`, `/autonomy arguments:on`, `/autonomy arguments:off`, `/autonomy arguments:tick`, "
+            "`/autonomy arguments:log`, `/autonomy arguments:interval <seconds>`, "
             "`blacklist`/`unblacklist channel|server <id>`"
         )
 
@@ -13591,7 +13608,7 @@ class MaxwellBot(commands.Bot):
 
     # ---- sleep gate ----
     # The bot can take a 1-60 minute sleep window via the `sleep` tool
-    # or the `,sleep` admin command. While sleeping, the triggering
+    # or the restricted `/sleep` command. While sleeping, the triggering
     # channel gets a single "Max is sleeping, back in Xm" notice
     # (deduped per user) and the LLM dispatch is skipped. Never DM
     # the user about sleep. The wake is automatic when the monotonic
@@ -15251,10 +15268,10 @@ class MaxwellBot(commands.Bot):
         return f"Tool {name}: {result_text}"
 
     def _consume_destructive_confirm(self, author_id: str) -> bool:
-        """Return True (one-shot) if `author_id` has a live `,confirm` token.
+        """Return True (one-shot) if `author_id` has a live confirmation token.
 
         Expired tokens are reaped as a side effect. One-shot: a successful
-        consume removes the token so a single `,confirm` authorizes exactly one
+        consume removes the token so a single confirmation authorizes exactly one
         destructive call, not a chain of them.
         """
         if not author_id:
@@ -15377,11 +15394,10 @@ class MaxwellBot(commands.Bot):
 
         result_by_id: dict[str, str] = {}
 
-        # One progress message per batch, not per tool. We edit it to show
-        # the CURRENT tool as it runs (one sentence, not a growing list).
-        # When the batch is over we delete it so the channel is left with
-        # only the tool's real output and the final send_message reply.
-        # Disabled by control flag (default off) so operators opt in.
+        # One progress message per batch, not per tool. As tools start, the
+        # same message accumulates their names. When the batch is over it is
+        # deleted; only Maxwell's final response remains in the channel.
+        # Enabled by default; admins can silence a server with `/progress arguments:off`.
         # See tool_progress.py for the full design.
         # If the caller already created+started a progress message (e.g. during
         # the LLM generation phase in _handle_message), reuse it so the same
@@ -15397,77 +15413,14 @@ class MaxwellBot(commands.Bot):
             )
             progress = _make_tool_progress(message) if progress_enabled else None
 
-        # 2026-07-21: pick a per-tool "artifact" field for the progress
-        # line's code-snippet preview. The user wants to see the code
-        # the model is generating scroll by in real time. Per-tool
-        # field map keeps the preview accurate (HTML for create_site,
-        # command for shell, etc.) instead of leaking a slug or URL
-        # which would be useless. The progress line renderer in
-        # tool_progress.py handles whitespace collapsing and the
-        # ~80-char tail window.
-        def _artifact_snippet_for(tool_name: str, params: dict) -> str:
-            _ARTIFACT_FIELDS = {
-                "create_site": "body",
-                # "shell": suppress showing the raw command; show clean status message
-                "send_file": "content",
-                "send_message": "body",
-                "edit_message": "content",
-                "image_generator": "prompt",
-                # The registered tool name is "hd_image"; the old
-                # "hd_image_generator" key never matched, so the preview fell
-                # through to "first string param" — which now risks showing the
-                # image URL (or a data URI) instead of the prompt.
-                "hd_image": "prompt",
-                "web_search": "query",
-                "tts": "text",
-            }
-            field = _ARTIFACT_FIELDS.get(tool_name)
-            if not field:
-                # Unknown tool: pick the first non-reasoning string
-                # field. Falls back to whatever the model wrote —
-                # usually the most interesting argument.
-                for k, v in params.items():
-                    if k == "reasoning":
-                        continue
-                    if isinstance(v, str) and v.strip():
-                        return v
-                return ""
-            val = params.get(field)
-            if not isinstance(val, str):
-                return ""
-            return val
-
         async def run_one(call: dict) -> str:
             name = call["name"]
             params = dict(call.get("arguments") or {})
-            # Peek at the reasoning WITHOUT popping it. _execute_tool_by_name
-            # below pops it via extract_reasoning and records it to the trace —
-            # if we popped it here too, the trace would always read
-            # "(no reasoning provided by the model)" because the second pop
-            # finds nothing. We only need the value for the progress message.
-            tool_reasoning = str(params.get("reasoning", "") or "")
-            # 2026-07-21: also peek at the artifact so the progress line
-            # can show a snippet of the code the model is generating.
-            # The user wants to SEE the artifact scroll by, not just
-            # hear "thinking: building the page…". For create_site the
-            # snippet is the HTML body; for shell it's the command; for
-            # send_file it's the file content; etc. We pick a
-            # per-tool field rather than the first non-reasoning key
-            # so we surface the actual code, not a slug or URL.
-            artifact_snippet = _artifact_snippet_for(name, params)
             if progress is not None:
                 import contextlib
 
                 with contextlib.suppress(Exception):
-                    # 2026-07-21: clear the buffer before replacing it
-                    # with the tool's natural-language reasoning, so
-                    # any leftover raw JSON from the tick() deltas
-                    # doesn't bleed into the visible line.
-                    if hasattr(progress, "_reasoning_buffer"):
-                        progress._reasoning_buffer = ""
-                    await progress.update(
-                        name, tool_reasoning, snippet=artifact_snippet
-                    )
+                    await progress.note_tool(name)
             line = await MaxwellBot._execute_tool_by_name(
                 self,
                 message,

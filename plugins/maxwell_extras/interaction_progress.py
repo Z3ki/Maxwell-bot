@@ -36,6 +36,9 @@ class _InteractionProgressState:
         self.status_set = False
         self.completed = False
         self.session: Any = None
+        self.tool_calls: list[str] = []
+        self.tool_status_last_edit = 0.0
+        self.tool_status_task: asyncio.Task | None = None
         self.timer: asyncio.Task | None = None
         self.cleanup: asyncio.Task | None = None
         self.lock = asyncio.Lock()
@@ -133,6 +136,103 @@ async def _mark_working(state: _InteractionProgressState) -> Any | None:
             return None
         state.status_set = posted is not None
         return posted
+
+
+def _tool_status_text(calls: list[str]) -> str:
+    counts: dict[str, int] = {}
+    order: list[str] = []
+    for value in calls:
+        name = str(value or "").strip()
+        if not name:
+            continue
+        if name not in counts:
+            order.append(name)
+            counts[name] = 0
+        counts[name] += 1
+    visible = [
+        f"`{name}`" + (f" ×{counts[name]}" if counts[name] > 1 else "")
+        for name in order[:8]
+    ]
+    if len(order) > 8:
+        visible.append(f"+{len(order) - 8} more")
+    return "Maxwell is using: " + ", ".join(visible)
+
+
+async def _flush_tool_status(state: _InteractionProgressState) -> None:
+    async with state.lock:
+        if state.completed or not state.status_set or not state.tool_calls:
+            return
+        try:
+            await _edit_original(
+                state.interaction, _tool_status_text(state.tool_calls)
+            )
+        except Exception:
+            return
+        state.tool_status_last_edit = time.monotonic()
+
+
+async def _flush_tool_status_later(
+    state: _InteractionProgressState, delay: float
+) -> None:
+    try:
+        await asyncio.sleep(delay)
+        await _flush_tool_status(state)
+    except asyncio.CancelledError:
+        pass
+
+
+async def _note_interaction_tool(
+    state: _InteractionProgressState, name: str
+) -> None:
+    await _mark_working(state)
+    async with state.lock:
+        if state.completed:
+            return
+        state.tool_calls.append(str(name or "").strip())
+        delay = 1.05 - (time.monotonic() - state.tool_status_last_edit)
+        if delay <= 0:
+            flush_now = True
+        else:
+            flush_now = False
+            if state.tool_status_task is None or state.tool_status_task.done():
+                state.tool_status_task = _spawn(
+                    _flush_tool_status_later(state, delay)
+                )
+    if flush_now:
+        await _flush_tool_status(state)
+
+
+async def _clear_working_status(state: _InteractionProgressState) -> None:
+    """Remove the temporary interaction response before the final follow-up."""
+    pending = state.tool_status_task
+    if pending is not None and not pending.done() and state.tool_calls:
+        with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(pending), timeout=1.2)
+    async with state.lock:
+        if state.completed:
+            return
+        should_delete = state.escalated and state.status_set
+        state.completed = True
+        _cancel_timer(state)
+        pending = state.tool_status_task
+        state.tool_status_task = None
+        if pending is not None and not pending.done():
+            pending.cancel()
+        state.status_set = False
+    if not should_delete:
+        return
+    delete = getattr(state.interaction, "delete_original_response", None)
+    if callable(delete):
+        with contextlib.suppress(Exception):
+            await delete()
+            return
+    original = getattr(state.interaction, "original_response", None)
+    if callable(original):
+        with contextlib.suppress(Exception):
+            message = await original()
+            delete_message = getattr(message, "delete", None)
+            if callable(delete_message):
+                await delete_message()
 
 
 async def _slow_timer(state: _InteractionProgressState) -> None:
@@ -249,6 +349,8 @@ def _patch_session() -> None:
         ):
             await _mark_working(state)
 
+        if state.escalated:
+            await _clear_working_status(state)
         return await next_send["fn"](self, content=content, file=file, **kwargs)
 
     session_init._maxwell_interaction_progress_wrapped = True  # type: ignore[attr-defined]
@@ -327,7 +429,10 @@ def install_interaction_progress(bot: Any, ctx: Any = None) -> None:
     from user_install import register_interaction_handler
 
     register_interaction_handler(
-        pre_handler, priority=20, name="interaction_progress"
+        # Discovery and settings commands are consumed by higher-level app
+        # handlers. Start the slow timer only after those handlers decline,
+        # immediately before an AI turn falls through to the default handler.
+        pre_handler, priority=1000, name="interaction_progress"
     )
 
     async def before_tool(payload) -> None:
@@ -336,12 +441,26 @@ def install_interaction_progress(bot: Any, ctx: Any = None) -> None:
         if message is not None and is_user_install_message(message):
             state = _state_for_message(message)
             if state is not None:
-                await _mark_working(state)
+                await _note_interaction_tool(state, str(data.get("name") or ""))
+
+    async def after_tool(payload) -> None:
+        data = getattr(payload, "data", payload) or {}
+        message = data.get("message")
+        if (
+            message is not None
+            and is_user_install_message(message)
+            and str(data.get("name") or "") == "no_response"
+        ):
+            state = _state_for_message(message)
+            if state is not None:
+                await _clear_working_status(state)
 
     if ctx is not None and hasattr(ctx, "register_hook"):
         ctx.register_hook("before_tool", before_tool, priority=40)
+        ctx.register_hook("after_tool", after_tool, priority=40)
     elif hasattr(bot, "hooks") and bot.hooks is not None:
         bot.hooks.register("maxwell_extras", "before_tool", before_tool, priority=40)
+        bot.hooks.register("maxwell_extras", "after_tool", after_tool, priority=40)
 
     bot._maxwell_interaction_progress_installed = True
 

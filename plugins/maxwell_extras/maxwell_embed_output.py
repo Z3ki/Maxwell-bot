@@ -16,7 +16,6 @@ import user_install as ui
 _INSTALLED = False
 _ORIGINAL_SEND = None
 _EMBED_COLOR = 0x5865F2
-_EMBED_FOOTER = "Personal app • /maxwell"
 
 
 def _is_maxwell_slash(interaction: Any) -> bool:
@@ -58,7 +57,6 @@ def _reply_embed(text: str, bot: Any = None) -> discord.Embed:
         embed.set_author(name=name, icon_url=avatar_url)
     else:
         embed.set_author(name=name)
-    embed.set_footer(text=_EMBED_FOOTER)
     return embed
 
 

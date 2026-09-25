@@ -1555,7 +1555,6 @@
         {
           title: "Generated Sites",
           fields: [
-            { k: "create_site_quota_per_user", t: "int", min: 0, max: 10000 },
             { k: "site_ttl_hours", t: "int", min: 0, max: 8760, hint: "0 = never expire" },
             { k: "site_inject_csp", t: "bool" },
           ],
@@ -1579,8 +1578,8 @@
         autonomy_enabled: "Autonomy tab (dedicated endpoint)",
         autonomy_interval_seconds: "Autonomy tab (dedicated endpoint)",
         autonomy_min_post_gap_seconds: "deprecated — no longer enforced",
-        guild_solo_channel: "set in chat with ,solo",
-        guild_solo_autonomy_added: "bookkeeping for ,solo off",
+        guild_solo_channel: "set with /solo",
+        guild_solo_autonomy_added: "bookkeeping for /solo off",
       };
       function ctlLabel(f) {
         return (

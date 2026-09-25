@@ -1278,7 +1278,7 @@ def format_timing_debug(
     daily: dict | None = None,
     extra: list[str] | None = None,
 ) -> str:
-    """Human-readable TTFT / TPS dump for `,debug` and the debug tool."""
+    """Human-readable TTFT / TPS dump for `/debug` and the debug tool."""
     rows = [r for r in (records or []) if isinstance(r, dict)]
     lines = ["llm debug"]
     if not rows:
@@ -1414,7 +1414,7 @@ def format_timing_reply_line(rec: dict | None) -> str:
 
 
 def append_timing_to_reply(text: str, rec: dict | None, *, limit: int = 1900) -> str:
-    """User-facing replies no longer get a TTFT/TPS footer. ``,debug`` still has it."""
+    """User-facing replies no longer get a TTFT/TPS footer. `/debug` still has it."""
     return str(text or "")
 
 

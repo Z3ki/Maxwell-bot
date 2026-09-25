@@ -24,7 +24,7 @@ A new plugin:
 1. Create `plugins/<id>/` (`id` must be a Python identifier).
 2. Write `plugin.json` (validated before the Python is imported).
 3. Implement `setup(bot, ctx)` returning tools and/or calling `ctx.*`.
-4. Enable it (default comes from `enabled_by_default`, or `,plugin enable`).
+4. Enable it (default comes from `enabled_by_default`, or `/plugins arguments:enable <name>`).
 5. Use the capability. Some host changes still need a process restart
    (`requires_restart` in the manifest).
 
@@ -37,7 +37,7 @@ A new plugin:
 | `id` / `name` | Unique identifier |
 | `version` | Plugin version |
 | `api_version` | Must be `1` |
-| `description`, `author` | Dashboard / `,plugin list` |
+| `description`, `author` | Dashboard / `/plugins` |
 | `dependencies` | Other plugin ids that must load first |
 | `optional_dependencies` | Python packages; missing ones disable *this* plugin, not Maxwell |
 | `permissions` | Declared capabilities (`network`, `shell`, …) |
@@ -86,7 +86,7 @@ compatibility parser, the dashboard disable list, autonomy, and audit logs.
 
 ## Managing plugins
 
-- Discord: `,plugin list|enable|disable|reload|install|uninstall`
+- Discord: `/plugins arguments:list|enable|disable` (code reload/install/uninstall are not available from Discord)
 - Tool: `manage_plugin`
 - Dashboard: Plugins tab
 - API: `GET /api/plugins`, `POST /api/plugins/install`,

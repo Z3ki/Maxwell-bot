@@ -24,9 +24,9 @@ The previous manual-confirmation override flow was removed. There is no confirma
 
 This is a defense-in-depth boundary, not a guarantee that web content is safe. Keep powerful tools disabled where they are not needed and limit Discord permissions to the minimum required.
 
-## Owner/admin surfaces
+## Operator surfaces
 
-`/owner` is authorized against configured admin/owner IDs and returns ephemeral output. Its data exports redact keys that look like credentials/secrets, and secret-like control keys are not editable through the owner panel.
+`/diagnostics` and `/maintenance` are authorized against configured Maxwell developer IDs and return ephemeral output. Diagnostic exports redact credential-like values, and secret-like controls cannot be edited through Discord. `/config` checks the caller's server permissions before changing server-scoped settings; personal settings remain private to the caller.
 
 The browser dashboard/API must still be protected with its own authentication. Do not treat Discord owner authorization as a substitute for dashboard authentication or reverse-proxy isolation.
 

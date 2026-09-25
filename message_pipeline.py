@@ -379,7 +379,7 @@ class ReplyQueue:
                 except asyncio.CancelledError:
                     # Two very different cancellations arrive here:
                     #
-                    #  - the REPLY was cancelled (",stop", same-user
+                    #  - the REPLY was cancelled (`/stop`, same-user
                     #    interrupt). That is a deliberate stop for that one
                     #    turn; anything queued behind it is separate traffic
                     #    and must still be answered. The shield above means

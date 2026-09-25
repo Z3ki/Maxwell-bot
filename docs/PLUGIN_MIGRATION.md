@@ -17,7 +17,7 @@ plugin host. Remaining work for a later session:
 - Dashboard Plugins tab + owner API enable/disable/reload/config
 - Sample plugin under `examples/sample_plugin/`
 - Autonomy routing, visible-output suppression, modern user-install send,
-  `/owner` and `/maxwell` embed wrapping use host APIs instead of wrapping
+  `/diagnostics`, `/maintenance`, and `/maxwell` embed wrapping use host APIs instead of wrapping
   MaxwellBot methods
 - Chat providers (primary / autonomy / aux) are constructed through
   `maxwell_core.providers.factory`

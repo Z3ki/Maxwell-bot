@@ -11,6 +11,7 @@ class _Message:
     def __init__(self, content: str = ""):
         self.id = 999
         self.content = content
+        self.deleted = False
 
     async def edit(self, *, content=None, **_kwargs):
         if content is not None:
@@ -18,7 +19,7 @@ class _Message:
         return self
 
     async def delete(self):
-        return None
+        self.deleted = True
 
 
 class _Response:
@@ -52,6 +53,7 @@ class _Interaction:
         self.followup = _Followup()
         self.original = _Message()
         self.edits = []
+        self.original_deleted = False
 
     async def edit_original_response(self, *, content=None, **_kwargs):
         self.original.content = str(content or "")
@@ -60,6 +62,10 @@ class _Interaction:
 
     async def original_response(self):
         return self.original
+
+    async def delete_original_response(self):
+        self.original_deleted = True
+        await self.original.delete()
 
 
 class _RacingInteraction(_Interaction):
@@ -101,7 +107,7 @@ def test_fast_answer_uses_original_interaction():
     asyncio.run(run())
 
 
-def test_tool_escalation_keeps_working_status_and_uses_followup():
+def test_tool_escalation_removes_working_status_and_uses_followup():
     async def run():
         mod._patch_session()
         interaction = _Interaction(2)
@@ -112,10 +118,12 @@ def test_tool_escalation_keeps_working_status_and_uses_followup():
         sent = await session.send("final answer")
         assert interaction.original.content == mod._STATUS_TEXT
         assert interaction.edits == [mod._STATUS_TEXT]
+        assert interaction.original_deleted is True
+        assert interaction.original.deleted is True
         assert interaction.followup.sent[0][0]["content"] == "final answer"
         assert sent is interaction.followup.sent[0][1]
         assert state.escalated is True
-        assert state.status_set is True
+        assert state.status_set is False
 
     asyncio.run(run())
 
@@ -144,9 +152,34 @@ def test_answer_after_ten_seconds_escalates_before_send():
         session = UserInstallSession(interaction)
         sent = await session.send("late answer")
         assert interaction.original.content == mod._STATUS_TEXT
+        assert interaction.original_deleted is True
         assert interaction.followup.sent[0][0]["content"] == "late answer"
         assert sent is interaction.followup.sent[0][1]
         assert state.escalated is True
+
+    asyncio.run(run())
+
+
+def test_interaction_tool_status_accumulates_then_is_removed_before_reply():
+    async def run():
+        mod._patch_session()
+        interaction = _Interaction(6)
+        state = _state(interaction)
+        session = UserInstallSession(interaction)
+        await interaction.response.defer()
+
+        await mod._note_interaction_tool(state, "web_search")
+        assert interaction.original.content == "Maxwell is using: `web_search`"
+        state.tool_status_last_edit -= 2.0
+        await mod._note_interaction_tool(state, "fetch_url")
+        assert interaction.original.content == (
+            "Maxwell is using: `web_search`, `fetch_url`"
+        )
+
+        sent = await session.send("final answer")
+        assert interaction.original_deleted is True
+        assert interaction.followup.sent[0][0]["content"] == "final answer"
+        assert sent is interaction.followup.sent[0][1]
 
     asyncio.run(run())
 

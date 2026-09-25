@@ -356,8 +356,8 @@ class Config:
     EMBED_DIM = _int_env("MAXWELL_EMBED_DIM", 1024, min_value=8, max_value=16384)
 
     # When false (default), shell refuses to run on a turn
-    # that read untrusted fetched content (URLs, web search) without an
-    # out-of-band `,confirm` from an admin. This blocks indirect prompt
+    # that read untrusted fetched content (URLs, web search). A new clean user
+    # request is required after tainted content. This blocks indirect prompt
     # injection from turning a fetched page into a shell command.
     # Set to true to skip the gate entirely — the model can call shell
     # after fetch_url/web_search without confirmation. Only do this if
@@ -392,11 +392,10 @@ class Config:
     AUX_MODEL = os.getenv("AUX_MODEL", "").strip()
     AUX_DISABLE_REASONING = _bool_env("AUX_DISABLE_REASONING", True)
 
-    # Live tool progress messages. OFF by default: a per-server `,progress on`
-    # opts a server in, and MAXWELL_PROGRESS_MESSAGES=true enables it for every
-    # server as a baseline. `,progress off` silences a noisy server even under
-    # the env baseline; DMs never get them. See tool_progress.py.
-    PROGRESS_MESSAGES = _bool_env("MAXWELL_PROGRESS_MESSAGES", False)
+    # Live tool progress messages are on by default. A per-server
+    # `/progress arguments:off` silences a noisy server; MAXWELL_PROGRESS_MESSAGES=false
+    # disables the baseline globally. DMs never get them. See tool_progress.py.
+    PROGRESS_MESSAGES = _bool_env("MAXWELL_PROGRESS_MESSAGES", True)
 
     # Custom streaming tool-call protocol. Native OpenAI-style tools= doesn't
     # stream incrementally on some providers (notably Ollama cloud's
@@ -609,9 +608,9 @@ class Config:
             )
         if not cls.MAXWELL_OWNER_IDS:
             _log.warning(
-                "MAXWELL_OWNER_IDS is empty — admin commands (`,prompt`, "
-                "`,clearmem`, `,autonomy`, `,rem`, etc.) will be denied to "
-                "everyone. Set your Discord user ID in .env."
+                "MAXWELL_OWNER_IDS is empty — restricted /diagnostics and "
+                "/maintenance commands will be denied to everyone. Set your "
+                "Discord user ID in .env."
             )
         if cls.ENABLE_EMAIL_TOOLS and not cls.MAXWELL_EMAIL_PASSWORD:
             _log.warning(

@@ -146,6 +146,33 @@ def test_update_replaces_in_place():
     asyncio.run(prog.stop())
 
 
+def test_tool_status_accumulates_names_and_is_deleted_when_done():
+    msg = FakeMessage()
+    prog = tool_progress.ToolProgress(msg)
+    asyncio.run(prog.start())
+    posted = msg.channel.sent[0]
+
+    # These are actual dispatch notifications. The same status is edited to
+    # show both names, without copying arguments or results into the channel.
+    prog._last_edit = 0
+    asyncio.run(prog.note_tool("web_search"))
+    assert posted.content == "Maxwell is using: `web_search`"
+    prog._last_edit = 0
+    asyncio.run(prog.note_tool("fetch_url"))
+    assert posted.content == "Maxwell is using: `web_search`, `fetch_url`"
+    assert len(msg.channel.sent) == 1
+
+    asyncio.run(prog.stop())
+    assert posted in msg.channel.deleted
+
+
+def test_tool_status_compacts_repeated_calls():
+    msg = FakeMessage()
+    prog = tool_progress.ToolProgress(msg)
+    prog._tools_used = ["web_search", "web_search", "fetch_url"]
+    assert prog._render() == "Maxwell is using: `web_search` ×2, `fetch_url`"
+
+
 def test_update_uses_models_own_words():
     """The reason field IS the message — no decoration, no backticks, no emoji.
     Format: 'using <tool>: <reasoning>'."""

@@ -56,33 +56,16 @@ def discovery_enabled(control: dict | None) -> bool:
 
 def command_help_text(*, discovery: bool) -> str:
     lines = [
-        "Commands:",
-        "` ,help` - show this list",
-        "` ,usage` - your message allowance",
-        "` ,debug` - last LLM call TTFT / TPS / tokens (admin)",
-        "` ,stop` - stop active response in this channel",
-        "` ,prompt [text]` - view/set server prompt (admin)",
-        "` ,clearprompt` - clear server prompt (admin)",
-        "` ,clearmem` - clear channel memory (admin)",
-        "` ,context ...` - manage memory/context (admin)",
-        "` ,rem ...` - manage/run REM (admin)",
-        "` ,autonomy ...` - manage autonomy engine + channel/server blacklists (admin)",
-        "` ,vc ...` - voice commands",
-        "` ,drug [minutes|off|status]` - drug mode timer",
-        "` ,solo [#channel|off|status]` - lock this server to ONE channel: silence everywhere else and stop autonomy here (admin)",
-        "` ,jailbreak on|off|status` - toggle freedom-mode prompt for this server (admin)",
-        "` ,progress on|off|status` - toggle live 'thinking: …' messages during tool calls, per server (admin)",
-        "` ,ticket on|off|status` - greet new ticket/support channels in this server (admin; off by default)",
-        "` ,sleep [minutes|off|status]` - take a 1-60m sleep window; pings get a notice (admin)",
-        "` ,wake` - clear active sleep window (admin)",
-        "` ,admin [@user|user_id|clear]` - add/remove/list admins (admin). Promoted users can log into the dashboard at /admin via 'Continue with Discord'.",
-        "` ,plugin list|enable|disable` - manage available plugins (admin for --global)",
-        "` ,blacklist [@user|clear]` / `,unblacklist @user` - blacklist controls (admin)",
-        "` /help` - same list",
-        "` /usage` - your message allowance",
+        "Maxwell slash commands:",
+        "AI: `/maxwell`, `/image`, `/chess`, `/checkers`, `/moderation`, `/memory`, `/reminder`.",
+        "Personal: `/config` for your defaults; `/personality` for your reply-style preference; `/usage` for your allowance.",
+        "Server settings: `/config scope:server` (Manage Server or configured Maxwell admin), `/progress`, `/ticket-greetings`, `/solo`, `/server-prompt`, `/clear-server-prompt`.",
+        "Memory: `/memory`, `/context`, `/clear-memory`, `/negative-memory`, `/downvote`, `/summarize-memory`.",
+        "Operations: `/stop`, `/jobs`, `/job`, `/rem`, `/autonomy`, `/sleep`, `/wake`, `/voice`, `/plugins`, `/admin`, `/blacklist`, `/unblacklist`.",
+        "Restricted: `/diagnostics` and `/maintenance` are available only to configured Maxwell developers.",
     ]
     if discovery:
-        lines.append("` /premium` or `,premium` - plan details")
+        lines.append("Discovery: `/premium` shows current plan information; it does not start a purchase.")
     return "\n".join(lines)
 
 

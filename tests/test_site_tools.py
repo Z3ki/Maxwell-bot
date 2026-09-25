@@ -23,7 +23,7 @@ def bot(tmp_path):
     data_dir = tmp_path / "data"
     site_dir.mkdir(parents=True)
     data_dir.mkdir()
-    control = {"create_site_quota_per_user": 50}
+    control = {}
     return SimpleNamespace(
         config=SimpleNamespace(
             MAXWELL_SITE_DIR=str(site_dir),

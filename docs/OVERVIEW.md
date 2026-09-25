@@ -42,7 +42,7 @@ Discord bot / app commands
 | `jobs.py` | Background jobs and long-running work. |
 | `message_pipeline.py` | Message-processing pipeline helpers. |
 | `user_install.py` | Discord user-install/app-command and context-menu support. |
-| `plugins/maxwell_extras/` | Owner control panel, app-command progress, rich `/maxwell` output, tool-audit disclosure. |
+| `plugins/maxwell_extras/` | Owner control panel, app-command progress, rich `/maxwell` output. |
 | `api/api_server.py`, `api/state.py`, `api/storage.py` | Dashboard/admin API, sanitized controls, persisted admin state. |
 | `web/` | Dashboard frontend. |
 | `site_server.py`, `site_backend.py` | Generated-site serving/backend runtime integration. |
@@ -81,16 +81,19 @@ RAG availability is controlled through configuration/feature switches. Embedding
 Maxwell supports the normal bot conversation path plus Discord app-command/user-install surfaces.
 
 - `/maxwell` is the personal app-command surface when user install is enabled.
-- `/owner` is an owner-only status/control panel.
+- `/config` exposes personal defaults to everyone and server settings to authorized server administrators.
+- `/personality` stores a personal reply-style preference.
+- `/diagnostics` and `/maintenance` are restricted to configured Maxwell developers.
+- `/image`, `/chess`, `/checkers`, `/moderation`, `/memory`, and `/reminder` provide focused request paths.
 - Message/user context-menu actions are registered through the user-install layer.
 
-The `maxwell_extras` plugin adds the current `/maxwell` presentation behavior: textual slash-command replies use embeds. Fast responses stay in the original deferred interaction. A tool-backed or >10-second request leaves a stable `working on it…` status and sends the final answer as a follow-up.
+The `maxwell_extras` plugin adds the current `/maxwell` presentation behavior: textual slash-command replies use clean branded embeds. Fast responses stay in the original deferred interaction. A tool-backed or >10-second request shows a temporary status with the tools Maxwell is using, removes it when complete, and sends the final answer as a follow-up.
 
-## Owner controls
+## Operator controls
 
 Owner/admin identity comes from configured admin IDs such as `MAXWELL_OWNER_IDS` / `CREATOR_ID` and persisted admin state.
 
-`/owner` can show redacted runtime/control data and make validated persistent updates to `DATA_DIR/bot_control.json`. The dashboard works with the same sanitized runtime-control model.
+`/diagnostics` can show redacted runtime/control data. `/maintenance` can make validated persistent updates to `DATA_DIR/bot_control.json`. Both commands independently check configured Maxwell developer IDs. The dashboard uses the same sanitized runtime-control model.
 
 ## Runtime controls
 

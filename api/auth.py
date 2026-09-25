@@ -50,7 +50,7 @@ def _load_admin_creds():
 def _load_bot_admins():
     """Read the bot's live admin allowlist from admins.json.
 
-    The bot writes this file every time `,admin @user` / `,admin clear` runs,
+    The bot writes this file every time `/admin` changes the admin list,
     so a user promoted via chat can immediately OAuth into the dashboard
     without a restart. We read it on every call (it's tiny) so promotions
     take effect without bouncing the API process.

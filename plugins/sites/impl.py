@@ -227,16 +227,6 @@ class CreateSiteTool(Tool):
                 )
 
         control = self._control()
-        max_sites = int(control.get("create_site_quota_per_user", 10))
-        active_user_sites = [s for s in sites.values() if s.get("user_id") == user_id]
-        already_ours = (
-            isinstance(existing, dict) and str(existing.get("user_id") or "") == user_id
-        )
-        if not already_ours and len(active_user_sites) >= max_sites:
-            return (
-                f"Error: site quota reached ({len(active_user_sites)}/{max_sites} active sites). "
-                "Use delete_site on an old slug first, or edit_site to reuse one."
-            )
 
         if len(body) > self.MAX_CONTENT_SIZE:
             return f"Error: content too long ({len(body)} chars, max {self.MAX_CONTENT_SIZE})"
@@ -371,9 +361,8 @@ class CreateSiteTool(Tool):
             # Commit the site metadata under a cross-process FileLock so a
             # concurrent create_site (or an API site_update/site_delete) can't
             # lose this entry or have this entry overwrite theirs. Reload fresh
-            # inside the lock and re-check ownership/quota (they may have
-            # changed since the pre-check). If the save fails, remove the
-            # just-written HTML so we don't leave an untracked orphan site.
+            # inside the lock and re-check slug ownership. If the save fails,
+            # remove the just-written HTML so we don't leave an untracked site.
             site_entry = {
                 "user_id": user_id,
                 "user_name": message.author.display_name,
@@ -397,14 +386,14 @@ class CreateSiteTool(Tool):
                 logger.error(f"Failed to commit site metadata for {slug}: {e}")
                 return f"Error creating site: {e}"
             if not committed:
-                # Overwrite disallowed by a concurrent owner change / quota hit
-                # discovered under the lock; clean up only a directory we created.
+                # Overwrite disallowed by a concurrent owner change discovered
+                # under the lock; clean up only a directory we created.
                 if created_new_dir:
                     with contextlib.suppress(Exception):
                         shutil.rmtree(site_dir, ignore_errors=True)
                 return (
                     f"Error: site slug '{slug}' could not be committed "
-                    "(owner/quota changed concurrently). Try again."
+                    "(ownership changed concurrently). Try again."
                 )
             result = f"Site created: {self.base_url}/{slug}/"
             if len(written) > 1:
@@ -449,8 +438,8 @@ class CreateSiteTool(Tool):
     def _commit_site_locked(
         self, slug: str, user_id: str, is_admin: bool, entry: dict
     ) -> bool:
-        """Reload sites.json under a cross-process lock, re-check ownership and
-        quota, add the entry, and save atomically. Returns True on commit.
+        """Reload sites.json under a cross-process lock, re-check ownership,
+        add the entry, and save atomically. Returns True on commit.
 
         Runs in a worker thread (via asyncio.to_thread) because FileLock uses
         blocking fcntl. This is the single locked RMW for create_site metadata,
@@ -458,7 +447,6 @@ class CreateSiteTool(Tool):
         creates.
         """
         path = Path(self.bot.config.DATA_DIR) / "sites.json"
-        max_sites = int(self._control().get("create_site_quota_per_user", 10))
         with FileLock(path, timeout=15.0):
             sites = {}
             try:
@@ -475,15 +463,6 @@ class CreateSiteTool(Tool):
                 owner = str(existing.get("user_id") or "")
                 if owner and owner != user_id and not is_admin:
                     return False
-            # Re-check quota under the lock.
-            active = [s for s in sites.values() if s.get("user_id") == user_id]
-            # If this slug is already ours (overwrite), it doesn't count as new.
-            already_ours = (
-                isinstance(existing, dict)
-                and str(existing.get("user_id") or "") == user_id
-            )
-            if not already_ours and len(active) >= max_sites:
-                return False
             sites[slug] = entry
             _atomic_json_write_sync(path, sites)
             # Keep the in-memory map + mtime in sync for this process.
@@ -777,7 +756,7 @@ class DeleteSiteTool(_SiteOwnedTool):
     def get_description(self):
         return (
             "Delete a site you published: removes the files, the metadata, and "
-            "its backend store, and frees a slot against your site quota. "
+            "its backend store. "
             "Params: name (slug). Irreversible — the URL 404s immediately."
         )
 

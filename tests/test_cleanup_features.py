@@ -24,7 +24,7 @@ def test_maxwell_slash_reply_uses_embed_shape():
     assert embed.colour.value == 0x5865F2
     assert embed.author.name == "Maxwell el gato"
     assert str(embed.author.icon_url) == "https://example.com/maxwell.png"
-    assert embed.footer.text == "Personal app • /maxwell"
+    assert embed.footer.text is None
 
 
 def test_context_action_is_not_treated_as_maxwell_slash():

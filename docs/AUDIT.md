@@ -7,7 +7,7 @@
 Since the original audit snapshot, Maxwell has continued to change. Current `main` now includes, among other things:
 
 - The friendly easy-install provider names `AI_API_URL`, `AI_MODEL`, and `AI_API_KEY`, with `OLLAMA_*` retained as compatibility/advanced names.
-- Owner-only `/owner` runtime status/control support with redacted data export and validated persisted edits.
+- Developer-only `/diagnostics` and `/maintenance` support with redacted data export and validated persisted edits.
 - Discord `/maxwell` rich embed output plus slow/tool-backed interaction progress that promotes to a stable `working on it…` state after about 10 seconds and sends the final response separately.
 - Provider-native OpenAI-style `tool_calls` as the preferred tool path when supported.
 - Fail-closed destructive-tool handling for turns tainted by fetched/web content; the old manual-confirmation override flow was removed.

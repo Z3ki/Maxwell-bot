@@ -4,9 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from plugins.maxwell_extras.owner_control import (
-    OWNER_COMMAND,
-    OWNER_COMMAND_NAME,
+from plugins.maxwell_extras.admin_commands import (
+    DIAGNOSTICS_COMMAND,
+    MAINTENANCE_COMMAND,
     _coerce_value,
     _is_owner,
     _redact,
@@ -14,16 +14,22 @@ from plugins.maxwell_extras.owner_control import (
 )
 
 
-def test_owner_command_is_available_for_guild_and_user_install():
-    assert OWNER_COMMAND["name"] == OWNER_COMMAND_NAME == "owner"
-    assert OWNER_COMMAND["integration_types"] == [0, 1]
+def test_admin_surface_splits_diagnostics_from_maintenance_and_removes_owner_command():
+    assert DIAGNOSTICS_COMMAND["name"] == "diagnostics"
+    assert MAINTENANCE_COMMAND["name"] == "maintenance"
+    assert DIAGNOSTICS_COMMAND["integration_types"] == [0, 1]
     actions = {
         choice["value"]
-        for option in OWNER_COMMAND["options"]
+        for option in MAINTENANCE_COMMAND["options"]
         if option["name"] == "action"
         for choice in option["choices"]
     }
-    assert {"overview", "controls", "data", "set", "enable", "disable"} <= actions
+    assert {"set", "enable", "disable", "reload_control", "quota_set"} <= actions
+    assert {"overview", "controls", "data"} <= {
+        choice["value"]
+        for option in DIAGNOSTICS_COMMAND["options"]
+        for choice in option["choices"]
+    }
 
 
 def test_owner_gate_uses_configured_owner_ids():
@@ -96,3 +102,8 @@ def test_sensitive_control_cannot_be_changed_through_discord(tmp_path):
     with pytest.raises(ValueError, match="sensitive"):
         asyncio.run(_set_control(bot, "autonomy_api_key", "do-not-store"))
     assert not (tmp_path / "bot_control.json").exists()
+
+
+def test_old_owner_command_is_not_in_either_command_definition():
+    assert DIAGNOSTICS_COMMAND["name"] != "owner"
+    assert MAINTENANCE_COMMAND["name"] != "owner"

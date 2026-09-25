@@ -2772,7 +2772,7 @@ class RAGMemoryManager:
                 params.append(updates[key])
         # Metadata-only updates (visibility/tags/expires_at) live in the
         # metadata JSON column, not a dedicated column. Callers (bot.py
-        # ",context private/global", api, context_cleanup) pass them as
+        # `/context arguments:private|global`, api, context_cleanup) pass them as
         # top-level keys; previously they were silently ignored and
         # update_shared_context returned False for a visibility-only edit,
         # making the bot report "Context fact not found." for an existing

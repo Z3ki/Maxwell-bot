@@ -2355,7 +2355,7 @@ async def discord_auth_callback(request):
     avatar_url = (
         f"https://cdn.discordapp.com/avatars/{user_id}/{avatar}.png" if avatar else ""
     )
-    # Source of truth: the bot's live admins.json (updated by `,admin @user`).
+    # Source of truth: the bot's live admins.json (updated by `/admin`).
     # Anyone in this list can use the bot's admin commands AND log into the
     # dashboard via Discord OAuth. No hardcoded env list to keep in sync.
     allowed = _load_bot_admins()

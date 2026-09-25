@@ -1,17 +1,14 @@
-"""Discord extras plugin: rich messages, reminders, media inspection, and audit UI."""
+"""Discord extras plugin: rich messages, reminders, media inspection, and progress UI."""
 
 
 def setup(bot, ctx):
-    from .audit_chunk_tail import install_audit_chunk_tail
-    from .audit_progress_fix import install_progress_audit_fix
-    from .audit_ui import install_tool_audit
+    from .admin_commands import install_admin_commands
+    from .command_suite import install_command_suite
     from .interaction_progress import install_interaction_progress
     from .maxwell_embed_output import install_maxwell_embed_output
-    from .owner_control import install_owner_control
     from .rich_interactions import install_rich_interactions
     from .user_install_features import (
         install_user_install_features,
-        install_user_install_tool_disclosure,
     )
 
     from .tools import (
@@ -23,6 +20,7 @@ def setup(bot, ctx):
         deliver_due_reminders,
         patch_image_generators,
     )
+    from .user_preferences import UserPreferenceStore
 
     store = ReminderStore(ctx.store_path("reminders.json"))
 
@@ -33,22 +31,18 @@ def setup(bot, ctx):
 
     # Upgrade the personal-app command definitions before on_ready syncs them to
     # Discord, and teach its webhook transport to preserve embeds/views/files.
+    preferences = UserPreferenceStore(ctx.store_path("user_preferences.json"))
+    bot._user_preferences = preferences
     install_user_install_features(bot)
+    install_command_suite(bot, preferences)
 
-    # Official-bot bio cleanup, taint-gate `,confirm` removal, plugin runtime
+    # Official-bot bio cleanup, retired `,confirm` command, plugin runtime
     # guards, style-freedom, autonomy routing, and visible-output suppression
     # live in the host. Do not wrap those methods here.
 
     # Image tools remain the same implementations/providers, but their outgoing
     # generated files are intercepted and returned to the model instead of posted.
     patch_image_generators(bot, ctx)
-
-    # Record tools that actually executed and attach a persistent disclosure
-    # button to normal Discord and personal-app follow-up replies.
-    install_tool_audit(bot, ctx)
-    install_audit_chunk_tail(bot)
-    install_user_install_tool_disclosure(bot)
-    install_progress_audit_fix(bot)
 
     # Discord app commands keep fast answers in the deferred interaction. Tool
     # use or >10s latency promotes it to a stable "working on it…" status and
@@ -60,9 +54,9 @@ def setup(bot, ctx):
     # converting text to an embed first keeps those fast replies rich too.
     install_maxwell_embed_output(bot)
 
-    # Register the owner panel after the generic interaction-progress wrapper so
-    # /owner is intercepted before it starts an AI turn or a slow-response timer.
-    install_owner_control(bot)
+    # Restricted diagnostics and maintenance are purpose-specific commands;
+    # each handler checks the configured Maxwell developer allowlist itself.
+    install_admin_commands(bot)
 
     # Rich messages now support stateful callback buttons. The action registry
     # is persistent, clicks are routed through on_interaction back into Maxwell,
@@ -83,7 +77,12 @@ def teardown(bot):
 
     ui.unwrap_session_send("maxwell_embed")
     ui.unwrap_session_send("interaction_progress")
-    ui.unwrap_session_send("tool_disclosure")
-    ui.unregister_interaction_handler("owner_control")
+    from .admin_commands import DIAGNOSTICS_COMMAND_NAME, MAINTENANCE_COMMAND_NAME
+    from .command_suite import uninstall_command_suite
+
+    ui.unregister_command(DIAGNOSTICS_COMMAND_NAME)
+    ui.unregister_command(MAINTENANCE_COMMAND_NAME)
+    ui.unregister_interaction_handler("admin_commands")
+    uninstall_command_suite(bot)
     ui.unregister_interaction_handler("interaction_progress")
     del bot

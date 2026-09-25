@@ -318,7 +318,7 @@ configure_env() {
   printf '\n%sStep 1/5: Discord bot token%s\n' "$BOLD" "$RESET"
   printf '  Create an application at https://discord.com/developers/applications, add a Bot, copy the bot token.\n'
   printf '  Enable Privileged Gateway Intents: Message Content, Server Members, Presence.\n'
-  printf '  Invite with bot + applications.commands. Maxwell uses prefix commands and Discord app commands (/maxwell, /owner).\n'
+  printf '  Invite with bot + applications.commands. Maxwell uses Discord slash commands (/maxwell, /config, /help).\n'
   printf '  Official bot token only — never a user token or browser Authorization header.\n'
   bot_token=$(prompt_secret "Discord bot token" "${DISCORD_BOT_TOKEN:-${DISCORD_TOKEN:-}}")
   if [ -n "$bot_token" ]; then set_env_value DISCORD_BOT_TOKEN "$bot_token"; ok "Discord bot token saved"; else warn "DISCORD_BOT_TOKEN left blank; set it in .env before starting."; fi
@@ -544,7 +544,7 @@ banner_and_confirm() {
   printf '%sMaxwell installer%s\n' "$BOLD" "$RESET"
   printf 'Maxwell is an official Discord bot backed by any OpenAI-compatible LLM. MIT open source; this installer fetches the app, writes .env, and runs it in Docker.\n\n'
   printf 'You need a bot token from https://discord.com/developers/applications (not a user token).\n'
-  printf 'Enable Message Content, Server Members, and Presence intents. Invite with bot + applications.commands (/maxwell, /owner).\n'
+  printf 'Enable Message Content, Server Members, and Presence intents. Invite with bot + applications.commands (/maxwell, /config, /help).\n'
 }
 
 final_summary() {
@@ -562,7 +562,8 @@ final_summary() {
   Doctor:    docker compose -f $compose exec maxwell python3 doctor.py
              docker compose -f $compose exec maxwell python3 doctor.py --probe
   Dashboard: http://127.0.0.1:8765
-  App cmds:  /owner (owners), /maxwell (user-install)
+  App cmds:  /maxwell, /config, /personality, /help, /usage, /image, /chess, /checkers
+             /moderation, /memory, /reminder, /diagnostics, /maintenance
   Edit config: $(pwd -P)/.env   then   docker compose -f $compose up -d
   Reconfigure: ./install.sh --local --reconfigure
   Update:      git pull --ff-only && ./install.sh --local

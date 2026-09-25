@@ -1,6 +1,6 @@
 # Maxwell
 
-Maxwell is an official Discord AI bot with multimodal chat, tool calling, memory, owner controls, a browser dashboard, background jobs, moderation tools, image generation, web tools, generated sites, and optional second transports. It can use Ollama, OpenRouter, OpenAI, LM Studio, or another OpenAI-compatible API.
+Maxwell is an official Discord AI bot with multimodal chat, tool calling, memory, operator controls, a browser dashboard, background jobs, moderation tools, image generation, web tools, generated sites, and optional second transports. It can use Ollama, OpenRouter, OpenAI, LM Studio, or another OpenAI-compatible API.
 
 ## Install — easiest path
 
@@ -130,11 +130,11 @@ The installer preserves `.env`, `data/`, and generated-site files.
 
 ## Discord app commands
 
-For configured owners, `/owner` exposes Maxwell's owner-only status and live-control panel. It can show runtime state, memory/autonomy/tool/plugin controls, export redacted control data, and persist validated control changes.
+Maxwell uses Discord slash commands. `/help` lists the command set; `/config` manages personal defaults for everyone and server settings for authorized administrators; `/personality` stores a personal reply-style preference. Focused commands include `/image`, `/chess`, `/checkers`, `/moderation`, `/memory`, and `/reminder`. `/diagnostics` and `/maintenance` provide separate, developer-restricted operator functions.
 
 The personal-app `/maxwell` command and context-menu actions are available when user install is enabled. `/maxwell` text replies are rendered as Discord embeds. Fast app-command responses stay in the deferred interaction; if a command uses a tool or is still running after about 10 seconds, Maxwell leaves a stable `working on it…` status and sends the final answer as a follow-up.
 
-Owner access is determined by `MAXWELL_OWNER_IDS` / configured creator/admin IDs. The owner panel never exposes secret values in its data export.
+Developer access is determined by configured Maxwell owner IDs. Diagnostics redact secret-like values, and maintenance refuses to edit secret controls.
 
 ## Advanced install
 
@@ -166,7 +166,7 @@ See [`docs/INSTALL.md`](docs/INSTALL.md) for Docker Desktop, reverse-proxy, OAut
 - Plugin-driven tools and extras: bundled features live under `plugins/`, loaded by `maxwell_core`.
 - Tools for web/search, files/media, Discord management, moderation, polls, generated sites, image generation, shell sandboxing, coding/background jobs, and more.
 - Fail-closed handling for destructive tools after fetched/web content has tainted the current turn.
-- Owner/admin controls through `/owner` and the browser dashboard.
+- Personal and server settings through `/config` and `/personality`; restricted operator controls through `/diagnostics` and `/maintenance`.
 - SQLite-backed RAG/vector memory plus scoped context, entity/knowledge-graph memory, and optional REM-style consolidation.
 - Optional autonomy/background actions with runtime controls.
 - Generated static sites and optional backend containers.

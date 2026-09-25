@@ -62,35 +62,24 @@ See [`.env.example`](../.env.example) for the complete advanced environment refe
 | `CREATOR_ID` | blank | Optional creator Discord ID. |
 | `MAXWELL_OWNER_IDS` | blank | Comma-separated owner/admin Discord IDs. |
 | `MAXWELL_USER_ID` | blank | Optional configured bot user ID. |
-| `COMMAND_PREFIX` | `,` when unset | Prefix for legacy text commands. |
+| `COMMAND_PREFIX` | `,` when unset | Internal compatibility prefix used by slash-command handlers; public text-prefix commands are retired. |
 | `BOT_BIRTHDAY` | `2026-05-21` | ISO persona birthday. |
 | `BOT_INVITE_URL` | blank | Optional public invite URL. |
 | `MAXWELL_USAGE_URL` | blank | Optional provider usage/quota endpoint. |
 
 Blank IDs do not grant implicit ownership.
 
-## `/owner` control panel
+## Discord slash commands
 
-The `maxwell_extras` plugin registers an owner-only `/owner` application command. It can show runtime state, controls, memory, autonomy, tools, and plugins; export redacted data; persist validated control changes; and reload the control file.
+`/config` is available to everyone for personal defaults. The server scope requires the server owner, a Manage Server administrator, or a configured Maxwell admin. Server settings include tool-progress messages, ticket greetings, and custom server instructions. `/personality` stores a short personal reply-style preference for personal app requests.
 
-Changes are sanitized and persisted to `DATA_DIR/bot_control.json`. Secret-like values are redacted and are not editable through the Discord owner panel.
+Purpose-specific commands include `/image`, `/chess`, `/checkers`, `/moderation`, `/memory`, and `/reminder`. `/diagnostics` and `/maintenance` replace the former owner command and independently restrict every request to configured Maxwell developers. Sensitive control values remain redacted and cannot be edited through Discord.
 
-Examples:
+The former comma-prefix commands are no longer accepted. `/help` lists the available slash commands.
 
-```text
-/owner action:overview
-/owner action:enable key:autonomy_enabled
-/owner action:set key:ai_concurrency value:3
-/owner action:quota key:123456789012345678
-/owner action:quota_set key:123456789012345678 value:200
-/owner action:quota_reset key:123456789012345678
-/owner action:quota_exempt key:123456789012345678
-/owner action:spend key:123456789012345678
-```
+Customer-facing AI usage is messages, not tokens. The free allowance is 300 messages per rolling five-hour window (`message_quota_limit` / `message_quota_window_seconds`). The ledger lives at `DATA_DIR/message_quota.sqlite3`. One user-visible AI turn, voice utterance, or user-created background job counts as one message. Tool-loop follow-ups do not. `/usage` shows that allowance. `/premium` is an optional discovery command and is not a purchase. Premium is not launched: Personal Plus is proposed at $2.99/month per user and Server Plus at $4.99/month per server, using Discord's native Guild Subscription that stays with the purchased server and cannot be transferred. Exact Plus allowances are not decided and are not applied. Billing, checkout, and …
 
-Customer-facing AI usage is messages, not tokens. The free allowance is 300 messages per rolling five-hour window (`message_quota_limit` / `message_quota_window_seconds`). The ledger lives at `DATA_DIR/message_quota.sqlite3`. One user-visible AI turn, voice utterance, or user-created background job counts as one message. Tool-loop follow-ups do not. `/usage` and `,usage` show that allowance. `/premium` is an optional discovery command and is not a purchase. Premium is not launched: Personal Plus is proposed at $2.99/month per user and Server Plus at $4.99/month per server, using Discord's native Guild Subscription that stays with the purchased server and cannot be transferred. Exact Plus allowances are not decided and are not applied. Billing, checkout, and …
-
-Token and reported API-cost accounting stay internal, in `DATA_DIR/daily_tokens.sqlite3`, as a spending cap. Requests still reserve estimated tokens so concurrent calls cannot oversubscribe that cap. A provider timeout charges the reservation conservatively. Owners inspect that ledger with `/owner action:spend`. Historical Telegram ledger keys remain addressable as `tg:<id>` on the internal ledger only. `quota_clear` removes a user's message-limit override; `quota_unexempt` removes only the exemption.
+Token and reported API-cost accounting stay internal, in `DATA_DIR/daily_tokens.sqlite3`, as a spending cap. Requests still reserve estimated tokens so concurrent calls cannot oversubscribe that cap. A provider timeout charges the reservation conservatively. Authorized developers inspect that ledger with `/maintenance action:spend`. Historical Telegram ledger keys remain addressable as `tg:<id>` on the internal ledger only. `quota_clear` removes a user's message-limit override; `quota_unexempt` removes only the exemption.
 
 ## Runtime controls
 
@@ -127,7 +116,7 @@ Frequently used controls include:
 | `autofix_enabled` | Runtime autofix switch |
 | `enable_night_fallback` | Night-window fallback routing when configured |
 
-The authoritative set and valid ranges are in `control_defaults.py` and `api.state._sanitize_control`. Prefer the dashboard or `/owner` to editing `bot_control.json` while Maxwell is running.
+The authoritative set and valid ranges are in `control_defaults.py` and `api.state._sanitize_control`. Prefer the dashboard or `/maintenance` to editing `bot_control.json` while Maxwell is running.
 
 ## Message reliability
 
@@ -149,7 +138,7 @@ Simple installs keep token-spending background loops off by default. The exact d
 
 ## App-command behavior
 
-For `/maxwell`, fast answers use the original deferred interaction. A tool-backed or >10-second command promotes that interaction to a stable `working on it…` status and sends the final result as a follow-up. Textual `/maxwell` follow-ups are rendered as embeds unless the response already contains an explicit rich payload.
+For `/maxwell`, fast answers use the original deferred interaction. A tool-backed or >10-second command updates the temporary interaction status with tool names, removes that status on completion, and sends the final result as a follow-up. Textual `/maxwell` follow-ups are rendered as branded embeds unless the response already contains an explicit rich payload.
 
 ## Tool safety behavior
 

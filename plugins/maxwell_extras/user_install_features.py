@@ -2,12 +2,11 @@
 
 Keeps the core transport small while upgrading the personal-app surface with
 richer slash options, extra message context actions, configurable live-channel
-context, richer webhook payloads, and tool-disclosure support.
+context, and richer webhook payloads.
 """
 
 from __future__ import annotations
 
-import contextlib
 from types import SimpleNamespace
 from typing import Any
 
@@ -44,9 +43,14 @@ _CONTEXT_CHOICES = [
 ]
 
 _FEATURES_INSTALLED = False
-_DISCLOSURE_INSTALLED = False
 _ORIGINAL_BUILD_TURN = None
-_ORIGINAL_SESSION_SEND = None
+_USER_PREFERENCE_STORE = None
+
+
+def set_user_preference_store(store: Any) -> None:
+    """Make personal defaults available to the slash turn builder."""
+    global _USER_PREFERENCE_STORE
+    _USER_PREFERENCE_STORE = store
 
 
 def modern_user_install_commands() -> list[dict[str, Any]]:
@@ -281,6 +285,16 @@ def _enhanced_build_turn(interaction: Any, original_build: Any) -> dict[str, Any
         return None
     if cmd_type == 1 and name == ui.USER_INSTALL_COMMAND_NAME:
         opts = _options(interaction)
+        user_id = str(getattr(getattr(interaction, "user", None), "id", "") or "")
+        store = _USER_PREFERENCE_STORE
+        if store is not None and user_id:
+            try:
+                defaults = store.get(user_id).get("defaults") or {}
+            except Exception:
+                defaults = {}
+            for key in ("mode", "web", "detail", "context", "language"):
+                if key not in opts and key in defaults:
+                    opts[key] = defaults[key]
         turn["prompt"] = _slash_prompt(str(turn.get("prompt") or ""), opts)
         turn["history_limit"] = _context_limit(interaction)
         mode = str(opts.get("mode") or "ask")
@@ -404,7 +418,7 @@ def install_user_install_features(bot: Any) -> None:
     """Upgrade commands and transport before Discord command sync happens."""
 
     del bot  # install is process-wide because user_install is a shared transport module.
-    global _FEATURES_INSTALLED, _ORIGINAL_BUILD_TURN, _ORIGINAL_SESSION_SEND
+    global _FEATURES_INSTALLED, _ORIGINAL_BUILD_TURN
     if _FEATURES_INSTALLED:
         return
 
@@ -445,40 +459,10 @@ def install_user_install_features(bot: Any) -> None:
     _FEATURES_INSTALLED = True
 
 
-def install_user_install_tool_disclosure(bot: Any) -> None:
-    """Attach the existing Tools · N audit button to user-install follow-ups."""
-
-    global _DISCLOSURE_INSTALLED
-    if _DISCLOSURE_INSTALLED:
-        return
-    from . import audit_ui
-
-    def factory(original):
-        async def disclosed_send(
-            self: Any,
-            content: str | None = None,
-            file: Any = None,
-            **kwargs: Any,
-        ) -> Any:
-            sent = await original(self, content=content, file=file, **kwargs)
-            inbound = SimpleNamespace(id=getattr(self.interaction, "id", 0))
-            with contextlib.suppress(Exception):
-                await audit_ui._attach_trace(bot, sent, inbound)
-            return sent
-
-        disclosed_send._maxwell_user_install_disclosure = True  # type: ignore[attr-defined]
-        return disclosed_send
-
-    # wrap_session_send rebuilds UserInstallSession.send from _send_impl.
-    # Patching .send directly is wiped when embed/progress wrappers install.
-    ui.wrap_session_send(factory, name="tool_disclosure", priority=80)
-    _DISCLOSURE_INSTALLED = True
-
-
 __all__ = [
     "MESSAGE_EXPLAIN",
     "MESSAGE_FACT_CHECK",
     "install_user_install_features",
-    "install_user_install_tool_disclosure",
     "modern_user_install_commands",
+    "set_user_preference_store",
 ]

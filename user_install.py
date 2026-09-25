@@ -56,6 +56,18 @@ def register_command(command: dict[str, Any]) -> None:
     USER_INSTALL_NAMES = frozenset({*USER_INSTALL_NAMES, name})
 
 
+def unregister_command(name: str) -> None:
+    """Remove an application command and stop routing its interactions here."""
+    name = str(name or "").strip()
+    if not name:
+        return
+    USER_INSTALL_COMMANDS[:] = [cmd for cmd in USER_INSTALL_COMMANDS if cmd.get("name") != name]
+    global USER_INSTALL_NAMES
+    USER_INSTALL_NAMES = frozenset(
+        str(cmd.get("name") or "") for cmd in USER_INSTALL_COMMANDS if cmd.get("name")
+    )
+
+
 def register_interaction_handler(
     callback: Any, *, priority: int = 100, name: str = ""
 ) -> None:

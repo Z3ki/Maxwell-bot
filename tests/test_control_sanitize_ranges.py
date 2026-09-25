@@ -33,6 +33,12 @@ def test_defaults_are_their_own_fixed_point():
     assert not drifted, f"default is outside its own clamp: {drifted}"
 
 
+def test_removed_site_quota_setting_is_not_exposed_or_returned():
+    assert "create_site_quota_per_user" not in DEFAULT_CONTROL
+    out = _sanitize_control({"create_site_quota_per_user": 1})
+    assert "create_site_quota_per_user" not in out
+
+
 @pytest.mark.parametrize(
     "key",
     [
