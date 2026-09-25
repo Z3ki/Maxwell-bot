@@ -33,3 +33,6 @@ jobs:
       - name: Benchmark bounded inbound admission
         if: matrix.python-version == '3.12'
         run: python scripts/benchmark_inbound_queue.py --servers 100 500 1000 --iterations 10 --max-outstanding 256
+      - name: Benchmark pending embedding recovery scan
+        if: matrix.python-version == '3.12'
+        run: python scripts/benchmark_embedding_backlog.py --rows 100000 --pending 1000 --iterations 10

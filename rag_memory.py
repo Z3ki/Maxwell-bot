@@ -144,6 +144,9 @@ MAX_BACKGROUND_EMBED_TASKS = int(
         ),
     )
 )
+# Retry durable NULL-vector rows at a low rate. The first recovery pass runs
+# at startup; periodic passes retry work deferred by outages or queue saturation.
+EMBED_RECOVERY_INTERVAL_SECONDS = 60.0
 
 # Long-content embedding. Past EMBED_MAX_CHARS we split into sentence-boundary
 # chunks, embed each, and mean-pool. Module-level (not local to _embed) so the
@@ -820,6 +823,8 @@ class RAGMemoryManager:
         # in-flight embeds are silently dropped and rows stay embedding=NULL)
         # and so tests don't spam "coroutine ignored GeneratorExit".
         self._embed_tasks: set[asyncio.Task] = set()
+        self._embed_recovery_task: asyncio.Task | None = None
+        self._active_embed_row_ids: set[str] = set()
         # If the local embedder is unavailable or too slow, don't retry it for
         # every RAG search in the same turn (or every concurrent turn).
         self._query_embed_disabled_until = 0.0
@@ -835,6 +840,41 @@ class RAGMemoryManager:
 
     def _embed_endpoint_paused(self) -> bool:
         return time.monotonic() < self._embed_endpoint_down_until
+
+    def start_embedding_recovery_worker(self) -> asyncio.Task | None:
+        """Start one bounded worker that retries durable rows without vectors."""
+        if not EMBEDDINGS_ENABLED:
+            return None
+        current = self._embed_recovery_task
+        if current is not None and not current.done():
+            return current
+
+        async def _run():
+            while True:
+                try:
+                    if EMBEDDINGS_ENABLED and not self._embed_endpoint_paused():
+                        row = self._db.execute(
+                            "SELECT MAX(rowid) AS max_rowid FROM vectors "
+                            "WHERE embedding IS NULL"
+                        ).fetchone()
+                        max_rowid = row["max_rowid"] if row else None
+                        if max_rowid is not None:
+                            # Snapshot the current backlog so continuous
+                            # ingestion cannot keep one maintenance pass alive.
+                            await self._embed_pending_all(max_rowid=int(max_rowid))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "Memory embedding recovery pass failed: %s",
+                        type(exc).__name__,
+                    )
+                await asyncio.sleep(EMBED_RECOVERY_INTERVAL_SECONDS)
+
+        self._embed_recovery_task = asyncio.create_task(
+            _run(), name="memory-embedding-recovery"
+        )
+        return self._embed_recovery_task
 
     def _spawn(self, coro) -> asyncio.Task | None:
         """Create a bounded, tracked background task for embed work."""
@@ -976,6 +1016,13 @@ class RAGMemoryManager:
                 "UPDATE vectors SET source=? WHERE id=?", (new_src, r["id"])
             )
 
+        # Pending rows are the durable embedding backlog. The rowid is carried
+        # implicitly by this rowid-table index, keeping backlog scans bounded
+        # to NULL vectors rather than walking the full embedding corpus.
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vectors_pending_embedding "
+            "ON vectors(embedding) WHERE embedding IS NULL"
+        )
         self._db.execute("CREATE INDEX IF NOT EXISTS idx_kind ON vectors(kind)")
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_channel ON vectors(channel_id)"
@@ -1588,8 +1635,15 @@ class RAGMemoryManager:
             # Prune failure only means the cache stays oversized for now.
             logger.debug("embed_cache prune failed: %s", e)
 
-    async def _embed_and_store(self, row_id: str, text: str) -> bool:
-        """Generate embedding and update the row in DB."""
+    async def _embed_and_store(
+        self, row_id: str, text: str, *, reservation_held: bool = False
+    ) -> bool:
+        """Generate one embedding without duplicating work for the same row."""
+        row_key = str(row_id)
+        if not reservation_held:
+            if row_key in self._active_embed_row_ids:
+                return False
+            self._active_embed_row_ids.add(row_key)
         try:
             vec = await self._embed(text, background=True)
             if vec is not None:
@@ -1601,7 +1655,7 @@ class RAGMemoryManager:
                 # retain only a prefix, but their hash covers the full input.
                 cursor = self._db.execute(
                     "UPDATE vectors SET embedding=? WHERE id=? AND (content=? OR content_hash=?)",
-                    (blob, row_id, str(text or ""), digest),
+                    (blob, row_key, str(text or ""), digest),
                 )
                 return cursor.rowcount > 0
             return False
@@ -1609,6 +1663,9 @@ class RAGMemoryManager:
             raise
         except Exception:
             return False
+        finally:
+            if not reservation_held:
+                self._active_embed_row_ids.discard(row_key)
 
     async def _embed_pending(self, kind: str):
         """Embed all rows of a kind that don't have embeddings yet."""
@@ -1626,97 +1683,144 @@ class RAGMemoryManager:
         except Exception as e:
             logger.warning(f"Failed to embed pending {kind}: {e}")
 
-    async def _embed_pending_all(self, batch_size: int = 4):
-        """Embed ALL rows without embeddings, in batches. Used for migration.
+    async def _embed_pending_all(
+        self, batch_size: int = 4, *, max_rowid: int | None = None
+    ):
+        """Retry durable rows without embeddings, in bounded batches.
 
-        Uses ollama's batch embed API to speed up — sends multiple texts
-        in a single request instead of one-at-a-time.
+        Walk by rowid so a failed first batch cannot starve later pending rows.
+        Optional max_rowid bounds a maintenance pass to its startup snapshot.
         """
         try:
             total_embedded = 0
-            # Rows that fail remain NULL. Walk by rowid so each is attempted
-            # once without starving later rows behind a failed first batch.
             last_rowid = 0
             while True:
-                rows = self._db.execute(
+                if self._embed_endpoint_paused():
+                    break
+                sql = (
                     "SELECT rowid AS pending_rowid, id, content FROM vectors "
-                    "WHERE embedding IS NULL AND rowid > ? ORDER BY rowid LIMIT ?",
-                    (last_rowid, max(1, batch_size)),
-                ).fetchall()
+                    "WHERE embedding IS NULL AND rowid > ?"
+                )
+                params: list[int] = [last_rowid]
+                if max_rowid is not None:
+                    sql += " AND rowid <= ?"
+                    params.append(int(max_rowid))
+                sql += " ORDER BY rowid LIMIT ?"
+                params.append(max(1, int(batch_size)))
+                rows = self._db.execute(sql, params).fetchall()
                 if not rows:
                     break
                 last_rowid = rows[-1]["pending_rowid"]
 
-                # Long rows need sentence-boundary chunking + mean-pooling,
-                # which the batch API can't express (one vector per input).
-                # They used to be silently truncated at 8000 chars here even
-                # though _embed() had already been raised to EMBED_MAX_CHARS
-                # — the batch path is a migration path, so those rows were
-                # permanently stored with a truncated vector. Route them
-                # through _embed_and_store (chunked, cached) instead.
-                long_rows = [
-                    r for r in rows if len(r["content"] or "") > EMBED_MAX_CHARS
+                # A live background task may already be embedding one of these
+                # rows. Reserve the rest synchronously before the next await so
+                # an edit/retry cannot send duplicate requests to the embedder.
+                rows = [
+                    row for row in rows
+                    if str(row["id"]) not in self._active_embed_row_ids
                 ]
-                rows = [r for r in rows if len(r["content"] or "") <= EMBED_MAX_CHARS]
-                for row in long_rows:
-                    if await self._embed_and_store(row["id"], row["content"]):
-                        total_embedded += 1
                 if not rows:
                     continue
-
-                # Batch embed: send all texts in one request
-                texts = [row["content"] for row in rows]
-                payload = {"model": EMBED_MODEL, "input": texts}
-
+                reserved_ids = {str(row["id"]) for row in rows}
+                self._active_embed_row_ids.update(reserved_ids)
                 try:
-                    fallback_rows = None
-                    session = await self._get_embed_session()
-                    async with self._embed_slot(background=True):
-                        async with session.post(
-                            EMBED_URL,
-                            json=payload,
-                            headers=EMBED_HEADERS,
-                            timeout=aiohttp.ClientTimeout(
-                                total=EMBED_HTTP_TIMEOUT_SECONDS
-                            ),
-                        ) as resp:
-                            if resp.status != 200:
-                                body = await resp.text()
-                                logger.warning(
-                                    f"Batch embed API returned {resp.status}: {body[:200]}"
-                                )
-                                fallback_rows = rows
-                            else:
-                                data = await resp.json()
-                                embeddings = _extract_embeddings(data)
-                                if not embeddings:
-                                    logger.warning("Batch embed returned no embeddings")
-                                else:
-                                    for i, row in enumerate(rows):
-                                        if i < len(embeddings):
-                                            vec = np.array(embeddings[i], dtype=np.float32)
-                                            if len(vec) == EMBED_DIM:
-                                                blob = _embedding_to_blob(vec)
-                                                cursor = self._db.execute(
-                                                    "UPDATE vectors SET embedding=? WHERE id=? AND content=?",
-                                                    (blob, row["id"], row["content"]),
-                                                )
-                                                total_embedded += cursor.rowcount
-                    if fallback_rows:
-                        for row in fallback_rows:
-                            if await self._embed_and_store(row["id"], row["content"]):
-                                total_embedded += 1
-                except Exception as e:
-                    logger.warning(f"Batch embed failed: {e}")
-                    # Fall back to one-by-one for this batch
-                    for row in rows:
-                        if await self._embed_and_store(row["id"], row["content"]):
+                    long_rows = [
+                        row for row in rows
+                        if len(row["content"] or "") > EMBED_MAX_CHARS
+                    ]
+                    short_rows = [
+                        row for row in rows
+                        if len(row["content"] or "") <= EMBED_MAX_CHARS
+                    ]
+                    for row in long_rows:
+                        if self._embed_endpoint_paused():
+                            break
+                        if await self._embed_and_store(
+                            row["id"], row["content"], reservation_held=True
+                        ):
                             total_embedded += 1
+                    if not short_rows or self._embed_endpoint_paused():
+                        continue
+
+                    # Batch embed: send a small bounded set in one request.
+                    texts = [row["content"] for row in short_rows]
+                    payload = {"model": EMBED_MODEL, "input": texts}
+
+                    try:
+                        fallback_rows = None
+                        session = await self._get_embed_session()
+                        async with self._embed_slot(background=True):
+                            async with session.post(
+                                EMBED_URL,
+                                json=payload,
+                                headers=EMBED_HEADERS,
+                                timeout=aiohttp.ClientTimeout(
+                                    total=EMBED_HTTP_TIMEOUT_SECONDS
+                                ),
+                            ) as resp:
+                                if resp.status != 200:
+                                    body = await resp.text()
+                                    logger.warning(
+                                        "Batch embed API returned %s: %s",
+                                        resp.status,
+                                        body[:200],
+                                    )
+                                    fallback_rows = short_rows
+                                else:
+                                    data = await resp.json()
+                                    embeddings = _extract_embeddings(data)
+                                    if not embeddings:
+                                        logger.warning(
+                                            "Batch embed returned no embeddings"
+                                        )
+                                    else:
+                                        for i, row in enumerate(short_rows):
+                                            if i < len(embeddings):
+                                                vec = np.array(
+                                                    embeddings[i], dtype=np.float32
+                                                )
+                                                if len(vec) == EMBED_DIM:
+                                                    blob = _embedding_to_blob(vec)
+                                                    cursor = self._db.execute(
+                                                        "UPDATE vectors SET embedding=? "
+                                                        "WHERE id=? AND content=?",
+                                                        (blob, row["id"], row["content"]),
+                                                    )
+                                                    total_embedded += cursor.rowcount
+                        if fallback_rows:
+                            for row in fallback_rows:
+                                if self._embed_endpoint_paused():
+                                    break
+                                if await self._embed_and_store(
+                                    row["id"],
+                                    row["content"],
+                                    reservation_held=True,
+                                ):
+                                    total_embedded += 1
+                    except (GeneratorExit, asyncio.CancelledError):
+                        raise
+                    except Exception as exc:
+                        logger.warning("Batch embed failed: %s", type(exc).__name__)
+                        # Fall back to one-by-one for this batch. Text stays
+                        # durable if the embed service remains unavailable.
+                        for row in short_rows:
+                            if self._embed_endpoint_paused():
+                                break
+                            if await self._embed_and_store(
+                                row["id"], row["content"], reservation_held=True
+                            ):
+                                total_embedded += 1
+                finally:
+                    self._active_embed_row_ids.difference_update(reserved_ids)
 
             if total_embedded:
-                logger.info(f"Batch-embedded {total_embedded} vectors total")
-        except Exception as e:
-            logger.warning(f"Failed to embed pending vectors: {e}")
+                logger.info("Batch-embedded %s vectors total", total_embedded)
+        except (GeneratorExit, asyncio.CancelledError):
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Failed to embed pending vectors: %s", type(exc).__name__
+            )
 
     # ─── channel memory (short-term) ──────────────────────────────
 
@@ -3558,6 +3662,10 @@ class RAGMemoryManager:
         elapsed = float(metrics["elapsed_seconds"])
         return {
             "background_queue_depth": len(self._embed_tasks),
+            "active_embedding_rows": len(self._active_embed_row_ids),
+            "recovery_worker_running": bool(
+                self._embed_recovery_task and not self._embed_recovery_task.done()
+            ),
             "pending_work": pending_work,
             "requests": requests,
             "failures": int(metrics["failures"]),
@@ -3586,6 +3694,11 @@ class RAGMemoryManager:
         Ollama hold PM2 past its graceful-shutdown deadline; unembedded rows
         remain NULL and are safe to retry later.
         """
+        recovery_task = self._embed_recovery_task
+        self._embed_recovery_task = None
+        if recovery_task is not None and not recovery_task.done():
+            recovery_task.cancel()
+            await asyncio.gather(recovery_task, return_exceptions=True)
         if self._embed_tasks:
             pending = list(self._embed_tasks)
             try:

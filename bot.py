@@ -5293,6 +5293,7 @@ class MaxwellBot(commands.Bot):
             started = self.plugin_manager.start_jobs()
             if started:
                 logger.info("Plugin jobs started: %d", started)
+        self.memory.start_embedding_recovery_worker()
         self._tasks = [
             asyncio.create_task(self._backfill_site_graph(), name="site-graph-backfill"),
             asyncio.create_task(self._site_cleanup_loop()),
