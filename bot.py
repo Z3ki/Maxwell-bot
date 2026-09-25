@@ -3053,18 +3053,12 @@ class MaxwellBot(commands.Bot):
             quotas = getattr(self, "_message_quota", None)
             if quotas is not None:
                 guild = getattr(message, "guild", None)
-                try:
-                    quotas.charge(
-                        str(quota_user_id),
-                        enforced_message_limit(self._control),
-                        enforced_window_seconds(self._control),
-                        guild_id=str(getattr(guild, "id", "") or ""),
-                    )
-                except MessageQuotaExceeded:
-                    if reservation:
-                        ledger.settle(reservation, 0)
-                        reservation = None
-                    raise
+                quotas.charge(
+                    str(quota_user_id),
+                    enforced_message_limit(self._control),
+                    enforced_window_seconds(self._control),
+                    guild_id=str(getattr(guild, "id", "") or ""),
+                )
         started = time.monotonic()
         try:
             return await self.ai_provider.generate_response(messages, **kwargs)
